@@ -17,7 +17,7 @@
   import { untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
-  import { onTabKey } from '../../lib/tabKeys';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import type { SkillFileEntry } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -66,7 +66,7 @@
   }
   async function confirmDiscard(): Promise<boolean> {
     if (!editorDirty) return true;
-    const ok = await confirmer.ask(`You have unsaved changes to ${group.name}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
+    const ok = await confirmer.ask(`You have unsaved changes to ${group.name}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
     if (ok) setDirty(false);
     return ok;
   }
@@ -319,14 +319,13 @@
         </ul>
       </div>
     {/if}
-    <div class="tabs" role="tablist" aria-label="Skill detail" tabindex="-1" onkeydown={onTabKey}>
-      {#each TABS as t (t.id)}
-        <button role="tab" id="st-{t.id}" aria-selected={tab === t.id} aria-controls="sp-{t.id}" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => goTab(t.id)}>{t.label}</button>
-      {/each}
+    <!-- activate="click": leaving Edit can be refused (unsaved changes). -->
+    <div class="skill-tabs">
+      <Tabs label="Skill detail" tabs={TABS} value={tab} onchange={(id) => void goTab(id)} idBase="skill" activate="click" />
     </div>
   </header>
 
-  <div class="d-body" role="tabpanel" id="sp-{tab}" aria-labelledby="st-{tab}">
+  <div class="d-body" role="tabpanel" id="skill-panel-{tab}" aria-labelledby="skill-tab-{tab}">
     {#if comparing && tab === 'overview'}
       <section class="compare">
         <div class="compare-head">
@@ -566,28 +565,14 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .tabs {
-    display: flex;
-    gap: 2px;
+  /* The header draws the rule; the strip's underline sits on it. */
+  .skill-tabs {
     margin-bottom: -1px;
+    min-width: 0;
   }
-  .tabs > button {
-    height: 32px;
-    padding: 0 12px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .tabs > button:hover {
-    color: var(--text);
-  }
-  .tabs > button.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
+  .skill-tabs :global(.otabs) {
+    border-block-end: 0;
+    padding-inline: 0;
   }
   .d-body {
     flex: 1;
@@ -768,9 +753,6 @@
     }
     .d-body {
       padding: 12px 14px 24px;
-    }
-    .tabs {
-      overflow-x: auto;
     }
   }
 </style>

@@ -28,6 +28,7 @@
   import TaskEntry from './cards/TaskEntry.svelte';
   import SystemLine from './cards/SystemLine.svelte';
   import type { AssistantThread } from '../../lib/api/types';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     thread: AssistantThread;
@@ -137,14 +138,7 @@
           <Skeleton rows={4} height={44} />
         </div>
       {:else if failed}
-        <div class="error" role="alert">
-          <Icon name="warning" size={14} />
-          <div class="error-t">
-            <strong>Couldn’t load this conversation.</strong>
-            <span class="dim">{index?.error}</span>
-          </div>
-          <button class="btn small" onclick={() => void assistant.loadTurns(thread.id)}>Retry</button>
-        </div>
+        <LoadState variant="compact" what="this conversation" error={index?.error || 'No details were reported.'} empty onretry={() => void assistant.loadTurns(thread.id)} />
       {:else if empty}
         <EmptyState icon="assistant" title="Nothing here yet" body="Ask Otto anything — plan, research, remember, remind. Every action shows up here, and it asks before anything leaves your Mac." />
       {:else}
@@ -228,7 +222,7 @@
     overscroll-behavior: contain;
   }
   .col {
-    max-width: 820px;
+    max-width: var(--prose-readable);
     padding: 18px 20px 12px;
     display: flex;
     flex-direction: column;
@@ -315,27 +309,6 @@
   }
   .state {
     padding: 8px 0;
-  }
-  .error {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .error-t {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: var(--fs-s);
   }
   .pending-bubble {
     align-self: flex-end;

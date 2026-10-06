@@ -33,7 +33,11 @@ pub async fn onboard_root(
         .display_name
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| "Root".to_string());
-    let user = users.create("root", &hash, &display_name, true).await?;
+    // The count() above is only a fast path (skips hashing); the insert itself
+    // is conditional on zero users, so a concurrent onboarding can't also win.
+    let user = users
+        .create_first_root("root", &hash, &display_name)
+        .await?;
     let token = AuthRepo::new(ctx.pool.clone()).issue(&user.id).await?;
 
     Ok(Json(LoginResp { token, user }))

@@ -41,6 +41,12 @@
   // ── minted-link state (shown after POST) ────────────────────────────────────
   let mintedUrl = $state<string | null>(null);
   let mintedToken = $state<string | null>(null);
+  /** Whether another device can open the minted link (false ⇒ loopback-only:
+   *  no Public link domain and no network listener — S20-01). */
+  let mintedRemote = $state(true);
+  /** `lan`: the link is the LAN listener (same Wi-Fi only, self-signed
+   *  certificate) — S20-303. */
+  let mintedLan = $state(false);
   /** Which share the URL/QR panel shows — revoking ANOTHER link keeps it. */
   let mintedShareId: string | null = null;
   let qrCanvas: HTMLCanvasElement | null = $state(null);
@@ -145,6 +151,9 @@
       );
       mintedUrl = resp.url;
       mintedToken = resp.token;
+      // Older daemons omit the flag — treat absence as reachable (old behaviour).
+      mintedRemote = resp.reachable_remotely !== false;
+      mintedLan = resp.reach === 'lan';
       mintedShareId = resp.info.id;
       // Optimistically prepend the new share to the list.
       shares = [resp.info, ...shares];
@@ -152,7 +161,9 @@
         'Share link created',
         email
           ? `A 6-digit code was emailed to ${email}. The recipient must enter it before attaching.`
-          : 'Copy the URL or scan the QR code.',
+          : mintedRemote
+            ? 'Copy the URL or scan the QR code.'
+            : 'This link only works on this Mac — see the note below.',
       );
     } catch (e) {
       toastError('Couldn’t create share link', e);
@@ -289,7 +300,7 @@
           before creating OTP-gated links.
         </div>
       {/if}
-      <input
+      <input dir="ltr"
         id="sm-recipient"
         class="sm-input"
         type="email"
@@ -328,7 +339,7 @@
 
     <div class="sm-row">
       <label class="sm-label" for="sm-label">Label (optional)</label>
-      <input
+      <input dir="auto"
         id="sm-label"
         class="sm-input"
         type="text"
@@ -361,10 +372,36 @@
           </button>
         </div>
 
-        <div class="sm-qr-wrap">
-          <canvas bind:this={qrCanvas} class="sm-qr"></canvas>
-          <p class="sm-qr-hint">Scan to open on your phone</p>
-        </div>
+        {#if mintedRemote}
+          <div class="sm-qr-wrap">
+            <canvas bind:this={qrCanvas} class="sm-qr"></canvas>
+            <p class="sm-qr-hint">Scan to open on your phone</p>
+          </div>
+          {#if mintedLan}
+            <!-- The LAN listener: no public route, and its certificate is
+                 Otto's own self-signed one. Say both up front. -->
+            <p class="sm-role-note" role="note" data-testid="share-lan-only">
+              <Icon name="info" size={12} />
+              Works on your Wi-Fi only; your phone will warn about Otto’s self-signed certificate.
+            </p>
+          {/if}
+        {:else}
+          <!-- The origin is loopback (the desktop app always talks to 127.0.0.1):
+               a phone scanning this would open ITSELF. Say so instead of a QR. -->
+          <div class="sm-sender-warn sm-local-warn" role="note" data-testid="share-local-only">
+            <Icon name="warning" size={12} />
+            <span>
+              This link only works on this Mac —
+              <a
+                href="#/settings/sharing"
+                onclick={(e) => { e.preventDefault(); onclose(); router.go('settings/sharing'); }}
+              >
+                set a Public link domain
+              </a>
+              (or turn on the network listener) to share it.
+            </span>
+          </div>
+        {/if}
 
         {#if role === 'viewer'}
           <p class="sm-role-note">
@@ -411,7 +448,12 @@
               </span>
             </div>
             <div class="sm-share-meta">
-              <span class="sm-share-expiry">{fmtExpiry(share.expires_at)}</span>
+              <span
+                class="sm-share-expiry"
+                title={share.dormant
+                  ? 'Window lapsed — the link holder can still request a new code until it is revoked'
+                  : undefined}>{share.dormant ? 'dormant (revivable)' : fmtExpiry(share.expires_at)}</span
+              >
               <button
                 class="btn sm-revoke-btn"
                 disabled={revoking[share.id]}
@@ -466,6 +508,10 @@
     color: var(--accent-text);
     text-decoration: underline;
     cursor: pointer;
+  }
+  .sm-local-warn {
+    align-items: flex-start;
+    line-height: 1.45;
   }
   .sm-note {
     font-size: var(--fs-xs);
@@ -593,7 +639,7 @@
     color: var(--accent-text);
   }
   .sm-link-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .sm-link-btn.danger {
@@ -688,7 +734,7 @@
     background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .sm-revoke-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

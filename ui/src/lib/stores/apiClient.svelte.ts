@@ -42,6 +42,7 @@ import { HistoryRefresh, HistoryDetail } from './apiHistory';
 import { toasts } from '../toast.svelte';
 import type { PreRequestReq, TestResult } from '../api/scripts';
 import { runScript } from '../api/scriptRunner';
+import { parseGraphqlVariables } from '../../modules/api/graphqlVars';
 import {
   detectAndParse,
   collectionToPostman,
@@ -614,6 +615,17 @@ class ApiClientStore {
     return null;
   }
   loading = $state(false);
+  /** The workspace whose lists settled (loaded or failed) at least once. Not
+   *  cleared by a refetch, so a reload never re-enters the "not loaded" state. */
+  listsSettledFor: Id | null = $state(null);
+  /** The current workspace's lists are in flight OR have not been asked for
+   *  yet. `loading` alone is false on the first render, before the page's
+   *  effect starts `loadAll` — an empty-looking store then read as "nothing
+   *  saved" and flashed onboarding → editor → onboarding. */
+  get listsPending(): boolean {
+    const wid = this.wsId();
+    return this.loading || (wid !== null && this.listsSettledFor !== wid);
+  }
   /** Why the collections + requests lists couldn't load (the sidebar tree's
    *  inline error with Retry); null when fine. Scoped per list so a failed
    *  environments refresh can never paint "Couldn’t load" over the tree. */
@@ -720,7 +732,10 @@ class ApiClientStore {
         this.envLoadError = errMsg(e);
       }
     } finally {
-      if (current()) this.loading = false;
+      if (current()) {
+        this.loading = false;
+        this.listsSettledFor = wid;
+      }
     }
     if (current()) void this.loadSshConnections();
   }
@@ -1421,6 +1436,8 @@ class ApiClientStore {
       headers: draft.headers.map(h => ({...h})), body: draft.body,
     };
     try {
+      // Bad variables JSON fails the send here, inline, before any script runs.
+      const gqlVariables = draft.body_mode === 'graphql' ? parseGraphqlVariables(draft.graphql_variables) : null;
       if (draft.pre_request_script?.trim()) {
         const pre = await runScript({ kind:'pre', code:draft.pre_request_script, request:reqCtx, vars:runtimeVars }, signal);
         checkCurrent();
@@ -1433,9 +1450,7 @@ class ApiClientStore {
       checkCurrent();
       let effectiveBody = reqCtx.body;
       if (draft.body_mode === 'graphql') {
-        let variables: unknown = {};
-        try { variables = draft.graphql_variables?.trim() ? JSON.parse(draft.graphql_variables) : {}; } catch { /* Preserve the existing empty-object fallback. */ }
-        effectiveBody = JSON.stringify({query:reqCtx.body, variables});
+        effectiveBody = JSON.stringify({query:reqCtx.body, variables: gqlVariables ?? {}});
       }
       const settings = draft.settings;
       const body: ExecuteApiReq = {

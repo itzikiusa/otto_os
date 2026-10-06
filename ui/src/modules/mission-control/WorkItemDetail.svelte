@@ -34,6 +34,8 @@
   import { openExternal } from '../../lib/external';
   import { copyText } from '../../lib/clipboard';
   import { sentenceCase, type Tone } from '../../lib/status';
+  import { swarm } from '../../lib/stores/swarm.svelte';
+  import { SOURCE_MODULE, directRoute, reviewRoute, stopPath, isActive } from './sourceLinks';
 
   interface Props {
     wsId: string;
@@ -99,7 +101,7 @@
     if (busy) return false;
     if (!isDirty()) return true;
     const discard = await confirmer.ask('You have unsaved work item changes. Leaving discards them.', {
-      title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing',
+      title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing',
     });
     if (discard) editing = false;
     return discard;
@@ -232,6 +234,73 @@
     ws.navigateToSession(detail.source_id);
   }
 
+  // "Open in <module>" — every kind lands on its source row in the owning
+  // module (sourceLinks.ts). Kinds whose route needs more than the source id
+  // look it up first (a swarm project's swarm, a run's workflow, a review's PR).
+  let opening = $state(false);
+  async function openSource(): Promise<void> {
+    const d = detail;
+    if (!d || opening) return;
+    if (d.kind === 'session' || d.kind === 'external_trigger') return openSession();
+    const direct = directRoute(d.kind, d.source_id);
+    if (direct) {
+      await router.goChecked(direct);
+      return;
+    }
+    opening = true;
+    try {
+      // Navigate FIRST and only touch the target page/store once the leave
+      // guards let us go: a declined guard used to fall through to a 10 s
+      // port wait and a false "Couldn’t open" toast (and, for a swarm, still
+      // switch the global swarm store under the page the user stayed on).
+      if (d.kind === 'swarm') {
+        const p = await missionControlApi.sourceProject(d.source_id);
+        if (p.swarm_id) {
+          if (!(await router.goChecked(`swarm/${encodeURIComponent(p.swarm_id)}`))) return;
+          await swarm.openProject(wsId, p.swarm_id, p.id);
+        } else await router.goChecked('swarm');
+      } else if (d.kind === 'workflow') {
+        const r = await missionControlApi.sourceWorkflowRun(d.source_id);
+        const { workflowsPagePort } = await import('../../lib/uiCommands/workflows');
+        if (!(await router.goChecked(`workflows/${encodeURIComponent(r.workflow_id)}`))) return;
+        const page = await workflowsPagePort.get(new AbortController().signal);
+        if (await page.open(r.workflow_id)) await page.openRun(r.workflow_id, r.id);
+      } else if (d.kind === 'review') {
+        const r = await missionControlApi.sourceReview(d.source_id);
+        await router.goChecked(reviewRoute(r.repo_id, r.pr_number));
+      }
+    } catch (e) {
+      toastError(`Couldn’t open this in ${SOURCE_MODULE[d.kind]}`, e);
+    } finally {
+      opening = false;
+    }
+  }
+
+  // Stop — through the owner's own cancel endpoint; the projector moves the
+  // item when the owner's status event lands.
+  const stopUrl = $derived(detail && isActive(detail.status) ? stopPath(detail.kind, detail.source_id) : null);
+  let stopping = $state(false);
+  async function stopSource(): Promise<void> {
+    const d = detail;
+    const path = stopUrl;
+    if (!d || !path || stopping) return;
+    const ok = await confirmer.ask(
+      `Stop “${d.title}”? ${KIND_LABEL[d.kind]} work in progress halts; finished steps are kept.`,
+      { title: `Stop ${KIND_LABEL[d.kind].toLowerCase()}`, confirmLabel: 'Stop', danger: true },
+    );
+    if (!ok) return;
+    stopping = true;
+    try {
+      await missionControlApi.stopSource(path);
+      toasts.success('Stop requested');
+      onChange?.();
+    } catch (e) {
+      toastError('Couldn’t stop it', e);
+    } finally {
+      stopping = false;
+    }
+  }
+
   /** A person's label: "You", a name, or a shortened id (full id in title). */
   function who(v: string | null | undefined): string {
     if (!v) return '—';
@@ -310,9 +379,12 @@
         <span class="chip-risk" style="--c:{riskColor(detail.risk_level)}">{RISK_LABEL[detail.risk_level]} risk</span>
         {#if detail.needs_approval}<span class="chip warn">Needs approval ({detail.pending_approvals})</span>{/if}
         <span class="grow"></span>
-        {#if detail.kind === 'session' || detail.kind === 'external_trigger'}
-          <button class="btn small" onclick={openSession}><Icon name="terminal" size={12} />Open session</button>
+        {#if stopUrl}
+          <button class="btn small danger" onclick={() => void stopSource()} disabled={stopping} aria-busy={stopping}><Icon name="stop" size={12} />{stopping ? 'Stopping…' : 'Stop'}</button>
         {/if}
+        <button class="btn small" onclick={() => void openSource()} disabled={opening} aria-busy={opening}>
+          <Icon name={KIND_ICON[detail.kind]} size={12} />{detail.kind === 'session' || detail.kind === 'external_trigger' ? 'Open session' : `Open in ${SOURCE_MODULE[detail.kind]}`}
+        </button>
       </div>
 
       <!-- fact grid: who/what/where/cost -->
@@ -332,8 +404,8 @@
           {#if !editing}<button class="btn ghost small" onclick={beginEdit}><Icon name="edit" size={12} />Edit</button>{/if}
         </div>
         {#if editing}
-          <label class="field"><span class="flabel">Goal</span><textarea class="input field-input" rows="2" bind:value={editGoal}></textarea></label>
-          <label class="field"><span class="flabel">Result summary</span><textarea class="input field-input" rows="2" bind:value={editResult}></textarea></label>
+          <label class="field"><span class="flabel">Goal</span><textarea dir="auto" class="input field-input" rows="2" bind:value={editGoal}></textarea></label>
+          <label class="field"><span class="flabel">Result summary</span><textarea dir="auto" class="input field-input" rows="2" bind:value={editResult}></textarea></label>
           <label class="field">
             <span class="flabel">Risk (policy)</span>
             <select class="input field-input" bind:value={editRisk}>
@@ -386,7 +458,7 @@
           </ul>
         {/if}
         <div class="ap-req">
-          <input class="input req-in" placeholder="Reason (optional)" aria-label="Approval reason (optional)" bind:value={approveReason} onkeydown={(e) => e.key === 'Enter' && !busy && void requestApproval()} />
+          <input dir="auto" class="input req-in" placeholder="Reason (optional)" aria-label="Approval reason (optional)" bind:value={approveReason} onkeydown={(e) => e.key === 'Enter' && !busy && void requestApproval()} />
           <button class="btn small" disabled={busy} onclick={requestApproval}>Request approval</button>
         </div>
       </section>

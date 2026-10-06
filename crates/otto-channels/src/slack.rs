@@ -285,28 +285,69 @@ fn is_membership_subtype(subtype: Option<&str>) -> bool {
     )
 }
 
-/// True when a `message_changed` payload's inner message was edited BY A HUMAN.
-/// Slack stamps `edited: {user, ts}` only then; the same event fires with no
-/// stamp when Slack rewrites the message on its own — attaching a link unfurl,
-/// a file preview, or reaction metadata.
-fn is_human_edit(message: &serde_json::Value) -> bool {
-    message["edited"].is_object()
+/// How far apart (seconds) a `message_changed` event and its message's
+/// `edited.ts` may be for the event to BE that human edit.
+const EDIT_EVENT_WINDOW_SECS: f64 = 60.0;
+
+/// True when a `message_changed` EVENT is a human edit happening now. Slack
+/// stamps `edited: {user, ts}` only on a human edit, and fires the same event
+/// with no stamp when it rewrites the message on its own (a link unfurl, a
+/// file preview, reaction metadata). The stamp then STAYS on every later
+/// rewrite of that message, so its presence alone re-injected an old edited
+/// message as a new turn after a restart (or once the dedup window evicted
+/// it): the edit must be fresh — `edited.ts` within a minute of the event's
+/// own ts. A `hidden` inner message is never user content.
+fn is_human_edit(event: &serde_json::Value) -> bool {
+    let message = &event["message"];
+    if message["hidden"].as_bool() == Some(true) {
+        return false;
+    }
+    let secs = |v: &serde_json::Value| v.as_str().and_then(|t| t.parse::<f64>().ok());
+    let Some(edited) = secs(&message["edited"]["ts"]) else {
+        return false;
+    };
+    match secs(&event["event_ts"]).or_else(|| secs(&event["ts"])) {
+        Some(at) => (at - edited).abs() <= EDIT_EVENT_WINDOW_SECS,
+        // No event timestamp to compare: trust the stamp (old behaviour).
+        None => true,
+    }
 }
 
-/// The ts that identifies the underlying MESSAGE, for dedup. A `message_changed`
-/// event carries its own (edit) `ts` at the top level while the message it
-/// concerns keeps the original under `message.ts` — keying on the outer one
-/// makes every rewrite of a message look like a brand-new message.
-fn dedup_ts(event: &serde_json::Value) -> &str {
-    event["message"]["ts"]
+/// The dedup identity of an event. A `message_changed` event carries its own
+/// (edit) `ts` at the top level while the message it concerns keeps the
+/// original under `message.ts` — keying on the outer one made every Slack
+/// rewrite (unfurl, preview) look like a brand-new message, so those key on
+/// the ORIGINAL ts and dedup onto the post itself.
+///
+/// A HUMAN edit is new content and must be forwarded (see `process_event`),
+/// so it keys on the original ts PLUS its `edited.ts`: distinct from the
+/// original post (which used to swallow every edit), yet each specific edit
+/// is still delivered at most once (Socket Mode redelivers).
+fn dedup_ts(event: &serde_json::Value) -> String {
+    let original = event["message"]["ts"]
         .as_str()
         .or_else(|| event["ts"].as_str())
-        .unwrap_or("")
+        .unwrap_or("");
+    match event["message"]["edited"]["ts"].as_str() {
+        Some(edit) if is_human_edit(event) => format!("{original}#edit:{edit}"),
+        _ => original.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Adapter implementation
 // ---------------------------------------------------------------------------
+
+/// The dedup window for `bot_token`, shared by every listener generation of
+/// this bot in the process (see `run`).
+fn seen_window(bot_token: &str) -> Arc<Mutex<DedupWindow>> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<DedupWindow>>>>,
+    > = std::sync::OnceLock::new();
+    let map = MAP.get_or_init(Default::default);
+    let mut m = map.lock().unwrap_or_else(|p| p.into_inner());
+    Arc::clone(m.entry(bot_token.to_string()).or_default())
+}
 
 /// Slack bot adapter: post, edit and upload messages via the Web API.
 pub struct SlackAdapter {
@@ -518,6 +559,18 @@ impl SlackAdapter {
 // Socket Mode listener
 // ---------------------------------------------------------------------------
 
+/// Sleep `ms`, waking early (in 250 ms slices) once `cancel` is set: a
+/// disabled / shut-down listener in a (≤ 60 s) backoff must not linger and
+/// make one more `apps.connections.open` call.
+async fn sleep_unless_cancelled(ms: u64, cancel: &AtomicBool) {
+    let mut left = ms;
+    while left > 0 && !cancel.load(Ordering::Relaxed) {
+        let step = left.min(250);
+        tokio::time::sleep(Duration::from_millis(step)).await;
+        left -= step;
+    }
+}
+
 /// Open and maintain a Slack Socket Mode connection until `cancel` is set.
 /// Each inbound `message` event is forwarded to `bridge`. Every connect /
 /// drop / failure is reported to `health` (Settings → Channels shows it).
@@ -538,8 +591,12 @@ pub async fn run(
             debug!("slack: removed {n} stale downloaded attachment(s)");
         }
     });
-    // In-memory dedup set: keyed by "channel:ts".
-    let seen: Arc<Mutex<DedupWindow>> = Arc::new(Mutex::new(DedupWindow::default()));
+    // In-memory dedup set: keyed by "channel:ts". Shared per bot token
+    // across listener generations: a config edit respawns the listener while
+    // Slack may still redeliver events the previous generation handled (an
+    // unacked envelope, or the old socket's last frames) — a fresh window
+    // used to forward those twice.
+    let seen = seen_window(&bot_token);
 
     let mut backoff_ms: u64 = 3_000;
     const BACKOFF_MAX_MS: u64 = 60_000;
@@ -561,7 +618,7 @@ pub async fn run(
                     backoff_ms = BACKOFF_MAX_MS;
                 }
                 health.failed(&detail, permanent);
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
@@ -582,7 +639,7 @@ pub async fn run(
                 let why = redact_url(&e, &wss_url);
                 error!("slack: websocket connect failed: {why}");
                 health.failed(&format!("Socket Mode connect failed: {why}"), false);
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
@@ -598,7 +655,7 @@ pub async fn run(
                     ),
                     false,
                 );
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                sleep_unless_cancelled(backoff_ms, &cancel).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue 'outer;
             }
@@ -780,7 +837,7 @@ pub async fn run(
             health.reconnecting(&drop_reason);
         }
         // Pause before reconnecting (exponential backoff, reset on successful hello).
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        sleep_unless_cancelled(backoff_ms, &cancel).await;
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
     }
 }
@@ -852,7 +909,7 @@ async fn handle_event(
         debug!(event_type, "slack: ignored non-message event");
         return;
     }
-    info!(event_type, "slack: message-like event received");
+    debug!(event_type, "slack: message-like event received");
 
     // Loop prevention — the ONLY thing we ever drop. Never forward the bot's
     // own messages, including the nested message of an edit (`message_changed`):
@@ -860,7 +917,7 @@ async fn handle_event(
     // edit emits a message_changed event authored by the bot. Without this the
     // relay would feed its own output back to the agent in a tight loop.
     if event["bot_id"].is_string() || event["message"]["bot_id"].is_string() {
-        info!(event_type, "slack: bot message skipped (loop prevention)");
+        debug!(event_type, "slack: bot message skipped (loop prevention)");
         return;
     }
 
@@ -889,7 +946,7 @@ async fn handle_event(
     // happened to contain a URL got processed twice: two agent sessions, or two
     // runs of the same workflow, from one human message. Only a human edit
     // carries `message.edited`.
-    if subtype == Some("message_changed") && !is_human_edit(&event["message"]) {
+    if subtype == Some("message_changed") && !is_human_edit(event) {
         info!(
             event_type,
             "slack: message rewrite skipped (unfurl/attachment, no user edit)"
@@ -911,7 +968,7 @@ async fn handle_event(
     // The allowed-users gate runs HERE as well as in the bridge: before it,
     // anyone who could message the bot made the daemon download up to 50 MB
     // per attachment into the temp dir — only for the bridge to drop it.
-    if !crate::bridge::user_allowed(&integ.allowed_users, &user) {
+    if !crate::bridge::integration_admits(integ, &user) {
         info!(
             event_type,
             user = %user,
@@ -968,7 +1025,13 @@ async fn handle_event(
         chat: channel,
         thread,
         user,
+        user_name: ["display_name", "real_name"]
+            .iter()
+            .find_map(|k| content["user_profile"][*k].as_str())
+            .filter(|n| !n.trim().is_empty())
+            .map(str::to_string),
         text: combined,
+        edited: subtype == Some("message_changed"),
     };
     info!(
         workspace = %inbound.workspace_id,
@@ -1178,18 +1241,16 @@ mod tests {
                 "attachments": [{"title": "some link"}]
             }
         });
-        assert!(
-            !is_human_edit(&unfurl["message"]),
-            "an unfurl is not an edit"
-        );
+        assert!(!is_human_edit(&unfurl), "an unfurl is not an edit");
         assert_eq!(
             dedup_ts(&unfurl),
             "1785255511.983239",
             "dedup on the original"
         );
 
-        // A real human edit keeps the `edited` stamp — still forwarded, but it
-        // dedups onto the original message so it cannot re-trigger either.
+        // A real human edit keeps the `edited` stamp — it is new content and
+        // is forwarded, so it must NOT dedup onto the original post (that
+        // swallowed every edit); a redelivery of the same edit still dedups.
         let edited = serde_json::json!({
             "channel": "C1",
             "ts": "1785255520.000200",
@@ -1201,8 +1262,34 @@ mod tests {
                 "edited": {"user": "U1", "ts": "1785255520.000000"}
             }
         });
-        assert!(is_human_edit(&edited["message"]));
-        assert_eq!(dedup_ts(&edited), "1785255511.983239");
+        assert!(is_human_edit(&edited));
+        // A LATER rewrite (unfurl, parent update) of an edited message keeps
+        // the old stamp — it is not a fresh edit and is not re-forwarded.
+        let mut stale = edited.clone();
+        stale["ts"] = serde_json::json!("1785259999.000100");
+        assert!(
+            !is_human_edit(&stale),
+            "an old edit stamp is not a new edit"
+        );
+        // A hidden inner message is never user content.
+        let mut hidden = edited.clone();
+        hidden["message"]["hidden"] = serde_json::json!(true);
+        assert!(!is_human_edit(&hidden));
+        assert_eq!(
+            dedup_ts(&edited),
+            "1785255511.983239#edit:1785255520.000000",
+            "an edit is distinct from the original post"
+        );
+        assert_ne!(dedup_ts(&edited), dedup_ts(&unfurl));
+        // A second, later edit is distinct again.
+        let mut edited2 = edited.clone();
+        edited2["message"]["edited"]["ts"] = serde_json::json!("1785255530.000000");
+        assert_ne!(dedup_ts(&edited2), dedup_ts(&edited));
+        // The dedup window survives a listener respawn on the same bot.
+        assert!(Arc::ptr_eq(
+            &seen_window("xoxb-dedup-test"),
+            &seen_window("xoxb-dedup-test")
+        ));
 
         // A plain new message keys on its own ts, exactly as before.
         let plain = serde_json::json!({"channel": "C1", "ts": "1785255600.5", "text": "hi"});

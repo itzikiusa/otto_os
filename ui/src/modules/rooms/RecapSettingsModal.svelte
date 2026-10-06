@@ -18,8 +18,8 @@
     <!-- Never offer the form before the saved values arrived: Save would overwrite them with defaults. -->
     <LoadState what="local engine settings" variant="compact" {loading} error={loadError} empty={true} onretry={load} />
   {:else}<div class="fields">
-    <label>whisper.cpp executable <input bind:value={config.whisper_executable} placeholder="/absolute/path/to/whisper-cli" /></label>
-    <label>Multilingual model file <input bind:value={config.whisper_model} placeholder="/absolute/path/to/ggml-model.bin" /></label>
+    <label>whisper.cpp executable <input dir="ltr" bind:value={config.whisper_executable} placeholder="/absolute/path/to/whisper-cli" /></label>
+    <label>Multilingual model file <input dir="ltr" bind:value={config.whisper_model} placeholder="/absolute/path/to/ggml-model.bin" /></label>
     <label>Speech language <select bind:value={config.language}><option value="auto">Detect automatically</option><option value="en">English</option><option value="he">Hebrew</option></select></label>
     <label>Recognition threads <select bind:value={config.threads}>{#each [1, 2, 3, 4] as threads}<option value={threads}>{threads}</option>{/each}</select></label>
   </div>

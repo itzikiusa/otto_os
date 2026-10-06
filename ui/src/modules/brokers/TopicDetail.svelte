@@ -8,6 +8,7 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmProd } from '../../lib/confirmProd';
   import { formatBytes } from '../../lib/metric-format';
@@ -45,6 +46,12 @@
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
 
   type Tab = 'messages' | 'partitions' | 'config' | 'produce';
+  const TOPIC_TABS: TabItem<Tab>[] = [
+    { id: 'messages', label: 'Messages' },
+    { id: 'partitions', label: 'Partitions' },
+    { id: 'config', label: 'Config' },
+    { id: 'produce', label: 'Produce' },
+  ];
   let tab = $state<Tab>('messages');
 
   let detail = $state<TopicDetail | null>(null);
@@ -642,19 +649,18 @@
 <div class="td">
   <header>
     <div class="title">
-      <Icon name="box" size={15} />
+      <Icon name="box" size={14} />
       <span class="name" title={topic}>{topic}</span>
       {#if detail}<span class="muted">· {detail.partitions.length}p · {detail.message_count.toLocaleString()} msgs</span>{/if}
     </div>
     <button class="btn small danger" onclick={deleteTopic}>Delete topic</button>
   </header>
 
-  <nav class="subtabs">
-    <button class:on={tab === 'messages'} onclick={() => (tab = 'messages')}>Messages</button>
-    <button class:on={tab === 'partitions'} onclick={() => (tab = 'partitions')}>Partitions</button>
-    <button class:on={tab === 'config'} onclick={() => (tab = 'config')}>Config</button>
-    <button class:on={tab === 'produce'} onclick={() => (tab = 'produce')}>Produce</button>
-  </nav>
+  <!-- The topic's main view switch: a real tablist (S19-302), so VoiceOver
+       says which view is open; arrow keys / RTL come from <Tabs>. -->
+  <div class="subtabs">
+    <Tabs label="Topic view" idBase="topic" tabs={TOPIC_TABS} value={tab} onchange={(id) => (tab = id)} />
+  </div>
 
   {#if detailErr}
     <div class="err" role="alert">
@@ -666,6 +672,7 @@
     </div>
   {/if}
 
+  <div class="tpanel" role="tabpanel" id="topic-panel-{tab}" aria-labelledby="topic-tab-{tab}">
   {#if tab === 'messages'}
     <div class="consume-bar">
       <select bind:value={startMode} aria-label="Start position" title="Start position">
@@ -697,14 +704,14 @@
         <option value="base64">Base64</option>
       </select>
       <div class="filter-group">
-        <input class="grow" bind:value={keyFilter} placeholder="filter key…" aria-label="Filter by key" title="Server-side key filter (case-insensitive substring)" />
+        <input dir="ltr" class="grow" bind:value={keyFilter} placeholder="filter key…" aria-label="Filter by key" title="Server-side key filter (case-insensitive substring)" />
         {#if keyFilter.trim()}
           <label class="chk-small" title="Scan from beginning to find older matching messages">
             <input type="checkbox" bind:checked={keyFromBeginning} /> From start
           </label>
         {/if}
       </div>
-      <input class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
+      <input dir="ltr" class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
       <label class="auto" class:on={autoPoll} title="Append new messages every 3 s, backing off to 15 s while none arrive (incremental, capped at {TAIL_CAP})">
         <input type="checkbox" bind:checked={autoPoll} disabled={!!consumeError && !autoPoll} /> Live
       </label>
@@ -875,8 +882,8 @@
     {/if}
   {:else if tab === 'config'}
     <div class="cfg-set">
-      <input class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
-      <input class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
+      <input dir="ltr" class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
+      <input dir="ltr" class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
       <button
         class="btn small"
         onclick={setConfig}
@@ -911,7 +918,7 @@
       </div>
       <label class="field">
         <span>Key (optional){pKeyBase64 ? ' — base64' : ''}</span>
-        <input bind:value={pKey} placeholder={pKeyBase64 ? 'base64-encoded bytes' : 'string key'} />
+        <input dir="auto" bind:value={pKey} placeholder={pKeyBase64 ? 'base64-encoded bytes' : 'string key'} />
       </label>
       <label class="field">
         <span>Partition (optional)</span>
@@ -923,7 +930,7 @@
       {#if !pTombstone}
         <label class="field grow">
           <span>Value{pValueBase64 ? ' — base64' : ''}</span>
-          <textarea
+          <textarea dir="ltr"
             bind:value={pValue}
             rows="6"
             placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}
@@ -940,8 +947,8 @@
         </div>
         {#each pHeaders as h, i (i)}
           <div class="header-row">
-            <input bind:value={h.key} placeholder="key" class="header-key" aria-label="Header {i + 1} key" />
-            <input bind:value={h.value} placeholder="value" class="header-val" aria-label="Header {i + 1} value" />
+            <input dir="ltr" bind:value={h.key} placeholder="key" class="header-key" aria-label="Header {i + 1} key" />
+            <input dir="ltr" bind:value={h.value} placeholder="value" class="header-val" aria-label="Header {i + 1} value" />
             <button
               class="icon-btn danger-tiny"
               onclick={() => removeHeader(i)}
@@ -959,6 +966,7 @@
       </button>
     </div>
   {/if}
+  </div>
 </div>
 
 {#if sendToAgentOpen && selected && ws.current}
@@ -1021,30 +1029,14 @@
     flex: none;
   }
   .subtabs {
-    display: flex;
-    gap: 2px;
-    padding: 6px 12px 0;
+    padding: 0 12px;
     border-bottom: 1px solid var(--border);
-    /* Scroll the four subtabs horizontally rather than letting the last one
-       (Produce) jut off the right edge on the narrowest phones (~320px). */
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    -webkit-overflow-scrolling: touch;
   }
-  .subtabs button {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 6px 12px;
-    border-radius: var(--radius-s) var(--radius-s) 0 0;
-    cursor: pointer;
-    font-size: var(--fs-m);
-    white-space: nowrap;
-    flex: none;
-  }
-  .subtabs button.on {
-    color: var(--text);
-    border-bottom: 2px solid var(--accent);
+  .tpanel {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .consume-bar {
     display: flex;

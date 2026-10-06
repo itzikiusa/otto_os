@@ -102,6 +102,7 @@ test('retry without a durable prompt fails; with the DB prompt+diff it re-runs',
   // No prompts seeded and no $TMPDIR prompt file exists for this fresh id →
   // the legacy failure mode.
   const bare = await seedReview({
+    status: 'error', // retry needs a settled review (S2-303: never mid-run)
     agents: [agentRow('Correctness', 'error', { note: 'stopped by user' }), agentRow('Summarizer', 'pending')],
   });
   const noPrompt = await ctx.post(api(`/reviews/${bare.id}/agents/0/retry`));
@@ -114,6 +115,7 @@ test('retry without a durable prompt fails; with the DB prompt+diff it re-runs',
   // the test daemon (the background run fails to start, which is fine — the
   // durability contract under test is the prompt lookup, not the agent run).
   const durable = await seedReview({
+    status: 'error', // retry needs a settled review (S2-303: never mid-run)
     agents: [
       agentRow('Correctness', 'error', { note: 'stopped by user', provider: 'e2e-no-such-cli' }),
       agentRow('Summarizer', 'pending'),
@@ -134,6 +136,7 @@ test('legacy pre-0100 retry: temp prompt file only (no DB row) still works', asy
   // process.env), so planting the legacy `otto-review-<id>-<index>.prompt`
   // file here exercises the DB-miss → temp-file fallback ordering for real.
   const legacy = await seedReview({
+    status: 'error', // retry needs a settled review (S2-303: never mid-run)
     agents: [
       agentRow('Correctness', 'error', { note: 'stuck', provider: 'e2e-no-such-cli' }),
       agentRow('Summarizer', 'pending'),

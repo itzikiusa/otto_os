@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   // Insights view — two tabs:
@@ -21,6 +22,9 @@
   import type { InsightKind, InsightReport, InsightRunPeriod } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -116,6 +120,7 @@
     if (loaded) return;
     loaded = true;
     void load();
+    void restoreActiveRun();
     return () => {
       disposed = true;
       if (pollTimer) clearTimeout(pollTimer);
@@ -245,22 +250,30 @@
     if (routeKey) router.replace('insights');
   }
 
-  // Fetch the full summary for the open report (the list has an excerpt).
+  // Fetch the full summary for the open report (the list has an excerpt) AND
+  // for the report its deltas compare against: a metric the excerpt cuts off
+  // falls back to the index (tool errors: 0), so comparing the open report's
+  // summary value with the previous one's index value showed "Up 24, worse"
+  // for a day that actually went 41 → 24.
   $effect(() => {
     const r = selected;
     if (!r) return;
-    const k = keyOf(r);
-    if (fullMd[k] != null) return;
+    const prev = untrack(() => previousOf(r));
+    const want = [r, ...(prev ? [prev] : [])].filter((x) => untrack(() => fullMd[keyOf(x)]) == null);
+    if (!want.length) return;
     let current = true;
-    const path = r.html_path ? siblingPath(r.html_path, 'summary') : null;
-    const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
-    void summary
-      .then((text) => {
-        if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
-      })
-      .catch(() => {
-        if (current) fullMd = { ...fullMd, [k]: r.summary };
-      });
+    for (const x of want) {
+      const k = keyOf(x);
+      const path = x.html_path ? siblingPath(x.html_path, 'summary') : null;
+      const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
+      void summary
+        .then((text) => {
+          if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
+        })
+        .catch(() => {
+          if (current) fullMd = { ...fullMd, [k]: x.summary };
+        });
+    }
     return () => { current = false; };
   });
 
@@ -282,10 +295,22 @@
   function sameKind(r: InsightReport): InsightReport[] {
     return reports.filter((x) => x.kind === r.kind);
   }
+  /** Report key → the previous report of the same kind, built once per
+   *  `reports` change. `previousOf` used to filter + findIndex over every
+   *  report for each row (twice per row) — O(rows × reports) per render. */
+  const previousByKey = $derived.by(() => {
+    const m = new Map<string, InsightReport | null>();
+    const byKind = new Map<string, InsightReport[]>();
+    for (const r of reports) {
+      const list = byKind.get(r.kind);
+      if (list) list.push(r);
+      else byKind.set(r.kind, [r]);
+    }
+    for (const list of byKind.values()) list.forEach((r, i) => m.set(keyOf(r), list[i + 1] ?? null));
+    return m;
+  });
   function previousOf(r: InsightReport): InsightReport | null {
-    const list = sameKind(r);
-    const i = list.findIndex((x) => keyOf(x) === keyOf(r));
-    return i >= 0 ? (list[i + 1] ?? null) : null;
+    return previousByKey.get(keyOf(r)) ?? null;
   }
 
   function shortDate(iso: string): string {
@@ -371,7 +396,8 @@
 
   /** Desktop: a native pop-out window on this report's route. Browser: a new
    *  tab whose only content is the report in a sandboxed, opaque-origin
-   *  iframe — never the report itself at the app's origin. */
+   *  iframe — never the report itself at the app's origin. Popups it opens
+   *  stay sandboxed (no `allow-popups-to-escape-sandbox`). */
   async function openWindow(r: InsightReport): Promise<void> {
     const route = `insights/r/${r.kind}/${r.period_start}/${r.period_end}`;
     try {
@@ -382,7 +408,7 @@
       const wrapper =
         '<!doctype html><meta charset="utf-8"><title>Insight report</title>' +
         '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style>' +
-        `<iframe sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc="${attr}"></iframe>`;
+        `<iframe sandbox="allow-scripts allow-popups" srcdoc="${attr}"></iframe>`;
       const url = URL.createObjectURL(new Blob([wrapper], { type: 'text/html' }));
       window.open(url, '_blank', 'noopener');
       // Not revoked: the new tab needs the URL; it's released when the tab closes.
@@ -418,6 +444,10 @@
     { value: 'month:1', label: 'Last month' },
     { value: 'month:2', label: '2 months ago' },
   ];
+  /** Starting / stopping a run is root-only on the daemon (`POST /insights/run`,
+   *  `/insights/runs/{id}/cancel` → `require_root`): other members read the
+   *  reports but never see controls that can only end in a 403. */
+  const canRun = $derived(auth.isRoot);
   let runChoice = $state('day:1');
   let running = $state(false);
   /** Reason the last run did not start (e.g. skill not installed). */
@@ -431,13 +461,58 @@
   // writing — the report then never appeared until a manual reload.
   const POLL_MAX = 100;
   let pollCount = $state(0);
+  /** Consecutive poll ticks the run was missing from the active-run list. */
+  let pollGoneTicks = 0;
+  /** Seconds already elapsed when a run was picked up again (page re-opened). */
+  let pollBaseSec = $state(0);
+  let stoppingRun = $state(false);
+
+  /** A run started earlier (this page was left, or another window started it)
+   *  is still generating: bring its banner back and resume polling for it. */
+  async function restoreActiveRun(): Promise<void> {
+    try {
+      const runs = await insightsApi.activeRuns();
+      const r = runs[runs.length - 1];
+      if (disposed || !r || pollRunId) return;
+      pollRunId = r.run_id;
+      pollGoneTicks = 0;
+      pollReportKey = r.report_key;
+      reportBeforeRun = r.report_revision;
+      pollCount = 0;
+      pollBaseSec = Math.max(0, Math.floor((Date.now() - Date.parse(r.started_at)) / 1000));
+      schedulePoll();
+    } catch {
+      /* best-effort: without it the page still works, just without the banner */
+    }
+  }
+
+  async function stopRun(): Promise<void> {
+    const id = pollRunId;
+    if (!id || stoppingRun) return;
+    const ok = await confirmer.ask('Stop generating this insights report? The agent session is ended; nothing already published is removed.', {
+      title: 'Stop insights run', danger: true, confirmLabel: 'Stop run',
+    });
+    if (!ok) return;
+    stoppingRun = true;
+    try {
+      await insightsApi.cancelRun(id);
+      if (pollTimer) clearTimeout(pollTimer);
+      pollRunId = null;
+      toasts.info('Insights run stopped');
+    } catch (e) {
+      toastError('Couldn’t stop the insights run', e);
+    } finally {
+      stoppingRun = false;
+    }
+  }
 
   async function runNow(choice = runChoice): Promise<void> {
-    if (loading || loadError || running || pollRunId) return;
+    if (!canRun || loading || loadError || running || pollRunId) return;
     const [p, o] = choice.split(':');
     running = true;
     runFailReason = null;
     pollCount = 0;
+    pollBaseSec = 0;
     const period = p as InsightRunPeriod;
     const offset = Number(o) || 1;
     const fallbackKey = localReportKey(period, offset);
@@ -448,8 +523,10 @@
         runFailReason = resp.reason ?? 'Check that the insights skill is installed.';
         return;
       }
+      if (resp.attached) toasts.info('Already generating this report', 'Showing the run in progress instead of starting another.');
       if (resp.run_id) {
         pollRunId = resp.run_id;
+        pollGoneTicks = 0;
         pollReportKey = resp.report_key ?? fallbackKey;
         reportBeforeRun = resp.report_revision;
         schedulePoll();
@@ -483,12 +560,37 @@
       pollCount += 1;
       let ready: InsightReport | null = null;
       try {
-        if (!pollReportKey) return;
+        // No key to poll (an older daemon's run): end the banner instead of
+        // returning without rescheduling — that left it stuck and blocked Run now.
+        if (!pollReportKey) {
+          pollRunId = null;
+          return;
+        }
         const status = await insightsApi.reportStatus(pollReportKey);
         if (disposed) return;
         if (status.report?.html_path && status.html_revision && status.html_revision !== reportBeforeRun) ready = status.report;
       } catch {
         /* keep polling; the next tick retries */
+      }
+      // The run itself ended (failed, or stopped from another window) without
+      // publishing: end the banner with why instead of polling ~5 min and
+      // blocking Run now (S17-311). Two consecutive sightings, so a run that
+      // finished between the report check and this one isn't misread.
+      if (!ready && pollRunId) {
+        try {
+          const active = await insightsApi.activeRuns();
+          if (disposed) return;
+          pollGoneTicks = active.some((r) => r.run_id === pollRunId) ? 0 : pollGoneTicks + 1;
+        } catch {
+          /* unknown — keep polling */
+        }
+        if (pollGoneTicks >= 2) {
+          pollRunId = null;
+          pollGoneTicks = 0;
+          runFailReason = 'The insights run ended without publishing a report — it failed or was stopped. Its session shows what happened.';
+          void load();
+          return;
+        }
       }
       if (ready) {
         pollRunId = null;
@@ -513,8 +615,10 @@
   $effect(() => {
     const r = selected;
     return registry.register('insights', [
+      ...(canRun ? [
       { id: 'insights.run', title: "Run yesterday’s insights report", group: 'Insights', keywords: 'generate usage report now', run: () => void runNow('day:1') },
       { id: 'insights.run-week', title: "Run last week’s insights report", group: 'Insights', keywords: 'generate weekly usage report', run: () => void runNow('week:1') },
+      ] : []),
       ...(r
         ? [
             { id: 'insights.export-md', title: 'Export insights summary as Markdown', group: 'Insights', keywords: 'download md report', run: () => exportMd(r) },
@@ -595,7 +699,7 @@
         <button class="icon-btn" data-overflow="-1" data-icon="gear" data-label="Schedule settings" onclick={() => router.go('settings/insights')} aria-label="Schedule settings" title="Schedule settings">
           <Icon name="gear" size={14} />
         </button>
-        {#if reports.length > 0 || loading}
+        {#if canRun && (reports.length > 0 || loading)}
           <select class="input run-period" bind:value={runChoice} disabled={loading || !!loadError || running || !!pollRunId} aria-label="Period to report on" title="Period to report on">
             {#each RUN_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
           </select>
@@ -631,7 +735,9 @@
             <div class="banner" role="status">
               <Icon name="refresh" size={14} />
               <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
-              <span class="dim">{Math.floor((pollCount * 3) / 60)}:{String((pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
+              <span class="dim">{Math.floor((pollBaseSec + pollCount * 3) / 60)}:{String((pollBaseSec + pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
+              <button class="btn small" onclick={() => pollRunId && ws.navigateToSession(pollRunId)}><Icon name="terminal" size={12} /> View live session</button>
+              {#if canRun}<button class="btn small" disabled={stoppingRun} aria-busy={stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {stoppingRun ? 'Stopping…' : 'Stop'}</button>{/if}
             </div>
           {/if}
         </div>
@@ -651,9 +757,9 @@
           icon="gauge"
           title="No insight reports yet"
           body="An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. Scheduled reports are off until you turn them on."
-          actionLabel={running ? 'Starting…' : "Run yesterday’s report"}
+          actionLabel={canRun ? (running ? 'Starting…' : "Run yesterday’s report") : undefined}
           actionIcon="play"
-          onaction={() => runNow('day:1')}
+          onaction={canRun ? () => runNow('day:1') : undefined}
         >
           <button class="btn ghost" onclick={() => router.go('settings/insights')}>Turn on scheduled reports</button>
         </EmptyState>
@@ -672,6 +778,7 @@
                 {#each shownRows as r (keyOf(r))}
                   {@const p = parsedByKey.get(keyOf(r))}
                   {@const acts = actionSummary(r)}
+                  {@const stats = rowStats(r)}
                   <button class="rep-row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
                     <div class="row-top">
                       <span class="chip">{kindLabel(r.kind)}</span>
@@ -684,9 +791,9 @@
                     {:else if !r.summary.trim() && !r.html_path}
                       <div class="row-headline dim">No summary yet — the run may still be writing it.</div>
                     {/if}
-                    {#if rowStats(r).length > 0}
+                    {#if stats.length > 0}
                       <div class="row-stats">
-                        {#each rowStats(r) as s (s.key)}
+                        {#each stats as s (s.key)}
                           <span class="stat {s.d?.tone ?? 'neutral'}" title={statTitle(s.key, s.value)}>
                             {statText(s.key, s.value)}
                             {#if s.d && s.d.direction !== 'flat'}<Icon name={s.d.direction === 'up' ? 'arrowUp' : 'arrowDown'} size={12} />{/if}

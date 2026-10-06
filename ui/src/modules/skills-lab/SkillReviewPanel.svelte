@@ -19,7 +19,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, type BadgeTone } from '../../lib/status';
   import { severityLabel } from '../../lib/labels';
@@ -211,11 +211,15 @@
       !(await confirmer.ask(`Stop the review of “${selected.skill_name}”? Agents still running are stopped and their partial findings are not summarized.`, {
         title: 'Stop review',
         confirmLabel: 'Stop review',
+        danger: true,
       }))
     )
       return;
+    const id = selected.id;
     try {
-      selected = await skillReviewApi.cancel(selected.id);
+      const updated = await skillReviewApi.cancel(id);
+      // Another review may have been opened while the stop was in flight.
+      if (selected?.id === id) selected = updated;
       await loadList();
     } catch (e) {
       toastError('Couldn’t stop the review', e);
@@ -228,7 +232,7 @@
     if (
       !(await confirmer.ask(
         `Delete the review of “${rev.skill_name}”? Its findings, agent transcripts and summary are removed. The skill itself is not touched.`,
-        { title: 'Delete review' },
+        { title: 'Delete review', confirmLabel: 'Delete', danger: true },
       ))
     )
       return;
@@ -413,7 +417,7 @@
         {/if}
         <label class="lr-field">
           <span>Additional instructions <span class="hint-inline">optional</span></span>
-          <textarea
+          <textarea dir="auto"
             class="input lr-textarea"
             rows="3"
             bind:value={fInstructions}
@@ -548,7 +552,7 @@
               {/if}
               {#if fx.session_id && fixTermOpen}
                 <div class="lr-fix-term">
-                  <Terminal sessionId={fx.session_id} preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={fx.session_id} preferDom resumeOnOpen={false} />
                 </div>
               {/if}
             {/if}
@@ -563,7 +567,7 @@
                   <select class="input" bind:value={fixProvider} title="Fixer agent" aria-label="Fixer agent">
                     {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
                   </select>
-                  <input
+                  <input dir="auto"
                     type="text"
                     class="input lr-fix-input"
                     aria-label="Extra instructions for the fixer"

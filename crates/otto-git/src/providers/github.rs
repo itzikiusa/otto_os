@@ -47,6 +47,71 @@ pub struct Github {
 }
 
 impl Github {
+    /// The one GitHub merge: `expected_head_sha` is forwarded as the merge
+    /// body's `sha`, so GitHub itself refuses (409) when the head moved.
+    async fn merge_with(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+        expected_head_sha: Option<&str>,
+    ) -> Result<()> {
+        let method = match strategy {
+            MergeStrategy::Merge => "merge",
+            MergeStrategy::Squash => "squash",
+            MergeStrategy::Rebase => "rebase",
+        };
+        // Read the head ref BEFORE the merge: GitHub has no merge-body flag for
+        // deleting the source branch, and the PR payload is the only place the
+        // ref name is available.
+        let head_ref = if delete_source_branch {
+            {
+                let pr = self.pr_raw(r, number).await?;
+                // Fork cleanup needs credentials/authority for the fork. Never
+                // substitute a same-named branch in the base repository.
+                if vstr(&pr, &["head", "repo", "full_name"])
+                    .eq_ignore_ascii_case(&format!("{}/{}", r.owner, r.repo))
+                {
+                    vstr(&pr, &["head", "ref"])
+                } else {
+                    String::new()
+                }
+            }
+        } else {
+            String::new()
+        };
+        self.http
+            .ok(self
+                .req(
+                    reqwest::Method::PUT,
+                    &format!("{}/{number}/merge", Self::prs_path(r)),
+                )
+                .json(&merge_json(method, expected_head_sha)))
+            .await
+            .map_err(super::pinned_merge_err)?;
+        if !head_ref.is_empty() {
+            let path = format!(
+                "/repos/{}/{}/git/refs/heads/{}",
+                r.owner,
+                r.repo,
+                encode_ref_path(&head_ref)
+            );
+            if let Err(e) = self.http.ok(self.req(reqwest::Method::DELETE, &path)).await {
+                // The merge is the operation the caller asked for; the delete
+                // is best-effort. The repo's "automatically delete head
+                // branches" setting may have got there first (422 "Reference
+                // does not exist" = the wanted end state), and a protected
+                // branch or a token without delete rights must not turn a merge
+                // that ALREADY LANDED into a failure the user retries.
+                if !e.to_string().contains("Reference does not exist") {
+                    tracing::warn!(pr = number, branch = %head_ref, "merged, but the source branch could not be deleted: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(token: String) -> Self {
         Self::with_base(token, BASE.to_string())
     }
@@ -937,53 +1002,20 @@ impl super::GitProvider for Github {
         strategy: MergeStrategy,
         delete_source_branch: bool,
     ) -> Result<()> {
-        let method = match strategy {
-            MergeStrategy::Merge => "merge",
-            MergeStrategy::Squash => "squash",
-            MergeStrategy::Rebase => "rebase",
-        };
-        // Read the head ref BEFORE the merge: GitHub has no merge-body flag for
-        // deleting the source branch, and the PR payload is the only place the
-        // ref name is available.
-        let head_ref = if delete_source_branch {
-            {
-                let pr = self.pr_raw(r, number).await?;
-                // Fork cleanup needs credentials/authority for the fork. Never
-                // substitute a same-named branch in the base repository.
-                if vstr(&pr, &["head", "repo", "full_name"])
-                    .eq_ignore_ascii_case(&format!("{}/{}", r.owner, r.repo))
-                {
-                    vstr(&pr, &["head", "ref"])
-                } else {
-                    String::new()
-                }
-            }
-        } else {
-            String::new()
-        };
-        self.http
-            .ok(self
-                .req(
-                    reqwest::Method::PUT,
-                    &format!("{}/{number}/merge", Self::prs_path(r)),
-                )
-                .json(&json!({ "merge_method": method })))
-            .await?;
-        if !head_ref.is_empty() {
-            let path = format!("/repos/{}/{}/git/refs/heads/{head_ref}", r.owner, r.repo);
-            if let Err(e) = self.http.ok(self.req(reqwest::Method::DELETE, &path)).await {
-                // The merge is the operation the caller asked for; the delete
-                // is best-effort. The repo's "automatically delete head
-                // branches" setting may have got there first (422 "Reference
-                // does not exist" = the wanted end state), and a protected
-                // branch or a token without delete rights must not turn a merge
-                // that ALREADY LANDED into a failure the user retries.
-                if !e.to_string().contains("Reference does not exist") {
-                    tracing::warn!(pr = number, branch = %head_ref, "merged, but the source branch could not be deleted: {e}");
-                }
-            }
-        }
-        Ok(())
+        self.merge_with(r, number, strategy, delete_source_branch, None)
+            .await
+    }
+
+    async fn merge_pinned(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+        expected_head_sha: Option<&str>,
+    ) -> Result<()> {
+        self.merge_with(r, number, strategy, delete_source_branch, expected_head_sha)
+            .await
     }
 
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -1252,8 +1284,29 @@ fn parse_github_expiry(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// `PUT /pulls/{n}/merge` body: the method plus, when pinned, the head `sha`
+/// GitHub must still see (409 "Head branch was modified" otherwise).
+fn merge_json(method: &str, expected_head_sha: Option<&str>) -> serde_json::Value {
+    let mut body = json!({ "merge_method": method });
+    if let Some(sha) = expected_head_sha.map(str::trim).filter(|s| !s.is_empty()) {
+        body["sha"] = json!(sha);
+    }
+    body
+}
+
 /// Parse a small inline check-runs JSON fixture into a CiStatus aggregate.
 /// Used by tests; not exposed to the public API.
+/// Percent-encode each `/`-separated segment of a branch name for a REST path.
+/// Unencoded, a `#` truncates the path (everything after it is a fragment):
+/// deleting `fix#123` would delete an unrelated branch named `fix` (S2-307).
+/// `/` stays a separator — GitHub's ref routes take `heads/feat/x` as is.
+pub(crate) fn encode_ref_path(name: &str) -> String {
+    name.split('/')
+        .map(|seg| urlencoding::encode(seg).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
     let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
@@ -1298,7 +1351,7 @@ fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_thread_resolution, collaborator_from, comment_from, create_pr_body,
+        apply_thread_resolution, collaborator_from, comment_from, create_pr_body, encode_ref_path,
         parse_check_runs_fixture, parse_github_expiry, reviewer_warning, scopes_header,
         summary_from,
     };
@@ -1540,5 +1593,15 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/b"));
+    }
+
+    /// S2-307: a `#` (or `?`, `%`) in a branch name is encoded so the DELETE
+    /// can never land on a truncated, unrelated ref; `/` stays a separator.
+    #[test]
+    fn ref_path_segments_are_percent_encoded() {
+        assert_eq!(encode_ref_path("fix#123"), "fix%23123");
+        assert_eq!(encode_ref_path("feat/a?b"), "feat/a%3Fb");
+        assert_eq!(encode_ref_path("feat/x"), "feat/x");
+        assert_eq!(encode_ref_path("100%"), "100%25");
     }
 }

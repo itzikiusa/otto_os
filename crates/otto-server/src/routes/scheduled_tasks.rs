@@ -37,6 +37,7 @@ pub fn routes() -> Router<ServerCtx> {
     Router::new()
         .route("/workspaces/{id}/scheduled-tasks", get(list).post(create))
         .route("/scheduled-tasks/presets", get(presets))
+        .route("/scheduled-tasks/preview", post(preview))
         .route(
             "/scheduled-tasks/{id}",
             get(get_one).patch(update).delete(remove),
@@ -55,23 +56,9 @@ pub fn routes() -> Router<ServerCtx> {
 /// explicit pick → the workspace's `default_provider` → the global
 /// `default_provider` setting → "claude".
 async fn resolve_task_provider(ctx: &ServerCtx, ws_id: &Id, explicit: &str) -> String {
-    let ws_default = ctx
-        .workspaces
-        .get(ws_id)
+    let ws = ctx.workspaces.get(ws_id).await.ok();
+    ctx.resolve_provider_or_fallback(ws.as_ref(), Some(explicit), "scheduled_tasks")
         .await
-        .ok()
-        .map(|ws| otto_core::provider::workspace_default(&ws.settings).to_string())
-        .unwrap_or_default();
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[
-        explicit,
-        ws_default.as_str(),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ])
 }
 
 /// `POST /scheduled-tasks/{id}/convert-to-workflow` — materialize a scheduled
@@ -252,6 +239,47 @@ struct UpdateReq {
     max_retries: Option<i64>,
     notify_on_change: Option<bool>,
     attach_proof: Option<bool>,
+}
+
+/// The PATCH fields that would change WHAT a task runs or WHERE its result
+/// goes and that actually differ from the stored task (a full-form PATCH
+/// re-sending unchanged values is not a change).
+fn owner_only_changes(task: &ScheduledTask, req: &UpdateReq) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let diff = |new: Option<&str>, old: &str| new.is_some_and(|n| n != old);
+    if diff(req.prompt.as_deref(), &task.prompt) {
+        out.push("prompt");
+    }
+    if req.skill.as_ref().is_some_and(|s| s != &task.skill) {
+        out.push("skill");
+    }
+    if diff(req.provider.as_deref(), &task.provider) {
+        out.push("provider");
+    }
+    if diff(req.model.as_deref(), &task.model) {
+        out.push("model");
+    }
+    if diff(req.cwd.as_deref(), &task.cwd) {
+        out.push("cwd");
+    }
+    if req
+        .destination
+        .as_ref()
+        .is_some_and(|d| d != &task.destination)
+    {
+        out.push("destination");
+    }
+    if req
+        .workflow_id
+        .as_ref()
+        .is_some_and(|w| w != &task.workflow_id)
+    {
+        out.push("workflow");
+    }
+    if diff(req.sandbox.as_deref(), &task.sandbox) {
+        out.push("sandbox");
+    }
+    out
 }
 
 /// Distinguish "key absent" from "key present and null" for `skill`/`workflow_id`.
@@ -457,6 +485,22 @@ async fn update(
 ) -> ApiResult<Json<ScheduledTask>> {
     let task = ctx.scheduled_tasks.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    // Runs execute AS `created_by` (their session, their verified Gmail for
+    // email delivery), so what runs and where the result goes is the owner's
+    // call: another Editor changing them would make A's agent run B's prompt
+    // and mail it to B's address (S3-05). Schedule/enable edits stay open.
+    let changed = owner_only_changes(&task, &req);
+    if !changed.is_empty()
+        && task.created_by.as_deref() != Some(user.id.as_str())
+        && require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Admin)
+            .await
+            .is_err()
+    {
+        return Err(ApiError(Error::Forbidden(format!(
+            "only the task's owner or a workspace admin can change its {} — it runs as its owner",
+            changed.join(", ")
+        ))));
+    }
     if let Some(p) = req.provider.as_deref() {
         check_provider(p)?;
     }
@@ -568,8 +612,16 @@ async fn cancel_run(
         .await
         .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
-    if run.status != "running" || !scheduled_tasks_engine::cancel_run(&run_id) {
+    if run.status != "running" {
         return Err(ApiError(Error::Conflict("the run is not running".into())));
+    }
+    if !scheduled_tasks_engine::cancel_run(&run_id) {
+        // The row still says running but execution already ended: it is
+        // writing/delivering its report, which can't be stopped midway (S3-12).
+        return Err(ApiError(Error::Conflict(
+            "the run is finishing (saving and delivering its report) and can no longer be stopped"
+                .into(),
+        )));
     }
     Ok(Json(json!({"ok": true})))
 }
@@ -633,6 +685,59 @@ async fn presets(
     CurrentUser(_user): CurrentUser,
 ) -> ApiResult<Json<Vec<ScheduledTaskPreset>>> {
     Ok(Json(builtin_presets()))
+}
+
+/// `POST /scheduled-tasks/preview` body: the form's schedule + timezone.
+#[derive(Debug, Deserialize)]
+struct PreviewReq {
+    #[serde(default)]
+    schedule: Value,
+    #[serde(default)]
+    timezone: Option<String>,
+}
+
+/// How many upcoming fires a preview lists (mirrors the workflow trigger preview).
+const PREVIEW_FIRES: usize = 5;
+
+/// `POST /scheduled-tasks/preview` — the next fire times of an UNSAVED schedule,
+/// so a task form can say "Next fires …" before Save (a `0 9 * * 0` typed for
+/// Monday shows Sunday up front). Validates exactly like create/update, runs the
+/// scheduler's own cadence evaluator, and touches no task or cursor.
+async fn preview(
+    State(_ctx): State<ServerCtx>,
+    CurrentUser(_user): CurrentUser,
+    Json(req): Json<PreviewReq>,
+) -> ApiResult<Json<Value>> {
+    let timezone = req.timezone.unwrap_or_default();
+    check_timezone(&timezone)?;
+    validate_schedule(&req.schedule)?;
+    let tz = cadence::task_tz(if timezone.trim().is_empty() {
+        "UTC"
+    } else {
+        timezone.trim()
+    });
+    let next = preview_fire_times(&req.schedule, tz, chrono::Utc::now(), PREVIEW_FIRES);
+    Ok(Json(json!({ "next_fire_times": next })))
+}
+
+/// Up to `n` successive fire instants after `from` (RFC 3339, UTC), stepping the
+/// same `cadence::next_run` the scheduler stamps into `next_run_at`.
+fn preview_fire_times(
+    schedule: &Value,
+    tz: chrono_tz::Tz,
+    from: chrono::DateTime<chrono::Utc>,
+    n: usize,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(n);
+    let mut cursor = from;
+    for _ in 0..n {
+        let Some(at) = cadence::next_run(schedule, cursor, tz) else {
+            break;
+        };
+        out.push(at.to_rfc3339());
+        cursor = at;
+    }
+    out
 }
 
 /// The built-in preset list. `ticket-followup-review` makes the motivating example
@@ -719,6 +824,79 @@ pub fn builtin_presets() -> Vec<ScheduledTaskPreset> {
 mod tests {
     use super::*;
 
+    /// S3-05: a task runs as its owner, so another Editor may retime/pause it
+    /// but not change its prompt or destination (403); the owner and a
+    /// workspace admin may. A full-form PATCH resending unchanged values passes.
+    #[tokio::test]
+    async fn non_owner_editor_cannot_retarget_a_task() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws").await;
+        let now = chrono::Utc::now();
+        let mk = |id: &str| otto_core::domain::User {
+            id: id.into(),
+            username: id.into(),
+            display_name: id.into(),
+            is_root: false,
+            disabled: false,
+            created_at: now,
+        };
+        for (id, role) in [("owner", "editor"), ("bob", "editor"), ("adm", "admin")] {
+            sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, 'x', ?, 0, ?)")
+                .bind(id).bind(id).bind(id).bind(now.to_rfc3339()).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws', ?, ?)",
+            )
+            .bind(id)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let mut new = otto_state::NewScheduledTask::defaults("ws".into(), "t".into());
+        new.prompt = "daily digest".into();
+        new.created_by = Some("owner".into());
+        new.schedule = json!({"cadence":"interval","every_min":60});
+        let task = ctx.scheduled_tasks.create(new).await.unwrap();
+        let app = routes().with_state(ctx.clone());
+        let patch = |who: &str, body: Value| {
+            let mut req = Request::builder()
+                .method("PATCH")
+                .uri(format!("/scheduled-tasks/{}", task.id))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut()
+                .insert(otto_core::auth::AuthUser(mk(who)));
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let evil = json!({"destination":{"type":"email","to":"bob@evil.test"}});
+        assert_eq!(patch("bob", evil.clone()).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            patch("bob", json!({"prompt":"leak secrets"})).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            ctx.scheduled_tasks.get(&task.id).await.unwrap().prompt,
+            "daily digest"
+        );
+        // Schedule / enable edits, and unchanged values, stay open to Editors.
+        assert_eq!(
+            patch("bob", json!({"enabled":false,"prompt":"daily digest"})).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch("owner", json!({"prompt":"weekly digest"})).await,
+            StatusCode::OK
+        );
+        assert_eq!(patch("adm", evil).await, StatusCode::OK);
+    }
+
     #[test]
     fn provider_check_allows_known_and_custom_slugs() {
         for p in ["claude", "codex", "agy", "shell", "", "my-custom-agent"] {
@@ -745,6 +923,33 @@ mod tests {
         assert!(check_timezone("Europe/London").is_ok());
         assert!(check_timezone("").is_ok());
         assert!(check_timezone("Mars/Phobos").is_err());
+    }
+
+    #[test]
+    fn preview_lists_the_cron_weekday_actually_typed() {
+        use chrono::{Datelike, TimeZone};
+        // 2026-10-05 is a Monday. `0 9 * * 0` is SUNDAY 09:00 — the preview must
+        // say so before Save (S20-17), not "Next in 5 days" after it.
+        let from = chrono::Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+        let spec = json!({ "cadence": "cron", "expr": "0 9 * * 0" });
+        let fires = preview_fire_times(&spec, chrono_tz::UTC, from, PREVIEW_FIRES);
+        assert_eq!(fires.len(), PREVIEW_FIRES);
+        let first = chrono::DateTime::parse_from_rfc3339(&fires[0]).unwrap();
+        assert_eq!(first.weekday(), chrono::Weekday::Sun);
+        assert_eq!(fires[0], "2026-10-11T09:00:00+00:00");
+        assert_eq!(fires[1], "2026-10-18T09:00:00+00:00");
+    }
+
+    #[test]
+    fn preview_respects_timezone_and_spent_once() {
+        use chrono::TimeZone;
+        let from = chrono::Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+        let daily = json!({ "cadence": "daily", "at": "09:00" });
+        let fires = preview_fire_times(&daily, chrono_tz::Asia::Jerusalem, from, 2);
+        // 09:00 in Jerusalem (UTC+3 in October) is 06:00 UTC, the next day.
+        assert_eq!(fires[0], "2026-10-06T06:00:00+00:00");
+        let spent = json!({ "cadence": "once", "run_at": "2026-01-01T00:00:00Z" });
+        assert!(preview_fire_times(&spent, chrono_tz::UTC, from, 5).is_empty());
     }
 
     #[test]

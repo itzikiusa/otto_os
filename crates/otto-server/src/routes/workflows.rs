@@ -83,9 +83,15 @@ pub async fn get_workflow(
 pub async fn update_workflow(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<UpdateWorkflowReq>,
 ) -> ApiResult<Json<Workflow>> {
+    // S3-301: an agent credential never rewrites a workflow graph — it could
+    // drop the `human_approval` node that supervises it, then run the result.
+    if req.graph.is_some() {
+        require_human_for(&auth, GRAPH_WRITE_REFUSED)?;
+    }
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     if let Some(v) = req.on_restart.as_deref() {
@@ -165,9 +171,12 @@ pub async fn get_version(
 pub async fn restore_version(
     Path((id, v)): Path<(Id, i64)>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     body: Option<Json<RestoreVersionReq>>,
 ) -> ApiResult<Json<Workflow>> {
+    // Restoring swaps the whole graph back in — a graph write (S3-301).
+    require_human_for(&auth, GRAPH_WRITE_REFUSED)?;
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     let ver = repo(&ctx)
@@ -489,15 +498,76 @@ pub(crate) fn seed_review_mode(
     }
 }
 
+const GRAPH_WRITE_REFUSED: &str =
+    "an agent session's credential cannot change a workflow's graph — \
+     a person signed in to Otto must edit it";
+const APPROVAL_SKIP_REFUSED: &str = "this would skip a human approval step — an agent session's \
+     credential cannot start or retry a run below an approval gate; a person must do it";
+
+/// `require_human` with a message that says what was refused.
+fn require_human_for(
+    auth: &crate::auth::CurrentAuthContext,
+    msg: &'static str,
+) -> Result<(), ApiError> {
+    if crate::ui_bridge::is_human(&auth.0) {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Forbidden(msg.into())))
+    }
+}
+
+/// The `human_approval` nodes strictly UPSTREAM of `start` (S3-301): the
+/// gates a run entered at `start` never passes through.
+pub(crate) fn approval_ancestors(
+    graph: &otto_core::workflows::WorkflowGraph,
+    start: &str,
+) -> Vec<String> {
+    let mut preds: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    for e in &graph.edges {
+        preds
+            .entry(e.target.as_str())
+            .or_default()
+            .push(e.source.as_str());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut stack: Vec<&str> = preds.get(start).cloned().unwrap_or_default();
+    let mut gates = Vec::new();
+    while let Some(n) = stack.pop() {
+        if n == start || !seen.insert(n) {
+            continue;
+        }
+        if graph
+            .nodes
+            .iter()
+            .any(|node| node.id == n && node.kind == "human_approval")
+        {
+            gates.push(n.to_string());
+        }
+        if let Some(p) = preds.get(n) {
+            stack.extend(p.iter().copied());
+        }
+    }
+    gates
+}
+
 /// `POST /workflows/{id}/run`
 pub async fn run_workflow(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RunWorkflowReq>,
 ) -> ApiResult<Json<WorkflowRun>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    // S3-301: a partial run that starts BELOW a `human_approval` gate skips
+    // it — only a person may do that. (A fresh run never adopts an earlier
+    // approval, so every upstream gate counts.)
+    if let Some(start) = req.start_node.as_deref() {
+        if !approval_ancestors(&wf.graph, start).is_empty() {
+            require_human_for(&auth, APPROVAL_SKIP_REFUSED)?;
+        }
+    }
     crate::workflow_validation::ensure_valid(&wf.graph).map_err(ApiError)?;
     if req
         .start_node
@@ -515,8 +585,23 @@ pub async fn run_workflow(
         .await
         .map_err(ApiError)?;
 
-    let input = seed_review_mode(req.input.unwrap_or(Value::Null), req.review_mode.as_deref())
+    // An Editor may pick result destinations and a working directory, but
+    // never a chat origin: `origin_workspace_id` would post through ANOTHER
+    // workspace's Slack/Telegram integration, and `channel`/`chat`/`thread`
+    // would let chat messages there control this run (S3-02).
+    let mut raw_input = req.input.unwrap_or(Value::Null);
+    otto_workflows::triggers::strip_reserved_input(
+        &mut raw_input,
+        otto_workflows::triggers::InputSource::Manual,
+    );
+    // The run's location must be THIS workspace's (S3-302): an explicit
+    // `repo_id`, a `working_directory` and `repos` may only name its
+    // registered repos (or their worktrees) or its root — a foreign one would
+    // drive another workspace's checkout and git account. 400 otherwise.
+    workflow_engine::ensure_run_location(&ctx, &ws, &raw_input)
+        .await
         .map_err(ApiError)?;
+    let input = seed_review_mode(raw_input, req.review_mode.as_deref()).map_err(ApiError)?;
     let run = repo(&ctx)
         .create_run(&wf.id, &wf.workspace_id, &input, Some(&user.id))
         .await
@@ -557,6 +642,7 @@ pub async fn run_workflow(
 pub async fn retry_run_node(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RetryRunNodeReq>,
 ) -> ApiResult<Json<WorkflowRun>> {
@@ -569,6 +655,15 @@ pub async fn retry_run_node(
     }
     // Canceled, but its old driver hasn't noticed yet (it polls; mid retry
     // backoff that took up to a minute): a retry now would run next to it.
+    // A driver that just wrote its terminal status is still delivering and
+    // reaping for a moment — give it a short grace before refusing, so a
+    // Retry clicked right after the run ends doesn't bounce with a 409.
+    for _ in 0..30 {
+        if !workflow_engine::driver_alive(&id) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     if workflow_engine::driver_alive(&id) {
         return Err(ApiError(Error::Conflict(
             "the run is still stopping — try again in a few seconds".into(),
@@ -600,6 +695,19 @@ pub async fn retry_run_node(
         .definition_for_run(&run)
         .await
         .map_err(ApiError)?;
+    // S3-301: the retry ADOPTS every other step's prior state, so an upstream
+    // `human_approval` gate that did not succeed (rejected, errored, never
+    // reached) would be skipped. Only a person may retry past one.
+    let unapproved = approval_ancestors(&wf.graph, node_id)
+        .into_iter()
+        .any(|gate| {
+            !run.nodes
+                .iter()
+                .any(|n| n.node_id == gate && n.status == NodeStatus::Success)
+        });
+    if unapproved {
+        require_human_for(&auth, APPROVAL_SKIP_REFUSED)?;
+    }
     let ws = ctx
         .workspaces
         .get(&wf.workspace_id)
@@ -1576,43 +1684,47 @@ pub async fn webhook_trigger(
     } else {
         serde_json::from_slice(&body).unwrap_or(Value::Null)
     };
-    // Thread the trigger's default result destinations into the input (the
-    // caller's own body keys win) so a webhook-fired run reports somewhere by
-    // default instead of finishing silently.
-    if let Value::Object(spec_defaults) = &trigger.spec {
-        let map = match &mut input {
-            Value::Object(m) => m,
-            other => {
-                *other = Value::Object(Default::default());
-                match other {
-                    Value::Object(m) => m,
-                    _ => unreachable!(),
-                }
-            }
-        };
-        for key in [
-            "result_channel",
-            "result_chat",
-            "result_thread",
-            "result_webhook",
-        ] {
-            if map.contains_key(key) {
-                continue;
-            }
-            if let Some(v) = spec_defaults
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-            {
-                map.insert(key.into(), Value::String(v.to_string()));
-            }
-        }
+    // The body is UNTRUSTED (token-only, often a CI system or a URL that
+    // leaked into logs): it may never choose whose integration posts, where
+    // results go or which directory agents run in (S3-02). Only the
+    // Editor-configured trigger spec supplies those.
+    let dropped = otto_workflows::triggers::strip_reserved_input(
+        &mut input,
+        otto_workflows::triggers::InputSource::Webhook,
+    );
+    if !dropped.is_empty() {
+        tracing::warn!(workflow_id = %wf.id, ?dropped, "webhook trigger: ignored reserved run-input keys");
     }
+    let map = match &mut input {
+        Value::Object(m) => m,
+        other => {
+            // A scalar/array body is kept as the run's `payload`.
+            let payload = std::mem::take(other);
+            *other = json!({});
+            let m = other.as_object_mut().expect("just set");
+            if !payload.is_null() {
+                m.insert("payload".into(), payload);
+            }
+            m
+        }
+    };
+    // The trigger's default result destinations + run location, so a
+    // webhook-fired run reports somewhere instead of finishing silently.
+    otto_workflows::triggers::copy_result_destinations(&trigger.spec, map);
+    otto_workflows::triggers::copy_location_defaults(&trigger.spec, map);
 
+    // One run at a time per workflow, checked atomically with the insert —
+    // the same admission the schedule/event triggers and scheduled tasks use,
+    // so a retrying CI caller can't stack concurrent runs (409 instead).
     let run = repo(&ctx)
-        .create_run(&wf.id, &wf.workspace_id, &input, None)
+        .admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)
         .await
-        .map_err(ApiError)?;
+        .map_err(ApiError)?
+        .ok_or_else(|| {
+            ApiError(Error::Conflict(
+                "a run of this workflow is already in progress — retry once it finishes".into(),
+            ))
+        })?;
 
     workflow_engine::spawn_run(
         ctx.clone(),
@@ -1657,9 +1769,14 @@ pub struct ApproveRunReq {
 pub async fn approve_run(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ApproveRunReq>,
 ) -> ApiResult<Json<Value>> {
+    // S3-01: the `human_approval` gate supervises the run's own agents. A
+    // workflow step's managed token authorizes as the run's owner, so the
+    // Editor check alone would let the supervised agent approve itself.
+    crate::auth::require_human(&auth.0)?;
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
     let rev = repo(&ctx)
@@ -1788,9 +1905,23 @@ mod tests {
             builder = builder.header("content-type", "application/json");
         }
         let mut request = builder.body(request_body).unwrap();
-        request.extensions_mut().insert(otto_core::auth::AuthUser(
-            crate::routes::browser::tests::root_user(),
-        ));
+        let root = crate::routes::browser::tests::root_user();
+        request
+            .extensions_mut()
+            .insert(otto_core::auth::AuthUser(root.clone()));
+        // A person's own credential: graph writes need one (S3-301).
+        request
+            .extensions_mut()
+            .insert(otto_core::auth::AuthContext {
+                real_user: root.clone(),
+                effective_user: root,
+                scope: None,
+                mcp_only: false,
+                mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
+                managed_session_id: None,
+            });
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
@@ -2338,5 +2469,40 @@ mod tests {
                 input
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_gate_tests {
+    use super::approval_ancestors;
+
+    #[test]
+    fn approval_ancestors_finds_every_gate_a_partial_run_would_skip() {
+        // implement → approve → pr ; implement → notify ; (approve2 → pr)
+        let graph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "implement", "kind": "agent"},
+                {"id": "approve", "kind": "human_approval"},
+                {"id": "approve2", "kind": "human_approval"},
+                {"id": "pr", "kind": "git_pr"},
+                {"id": "notify", "kind": "channel_notify"}
+            ],
+            "edges": [
+                {"id": "e1", "source": "implement", "target": "approve"},
+                {"id": "e2", "source": "approve", "target": "pr"},
+                {"id": "e3", "source": "approve2", "target": "pr"},
+                {"id": "e4", "source": "implement", "target": "notify"}
+            ]
+        }))
+        .unwrap();
+        let mut gates = approval_ancestors(&graph, "pr");
+        gates.sort();
+        assert_eq!(gates, vec!["approve".to_string(), "approve2".to_string()]);
+        // Starting AT the gate runs it; starting upstream of it, or on a
+        // branch without one, skips nothing.
+        assert!(approval_ancestors(&graph, "approve").is_empty());
+        assert!(approval_ancestors(&graph, "implement").is_empty());
+        assert!(approval_ancestors(&graph, "notify").is_empty());
+        assert!(approval_ancestors(&graph, "missing").is_empty());
     }
 }

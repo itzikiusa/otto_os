@@ -162,9 +162,11 @@ UI graphics.
 | Pair | Native light | Native dark | Pro Dark | Warm light | Warm dark |
 |---|---|---|---|---|---|
 | `--text` on `--bg` | 15.5 | 14.9 | 14.8 | 10.8 | 13.0 |
-| `--text-dim` on `--surface-2` | 5.26 | 5.64 | 5.40 | 5.69 | 5.44 |
-| `--text-dim` on `--surface-3` | 4.81 | 5.00 | 4.83 | 5.19 | 4.88 |
-| `--accent-text` on `--bg` | 6.09 | 7.08 | 6.56 | 5.22 | 8.15 |
+| `--text-dim` on `--surface-2` | 6.42 | 6.52 | 6.38 | 6.34 | 7.17 |
+| `--text-dim` on `--surface-3` | 5.87 | 5.78 | 5.71 | 5.79 | 6.44 |
+| `--text-dim` on `--accent-soft-strong` over `--surface-3` | 4.62 | 4.63 | 4.65 | 4.64 | 4.63 |
+| `--accent-text` on `--bg` | 6.74 | 8.51 | 7.67 | 7.02 | 9.03 |
+| `--accent-text` on `--accent-soft-strong` over `--surface-3` | 4.65 | 4.64 | 4.66 | 4.63 | 4.61 |
 | `--accent-contrast` on `--accent-solid` | 4.94 | 4.94 | 6.38 | 4.76 | 6.83 |
 | `--danger` on `--surface-2` | 5.75 | 5.58 | 6.57 | 5.60 | 5.70 |
 | `--warning` on `--surface-2` | 5.67 | 6.54 | 7.70 | 5.52 | 6.68 |
@@ -174,6 +176,15 @@ UI graphics.
 
 Rules that follow from the table:
 
+- **Every text token clears AA on every ground and every accent tint.**
+  `--text`, `--text-dim` and `--accent-text` are ≥ 4.5:1 on `--bg`,
+  `--bg-sidebar`, `--surface…-3` and on `--accent-soft` / `--accent-soft-strong`
+  over each — a selected (and hovered) row on `--surface-3` was the worst case
+  at 3.5–4.0:1, so `--text-dim` moved toward `--text` (Native light `#56565b`,
+  Native dark `#b9b9bf`, Pro Dark `#a8a8b5`, Warm light `#59554f`, Warm dark
+  `#c5c0b5`) and each theme sets its own `--accent-text` mix.
+  `ui/unit/tokenContrast.test.ts` measures the whole matrix; a custom accent's
+  `--accent-text` is chosen against the same tints (`lib/accent.ts`).
 - **`--text-dim` clears AA on `--surface-3` in every theme.** Native dark
   (`#9f9fa6` → `#acacb3`), Warm light (`#6b6760` → `#605c56`) and Warm dark
   (`#a09a8e` → `#ada79b`) were nudged for it; it stays far dimmer than `--text`
@@ -326,6 +337,14 @@ Fixed dimensions to match, as used by the shared primitives:
 Gaps: 6 px between toolbar controls, 8 px between related controls, 12 px
 between groups, 16–24 px between sections. Line things up to a shared left
 edge instead of adding more space.
+
+Control-state and size tokens (`tokens.css`):
+
+| Token | Value | Use |
+|---|---|---|
+| `--disabled-opacity` | 0.45 | Every disabled control or disabled row (`.btn`, `.icon-btn`, `.input`, `.segmented`, `.pill-toggle`, chips, local controls). `ui-guards` ratchets other `opacity` literals in a disabled rule set (`disabled-opacity`); `scripts/codemods/disabled-opacity.mjs` rewrites them. |
+| `--hit-min` | 36 px | Minimum touch hit size on phone. The shared controls already grow their hit area under `(pointer: coarse)` (app.css); a module control that needs a bigger box uses `min-block-size: var(--hit-min)` instead of its own 32/34/38 px. Don't add `min-height` to a `.btn` for touch — the global rule covers it. |
+| `--prose-readable` | 820 px | The readable column of chat / prose surfaces (Assistant tabs, composer). Whole pages use `PageBody width="readable"` (`--page-readable`, 1200 px). |
 
 ---
 
@@ -541,6 +560,11 @@ Rules:
 
   Examples in the tree: `shell/Drawer.svelte`,
   `run-with-otto/RunStageRail.svelte`.
+- **Motion started from script.** The global reduced-motion override only
+  reaches CSS. A JS scroll uses `behavior: scrollBehavior()` and a Svelte
+  transition `duration: motionMs(160)` (`lib/motion.ts`; `reducedMotion()` is
+  the shared check). `ui-guards` ratchets a literal `behavior: 'smooth'`
+  (`smooth-scroll`).
 - **Shared primitives.** `app.css` owns `@keyframes otto-spin` and
   `otto-pulse` plus a `.spinner` utility (size via `--spinner-size`); a
   component never spins its own ring (`local-spinner` ratchet). Use them
@@ -583,12 +607,17 @@ Rules:
 
   | px | Where |
   |---|---|
-  | 12 | inside `.btn.small` and chips |
+  | 12 | inside `.btn.small`, chips, inline with `--fs-xs`/`--fs-s` text, and the caret of a split button or disclosure (no smaller caret) |
   | 13–14 | inside `.btn`, `.icon-btn` and toolbars (14 is the toolbar minimum) |
   | 16 | nav rows, the `PageHeader` icon, standalone |
-  | 24–26 | empty-state tiles only |
+  | 20 | **phone touch chrome only**: `BottomNav`, `MobileActionBar` and the mobile top bar (`shell/App.svelte`) |
+  | 24–26 | empty-state / placeholder tiles only |
 
-  Don't use other sizes.
+  Don't use other sizes. `ui-guards` enforces this (`icon-size`, numeric
+  literals in `<Icon size={…}>`, ternaries included);
+  `node scripts/codemods/icon-sizes.mjs` snaps a tree onto the scale
+  (≤ 11 → 12, 15 → 14, 17–18 → 16, 19–23 → 24 or 20 in touch chrome,
+  ≥ 27 → 26).
 - **Adding an icon:** add a path to `paths` in `Icon.svelte`'s module script. It
   should be drawn for 16×16 as strokes in the same visual weight, with a
   one-line comment if the metaphor isn't obvious. Check it at 12 px and at

@@ -150,9 +150,9 @@ async function typeTimed(page: Page, text: string): Promise<number[]> {
   });
   for (const ch of text) {
     await page.keyboard.type(ch);
-    await page.waitForTimeout(40);
+    await page.waitForTimeout(40); // ui-guards: allow — deliberate keystroke cadence
   }
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(200); // ui-guards: allow — absence: trailing keystroke handlers
   return page.evaluate(() => (window as unknown as { __keys: number[] }).__keys);
 }
 
@@ -190,7 +190,7 @@ test('200 pasted INSERTs: wrapped, responsive, completion scoped to the statemen
   });
   const before = seen.length;
   const inString = await typeTimed(page, 'abc def, xyz');
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(400); // ui-guards: allow — absence: no completion request
   expect(seen.length - before, 'no completion requests while typing string data').toBe(0);
 
   // Type a new statement at the end: identifiers → completion runs, but each
@@ -251,7 +251,7 @@ test('switching query tabs keeps the editor state (text, undo) instead of rebuil
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.press('Delete');
   await page.keyboard.insertText('SELECT 1');
-  await page.waitForTimeout(600); // let the edit land as its own undo event
+  await page.waitForTimeout(600); // let the edit land as its own undo event (ui-guards: allow — CodeMirror undo grouping is time-based)
   await page.keyboard.type(' + 2');
   expect((await cm(page)).text).toBe('SELECT 1 + 2');
 
@@ -287,12 +287,12 @@ test('completion: one request per word, re-ask when truncated, smooth popup, dia
   // filters its answer via `validFor`. It used to abort + re-request on every
   // keystroke (one request per ~100 ms pause, each cancelled by the next key).
   await page.keyboard.insertText('SELECT * FROM ');
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(300); // ui-guards: allow — debounced completion of the prefix settles
   completionDelay = 900;
   const before = seen.length;
   for (const ch of 'customers') {
     await page.keyboard.type(ch);
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(100); // ui-guards: allow — deliberate keystroke cadence
   }
   await expect(page.locator('.cm-tooltip-autocomplete li').first()).toBeVisible({ timeout: 5_000 });
   completionDelay = 0;
@@ -320,7 +320,7 @@ test('completion: one request per word, re-ask when truncated, smooth popup, dia
   // the longer word (the daemon capped the list for the shorter one).
   answerTruncated = true;
   await page.keyboard.insertText(' WHERE ');
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(300); // ui-guards: allow — debounced completion of the prefix settles
   await page.keyboard.type('c');
   await expect.poll(() => seen.at(-1)?.tail.endsWith('WHERE c') ?? false, { timeout: 5_000 }).toBe(true);
   const afterFirst = seen.length;
@@ -336,12 +336,12 @@ test('completion: one request per word, re-ask when truncated, smooth popup, dia
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.press('Delete');
   await page.keyboard.insertText("SELECT * FROM customers WHERE name = 'O\\'Brien");
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(300); // ui-guards: allow — debounced completion of the prefix settles
   const inString = seen.length;
   for (const ch of ' and friends') {
     await page.keyboard.type(ch);
-    await page.waitForTimeout(30);
+    await page.waitForTimeout(30); // ui-guards: allow — deliberate keystroke cadence
   }
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(400); // ui-guards: allow — absence: no completion request
   expect(seen.length - inString, `no completion inside 'O\\'Brien … (asked: ${JSON.stringify(seen.slice(inString).map((r) => r.tail))})`).toBe(0);
 });

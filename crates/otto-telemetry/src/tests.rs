@@ -53,7 +53,12 @@ fn ranking_excludes_fast_high_volume_operations() {
         total_ms: 1800.0,
         ..Default::default()
     };
-    let found = analysis::rank(&[fast, slow], &TelemetryConfig::default(), 1);
+    let found = analysis::rank(
+        &[fast, slow],
+        &Default::default(),
+        &TelemetryConfig::default(),
+        1,
+    );
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].component, "database");
 }
@@ -145,7 +150,7 @@ async fn dismissed_suggestions_and_daily_schedule_survive_restart() {
         total_ms: 3000.0,
         ..Default::default()
     };
-    let suggestions = analysis::rank(&[op], &TelemetryConfig::default(), 42);
+    let suggestions = analysis::rank(&[op], &Default::default(), &TelemetryConfig::default(), 42);
     let id = suggestions[0].id.clone();
     {
         let mut state = service.persisted.write().unwrap();
@@ -207,6 +212,7 @@ async fn real_collector_delivers_all_signals_and_recovers() {
         span.status = "error".into();
         assert!(service.record(span));
     }
+    service.request_flush();
     let start = Instant::now();
     loop {
         let rows = usage
@@ -250,83 +256,55 @@ async fn real_collector_delivers_all_signals_and_recovers() {
     let recommendation_id = recommendations[0].id.clone();
     service.dismiss(&recommendation_id).await.unwrap();
     assert!(service.analyze().await.unwrap().is_empty());
+    // Between flushes telemetry holds no lease: the engine may idle-stop.
     let ch = usage.clickhouse().unwrap();
-    assert!(
-        !ch.maybe_park(Duration::ZERO).await,
-        "telemetry lease must prevent parking"
-    );
-    let old_pid = service
-        .runtime
-        .lock()
-        .await
-        .collector
-        .as_ref()
-        .unwrap()
-        .pid();
-    service
-        .runtime
-        .lock()
-        .await
-        .collector
-        .as_mut()
-        .unwrap()
-        .stop()
-        .await;
     let start = Instant::now();
-    loop {
-        let ready = {
-            let runtime = service.runtime.lock().await;
-            runtime
-                .collector
-                .as_ref()
-                .is_some_and(|c| c.pid().is_some() && c.pid() != old_pid)
-        };
-        if ready {
-            break;
-        }
-        assert!(start.elapsed() < Duration::from_secs(40));
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    // Replacing the shared engine changes its HTTP endpoint. The exporter must
-    // acquire the replacement lease and deliver to the recovered engine.
-    let old_endpoint = service
-        .runtime
-        .lock()
-        .await
-        .lease
-        .as_ref()
-        .unwrap()
-        .endpoint
-        .clone();
-    ch.shutdown().await;
-    let start = Instant::now();
-    loop {
-        let recovered = {
-            let runtime = service.runtime.lock().await;
-            runtime
-                .lease
-                .as_ref()
-                .is_some_and(|lease| lease.endpoint != old_endpoint)
-                && service.status().collector_ready
-        };
-        if recovered {
-            break;
-        }
+    while !ch.maybe_park(Duration::ZERO).await {
         assert!(
-            start.elapsed() < Duration::from_secs(65),
-            "ClickHouse replacement did not recover telemetry"
+            start.elapsed() < Duration::from_secs(40),
+            "telemetry must release ClickHouse between flushes"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let delivered = |name: &'static str| {
+        let usage = usage.clone();
+        async move {
+            usage
+                .query_rows(&format!(
+                    "SELECT count() n FROM otto_telemetry.otel_traces WHERE SpanName='{name}'"
+                ))
+                .await
+                .is_ok_and(|rows| number(&rows[0], "n") > 0.0)
+        }
+    };
+    // Sampling a parked engine never wakes it; a requested flush does, once.
+    assert!(service.record(SpanRecord::new("after.park", "server", 120.0)));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(ch.is_parked(), "buffering must not wake ClickHouse");
+    service.request_flush();
+    let start = Instant::now();
+    while !(service.status().last_error.is_none() && delivered("after.park").await) {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            service.status()
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    // Replacing the shared engine changes its HTTP endpoint. The next flush
+    // must lease the replacement and deliver to the recovered engine.
+    ch.shutdown().await;
     assert!(service.record(SpanRecord::new("after.recovery", "server", 120.0)));
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    assert!(service
-        .overview(24)
-        .await
-        .unwrap()
-        .operations
-        .iter()
-        .any(|op| op.name == "after.recovery"));
+    service.request_flush();
+    let start = Instant::now();
+    while !delivered("after.recovery").await {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "ClickHouse replacement did not recover telemetry: {:?}",
+            service.status()
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     #[cfg(target_os = "macos")]
     {
         let mut profiling = c.clone();
@@ -352,7 +330,9 @@ async fn real_collector_delivers_all_signals_and_recovers() {
     new_config.logs_days = 3;
     new_config.metrics_days = 8;
     service.configure(new_config).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // Retention DDL runs with the next flush (sampling keeps data buffered).
+    service.request_flush();
+    tokio::time::sleep(Duration::from_secs(30)).await;
     let rows=usage.query_rows("SELECT name,create_table_query FROM system.tables WHERE database='otto_telemetry' AND name IN ('otel_traces','otel_logs','otel_metrics_gauge','operation_minutes','resource_minutes')").await.unwrap();
     for row in rows {
         let expected = match string(&row, "name").as_str() {
@@ -401,9 +381,136 @@ fn spikes_require_sustained_cpu_or_an_abrupt_memory_increase() {
 fn slow_query_filters_before_limiting() {
     let sql = schema::slow_operations(&TelemetryConfig::default());
     assert!(
-        sql.find("HAVING count >= 3 AND p95_ms >= 100").unwrap() < sql.find("LIMIT 100").unwrap()
+        sql.find("HAVING count >= 3 AND p95_ms >= 100").unwrap() < sql.find("LIMIT 500").unwrap()
     );
     assert!(!sql.contains("LIMIT 1000"));
+}
+#[test]
+fn ranking_uses_self_time_and_collapses_shared_traces() {
+    let op = |name: &str, total: f64, trace: &str| OperationSummary {
+        component: "git".into(),
+        name: name.into(),
+        count: 10,
+        p95_ms: 500.0,
+        max_ms: 900.0,
+        total_ms: total,
+        trace_id: trace.into(),
+        ..Default::default()
+    };
+    // The handler only waits on fetch (same slowest trace); the status call is
+    // an independent, smaller cost with its own trace.
+    let handler = op("http.post.repos.fetch", 9000.0, "a");
+    let fetch = op("git.fetch", 8800.0, "a");
+    let status = op("git.status", 3000.0, "b");
+    let self_ms: std::collections::HashMap<_, _> = [
+        (("git".into(), "http.post.repos.fetch".into()), 200.0),
+        (("git".into(), "git.fetch".into()), 8800.0),
+        (("git".into(), "git.status".into()), 3000.0),
+    ]
+    .into();
+    let found = analysis::rank(
+        &[handler, fetch, status],
+        &self_ms,
+        &TelemetryConfig::default(),
+        1,
+    );
+    let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["git.fetch", "git.status"]);
+    assert_eq!(found[0].self_ms, Some(8800.0));
+    // Without self times, inclusive ranking still collapses the shared trace.
+    let fallback = analysis::rank(
+        &[op("parent", 9000.0, "a"), op("child", 8800.0, "a")],
+        &Default::default(),
+        &TelemetryConfig::default(),
+        1,
+    );
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].name, "parent");
+}
+#[test]
+fn trace_drilldown_is_bounded_by_the_trace_id_lookup() {
+    let id = "0123456789abcdef0123456789abcdef";
+    let sql = schema::trace(id, 1);
+    assert!(sql.contains("FROM otto_telemetry.otel_traces_trace_id_ts WHERE TraceId="));
+    assert!(sql.contains("Timestamp>=(SELECT min(Start)"));
+    assert!(sql.contains("Timestamp<=(SELECT max(End)+1"));
+}
+#[test]
+fn flush_waits_for_the_interval_and_wakes_only_when_urgent() {
+    let minute = Duration::from_secs(60);
+    // Nothing buffered: never flush.
+    assert!(!flush_decision(false, false, None, 0).0);
+    // First flush after enabling validates the pipeline and may wake.
+    assert_eq!(flush_decision(true, false, None, 1), (true, true));
+    // Within the interval: keep buffering.
+    assert!(!flush_decision(true, false, Some(minute), 10).0);
+    // Interval elapsed: flush, but do not wake an idle-stopped engine.
+    assert_eq!(
+        flush_decision(true, false, Some(6 * minute), 10),
+        (true, false)
+    );
+    // Deferred too long, or queue pressure, or an explicit request: wake.
+    assert_eq!(
+        flush_decision(true, false, Some(31 * minute), 10),
+        (true, true)
+    );
+    assert_eq!(
+        flush_decision(true, false, Some(minute), QUEUE_LIMIT * 3 / 4),
+        (true, true)
+    );
+    assert_eq!(flush_decision(true, true, Some(minute), 1), (true, true));
+}
+#[test]
+fn resource_samples_collapse_to_bounded_per_minute_maxima() {
+    let dropped = AtomicU64::new(0);
+    let mut buffer = BTreeMap::new();
+    let point = |t: i64, cpu: f64, rss: Option<f64>| ResourcePoint {
+        timestamp: t,
+        process: "daemon".into(),
+        cpu_percent: Some(cpu),
+        rss_mb: rss,
+        host_load: None,
+    };
+    merge_point(&mut buffer, &point(120, 5.0, Some(100.0)), &dropped);
+    merge_point(&mut buffer, &point(150, 40.0, None), &dropped);
+    merge_point(&mut buffer, &point(179, 10.0, Some(90.0)), &dropped);
+    merge_point(&mut buffer, &point(180, 1.0, Some(1.0)), &dropped);
+    assert_eq!(buffer.len(), 2);
+    let first = &buffer[&(120, "daemon".to_string())];
+    assert_eq!(first.cpu_percent, Some(40.0));
+    assert_eq!(first.rss_mb, Some(100.0));
+    for minute in 0..(POINT_LIMIT as i64 + 5) {
+        merge_point(
+            &mut buffer,
+            &point(10_000 + minute * 60, 1.0, None),
+            &dropped,
+        );
+    }
+    assert_eq!(buffer.len(), POINT_LIMIT);
+    assert_eq!(dropped.load(Ordering::Relaxed), 7);
+    assert!(
+        !buffer.contains_key(&(120, "daemon".to_string())),
+        "oldest evicted first"
+    );
+}
+#[test]
+fn collector_exporter_stats_parse_failures_and_queue_depth() {
+    let text = "# HELP otelcol_exporter_queue_size Current size\n\
+otelcol_exporter_queue_size{exporter=\"clickhouse/traces\",data_type=\"traces\"} 12\n\
+otelcol_exporter_queue_size{exporter=\"clickhouse/logs\",data_type=\"logs\"} 3\n\
+otelcol_exporter_send_failed_spans_total{exporter=\"clickhouse/traces\"} 7\n\
+otelcol_exporter_send_failed_log_records_total{exporter=\"clickhouse/logs\"} 1\n\
+otelcol_exporter_sent_spans_total{exporter=\"clickhouse/traces\"} 900\n";
+    assert_eq!(
+        collector::parse_exporter_stats(text),
+        Some(collector::ExporterStats {
+            send_failed: 8,
+            queue_size: 15,
+            sent_spans: 900,
+            failed_spans: 7,
+        })
+    );
+    assert_eq!(collector::parse_exporter_stats("# nothing yet\n"), None);
 }
 #[tokio::test]
 async fn enable_persists_a_stable_first_analysis_deadline() {
@@ -432,6 +539,17 @@ async fn enable_persists_a_stable_first_analysis_deadline() {
         .unwrap()
         .unwrap();
     let deadline = service.status().next_analysis_at.unwrap();
+    let started = service
+        .persisted
+        .read()
+        .unwrap()
+        .schedule_started_at
+        .unwrap();
+    assert_eq!(
+        deadline - started,
+        3600,
+        "first analysis runs an hour after enabling, not a day"
+    );
     service.shutdown().await;
     let restarted = TelemetryService::start(usage.clone(), temp.path().to_path_buf(), config).await;
     assert_eq!(restarted.status().next_analysis_at, Some(deadline));
@@ -505,4 +623,144 @@ async fn canceled_pending_export_is_accounted_without_claiming_acceptance() {
         };
     }
     assert_eq!(discarded.load(Ordering::Relaxed), 17);
+}
+
+/// S9-03: a flush is only confirmed when the exporter counters were read and
+/// every queue drained. Records still queued at the deadline (a slow / waking
+/// ClickHouse) or unreadable counters are a failure: nothing counts as
+/// exported and status carries an error.
+#[test]
+fn drain_settlement_never_claims_unconfirmed_exports() {
+    use collector::ExporterStats;
+    let stalled = settle(
+        Some(ExporterStats {
+            queue_size: 40,
+            ..Default::default()
+        }),
+        40,
+    );
+    assert_eq!(
+        stalled.exported, 0,
+        "queued records were counted as exported"
+    );
+    assert_eq!(stalled.failed, 40);
+    assert!(stalled.error.as_deref().is_some_and(|e| e.contains("40")));
+
+    let unknown = settle(None, 12);
+    assert_eq!((unknown.exported, unknown.failed), (0, 12));
+    assert!(
+        unknown.error.is_some(),
+        "missing counters must not read as success"
+    );
+
+    let partial = settle(
+        Some(ExporterStats {
+            send_failed: 3,
+            failed_spans: 3,
+            sent_spans: 7,
+            queue_size: 0,
+        }),
+        10,
+    );
+    assert_eq!((partial.exported, partial.failed), (7, 3));
+    assert!(partial.error.is_some());
+
+    // S9-307: queues empty, but 4 accepted spans are neither sent nor failed
+    // (a batch mid-retry when the collector stopped) — not a clean run.
+    let mid_retry = ExporterStats {
+        sent_spans: 6,
+        ..Default::default()
+    };
+    assert!(!drained(&mid_retry, 10), "the drain must keep waiting");
+    let settled = settle(Some(mid_retry), 10);
+    assert_eq!((settled.exported, settled.failed), (6, 4));
+    assert!(settled.error.as_deref().is_some_and(|e| e.contains('4')));
+
+    let done = ExporterStats {
+        sent_spans: 10,
+        ..Default::default()
+    };
+    assert!(drained(&done, 10));
+    let clean = settle(Some(done), 10);
+    assert_eq!(
+        clean,
+        Settlement {
+            exported: 10,
+            failed: 0,
+            error: None
+        }
+    );
+}
+
+/// S9-05: cancelled spans are filed under their own operation name (so they
+/// neither feed the real operation's quantiles nor vanish) and keep their
+/// status through the drill-down; `Unset` is not shown as "ok".
+#[test]
+fn cancelled_and_unset_spans_stay_distinguishable() {
+    let mut s = SpanRecord::new("GET /api/v1/x", "server", 900.0);
+    s.status = "cancelled".into();
+    let span = &otlp::traces(&[s])["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+    assert_eq!(span["name"], "GET /api/v1/x [cancelled]");
+    assert_eq!(span["status"]["code"], 0);
+    assert_eq!(span["status"]["message"], "cancelled");
+    assert!(span["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["key"] == "otto.status" && a["value"]["stringValue"] == "cancelled"));
+    assert_eq!(span_status("Unset", Some("cancelled")), "cancelled");
+    assert_eq!(span_status("Unset", None), "unset");
+    assert_eq!(span_status("Error", None), "error");
+    assert_eq!(span_status("Ok", None), "ok");
+}
+
+/// S9-08: resource points taken for an export that is cancelled (dropped
+/// mid-send by a config change) go back into the buffer instead of vanishing.
+#[tokio::test]
+async fn cancelled_export_requeues_unsent_points() {
+    let buffer = Arc::new(Mutex::new(BTreeMap::new()));
+    let dropped = Arc::new(AtomicU64::new(0));
+    let point = |t: i64| ResourcePoint {
+        timestamp: t,
+        process: "daemon".into(),
+        cpu_percent: Some(1.0),
+        rss_mb: None,
+        host_load: None,
+    };
+    let (b, d) = (buffer.clone(), dropped.clone());
+    let task = tokio::spawn(async move {
+        let mut pending = PendingPoints {
+            buffer: &b,
+            dropped: &d,
+            points: vec![point(60), point(120), point(180)],
+            sent: 0,
+        };
+        pending.sent = 1; // first chunk acknowledged
+        std::future::pending::<()>().await;
+    });
+    tokio::task::yield_now().await;
+    task.abort();
+    let _ = task.await;
+    let keys: Vec<i64> = buffer.lock().unwrap().keys().map(|k| k.0).collect();
+    assert_eq!(keys, vec![120, 180], "unsent points were lost on cancel");
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+}
+
+/// S9-04: the collector binary's verified digest is reused only for the
+/// exact same file identity; any rewrite (new ctime/size) re-hashes.
+#[tokio::test]
+async fn verified_digest_cache_is_keyed_by_file_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("bin");
+    std::fs::write(&path, b"one").unwrap();
+    let key = collector::file_key(&path).await;
+    assert!(key.is_some());
+    collector::remember_digest(key, "d1".into());
+    assert_eq!(collector::verified_digest(key).as_deref(), Some("d1"));
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&path, b"other").unwrap();
+    let changed = collector::file_key(&path).await;
+    assert_ne!(changed, key);
+    assert_eq!(collector::verified_digest(changed), None);
+    assert_eq!(collector::verified_digest(None), None);
 }

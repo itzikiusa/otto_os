@@ -186,8 +186,13 @@ test('team-performance: developer drill-down — verdicts, bullet bars, evidence
   const goalRow = frame.locator('#goals .goal[data-metric="median_cycle_days"]');
   await expect(goalRow).toBeVisible();
   await goalRow.locator('input.goal-target').fill('3.5');
+  // Assert the PERSISTED save (the PUT /goals response), not the transient
+  // "saved" span: the handler re-renders the section 400 ms later and wipes
+  // it, a window a loaded runner's expect polling missed (S12-304).
+  const saved = page.waitForResponse((r) => r.request().method() === 'PUT' && /\/goals(\?|$)/.test(r.url()));
   await frame.locator('#save-goals').click();
-  await expect(frame.locator('#goals-msg')).toHaveText('saved');
+  expect((await saved).ok(), 'PUT /goals succeeded').toBe(true);
+  await expect(frame.locator('#goals .goal[data-metric="median_cycle_days"] input.goal-target')).toHaveValue('3.5');
 });
 
 test('team-performance: goal target persists across a full reload', async ({ page }) => {
@@ -201,6 +206,11 @@ test('team-performance: goal target persists across a full reload', async ({ pag
   // A saved goal is no longer marked as a suggestion.
   await expect(goalRow).not.toContainText('(suggested)');
 });
+
+async function selectFixtureRepo(frame: FrameLocator): Promise<void> {
+  const value = await frame.locator('#repo option', { hasText: 'plugins-fixture' }).getAttribute('value');
+  await frame.locator('#repo').selectOption(value ?? '');
+}
 
 test.describe('dora-metrics (needs cargo)', () => {
   test.beforeAll(async ({}, testInfo) => {
@@ -229,6 +239,9 @@ test.describe('dora-metrics (needs cargo)', () => {
 
     // Repo preselected; metrics load on boot (or via Refresh).
     await expect(frame.locator('#repo option', { hasText: 'plugins-fixture' })).toHaveCount(1, { timeout: 20_000 });
+    // The shared e2e daemon lists other specs' repos too; the preselected
+    // (first) one need not be the fixture with deploy tags.
+    await selectFixtureRepo(frame);
     await frame.locator('#run').click();
 
     // 4 KPI tiles, each with a printed tier word.
@@ -257,6 +270,9 @@ test.describe('dora-metrics (needs cargo)', () => {
     test.setTimeout(90_000);
     const frame = await pluginFrame(page, 'dora-metrics');
     await expect(frame.locator('#repo option', { hasText: 'plugins-fixture' })).toHaveCount(1, { timeout: 20_000 });
+    // The shared e2e daemon lists other specs' repos too; the preselected
+    // (first) one need not be the fixture with deploy tags.
+    await selectFixtureRepo(frame);
     await frame.locator('#run').click();
     await expect(frame.locator('.kpi-tile')).toHaveCount(4, { timeout: 20_000 });
 

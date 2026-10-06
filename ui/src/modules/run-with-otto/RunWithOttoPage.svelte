@@ -3,6 +3,7 @@
   // GitHub issue/PR, a Slack thread, a finding, a failing test) into a reviewed,
   // evidence-backed PR draft. The page has three areas: the launcher (the one
   // button), the runs list, and the open run's detail panel.
+  import { scrollBehavior } from '../../lib/motion';
   import { untrack } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -103,7 +104,7 @@
     void runWithOtto.open(run.id);
     // Stacked layout: bring the freshly opened detail into view.
     if (!viewport.isDesktop) {
-      requestAnimationFrame(() => detailEl?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+      requestAnimationFrame(() => detailEl?.scrollIntoView({ block: 'start', behavior: scrollBehavior() }));
     }
   }
 
@@ -125,7 +126,10 @@
 <div class="rwo">
 
   {#if ws.currentId}
-    <RunLauncher wsId={ws.currentId} {onLaunched} />
+    <!-- Keyed per workspace: no draft/repo pick leaks across a switch. -->
+    {#key ws.currentId}
+      <RunLauncher wsId={ws.currentId} {onLaunched} />
+    {/key}
 
   <div class="body-wrap">
   <div class="body" class:has-detail={openRun}>

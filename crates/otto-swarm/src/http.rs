@@ -37,6 +37,7 @@ pub trait SwarmCtx: Clone + Send + Sync + 'static {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct ApiErr(pub Error);
 impl From<Error> for ApiErr {
     fn from(e: Error) -> Self {
@@ -56,6 +57,9 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!("internal error: {}", self.0);
+        }
         (
             status,
             Json(otto_core::api::Problem {

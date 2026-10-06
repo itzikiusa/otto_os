@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latestOnly } from '../../lib/latest';
   import { onDestroy, tick, untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -9,6 +10,8 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -29,7 +32,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
-  import type { Workflow } from '../../lib/api/types';
+  import type { EmailSenderResp, Integration, Workflow } from '../../lib/api/types';
   import { renderMarkdownGfm } from '../../lib/md';
   import { copyText } from '../../lib/clipboard';
 
@@ -113,8 +116,34 @@
    *  few fields most people need); editing a task that uses them opens it. */
   let showAdvanced = $state(false);
 
-  // Set after a successful "Convert to workflow" — surfaces a link to Workflows.
+  // Set after a successful "Convert to workflow" — surfaces a link that opens
+  // the new workflow (`#/workflows/<id>`).
   let convertedWfId = $state<string | null>(null);
+
+  /** Which delivery destinations are set up (null = unknown — offer them all).
+   *  Slack/Telegram need an enabled workspace integration with a bot token
+   *  (Settings → Slack, Telegram & webhooks); email needs the owner's verified sender (Settings →
+   *  Sharing). Offering an unconfigured one only failed at the first run. */
+  let destReady = $state<{ slack: boolean; telegram: boolean; email: boolean } | null>(null);
+  async function loadDestReady(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    const [intg, sender] = await Promise.all([
+      api.get<Integration[]>(`/workspaces/${wsId}/integrations`).catch(() => null),
+      api.get<EmailSenderResp>('/email-sender').catch(() => null),
+    ]);
+    const chan = (c: string) =>
+      intg ? intg.some((i) => i.channel === c && i.enabled && i.has_bot_token) : true;
+    destReady = { slack: chan('slack'), telegram: chan('telegram'), email: sender ? sender.verified === true : true };
+  }
+  /** A destination that is known NOT to be set up (the current pick of an
+   *  edited task stays selectable so its form still reads true). */
+  function destBlocked(d: 'slack' | 'telegram' | 'email'): boolean {
+    return destReady !== null && !destReady[d] && fDestType !== d;
+  }
+  $effect(() => {
+    if (creating || editId) untrack(() => void loadDestReady());
+  });
 
   /** The browser's IANA timezone, e.g. "Europe/London" (default for new tasks). */
   const browserTz = (() => {
@@ -248,7 +277,7 @@
     if ((creating || editId) && formState() !== formSnapshot) {
       const ok = await confirmer.ask(editId ? 'Discard your changes to this task?' : 'Discard this new task?', {
         title: 'Discard changes',
-        confirmLabel: 'Discard',
+        danger: true, confirmLabel: 'Discard',
       });
       if (!ok) return false;
     }
@@ -370,6 +399,49 @@
     if (fCadence === 'cron') return { cadence: 'cron', expr: fCronExpr.trim() };
     if (fCadence === 'once') return { cadence: 'once', run_at: fRunAt };
     return { cadence: 'weekly', at: fAt, weekday: fWeekday };
+  }
+
+  // ── "Next fires" preview (S20-17) ─────────────────────────────────────────
+  // The form asks the daemon's own cadence evaluator (the one that stamps
+  // `next_run_at`) for the next fires of the UNSAVED schedule, so `0 9 * * 0`
+  // typed for Monday reads "Sun …" before Save — same idea as the workflow
+  // trigger preview, but live (debounced) instead of behind a button.
+  let firePreview = $state<{ key: string; times: string[]; tz: string; error: string } | null>(null);
+  const previewKey = $derived.by(() => {
+    if (!(creating || editId) || fCadence === 'interval' || !tzOk) return '';
+    if (fCadence === 'cron' && cronFieldCount !== 5) return '';
+    if (fCadence === 'once' && !fRunAt) return '';
+    return JSON.stringify([buildSchedule(), fTimezone.trim() || 'UTC']);
+  });
+  $effect(() => {
+    const key = previewKey;
+    if (!key) {
+      firePreview = null;
+      return;
+    }
+    const [schedule, timezone] = JSON.parse(key) as [Record<string, unknown>, string];
+    const timer = setTimeout(() => {
+      scheduledTasksApi
+        .preview(schedule, timezone)
+        .then((r) => {
+          if (alive && previewKey === key) firePreview = { key, times: r.next_fire_times, tz: timezone, error: '' };
+        })
+        .catch((e: unknown) => {
+          if (alive && previewKey === key) {
+            firePreview = { key, times: [], tz: timezone, error: e instanceof Error ? e.message : 'The daemon couldn’t check this schedule.' };
+          }
+        });
+    }, 350);
+    return () => clearTimeout(timer);
+  });
+  /** Only a preview for the CURRENT form is shown (never a stale one). */
+  const shownPreview = $derived(firePreview && firePreview.key === previewKey ? firePreview : null);
+  function fireLabel(at: string, tz: string): string {
+    try {
+      return new Date(at).toLocaleString(undefined, { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return new Date(at).toLocaleString();
+    }
   }
 
   function buildDestination(): Record<string, unknown> {
@@ -660,10 +732,37 @@
     void scheduledTasks.loadRuns(t.id);
   }
 
+  /** "Workflow run" opens THAT run — not the task's current workflow (which
+   *  may have been re-pointed since). The run names its own workflow. */
+  async function openWorkflowRun(runId: string, fallbackWorkflowId: string | null | undefined): Promise<void> {
+    let workflowId = fallbackWorkflowId ?? null;
+    try {
+      // The summary projection (no node bodies / checkpoints): only the run's
+      // workflow id is needed — the task may have been re-targeted since —
+      // and `page.openRun` fetches the full run itself (S17-309).
+      const p = await api.get<{ run?: { workflow_id?: string } | null }>(
+        `/workflow-runs/${encodeURIComponent(runId)}/progress`,
+      );
+      workflowId = p.run?.workflow_id || workflowId;
+    } catch {
+      /* fall back to the task's workflow */
+    }
+    if (!workflowId) return;
+    if (!(await router.goChecked(`workflows/${encodeURIComponent(workflowId)}`))) return;
+    try {
+      const { workflowsPagePort } = await import('../../lib/uiCommands/workflows');
+      const page = await workflowsPagePort.get(new AbortController().signal);
+      if (await page.open(workflowId)) await page.openRun(workflowId, runId);
+    } catch (e) {
+      toasts.error('Couldn’t open the workflow run', errText(e));
+    }
+  }
+
   function openSession(sessionId: string | null | undefined): void {
     if (sessionId) ws.navigateToSession(sessionId);
   }
 
+  const reportSeq = latestOnly();
   async function viewReport(run: ScheduledTaskRun, taskName: string, plain = false): Promise<void> {
     reportRun = run;
     reportTaskName = taskName;
@@ -672,12 +771,16 @@
     reportLoading = true;
     reportText = '';
     reportError = '';
+    // Only the report last asked for may land (A's slow text used to fill
+    // the modal opened for B).
+    const t = reportSeq.begin();
     try {
-      reportText = await authedText(scheduledTasksApi.reportPath(run.id));
+      const text = await authedText(scheduledTasksApi.reportPath(run.id));
+      if (t.current) reportText = text;
     } catch (e) {
-      reportError = loadErrorText(e);
+      if (t.current) reportError = loadErrorText(e);
     } finally {
-      reportLoading = false;
+      if (t.current) reportLoading = false;
     }
   }
 
@@ -738,11 +841,12 @@
   {#snippet leading()}
     {#if creating || editId}
       <button class="icon-btn" title="Back to Scheduled Tasks" aria-label="Back to Scheduled Tasks" disabled={busy} onclick={closeForm}>
-        <Icon name="chevronLeft" size={15} />
+        <Icon name="chevronLeft" size={14} />
       </button>
     {/if}
   {/snippet}
   {#snippet actions()}
+    <AutomateGuideButton current="scheduled-tasks" />
     {#if !(creating || editId) && list.length > 0}
       <button class="btn small primary" onclick={startCreate}><Icon name="plus" size={12} /> New task</button>
     {/if}
@@ -766,7 +870,7 @@
 
       <label class="field">
         <span>Name</span>
-        <input class="input" bind:value={fName} placeholder="Nightly ticket review" required />
+        <input dir="auto" class="input" bind:value={fName} placeholder="Nightly ticket review" required />
       </label>
 
       <div class="frow">
@@ -810,7 +914,7 @@
       {#if fKind === 'agent_prompt' && !PROVIDERS.includes(fProvider)}
         <label class="field">
           <span>Custom provider slug</span>
-          <input class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
+          <input dir="auto" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
         </label>
       {/if}
 
@@ -824,12 +928,12 @@
       {:else if fProvider === 'shell'}
         <label class="field">
           <span>Shell command</span>
-          <textarea class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
+          <textarea dir="auto" class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
         </label>
       {:else}
         <label class="field">
           <span>Prompt (the agent’s instructions)</span>
-          <textarea class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
+          <textarea dir="auto" class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
         </label>
       {/if}
 
@@ -857,7 +961,7 @@
         {:else if fCadence === 'cron'}
           <label class="field">
             <span>Cron expression (5 fields)</span>
-            <input class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
+            <input dir="ltr" class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
             <small class="field-hint" class:bad={cronFieldCount !== 5}>
               {cronFieldCount === 5
                 ? 'minute · hour · day of month · month · day of week (0 or 7 = Sun)'
@@ -883,7 +987,7 @@
         {#if fCadence !== 'interval'}
           <label class="field">
             <span>Timezone</span>
-            <input class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
+            <input dir="auto" class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
             {#if !tzOk}<small class="field-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
             {#if tzNames.length}
               <datalist id="sched-tz-list">{#each tzNames as z (z)}<option value={z}></option>{/each}</datalist>
@@ -891,32 +995,60 @@
           </label>
         {/if}
       </div>
+      {#if shownPreview}
+        <div class="fire-preview" class:bad={!!shownPreview.error} role="status" aria-live="polite" data-testid="sched-next-fires">
+          {#if shownPreview.error}
+            <Icon name="warning" size={12} /> {shownPreview.error}
+          {:else if shownPreview.times.length}
+            <span class="fp-h">Next fires ({shownPreview.tz}):</span>
+            <ul>
+              {#each shownPreview.times.slice(0, 3) as at (at)}<li>{fireLabel(at, shownPreview.tz)}</li>{/each}
+            </ul>
+          {:else}
+            <span class="fp-h">This schedule has no upcoming run.</span>
+          {/if}
+        </div>
+      {/if}
 
       <div class="frow">
-        <label class="field">
-          <span>Destination</span>
-          <select class="input" bind:value={fDestType}>
+        <!-- A div, not a <label>: the hints and their buttons sat inside the
+             label and became part of the select's accessible name. -->
+        <div class="field">
+          <label for="sched-dest-type">Destination</label>
+          <select id="sched-dest-type" class="input" bind:value={fDestType} aria-describedby="sched-dest-hint-ch sched-dest-hint-email">
             <option value="none">None (store only)</option>
-            <option value="slack">Slack</option>
-            <option value="telegram">Telegram</option>
-            <option value="email">Email</option>
+            <option value="slack" disabled={destBlocked('slack')}>Slack{destBlocked('slack') ? ' — not set up' : ''}</option>
+            <option value="telegram" disabled={destBlocked('telegram')}>Telegram{destBlocked('telegram') ? ' — not set up' : ''}</option>
+            <option value="email" disabled={destBlocked('email')}>Email{destBlocked('email') ? ' — not set up' : ''}</option>
             <option value="webhook">HTTP webhook</option>
           </select>
-        </label>
+          {#if destReady && (!destReady.slack || !destReady.telegram)}
+            <span id="sched-dest-hint-ch" class="field-hint" class:bad={(fDestType === 'slack' && !destReady.slack) || (fDestType === 'telegram' && !destReady.telegram)}>
+              {fDestType === 'slack' && !destReady.slack ? 'Slack isn’t set up for this workspace.' : fDestType === 'telegram' && !destReady.telegram ? 'Telegram isn’t set up for this workspace.' : 'Slack / Telegram need a workspace integration.'}
+              <button type="button" class="btn small ghost" onclick={() => router.go('settings/channels')}>Set up in Settings → Slack, Telegram & webhooks</button>
+            </span>
+          {/if}
+          {#if destReady && !destReady.email}
+            <span id="sched-dest-hint-email" class="field-hint" class:bad={fDestType === 'email'}>
+              Email needs a verified sender.
+              <button type="button" class="btn small ghost" onclick={() => router.go('settings/sharing')}>Set up in Settings → Sharing</button>
+            </span>
+          {/if}
+        </div>
         {#if fDestType === 'slack' || fDestType === 'telegram'}
           <label class="field">
             <span>Chat / channel id (optional)</span>
-            <input class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
+            <input dir="auto" class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
           </label>
         {:else if fDestType === 'email'}
           <label class="field">
             <span>Send to (email)</span>
-            <input class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com" />
+            <input dir="ltr" class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com" />
           </label>
         {:else if fDestType === 'webhook'}
           <label class="field">
             <span>Webhook URL</span>
-            <input class="input" type="url" bind:value={fUrl} placeholder="https://…" />
+            <input dir="ltr" class="input" type="url" bind:value={fUrl} placeholder="https://…" />
           </label>
         {/if}
       </div>
@@ -924,7 +1056,7 @@
       {#if fProvider === 'shell' && fKind === 'agent_prompt'}
         <label class="field">
           <span>Working dir (optional)</span>
-          <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="dir to run the command in" /></PathField>
+          <PathField bind:value={fCwd}><input dir="ltr" class="input" bind:value={fCwd} placeholder="dir to run the command in" /></PathField>
         </label>
       {/if}
 
@@ -941,11 +1073,11 @@
         <div class="frow">
           <label class="field">
             <span>Skill (optional, inlined)</span>
-            <input class="input" bind:value={fSkill} placeholder="e.g. db-mysql" />
+            <input dir="auto" class="input" bind:value={fSkill} placeholder="e.g. db-mysql" />
           </label>
           <label class="field">
             <span>Working dir (optional)</span>
-            <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="repo path — not a sandbox" /></PathField>
+            <PathField bind:value={fCwd}><input dir="ltr" class="input" bind:value={fCwd} placeholder="repo path — not a sandbox" /></PathField>
           </label>
         </div>
 
@@ -984,7 +1116,7 @@
       <div class="notice" role="status">
         <span>Created a workflow from this task.</span>
         <span class="grow"></span>
-        <button class="btn small" onclick={() => { convertedWfId = null; router.go('workflows'); }}>Open Workflows</button>
+        <button class="btn small" onclick={() => { const id = convertedWfId; convertedWfId = null; router.go(id ? `workflows/${id}` : 'workflows'); }}>Open workflow</button>
         <button class="btn small" onclick={() => (convertedWfId = null)}>Dismiss</button>
       </div>
     {/if}
@@ -1006,7 +1138,9 @@
           actionLabel="New task"
           actionIcon="plus"
           onaction={startCreate}
-        />
+        >
+          <AutomateGuide current="scheduled-tasks" />
+        </EmptyState>
       {/snippet}
       <ul class="tasks">
         {#each list as t (t.id)}
@@ -1074,11 +1208,17 @@
                     {#if r.skipped_delivery}<Badge label="No change" title="Not delivered: the report is unchanged since the last run" />{/if}
                     {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
                     {#if r.proof_pack_id}<Badge tone="ok" label="Proof" title="A proof pack is attached to this run" />{/if}
-                    {#if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
+                    {#if r.workflow_run_id && t.workflow_id}
+                      <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => void openWorkflowRun(r.workflow_run_id!, t.workflow_id)}>Workflow run</button>
+                    {:else if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
                     {#if r.status === 'error' && r.error}
                       <p class="run-err" role="note"><Icon name="warning" size={12} /> {r.error}</p>
+                    {:else if r.status === 'skipped' && r.error}
+                      <!-- Why it was skipped (e.g. the workflow was still busy) —
+                           neutral, not a failure (S3-306). -->
+                      <p class="run-err note" role="note">{r.error}</p>
                     {/if}
                     {#if r.delivery_error}
                       <p class="run-err warn" role="note">Not delivered: {r.delivery_error}</p>
@@ -1168,16 +1308,22 @@
   .run-sum.none { color: var(--text-dim); font-style: italic; }
   .run-err { flex-basis: 100%; margin: 0; padding-inline-start: 4px; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; display: flex; gap: 4px; align-items: baseline; }
   .run-err.warn { color: var(--warning); }
+  .run-err.note { color: var(--text-dim); }
   .form { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }
   .frow { display: flex; gap: 12px; flex-wrap: wrap; }
   /* Shared .field (app.css); the form's gap spaces the rows, so no bottom margin. */
   .frow .field { flex: 1; min-width: 180px; }
   .field { margin-bottom: 0; font-size: var(--fs-s); color: var(--text); min-width: 0; }
-  .field > span { color: var(--text-dim); font-weight: 500; }
+  .field > span, .field > label { color: var(--text-dim); font-weight: 500; }
   .field :global(.input) { width: 100%; }
   .field :global(.mono) { font-family: var(--font-mono); }
   .field .field-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .field .field-hint.bad { color: var(--danger); }
+  .fire-preview { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--text-dim); }
+  .fire-preview.bad { color: var(--danger); align-items: center; }
+  .fire-preview .fp-h { font-weight: 600; }
+  .fire-preview ul { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; padding: 0; list-style: none; }
+  .fire-preview li { font-variant-numeric: tabular-nums; }
   .toggles { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
   .adv { border-block-start: 1px solid var(--border); padding-block-start: 10px; }
   .adv-toggle {

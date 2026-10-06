@@ -89,10 +89,13 @@
     previews = { ...previews, [sceneId]: { key, loading: true } };
     const renderId = `canvas-panel-${sceneId}`;
     const source = doc.source ?? '';
+    // Both renderers theme by scheme — a light Mermaid figure on the dark
+    // panel was unreadable (same defect as ActionCard, S18-307).
+    const dark = ui.resolvedScheme === 'dark';
     const out =
       format === 'd2'
-        ? await renderD2(renderId, source, { sketch: doc.sketch, dark: ui.resolvedScheme === 'dark' })
-        : await renderMermaid(renderId, source);
+        ? await renderD2(renderId, source, { sketch: doc.sketch, dark })
+        : await renderMermaid(renderId, source, { dark });
     previews = { ...previews, [sceneId]: { key, svg: out.svg, error: out.error } };
   }
 
@@ -101,7 +104,7 @@
     expanded = { ...expanded, [ref.id]: open };
     if (!open || ref.format === 'excalidraw') return;
 
-    const key = `${ref.id}:${ref.updated_at}`;
+    const key = `${ref.id}:${ref.updated_at}:${ui.resolvedScheme}`;
     if (previews[ref.id]?.key === key) return; // cached — same scene revision
 
     previews = { ...previews, [ref.id]: { key, loading: true } };
@@ -270,7 +273,7 @@
                 <button class="ref-body" aria-expanded={!!expanded[ref.id]} onclick={() => void togglePreview(ref)}>
                   <span class="ref-chevron">
                     {#if formatOf(ref) !== 'excalidraw'}
-                      <Icon name={expanded[ref.id] ? 'chevronDown' : 'chevronRight'} size={11} />
+                      <Icon name={expanded[ref.id] ? 'chevronDown' : 'chevronRight'} size={12} />
                     {/if}
                   </span>
                   <span class="ref-text">
@@ -299,7 +302,7 @@
                 <div class="ref-preview">
                   {#if formatOf(ref) === 'excalidraw'}
                     <div class="board-card">
-                      <Icon name="shapes" size={18} />
+                      <Icon name="shapes" size={16} />
                       <span>Excalidraw board — open in Canvas to view/edit</span>
                     </div>
                   {:else if previews[ref.id]?.loading}
@@ -323,7 +326,7 @@
     <div class="cp-footer">
       {#if attachOpen}
         <div class="attach-picker">
-          <input
+          <input dir="ltr"
             class="attach-search"
             placeholder="Filter scenes to attach…"
             aria-label="Filter scenes to attach"
@@ -350,7 +353,7 @@
         </div>
       {/if}
       <div class="cp-footer-actions">
-        <button class="footer-btn" class:on={attachOpen} onclick={toggleAttachPicker}>
+        <button class="footer-btn" class:on={attachOpen} aria-expanded={attachOpen} onclick={toggleAttachPicker}>
           <Icon name="plug" size={12} /> Attach scene…
         </button>
         <button class="footer-btn" disabled={creating} onclick={createNewScene}>
@@ -502,7 +505,7 @@
     border-color: var(--accent);
   }
   .footer-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 

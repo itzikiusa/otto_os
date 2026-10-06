@@ -408,7 +408,7 @@
     background: color-mix(in srgb, var(--accent) 6%, var(--surface));
   }
   .art:disabled {
-    opacity: 0.7;
+    opacity: var(--disabled-opacity);
   }
   .art-label {
     font-weight: 600;

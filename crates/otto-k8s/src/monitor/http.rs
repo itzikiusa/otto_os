@@ -1,8 +1,16 @@
 //! Monitoring REST routes (contract `docs/contracts/api.md` "Kubernetes
-//! monitoring"). Authorization is the server's policy table: everything
-//! under `/k8s/clusters/{id}/monitor*` is View on GET / Edit otherwise, and
-//! `/k8s/monitor/overview` is View. Handlers validate input, talk to the
-//! SQLite repo + the `MonitorSink`, and audit config writes.
+//! monitoring"). The server's policy table only gates the feature tier
+//! (lowered to View for Enforced clusters), so every handler here
+//! authorizes the exact operation on the cluster itself (S6-01):
+//!
+//! - config read (`GET …/monitor`) — `discover`;
+//! - config write / probe test / run now — `configure` (+ the legacy Admin
+//!   tier, [`crate::access::can_configure`]): these make the daemon fetch
+//!   from pods with the cluster's own credentials;
+//! - dashboard reads (`workloads`, `series`, `events`, `health`) — `metrics`,
+//!   scoped to the namespaces the caller holds it on ([`metrics_scope`]);
+//! - `/k8s/monitor/overview` — one row per cluster the caller can discover,
+//!   full only where `metrics` is cluster-wide.
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
@@ -10,10 +18,12 @@ use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
 use otto_core::auth::AuthUser;
+use otto_core::domain::User;
 use otto_core::{Error, Id};
-use otto_state::{K8sCluster, K8sMonitorRepo, K8sMonitorStatusRow};
+use otto_state::{DbPool, K8sCluster, K8sMonitorRepo, K8sMonitorStatusRow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::cache;
@@ -83,14 +93,173 @@ async fn load<S: K8sCtx>(
     Ok((cluster, cfg, status))
 }
 
+/// Which namespaces of one cluster a caller may read monitoring data for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NsScope {
+    /// `metrics` granted cluster-wide.
+    All,
+    /// `metrics` granted on exactly these namespaces (possibly none).
+    Only(BTreeSet<String>),
+}
+
+impl NsScope {
+    pub fn allows(&self, ns: &str) -> bool {
+        match self {
+            NsScope::All => true,
+            NsScope::Only(set) => set.contains(ns),
+        }
+    }
+    /// `None` = no namespace restriction; else the granted list.
+    fn namespaces(&self) -> Option<Vec<String>> {
+        match self {
+            NsScope::All => None,
+            NsScope::Only(set) => Some(set.iter().cloned().collect()),
+        }
+    }
+}
+
+/// The caller's `metrics` scope on cluster `id`; `None` when the cluster is
+/// not even discoverable to them (callers answer 404, like every cluster
+/// read). Namespace candidates come from the policy's child selections, so
+/// the cost is bounded by the grants, not by the cluster's namespace count.
+/// A handler asking about many clusters loads one [`Evaluator`] and calls
+/// [`metrics_scope_with`] per cluster instead (S6-309).
+///
+/// [`Evaluator`]: crate::access::Evaluator
+pub async fn metrics_scope(
+    pool: &DbPool,
+    user: &User,
+    id: &Id,
+) -> otto_core::Result<Option<NsScope>> {
+    let ev = crate::access::Evaluator::load(pool, user).await?;
+    metrics_scope_with(&ev, pool, id).await
+}
+
+/// [`metrics_scope`] with the caller's tier and groups already loaded: one
+/// policy read for the cluster, then in-memory evaluation.
+pub async fn metrics_scope_with(
+    ev: &crate::access::Evaluator,
+    pool: &DbPool,
+    id: &Id,
+) -> otto_core::Result<Option<NsScope>> {
+    Ok(ev
+        .policy(pool, id)
+        .await?
+        .and_then(|policy| metrics_scope_in(ev, &policy, id)))
+}
+
+/// Pure half of [`metrics_scope_with`].
+fn metrics_scope_in(
+    ev: &crate::access::Evaluator,
+    policy: &otto_core::access::AccessPolicy,
+    id: &Id,
+) -> Option<NsScope> {
+    if !ev.allows(policy, id, "discover", None) {
+        return None;
+    }
+    if ev.allows(policy, id, "metrics", None) {
+        return Some(NsScope::All);
+    }
+    let granted: BTreeSet<String> = policy
+        .rules
+        .iter()
+        .filter_map(|r| r.children.as_ref())
+        .flatten()
+        .filter_map(|c| c.strip_prefix("namespace:"))
+        .filter(|ns| ev.allows(policy, id, "metrics", Some(*ns)))
+        .map(str::to_string)
+        .collect();
+    Some(NsScope::Only(granted))
+}
+
+/// `metrics` on cluster `id`, for namespace `ns` when one is named (it is
+/// validated as a Kubernetes name first). Unnamed: the caller's scope, which
+/// the handler applies to what it returns; 403 when it holds no namespace.
+async fn require_metrics(
+    pool: &DbPool,
+    user: &User,
+    id: &Id,
+    ns: Option<&str>,
+) -> ApiResult<NsScope> {
+    let ns = ns.map(str::trim).filter(|n| !n.is_empty());
+    crate::access::namespace(ns)?;
+    let scope = metrics_scope(pool, user, id)
+        .await?
+        .ok_or_else(|| Error::NotFound("Kubernetes cluster".into()))?;
+    let ok = match (ns, &scope) {
+        (Some(n), s) => s.allows(n),
+        (None, NsScope::All) => true,
+        (None, NsScope::Only(set)) => !set.is_empty(),
+    };
+    if !ok {
+        return Err(
+            Error::Forbidden("cluster does not allow metrics for this namespace".into()).into(),
+        );
+    }
+    Ok(scope)
+}
+
+/// `configure` on cluster `id` (plus the legacy Admin tier): writing probes,
+/// testing them and running a cycle make the daemon reach into pods with the
+/// cluster's own credentials.
+async fn require_configure(pool: &DbPool, user: &User, id: &Id) -> ApiResult<()> {
+    crate::access::check(pool, user, id, "configure", None).await?;
+    if !crate::access::can_configure(pool, user, id).await? {
+        return Err(Error::Forbidden("cluster does not allow configure".into()).into());
+    }
+    Ok(())
+}
+
+/// Drop workload rows and namespaces outside `scope` from a (shared, cached)
+/// `workloads` answer.
+fn scope_workloads(mut out: Value, scope: &NsScope) -> Value {
+    if *scope == NsScope::All {
+        return out;
+    }
+    if let Some(list) = out.get_mut("workloads").and_then(Value::as_array_mut) {
+        list.retain(|w| scope.allows(w.get("namespace").and_then(Value::as_str).unwrap_or("")));
+    }
+    if let Some(list) = out.get_mut("namespaces").and_then(Value::as_array_mut) {
+        list.retain(|n| scope.allows(n.as_str().unwrap_or("")));
+    }
+    // The collector's status row is cluster-wide: its pod counts cover every
+    // namespace and `last_error` / a `forbidden: …` metrics-server message can
+    // name pods or namespaces outside the grant (S6-306). A scoped caller keeps
+    // the shape and the cycle timestamps (is the collector alive?), nothing
+    // that describes the rest of the cluster.
+    if let Some(status) = out.get_mut("status").and_then(Value::as_object_mut) {
+        for k in ["pods_seen", "pods_scraped", "pods_failed", "cycle_ms"] {
+            if status.contains_key(k) {
+                status.insert(k.into(), json!(0));
+            }
+        }
+        if status.contains_key("last_error") {
+            status.insert("last_error".into(), json!(""));
+        }
+        if let Some(ms) = status.get_mut("metrics_server") {
+            let head = ms
+                .as_str()
+                .and_then(|m| m.split(':').next())
+                .unwrap_or("unknown")
+                .trim()
+                .to_string();
+            *ms = json!(head);
+        }
+        status.insert("restricted".into(), json!(true));
+    }
+    out
+}
+
 fn monitor_resp(cfg: &MonitorConfig, status: Option<&K8sMonitorStatusRow>) -> Value {
     json!({ "config": cfg, "status": status, "presets": presets_out() })
 }
 
 async fn get_monitor<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Value>> {
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let (_, cfg, status) = load(&ctx, &id).await?;
     Ok(Json(monitor_resp(&cfg, status.as_ref())))
 }
@@ -101,6 +270,7 @@ async fn put_monitor<S: K8sCtx>(
     Path(id): Path<Id>,
     Json(cfg): Json<MonitorConfig>,
 ) -> ApiResult<Json<Value>> {
+    require_configure(&ctx.pool(), &user, &id).await?;
     let cluster = Clusters::new(&ctx).get(&id).await?;
     cfg.validate(cluster.default_namespace.as_deref())?;
     if cfg.enabled {
@@ -143,10 +313,18 @@ pub struct TestReq {
 /// `POST /k8s/clusters/{id}/monitor/test` — one pod, every probe, parsed.
 async fn test_probes<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     body: Option<Json<TestReq>>,
 ) -> ApiResult<Json<Value>> {
+    require_configure(&ctx.pool(), &user, &id).await?;
     let req = body.map(|Json(b)| b).unwrap_or_default();
+    // Both reach kubectl argv (`-n <ns>`, a snapshot key): Kubernetes names
+    // only, never flag-shaped.
+    crate::access::namespace(req.ns.as_deref())?;
+    if let Some(pod) = req.pod.as_deref().filter(|p| !p.trim().is_empty()) {
+        crate::resources::validate_name("pod", pod)?;
+    }
     let (cluster, cfg, _) = load(&ctx, &id).await?;
     if cfg.probes.is_empty() {
         return Err(Error::Invalid("no probes configured".into()).into());
@@ -257,8 +435,10 @@ async fn test_probes<S: K8sCtx>(
 /// `POST /k8s/clusters/{id}/monitor/run` — one cycle inline.
 async fn run_now<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<K8sMonitorStatusRow>> {
+    require_configure(&ctx.pool(), &user, &id).await?;
     let (cluster, cfg, status) = load(&ctx, &id).await?;
     cfg.validate(cluster.default_namespace.as_deref())?;
     let sink = ctx
@@ -372,6 +552,7 @@ fn pods_json(snap: &Snapshot) -> Value {
 /// `GET /k8s/monitor/overview?window=` — one row per registered cluster.
 async fn overview<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<WindowQuery>,
 ) -> ApiResult<Json<Vec<Value>>> {
     let window_label = q.window.clone().unwrap_or_else(|| "24h".into());
@@ -380,11 +561,28 @@ async fn overview<S: K8sCtx>(
     let sink = ctx.monitor_sink();
     // Clusters in parallel (each cold row is ~5 ClickHouse queries), order
     // preserved (K3).
-    let clusters = Clusters::new(&ctx).list().await?;
-    let rows: Vec<ApiResult<Value>> = stream::iter(clusters)
-        .map(|cluster| {
+    // Per caller (S6-05): undiscoverable clusters are left out; a cluster
+    // without cluster-wide `metrics` gets a stub row (no pod / workload /
+    // error figures) — the cached full row is cluster-wide data.
+    let pool = ctx.pool();
+    let ev = crate::access::Evaluator::load(&pool, &user).await?;
+    let mut visible = Vec::new();
+    for cluster in Clusters::new(&ctx).list().await? {
+        match metrics_scope_with(&ev, &pool, &cluster.id).await? {
+            None => {}
+            Some(scope) => visible.push((cluster, scope == NsScope::All)),
+        }
+    }
+    let rows: Vec<ApiResult<Value>> = stream::iter(visible)
+        .map(|(cluster, full)| {
             let (repo, sink, window_label) = (&repo, &sink, window_label.as_str());
-            async move { overview_row(repo, sink.as_ref(), cluster, window_label, window).await }
+            async move {
+                if full {
+                    overview_row(repo, sink.as_ref(), cluster, window_label, window).await
+                } else {
+                    overview_stub(repo, cluster, window_label).await
+                }
+            }
         })
         .buffered(OVERVIEW_CONCURRENCY)
         .collect()
@@ -394,6 +592,37 @@ async fn overview<S: K8sCtx>(
 
 /// Clusters computed at once by `/k8s/monitor/overview`.
 const OVERVIEW_CONCURRENCY: usize = 4;
+
+/// The overview row for a cluster the caller may see but not read
+/// cluster-wide: identity + whether monitoring is on, no figures.
+async fn overview_stub(
+    repo: &K8sMonitorRepo,
+    cluster: K8sCluster,
+    window_label: &str,
+) -> ApiResult<Value> {
+    let cfg = repo
+        .get_config(cluster.id.as_str())
+        .await?
+        .map(|r| probes::from_row(&r))
+        .unwrap_or_default();
+    Ok(json!({
+        "cluster": {"id": cluster.id, "name": cluster.name, "environment": cluster.environment, "color": cluster.color},
+        "enabled": cfg.enabled,
+        "interval_secs": cfg.interval_secs,
+        "status": Value::Null,
+        "health": "unknown",
+        "window": window_label,
+        "pods": {"running": 0, "pending": 0, "failed": 0, "crashloop": 0, "total": 0},
+        "restarts": health::RestartCounts::default(),
+        "churn": 0,
+        "mem": {"used": 0.0, "limit": 0.0, "pct": 0.0},
+        "rps": 0.0,
+        "err_pct": 0.0,
+        "drift": [],
+        "workloads": 0,
+        "restricted": true,
+    }))
+}
 
 /// One overview row: cache-keyed on the cluster's last cycle, single-flight.
 async fn overview_row(
@@ -475,9 +704,11 @@ async fn overview_row(
 /// `GET /k8s/clusters/{id}/monitor/workloads?window=&ns=`.
 async fn workloads<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<WindowQuery>,
 ) -> ApiResult<Json<Value>> {
+    let scope = require_metrics(&ctx.pool(), &user, &id, q.ns.as_deref()).await?;
     let window_label = q.window.clone().unwrap_or_else(|| "1h".into());
     let window = queries::parse_window(&window_label)?;
     check_ident("ns", q.ns.as_deref())?;
@@ -488,13 +719,15 @@ async fn workloads<S: K8sCtx>(
         window_label,
         q.ns.as_deref().unwrap_or("")
     );
+    // The cached answer is cluster-wide; the caller's scope is applied on
+    // the way out, hit or miss.
     let cycle = cycle_key(status.as_ref());
     if let Some(v) = cache::get(&ck, &cycle) {
-        return Ok(Json(v));
+        return Ok(Json(scope_workloads(v, &scope)));
     }
     let _flight = cache::flight(&ck).await;
     if let Some(v) = cache::get(&ck, &cycle) {
-        return Ok(Json(v));
+        return Ok(Json(scope_workloads(v, &scope)));
     }
     let sink = ctx
         .monitor_sink()
@@ -556,7 +789,7 @@ async fn workloads<S: K8sCtx>(
         "namespaces": all_namespaces, "workloads": rows,
     });
     cache::put(ck, &cycle, &out);
-    Ok(Json(out))
+    Ok(Json(scope_workloads(out, &scope)))
 }
 
 fn str_field(v: &Value, k: &str) -> String {
@@ -579,14 +812,23 @@ pub struct SeriesQuery {
     pub pod: Option<String>,
     pub window: Option<String>,
     pub step: Option<u32>,
+    /// Limit to one namespace (also the only way a namespace-scoped caller
+    /// narrows below its whole grant).
+    pub ns: Option<String>,
 }
 
 /// `GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=&step=`.
 async fn series<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<SeriesQuery>,
 ) -> ApiResult<Json<Value>> {
+    let scope = require_metrics(&ctx.pool(), &user, &id, q.ns.as_deref()).await?;
+    let namespaces = match q.ns.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => Some(vec![n.to_string()]),
+        None => scope.namespaces(),
+    };
     let window = queries::parse_window(q.window.as_deref().unwrap_or("1h"))?;
     check_ident("metric", Some(q.metric.as_str()))?;
     if q.metric.is_empty() {
@@ -608,8 +850,9 @@ async fn series<S: K8sCtx>(
         window.num_seconds(),
     );
     let counter = queries::is_counter(&q.metric);
-    let sql = queries::series_sql(
+    let sql = queries::series_sql_in_namespaces(
         cluster.id.as_str(),
+        namespaces.as_deref(),
         &q.metric,
         q.workload.as_deref(),
         q.pod.as_deref(),
@@ -634,14 +877,21 @@ pub struct EventsQuery {
     pub class: Option<String>,
     pub workload: Option<String>,
     pub limit: Option<u32>,
+    pub ns: Option<String>,
 }
 
 /// `GET /k8s/clusters/{id}/monitor/events?window=&class=&workload=&limit=`.
 async fn events<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<Vec<Value>>> {
+    let scope = require_metrics(&ctx.pool(), &user, &id, q.ns.as_deref()).await?;
+    let namespaces = match q.ns.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => Some(vec![n.to_string()]),
+        None => scope.namespaces(),
+    };
     let window = queries::parse_window(q.window.as_deref().unwrap_or("24h"))?;
     check_ident("class", q.class.as_deref())?;
     check_ident("workload", q.workload.as_deref())?;
@@ -650,8 +900,9 @@ async fn events<S: K8sCtx>(
         .monitor_sink()
         .filter(|s| s.available())
         .ok_or_else(|| Error::Conflict("usage engine (ClickHouse) is not available".into()))?;
-    let sql = queries::events_sql(
+    let sql = queries::events_sql_in_namespaces(
         cluster.id.as_str(),
+        namespaces.as_deref(),
         window,
         q.class.as_deref(),
         q.workload.as_deref(),
@@ -683,7 +934,14 @@ async fn health_digest<S: K8sCtx>(
     // is what the `k8s_health` agent tool returns (pod names, restarts,
     // memory), so the feature grant alone must not reach a cluster the
     // caller was never given.
-    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
+    // The digest is cluster-wide (every namespace's pods), so it needs
+    // `metrics` on the whole cluster (S6-05), not just `discover`.
+    if require_metrics(&ctx.pool(), &user, &id, None).await? != NsScope::All {
+        return Err(Error::Forbidden(
+            "the health digest needs metrics on the whole cluster".into(),
+        )
+        .into());
+    }
     let label = q.window.clone().unwrap_or_else(|| "1h".into());
     let window = queries::parse_window(&label)?;
     let (cluster, cfg, status) = load(&ctx, &id).await?;

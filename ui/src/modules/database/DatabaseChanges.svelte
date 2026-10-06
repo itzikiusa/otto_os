@@ -147,7 +147,7 @@
       <LoadState what="database changes" {loading} error={loadError} empty={changes.length===0} onretry={()=>void refresh()} variant="compact">
         {#snippet emptyView()}<p class="hint">No visible changes yet.</p>{/snippet}
         {#each changes as change (change.id)}
-          <button class="item" class:active={selected?.id===change.id} onclick={()=>void select(change)} disabled={busy}>
+          <button class="item" class:active={selected?.id===change.id} aria-current={selected?.id===change.id ? 'true' : undefined} onclick={()=>void select(change)} disabled={busy}>
             <strong>{change.title}</strong>
             <span>{sentenceCase(change.status)} · r{change.revision}</span>
           </button>
@@ -157,8 +157,8 @@
     <main>
       {#if editing}
         <h3>{selected ? 'Revise change' : 'New change'}</h3>
-        <label>Title<input bind:value={title} maxlength="200" /></label>
-        <label>Description<textarea bind:value={description} rows="2" maxlength="16384"></textarea></label>
+        <label>Title<input dir="auto" bind:value={title} maxlength="200" /></label>
+        <label>Description<textarea dir="auto" bind:value={description} rows="2" maxlength="16384"></textarea></label>
         <fieldset>
           <legend>Database targets</legend>
           {#each draftTargets as target,index}
@@ -168,7 +168,7 @@
                   {#each database.connections.filter(c=>['mysql','postgres'].includes(c.kind)) as conn}<option value={conn.id}>{conn.name}</option>{/each}
                 </select>
               </label>
-              <label>Database {index+1}<input bind:value={target.node} placeholder="Exact database name" /></label>
+              <label>Database {index+1}<input dir="auto" bind:value={target.node} placeholder="Exact database name" /></label>
               {#if draftTargets.length>1}
                 <button class="btn" aria-label={`Remove target ${index+1}`} onclick={()=>draftTargets=draftTargets.filter((_,i)=>i!==index)}>Remove</button>
               {/if}
@@ -176,7 +176,7 @@
           {/each}
           <button class="btn" disabled={draftTargets.length>=20} onclick={()=>draftTargets=[...draftTargets,{connection_id:connectionId,node:''}]}>Add target</button>
         </fieldset>
-        <label>SQL script<textarea class="script" bind:value={script} rows="14" spellcheck="false" maxlength="262144" placeholder="ALTER TABLE …"></textarea></label>
+        <label>SQL script<textarea dir="ltr" class="script" bind:value={script} rows="14" spellcheck="false" maxlength="262144" placeholder="ALTER TABLE …"></textarea></label>
         <p class="hint">Saving a revision invalidates earlier validation and approval. Scripts run in target order; a rollout is not one transaction.</p>
         <div class="actions">
           <button class="btn primary" onclick={save} disabled={busy || !title.trim() || !script.trim() || draftTargets.some(t=>!t.node.trim()) || !can('change_submit')}>{label('save','Save draft','Saving…')}</button>
@@ -213,7 +213,7 @@
           </div>
         {/if}
         {#if selected.status==='awaiting_review' && can('change_approve')}
-          <label>Review note<textarea bind:value={note} rows="2" placeholder="Decision and reason"></textarea></label>
+          <label>Review note<textarea dir="auto" bind:value={note} rows="2" placeholder="Decision and reason"></textarea></label>
           <div class="actions">
             <button class="btn primary" disabled={busy||!independent} onclick={()=>action('approve')}>{label('approve','Approve revision')}</button>
             <button class="btn danger" disabled={busy||!note.trim()} onclick={()=>action('reject')}>{label('reject','Request revision')}</button>
@@ -241,7 +241,7 @@
               <p>{attempt.summary}</p>
               {#if attempt.state==='outcome_unknown' && selected.status==='outcome_unknown' && can('change_execute')}
                 <p class="hint">Inspect the target database before recording an outcome. This does not replay SQL.</p>
-                <label>Reconciliation evidence<textarea bind:value={note} rows="2" placeholder="Describe the schema/data checks you performed"></textarea></label>
+                <label>Reconciliation evidence<textarea dir="auto" bind:value={note} rows="2" placeholder="Describe the schema/data checks you performed"></textarea></label>
                 <div class="actions">
                   <button class="btn" disabled={busy||note.trim().length<10} onclick={()=>void perform('rec-succeeded',()=>changesApi.reconcile(selected!.id,selected!.revision,attempt.id,'succeeded',note))}>{label('rec-succeeded','Record applied')}</button>
                   <button class="btn" disabled={busy||note.trim().length<10} onclick={()=>void perform('rec-failed',()=>changesApi.reconcile(selected!.id,selected!.revision,attempt.id,'failed',note))}>{label('rec-failed','Record not applied')}</button>
@@ -323,7 +323,7 @@
     font-size: var(--fs-m);
   }
   nav .item:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   nav span {

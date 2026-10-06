@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../lib/loadError';
   // "New skill" sheet with a small template picker:
   //   • Blank           — a SKILL.md scaffold (frontmatter + When to use / Method)
   //   • From bundled    — start from a bundled skill's SKILL.md under a new name
@@ -101,8 +102,8 @@
       }
       oncreated(s);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      error = /409|exists|conflict/i.test(msg) ? `A skill with that name already exists. Choose another name.` : msg;
+      const conflict = (e as { status?: unknown })?.status === 409 || /already exists/i.test(e instanceof Error ? e.message : '');
+      error = conflict ? `A skill with that name already exists. Choose another name.` : loadErrorText(e);
     } finally {
       busy = false;
     }
@@ -164,7 +165,7 @@
     {/if}
     <div class="field">
       <label for="ns-name">Name</label>
-      <input
+      <input dir="ltr"
         id="ns-name"
         class="input mono"
         bind:value={name}
@@ -183,13 +184,13 @@
     <div class="row2">
       <div class="field">
         <label for="ns-cat">Category</label>
-        <input id="ns-cat" class="input" list="ns-cats" bind:value={category} placeholder="review" />
+        <input dir="auto" id="ns-cat" class="input" list="ns-cats" bind:value={category} placeholder="review" />
         <datalist id="ns-cats">{#each categories as c (c)}<option value={c}></option>{/each}</datalist>
       </div>
     </div>
     <div class="field">
       <label for="ns-desc">Description</label>
-      <textarea id="ns-desc" class="input" rows="2" bind:value={description} placeholder="Draft release notes from the PRs merged since the last tag."></textarea>
+      <textarea dir="auto" id="ns-desc" class="input" rows="2" bind:value={description} placeholder="Draft release notes from the PRs merged since the last tag."></textarea>
       <span class="hint">Agents read this to decide when to use the skill — say what it does and when.</span>
     </div>
   {/if}

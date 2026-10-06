@@ -27,8 +27,8 @@ for (const [theme, scheme, width, rtl] of [['native','light',1440,false],['nativ
     await page.addInitScript(({theme,scheme,rtl}) => {localStorage.setItem('otto_theme',theme);localStorage.setItem('otto_scheme',scheme);localStorage.setItem('otto_direction',rtl?'rtl':'ltr');},{theme,scheme,rtl});
     await page.context().route('**/browser/page?url=**', route => route.fulfill({json:{url:'https://example.invalid/keyboard',title:'Keyboard reader',markdown:'A passage for keyboard annotation.\n\n```ts\nconst endpoint = "https://example.invalid/'+ 'long/'.repeat(35)+'";\n```\n\n'+ 'Readable paragraph with useful context. '.repeat(40),engine:'fixture',degraded:false}}));
     await openPage(page,'browser');
-    await page.getByPlaceholder('Enter URL').fill('https://example.invalid/keyboard');
-    await page.getByPlaceholder('Enter URL').press('Enter');
+    await page.getByPlaceholder('e.g. https://example.com').fill('https://example.invalid/keyboard');
+    await page.getByPlaceholder('e.g. https://example.com').press('Enter');
     await expect(page.locator('.reader h1')).toHaveText('Keyboard reader');
     await page.getByRole('button',{name:'Mark passage',exact:true}).focus();
     await page.keyboard.press('Enter');
@@ -135,7 +135,8 @@ test('Canvas late scene responses cannot replace the latest selection', async ({
   let release!:()=>void, started!:()=>void;
   const held=new Promise<void>(resolve=>{release=resolve;});
   const requested=new Promise<void>(resolve=>{started=resolve;});
-  await page.context().route(`**/canvas/scenes/${scenes[0].id}`,async route=>{const response=await route.fetch();started();await held;await route.fulfill({response});});
+  // The editor reads scenes as `…/canvas/scenes/{id}?files=ref` — match the path, not the full URL.
+  await page.context().route(url=>url.pathname.endsWith(`/canvas/scenes/${scenes[0].id}`),async route=>{const response=await route.fetch();started();await held;await route.fulfill({response});});
   await page.locator('.scene-list .row',{hasText:scenes[0].title}).getByRole('button').first().click(); await requested;
   await page.locator('.scene-list .row',{hasText:scenes[1].title}).getByRole('button').first().click();
   await expect(page.locator('.board')).toContainText(scenes[1].title);

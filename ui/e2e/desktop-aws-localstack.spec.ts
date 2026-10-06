@@ -272,7 +272,12 @@ test.beforeAll(async () => {
   const now = Date.now();
   awsCli([
     'logs', 'put-log-events', '--log-group-name', LOG_GROUP, '--log-stream-name', LOG_STREAM,
-    '--log-events', `timestamp=${now - 2000},message=boot ok`, `timestamp=${now - 1000},message={"level":"error","msg":"boom"}`,
+    // JSON, not the `timestamp=…,message=…` shorthand: AWS CLI v2's shorthand
+    // parser rejects the second event's `{…}` message (ParamValidation).
+    '--log-events', JSON.stringify([
+      { timestamp: now - 2000, message: 'boot ok' },
+      { timestamp: now - 1000, message: JSON.stringify({ level: 'error', msg: 'boom' }) },
+    ]),
   ]);
 
   // ── the Otto account, pointed at the container ──

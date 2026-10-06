@@ -94,6 +94,9 @@ pub const DEFAULT_EXIT_LINGER: Duration = Duration::from_secs(10 * 60);
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Handshake (HELLO → HELLO_ACK → SNAPSHOT) and control-write timeout.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a finished client connection keeps reading the control frames
+/// (KILL / RELEASE) its client sent before hanging up.
+const CLIENT_DRAIN: Duration = Duration::from_millis(500);
 /// `sun_path` is 104 bytes on macOS (108 on Linux), NUL included. Keep a
 /// margin so a socket path never silently truncates.
 const MAX_SOCKET_PATH: usize = 100;
@@ -527,6 +530,16 @@ pub(crate) fn spawn_and_attach(
         Ok(Ok(())) => {}
         Ok(Err(msg)) => return Err(Error::Internal(format!("pty holder: {msg}"))),
         Err(_) => {
+            // A holder that is up but slow may already have spawned the
+            // child: end it through the holder first (KILL escalates past an
+            // ignored HUP), or SIGKILLing only the holder orphans a child
+            // that ignores HUP (review S1-24). Bounded by the escalation.
+            if terminate(&socket).is_ok() {
+                let _ = crate::held::wait_holder_gone(
+                    &socket,
+                    Duration::from_secs(2 * crate::KILL_GRACE.as_secs() + 1),
+                );
+            }
             // Still not ready, so not reaped either: its pid is still ours.
             #[cfg(unix)]
             // SAFETY: signalling our own unreaped child.
@@ -588,8 +601,16 @@ pub fn terminate(socket: &Path) -> std::io::Result<()> {
     let hello = serde_json::to_vec(&Hello::ours()).unwrap_or_default();
     s.write_all(&frame::encode(frame::HELLO, &hello))?;
     // Wait for the ack so our KILL is processed by THIS connection's handler
-    // (not dropped as pre-handshake noise).
-    let _ = frame::read_sync(&mut s);
+    // (not dropped as pre-handshake noise). No ack = a wedged holder that
+    // never claimed this connection: the KILL would be lost, so this is a
+    // failure, not a success (review S1-08).
+    let (kind, _) = frame::read_sync(&mut s)?;
+    if kind != frame::HELLO_ACK {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("pty holder: unexpected frame {kind:#x} instead of HELLO_ACK"),
+        ));
+    }
     s.write_all(&frame::encode(frame::KILL, &[]))?;
     s.write_all(&frame::encode(frame::RELEASE, &[]))?;
     // Give the holder a moment to read them before we hang up.
@@ -911,96 +932,130 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
         return;
     }
 
-    let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
-    let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
-    payload.extend_from_slice(&snap.data);
-    if write_frame(&mut wr, frame::SNAPSHOT, &payload)
-        .await
-        .is_err()
-    {
-        sh.release_claim(gen);
-        return;
-    }
-    let mut out = snap.output;
-
+    // Read this client's frames BEFORE the (possibly large, slow) SNAPSHOT
+    // write: a terminate()-style client sends KILL right after HELLO_ACK,
+    // and a racing newer client's HELLO could kick this one while the
+    // snapshot is still being written — the KILL must not be left unread
+    // in the socket buffer (review S1-08).
+    let superseded = Arc::new(AtomicBool::new(false));
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<InputAck>();
     let (in_tx, in_rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
     let input_task = tokio::spawn(input_loop(Arc::clone(&sh.handle), in_rx, ack_tx));
     let (eof_tx, mut eof_rx) = oneshot::channel::<()>();
-    let reader_task = tokio::spawn(client_reader(rd, Arc::clone(&sh), in_tx, eof_tx));
+    let mut reader_task = tokio::spawn(client_reader(
+        rd,
+        Arc::clone(&sh),
+        in_tx,
+        eof_tx,
+        Arc::clone(&superseded),
+    ));
+
+    let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
+    let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
+    payload.extend_from_slice(&snap.data);
+    let snapshot_sent = write_frame(&mut wr, frame::SNAPSHOT, &payload)
+        .await
+        .is_ok();
+    let mut out = snap.output;
     let mut exit_rx = sh.handle.on_exit();
     let mut exit_sent = false;
 
-    loop {
-        tokio::select! {
-            changed = kick.changed() => {
-                if changed.is_err() || *kick.borrow() != gen {
-                    let _ = write_frame(&mut wr, frame::SUPERSEDED, &[]).await;
-                    break;
-                }
-            }
-            _ = &mut eof_rx => break,
-            chunk = out.recv() => {
-                match chunk {
-                    Ok(bytes) => {
-                        if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // This client fell behind: replace the lost chunks
-                        // with one fresh snapshot (it rebuilds from it).
-                        let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
-                        out = snap.output;
-                        let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
-                        payload.extend_from_slice(&snap.data);
-                        if write_frame(&mut wr, frame::SNAPSHOT, &payload).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            Some(ack) = ack_rx.recv() => {
-                let payload = serde_json::to_vec(&ack).unwrap_or_default();
-                if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
-                    break;
-                }
-            }
-            code = wait_exit(&mut exit_rx), if !exit_sent => {
-                // Final output first: wait (bounded — a grandchild may keep
-                // the tty open) for the reader to drain, then forward what
-                // the receiver still holds, then the exit itself.
-                let mut done = sh.handle.output_closed();
-                let _ = tokio::time::timeout(Duration::from_secs(1), done.wait_for(|d| *d)).await;
-                let mut failed = false;
-                loop {
-                    match out.try_recv() {
-                        Ok(bytes) => {
-                            if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
-                                failed = true;
+    if snapshot_sent {
+        loop {
+            tokio::select! {
+                        changed = kick.changed() => {
+                            if changed.is_err() || *kick.borrow() != gen {
+                                superseded.store(true, Ordering::SeqCst);
+                                let _ = write_frame(&mut wr, frame::SUPERSEDED, &[]).await;
                                 break;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-                        Err(_) => break,
-                    }
-                }
-                if failed {
-                    break;
-                }
-                let payload = serde_json::json!({ "code": code }).to_string();
-                if write_frame(&mut wr, frame::EXITED, payload.as_bytes()).await.is_err() {
-                    break;
-                }
-                exit_sent = true;
-                sh.wake.notify_one();
+                        _ = &mut eof_rx => break,
+                        chunk = out.recv() => {
+                            match chunk {
+                                Ok(bytes) => {
+                                    if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    // This client fell behind: replace the lost chunks
+                                    // with one fresh snapshot (it rebuilds from it).
+                                    let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
+                                    out = snap.output;
+                                    let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
+                                    payload.extend_from_slice(&snap.data);
+                                    if write_frame(&mut wr, frame::SNAPSHOT, &payload).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                        Some(ack) = ack_rx.recv() => {
+                            let payload = serde_json::to_vec(&ack).unwrap_or_default();
+                            if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
+                                break;
+                            }
+                        }
+                        code = wait_exit(&mut exit_rx), if !exit_sent => {
+                            // Final output first: wait (bounded — a grandchild may keep
+                            // the tty open) for the reader to drain, then forward what
+                            // the receiver still holds, then the exit itself.
+                            let mut done = sh.handle.output_closed();
+                            let _ = tokio::time::timeout(Duration::from_secs(1), done.wait_for(|d| *d)).await;
+                            let mut failed = false;
+                            loop {
+                                match out.try_recv() {
+                                    Ok(bytes) => {
+                                        if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
+                                            failed = true;
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                            // Acks for input the child consumed before exiting go out
+                            // before the exit too: the client fails a still-pending write
+                            // on EXITED, which reported delivered input as lost.
+                            while let Ok(ack) = ack_rx.try_recv() {
+                                let payload = serde_json::to_vec(&ack).unwrap_or_default();
+                                if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                            if failed {
+                                break;
+                            }
+                            let payload = serde_json::json!({ "code": code }).to_string();
+                            if write_frame(&mut wr, frame::EXITED, payload.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            exit_sent = true;
+                            sh.wake.notify_one();
+                        }
             }
         }
     }
-    reader_task.abort();
+    // Whatever ended this connection — a kick, OR a write that failed because
+    // the client already hung up — drain the control frames it sent first (a
+    // KILL / RELEASE racing the end) until it hangs up. Aborting the reader
+    // straight away lost them: a daemon dropping its handle (KILL + RELEASE,
+    // then close) while we were writing output or the EXITED frame got EPIPE
+    // here, and the unread KILL left the child running (the holder lingering
+    // for the orphan TTL) or the unread RELEASE kept an exited holder around
+    // for the exit linger. Only control frames count from here on (input
+    // belongs to no one now). Bounded: a client that hung up is at EOF at
+    // once, a superseded daemon closes on SUPERSEDED, a terminate() client
+    // within 300 ms.
+    superseded.store(true, Ordering::SeqCst);
     input_task.abort();
     let _ = wr.shutdown().await;
+    let _ = tokio::time::timeout(CLIENT_DRAIN, &mut reader_task).await;
+    reader_task.abort();
     sh.release_claim(gen);
 }
 
@@ -1010,9 +1065,22 @@ async fn client_reader(
     sh: Arc<Shared>,
     in_tx: mpsc::UnboundedSender<(u64, Vec<u8>)>,
     eof_tx: oneshot::Sender<()>,
+    superseded: Arc<AtomicBool>,
 ) {
     loop {
-        match frame::read_async(&mut rd).await {
+        let frame = frame::read_async(&mut rd).await;
+        if superseded.load(Ordering::SeqCst) {
+            // Replaced by a newer client: only the frozen control frames
+            // still count (input / resizes belong to the new client).
+            match frame {
+                Ok((kind, _)) => {
+                    control_frame(&sh, kind);
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        match frame {
             Ok((frame::INPUT, payload)) if payload.len() >= 8 => {
                 let mut seq = [0u8; 8];
                 seq.copy_from_slice(&payload[..8]);

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ async function runStatement(page: Page, sql: string): Promise<void> {
   const content = page.locator('.qe-edit .cm-content');
   await content.click();
   await page.waitForTimeout(60);
-  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press(await editorSelectAll(page));
   await page.waitForTimeout(40);
   await page.keyboard.insertText(sql);
   await page.waitForTimeout(300);

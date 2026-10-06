@@ -2095,6 +2095,28 @@ mod tests {
             unsafe { rdkafka::bindings::rd_kafka_mock_clear_requests(self.mock) };
         }
 
+        /// Wait until the clients on this mock stop sending Metadata in the
+        /// background, then `clear`. librdkafka fires an async Metadata
+        /// request whenever a broker connection comes up (`connect_up` →
+        /// `metadata_refresh_known_topics`), and the cold pass / first tail
+        /// tick open new connections (bootstrap → the learned broker id, the
+        /// fresh peek-pool consumer) — that refresh can land a few ms into
+        /// the NEXT measured window. It is not part of the call under test,
+        /// so the budget is measured only once the cluster is quiet: a
+        /// 300 ms window with no Metadata request (5 s ceiling, after which
+        /// the measurement runs anyway and the budget assertion decides).
+        fn settle_then_clear(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                self.clear();
+                std::thread::sleep(Duration::from_millis(300));
+                if self.requests(API_METADATA) == 0 || Instant::now() >= deadline {
+                    break;
+                }
+            }
+            self.clear();
+        }
+
         /// Requests seen since the last `clear`, by API key.
         fn requests(&self, api_key: i16) -> usize {
             use rdkafka::bindings as rd;
@@ -2173,7 +2195,7 @@ mod tests {
         assert_eq!(cold["t0"], 30, "{cold:?}");
 
         // Warm: partitions from the cache, watermarks in one batch per kind.
-        mock.clear();
+        mock.settle_then_clear();
         let started = Instant::now();
         let warm = client.topics_message_counts(&names).unwrap();
         let took = started.elapsed();
@@ -2205,7 +2227,7 @@ mod tests {
         mock.produce("t0", 30);
 
         // Next tick: everything after the previous highs, in one batch.
-        mock.clear();
+        mock.settle_then_clear();
         let started = Instant::now();
         let tick = client
             .consume_raw_from("t0", &req, Some(&starts), Some(MAX_CONSUME_BYTES))

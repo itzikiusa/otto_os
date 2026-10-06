@@ -213,11 +213,11 @@
           <div class="kw">
             <div class="field">
               <label for="kw-code">Extra words that mean “code”</label>
-              <input id="kw-code" class="input" bind:value={draft.code} placeholder="terraform, jq, regex" />
+              <input dir="ltr" id="kw-code" class="input" bind:value={draft.code} placeholder="terraform, jq, regex" />
             </div>
             <div class="field">
               <label for="kw-hard">Extra words that mean “think hard”</label>
-              <input id="kw-hard" class="input" bind:value={draft.hard} placeholder="deep dive, audit, proof" />
+              <input dir="auto" id="kw-hard" class="input" bind:value={draft.hard} placeholder="deep dive, audit, proof" />
             </div>
           </div>
           <p class="help">Comma-separated. They add to the built-in rules.</p>

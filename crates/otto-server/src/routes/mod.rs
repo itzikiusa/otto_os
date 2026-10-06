@@ -173,6 +173,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/auth/tokens/{id}", delete(auth_routes::revoke_token))
         // --- Share-link management (mobile plan Task 1.9) ----------------
+        .route("/auth/shares", get(share::list_my_shares))
         .route("/auth/shares/{share_id}", delete(share::revoke_share))
         .route("/auth/shares/revoke-all", post(share::revoke_all_shares))
         // --- Per-user email sender (Gmail App Password → Keychain; mobile
@@ -181,6 +182,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/email-sender",
             get(email_sender::get_email_sender).put(email_sender::set_email_sender),
+        )
+        .route(
+            "/email-sender/verify",
+            post(email_sender::verify_email_sender),
         )
         // --- Agent activity (live trail + task tracker) ------------------
         .route(
@@ -268,6 +273,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // Secret store status + confirmed "Secure secrets…" migration (root).
         .route("/admin/secrets/status", get(settings::secrets_status))
         .route("/admin/secrets/secure", post(settings::secrets_secure))
+        .route(
+            "/admin/secrets/reset-store",
+            post(settings::secrets_reset_store),
+        )
         // --- Dynamic model catalog (discovered per-provider model ids) ----
         .route("/providers/models", get(crate::model_catalog::list))
         // --- Walkthrough video redirect resolver (WebKit can't follow a
@@ -475,6 +484,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/fs/browse", get(fs::browse))
         .route("/fs/read", get(fs::read_file))
+        .route("/fs/stat", get(fs::stat))
         .route("/logs/daemon", get(logs::daemon_logs))
         // UI last-resort error report (self-heal hook in ui/src/main.ts).
         .route("/client/errors", post(logs::client_error))

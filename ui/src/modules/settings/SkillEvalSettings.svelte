@@ -4,6 +4,7 @@
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
+  import { router } from '../../lib/router.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Root-only defaults for the Skills Evaluator: the validations, improver
   // agent, iterations, and validation passes pre-filled into the start form.
@@ -131,7 +132,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>Each validation runs as its own agent (one per CLI selected); the improver edits the skill between iterations. The start form in Skills Lab is pre-filled from these, and you can change them per run.</SectionIntro>
+  <SectionIntro>Each validation runs as its own agent (one per CLI selected); the improver edits the skill between iterations. The start form in <button type="button" class="intro-link" onclick={() => router.go('skills-eval/evaluator')}>Skills Lab → Evaluator</button> is pre-filled from these, and you can change them per run.</SectionIntro>
   <div class="eval-body">
 
   {#if !cfg}
@@ -174,7 +175,7 @@
           <div class="val-row">
             <div class="field grow">
               <label for={`sv-name-${i}`}>Name</label>
-              <input
+              <input dir="auto"
                 id={`sv-name-${i}`}
                 class="input"
                 placeholder="logging"
@@ -194,7 +195,7 @@
           </div>
           <div class="field">
             <label for={`sv-crit-${i}`}>Passes when</label>
-            <textarea
+            <textarea dir="auto"
               id={`sv-crit-${i}`}
               class="input val-textarea"
               rows="2"

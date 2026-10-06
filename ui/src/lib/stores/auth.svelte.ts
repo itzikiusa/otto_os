@@ -1,15 +1,56 @@
 // Auth / boot state: GET /meta → onboarding | login | ready.
 
-import { api, setToken, getToken, ApiError, UNAUTHORIZED_EVENT, setAltLoopbackBase } from '../api/client';
-import { lsGet, lsSet, lsRemove } from '../storage';
+import {
+  api,
+  setToken,
+  getToken,
+  getImpersonationToken,
+  setImpersonationToken,
+  ApiError,
+  UNAUTHORIZED_EVENT,
+  setAltLoopbackBase,
+} from '../api/client';
+import { lsRemove, ssGet, ssSet, ssRemove } from '../storage';
 import type { CapabilitiesResp, LoginResp, MeResp, MetaResp, User } from '../api/types';
 import type { Capability, Feature } from '../api/types';
 
 export type BootPhase = 'loading' | 'onboarding' | 'login' | 'ready' | 'offline';
 
-/** localStorage key used to persist the admin's own token across page reloads
- *  while an impersonation session is active. Cleared on `stopImpersonating`. */
+/** Older builds kept the admin's own bearer here (sessionStorage, and before
+ *  that localStorage) while impersonating, and swapped the impersonation
+ *  token into the SHARED `otto_token` (S13-303). The impersonation bearer now
+ *  lives per tab (`setImpersonationToken`) and the admin token never leaves
+ *  `otto_token`, so there is nothing to save — purge any leftover copy. */
 const ADMIN_TOKEN_KEY = 'otto_admin_token';
+lsRemove(ADMIN_TOKEN_KEY);
+ssRemove(ADMIN_TOKEN_KEY);
+
+/** When this tab's impersonation began (ms), beside the impersonation token in
+ *  THIS tab's sessionStorage (S13-07). It used to live in shared localStorage,
+ *  where a second, non-impersonating admin tab cleared it and the banner
+ *  froze at "30:00" while the real 30-minute server TTL ran out. */
+const IMP_START_KEY = 'otto_imp_start_ms';
+lsRemove(IMP_START_KEY); // older builds' shared copy
+
+function beginImpersonation(impToken: string): void {
+  setImpersonationToken(impToken);
+  ssSet(IMP_START_KEY, String(Date.now()));
+}
+
+/** End THIS tab's impersonation (if any): the tab falls back to the shared
+ *  sign-in token. Returns whether one was active. */
+function endImpersonation(): boolean {
+  const active = getImpersonationToken() !== null;
+  if (active) setImpersonationToken(null);
+  ssRemove(IMP_START_KEY);
+  return active;
+}
+
+/** Start of this tab's impersonation (ms since epoch), or null if unknown. */
+export function impersonationStartedMs(): number | null {
+  const v = parseInt(ssGet(IMP_START_KEY) ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
 
 // Capability ladder: index = strength (higher = more permissive).
 const CAP_ORDER: Capability[] = ['none', 'view', 'edit', 'admin'];
@@ -19,8 +60,40 @@ function capIndex(c: string): number {
   return i < 0 ? 0 : i;
 }
 
+
+/** Boot's `/meta` deadline (S13-05). A daemon that accepts the connection but
+ *  stalls used to hold boot on "Connecting to the Otto daemon…" forever: the
+ *  2 s offline retry only runs in 'offline', and `booting` blocked re-entry.
+ *  Past this, boot goes 'offline' and the retry loop takes over. */
+export const META_BOOT_TIMEOUT_MS = 5_000;
+/** The same deadline for an in-place re-boot of a RUNNING app (S13-304):
+ *  `/meta`'s cold tool probe alone can take ~4 s, and a miss here no longer
+ *  costs a spinner — the shell stays up — so give it more room. */
+export const META_REBOOT_TIMEOUT_MS = 10_000;
+
+/** `GET /meta`, aborted (and rejected) after `ms`. */
+function metaWithin(ms: number): Promise<MetaResp> {
+  const ctl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      reject(new Error('timeout'));
+    }, ms);
+  });
+  return Promise.race([api.get<MetaResp>('/meta', ctl.signal), expired]).finally(() => clearTimeout(timer));
+}
+
+/** Tab-scoped (sessionStorage) wizard step, saved once the root account
+ *  exists: a reload mid-setup then RESUMES the wizard instead of landing in
+ *  the app with the workspace / usage / tool steps silently skipped (S20-11).
+ *  Cleared by Finish. */
+export const ONBOARDING_RESUME_KEY = 'otto_onboarding_step';
+
 class AuthStore {
   phase: BootPhase = $state('loading');
+  /** Set when a reload resumed the first-run wizard past root creation. */
+  onboardingResumeStep: number | null = $state(null);
   meta: MetaResp | null = $state(null);
   /** Effective (acted-as) user — the identity the UI renders as. */
   me: User | null = $state(null);
@@ -95,7 +168,7 @@ class AuthStore {
   private applyMe(resp: MeResp): void {
     this.me = resp.user;
     this.realUser = resp.real_user;
-    // Restore the isImpersonating state persisted in localStorage on reload
+    // Restore the isImpersonating state persisted in sessionStorage on reload
     // (the admin token survives because we persisted it before swapping).
   }
 
@@ -127,13 +200,17 @@ class AuthStore {
     // unhandled rejection behind.
     early?.me.catch(() => {});
     early?.caps.catch(() => {});
+    const running = this.phase === 'ready';
     try {
-      this.meta = await api.get<MetaResp>('/meta');
+      this.meta = await metaWithin(running ? META_REBOOT_TIMEOUT_MS : META_BOOT_TIMEOUT_MS);
       // Background/slow calls move to the daemon's second loopback host
       // (a separate socket pool) when it advertises one.
       setAltLoopbackBase(this.meta.alt_loopback_base);
     } catch {
-      this.phase = 'offline';
+      // Like the /auth/me catch below: an in-place re-boot of a running app
+      // keeps the shell (editors, drafts, terminals) up — only a cold boot
+      // falls to the offline screen and its retry loop (S13-304).
+      if (this.phase !== 'ready') this.phase = 'offline';
       return;
     }
     if (this.meta.needs_onboarding) {
@@ -159,51 +236,77 @@ class AuthStore {
         // Errors are non-fatal.
         await this.loadCapabilities();
       }
+      const resume = Number(ssGet(ONBOARDING_RESUME_KEY) ?? '');
+      if (Number.isInteger(resume) && resume >= 2 && resume <= 4) {
+        this.onboardingResumeStep = resume;
+        this.phase = 'onboarding';
+        return;
+      }
       this.phase = 'ready';
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setToken(null);
-      this.phase = 'login';
+      // Only a rejected token means "sign in again". A timeout / 5xx / dropped
+      // connection on /auth/me (daemon restarting, sleep/wake) used to land on
+      // the login screen with a perfectly valid token: stay offline instead —
+      // App polls boot(true) every 2 s — or, for an in-place re-boot of a
+      // running app, keep the shell up.
+      if (e instanceof ApiError && e.status === 401) {
+        // An expired impersonation token (S13-302: the 4401 re-boot, a reload
+        // past the 30-minute TTL) falls back to the admin's own session in
+        // this tab instead of signing them out of it.
+        if (token !== null && token === getImpersonationToken()) {
+          endImpersonation();
+          if (getToken()) return this.performBoot(true);
+        }
+        setToken(null);
+        this.phase = 'login';
+      } else if (this.phase !== 'ready') {
+        this.phase = 'offline';
+      }
     }
   }
 
   async login(username: string, password: string): Promise<void> {
     const resp = await api.post<LoginResp>('/auth/login', { username, password });
+    endImpersonation();
     setToken(resp.token);
     this.me = resp.user;
     this.realUser = resp.user;
-    await this.loadCapabilities();
+    // `/meta` was fetched signed-out (tools/providers withheld from
+    // anonymous callers); reload it with the new bearer.
+    await Promise.all([this.loadCapabilities(), this.refreshMeta()]);
     this.phase = 'ready';
   }
 
   /** Used by onboarding which returns a LoginResp directly. */
   async acceptLogin(resp: LoginResp): Promise<void> {
+    endImpersonation();
     setToken(resp.token);
     this.me = resp.user;
     this.realUser = resp.user;
-    await this.loadCapabilities();
+    // `/meta` was fetched signed-out (tools/providers withheld from
+    // anonymous callers); reload it with the new bearer.
+    await Promise.all([this.loadCapabilities(), this.refreshMeta()]);
     this.phase = 'ready';
   }
 
   /**
    * Begin impersonating `userId`.
    *
-   * Saves the current (admin) token to localStorage under `otto_admin_token`
-   * so it can be recovered after a page reload, swaps the active bearer to the
-   * short-lived impersonation token, then re-boots so the whole app (identity,
-   * capabilities, banner) reflects the target user.
+   * The short-lived impersonation token becomes THIS tab's bearer
+   * (sessionStorage, S13-303) — the admin's own token stays untouched in the
+   * shared `otto_token`, so other windows keep acting as the admin and Exit /
+   * expiry simply drop the overlay. Then identity + capabilities reload as
+   * the target user.
    */
   async impersonate(userId: string): Promise<void> {
-    const adminToken = getToken();
-    if (!adminToken) throw new Error('not authenticated');
+    if (!getToken()) throw new Error('not authenticated');
 
     const { token: impToken } = await api.post<{ token: string }>(
       `/admin/impersonate/${userId}`,
       {},
     );
 
-    // Persist the admin token so Exit works even after a page reload.
-    lsSet(ADMIN_TOKEN_KEY, adminToken);
-    setToken(impToken);
+    beginImpersonation(impToken);
 
     // Re-load identity + capabilities as the impersonated user.
     await this.loadMe();
@@ -213,9 +316,9 @@ class AuthStore {
   /**
    * End the active impersonation session.
    *
-   * Calls `/admin/impersonate/stop` to revoke the impersonation token on the
-   * server, restores the saved admin token (from in-memory or localStorage),
-   * clears the persisted key, then re-boots so the app reverts to the admin.
+   * Calls `/admin/impersonate/stop` (with the impersonation bearer) to revoke
+   * it on the server, drops this tab's overlay, then reloads as the admin
+   * from the shared sign-in token.
    */
   async stopImpersonating(): Promise<void> {
     try {
@@ -224,15 +327,10 @@ class AuthStore {
       // Revoke is best-effort; proceed regardless (token may already be expired).
     }
 
-    const savedAdmin =
-      lsGet(ADMIN_TOKEN_KEY);
-    lsRemove(ADMIN_TOKEN_KEY);
+    endImpersonation();
 
-    if (savedAdmin) {
-      setToken(savedAdmin);
-    } else {
-      // Fallback: no saved token — go to login.
-      setToken(null);
+    if (!getToken()) {
+      // The admin signed out elsewhere meanwhile — go to login.
       this.me = null;
       this.realUser = null;
       this.capabilities = {};
@@ -260,10 +358,8 @@ class AuthStore {
       await api.get<MeResp>('/auth/me');
     } catch (e) {
       if (!(e instanceof ApiError && e.status === 401) || token !== getToken()) return;
-      const savedAdmin = lsGet(ADMIN_TOKEN_KEY);
-      lsRemove(ADMIN_TOKEN_KEY);
-      if (savedAdmin && savedAdmin !== token) {
-        setToken(savedAdmin);
+      // An expired impersonation token falls back to this tab's admin session.
+      if (token === getImpersonationToken() && endImpersonation() && getToken()) {
         try {
           await this.loadMe();
           await this.loadCapabilities();
@@ -283,12 +379,21 @@ class AuthStore {
   }
 
   async logout(): Promise<void> {
+    // Signing out while impersonating: revoke the overlay first, then sign
+    // the ADMIN's own session out (the request below must carry that token).
+    if (getImpersonationToken()) {
+      try {
+        await api.post('/admin/impersonate/stop', {});
+      } catch {
+        /* already expired / revoked */
+      }
+      endImpersonation();
+    }
     try {
       await api.post('/auth/logout');
     } catch {
       /* token may already be invalid */
     }
-    lsRemove(ADMIN_TOKEN_KEY);
     setToken(null);
     this.me = null;
     this.realUser = null;

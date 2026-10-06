@@ -528,6 +528,16 @@ fn patch_opt(current: Option<Id>, patch: Option<String>) -> Option<Id> {
     }
 }
 
+/// The per-project publication lock (shared across request-scoped services
+/// and root aliases via [`crate::service::commit_lock`]; the `project:` prefix
+/// keeps it apart from artifact ids).
+async fn project_lock(
+    svc: &DesignService,
+    id: &str,
+) -> otto_core::Result<Arc<tokio::sync::Mutex<()>>> {
+    crate::service::commit_lock(svc.root(), &format!("project:{id}")).await
+}
+
 async fn update_project<S: DesignCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -535,6 +545,11 @@ async fn update_project<S: DesignCtx>(
     Json(req): Json<UpdateProjectReq>,
 ) -> ApiResult<Response> {
     let svc = ctx.design();
+    // Read-modify-write of the whole row: serialize per project (the same
+    // process-wide lock registry as artifact commits), or two concurrent
+    // PATCHes of different fields silently drop one another's change.
+    let lock = project_lock(&svc, &id).await?;
+    let _held = lock.lock().await;
     let mut p = load_project(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(n) = req.name {
         p.name = clean_title(&n)?;
@@ -586,6 +601,8 @@ async fn delete_project<S: DesignCtx>(
         load_project(&ctx, &svc, &user, &id, WorkspaceRole::Admin).await?;
         svc.store().delete_project(&id).await?;
     } else {
+        let lock = project_lock(&svc, &id).await?;
+        let _held = lock.lock().await;
         let mut p = load_project(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
         p.archived = true;
         svc.store().write_project(&p).await?;

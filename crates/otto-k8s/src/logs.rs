@@ -19,6 +19,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
 use crate::cli::{self, Kubectl};
+use crate::resources;
 
 /// One-shot budget.
 pub const LOGS_TIMEOUT: Duration = Duration::from_secs(60);
@@ -88,7 +89,37 @@ pub fn logs_args(ns: &str, pod: &str, q: &LogsQuery) -> Vec<String> {
     target_args(ns, LogTarget::Pod(pod), q)
 }
 
-/// `logs_args` for either target.
+/// Reject a pod / container / namespace that could be parsed as a kubectl
+/// flag (`--context=other`, `-A`, `--server=…`) — see
+/// [`crate::resources::validate_name`]. The selector is passed as a single
+/// `--selector=<sel>` token, so it can't smuggle a flag of its own.
+pub fn validate_target(ns: &str, target: &LogTarget<'_>, q: &LogsQuery) -> Result<()> {
+    resources::validate_name("namespace", ns)?;
+    match target {
+        LogTarget::Pod(pod) => resources::validate_name("pod", pod)?,
+        LogTarget::Selector(sel) => {
+            if sel.trim().is_empty() {
+                return Err(Error::Invalid("selector is required".into()));
+            }
+        }
+    }
+    if let Some(c) = q
+        .container
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        resources::validate_name("container", c)?;
+    }
+    Ok(())
+}
+
+/// Largest `--tail` we ask for: with the byte cap below it is only a hint, but
+/// it stops a huge tail from making the API server stream a whole log.
+pub const MAX_TAIL: i64 = 100_000;
+
+/// `logs_args` for either target. Every option is one `--flag=value` token
+/// and the pod name follows `--`, so no value can be read as a flag.
 pub fn target_args(ns: &str, target: LogTarget<'_>, q: &LogsQuery) -> Vec<String> {
     let mut a: Vec<String> = vec!["logs".into()];
     let container = q
@@ -96,25 +127,19 @@ pub fn target_args(ns: &str, target: LogTarget<'_>, q: &LogsQuery) -> Vec<String
         .as_deref()
         .map(str::trim)
         .filter(|c| !c.is_empty());
-    match target {
-        LogTarget::Pod(pod) => a.push(pod.into()),
-        LogTarget::Selector(sel) => {
-            a.push("-l".into());
-            a.push(sel.into());
-            a.push("--prefix".into());
-            a.push(format!("--max-log-requests={MAX_LOG_REQUESTS}"));
-            if container.is_none() {
-                a.push("--all-containers".into());
-            }
+    if let LogTarget::Selector(sel) = target {
+        a.push(format!("--selector={sel}"));
+        a.push("--prefix".into());
+        a.push(format!("--max-log-requests={MAX_LOG_REQUESTS}"));
+        if container.is_none() {
+            a.push("--all-containers".into());
         }
     }
-    a.push("-n".into());
-    a.push(ns.into());
+    a.push(format!("--namespace={ns}"));
     if let Some(c) = container {
-        a.push("-c".into());
-        a.push(c.into());
+        a.push(format!("--container={c}"));
     }
-    let tail = q.tail.unwrap_or(500);
+    let tail = q.tail.unwrap_or(500).min(MAX_TAIL);
     if tail >= 0 {
         a.push(format!("--tail={tail}"));
     }
@@ -134,6 +159,13 @@ pub fn target_args(ns: &str, target: LogTarget<'_>, q: &LogsQuery) -> Vec<String
     }
     if q.follow == Some(true) {
         a.push("-f".into());
+    } else {
+        // One-shot: the server stops at the cap instead of us buffering past it.
+        a.push(format!("--limit-bytes={LOGS_CAP}"));
+    }
+    if let LogTarget::Pod(pod) = target {
+        a.push("--".into());
+        a.push(pod.into());
     }
     a
 }
@@ -170,11 +202,98 @@ pub async fn fetch_target(
     target: LogTarget<'_>,
     q: &LogsQuery,
 ) -> Result<String> {
+    validate_target(ns, &target, q)?;
     let mut q = q.clone();
     q.follow = Some(false);
     let argv = k.argv(target_args(ns, target, &q));
-    let out = cli::run(&k.program, &argv, &k.env, LOGS_TIMEOUT, None).await?;
-    Ok(cap_tail(out.stdout, LOGS_CAP))
+    let mut cmd = Command::new(&k.program);
+    cmd.args(&argv)
+        .envs(k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd.spawn().map_err(|e| cli::spawn_error(&k.program, &e))?;
+    let (status, text, stderr) = read_capped(child, LOGS_CAP, LOGS_TIMEOUT)
+        .await
+        .map_err(|e| match e {
+            ReadCapped::Timeout => Error::Upstream(format!(
+                "{} logs timed out after {}s",
+                k.program,
+                LOGS_TIMEOUT.as_secs()
+            )),
+            ReadCapped::Io(e) => Error::Internal(format!("{}: {e}", k.program)),
+        })?;
+    if status != 0 {
+        return Err(cli::classify_failure(&k.program, &stderr));
+    }
+    Ok(text)
+}
+
+#[derive(Debug)]
+enum ReadCapped {
+    Timeout,
+    Io(std::io::Error),
+}
+
+/// Read a child's stdout incrementally, keeping only its last `cap` bytes
+/// (a ring — memory stays at `cap` however much kubectl prints), with stderr
+/// drained concurrently into its own small ring. Past `deadline` the child is
+/// killed. Returns `(exit, tail-capped stdout, stderr tail)`.
+async fn read_capped(
+    mut child: Child,
+    cap: usize,
+    deadline: Duration,
+) -> std::result::Result<(i32, String, String), ReadCapped> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ReadCapped::Io(std::io::Error::other("no stdout")))?;
+    let (err_ring, drain) = drain_stderr(child.stderr.take());
+    let read = async {
+        let mut ring: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+        let mut truncated = false;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = stdout.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            ring.extend(&buf[..n]);
+            if ring.len() > cap {
+                let excess = ring.len() - cap;
+                ring.drain(..excess);
+                truncated = true;
+            }
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status.code().unwrap_or(-1), Vec::from(ring), truncated))
+    };
+    let (status, bytes, truncated) = match tokio::time::timeout(deadline, read).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(ReadCapped::Io(e)),
+        // Dropping `read` drops `child` (kill_on_drop) — the process dies here.
+        Err(_) => return Err(ReadCapped::Timeout),
+    };
+    if let Some(t) = drain {
+        let _ = tokio::time::timeout(Duration::from_secs(2), t).await;
+    }
+    let stderr =
+        String::from_utf8_lossy(&err_ring.lock().unwrap_or_else(|p| p.into_inner())).into_owned();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = if truncated {
+        // The ring already holds the last `cap` bytes; drop the partial first
+        // line and add the marker `cap_tail` would have.
+        let cut = text.find('\n').map(|i| i + 1).unwrap_or(0);
+        format!(
+            "[otto: output truncated to the last {} bytes]\n{}",
+            cap,
+            &text[cut..]
+        )
+    } else {
+        text
+    };
+    Ok((status, text, stderr))
 }
 
 /// Streaming logs: a `text/plain` body that stays open while `kubectl logs -f`
@@ -186,6 +305,7 @@ pub fn follow(k: &Kubectl, ns: &str, pod: &str, q: &LogsQuery) -> Result<Body> {
 /// Streaming logs for either target.
 pub fn follow_target(k: &Kubectl, ns: &str, target: LogTarget<'_>, q: &LogsQuery) -> Result<Body> {
     let mut q = q.clone();
+    validate_target(ns, &target, &q)?;
     q.follow = Some(true);
     let argv = k.argv_stream(target_args(ns, target, &q));
     let mut cmd = Command::new(&k.program);
@@ -330,13 +450,11 @@ mod tests {
             target_args("shop", LogTarget::Selector("app=web,tier=fe"), &q),
             vec![
                 "logs",
-                "-l",
-                "app=web,tier=fe",
+                "--selector=app=web,tier=fe",
                 "--prefix",
                 "--max-log-requests=100",
                 "--all-containers",
-                "-n",
-                "shop",
+                "--namespace=shop",
                 "--tail=200",
                 "-f"
             ]
@@ -348,7 +466,7 @@ mod tests {
         };
         let a = target_args("shop", LogTarget::Selector("app=web"), &c);
         assert!(!a.iter().any(|x| x == "--all-containers"));
-        assert!(a.windows(2).any(|w| w == ["-c", "nginx"]));
+        assert!(a.iter().any(|x| x == "--container=nginx"));
     }
 
     #[test]
@@ -365,22 +483,28 @@ mod tests {
             logs_args("shop", "web-1", &q),
             vec![
                 "logs",
-                "web-1",
-                "-n",
-                "shop",
-                "-c",
-                "web",
+                "--namespace=shop",
+                "--container=web",
                 "--tail=100",
                 "--since=10m",
                 "--previous",
                 "--timestamps",
-                "-f"
+                "-f",
+                "--",
+                "web-1"
             ]
         );
         let d = LogsQuery::default();
         assert_eq!(
             logs_args("shop", "web-1", &d),
-            vec!["logs", "web-1", "-n", "shop", "--tail=500"]
+            vec![
+                "logs",
+                "--namespace=shop",
+                "--tail=500",
+                "--limit-bytes=5242880",
+                "--",
+                "web-1"
+            ]
         );
         let t = LogsQuery {
             since: Some("2026-09-01T10:00:00Z".into()),
@@ -391,12 +515,89 @@ mod tests {
             logs_args("shop", "p", &t),
             vec![
                 "logs",
-                "p",
-                "-n",
-                "shop",
-                "--since-time=2026-09-01T10:00:00Z"
+                "--namespace=shop",
+                "--since-time=2026-09-01T10:00:00Z",
+                "--limit-bytes=5242880",
+                "--",
+                "p"
             ]
         );
+    }
+
+    #[test]
+    fn flag_shaped_names_are_rejected() {
+        let q = LogsQuery::default();
+        for bad in [
+            "--context=x",
+            "-A",
+            "--server=https://evil.example",
+            "a b",
+            "",
+        ] {
+            assert!(
+                validate_target("shop", &LogTarget::Pod(bad), &q).is_err(),
+                "pod {bad:?} must be rejected"
+            );
+            assert!(
+                validate_target(bad, &LogTarget::Pod("web-1"), &q).is_err(),
+                "ns {bad:?} must be rejected"
+            );
+            let c = LogsQuery {
+                container: Some(bad.into()),
+                ..Default::default()
+            };
+            if !bad.is_empty() {
+                assert!(validate_target("shop", &LogTarget::Pod("web-1"), &c).is_err());
+            }
+        }
+        assert!(validate_target("shop", &LogTarget::Pod("web-1"), &q).is_ok());
+        assert!(validate_target("shop", &LogTarget::Selector("app=web"), &q).is_ok());
+        // The pod is always behind `--`; a selector is one `--selector=` token.
+        let a = target_args("shop", LogTarget::Selector("--context=x"), &q);
+        assert!(a.iter().all(|x| x != "--context=x"));
+    }
+
+    #[test]
+    fn tail_is_clamped() {
+        let q = LogsQuery {
+            tail: Some(i64::MAX),
+            ..Default::default()
+        };
+        let a = logs_args("shop", "p", &q);
+        assert!(a.iter().any(|x| x == &format!("--tail={MAX_TAIL}")));
+    }
+
+    #[tokio::test]
+    async fn read_capped_keeps_only_the_tail_in_a_ring() {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "i=0; while [ $i -lt 20000 ]; do echo \"line $i\"; i=$((i+1)); done; echo bad >&2",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+        let child = cmd.spawn().unwrap();
+        let (status, text, stderr) = read_capped(child, 1000, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert_eq!(status, 0);
+        assert!(text.starts_with("[otto: output truncated to the last 1000 bytes]\n"));
+        assert!(text.ends_with("line 19999\n"));
+        assert!(text.len() < 1100);
+        assert!(stderr.contains("bad"));
+    }
+
+    #[tokio::test]
+    async fn read_capped_kills_the_child_at_the_deadline() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo start; while true; do sleep 0.1; done"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd.spawn().unwrap();
+        let r = read_capped(child, 1000, Duration::from_millis(300)).await;
+        assert!(matches!(r, Err(ReadCapped::Timeout)));
     }
 
     #[test]

@@ -19,7 +19,13 @@ runs, `cwd` not a sandbox, one-agent-run-per-task):
 
 - **Any provider** — `provider` is `claude | codex | agy | shell | <custom slug>`.
   Agent runs are provider-agnostic (the agent writes its report to a file we read);
-  `shell` runs the prompt as a command and captures stdout/stderr/exit-code.
+  `shell` runs the prompt as a command and captures stdout/stderr/exit-code. When
+  Settings → process sandbox is on for `shell` (the default provider set), the
+  command runs under the same Seatbelt profile as a shell agent session, with a
+  scrubbed environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
+  `TMPDIR`, `TERM` only). Changing a task's prompt, provider, model, cwd,
+  sandbox, workflow or destination is limited to its owner (it runs as them)
+  or a workspace admin; any Editor can still retime, pause or resume it.
 - **Local timezone** — a per-task IANA `timezone` (the create form defaults to your
   browser's). Daily/weekly/cron times are interpreted there, DST-correctly.
 - **Cron** — `schedule = {cadence:"cron", expr:"0 9 * * 1"}` (standard 5-field cron,
@@ -51,9 +57,9 @@ Implementation note: agent runs go through the shared `agent_run` session runner
 `OTTO_E2E`, which keeps the deterministic stub.
 
 This is the definitive end-user + operator guide. It documents what the code in
-`crates/otto-server/src/scheduled_tasks_engine.rs`,
-`crates/otto-server/src/scheduled_tasks_scheduler.rs`,
-`crates/otto-server/src/cadence.rs`,
+`crates/otto-automation/src/scheduled_tasks_engine.rs`,
+`crates/otto-automation/src/scheduled_tasks_scheduler.rs`,
+`crates/otto-automation/src/cadence.rs`,
 `crates/otto-server/src/routes/scheduled_tasks.rs`,
 `crates/otto-state/migrations/0084_scheduled_tasks.sql` (+ `0086_scheduled_tasks_v2.sql`), and
 `ui/src/modules/scheduled-tasks/` actually does — the real cadence kinds, the
@@ -95,11 +101,11 @@ and deliver it to Slack, email, or a webhook. Also driveable over MCP."*
 
 | Layer | File | Responsibility |
 |---|---|---|
-| **Cadence** | `crates/otto-server/src/cadence.rs` | Pure, unit-tested `is_due` / `next_run` / `validate` for the three cadences. |
-| **Engine** | `crates/otto-server/src/scheduled_tasks_engine.rs` | `run_task`: open a run row → run the agent → extract summary → write report → deliver → advance cursor. |
-| **Scheduler** | `crates/otto-server/src/scheduled_tasks_scheduler.rs` | The 60-s supervisor tick + per-task in-flight guard + startup reaper. |
+| **Cadence** | `crates/otto-automation/src/cadence.rs` | Pure, unit-tested `is_due` / `next_run` / `validate` for the three cadences. |
+| **Engine** | `crates/otto-automation/src/scheduled_tasks_engine.rs` | `run_task`: open a run row → run the agent → extract summary → write report → deliver → advance cursor. |
+| **Scheduler** | `crates/otto-automation/src/scheduled_tasks_scheduler.rs` | The 60-s supervisor tick + per-task in-flight guard + startup reaper. |
 | **HTTP routes** | `crates/otto-server/src/routes/scheduled_tasks.rs` | The `/scheduled-tasks/*` endpoints + the preset list + the report server. |
-| **MCP surface** | `crates/otto-server/src/mcp_outward.rs` | The 7 `otto.*` scheduled-task tools (read + write). |
+| **MCP surface** | `crates/otto-mcp/src/outward/` (catalog + routing) | The 7 `otto.*` scheduled-task tools (read + write). |
 | **Persistence** | `migrations/0084_scheduled_tasks.sql` (+ v2 `0086_scheduled_tasks_v2.sql`) + repo | `scheduled_tasks` + `scheduled_task_runs` tables. |
 | **Domain types** | `otto-core` | `ScheduledTask`, `ScheduledTaskRun`, `ScheduledTaskPreset`, `Feature::ScheduledTasks`, `Event::ScheduledTaskRunUpdated`. |
 | **UI** | `ui/src/modules/scheduled-tasks/ScheduledTasksPage.svelte` | The list, the create/edit form, the runs drill-down, and the report modal. |
@@ -436,8 +442,11 @@ matching tick instead of polling.
 - **A failed run says why, inline**: the run row shows its error and any delivery
   failure; the agent session stays linked (*Open session*), a shell task's
   stdout/stderr is kept as the report, and a workflow hand-off keeps its workflow
-  run id. A canceled workflow hand-off is a failed run, not a success. The task's
-  status badge reflects the latest run, manual ones included.
+  run id. A canceled workflow hand-off is a failed run, not a success. A workflow
+  task's run stays *Running* until its workflow run settles and records that real
+  outcome; when the workflow is still busy with an earlier run, the occurrence is
+  recorded **Skipped** (no failure notice). The task's status badge reflects the
+  latest run, manual ones included.
 - **Convert to workflow** asks first and, by default, pauses the original task — the
   new workflow's schedule trigger has the same cadence, so keeping both doubles every
   run and delivery.
@@ -559,8 +568,8 @@ tool itself must also be enabled in the Otto Server tab.
   `/scheduled-tasks/*` routes yourself.
 - **Contracts (authoritative):** `docs/contracts/api.md` (Scheduled Tasks, #135–#143)
   and `docs/contracts/ws.md` (`scheduled_task_run_updated`).
-- **Source:** `crates/otto-server/src/{scheduled_tasks_engine,scheduled_tasks_scheduler,cadence}.rs`,
+- **Source:** `crates/otto-automation/src/{scheduled_tasks_engine,scheduled_tasks_scheduler,cadence}.rs`,
   `crates/otto-server/src/routes/scheduled_tasks.rs`,
-  `crates/otto-server/src/mcp_outward.rs`,
+  `crates/otto-mcp/src/outward/`,
   `crates/otto-state/migrations/0084_scheduled_tasks.sql` (+ `0086_scheduled_tasks_v2.sql`),
   `ui/src/modules/scheduled-tasks/`.

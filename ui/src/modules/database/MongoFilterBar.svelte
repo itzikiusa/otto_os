@@ -80,7 +80,7 @@
 {#if visible}
   <div class="mfb" data-testid="mongo-filter-bar">
     <span class="mfb-label" title="Rewrite the active find() filter and run"><Icon name="search" size={12} />Filter</span>
-    <input
+    <input dir="ltr"
       bind:this={inputEl}
       class="mfb-input mono"
       type="text"
@@ -95,7 +95,7 @@
       <button class="mfb-seg" class:on={mode === 'set'} role="radio" aria-checked={mode === 'set'} onclick={() => (mode = 'set')} title="Replace the current filter">Replace</button>
       <button class="mfb-seg" class:on={mode === 'and'} role="radio" aria-checked={mode === 'and'} onclick={() => (mode = 'and')} title="Merge into the current filter">AND</button>
     </div>
-    <button class="mfb-run" onclick={submit} title="Rewrite the find() filter and run (Enter)"><Icon name="play" size={10} />Run</button>
+    <button class="mfb-run" onclick={submit} title="Rewrite the find() filter and run (Enter)"><Icon name="play" size={12} />Run</button>
     {#if chips.length > 0}
       <div class="mfb-chips" aria-label="Insert a field">
         {#each chips as col (col)}

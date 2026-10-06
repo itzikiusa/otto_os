@@ -555,18 +555,8 @@ pub(crate) async fn resolve_provider(
     ws: &otto_core::domain::Workspace,
     body: Option<&str>,
 ) -> String {
-    if let Some(p) = body.map(str::trim).filter(|p| !p.is_empty()) {
-        return p.to_string();
-    }
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    ctx.resolve_provider_or_fallback(Some(ws), body, "db_assist")
         .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ])
 }
 
 /// The loopback port the daemon listens on (`$OTTO_PORT`, default 7700) — baked

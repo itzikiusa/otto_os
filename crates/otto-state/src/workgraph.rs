@@ -39,7 +39,7 @@ macro_rules! str_enum {
 }
 
 str_enum!(
-    /// The eight kinds of work the graph unifies (one per Otto activity type).
+    /// The nine kinds of work the graph unifies (one per Otto activity type).
     WorkKind {
         Session => "session",
         Swarm => "swarm",

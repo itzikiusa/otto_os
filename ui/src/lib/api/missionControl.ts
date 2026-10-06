@@ -84,4 +84,18 @@ export const missionControlApi = {
 
   /** Re-derive the graph from the source repos (idempotent). */
   backfill: (ws: string) => api.post<BackfillResp>(`/workspaces/${ws}/workgraph/backfill`),
+
+  /** Stop an item through its OWNER's cancel endpoint (`stopPath` in
+   *  modules/mission-control/sourceLinks.ts — goal loop stop, workflow-run
+   *  cancel, review cancel). The projector picks the new status up from the
+   *  owner's event; the work graph itself has no lifecycle of its own. */
+  stopSource: (path: string) => api.post<unknown>(path, {}),
+
+  /** Source lookups an "Open in <module>" needs before it can route. */
+  sourceProject: (pid: string) =>
+    api.get<{ id: string; swarm_id: string | null }>(`/projects/${encodeURIComponent(pid)}`),
+  sourceWorkflowRun: (rid: string) =>
+    api.get<{ id: string; workflow_id: string }>(`/workflow-runs/${encodeURIComponent(rid)}`),
+  sourceReview: (rid: string) =>
+    api.get<{ id: string; repo_id: string; pr_number: number }>(`/reviews/${encodeURIComponent(rid)}`),
 };

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   // Workbench file list: search, pinned-first live docs, and the trash view
   // (Restore / Delete forever). Every row has a context menu (ctxMenu).
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
@@ -116,7 +117,7 @@
 
 {#snippet row(d: WorkbenchDoc)}
   <li>
-    <button
+    <button use:rowMenuKeys
       class="wb-row"
       class:active={workbench.active === d.id}
       data-testid="wb-file-row"
@@ -137,7 +138,7 @@
   <div class="wb-files-head">
     <label class="wb-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         type="search"
         placeholder={workbench.showTrash ? 'Search trash' : 'Search files'}
         aria-label={workbench.showTrash ? 'Search trash' : 'Search files'}
@@ -165,7 +166,7 @@
         {/snippet}
         <ul class="wb-list" aria-label="Trash">
           {#each trashed as d (d.id)}
-            <li class="wb-trash-row" data-testid="wb-trash-row" oncontextmenu={(e) => trashMenu(e, d)}>
+            <li use:rowMenuKeys class="wb-trash-row" data-testid="wb-trash-row" oncontextmenu={(e) => trashMenu(e, d)}>
               <span class="wb-name" title={d.name}>{d.name}</span>
               <span class="wb-when">{sizeLabel(d.size)}</span>
               <button class="btn small" onclick={() => void restore(d)} title="Restore with its full history">Restore</button>

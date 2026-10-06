@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { DESKTOP_GATE_SPECS, MOBILE_GATE_SPECS, gateMatcher } from './e2e/gate-specs';
 
 // Mobile/tablet E2E suite. Runs the real UI (Vite dev server) against an
 // ISOLATED throwaway daemon spun up in global-setup (temp data dir + temp port)
@@ -12,6 +13,21 @@ const SLOT = process.env.OTTO_E2E_SLOT ?? '0';
 const PW_PORT = process.env.OTTO_E2E_PW_PORT ?? '5173';
 const UI = process.env.OTTO_E2E_UI ?? `http://localhost:${PW_PORT}`;
 const STATE = `e2e/.auth-${SLOT}/state.json`;
+// CI's blocking functional job (ci.yml `e2e-functional`) sets this: the perf
+// specs belong to the perf-gates job (desktop-webkit, scaled budgets), so the
+// functional shards skip them instead of re-running wall-clock budgets on Chromium.
+const FUNCTIONAL_ONLY = process.env.OTTO_E2E_FUNCTIONAL_ONLY === '1';
+// Desktop specs assume the ≥1025px 3-pane shell; most do not self-skip at
+// phone/tablet width, so the mobile projects never pick them up.
+const MOBILE_IGNORE = /desktop-.*\.spec\.ts/;
+// The BLOCKING smoke gate (ci.yml `e2e-gate`) sets OTTO_E2E_GATE=1: the SAME
+// `desktop-browser` / `iphone-portrait` projects then match only the
+// green-history subset in e2e/gate-specs.ts. Same project names on purpose —
+// specs guard on `info.project.name`, so a gate under its own project name
+// self-skipped ~90 tests and passed vacuously (S12-301). The gate step also
+// fails on any skipped test or an `expected` count below GATE_MIN_EXPECTED
+// (scripts/e2e-flaky-check.mjs --gate).
+const GATE = process.env.OTTO_E2E_GATE === '1';
 
 export default defineConfig({
   testDir: './e2e',
@@ -21,9 +37,18 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // No retries anywhere: a retry turns a real flake into a silent pass. CI also
+  // fails on any `flaky` count in the JSON report (scripts/e2e-flaky-check.mjs)
+  // in case a spec opts back into retries via test.describe.configure.
+  retries: 0,
   workers: process.env.CI ? 2 : 4,
-  reporter: [['list'], ['html', { open: 'never', outputFolder: `e2e/.report-${SLOT}` }]],
+  reporter: [
+    ['list'],
+    ['html', { open: 'never', outputFolder: `e2e/.report-${SLOT}` }],
+    // Machine-readable summary for CI's flaky-count gate (outside the html
+    // folder, which the html reporter wipes on start).
+    ['json', { outputFile: `e2e/.results-${SLOT}.json` }],
+  ],
   use: {
     baseURL: UI,
     storageState: STATE,
@@ -37,17 +62,23 @@ export default defineConfig({
     timeout: 90_000,
   },
   projects: [
-    { name: 'iphone-portrait', use: { ...devices['iPhone 14 Pro Max'], storageState: STATE } },
-    { name: 'iphone-landscape', use: { ...devices['iPhone 14 Pro Max landscape'], storageState: STATE } },
-    { name: 'ipad-portrait', use: { ...devices['iPad Pro 11'], storageState: STATE } },
-    { name: 'ipad-landscape', use: { ...devices['iPad Pro 11 landscape'], storageState: STATE } },
-    { name: 'iphone-se', use: { ...devices['iPhone SE'], storageState: STATE } },
+    {
+      name: 'iphone-portrait',
+      testIgnore: MOBILE_IGNORE,
+      testMatch: GATE ? gateMatcher(MOBILE_GATE_SPECS) : undefined,
+      use: { ...devices['iPhone 14 Pro Max'], storageState: STATE },
+    },
+    { name: 'iphone-landscape', testIgnore: MOBILE_IGNORE, use: { ...devices['iPhone 14 Pro Max landscape'], storageState: STATE } },
+    { name: 'ipad-portrait', testIgnore: MOBILE_IGNORE, use: { ...devices['iPad Pro 11'], storageState: STATE } },
+    { name: 'ipad-landscape', testIgnore: MOBILE_IGNORE, use: { ...devices['iPad Pro 11 landscape'], storageState: STATE } },
+    { name: 'iphone-se', testIgnore: MOBILE_IGNORE, use: { ...devices['iPhone SE'], storageState: STATE } },
     // Desktop BROWSER (non-Tauri): exercises the ≥1025px 3-pane shell (the
     // remote-desktop path). testMatch restricts it to the desktop-* spec so the
     // mobile specs don't run at desktop width.
     {
       name: 'desktop-browser',
-      testMatch: /desktop-.*\.spec\.ts/,
+      testMatch: GATE ? gateMatcher(DESKTOP_GATE_SPECS) : /desktop-.*\.spec\.ts/,
+      testIgnore: FUNCTIONAL_ONLY ? /desktop-.*perf.*\.spec\.ts/ : undefined,
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, storageState: STATE },
     },
     // Desktop WEBKIT: the perf gates (desktop-*perf*) on the engine closest to

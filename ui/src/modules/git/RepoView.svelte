@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // One repo: toolbar header + tabs (Graph / Pull Requests / Review). Staging
   // and history both live on the graph now (WIP row + detail panel), so there
@@ -309,7 +310,7 @@
       <button class="btn ghost small" onclick={() => router.go('git')}><span class="rv-back-arrow" aria-hidden="true"><Icon name="chevronLeft" size={12} /></span> Repositories</button>
     {/if}
     {#if !onopenrepo}
-      <button
+      <button use:rowMenu
         class="rv-name rv-switch"
         title="{repo.name} · {repo.path} — switch repository{repoPool.length > 1 ? ` (${repoPool.length} registered)` : ''}"
         onclick={openRepoSwitcher}

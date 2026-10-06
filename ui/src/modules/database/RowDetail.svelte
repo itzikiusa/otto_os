@@ -62,7 +62,7 @@
   </header>
   <div class="rd-search">
     <Icon name="search" size={12} />
-    <input
+    <input dir="ltr"
       class="rd-search-input"
       type="text"
       placeholder="Find a field…"

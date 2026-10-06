@@ -757,6 +757,27 @@ async fn sftp_list<S: ConnectionsCtx>(
     }))
 }
 
+/// SFTP download/upload name a path ON THE DAEMON HOST: writing one plants a
+/// file anywhere the Mac owner can (`~/Library/LaunchAgents`, `~/.zshenv`),
+/// reading one ships any host file (`~/.ssh/id_ed25519`) to the remote. That
+/// is the host owner's power, so it is root-only for EVERY connection, Legacy
+/// included (S6-302) — workspace Editors transfer through the browser.
+pub(crate) async fn require_root_for_host_path<S: ConnectionsCtx>(
+    ctx: &S,
+    user: &otto_core::domain::User,
+) -> ApiResult<()> {
+    let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
+    if !current.is_root || current.disabled {
+        return Err(ApiErr(Error::Forbidden(HOST_PATH_ROOT_ONLY.into())));
+    }
+    Ok(())
+}
+
+/// The refusal text for a non-root daemon-host path (shown as-is in the UI).
+pub const HOST_PATH_ROOT_ONLY: &str =
+    "Only the root user can read or write files on the Otto host computer; \
+     transfer through your browser instead";
+
 /// POST /connections/{id}/sftp/download — Connections:Edit.
 async fn sftp_download<S: ConnectionsCtx>(
     State(ctx): State<S>,
@@ -764,14 +785,7 @@ async fn sftp_download<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SftpDownloadReq>,
 ) -> ApiResult<Json<SftpDownloadResp>> {
-    if ctx.connections().is_enforced(&id).await? {
-        let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
-        if !current.is_root || current.disabled {
-            return Err(ApiErr(Error::Forbidden(
-                "daemon-local transfer paths require root for governed connections".into(),
-            )));
-        }
-    }
+    require_root_for_host_path(&ctx, &user).await?;
     let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_read").await?;
     let local = expand_home(&req.local_path);
     // If the destination is an existing directory, sftp `get` lands the file
@@ -811,14 +825,7 @@ async fn sftp_upload<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SftpUploadReq>,
 ) -> ApiResult<StatusCode> {
-    if ctx.connections().is_enforced(&id).await? {
-        let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
-        if !current.is_root || current.disabled {
-            return Err(ApiErr(Error::Forbidden(
-                "daemon-local transfer paths require root for governed connections".into(),
-            )));
-        }
-    }
+    require_root_for_host_path(&ctx, &user).await?;
     let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_write").await?;
     let local = expand_home(&req.local_path);
     sftp.upload(&local, &req.remote_path)

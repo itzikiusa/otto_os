@@ -36,9 +36,14 @@
     padding: 0;
     border-radius: 999px;
     border: none;
-    background: color-mix(in srgb, var(--text-dim) 30%, transparent);
+    /* OFF is an outlined track: a --text-dim ring and knob on --surface-2.
+       Both are text tokens (>= 4.5:1 on every ground), so the control and its
+       state stay visible on white cards (WCAG 1.4.11; the old 30% grey track
+       with a white knob was 1.6:1). unit/tokenContrast.test.ts pins it. */
+    background: var(--surface-2);
+    box-shadow: inset 0 0 0 1px var(--text-dim);
     cursor: pointer;
-    transition: background var(--dur-fast) ease;
+    transition: background var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
   }
   .sw::after {
     content: '';
@@ -48,20 +53,28 @@
     width: 13px;
     height: 13px;
     border-radius: 50%;
-    background: var(--accent-contrast);
+    background: var(--text-dim);
+    box-shadow: 0 1px 2px var(--scrim-soft);
     transition: inset-inline-start var(--dur-fast) ease;
   }
   .sw.on {
     background: var(--accent-solid);
+    box-shadow: none;
   }
   .sw.on::after {
     inset-inline-start: 15px;
+    background: var(--accent-contrast);
   }
   .sw.on.success {
     background: var(--success);
   }
+  /* The tone is text-safe on --bg, so --bg is a >= 4.5:1 knob on it in every
+     scheme (a white knob on the dark-scheme green was 1.9:1). */
+  .sw.on.success::after {
+    background: var(--bg);
+  }
   .sw:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .sw:focus-visible {

@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { authedBlobUrl as fetchBlobUrl } from '../../lib/api/client';
   import { assetPath as vaultAssetPath } from '../../lib/api/vault';
 
@@ -103,6 +104,13 @@
    *  plain body at once, and `offThreadDone` re-runs this when the html lands
    *  in the cache. */
   let offThreadDone = $state(0);
+  /** renderKey of a large note whose worker render timed out (Retry shown). */
+  let renderTimedOut = $state<string | null>(null);
+  let renderRetry = $state(0);
+  function retryRender(): void {
+    renderTimedOut = null;
+    renderRetry++;
+  }
   const offThreadInFlight = new Set<string>();
   const renderKey = $derived.by(() => {
     const n = vault.note;
@@ -139,12 +147,21 @@
   $effect(() => {
     const key = renderKey;
     const n = vault.note;
+    void renderRetry;
     if (!key || !n || !rendersOffThread(n.raw) || renderCache.has(key) || offThreadInFlight.has(key)) return;
+    if (untrack(() => renderTimedOut) === key) return;
     const raw = n.raw, outgoing = n.outgoing;
     offThreadInFlight.add(key);
     untrack(() => {
-      void renderNoteOffThread(raw, outgoing).then((html) => {
+      void renderNoteOffThread(raw, outgoing).then(({ html, timedOut }) => {
         offThreadInFlight.delete(key);
+        if (timedOut) {
+          // The note hung the worker (S18-305): stay on the plain preview,
+          // never cache it, and offer Retry instead of re-parsing on the
+          // main thread (which would freeze the whole UI the same way).
+          if (renderKey === key) renderTimedOut = key;
+          return;
+        }
         cacheHtml(key, html);
         if (renderKey === key) offThreadDone++;
       });
@@ -209,7 +226,7 @@
   function scrollToHeading(anchor: string): void {
     requestAnimationFrame(() => {
       readEl?.querySelector(`#h-${CSS.escape(slugifyHeading(anchor))}`)?.scrollIntoView({
-        behavior: 'smooth',
+        behavior: scrollBehavior(),
         block: 'start',
       });
     });
@@ -460,6 +477,12 @@
         {#if structured && structuredOn && vault.note}
           <StructuredNote model={structured} note={vault.note} />
         {/if}
+        {#if renderTimedOut !== null && renderTimedOut === renderKey}
+          <div class="render-timeout" role="status">
+            <span>Rendering this note timed out · showing plain text.</span>
+            <button type="button" class="btn sm" onclick={retryRender}>Render again</button>
+          </div>
+        {/if}
         {@html rendered}
       </div>
     {/if}
@@ -593,6 +616,17 @@
     width: 100%;
     margin: 0 auto;
     line-height: 1.6;
+  }
+  .render-timeout {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-block-end: 8px;
+    padding: 6px 10px;
+    border-radius: var(--radius-s);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
   }
   .read :global(pre.note-plain) {
     white-space: pre-wrap;

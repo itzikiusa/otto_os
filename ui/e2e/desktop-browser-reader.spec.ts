@@ -66,8 +66,8 @@ test.afterEach(async () => {
 /** Navigate the URL bar to the mocked fixture URL and wait for the reader to
  *  render it. */
 async function openFixture(page: Page): Promise<void> {
-  await page.getByPlaceholder('Enter URL').fill(FIXTURE_URL);
-  await page.getByTitle('Go').click();
+  await page.getByPlaceholder('e.g. https://example.com').fill(FIXTURE_URL);
+  await page.getByRole('button', { name: 'Go', exact: true }).click();
   await expect(page.locator('.reader h1')).toHaveText('Fixture Page', { timeout: 15_000 });
 }
 
@@ -150,8 +150,8 @@ test('switching between reader tabs does not refetch the page', async ({ page })
   });
   await openFixture(page);
   await page.getByRole('button', { name: 'New tab' }).first().click();
-  await page.getByPlaceholder('Enter URL').fill('https://example.invalid/second-page');
-  await page.getByTitle('Go').click();
+  await page.getByPlaceholder('e.g. https://example.com').fill('https://example.invalid/second-page');
+  await page.getByRole('button', { name: 'Go', exact: true }).click();
   await expect(page.locator('.tab')).toHaveCount(2, { timeout: 15_000 });
   await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
   expect(pageFetches).toBe(2);

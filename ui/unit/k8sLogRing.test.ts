@@ -34,3 +34,17 @@ test('the filtered view drops exactly the matches the ring trimmed', () => {
   assert.deepEqual(buf, ['err2', 'ok2', 'err3']);
   assert.deepEqual(view, buf.filter(keep));
 });
+
+test('pending buffer stays capped while the window is hidden (S16-12)', async () => {
+  const { pushPendingCapped } = await import('../src/modules/kubernetes/logRing.ts');
+  const pending: string[] = [];
+  // Many chunks with no flush in between (rAF paused) never exceed the cap.
+  for (let c = 0; c < 50; c++) pushPendingCapped(pending, Array.from({ length: 1000 }, (_, i) => `${c}:${i}`), 20_000);
+  assert.equal(pending.length, 20_000);
+  assert.equal(pending[pending.length - 1], '49:999');
+  assert.equal(pending[0], '30:0');
+  // One huge chunk (no spread → no stack overflow).
+  const big: string[] = [];
+  pushPendingCapped(big, new Array(300_000).fill('x'), 5);
+  assert.equal(big.length, 5);
+});

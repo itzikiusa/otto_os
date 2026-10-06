@@ -397,20 +397,20 @@
               {#if editingId === q.id}
                 <!-- ── Edit mode ─────────────────────────────────────────── -->
                 <div class="edit-form">
-                  <textarea
+                  <textarea dir="auto"
                     class="edit-text"
                     bind:value={editText}
                     rows={3}
                     aria-label="Question"
                     placeholder="e.g. Does the limit reset weekly or on a rolling 7 days?"
                   ></textarea>
-                  <input
+                  <input dir="auto"
                     class="edit-input"
                     bind:value={editRationale}
                     aria-label="Rationale (optional)"
                     placeholder="e.g. Changes how we store the reset date"
                   />
-                  <select class="edit-sel" bind:value={editCategory}>
+                  <select aria-label="Category" class="edit-sel" bind:value={editCategory}>
                     <option value="scope">Scope</option>
                     <option value="data">Data</option>
                     <option value="ux">UX</option>
@@ -482,7 +482,7 @@
             <!-- ── Answer panel (inline) ─────────────────────────────────── -->
             {#if answeringId === q.id}
               <div class="answer-panel">
-                <textarea
+                <textarea dir="auto"
                   class="edit-text"
                   bind:value={answerText}
                   rows={3}
@@ -513,7 +513,7 @@
       <Modal title="Add Question" width={480} onclose={closeAdd}>
         <div class="qt-add-body">
           <label class="form-label">Question <span class="req">*</span>
-            <textarea
+            <textarea dir="auto"
               class="form-textarea"
               bind:value={newText}
               rows={3}
@@ -522,7 +522,7 @@
             ></textarea>
           </label>
           <label class="form-label">Rationale
-            <input
+            <input dir="auto"
               class="form-input"
               bind:value={newRationale}
               placeholder="e.g. Changes how we store the reset date"

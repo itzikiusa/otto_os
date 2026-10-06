@@ -1,6 +1,4 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 
 // Review Findings Workflow — end-to-end against the isolated test daemon (OTTO_E2E=1).
@@ -28,7 +26,6 @@ let ctx: APIRequestContext;
 let base: string;
 let ws: string;
 let repoId: string;
-let repoDir: string;
 
 const api = (p: string) => `${base}/api/v1${p}`;
 
@@ -69,7 +66,6 @@ test.beforeAll(async () => {
   ws = await seedWorkspace(ctx, base);
   const r = await seedGitRepo(ctx, base, ws);
   repoId = r.repoId;
-  repoDir = r.dir;
 });
 
 test.afterAll(async () => {
@@ -220,29 +216,22 @@ test('Proof Pack assembles with correct counts and exports markdown', async () =
   expect(exp.id).toBeTruthy();
 });
 
-test('Context Engine: a repo rule is materialized into a new session instruction file', async () => {
+test('Context Engine: a repo rule is materialized into the session instruction bundle, not the working tree', async () => {
   const rev = await seedReview();
   const f = await seedFinding(rev, { status: 'open', title: 'ctx-rule-src' });
   const marker = 'PARAMETERIZE-ALL-SQL-MARKER';
   await jpost(api(`/findings/${f.id}/repo-rule`), { title: marker, body: 'Always parameterize queries.' });
 
-  // Spawn a session in the repo dir; the Provisioner (PreSpawnHook) materializes
-  // the workspace context — including the repo-rules block — into CLAUDE.md/AGENTS.md.
-  await jpost(api(`/workspaces/${ws}/sessions`), { kind: 'agent', provider: 'claude', cwd: repoDir });
-
-  // Poll for the instruction file to contain the rule (materialize is synchronous,
-  // but allow a brief window for the spawn path).
-  let found = false;
-  for (let i = 0; i < 20 && !found; i++) {
-    for (const fn of ['CLAUDE.md', 'AGENTS.md']) {
-      const p = join(repoDir, fn);
-      if (existsSync(p) && readFileSync(p, 'utf8').includes(marker)) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) await new Promise((r) => setTimeout(r, 300));
-  }
+  // The Provisioner (PreSpawnHook) materializes the workspace context — the
+  // repo-rules block included — into an OUT-OF-TREE bundle under the real
+  // ~/.otto/context (the working tree is never touched, so there is no file in
+  // the repo to read). The preview runs the exact plan() a spawn uses and
+  // returns the instruction bytes the session would read.
+  const preview = await jpost(api(`/workspaces/${ws}/context/preview`), { provider: 'claude' });
+  const claude = (preview.providers as { provider: string; generated_instructions: string }[]).find(
+    (p) => p.provider === 'claude',
+  );
+  const found = !!claude?.generated_instructions.includes(marker);
   expect(found, `repo rule "${marker}" materialized into the session instruction file`).toBeTruthy();
 });
 

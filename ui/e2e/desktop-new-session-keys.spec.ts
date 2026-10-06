@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
-import { openPage } from './helpers';
+import { openNewSessionSheet, openPage } from './helpers';
 
 // New Session sheet keyboard flow + terminal auto-focus.
 //
@@ -31,14 +31,8 @@ test.describe('new-session keyboard flow', () => {
   test('arrows switch provider, ⌘Enter launches, terminal is focused', async ({ page }) => {
     await openPage(page, 'agents');
 
-    // Open the sheet via ⌘T; fall back to the TabBar + button if the shortcut
-    // doesn't reach the app in this browser build.
-    const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
-    await page.keyboard.press('Meta+t');
-    if (!(await dialog.isVisible().catch(() => false))) {
-      await page.getByTitle('New session', { exact: true }).click();
-    }
-    await expect(dialog).toBeVisible();
+    // Open the sheet via ⌘T (falls back to the TabBar + button).
+    const dialog = await openNewSessionSheet(page);
 
     // Focus is pulled into the selected provider card on open, so the
     // advertised arrow keys work immediately.

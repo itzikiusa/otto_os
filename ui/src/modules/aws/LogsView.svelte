@@ -18,7 +18,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
-  import { onTabKey } from '../../lib/tabKeys';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { adaptiveCadence, statusPollMs } from '../../lib/pollBackoff';
@@ -71,6 +71,10 @@
   // svelte-ignore state_referenced_locally
   let region = $state(linkRegion || account.region);
   let tab = $state<'events' | 'insights'>('events');
+  const VIEW_TABS: TabItem<'events' | 'insights'>[] = [
+    { id: 'events', label: 'Events' },
+    { id: 'insights', label: 'Insights' },
+  ];
 
   // ── groups ──
   let groupPrefix = $state(linkIsPrefix ? linkGroup : '');
@@ -106,9 +110,23 @@
   }
 
   // Region change → regions list + groups; prefix typing → debounced reload.
+  // A REAL switch (not the first run) also drops everything that named the
+  // old region's groups — the selected group, its streams, the Insights group
+  // list and the loaded events — so nothing from region A is queried in B.
+  let lastRegion: string | null = null;
   $effect(() => {
-    void region;
+    const r = region;
     untrack(() => {
+      if (lastRegion !== null && lastRegion !== r) {
+        selected = '';
+        streams = [];
+        stream = '';
+        insightGroups = [];
+        eventsAbort?.abort();
+        resetEvents();
+        eventsError = '';
+      }
+      lastRegion = r;
       void aws.loadRegions();
       void loadGroups();
     });
@@ -141,10 +159,11 @@
     streams = [];
     if (!g) return;
     untrack(() => {
+      const rg = region;
       awsApi
-        .logStreams(account.id, g, '', null, region)
+        .logStreams(account.id, g, '', null, rg)
         .then((r) => {
-          if (selected === g) streams = r.streams;
+          if (selected === g && region === rg) streams = r.streams;
         })
         .catch(() => {
           // The stream picker is optional — "All streams" still works.
@@ -242,20 +261,29 @@
   // Live tail: forward from the newest timestamp seen; ids dedupe the overlap.
   // Adaptive cadence: the overlap event comes back on every tick, so "got
   // data" means FRESH events after dedupe, not a non-empty response.
+  // The filter (stream / pattern / region) is captured — and tracked — here, so
+  // changing any of them restarts the tail (aborting the in-flight tick)
+  // instead of letting an old-filter tick append after `loadEvents` reset.
   let tailPoller: Poller | null = null;
   $effect(() => {
     if (!tail || !selected || tab !== 'events') return;
     const g = selected;
+    const st = stream;
+    const pat = appliedPattern;
+    const rg = region;
     const cadence = adaptiveCadence({ min: TAIL_MIN_MS, max: TAIL_MAX_MS });
     tailPoller = pollWhileVisible(
       async (signal) => {
         const newest = events.length ? events[events.length - 1].timestamp : Date.now() - 60_000;
         const r = await awsApi.logEvents(
           account.id,
-          { group: g, streams: stream ? [stream] : undefined, pattern: appliedPattern, start: newest, max: 500, region },
+          { group: g, streams: st ? [st] : undefined, pattern: pat, start: newest, max: 500, region: rg },
           signal,
         );
-        if (selected === g) cadence.record(pushEvents(r.events) > 0);
+        if (signal.aborted) return;
+        if (selected === g && stream === st && appliedPattern === pat && region === rg) {
+          cadence.record(pushEvents(r.events) > 0);
+        }
       },
       {
         get ms() {
@@ -358,6 +386,9 @@
   let iError = $state('');
   let ranQuery = $state('');
   let iPoll: ReturnType<typeof setTimeout> | null = null;
+  /** Region the running Insights query was started in — polls and Stop must
+   *  follow it, not the picker (a switch would lose a still-billing query). */
+  let iRegion = '';
   /** Status polls issued for the current query (indexes the backoff). */
   let iPollN = 0;
 
@@ -368,7 +399,7 @@
 
   async function pollResults(id: string): Promise<void> {
     try {
-      const r = await awsApi.logsInsightsResults(account.id, id, region);
+      const r = await awsApi.logsInsightsResults(account.id, id, iRegion);
       if (qid !== id) return;
       iResult = r;
       if (r.done) {
@@ -395,12 +426,14 @@
     iRunning = true;
     ranQuery = query;
     const end = Date.now();
+    const started = region;
     try {
       const r = await awsApi.logsInsightsStart(
         account.id,
         { groups: insightGroups, query, start: end - rangeMs(), end },
-        region,
+        started,
       );
+      iRegion = started;
       qid = r.query_id;
       iPollN = 0;
       void pollResults(r.query_id);
@@ -416,7 +449,7 @@
     iRunning = false;
     if (!id) return;
     try {
-      await awsApi.logsInsightsStop(account.id, id, region);
+      await awsApi.logsInsightsStop(account.id, id, iRegion);
       toasts.info('Query stopped');
     } catch (e) {
       toastError('Couldn’t stop', e);
@@ -448,6 +481,9 @@
   }
 
   onDestroy(() => {
+    // Leaving the view stops a still-running Insights query (it would keep
+    // scanning — and billing — with nobody polling it).
+    if (iRunning && qid) void awsApi.logsInsightsStop(account.id, qid, iRegion).catch(() => {});
     stopPolling();
     eventsAbort?.abort();
     if (prefixTimer) clearTimeout(prefixTimer);
@@ -473,13 +509,12 @@
         {#each aws.regions as r (r.code)}<option value={r.code}>{r.code}</option>{/each}
       </select>
     {:else}
-      <input class="mono" bind:value={region} aria-label="Region" size={12} />
+      <!-- Commit on change (blur / Enter), not per keystroke: every region
+           value reloads the groups. -->
+      <input dir="ltr" class="mono" value={region} aria-label="Region" size={12} onchange={(e) => { const v = e.currentTarget.value.trim(); if (v) region = v; }} />
     {/if}
   </label>
-  <div class="seg" role="tablist" aria-label="Logs view">
-    <button role="tab" aria-selected={tab === 'events'} tabindex={tab === 'events' ? 0 : -1} onkeydown={onTabKey} class:on={tab === 'events'} onclick={() => (tab = 'events')}>Events</button>
-    <button role="tab" aria-selected={tab === 'insights'} tabindex={tab === 'insights' ? 0 : -1} onkeydown={onTabKey} class:on={tab === 'insights'} onclick={() => (tab = 'insights')}>Insights</button>
-  </div>
+  <Tabs label="Logs view" size="s" tabs={VIEW_TABS} value={tab} onchange={(id) => (tab = id)} />
 </ViewToolbar>
 
 <div class="logs">
@@ -551,7 +586,7 @@
             {/each}
           </div>
           <form class="pat" onsubmit={(e) => { e.preventDefault(); applyPattern(); }}>
-            <input
+            <input dir="ltr"
               class="mono"
               bind:value={pattern}
               placeholder={'Filter pattern: ERROR, { $.level = "error" }'}
@@ -651,13 +686,13 @@
           {/if}
           <button class="icon-btn" onclick={exportInsights} disabled={!iResult?.result.rows.length} aria-label="Export results as CSV" title="Export results as CSV"><Icon name="download" size={13} /></button>
         </div>
-        <textarea class="mono q" bind:value={query} rows="4" spellcheck="false" aria-label="Logs Insights query"></textarea>
+        <textarea dir="ltr" class="mono q" bind:value={query} rows="4" spellcheck="false" aria-label="Logs Insights query"></textarea>
         {#if saved.length}
           <div class="saved">
             {#each saved as s (s.name)}
               <span class="sq-chip">
                 <button class="chip-l" onclick={() => (query = s.query)} title={s.query}>{s.name}</button>
-                <button class="chip-x" onclick={() => void deleteSaved(s)} aria-label={`Delete saved query ${s.name}`} title="Delete"><Icon name="x" size={10} /></button>
+                <button class="chip-x" onclick={() => void deleteSaved(s)} aria-label={`Delete saved query ${s.name}`} title="Delete"><Icon name="x" size={12} /></button>
               </span>
             {/each}
           </div>

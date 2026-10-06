@@ -21,6 +21,7 @@ struct IntegrationRow {
     bot_token_ref: Option<String>,
     app_token_ref: Option<String>,
     allowed_users: String,
+    open_to_all: bool,
     agent_reply: bool,
     reply_instructions: String,
     channel_id: String,
@@ -39,6 +40,7 @@ fn parse_row(r: &sqlx::sqlite::SqliteRow) -> Result<IntegrationRow> {
         bot_token_ref: r.get("bot_token_ref"),
         app_token_ref: r.get("app_token_ref"),
         allowed_users: r.get("allowed_users"),
+        open_to_all: r.get::<i64, _>("open_to_all") != 0,
         agent_reply: r.get::<i64, _>("agent_reply") != 0,
         reply_instructions: r.get("reply_instructions"),
         channel_id: r.get("channel_id"),
@@ -53,6 +55,7 @@ fn row_to_integration(row: &IntegrationRow) -> Integration {
         channel: row.channel,
         enabled: row.enabled,
         allowed_users: row.allowed_users.clone(),
+        open_to_all: row.open_to_all,
         agent_reply: row.agent_reply,
         reply_instructions: row.reply_instructions.clone(),
         channel_id: row.channel_id.clone(),
@@ -176,6 +179,28 @@ impl IntegrationsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("upsert workspace integration"))?;
+        Ok(())
+    }
+
+    /// Set the explicit "open to everyone" opt-in (`Integration::open_to_all`).
+    /// Separate from [`Self::upsert`], which never touches it: a new row
+    /// starts closed (a blank allow-list admits nobody).
+    pub async fn set_open_to_all(
+        &self,
+        workspace_id: &Id,
+        channel: Channel,
+        open: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE workspace_integrations SET open_to_all = ?
+             WHERE workspace_id = ? AND channel = ?",
+        )
+        .bind(open as i64)
+        .bind(workspace_id)
+        .bind(channel.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set integration open_to_all"))?;
         Ok(())
     }
 

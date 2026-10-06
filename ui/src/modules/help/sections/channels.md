@@ -14,7 +14,7 @@ Otto posts the reply — and any files the agent asks to share — back to the s
 thread. A third channel, **Webhook**, lets another system trigger an agent with
 an HTTP `POST` and optionally receive the reply at a callback URL.
 
-Channels are set up per workspace in **Settings → Channels**. Each workspace can
+Channels are set up per workspace in **Settings → Slack, Telegram & webhooks**. Each workspace can
 have one Slack, one Telegram and one Webhook integration.
 
 ## Getting started
@@ -30,7 +30,7 @@ have one Slack, one Telegram and one Webhook integration.
    Token** (`xoxb-…`).
 3. Under **Basic information → App-level tokens**, create a token with the
    `connections:write` scope and copy it (`xapp-…`).
-4. In Otto, open **Settings → Channels**, choose **Edit** on the Slack card and
+4. In Otto, open **Settings → Slack, Telegram & webhooks**, choose **Edit** on the Slack card and
    paste the bot token and the app token. Optionally set a **Default channel
    ID** (`C…`) and **Allowed users** (`U…` ids).
 5. Tick **Enabled** and choose **Save**. Within about 15 seconds the listener
@@ -45,7 +45,7 @@ have one Slack, one Telegram and one Webhook integration.
    (`123456:ABC…`).
 2. For group use, send `/setprivacy` to BotFather and choose **Disable** so the
    bot sees every message in the group.
-3. In **Settings → Channels**, choose **Edit** on the Telegram card, paste the
+3. In **Settings → Slack, Telegram & webhooks**, choose **Edit** on the Telegram card, paste the
    token, optionally add a **Default chat ID** and **Allowed users** (numeric
    ids), tick **Enabled** and choose **Save**.
 4. Message the bot directly, or add it to a group.

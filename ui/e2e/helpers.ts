@@ -1,4 +1,6 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page, type Request } from '@playwright/test';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
 
 // The top-level routable pages (hash router: #/<module>). `share` is excluded
@@ -53,18 +55,37 @@ export async function openPage(page: Page, id: string): Promise<void> {
 }
 
 /**
+ * Open the New Session sheet with ⌘T, falling back to the TabBar + button only
+ * if the shortcut never reaches the app. The sheet is lazy-loaded
+ * (`{#await import(...)}` in App.svelte), so it appears a beat after the key
+ * press: an instant `isVisible()` check reads false, and the fallback click then
+ * lands on the sheet's own backdrop once it mounts. Wait for the sheet first.
+ */
+export async function openNewSessionSheet(page: Page): Promise<Locator> {
+  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
+  await page.keyboard.press('Meta+t');
+  const opened = await dialog
+    .waitFor({ state: 'visible', timeout: 10_000 })
+    .then(() => true, () => false);
+  if (!opened) await page.getByTitle('New session', { exact: true }).click();
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+/**
  * Open the API page and make sure the request editor is showing. A workspace
  * with nothing in it (no saved requests, history or edited tab) opens on the
  * "Create your first request" onboarding state; this clicks through it.
  */
 export async function openApiEditor(page: Page): Promise<void> {
   await openPage(page, 'api');
-  // The editor is temporarily visible during the first workspace fetch. Wait
-  // for that fetch before deciding whether the empty-workspace CTA is needed.
-  await expect(page.getByText('Loading saved requests…', { exact: true })).toHaveCount(0);
+  // The editor shows (aria-busy) while the workspace's lists are in flight; an
+  // untouched empty workspace swaps it for onboarding once they settle. Decide
+  // only after that, or the onboarding check races the swap.
   const url = page.getByLabel('Request URL', { exact: true });
   const onboarding = page.getByText('Create your first request', { exact: true });
   await expect(url.or(onboarding).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 });
   if (await onboarding.isVisible()) {
     await page.getByRole('button', { name: 'New request', exact: true }).first().click();
   }
@@ -155,12 +176,36 @@ export async function ensureGridView(page: Page, timeout = 20_000): Promise<void
   await expect(seg.locator('.vs.on')).toHaveText('Grid');
 }
 
+/** Serious-impact axe rules each page is allowed to still have (S19-304),
+ *  ratchet-style like ui-guards-baseline.json: a page with an entry fails on
+ *  any serious rule NOT listed; a page without one is critical-only until a
+ *  baseline is recorded for it. Record / refresh with
+ *  `OTTO_A11Y_RECORD=1 npm run test:e2e -- pages.spec.ts theme.spec.ts rtl.spec.ts`
+ *  then `node scripts/a11y-baseline.mjs` (merges test-results/a11y-record.jsonl).
+ *  Only ever shrink an entry by hand; never add a rule to make a test pass. */
+const A11Y_BASELINE: Record<string, string[]> = (() => {
+  try {
+    return JSON.parse(readFileSync(join(process.cwd(), 'e2e/a11y-baseline.json'), 'utf8')) as Record<string, string[]>;
+  } catch {
+    return {};
+  }
+})();
+
+/** The baseline key for the page on screen: its hash route without a query. */
+export function a11yKey(url: string): string {
+  const hash = new URL(url).hash.replace(/^#\/?/, '');
+  return hash.split('?')[0] || 'root';
+}
+
 /**
- * Run an axe-core accessibility scan. Fails on any `critical` violation; returns
- * the full violation list so callers can additionally inspect `serious` ones.
+ * Run an axe-core accessibility scan. Fails on any `critical` violation, and
+ * on any `serious` one not in the page's ratcheted allowlist
+ * (e2e/a11y-baseline.json; see A11Y_BASELINE). Returns the full violation list
+ * so callers can additionally inspect `serious` ones.
  */
 export async function expectAccessible(
   page: Page,
+  opts: { key?: string } = {},
 ): Promise<Awaited<ReturnType<AxeBuilder['analyze']>>['violations']> {
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
@@ -170,6 +215,16 @@ export async function expectAccessible(
     critical,
     `critical a11y violations: ${critical.map((v) => v.id).join(', ')}`,
   ).toEqual([]);
+  const key = opts.key ?? a11yKey(page.url());
+  const serious = [...new Set(results.violations.filter((v) => v.impact === 'serious').map((v) => v.id))].sort();
+  if (process.env.OTTO_A11Y_RECORD) {
+    mkdirSync(join(process.cwd(), 'test-results'), { recursive: true });
+    appendFileSync(join(process.cwd(), 'test-results/a11y-record.jsonl'), `${JSON.stringify({ key, serious })}\n`);
+  } else if (A11Y_BASELINE[key]) {
+    const allowed = new Set(A11Y_BASELINE[key]);
+    const fresh = serious.filter((id) => !allowed.has(id));
+    expect(fresh, `new serious a11y violations on "${key}" (not in e2e/a11y-baseline.json): ${fresh.join(', ')}`).toEqual([]);
+  }
   return results.violations;
 }
 
@@ -210,4 +265,52 @@ export async function openRightPanelTab(page: Page, name: string): Promise<void>
     await page.locator('.ctx-menu').getByRole('menuitem', { name, exact: true }).click();
   }
   await expect(tab).toHaveAttribute('aria-selected', 'true');
+}
+
+/** The flattened PNG a snip annotated-save POSTs, as base64. The editor sends
+ *  a raw `image/png` body (docs/contracts/api.md, `POST /snips/{id}/annotated`),
+ *  not the legacy `{data_b64}` JSON — assert that framing, then hand back the
+ *  bytes in the form the specs decode. */
+export function snipAnnotatedPng(request: Request): string {
+  expect(request.headers()['content-type']).toBe('image/png');
+  const body = request.postDataBuffer();
+  expect(body, 'annotated save must carry a body').not.toBeNull();
+  expect(body!.subarray(0, 8).toString('hex'), 'annotated save must be a PNG').toBe('89504e470d0a1a0a');
+  return body!.toString('base64');
+}
+
+/** The tour film's chapter `title` as the Help page labels its button
+ *  (`m:ss Title`, `timeLabel` in src/modules/help/guide.ts) plus its start in
+ *  seconds — read from the bundled film.json so the playback specs follow a
+ *  re-cut film instead of pinning the old timestamps. */
+export function tourChapter(title: string): { label: string; start: number } {
+  const film = JSON.parse(readFileSync(join(process.cwd(), 'src/lib/walkthroughs/film.json'), 'utf8')) as {
+    chapters: { title: string; start: number }[];
+  };
+  const chapter = film.chapters.find((c) => c.title === title);
+  if (!chapter) throw new Error(`film.json has no chapter titled ${JSON.stringify(title)}`);
+  const s = Math.floor(chapter.start);
+  return { label: `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} ${title}`, start: chapter.start };
+}
+
+/** Path of a real tour MP4 (OTTO_E2E_TOUR_VIDEO — CI generates a synthetic
+ *  one); playback specs skip without it. */
+export const tourVideoPath = process.env.OTTO_E2E_TOUR_VIDEO;
+
+/**
+ * The select-all chord CodeMirror binds for THIS page. CodeMirror's `Mod` is
+ * Meta on Mac or iOS — the same test as @codemirror/view's `browser.mac`
+ * (`/Mac/` platform, or an Apple-vendor engine with a `Mobile/` UA or touch
+ * points) — Control otherwise. Playwright's `ControlOrMeta` follows the HOST OS instead, so on a
+ * Linux runner it sent Control+A to the iPhone (WebKit) project, which
+ * CodeMirror ignores — 19 iPhone DB tests failed on that alone (S12-304).
+ */
+export async function editorSelectAll(page: Page): Promise<string> {
+  const apple = await page.evaluate(() => {
+    const ios =
+      /Apple Computer/.test(navigator.vendor) &&
+      (/Mobile\/\w+/.test(navigator.userAgent) || navigator.maxTouchPoints > 2);
+    return ios || /Mac/.test(navigator.platform);
+  });
+  return apple ? 'Meta+A' : 'Control+A';
 }

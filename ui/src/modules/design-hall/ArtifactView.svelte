@@ -59,7 +59,7 @@
   import type { AssistSelection } from './assist/model';
   import StatusPill from './StatusPill.svelte';
   import StudioBadge from './StudioBadge.svelte';
-  import { formatLabel, isTextFormat, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
+  import { formatLabel, isTextFormat, newerHeadAfterTypedLoad, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
   import { library } from './library.svelte';
   import { originOf } from './nav';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -145,7 +145,14 @@
 
   async function load(target: string): Promise<void> {
     const my = ++loadSeq;
-    phase = detail?.artifact.id === target ? phase : 'loading';
+    const same = detail?.artifact.id === target;
+    // Snapshot the editor: a live >64 KB `content` event or a resync reloads
+    // while the user may keep typing. If the text moved during the fetch, the
+    // fetched head must NOT replace it — flag it as a newer version instead
+    // (S18-09). An explicit discard/"load theirs" sets `source` BEFORE calling,
+    // so its snapshot matches and the load applies.
+    const typedAt = same ? source : null;
+    phase = same ? phase : 'loading';
     try {
       const d = await api.getArtifact(target, { content: true });
       if (my !== loadSeq) return;
@@ -162,6 +169,13 @@
           return;
         }
         setBlob(c.blobUrl);
+      }
+      if (same && source !== typedAt) {
+        detail = d;
+        newerHead = newerHeadAfterTypedLoad(d.content_version_id ?? d.head?.id ?? null, baseVersionId);
+        phase = 'ready';
+        loadError = null;
+        return;
       }
       detail = d;
       source = text;
@@ -608,7 +622,7 @@
   async function discard(): Promise<void> {
     const ok = await confirmer.ask('Discard your unsaved edits? The design goes back to the last saved version.', {
       title: 'Discard edits',
-      confirmLabel: 'Discard',
+      danger: true, confirmLabel: 'Discard',
     });
     if (ok) {
       source = baseSource;
@@ -831,6 +845,7 @@
               <ArtifactStage
                 {artifact}
                 {source}
+                {dirty}
                 {blobUrl}
                 noVersion={!head}
                 {readonly}
@@ -844,17 +859,17 @@
         <aside class="right" aria-label="Design details">
           <button class="btn small ghost compact-details back-design" bind:this={designButton} onclick={() => void setDetails(false)}>Back to design</button>
           <div class="tabs segmented" role="tablist" aria-label="Details panel">
-            <button role="tab" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
+            <button role="tab" id="dh-tab-otto" aria-controls="dh-panel" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
               Otto
             </button>
-            <button role="tab" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
+            <button role="tab" id="dh-tab-links" aria-controls="dh-panel" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
               Links <span class="count">{split.uses.length + split.usedIn.length}</span>
             </button>
-            <button role="tab" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
+            <button role="tab" id="dh-tab-references" aria-controls="dh-panel" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
               References
             </button>
           </div>
-          <div class="panel" role="tabpanel">
+          <div class="panel" role="tabpanel" id="dh-panel" aria-labelledby="dh-tab-{rightTab}">
             {#if brief && rightTab !== 'otto'}
               <div class="brief">
                 <span class="k"><Icon name="sparkle" size={12} /> Brief</span>

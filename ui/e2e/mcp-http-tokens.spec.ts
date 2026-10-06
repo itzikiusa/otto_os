@@ -260,7 +260,7 @@ test('Otto Server tab surfaces the HTTP URL + a tokens panel', async ({ page }) 
 
   // Create a token through the UI and see the one-time secret banner.
   await page.locator('[data-testid="mcp-new-token"]').click();
-  await page.locator('.otto .create .fld input').first().fill('ui-made');
+  await page.getByLabel('Label', { exact: true }).fill('ui-made');
   await page.locator('[data-testid="mcp-create-token"]').click();
   await expect(page.locator('[data-testid="mcp-created-token"]')).toBeVisible({ timeout: 20_000 });
 });

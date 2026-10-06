@@ -72,7 +72,7 @@ async function openScene(page: Page, title: string): Promise<void> {
 }
 
 async function askAi(page: Page, prompt: string): Promise<void> {
-  await page.getByRole('button', { name: /ask ai/i }).click();
+  await page.getByRole('button', { name: 'Ask Otto', exact: true }).click();
   await page.getByPlaceholder(/ask for a diagram or a change/i).fill(prompt);
   await page.getByRole('button', { name: 'Send' }).click();
 }
@@ -196,7 +196,7 @@ test('Excalidraw mode: Ask AI → the agent writes canvas.json (on disk) + rende
   await openScene(page, 'Ex Ask');
   await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
 
-  await page.getByRole('button', { name: /ask ai/i }).click();
+  await page.getByRole('button', { name: 'Ask Otto', exact: true }).click();
   await page.getByPlaceholder(/ask for a diagram or a change/i).fill('order flow with a decision');
   await page.getByRole('button', { name: 'Send' }).click();
 
@@ -244,11 +244,11 @@ test('Mermaid mode: Ask AI → the agent writes canvas.mermaid (on disk) + rende
   await openScene(page, 'Mmd Ask');
   await expect(page.locator('.board').first()).toBeVisible({ timeout: 30_000 });
 
-  await page.getByRole('button', { name: /ask ai/i }).click();
+  await page.getByRole('button', { name: 'Ask Otto', exact: true }).click();
   await page.getByPlaceholder(/ask for a diagram or a change/i).fill('order flow');
   await page.getByRole('button', { name: 'Send' }).click();
 
-  await expect(page.getByText(/drawn on canvas/i).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/otto edited the diagram/i).first()).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.board svg').first()).toBeVisible({ timeout: 25_000 });
   await expect
     .poll(() => canvasFiles('canvas.mermaid').length, { timeout: 15_000 })
@@ -284,7 +284,7 @@ test('New scene: the menu offers D2 too — creates an empty D2 canvas', async (
   // A fresh, empty D2 board mounts — its own empty-state hint (no source yet,
   // so the WASM renderer is never even invoked for a blank scene).
   await expect(page.locator('.board').first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.board .empty .lead', { hasText: 'D2 diagram' })).toBeVisible({
+  await expect(page.locator('.board .empty h3', { hasText: 'D2 diagram' })).toBeVisible({
     timeout: 15_000,
   });
 });
@@ -344,7 +344,7 @@ test('D2: Ask AI → the agent writes canvas.d2 (on disk) + renders the stub dia
 
   await askAi(page, 'order flow with a validation decision');
 
-  await expect(page.getByText(/drawn on canvas/i).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/otto edited the diagram/i).first()).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.surface .content svg').first()).toBeVisible({ timeout: 25_000 });
   // The E2E stub's canned D2 diagram (crates/otto-orchestrator/src/e2e_stub.rs)
   // draws start/valid/process/reject nodes — assert one lands in the rendered SVG.
@@ -491,7 +491,7 @@ test('provider: changing the agent persists (PUT) on the scene', async ({ page }
 
   await openScene(page, 'Provider Scene');
   await expect(page.locator('.excali .excalidraw').first()).toBeVisible({ timeout: 30_000 });
-  await page.getByRole('button', { name: /ask ai/i }).click();
+  await page.getByRole('button', { name: 'Ask Otto', exact: true }).click();
   const select = page.locator('.assistant select.provider');
   // Only present when >1 provider is available.
   if (await select.count()) {

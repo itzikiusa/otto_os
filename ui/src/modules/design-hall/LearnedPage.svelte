@@ -21,6 +21,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { router } from '../../lib/router.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -87,7 +88,7 @@
       error = null;
     } catch (e) {
       if (my !== seq) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       phase = learned ? 'ready' : 'error';
     }
   }
@@ -126,7 +127,7 @@
       signals = s;
       sigError = null;
     } catch (e) {
-      if (my === sigSeq) sigError = e instanceof Error ? e.message : String(e);
+      if (my === sigSeq) sigError = loadErrorText(e);
     } finally {
       if (my === sigSeq) sigLoading = false;
     }
@@ -138,19 +139,25 @@
   let memories = $state<Memory[] | null>(null);
   let memError = $state<string | null>(null);
   let memQ = $state('');
+  let memSeq = 0;
   async function loadMemory(): Promise<void> {
     const w = wsId;
     if (!w) return;
+    // Newest call for the CURRENT workspace wins: the old workspace's
+    // memories must never land in the new one's list (S18-24).
+    const my = ++memSeq;
+    const current = () => my === memSeq && wsId === w;
     try {
-      memories = await listDesignMemories(w);
+      const rows = await listDesignMemories(w);
+      if (!current()) return;
+      memories = rows;
       memError = null;
     } catch (e) {
+      if (!current()) return;
       memError =
         e instanceof ApiError && e.status === 403
           ? 'Design memory lives in Otto memory, which needs Product view access.'
-          : e instanceof Error
-            ? e.message
-            : String(e);
+          : loadErrorText(e);
     }
   }
   const shownMemories = $derived.by(() => {
@@ -356,10 +363,7 @@
     {#if sigLoading && !signals.length}
       <Skeleton rows={6} height={32} />
     {:else if sigError}
-      <div class="err" role="alert">
-        <Icon name="warning" size={14} /> Couldn’t load signals. <span class="dim">{sigError}</span>
-        <button class="btn small" onclick={() => void loadSignals()}>Retry</button>
-      </div>
+      <LoadState what="signals" error={sigError} empty onretry={() => void loadSignals()} />
     {:else if shownSignals.length === 0}
       <EmptyState variant="page" icon="bulb" title={kind ? `No “${signalKindLabel(kind)}” signals yet` : 'No signals yet'}
         body="Applying or rejecting variants, fixes you accept, edits after an agent draft, approvals and shipping are captured here as signals." />
@@ -387,10 +391,7 @@
   {:else if tab === 'memory'}
     <p class="lead dim">Stored in Otto memory (collection: <code>design</code>) · local only. Otto recalls matching memories in every design turn.</p>
     {#if memError}
-      <div class="err" role="alert">
-        <Icon name="warning" size={14} /> {memError}
-        <button class="btn small" onclick={() => void loadMemory()}>Retry</button>
-      </div>
+      <LoadState what="design memory" error={memError} empty onretry={() => void loadMemory()} />
     {:else if memories === null}
       <Skeleton rows={4} height={32} />
     {:else if memories.length === 0}
@@ -398,7 +399,7 @@
         body="Atomic preferences (“avoid”, “prefer”, “pattern”) land here when agents or people save them to the design collection." />
     {:else}
       <label class="search"><Icon name="search" size={13} />
-        <input class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
+        <input dir="ltr" class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Kind</th><th>Memory</th><th>Source</th><th>Created</th></tr></thead>
@@ -419,8 +420,7 @@
     {#if phase === 'loading'}
       <Skeleton rows={3} height={56} />
     {:else if phase === 'error' || !learned}
-      <div class="err" role="alert"><Icon name="warning" size={14} /> Couldn’t load learning settings. <span class="dim">{error}</span>
-        <button class="btn small" onclick={() => void load()}>Retry</button></div>
+      <LoadState what="learning settings" error={error || 'No data came back.'} empty onretry={() => void load()} />
     {:else}
       <div class="settings card" data-testid="design-learned-settings">
         <div class="set">
@@ -447,10 +447,7 @@
   {:else if phase === 'loading'}
     <Skeleton rows={4} height={72} />
   {:else if phase === 'error' || !learned}
-    <div class="err" role="alert">
-      <Icon name="warning" size={14} /> Couldn’t load what Otto learned. <span class="dim">{error}</span>
-      <button class="btn small" onclick={() => void load()}>Retry</button>
-    </div>
+    <LoadState what="what Otto learned" error={error || 'No data came back.'} empty onretry={() => void load()} />
   {:else}
     <div class="split" class:with-evidence={withEvidence}>
       <div class="list">
@@ -514,7 +511,7 @@
                   <button class="row-btn" onclick={() => select(r.key)}>
                     <span class="rule-sm">{r.rule}</span>
                     <span class="meta">
-                      <span class="chip"><Icon name="file" size={11} /> skill: {learned.skill}</span>
+                      <span class="chip"><Icon name="file" size={12} /> skill: {learned.skill}</span>
                       {#if r.applied_at}<span class="dim small">accepted {rel(r.applied_at)}</span>{/if}
                       <span class="dim small">{plural(r.evidence.length, 'signal')}</span>
                     </span>
@@ -828,16 +825,6 @@
   .foot {
     margin: 12px 0 0;
     font-size: var(--fs-xs);
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: var(--fs-s);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
   }
   .settings {
     max-width: 880px;

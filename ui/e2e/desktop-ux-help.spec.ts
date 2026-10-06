@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectNoHorizontalOverflow, tourChapter } from './helpers';
 
 // Optional artifact: static UX checks never depend on a generated video.
 test.setTimeout(90_000);
@@ -112,15 +112,16 @@ test('real instrumental tour: playback, audio, seek, captions, guide and retry',
   expect(await video.evaluate((el: HTMLVideoElement) => el.textTracks[0].mode)).toBe('hidden');
   await page.getByRole('button', { name: 'CC off', exact: true }).click();
   expect(await video.evaluate((el: HTMLVideoElement) => el.textTracks[0].mode)).toBe('showing');
-  await page.getByRole('button', { name: '1:30 Git, reviews and proof' }).click();
-  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.currentTime)).toBeGreaterThanOrEqual(90.9);
+  const git = tourChapter('Git, reviews and proof');
+  await page.getByRole('button', { name: git.label }).click();
+  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.currentTime)).toBeGreaterThanOrEqual(git.start + 0.9);
   await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.textTracks[0].activeCues?.length ?? 0)).toBeGreaterThan(0);
   await page.screenshot({ path: `/tmp/otto-ux-help-${info.project.name}-playing.png` });
   await page.locator('.chapter').filter({ hasText: 'Git, reviews and proof' }).getByRole('button', { name: 'Read the guide' }).click();
   await expect(page.getByTestId('guide-article')).toHaveAttribute('data-guide-id', 'git');
   await page.getByTestId('guide-watch-part').click();
   video = page.getByTestId('tour-film-video');
-  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.currentTime)).toBeGreaterThanOrEqual(90.9);
+  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.currentTime)).toBeGreaterThanOrEqual(git.start + 0.9);
   await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.paused)).toBe(false);
   await video.evaluate((el) => el.dispatchEvent(new Event('error')));
   await page.getByTestId('tour-film-unavailable').getByRole('button', { name: 'Retry' }).click();

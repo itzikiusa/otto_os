@@ -152,3 +152,12 @@ export function sourceLabel(kind: string): string {
   if (kind === 'channel') return 'Chat / free text';
   return SOURCE_KINDS.find((s) => s.kind === kind)?.label ?? humanize(kind);
 }
+
+/** The PR number in a forge PR URL — GitHub `/pull/N`, GitLab
+ *  `/merge_requests/N`, Bitbucket `/pull-requests/N`. Null when unrecognised,
+ *  so the caller only offers "Open in Otto" when it can actually route there. */
+export function prNumberFromUrl(url: string | null | undefined): number | null {
+  if (!url) return null;
+  const m = /\/(?:pull|merge_requests|pull-requests)\/(\d+)(?:[/?#]|$)/.exec(url);
+  return m ? Number(m[1]) : null;
+}

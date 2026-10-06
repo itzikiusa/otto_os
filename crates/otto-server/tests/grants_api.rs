@@ -135,6 +135,18 @@ fn build_app(pool: DbPool, actor: User) -> Router {
         let u = injected.clone();
         async move {
             req.extensions_mut().insert(AuthUser((*u).clone()));
+            // A person's own (human) credential, as `auth_middleware` inserts
+            // for a login token — the grants writes require one.
+            req.extensions_mut().insert(otto_core::auth::AuthContext {
+                real_user: (*u).clone(),
+                effective_user: (*u).clone(),
+                scope: None,
+                mcp_only: false,
+                mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
+                managed_session_id: None,
+            });
             next.run(req).await
         }
     }));

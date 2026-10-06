@@ -13,6 +13,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { quoteIdent, stringLiteral } from './sql-dialect';
 
   const scope = $derived(databaseAccessChild(database.selectedObjectPath ?? database.activeDb));
   const canSchema = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_schema','database','edit',scope));
@@ -170,9 +171,7 @@
   /** Engine-correct identifier quoting for the statements this panel prepares —
    *  Postgres uses double quotes, MySQL/ClickHouse backticks. */
   function q(name: string): string {
-    return engine === 'postgres'
-      ? `"${name.replace(/"/g, '""')}"`
-      : '`' + name.replace(/`/g, '``') + '`';
+    return quoteIdent(engine, name);
   }
   // The prepared statements run in a query tab against the ACTIVE db, which
   // need not be this object's db — qualify from the selected object's path
@@ -377,7 +376,7 @@
   function sqlLiteral(v: unknown): string {
     if (v === null) return 'NULL';
     if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-    return `'${String(v).replace(/'/g, "''")}'`;
+    return stringLiteral(engine, String(v));
   }
   /** The SQL predicate for the condition rows, or the preserved one untouched. */
   function sqlPredicate(): string | null {
@@ -648,7 +647,7 @@
          a top-aligned page when the detail lands. -->
     <div class="st-head" role="status" aria-live="polite" aria-label="Loading structure">
       <div class="st-title">
-        <Icon name="grid" size={15} />
+        <Icon name="grid" size={14} />
         <h2 class="mono">{loadingName}</h2>
         <span class="kind-chip skel-chip">loading</span>
       </div>
@@ -677,7 +676,7 @@
   {:else}
     <div class="st-head">
       <div class="st-title">
-        <Icon name={titleIcon} size={15} />
+        <Icon name={titleIcon} size={14} />
         <h2 class="mono">{detail.name}</h2>
         <span class="kind-chip">{detail.kind}</span>
         {#if detail.row_count != null}
@@ -734,7 +733,7 @@
           Fields <span class="count">{mongoFields.length}</span>
           <span class="hint dim">sampled</span>
           <span class="grow"></span>
-          <input
+          <input dir="auto" aria-label="Filter fields"
             class="ib-search"
             type="search"
             bind:value={fieldQuery}
@@ -761,7 +760,7 @@
                   <td class="fld-act">
                     {#if canIndex}
                       <button class="mini-btn" disabled={!canSchema} onclick={() => indexField(f.path)}>
-                        <Icon name="plus" size={10} />Index
+                        <Icon name="plus" size={12} />Index
                       </button>
                     {/if}
                   </td>
@@ -816,7 +815,7 @@
                     <span class="idx-cols mono">({idx.columns.join(', ')})</span>
                     {#if defText != null}
                       <span class="grow"></span>
-                      <Icon name={openIdxDef === i ? 'chevronDown' : 'chevronRight'} size={10} />
+                      <Icon name={openIdxDef === i ? 'chevronDown' : 'chevronRight'} size={12} />
                     {/if}
                   </button>
                   {#if canIndex}
@@ -880,7 +879,7 @@
                 Fields
                 <span class="ib-count">{idxCols.length} selected</span>
                 <span class="grow"></span>
-                <input
+                <input dir="auto" aria-label="Filter index fields"
                   class="ib-search"
                   type="search"
                   bind:value={idxFieldQuery}
@@ -908,7 +907,7 @@
                       </button>
                     {/if}
                     <button class="ib-x" aria-label="Remove {f}" title="Remove {f}" onclick={() => toggleIdxCol(f)}>
-                      <Icon name="x" size={10} />
+                      <Icon name="x" size={12} />
                     </button>
                   </div>
                 {/each}
@@ -945,20 +944,20 @@
                   </span>
                   <span class="grow"></span>
                   <button class="mini-btn" onclick={addIdxCond}>
-                    <Icon name="plus" size={10} />Add condition
+                    <Icon name="plus" size={12} />Add condition
                   </button>
                 </div>
                 {#each idxConds as cond, ci (ci)}
                   <div class="ib-cond">
-                    <select class="mono" bind:value={cond.field}>
+                    <select aria-label="Condition field" class="mono" bind:value={cond.field}>
                       {#each idxCondFields as f (f)}<option value={f}>{f}</option>{/each}
                     </select>
-                    <select bind:value={cond.op}>
+                    <select aria-label="Condition operator" bind:value={cond.op}>
                       <option value="exists">exists</option>
                       <option value="in">in</option>
                     </select>
                     {#if cond.op === 'in'}
-                      <input
+                      <input dir="ltr" aria-label="Condition values"
                         class="mono"
                         type="text"
                         bind:value={cond.values}
@@ -1012,7 +1011,7 @@
 
             <label class="ib-name">
               Name
-              <input
+              <input dir="ltr"
                 class="mono"
                 type="text"
                 bind:value={idxName}
@@ -1065,7 +1064,7 @@
               <span class="fk-name mono">{fk.name}</span>
               <span class="fk-map mono">
                 ({fk.columns.join(', ')})
-                <Icon name="arrowDown" size={10} />
+                <Icon name="arrowDown" size={12} />
                 <button
                   class="fk-ref-btn mono"
                   title="Open {fk.ref_schema ? `${fk.ref_schema}.` : ''}{fk.ref_table}"
@@ -1682,7 +1681,7 @@
     color: var(--danger);
   }
   .idx-act:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .idx-item {

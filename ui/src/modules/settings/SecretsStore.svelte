@@ -9,7 +9,7 @@
   // file wiped and deleted. Never automatic — the Keychain may prompt.
   import { onMount } from 'svelte';
   import { api } from '../../lib/api/client';
-  import type { SecretsStatus, SecretsMigrationReport } from '../../lib/api/types';
+  import type { SecretsStatus, SecretsMigrationReport, SecretsResetStoreResp } from '../../lib/api/types';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -20,6 +20,7 @@
   let loading = $state(true);
   let loadError = $state('');
   let securing = $state(false);
+  let resetting = $state(false);
   let actionError = $state('');
   const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -81,6 +82,34 @@
       securing = false;
     }
   }
+
+  // Recovery for an orphaned encrypted store (S7-305): its master key is gone
+  // from the Keychain, so every secret save fails. The daemon refuses (409)
+  // while the file is still readable, so this can't discard working secrets.
+  async function resetStore() {
+    const ok = await confirmer.ask(
+      'Use this only when saving a secret fails because the encryption key is missing from your macOS Keychain. ' +
+        'Otto moves the unreadable secrets.enc aside to secrets.enc.orphaned-<time> in its data folder. The file is kept, ' +
+        'not deleted, and restoring the old “Otto” Keychain item makes it readable again. Secrets saved in it stop working ' +
+        'until you enter them again. If the store is still readable, nothing changes.',
+      { title: 'Reset secret store', confirmLabel: 'Move file aside', danger: true },
+    );
+    if (!ok) return;
+    resetting = true;
+    actionError = '';
+    try {
+      const r = await api.post<SecretsResetStoreResp>('/admin/secrets/reset-store', { confirm: true });
+      toasts.success(
+        'Secret store reset',
+        r.set_aside ? `The unreadable file was kept at ${r.set_aside}. Re-enter your secrets.` : 'There was no secret file to move.',
+      );
+      await load();
+    } catch (e) {
+      actionError = `The secret store was not changed. ${msg(e)}`;
+    } finally {
+      resetting = false;
+    }
+  }
 </script>
 
 <section class="secrets-card" aria-label="Secret storage">
@@ -119,6 +148,14 @@
         <button class="btn primary" disabled={securing || status.migrating} onclick={secure}>
           <Icon name="lock" size={13} />
           {securing || status.migrating ? 'Encrypting…' : 'Secure secrets…'}
+        </button>
+      </div>
+    {/if}
+    {#if status.mode === 'encrypted'}
+      <div class="controls">
+        <button class="btn danger" disabled={resetting} onclick={resetStore}>
+          <Icon name="warning" size={13} />
+          {resetting ? 'Resetting…' : 'Reset secret store…'}
         </button>
       </div>
     {/if}

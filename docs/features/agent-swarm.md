@@ -39,12 +39,13 @@ budget is hit, or you pause it.
 | Domain types + API router (CRUD/board) | `crates/otto-swarm/` (`types.rs`, `service.rs`, `http.rs`, `recruiter.rs`, `presets.rs`) |
 | Preset org charts (5 YAML templates) | `crates/otto-swarm/assets/presets/*.yaml` |
 | Persistence (rows, queries, migrations) | `crates/otto-state/src/swarm.rs`; migrations `0029_agent_swarm.sql`, `0034_swarm_budgets.sql`, `0035_swarm_project_story_link.sql`, `0037_swarm_project_story_unique.sql` |
-| Coordinator runtime + lifecycle + recruit/plan | `crates/otto-server/src/swarm_runtime.rs` |
-| One agent turn (spawn/resume, brief, watch, parse) | `crates/otto-server/src/swarm_run.rs` |
-| Per-agent cwd + identity + `otto-post` helper | `crates/otto-server/src/swarm_workspace.rs` |
-| Scheduled runs (daily/weekly/interval) | `crates/otto-server/src/swarm_scheduler.rs` |
+| Coordinator runtime + lifecycle + recruit/plan | `crates/otto-swarm/src/runtime/engine.rs` |
+| One agent turn (spawn/resume, brief, watch, parse) | `crates/otto-swarm/src/runtime/run.rs` |
+| Per-agent cwd + identity + `otto-post` helper | `crates/otto-swarm/src/runtime/workspace.rs` |
+| Scheduled runs (daily/weekly/interval) | `crates/otto-swarm/src/runtime/scheduler.rs` |
+| Server glue (`SwarmHost` impl for `ServerCtx`) | `crates/otto-server/src/swarm_host.rs` |
 | Board ingest (agent → board) | `crates/otto-server/src/routes/swarm_ingest.rs` |
-| Product story → swarm project bridge | `crates/otto-server/src/product_swarm.rs` |
+| Product story → swarm project bridge | `crates/otto-product/src/swarm.rs` |
 | UI section + views | `ui/src/modules/swarm/` |
 | UI store (REST + WS state) | `ui/src/lib/stores/swarm.svelte.ts` |
 | Contracts (authoritative) | `docs/contracts/api.md` (#59–#86, "Swarm lifecycle"), `docs/contracts/ws.md` (Agent Swarm events) |
@@ -247,10 +248,10 @@ work in a real terminal (§5.3).
 ## 4. The coordinator (how autonomous work actually runs)
 
 When a swarm is **active**, `start_coordinator` spawns a per-swarm background loop
-(`swarm_runtime::coordinator_loop`) that ticks **when something changed** — a
+(`runtime::engine::coordinator_loop`) that ticks **when something changed** — a
 `swarm_task_updated`, `swarm_run_updated`, `swarm_status`, `swarm_goal_updated`
 or `swarm_project_cleared` event for the swarm rings its bell
-(`swarm_wake.rs`), at most once per 2 s — plus a **60 s safety tick** (was a
+(`runtime/wake.rs`), at most once per 2 s — plus a **60 s safety tick** (was a
 fixed 5 s poll; stop/restart still wakes it at once). The bell exists only
 while a coordinator loop runs (registered before its first tick, dropped when
 the loop returns), so events for a swarm without a coordinator cost nothing
@@ -272,7 +273,7 @@ and leave nothing behind. Each tick:
    - **Bumps the task's attempt counter**, claims the task to `in_progress` so it
      isn't re-selected, and **creates a run**: `kind = "planning"` if the agent is
      a leader and the task isn't yet `delegated`, else `"task"`.
-   - **Spawns the turn** (`swarm_run::run_turn`) on a background task; when it
+   - **Spawns the turn** (`runtime::run::run_turn`) on a background task; when it
      returns, `route_result` applies the outcome.
 
 ### Routing a finished turn (`route_result`)
@@ -429,7 +430,7 @@ agent's working directory:
 It posts to `POST /api/v1/ingest/swarm/board`, gated by the session's ingest
 token (§9).
 
-### 5.7 Scheduled runs (`swarm_scheduler.rs`)
+### 5.7 Scheduled runs (`otto-swarm/src/runtime/scheduler.rs`)
 
 Agents can carry a **schedule** so they run on a cadence with a *standing
 directive*, independent of the task board — e.g. a **daily trend researcher** or a
@@ -537,7 +538,7 @@ authoritative spec is `docs/contracts/api.md` (#59–#86 + "Swarm lifecycle") an
 | 86 | `POST /swarm/swarms/{sid}/board` | editor | `PostMessageReq` → `SwarmMessage` |
 | — | `GET /swarm/tasks/{tid}/story` | viewer | → `TaskStoryLink` (always 200; `story:null` if none) |
 
-### Runtime endpoints (in `otto-server/src/swarm_runtime.rs`)
+### Runtime endpoints (in `otto-swarm/src/runtime/engine.rs`)
 
 | # | Method & path | Auth | Body → Response |
 |---|---|---|---|
@@ -657,7 +658,7 @@ turn.
 - **Identity materialized to disk, not tokens.** The agent's role, soul, scope,
   org position, current project/task, skills, and board instructions are written
   into its working directory as `CLAUDE.md`/`AGENTS.md` and `.claude/skills`
-  (`swarm_workspace::provision_agent`), so the per-turn prompt stays small.
+  (`runtime::workspace::provision_agent`), so the per-turn prompt stays small.
 - **Bounded recruiter prompt.** The recruiter injects at most
   `RECRUITER_SKILL_CAP = 40` skills, ranked by relevance to the role, instead of
   dumping the whole library — then validates the reply against the *full* library

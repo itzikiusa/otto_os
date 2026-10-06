@@ -11,7 +11,8 @@
   import { api, ApiError } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { IssueAccount, IssueProject } from '../../lib/api/types';
+  import type { IssueAccount, IssueProject, ListingPage } from '../../lib/api/types';
+  import { truncatedNote, unwrapListing } from '../../lib/listingPage';
   import type { ConfluenceSpace, ProductStoryVersion, ProductStoryDetail, ReviewedContent } from './types';
 
   interface Props {
@@ -30,6 +31,8 @@
   // ── Story-mode: projects + issue types ───────────────────────────────────
   let projects: IssueProject[] = $state([]);
   let projectsLoading = $state(false);
+  /** The project list stopped at its page cap (S5-22). */
+  let projectsTruncated = $state(false);
   let projectKey = $state('');
   let projectsError = $state('');
   let projectsSequence = 0;
@@ -42,6 +45,8 @@
   // ── RFC-mode: spaces + optional parent + optional title ──────────────────
   let spaces: ConfluenceSpace[] = $state([]);
   let spacesLoading = $state(false);
+  /** The space list stopped at its page cap (S5-22). */
+  let spacesTruncated = $state(false);
   let spaceKey = $state('');
   let spacesError = $state('');
   let spacesSequence = 0;
@@ -161,15 +166,18 @@
     const account = accountId, sequence = ++projectsSequence;
     const current = () => sequence === projectsSequence && accountId === account && mode === 'story';
     projectsLoading = true;
-    projectsError = ''; projects = [];
+    projectsError = ''; projects = []; projectsTruncated = false;
     issueTypesSequence++; issueTypesLoading = false;
     projectKey = '';
     issueTypes = [];
     issueType = 'Story';
     try {
-      const next = await api.get<IssueProject[]>(`/issue/projects?account_id=${account}`);
+      const next = unwrapListing(
+        await api.get<ListingPage<IssueProject>>(`/issue/projects?account_id=${account}&meta=1`),
+      );
       if (!current()) return;
-      projects = next;
+      projects = next.items;
+      projectsTruncated = next.truncated;
       if (projects.length > 0) {
         projectKey = projects[0].key;
         await loadIssueTypes();
@@ -208,14 +216,15 @@
     const account = accountId, sequence = ++spacesSequence;
     const current = () => sequence === spacesSequence && accountId === account && mode === 'rfc';
     spacesLoading = true;
-    spacesError = ''; spaces = [];
+    spacesError = ''; spaces = []; spacesTruncated = false;
     spaceKey = '';
     try {
-      const next = await api.get<ConfluenceSpace[]>(
-        `/issue/confluence/spaces?account_id=${account}`,
+      const next = unwrapListing(
+        await api.get<ListingPage<ConfluenceSpace>>(`/issue/confluence/spaces?account_id=${account}&meta=1`),
       );
       if (!current()) return;
-      spaces = next;
+      spaces = next.items;
+      spacesTruncated = next.truncated;
       if (spaces.length > 0) spaceKey = spaces[0].key;
     } catch (e) {
       if (!current()) return;
@@ -332,6 +341,9 @@
                 {/each}
               {/if}
             </select>
+            {#if projectsTruncated}
+              <p class="trunc-note" role="note">{truncatedNote('projects', projects.length)}</p>
+            {/if}
           {/if}
         </div>
 
@@ -382,13 +394,16 @@
                 {/each}
               {/if}
             </select>
+            {#if spacesTruncated}
+              <p class="trunc-note" role="note">{truncatedNote('spaces', spaces.length)}</p>
+            {/if}
           {/if}
         </div>
 
         <!-- Optional parent page id -->
         <div class="field">
           <label class="label" for="pd-parent">Parent page ID <span class="dim">(optional)</span></label>
-          <input
+          <input dir="auto"
             id="pd-parent"
             class="input"
             bind:value={parentId}
@@ -401,7 +416,7 @@
         <!-- Optional title override -->
         <div class="field">
           <label class="label" for="pd-title">Title override <span class="dim">(optional)</span></label>
-          <input
+          <input dir="auto"
             id="pd-title"
             class="input"
             bind:value={rfcTitle}
@@ -440,6 +455,12 @@
         {/if}
       </div>
 
+      {#if previewStoryId && previewStoryId !== product.selectedId}
+        <!-- Publish is disabled for this reason: say so instead of a silent grey button. -->
+        <div class="field-error" role="status" data-testid="publish-story-changed">
+          A different story is open now. Close this dialog and open Publish again to review what will be sent.
+        </div>
+      {/if}
       {#if formError}
         <div class="field-error">
           {formError}
@@ -462,6 +483,11 @@
 </Modal>
 
 <style>
+  .trunc-note {
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+  }
   .loading-inline {
     font-size: var(--fs-s);
     color: var(--text-dim);
@@ -483,7 +509,7 @@
     font-size: var(--fs-xs);
   }
   .input:disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .pd-preview {

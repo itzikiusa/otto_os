@@ -116,7 +116,7 @@
               <option value={s.id}>{s.name}</option>
             {/each}
           </select>
-          <input bind:value={r.tool_name} placeholder="(whole server)" class="mono" aria-label="Tool (blank = whole server)" />
+          <input dir="ltr" bind:value={r.tool_name} placeholder="(whole server)" class="mono" aria-label="Tool (blank = whole server)" />
           <select bind:value={r.mode} aria-label="Mode">
             <option value="allow">Allow</option>
             <option value="deny">Deny</option>

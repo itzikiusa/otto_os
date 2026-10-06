@@ -21,22 +21,17 @@ mod rooms;
 mod shortcuts;
 mod snip;
 mod supervisor;
+mod throttle;
 mod tray;
 mod windows;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
-/// Every Otto webview (main, pop-out, native pane child, room host) opts out
-/// of WebKit's inactive-view scheduling. xterm parses each PTY frame on a
-/// `setTimeout` and paints on rAF; once WebKit decides a window is occluded
-/// or "in the background" those clamp to ~1 s, which shows up as second-scale
-/// echo/scroll lag with an idle CPU. The UI's own pollers already pause on
-/// `visibilitychange`, so leaving timers live costs nothing while hidden.
-/// macOS 14+ only (`WKPreferences.inactiveSchedulingPolicy = .none`); older
-/// systems ignore it. The main window sets the same in `tauri.conf.json`.
-pub(crate) const NO_THROTTLE: tauri::utils::config::BackgroundThrottlingPolicy =
-    tauri::utils::config::BackgroundThrottlingPolicy::Disabled;
+/// The webview background-throttling policy every builder passes as
+/// `crate::NO_THROTTLE` (see `throttle.rs`); re-exported at the crate root so
+/// the examples that `#[path]`-include those modules resolve it the same way.
+pub(crate) use throttle::NO_THROTTLE;
 
 fn main() {
     // AppKit-dispatched callbacks can't unwind: log panics, contain them below.
@@ -61,6 +56,17 @@ fn main() {
                 let id = event.id().0.as_str();
                 match id {
                     "new-window" => windows::create_new_window(app),
+                    // File ▸ Close Window (⌘⇧W): the focused app window, via
+                    // the regular CloseRequested path (pop-out frame save,
+                    // window-set bookkeeping). The bar / tray panels never
+                    // take it.
+                    "close-window" => {
+                        if let Some((_, w)) = app.windows().into_iter().find(|(l, w)| {
+                            windows::is_app_window(l) && w.is_focused().unwrap_or(false)
+                        }) {
+                            let _ = w.close();
+                        }
+                    }
                     "quit" => {
                         windows::mark_quitting();
                         windows::snapshot_all(app);
@@ -192,7 +198,10 @@ fn main() {
             // and surfaces state, so failures here are non-fatal.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let report = supervisor::ensure_daemon().await;
+                let report = supervisor::ensure_daemon(|interim| {
+                    let _ = handle.emit("otto://daemon-state", interim);
+                })
+                .await;
                 let _ = handle.emit("otto://daemon-state", &report);
             });
 
@@ -313,6 +322,16 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
             &MenuItem::with_id(handle, "snip", "Take Snip", true, None::<&str>)?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(handle, "close-tab", "Close Tab", true, Some("Cmd+W"))?,
+            // ⌘⇧W, not PredefinedMenuItem::close_window: that one claims ⌘W,
+            // which Close Tab owns. Handled natively (on_menu_event) — it
+            // closes the focused app window through the normal close path.
+            &MenuItem::with_id(
+                handle,
+                "close-window",
+                "Close Window",
+                true,
+                Some("Cmd+Shift+W"),
+            )?,
         ],
     )?;
 

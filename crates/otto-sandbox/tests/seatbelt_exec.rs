@@ -248,3 +248,603 @@ fn which_git() -> Option<String> {
     }
     None
 }
+
+/// An EXISTING repo as the OS enforces it: the agent still commits and
+/// branches (objects, refs, index), but cannot point the daemon's own git at
+/// a program — `.git/config`, `hooks/` and `commondir` are write-denied, and
+/// the git dir cannot be renamed away and replaced.
+#[test]
+fn seatbelt_agent_commits_but_cannot_edit_git_config_or_hooks() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let Some(git) = which_git() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let setup = Command::new(&git)
+        .current_dir(&repo)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(setup.success());
+    for kv in [
+        ["user.email", "a@b.c"],
+        ["user.name", "t"],
+        ["commit.gpgsign", "false"],
+    ] {
+        Command::new(&git)
+            .current_dir(&repo)
+            .args(["config", kv[0], kv[1]])
+            .status()
+            .unwrap();
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let pol = SandboxPolicy::for_agent(
+        &repo,
+        Path::new(&home),
+        &repo.join(".otto-data"),
+        &[repo.join(".git")],
+        NetworkPolicy::Full,
+    );
+    let q = |p: &Path| shell_quote(p);
+    let g = q(Path::new(&git));
+    let (ok, err) = run_sandboxed(
+        &pol,
+        &format!(
+            "cd {} && echo hi > f.txt && {g} add f.txt && {g} commit -q -m first && {g} branch side",
+            q(&repo)
+        ),
+    );
+    assert!(ok, "commit in an existing repo must still work: {err}");
+
+    let config_before = std::fs::read_to_string(repo.join(".git/config")).unwrap();
+    let (ok, _) = run_sandboxed(
+        &pol,
+        &format!("cd {} && {g} config core.fsmonitor /tmp/x.sh", q(&repo)),
+    );
+    assert!(!ok, "editing .git/config must be refused");
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".git/config")).unwrap(),
+        config_before
+    );
+    for script in [
+        format!(
+            "mkdir -p {0}/.git/hooks && echo x > {0}/.git/hooks/pre-commit",
+            q(&repo)
+        ),
+        format!("echo /tmp > {}/.git/commondir", q(&repo)),
+        format!("mv {0}/.git {0}/.git-old", q(&repo)),
+    ] {
+        let (ok, _) = run_sandboxed(&pol, &script);
+        assert!(!ok, "must be refused: {script}");
+    }
+    assert!(repo.join(".git/HEAD").exists());
+    assert!(!repo.join(".git/hooks/pre-commit").exists());
+}
+
+/// A scratch root OUTSIDE every writable root of the agent profile (the
+/// system temp dirs are granted wholesale, so a fake `$HOME` there would make
+/// "not granted" checks vacuous).
+fn scratch() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    (tmp, root)
+}
+
+/// Whether the sandboxed `mkdir -p <dir> && echo x > <p>` succeeds (and `p` exists).
+fn can_write(pol: &SandboxPolicy, p: &Path) -> bool {
+    let dir = p.parent().unwrap();
+    let (ok, _) = run_sandboxed(
+        pol,
+        &format!(
+            "mkdir -p {} && echo x > {}",
+            shell_quote(dir),
+            shell_quote(p)
+        ),
+    );
+    ok && p.exists()
+}
+
+fn can_read(pol: &SandboxPolicy, p: &Path) -> bool {
+    run_sandboxed(pol, &format!("cat {} >/dev/null", shell_quote(p))).0
+}
+
+/// Code-loading configs under `$HOME` an unsandboxed program later runs:
+/// `~/.claude.json` (user-scope `mcpServers`), gemini's `settings.json`, and
+/// everything in `~/.config` that isn't a CLI's own state (direnv, fish…).
+/// Claude Code's own state stays writable.
+#[test]
+fn seatbelt_agent_cannot_plant_home_code_loading_configs() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    let cwd = root.join("project");
+    // `~/.config` itself exists on a real host (it is not granted, so a
+    // sandboxed `mkdir` of it would fail).
+    for d in [
+        home.join(".claude"),
+        home.join(".gemini"),
+        home.join(".config"),
+        cwd.clone(),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(home.join(".claude.json"), "{}").unwrap();
+    std::fs::write(home.join(".gemini/settings.json"), "{}").unwrap();
+    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+
+    for denied in [
+        home.join(".claude.json"),
+        home.join(".gemini/settings.json"),
+        home.join(".config/direnv/direnvrc"),
+        home.join(".config/fish/config.fish"),
+        home.join(".claude/settings.json"),
+        home.join(".claude/hooks/x.sh"),
+    ] {
+        assert!(
+            !can_write(&pol, &denied),
+            "{} must be write-denied",
+            denied.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join(".claude.json")).unwrap(),
+        "{}"
+    );
+    for allowed in [
+        home.join(".claude/projects/p/s.jsonl"),
+        home.join(".claude/todos/t.json"),
+        home.join(".claude/statsig/s"),
+        home.join(".gemini/antigravity-cli/state.json"),
+        home.join(".config/configstore/update-notifier-x.json"),
+        cwd.join("f.txt"),
+    ] {
+        assert!(
+            can_write(&pol, &allowed),
+            "{} must stay writable",
+            allowed.display()
+        );
+    }
+}
+
+/// A dotfiles-style `~/.claude` symlink: the grant resolves to the real dir,
+/// so the denies for not-yet-existing `hooks/` / `agents/` / `commands/` /
+/// `settings.local.json` must resolve through it too.
+#[test]
+fn seatbelt_denies_follow_a_symlinked_claude_dir() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    let real = root.join("dotfiles/claude");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, home.join(".claude")).unwrap();
+    let cwd = root.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+
+    for rel in [
+        "hooks/x.sh",
+        "agents/a.md",
+        "commands/c.md",
+        "settings.local.json",
+    ] {
+        let p = home.join(".claude").join(rel);
+        assert!(!can_write(&pol, &p), "{rel} via the symlink must be denied");
+        assert!(!real.join(rel).exists(), "{rel} was created");
+    }
+    assert!(can_write(&pol, &home.join(".claude/projects/p.jsonl")));
+}
+
+/// A named-account session: its own account home (CLAUDE_CONFIG_DIR /
+/// CODEX_HOME) is writable state, but not the configs in it that run code;
+/// other accounts' homes and the daemon logs are not even readable.
+#[test]
+fn seatbelt_account_home_carve_outs_and_other_accounts_hidden() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let data = root.join("Otto");
+    let own = data.join("provider-accounts/a1");
+    let other = data.join("provider-accounts/a2");
+    let cwd = root.join("project");
+    for d in [own.clone(), other.clone(), data.join("logs"), cwd.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(own.join(".credentials.json"), "mine").unwrap();
+    std::fs::write(other.join(".credentials.json"), "theirs").unwrap();
+    std::fs::write(data.join("logs/ottod.log"), "log").unwrap();
+    let pol = SandboxPolicy::for_agent(
+        &cwd,
+        &root.join("home"),
+        &data,
+        std::slice::from_ref(&own),
+        NetworkPolicy::Full,
+    );
+
+    for denied in [
+        own.join("settings.json"),
+        own.join("settings.local.json"),
+        own.join(".claude.json"),
+        own.join("config.toml"),
+        own.join("hooks/h.sh"),
+        own.join("plugins/p/plugin.json"),
+        other.join("settings.json"),
+    ] {
+        assert!(
+            !can_write(&pol, &denied),
+            "{} must be write-denied",
+            denied.display()
+        );
+    }
+    assert!(can_write(&pol, &own.join("projects/p/s.jsonl")));
+    assert!(can_write(&pol, &own.join("sessions/rollout.jsonl")));
+    assert!(can_read(&pol, &own.join(".credentials.json")), "own creds");
+    assert!(
+        !can_read(&pol, &other.join(".credentials.json")),
+        "other creds"
+    );
+    assert!(!can_read(&pol, &data.join("logs/ottod.log")), "daemon logs");
+}
+
+/// Read-only sessions (untrusted input) can't plant project-scope claude
+/// config that the user's next unconfined `claude` in that folder loads.
+#[test]
+fn seatbelt_read_only_session_cannot_plant_project_claude_config() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let cwd = root.join("project");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    let base = SandboxPolicy::for_agent(
+        &cwd,
+        &root.join("home"),
+        &root.join("Otto"),
+        &[],
+        NetworkPolicy::Full,
+    );
+    // An ordinary session still edits its repo's checked-in `.claude/`.
+    assert!(can_write(&base, &cwd.join(".claude/settings.json")));
+    std::fs::remove_file(cwd.join(".claude/settings.json")).unwrap();
+
+    let pol = base.deny_project_agent_config(&cwd);
+    for rel in [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".claude/hooks/h.sh",
+        ".claude/agents/a.md",
+        ".claude/commands/c.md",
+        ".mcp.json",
+    ] {
+        assert!(
+            !can_write(&pol, &cwd.join(rel)),
+            "{rel} must be write-denied"
+        );
+    }
+    assert!(can_write(&pol, &cwd.join("notes.md")));
+}
+
+/// A linked worktree's `gitdir` pointer: rewriting it would point the
+/// daemon's worktree probe (unsandboxed git) at an agent-built repo.
+#[test]
+fn seatbelt_agent_cannot_repoint_a_worktree_gitdir() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let repo = root.join("repo");
+    let admin = repo.join(".git/worktrees/w1");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(admin.join("gitdir"), "/real/w1/.git\n").unwrap();
+    let pol = SandboxPolicy::for_agent(
+        &repo,
+        &root.join("home"),
+        &root.join("Otto"),
+        &[repo.join(".git")],
+        NetworkPolicy::Full,
+    );
+    assert!(!can_write(&pol, &admin.join("gitdir")));
+    assert_eq!(
+        std::fs::read_to_string(admin.join("gitdir")).unwrap(),
+        "/real/w1/.git\n"
+    );
+    // The worktree's own HEAD/index stay writable (checkouts, commits).
+    assert!(can_write(&pol, &admin.join("HEAD")));
+}
+
+/// S1-301: Otto's context bundles (`~/.otto/context`, whose claude
+/// `settings.json` every claude session loads via `--settings`) are not
+/// writable by any agent profile, read-only or not.
+#[test]
+fn seatbelt_agent_cannot_write_otto_context_bundles() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let bundle = home.join(".otto/context/claude/-x-project");
+    for d in [bundle.clone(), cwd.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(bundle.join("settings.json"), "{}").unwrap();
+    let base = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    let ro = base.clone().harden_read_only(&cwd, &home);
+    for pol in [&base, &ro] {
+        assert!(!can_write(pol, &bundle.join("settings.json")));
+        assert!(!can_write(
+            pol,
+            &home.join(".otto/context/claude/new/settings.json")
+        ));
+        assert!(!can_write(pol, &home.join(".otto/x.txt")));
+    }
+    assert_eq!(
+        std::fs::read_to_string(bundle.join("settings.json")).unwrap(),
+        "{}"
+    );
+}
+
+/// S1-302 / S11-307: the CLI homes are allow-lists of state dirs. Instruction
+/// files, skills / prompts / extensions and scripts there are write-denied;
+/// transcripts, history, sqlite stores and token refreshes are not.
+#[test]
+fn seatbelt_agent_cli_homes_are_state_allow_lists() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    let cwd = root.join("project");
+    for d in [
+        home.join(".claude"),
+        home.join(".codex"),
+        home.join(".gemini"),
+        cwd.clone(),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(home.join(".claude/statusline-command.sh"), "echo hi").unwrap();
+    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+
+    for denied in [
+        ".claude/CLAUDE.md",
+        ".claude/skills/s/SKILL.md",
+        ".claude/output-styles/o.md",
+        ".claude/statusline-command.sh",
+        ".claude/evil.py",
+        ".claude/memory/MEMORY.md",
+        ".claude/downloads/claude",
+        ".codex/AGENTS.md",
+        ".codex/AGENTS.override.md",
+        ".codex/prompts/p.md",
+        ".codex/skills/s/SKILL.md",
+        ".codex/rules/default.rules",
+        ".codex/packages/standalone/codex",
+        ".codex/computer-use/Codex Computer Use.app/Contents/MacOS/x",
+        ".gemini/config/mcp_config.json",
+        ".gemini/GEMINI.md",
+        ".gemini/extensions/e/gemini-extension.json",
+        ".gemini/skills/s/SKILL.md",
+    ] {
+        assert!(
+            !can_write(&pol, &home.join(denied)),
+            "{denied} must be write-denied"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join(".claude/statusline-command.sh")).unwrap(),
+        "echo hi"
+    );
+    // A planted skill dir can't be swapped in by renaming either.
+    let (ok, _) = run_sandboxed(
+        &pol,
+        &format!(
+            "mkdir -p {0}/projects/x && mv {0}/projects/x {0}/skills",
+            shell_quote(&home.join(".claude"))
+        ),
+    );
+    assert!(!ok, "renaming a dir into ~/.claude/skills must be refused");
+    for allowed in [
+        ".claude/history.jsonl",
+        ".claude/projects/p/s.jsonl",
+        ".claude/shell-snapshots/s.sh",
+        ".claude/session-env/x/e",
+        ".codex/history.jsonl",
+        ".codex/auth.json",
+        ".codex/state_5.sqlite",
+        ".codex/sessions/2026/r.jsonl",
+        ".codex/tmp/arg0/x",
+        ".codex/log/codex-tui.log",
+        ".gemini/oauth_creds.json",
+        ".gemini/antigravity-cli/cli.log",
+        ".gemini/config/projects/p.json",
+        ".claude/daemon/dispatch/s",
+        ".codex/vendor_imports/skills-curated-cache.json",
+    ] {
+        assert!(
+            can_write(&pol, &home.join(allowed)),
+            "{allowed} must stay writable"
+        );
+    }
+}
+
+/// S11-307: the shared package caches unsandboxed programs execute from are
+/// not writable; the per-session cache env points somewhere that is.
+#[test]
+fn seatbelt_agent_cannot_poison_shared_package_caches() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    let cwd = root.join("project");
+    for d in [
+        home.join(".npm/_npx/abc"),
+        home.join(".cache"),
+        home.join("Library/Caches"),
+        cwd.clone(),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    for denied in [
+        ".npm/_npx/abc/node_modules/@x/server/dist/index.js",
+        ".cache/uv/archive-v0/x/pkg.py",
+        ".cache/pre-commit/repo1/hook.py",
+        "Library/Caches/ms-playwright/chromium/x",
+        "Library/Caches/go-build/aa/obj",
+    ] {
+        assert!(
+            !can_write(&pol, &home.join(denied)),
+            "{denied} must be write-denied"
+        );
+    }
+    let cache = std::env::temp_dir().join(format!("otto-agent-cache-test-{}", std::process::id()));
+    for (_, dir) in otto_sandbox::agent_cache_env(&cache) {
+        let f = Path::new(&dir).join("x");
+        assert!(can_write(&pol, &f), "{} must be writable", f.display());
+    }
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+/// S11-302: a profile built for a session at `$HOME` grants nothing there —
+/// the shell rc files and LaunchAgents stay out of reach.
+#[test]
+fn seatbelt_agent_at_home_cannot_write_dotfiles_or_launch_agents() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join("Library/LaunchAgents")).unwrap();
+    std::fs::write(home.join(".zshrc"), "# rc\n").unwrap();
+    let pol = SandboxPolicy::for_agent(
+        &home,
+        &home,
+        &root.join("Otto"),
+        std::slice::from_ref(&home),
+        NetworkPolicy::Full,
+    );
+    assert!(!can_write(&pol, &home.join(".zshrc")));
+    assert!(!can_write(&pol, &home.join("Library/LaunchAgents/x.plist")));
+    assert!(!can_write(&pol, &home.join(".ssh/config")));
+    assert_eq!(
+        std::fs::read_to_string(home.join(".zshrc")).unwrap(),
+        "# rc\n"
+    );
+    // A cwd at `/` is not granted either.
+    let pol = SandboxPolicy::for_agent(
+        Path::new("/"),
+        &home,
+        &root.join("Otto"),
+        &[],
+        NetworkPolicy::Full,
+    );
+    assert!(!can_write(&pol, &root.join("x.txt")));
+}
+
+/// S2-301(c) / S1-302: a read-only session (reviewing an untrusted PR,
+/// processing mail) cannot read credential stores, nor plant instructions in
+/// its folder or claude's per-project auto-memory.
+#[test]
+fn seatbelt_read_only_session_cannot_read_credentials_or_plant_instructions() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    let cwd = root.join("project");
+    for d in [
+        home.join(".ssh"),
+        home.join(".aws"),
+        home.join(".gnupg"),
+        home.join(".config/gh"),
+        home.join(".kube"),
+        home.join(".claude/projects/p"),
+        cwd.clone(),
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let secrets = [
+        ".ssh/id_ed25519",
+        ".aws/credentials",
+        ".gnupg/secring.gpg",
+        ".config/gh/hosts.yml",
+        ".kube/config",
+        ".netrc",
+    ];
+    for f in secrets {
+        std::fs::write(home.join(f), "secret").unwrap();
+    }
+    std::fs::write(home.join("notes.txt"), "fine").unwrap();
+    let base = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full);
+    // An ordinary session still reads them (git over ssh, gh, aws…).
+    assert!(can_read(&base, &home.join(".ssh/id_ed25519")));
+    let pol = base.harden_read_only(&cwd, &home);
+    for f in secrets {
+        assert!(!can_read(&pol, &home.join(f)), "{f} must be unreadable");
+    }
+    let (ok, _) = run_sandboxed(&pol, &format!("ls {}", shell_quote(&home.join(".ssh"))));
+    assert!(!ok, "listing ~/.ssh must be refused");
+    assert!(can_read(&pol, &home.join("notes.txt")));
+    for denied in [
+        cwd.join("CLAUDE.md"),
+        cwd.join("AGENTS.md"),
+        cwd.join("GEMINI.md"),
+        cwd.join(".claude/skills/s/SKILL.md"),
+        home.join(".claude/projects/p/memory/MEMORY.md"),
+    ] {
+        assert!(
+            !can_write(&pol, &denied),
+            "{} must be write-denied",
+            denied.display()
+        );
+    }
+    assert!(can_write(&pol, &home.join(".claude/projects/p/s.jsonl")));
+    assert!(can_write(&pol, &cwd.join("notes.md")));
+}
+
+/// The codex shadow `CODEX_HOME` in a context bundle: its state is writable
+/// (re-opened after the `~/.otto/context` deny), its config / skills /
+/// instruction files are not.
+#[test]
+fn seatbelt_codex_shadow_home_reopened_without_its_config() {
+    if !otto_sandbox::is_supported() {
+        return;
+    }
+    let (_tmp, root) = scratch();
+    let home = root.join("home");
+    let cwd = root.join("project");
+    let shadow = home.join(".otto/context/codex/-x-project/codex-home");
+    for d in [shadow.clone(), cwd.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let pol = SandboxPolicy::for_agent(&cwd, &home, &root.join("Otto"), &[], NetworkPolicy::Full)
+        .allow_provider_home(&shadow);
+    assert!(can_write(&pol, &shadow.join("sessions/r.jsonl")));
+    assert!(can_write(&pol, &shadow.join("auth.json")));
+    for denied in [
+        "config.toml",
+        "AGENTS.md",
+        "skills/s/SKILL.md",
+        "prompts/p.md",
+        "x.sh",
+    ] {
+        assert!(!can_write(&pol, &shadow.join(denied)), "{denied}");
+    }
+    // The rest of the bundle stays denied.
+    assert!(!can_write(
+        &pol,
+        &shadow.parent().unwrap().join("CONTEXT.md")
+    ));
+}

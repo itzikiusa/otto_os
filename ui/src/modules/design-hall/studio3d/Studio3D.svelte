@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../../lib/rowMenu';
   // 3D Studio 1.5 — the Design Hall layout for a `scene3d` artifact (mockup S4):
   //
   //   ┌ HIERARCHY ─────┬ toolbar: ✨ Generate ▾ · Turntable · Play · Export ▾ ───┬ Inspector · Links · References ┐
@@ -14,7 +15,7 @@
   // Image→3D / Refine in Blender — each lands as a reviewable `agent` version),
   // or a local export. Cloud 3D providers are opt-in and disabled without a
   // Keychain key; nothing is sent anywhere without an explicit click.
-  import { onTabKey } from '../../../lib/tabKeys';
+  import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
   import { toastError } from '../../../lib/toastError';
   import type { Snippet } from 'svelte';
   import { untrack } from 'svelte';
@@ -101,7 +102,14 @@
   /** Show the scene JSON beside a plain viewport (hand edits, agent diffs). */
   let showSource = $state(false);
   let turntable = $state(false);
-  let rightTab = $state<'inspector' | 'otto' | 'links' | 'references'>(untrack(() => (openOtto ? 'otto' : 'inspector')));
+  type RightTab = 'inspector' | 'otto' | 'links' | 'references';
+  const rightTabs = $derived<TabItem<RightTab>[]>([
+    { id: 'inspector', label: 'Inspector', testid: 's3d-tab-inspector' },
+    { id: 'otto', label: 'Otto', testid: 'design-tab-otto' },
+    { id: 'links', label: 'Links', count: linkCount, testid: 'design-tab-links' },
+    { id: 'references', label: 'References', testid: 'design-tab-references' },
+  ]);
+  let rightTab = $state<RightTab>(untrack(() => (openOtto ? 'otto' : 'inspector')));
   $effect(() => {
     if (openOtto) untrack(() => (rightTab = 'otto'));
   });
@@ -573,7 +581,7 @@
           <ul class="views">
             {#each doc.cameras as c (c.id)}
               <li>
-                <button class="view" onclick={() => vp?.goToView(c)} oncontextmenu={(e) => { e.preventDefault(); viewMenu(e, c.id); }} title="#view:{c.id}">
+                <button use:rowMenu class="view" onclick={() => vp?.goToView(c)} oncontextmenu={(e) => { e.preventDefault(); viewMenu(e, c.id); }} title="#view:{c.id}">
                   <Icon name="eye" size={12} /> <span>{c.name ?? c.id}</span>
                 </button>
                 <button class="icon-btn" aria-label="View options" title="View options" onclick={(e) => viewMenu(e, c.id)}><Icon name="more" size={12} /></button>
@@ -596,7 +604,7 @@
     <section class="center" aria-label="3D viewport">
       <div class="toolbar">
         <button class="btn small" onclick={generateMenu} disabled={readonly} aria-haspopup="menu" data-testid="s3d-generate">
-          <Icon name="sparkle" size={12} /> Generate <Icon name="chevronDown" size={11} />
+          <Icon name="sparkle" size={12} /> Generate <Icon name="chevronDown" size={12} />
         </button>
         <button class="btn small" class:on={turntable} aria-pressed={turntable} onclick={() => (turntable = !turntable)} data-testid="s3d-turntable">
           <Icon name="refresh" size={12} /> Turntable
@@ -605,7 +613,7 @@
           <Icon name="play" size={12} /> {play ? 'Stop' : 'Play'}
         </button>
         <button class="btn small" onclick={exportMenu} aria-haspopup="menu" data-testid="s3d-export">
-          <Icon name="download" size={12} /> Export <Icon name="chevronDown" size={11} />
+          <Icon name="download" size={12} /> Export <Icon name="chevronDown" size={12} />
         </button>
         <button class="btn small ghost" class:on={showSource} aria-pressed={showSource} onclick={() => (showSource = !showSource)} data-testid="design-source-toggle">
           <Icon name="file" size={12} /> Source
@@ -649,15 +657,8 @@
     </section>
 
     <aside class="right" aria-label="Details">
-      <div class="tabs" role="tablist" aria-label="Details panel">
-        <button role="tab" aria-selected={rightTab === 'inspector'} tabindex={rightTab === 'inspector' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'inspector'} onclick={() => (rightTab = 'inspector')} data-testid="s3d-tab-inspector">Inspector</button>
-        <button role="tab" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">Otto</button>
-        <button role="tab" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
-          Links <span class="count">{linkCount}</span>
-        </button>
-        <button role="tab" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">References</button>
-      </div>
-      <div class="panel" role="tabpanel">
+      <Tabs label="Details panel" idBase="s3d" tabs={rightTabs} value={rightTab} onchange={(id) => (rightTab = id)} />
+      <div class="panel" role="tabpanel" id="s3d-panel-{rightTab}" aria-labelledby="s3d-tab-{rightTab}">
         {#if rightTab === 'inspector'}
           <Inspector {doc} bind:selectedId onchange={edit} {readonly} {swatches} brandName={kit?.label ?? null} {colors} {editState} />
           {#if usedIn.length}
@@ -716,7 +717,7 @@
         </div>
         <p class="dim">Web budget: {b.label}{b.tone === 'over' ? ' — simplify the scene or split it before embedding.' : '.'}</p>
         <ul class="steps">
-          {#each r.steps as s (s)}<li><Icon name="check" size={11} /> {s}</li>{/each}
+          {#each r.steps as s (s)}<li><Icon name="check" size={12} /> {s}</li>{/each}
         </ul>
         <p class="dim">Draco isn’t offered: its encoder isn’t bundled and Otto stays offline. Every Otto viewer decodes meshopt.</p>
       {/if}
@@ -944,39 +945,6 @@
     inset-block-end: 12px;
     inset-inline-start: 12px;
     max-width: calc(100% - 24px);
-  }
-  .tabs {
-    display: flex;
-    gap: 16px;
-    padding: 0 16px;
-    border-block-end: 1px solid var(--border);
-    min-height: 40px;
-    align-items: stretch;
-  }
-  .tabs button {
-    appearance: none;
-    border: 0;
-    border-block-end: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-m);
-    padding: 0 2px;
-    cursor: pointer;
-  }
-  .tabs button.active {
-    color: var(--text);
-    border-block-end-color: var(--accent);
-    font-weight: 600;
-  }
-  .tabs button:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
-  }
-  .count {
-    color: var(--text-dim);
-    font-weight: 400;
-    margin-inline-start: 2px;
   }
   .panel {
     flex: 1;

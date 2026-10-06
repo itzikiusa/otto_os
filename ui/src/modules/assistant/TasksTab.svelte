@@ -12,6 +12,7 @@
   import { TASK_KIND, groupTasks, taskStateLabel, taskTone } from './model';
   import { whenLabel } from './format';
   import type { AssistantTask } from '../../lib/api/types';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     onopenthread: (id: string) => void;
@@ -69,11 +70,7 @@
   {:else if tasks.state === 'unsupported'}
     <EmptyState icon="check" title="Tasks aren’t available yet" body="This daemon doesn’t have the assistant’s task board. Update Otto to track reminders and long jobs here." />
   {:else if tasks.state === 'error' && !tasks.data.length}
-    <div class="error" role="alert">
-      <Icon name="warning" size={14} />
-      <div class="error-t"><strong>Couldn’t load tasks.</strong><span class="dim">{tasks.error}</span></div>
-      <button class="btn small" onclick={() => void assistant.loadTasks()}>Retry</button>
-    </div>
+    <LoadState variant="compact" what="tasks" error={tasks.error || 'No details were reported.'} empty onretry={() => void assistant.loadTasks()} />
   {:else if total === 0}
     <EmptyState icon="check" title="No tasks yet" body="Ask Otto for something that takes a while — “find me a cheaper flight”, “remind me at 5” — and it shows up here while it runs." />
   {:else}
@@ -107,7 +104,7 @@
 
 <style>
   .tasks {
-    max-width: 820px;
+    max-width: var(--prose-readable);
     padding: 18px 20px 32px;
     display: flex;
     flex-direction: column;

@@ -130,14 +130,47 @@ it switches content:
 - When a tab is addressable, the tab is a **route** (`#/insights/health`), so
   back/forward and deep links work.
 - A segmented control that picks a *value* (List | Graph, Desktop | Tablet |
-  Phone) uses `aria-pressed` on each button instead of tab roles.
+  Phone, Unstaged | Staged) uses `aria-pressed` on each button instead of tab
+  roles, inside `role="group"` + `aria-label`. `class:active` alone is
+  invisible to VoiceOver — `ui-guards` fails it (`segmented-state`). A group of
+  plain ACTIONS (Set all to Viewer | Editor | Admin) has no `active` and needs
+  neither; keep a destructive action out of such a group.
 - Tab counts go after the label in `--text-dim` (`Pending 3`), not in a
   coloured bubble, unless the count means "needs you" (then use `--warning`).
 - Selection is shown by the surface lift of `.segmented > .active`. Don't use
   the accent colour, and **never green** (green means success).
-- **Keyboard:** tablists should support ←/→ (and Home/End) between tabs. Most
-  local implementations don't yet. **TBD:** a shared `Tabs` component with
-  roving tabindex. Until then, add arrow keys when you build a new tablist.
+- **Keyboard:** tablists support ←/→ (visual direction, so RTL flips) and
+  Home/End between tabs, with a roving tabindex (`lib/tabKeys.ts`).
+
+**In-pane tab strips: `Tabs`** (`lib/components/Tabs.svelte`). A strip of
+views inside a pane or drawer (Messages / Send / Attributes, Overview / Logs /
+Manifest) is `<Tabs>`, not a local `.tabs` style. It is the one underline
+look: dim labels, the selected one in `--text` over a 2 px accent underline on
+the strip's hairline, `role="tablist"` / `role="tab"` / `aria-selected`,
+roving focus with arrow keys, disabled tabs skipped.
+
+| Prop | Notes |
+|---|---|
+| `tabs` | `{ id, label, icon?, count?, disabled?, title? }[]`. `count` renders after the label in `--text-dim`; `title` says why a tab is disabled. |
+| `value` + `onchange(id)` | `onchange` is the one place the view switches (pointer and keyboard). |
+| `label` | The tablist's `aria-label`. |
+| `idBase` | Tab ids become `{idBase}-tab-{id}` with `aria-controls="{idBase}-panel-{id}"`; give the panel `role="tabpanel"`, that id and `aria-labelledby`. |
+| `size` | `'m'` (default) or `'s'` for dense drawers. |
+| `activate` | `'focus'` (default), `'click'` when the switch is async or can be refused, `'manual'` (Enter/Space select). |
+| `trailing` | A snippet for controls at the end of the strip (outside the tablist). |
+
+```svelte
+<Tabs label="Queue details" idBase="sqs" value={tab} onchange={(id) => (tab = id)}
+      tabs={[{ id: 'messages', label: 'Messages' }, { id: 'send', label: 'Send', disabled: !canSend, title: 'Needs Edit on SQS' }]} />
+<div role="tabpanel" id="sqs-panel-{tab}" aria-labelledby="sqs-tab-{tab}">…</div>
+```
+
+Document tabs with a close button (open clusters, open notes, query tabs) are
+a different control and keep their own strip. `ui-guards` ratchets every other
+`role="tablist"` outside `lib/components` (`local-tablist`; a `.segmented`
+view switch is exempt only when it wires `lib/tabKeys` — the class alone is
+not): migrate a strip when you touch it. A tablist owns only tabs — put other
+controls in `trailing`.
 
 ## 4. Chips, badges and status
 
@@ -448,7 +481,14 @@ four.
   - raw detail in a dim second line
 - A failed page load is an inline error, not a toast.
 
-**The shared state components: use them, don't hand-roll an error block**
+**The shared state components: use them, don't hand-roll an error block.**
+A failed load inside an `{#if}` chain that already handles loading and empty
+is still `LoadState`: pass `error` and `empty` (`<LoadState what="signals"
+error={err} empty onretry={load} />`) and it renders only the error view —
+`variant="compact"` in a narrow rail. `ui-guards` ratchets every
+`…Retry</button>` outside `lib/components` (`inline-retry`); a Retry for a
+failed *action* (a send, a save banner) is not a load error, keep it and let
+the ratchet record it.
 
 | Component | Use |
 |---|---|
@@ -464,20 +504,26 @@ four.
 </LoadState>
 ```
 
-## 12. Planned primitives (TBD)
+## 12. Primitives: built and planned
 
-Proposed by the code audit and not built yet. **Don't reference them until they
-exist.** Build them in `lib/components/` when the first feature needs one, and
-update this doc:
+**Built** — use these; their sections above are the reference:
+
+| Primitive | Replaces |
+|---|---|
+| `Badge` (`lib/components/Badge.svelte`: `tone`, `variant`, `size`, `dot`) | `.chip` variants and local pill styles (`local-pill-class` ratchet) |
+| `Switch` (`lib/components/Switch.svelte`: `checked`, `onchange`, `label`, `tone`) | `.pill-toggle` and local toggles; a binary setting is a Switch, not a checkbox |
+| `Tabs` (`lib/components/Tabs.svelte`, [§3](#3-tabs-and-segmented-controls)) | local in-pane tab strips (`local-tablist` ratchet) |
+| `LoadState` / `EmptyState tone="error"` ([§11](#11-empty-loading-and-error-states)) | hand-rolled "Couldn't load + Retry" blocks (`inline-retry` ratchet) |
+
+**Planned** — proposed by the code audit and not built yet. **Don't reference
+them until they exist.** Build them in `lib/components/` when the first feature
+needs one, and update this doc:
 
 | Primitive | Replaces |
 |---|---|
 | `Button` / `IconButton` (required `label` → `aria-label` plus tooltip) | `.btn` / `.icon-btn` classes (keep the classes as the implementation) |
-| `Badge` (`tone`, `variant`, `size`) | `.chip` variants and 358 local pill styles; generalise `McpPill` |
-| `Tabs` (roving tabindex, arrow keys) | 81 local tab styles |
-| `Switch` (`role="switch"`) | `.pill-toggle`, 95 local toggles |
 | `Segmented` (radiogroup) | `.segmented` without ARIA |
 | `Drawer` | `AwsDrawer`, `RefineDrawer`, `ResourceDrawer`, `RulesDrawer` |
-| `ErrorState`, `Spinner` / `Loading` | 127 local error blocks, 23 spinners |
+| `Spinner` / `Loading` | local spinners (the global `.spinner` covers most) |
 | `DataTable` | 51 locally styled `<table>` elements |
 | `use:floating` action | The per-component clamp code behind ctxMenu, NamespacePicker and the git ref popover |

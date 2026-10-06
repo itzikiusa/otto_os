@@ -33,6 +33,10 @@ use serde_json::Value;
 use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
+// The review engine's pure core lives in otto-review; re-exported so the
+// `crate::modules::…` paths other engines use keep resolving.
+pub use otto_review::engine::*;
+use otto_review::worktree::{teardown_pr_worktree, PrWorktree};
 
 /// Reload identity and workspace authority at the actual input boundary. A
 /// session owner still needs Editor membership to type into that workspace.
@@ -66,19 +70,44 @@ async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Result<Session
     Ok(session)
 }
 
+/// Who is typing into a session through the REST fan-out routes: the person
+/// the credential belongs to, and — when the credential is an agent
+/// session's own token — that session (S11-305). An agent caller reaches only
+/// itself and the workers it opened, and what it sends is recorded as
+/// agent-originated, never as the person's message.
+#[derive(Clone, Copy)]
+struct Typist<'a> {
+    user_id: &'a Id,
+    agent: Option<&'a Id>,
+}
+
+impl<'a> Typist<'a> {
+    fn new(user_id: &'a Id, auth: &'a otto_core::auth::AuthContext) -> Self {
+        Self {
+            user_id,
+            agent: crate::feature_guard::agent_session_of(auth),
+        }
+    }
+}
+
 /// Send both the paste and its delayed submit through current authorization.
-async fn submit_session_text(ctx: &ServerCtx, user_id: &Id, id: &Id, text: &str) -> Result<()> {
-    input_session(ctx, user_id, id).await?;
+async fn submit_session_text(ctx: &ServerCtx, who: Typist<'_>, id: &Id, text: &str) -> Result<()> {
+    let user_id = who.user_id;
+    let session = input_session(ctx, user_id, id).await?;
+    agent_input_rule(who.agent, &session.id, &session.meta, true)?;
     ctx.manager
         .human_submit_text_checked(id, user_id, false, text, || async {
             input_session(ctx, user_id, id).await.map(|_| ())
         })
         .await?;
-    ctx.manager.record_user_message(id, text).await;
+    match who.agent {
+        Some(from) => ctx.manager.record_agent_message(id, from, text).await,
+        None => ctx.manager.record_user_message(id, text).await,
+    }
     Ok(())
 }
 
-async fn input_agents(ctx: &ServerCtx, user_id: &Id, ws_id: &Id) -> Result<Vec<Session>> {
+async fn input_agents(ctx: &ServerCtx, who: Typist<'_>, ws_id: &Id) -> Result<Vec<Session>> {
     let mut allowed = Vec::new();
     for session in ctx.manager.list_by_workspace(ws_id).await? {
         if session.kind == SessionKind::Agent
@@ -88,7 +117,8 @@ async fn input_agents(ctx: &ServerCtx, user_id: &Id, ws_id: &Id) -> Result<Vec<S
                     | otto_core::domain::SessionStatus::Working
                     | otto_core::domain::SessionStatus::Idle
             )
-            && input_session(ctx, user_id, &session.id).await.is_ok()
+            && agent_input_rule(who.agent, &session.id, &session.meta, true).is_ok()
+            && input_session(ctx, who.user_id, &session.id).await.is_ok()
         {
             allowed.push(session);
         }
@@ -98,15 +128,15 @@ async fn input_agents(ctx: &ServerCtx, user_id: &Id, ws_id: &Id) -> Result<Vec<S
 
 async fn broadcast_sessions(
     ctx: &ServerCtx,
-    user_id: &Id,
+    who: Typist<'_>,
     ws_id: &Id,
     text: &str,
     targets: Option<&[Id]>,
 ) -> Result<Vec<Id>> {
     let mut sent = Vec::new();
-    for session in input_agents(ctx, user_id, ws_id).await? {
+    for session in input_agents(ctx, who, ws_id).await? {
         if targets.is_none_or(|ids| ids.contains(&session.id))
-            && submit_session_text(ctx, user_id, &session.id, text)
+            && submit_session_text(ctx, who, &session.id, text)
                 .await
                 .is_ok()
         {
@@ -582,13 +612,62 @@ impl otto_product::ProductCtx for ServerCtx {
         Some(&self.swarm_repo)
     }
     fn attachments_root(&self) -> Option<std::path::PathBuf> {
-        Some(self.data_dir.join(crate::product_media::ATTACH_ROOT))
+        Some(self.data_dir.join(otto_product::media::ATTACH_ROOT))
     }
     fn mockup_scratch_root(&self) -> Option<std::path::PathBuf> {
         Some(self.data_dir.join(crate::mockup_assist::SCRATCH_ROOT))
     }
     fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
         Some(&self.attachment_repo)
+    }
+    fn workspace_root<'a>(
+        &'a self,
+        ws: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>> {
+        Box::pin(async move { self.workspaces.get(ws).await.ok().map(|w| w.root_path) })
+    }
+    fn stop_story_agents<'a>(
+        &'a self,
+        story_id: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            // Rewrite / test-generation / plan sessions have no agent row:
+            // trip their story-keyed cancel flags (so recovery does not
+            // respawn) and kill every live session attributed to the story.
+            // (Killed last, after the analysis agents' flags are tripped too.)
+            otto_product::run::signal_story_cancels(&self.product_agent_cancels, story_id);
+            let analyses = self
+                .product_repo
+                .list_analyses(story_id)
+                .await
+                .unwrap_or_default();
+            for a in analyses {
+                let agents = self
+                    .product_repo
+                    .list_analysis_agents(&a.id)
+                    .await
+                    .unwrap_or_default();
+                for ag in agents {
+                    if !matches!(ag.status.as_str(), "running" | "waiting" | "pending") {
+                        continue;
+                    }
+                    otto_product::run::signal_cancel(&self.product_agent_cancels, &ag.id);
+                    if let Some(sid) = ag.session_id.as_ref() {
+                        let _ = self.manager.kill_session(sid).await;
+                    }
+                }
+            }
+            if let Ok(story) = self.product_repo.get_story(story_id).await {
+                let live = self
+                    .manager
+                    .list_live_by_meta(&story.workspace_id, None, "work.story_id", story_id)
+                    .await
+                    .unwrap_or_default();
+                for s in live {
+                    let _ = self.manager.kill_session(&s.id).await;
+                }
+            }
+        })
     }
 }
 
@@ -619,6 +698,96 @@ impl otto_canvas::CanvasCtx for ServerCtx {
     }
 }
 
+impl otto_canvas::CanvasAssistCtx for ServerCtx {
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    async fn resolve_provider(
+        &self,
+        ws: Option<&otto_core::domain::Workspace>,
+        requested: Option<&str>,
+    ) -> otto_core::Result<String> {
+        ServerCtx::resolve_provider(self, ws, requested).await
+    }
+    fn ensure_trusted(&self, provider: &str, cwd: &str) {
+        otto_sessions::trust::ensure_trusted(provider, cwd);
+    }
+    fn ensure_trusted_scratch(&self, provider: &str, root: &std::path::Path, cwd: &str) {
+        otto_sessions::trust::ensure_trusted_scratch(provider, root, cwd);
+    }
+    async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
+        &self,
+        t: otto_canvas::AgentTurn<'_>,
+        on_ready: F,
+    ) -> otto_core::Result<(String, otto_core::Id)> {
+        crate::agent_session::run_session_turn(
+            self,
+            t.ws,
+            t.user,
+            t.existing,
+            t.title,
+            t.cwd,
+            t.provider,
+            t.meta,
+            t.prompt,
+            crate::agent_session::STUCK_IDLE,
+            on_ready,
+        )
+        .await
+        .map_err(|e| e.0)
+    }
+    async fn kill_session(&self, sid: &otto_core::Id) -> otto_core::Result<()> {
+        self.manager.kill_session(sid).await
+    }
+}
+
+impl otto_insights::InsightsCtx for ServerCtx {
+    fn library(&self) -> &otto_context::Library {
+        &self.context_library
+    }
+    fn manager(&self) -> &Arc<otto_sessions::SessionManager> {
+        &self.manager
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    async fn resolve_provider(
+        &self,
+        ws: Option<&otto_core::domain::Workspace>,
+        requested: Option<&str>,
+    ) -> otto_core::Result<String> {
+        ServerCtx::resolve_provider(self, ws, requested).await
+    }
+    async fn submit_prompt(&self, sid: &otto_core::Id, prompt: &str) -> bool {
+        if !crate::review_session::wait_for_tui(&self.manager, sid).await {
+            return false;
+        }
+        let _ = self
+            .manager
+            .input(sid, &crate::review_session::bracketed_paste(prompt))
+            .await;
+        tokio::time::sleep(crate::review_session::PASTE_TO_ENTER).await;
+        // Same swallowed-Enter guard as the assistant path (S4-19c): a TUI
+        // still digesting the paste can eat the first Enter, leaving the run
+        // idle behind a "generating" banner for the whole timeout.
+        let before = self.manager.live_handle(sid).map(|h| h.last_output_at());
+        let _ = self.manager.input(sid, b"\r").await;
+        if !crate::review_session::dispatched(&self.manager, sid, before).await {
+            let _ = self.manager.input(sid, b"\r").await;
+        }
+        true
+    }
+}
+
 impl otto_design::DesignCtx for ServerCtx {
     /// A per-request handle over the shared pool, `<data>/design` and the
     /// event bus — no ServerCtx field, so the test harnesses that build a
@@ -631,6 +800,61 @@ impl otto_design::DesignCtx for ServerCtx {
     }
     fn validate_content(&self, format: &str, bytes: &[u8]) -> otto_core::Result<()> {
         crate::design_hall::validate_content(format, bytes)
+    }
+}
+
+impl otto_design_assist::DesignAssistCtx for ServerCtx {
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    fn product_repo(&self) -> &otto_state::ProductRepo {
+        &self.product_repo
+    }
+    fn improve_engine(&self) -> &Arc<otto_improve::ImprovementEngine> {
+        &self.improve_engine
+    }
+    fn memory(&self) -> &Arc<otto_memory::MemoryService> {
+        &self.memory
+    }
+    async fn resolve_provider_or_fallback(
+        &self,
+        ws: Option<&otto_core::domain::Workspace>,
+        requested: Option<&str>,
+        site: &'static str,
+    ) -> String {
+        ServerCtx::resolve_provider_or_fallback(self, ws, requested, site).await
+    }
+    async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
+        &self,
+        t: otto_design_assist::AgentTurn<'_>,
+        on_ready: F,
+    ) -> otto_core::Result<(String, otto_core::Id)> {
+        crate::agent_session::run_session_turn_with(
+            self,
+            t.ws,
+            t.user,
+            t.existing,
+            t.title,
+            t.cwd,
+            t.provider,
+            t.meta,
+            t.prompt,
+            t.stuck_after,
+            crate::agent_session::TurnOpts {
+                done_file: t.done_file,
+                quiet_done: t.quiet_done,
+                ..Default::default()
+            },
+            on_ready,
+        )
+        .await
+        .map_err(|e| e.0)
+    }
+    async fn kill_session(&self, sid: &otto_core::Id) -> otto_core::Result<()> {
+        self.manager.kill_session(sid).await
     }
 }
 
@@ -757,32 +981,35 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/sessions/open", post(open_agent_session))
         .route(
             "/workspaces/{id}/product/stories/{sid}/analyze",
-            post(analyze),
+            post(otto_product::analysis::analyze::<ServerCtx>),
         )
         // Curated analysis-lens catalog the Analysis tab renders as configurable
         // checks. Read-only (Viewer); the prefix policy gates it as Product/View.
-        .route("/workspaces/{id}/product/lenses", get(product_lenses))
+        .route(
+            "/workspaces/{id}/product/lenses",
+            get(otto_product::analysis::product_lenses::<ServerCtx>),
+        )
         .route(
             "/workspaces/{id}/product/stories/{sid}/rewrite",
-            post(rewrite),
+            post(otto_product::analysis::rewrite::<ServerCtx>),
         )
         .route(
             "/workspaces/{id}/product/stories/{sid}/testcases/generate",
-            post(generate_tests),
+            post(otto_product::analysis::generate_tests::<ServerCtx>),
         )
         .route(
             "/workspaces/{id}/product/stories/{sid}/plan/generate",
-            post(generate_plan),
+            post(otto_product::analysis::generate_plan::<ServerCtx>),
         )
         .route(
             "/workspaces/{id}/product/stories/{sid}/plan",
-            post(save_plan),
+            post(otto_product::analysis::save_plan::<ServerCtx>),
         )
         // Product → Swarm: turn a refined story into a runnable swarm project.
         // Flat item route (resolves the workspace from the owning story).
         .route(
             "/product/stories/{sid}/to-swarm",
-            post(crate::product_swarm::story_to_swarm),
+            post(otto_product::swarm::story_to_swarm::<ServerCtx>),
         )
         // Discovery: launch a repeatable INVESTIGATION swarm from a story (Editor),
         // then list/read the runs (Viewer). Discovery projects are NOT story-linked
@@ -790,20 +1017,20 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // the run row carries the linkage.
         .route(
             "/product/stories/{sid}/discover",
-            post(crate::product_swarm::discover_story),
+            post(otto_product::swarm::discover_story::<ServerCtx>),
         )
         .route(
             "/product/stories/{sid}/discovery-runs",
-            get(crate::product_swarm::list_discovery_runs),
+            get(otto_product::swarm::list_discovery_runs::<ServerCtx>),
         )
         // Product → Canvas: list the Canvas scenes linked to a story (Viewer).
         .route(
             "/product/stories/{sid}/linked-canvases",
-            get(crate::product_swarm::list_linked_canvases),
+            get(otto_product::swarm::list_linked_canvases::<ServerCtx>),
         )
         .route(
             "/product/discovery-runs/{rid}",
-            get(crate::product_swarm::get_discovery_run),
+            get(otto_product::swarm::get_discovery_run::<ServerCtx>),
         )
         // Talk-to-agent refinement: a conversational thread on a story. Create +
         // list its threads (story-scoped), then read/converse/archive a thread
@@ -811,19 +1038,20 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // runs the agent inline and may write a new `suggested` story version.
         .route(
             "/product/stories/{sid}/refinement-threads",
-            post(crate::product_refine::create_thread).get(crate::product_refine::list_threads),
+            post(otto_product::refine::create_thread::<ServerCtx>)
+                .get(otto_product::refine::list_threads::<ServerCtx>),
         )
         .route(
             "/product/refinement-threads/{tid}",
-            get(crate::product_refine::get_thread),
+            get(otto_product::refine::get_thread::<ServerCtx>),
         )
         .route(
             "/product/refinement-threads/{tid}/messages",
-            post(crate::product_refine::send_message),
+            post(otto_product::refine::send_message::<ServerCtx>),
         )
         .route(
             "/product/refinement-threads/{tid}/archive",
-            post(crate::product_refine::archive_thread),
+            post(otto_product::refine::archive_thread::<ServerCtx>),
         )
         // Discovery Chat: a lightweight conversational agent on a story (works
         // from an empty draft) for early discovery/research. Each turn assembles
@@ -831,33 +1059,38 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // applies explicitly. Covered by the `/product/` policy prefix.
         .route(
             "/product/stories/{sid}/discovery-chats",
-            post(crate::product_chat::create_chat).get(crate::product_chat::list_chats),
+            post(otto_product::chat::create_chat::<ServerCtx>)
+                .get(otto_product::chat::list_chats::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}",
-            get(crate::product_chat::get_chat),
+            get(otto_product::chat::get_chat::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}/messages",
-            post(crate::product_chat::send_message),
+            post(otto_product::chat::send_message::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}/archive",
-            post(crate::product_chat::archive_chat),
+            post(otto_product::chat::archive_chat::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}/apply",
-            post(crate::product_chat::apply_action),
+            post(otto_product::chat::apply_action::<ServerCtx>),
         )
-        // Canvas agent-assist: turn a prompt into diagram blocks (needs the
-        // orchestrator, so it lives here rather than in the otto-canvas crate).
+        // Canvas agent-assist: turn a prompt into diagram blocks. The engine is
+        // otto-canvas's; the agent turn runs through `CanvasAssistCtx` (above).
         .route(
             "/canvas/scenes/{id}/assist",
-            post(crate::canvas_assist::assist_scene),
+            post(otto_canvas::assist::assist_scene::<ServerCtx>),
+        )
+        .route(
+            "/canvas/scenes/{id}/assist/stop",
+            post(otto_canvas::assist::stop_assist::<ServerCtx>),
         )
         .route(
             "/canvas/assist/preview",
-            post(crate::canvas_assist::assist_preview),
+            post(otto_canvas::assist::assist_preview::<ServerCtx>),
         )
         // Session ↔ Canvas scene references — needs the SessionManager to resolve
         // a session's workspace, so it lives here rather than in otto-canvas.
@@ -866,21 +1099,21 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
         .route(
             "/product/stories/{sid}/attachments",
-            post(crate::product_media::upload_attachment)
+            post(otto_product::media::upload_attachment::<ServerCtx>)
                 .layer(DefaultBodyLimit::max(40 * 1024 * 1024))
-                .get(crate::product_media::list_attachments),
+                .get(otto_product::media::list_attachments::<ServerCtx>),
         )
         .route(
             "/product/attachments/{aid}",
-            get(crate::product_media::serve_attachment)
-                .patch(crate::product_media::patch_attachment)
-                .delete(crate::product_media::delete_attachment),
+            get(otto_product::media::serve_attachment::<ServerCtx>)
+                .patch(otto_product::media::patch_attachment::<ServerCtx>)
+                .delete(otto_product::media::delete_attachment::<ServerCtx>),
         )
         // Design arena: save an edited artifact from the UI editor. Same 40 MB
         // body cap as the upload (base64 inflation over the 25 MB raw cap).
         .route(
             "/product/attachments/{aid}/content",
-            put(crate::product_media::put_attachment_content)
+            put(otto_product::media::put_attachment_content::<ServerCtx>)
                 .layer(DefaultBodyLimit::max(40 * 1024 * 1024)),
         )
         // In-place design agent: generate / refine an artifact (html | mermaid |
@@ -910,28 +1143,28 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         )
         .route(
             "/product/attachments/{aid}/annotations",
-            get(crate::product_media::list_annotations)
-                .post(crate::product_media::create_annotation),
+            get(otto_product::media::list_annotations::<ServerCtx>)
+                .post(otto_product::media::create_annotation::<ServerCtx>),
         )
         .route(
             "/product/annotations/{id}",
-            patch(crate::product_media::patch_annotation)
-                .delete(crate::product_media::delete_annotation),
+            patch(otto_product::media::patch_annotation::<ServerCtx>)
+                .delete(otto_product::media::delete_annotation::<ServerCtx>),
         )
         // Approve lives here (not in otto-product) so it can trigger self-improvement.
         .route(
             "/product/testcase-runs/{rid}/approve",
-            post(approve_testcase_run),
+            post(otto_product::analysis::approve_testcase_run::<ServerCtx>),
         )
         // Per-agent retry: re-run a single failed/stuck analysis lens agent.
         .route(
             "/product/analyses/{aid}/agents/{agent_id}/retry",
-            post(retry_analysis_agent),
+            post(otto_product::analysis::retry_analysis_agent::<ServerCtx>),
         )
         // Per-agent stop: kill a running/waiting analysis agent on demand.
         .route(
             "/product/analyses/{aid}/agents/{agent_id}/stop",
-            post(stop_analysis_agent),
+            post(otto_product::analysis::stop_analysis_agent::<ServerCtx>),
         )
 }
 
@@ -939,6 +1172,7 @@ async fn orchestrate(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<OrchestrateReq>,
 ) -> ApiResult<Json<OrchestrateResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -946,12 +1180,27 @@ async fn orchestrate(
     // The planner spawns a real claude session in the workspace root —
     // pre-trust the folder so the PTY never stalls on the trust dialog.
     otto_sessions::trust::ensure_trusted("claude", &ws.root_path);
-    let sessions = input_agents(&ctx, &user.id, &ws_id)
+    let octx = orchestrator_context(&ctx, Typist::new(&user.id, &auth), &ws_id, ws).await?;
+    let resp = ctx
+        .orchestrator
+        .orchestrate(req, octx)
         .await
         .map_err(ApiError)?;
+    Ok(Json(resp))
+}
+
+/// The workspace facts a plan is planned AND validated against: the caller's
+/// live sessions + connections and the live provider registry.
+async fn orchestrator_context(
+    ctx: &ServerCtx,
+    who: Typist<'_>,
+    ws_id: &Id,
+    ws: Workspace,
+) -> ApiResult<OrchestratorContext> {
+    let sessions = input_agents(ctx, who, ws_id).await.map_err(ApiError)?;
     let connections = ctx
         .connections
-        .list_for(&ws_id, &user.id)
+        .list_for(ws_id, who.user_id)
         .await
         .map_err(ApiError)?;
     // Effective default agent for this workspace: per-workspace setting, else
@@ -965,35 +1214,36 @@ async fn orchestrate(
         otto_core::provider::workspace_default(&ws.settings),
         otto_core::provider::global_default(global_default.as_ref()),
     ]);
-    let resp = ctx
-        .orchestrator
-        .orchestrate(
-            req,
-            OrchestratorContext {
-                sessions,
-                connections,
-                cwd: ws.root_path,
-                default_provider,
-                // Live registry (builtins + custom providers) so the planner can
-                // spawn any configured provider by name, e.g. "open grok session".
-                available_providers: ctx.manager.providers().names(),
-            },
-        )
-        .await
-        .map_err(ApiError)?;
-    Ok(Json(resp))
+    Ok(OrchestratorContext {
+        sessions,
+        connections,
+        cwd: ws.root_path,
+        default_provider,
+        // Live registry (builtins + custom providers) so the planner can
+        // spawn any configured provider by name, e.g. "open grok session".
+        available_providers: ctx.manager.providers().names(),
+    })
 }
 
 async fn orchestrate_execute(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<ExecutePlanReq>,
 ) -> ApiResult<Json<ExecuteResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+    // The plan comes back from the client, which may have edited (or forged)
+    // it since `/orchestrate` validated it — validate again against the live
+    // workspace before anything is spawned or typed.
+    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let octx = orchestrator_context(&ctx, Typist::new(&user.id, &auth), &ws_id, ws).await?;
+    otto_orchestrator::parse::validate_plan(&req.plan, &octx, &octx.allowed_providers())
+        .map_err(ApiError)?;
     let helper = ExecHelper {
         ctx: ctx.clone(),
         ws_id: ws_id.clone(),
+        agent: crate::feature_guard::agent_session_of(&auth).cloned(),
         user,
     };
     Ok(Json(execute(&req.plan, &helper, &helper).await))
@@ -1007,6 +1257,7 @@ async fn workspace_broadcast(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::BroadcastReq>,
 ) -> ApiResult<Json<otto_core::api::BroadcastResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -1016,7 +1267,8 @@ async fn workspace_broadcast(
     }
     // Treat an empty target list the same as "no targets" → broadcast to all.
     let targets = req.session_ids.filter(|ids| !ids.is_empty());
-    let session_ids = broadcast_sessions(&ctx, &user.id, &ws_id, text, targets.as_deref())
+    let who = Typist::new(&user.id, &auth);
+    let session_ids = broadcast_sessions(&ctx, who, &ws_id, text, targets.as_deref())
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::BroadcastResp { session_ids }))
@@ -1031,6 +1283,7 @@ async fn workspace_relay(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::RelayReq>,
 ) -> ApiResult<Json<otto_core::api::RelayResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -1038,9 +1291,8 @@ async fn workspace_relay(
     if text.is_empty() {
         return Err(ApiError(Error::Invalid("relay text is empty".into())));
     }
-    let candidates = input_agents(&ctx, &user.id, &ws_id)
-        .await
-        .map_err(ApiError)?;
+    let who = Typist::new(&user.id, &auth);
+    let candidates = input_agents(&ctx, who, &ws_id).await.map_err(ApiError)?;
     let addressable: Vec<_> = candidates
         .iter()
         .map(|s| otto_sessions::names::Addressable {
@@ -1063,7 +1315,7 @@ async fn workspace_relay(
     let resolved = otto_sessions::names::resolve_address(text, &addressable);
     let mut session_ids = Vec::new();
     for id in &resolved.targets {
-        if submit_session_text(&ctx, &user.id, id, resolved.text.trim())
+        if submit_session_text(&ctx, who, id, resolved.text.trim())
             .await
             .is_ok()
         {
@@ -1082,587 +1334,24 @@ async fn workspace_relay(
     }))
 }
 
-/// `GET /workspaces/{id}/product/lenses` — the curated analysis-lens catalog
-/// the Analysis tab renders as configurable checks. Read-only: Viewer role.
-async fn product_lenses(
-    Path(ws_id): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<otto_core::api::ProductLens>>> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(otto_product::analysis_lenses()))
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/analyze` — create a
-/// `ProductAnalysis` row and spawn the multi-agent fan-out in the background.
-async fn analyze(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<otto_product::types::AnalyzeReq>,
-) -> ApiResult<Json<otto_state::ProductAnalysis>> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    // Load story and verify it belongs to the requested workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check the workspace budget before
-    // spawning any agent sessions. Mirrors the review start_review gate exactly.
-    {
-        let verdict = crate::routes::usage::check_budget(
-            &ctx, &ws_id, "", // provider resolved below; gate workspace-level cap here
-        )
-        .await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — analysis blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring the
-    // `orchestrate` handler exactly.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-
-    // Build the flat AgentSpec list: one entry per (lens × provider). Each lens
-    // can be analyzed by multiple providers (claude/codex/agy), each as its own
-    // real, openable session — exactly like a PR-review fan-out.
-    let specs: Vec<crate::product_run::AgentSpec> = if !req.agents.is_empty() {
-        req.agents
-            .into_iter()
-            .flat_map(|a| {
-                let name = a.name.clone().unwrap_or_else(|| a.skill.clone());
-                // An agent with no providers defaults to the default provider.
-                let providers = if a.providers.is_empty() {
-                    vec![default_provider.clone()]
-                } else {
-                    a.providers.clone()
-                };
-                let skill = a.skill.clone();
-                let model = a.model.clone();
-                providers
-                    .into_iter()
-                    .filter(|p| !p.trim().is_empty())
-                    .map(move |provider| crate::product_run::AgentSpec {
-                        provider,
-                        model: model.clone(),
-                        skill: skill.clone(),
-                        name: name.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    } else {
-        // Default three-lens set, each on the resolved default provider.
-        [
-            ("po-story-overview", "PO Overview"),
-            ("story-architecture-overview", "Architecture"),
-            ("story-clarifying-questions", "Clarifying Questions"),
-        ]
-        .iter()
-        .map(|(skill, name)| crate::product_run::AgentSpec {
-            provider: default_provider.clone(),
-            model: None,
-            skill: skill.to_string(),
-            name: name.to_string(),
-        })
-        .collect()
-    };
-
-    // Summarizer provider: request override → default provider.
-    let summarizer_provider = req
-        .summarizer_provider
-        .clone()
-        .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| default_provider.clone());
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Latest source version id for the analysis row.
-    let source_version_id = ctx
-        .product_repo
-        .latest_source_version(&sid)
-        .await
-        .map_err(ApiError)?
-        .map(|v| v.id);
-
-    // Persist the analysis row (status = "running").
-    let analysis = ctx
-        .product_repo
-        .create_analysis(otto_state::NewAnalysis {
-            story_id: sid.clone(),
-            source_version_id,
-            status: "running".to_string(),
-            created_by: user.id.clone(),
-        })
-        .await
-        .map_err(ApiError)?;
-
-    // Spawn the fan-out; errors are isolated inside run_analysis. Each lens
-    // (and the summarizer) runs as a real session on behalf of the current
-    // user, mirroring the PR-review mechanism.
-    tokio::spawn(crate::product_run::run_analysis(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid.clone(),
-        analysis.id.clone(),
-        specs,
-        summarizer_provider,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(Json(analysis))
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/rewrite` — spawn the writer
-/// agent as a background task and return 202 Accepted immediately.
-async fn rewrite(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    body: Option<Json<otto_product::types::RewriteReq>>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    let req = body.map(|b| b.0).unwrap_or_default();
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
-    {
-        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — rewrite blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring analyze.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-    let provider = req.provider.clone().unwrap_or(default_provider);
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Spawn background task; errors are isolated inside run_rewrite.
-    tokio::spawn(crate::product_run::run_rewrite(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid,
-        provider,
-        req.model,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/testcases/generate` — spawn
-/// the test-case generation agent as a background task and return 202 Accepted.
-async fn generate_tests(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    body: Option<Json<otto_product::types::GenerateTestsReq>>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    let req = body.map(|b| b.0).unwrap_or_default();
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
-    {
-        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — test generation blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-    let provider = req.provider.clone().unwrap_or(default_provider);
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Spawn background task; errors are isolated inside run_generate_tests.
-    tokio::spawn(crate::product_run::run_generate_tests(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid,
-        provider,
-        req.model,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/plan/generate` — spawn the
-/// task-breakdown agent as a background task and return 202 Accepted. Mirrors
-/// `rewrite`/`generate_tests`.
-async fn generate_plan(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    body: Option<Json<otto_product::types::GeneratePlanReq>>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    let req = body.map(|b| b.0).unwrap_or_default();
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
-    {
-        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — plan generation blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-
-    // Resolve the planning provider list (multi-agent). Prefer `providers`
-    // (non-empty); else the single back-compat `provider`; else the default.
-    // Blanks are dropped, and an empty result falls back to the default provider.
-    let providers: Vec<String> = {
-        let mut list: Vec<String> = req
-            .providers
-            .iter()
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .collect();
-        if list.is_empty() {
-            list = vec![req
-                .provider
-                .clone()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .unwrap_or_else(|| default_provider.clone())];
-        }
-        list
-    };
-
-    // Summarizer provider: request override → default provider.
-    let summarizer_provider = req
-        .summarizer_provider
-        .clone()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| default_provider.clone());
-
-    // Interactivity: `None` ⇒ non-interactive (the default). `Some(true)` only
-    // when the UI explicitly turned the autonomy toggle OFF.
-    let interactive = req.interactive.unwrap_or(false);
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Spawn background task; errors are isolated inside run_generate_plan.
-    tokio::spawn(crate::product_run::run_generate_plan(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid,
-        providers,
-        summarizer_provider,
-        interactive,
-        req.model,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/plan` — persist PO checkbox
-/// toggles by overwriting the latest `kind="plan"` version's body in place (no
-/// new version, so we never spam the version history). Returns 204 No Content.
-async fn save_plan(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<otto_product::types::SavePlanReq>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Find the latest plan version and overwrite its body in place (preserving
-    // its existing title — reuses the 3-arg update_version_body repo method).
-    let plan = ctx
-        .product_repo
-        .latest_plan_version(&sid)
-        .await
-        .map_err(ApiError)?
-        .ok_or_else(|| ApiError(Error::NotFound("no plan version for story".into())))?;
-
-    ctx.product_repo
-        .update_version_body(&plan.id, &plan.title, &req.body_md)
-        .await
-        .map_err(ApiError)?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `POST /product/testcase-runs/{rid}/approve` — approve all testcases in the
-/// run and trigger a background self-improvement pass on the `story-test-cases`
-/// skill using the PO's review outcomes as the learning signal.
-///
-/// This handler lives in otto-server (not otto-product) so it can access the
-/// `ImprovementEngine`. The otto-product router no longer registers this route
-/// to avoid an axum duplicate-route panic.
-async fn approve_testcase_run(
-    Path(rid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<otto_state::ProductTestcaseRun>> {
-    // Resolve workspace via run → story, then role-check.
-    let run = ctx
-        .product_repo
-        .get_testcase_run(&rid)
-        .await
-        .map_err(ApiError)?;
-    let story = ctx
-        .product_repo
-        .get_story(&run.story_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
-
-    // Flip all testcases in this run to "approved", and mark the run row approved
-    // so clients can read the run's aggregate status (spec: approve "marks the run approved").
-    ctx.product_repo
-        .approve_run_testcases(&rid)
-        .await
-        .map_err(ApiError)?;
-    ctx.product_repo
-        .set_testcase_run(&rid, Some("approved"), None, None)
-        .await
-        .map_err(ApiError)?;
-
-    // Fetch the cases (now approved) for the improvement narrative.
-    let cases = ctx
-        .product_repo
-        .list_testcases(&rid)
-        .await
-        .map_err(ApiError)?;
-
-    // Build the narrative describing what the PO did with the test cases.
-    let narrative = crate::product_run::build_improve_narrative_from_tests(&story, &cases);
-
-    // Spawn background self-improvement — don't block the response.
-    let engine = Arc::clone(&ctx.improve_engine);
-    let ws_id = story.workspace_id.clone();
-    tokio::spawn(async move {
-        if let Err(e) = engine
-            .run_for_narrative(
-                &ws_id,
-                "test-cases",
-                &narrative,
-                &["story-test-cases".to_string()],
-                otto_core::domain::ImprovementTrigger::Manual,
-            )
-            .await
-        {
-            tracing::warn!("test-case skill improvement failed: {e}");
-        }
-    });
-
-    // Return the (now-approved) run row.
-    let updated = ctx
-        .product_repo
-        .get_testcase_run(&rid)
-        .await
-        .map_err(ApiError)?;
-    Ok(Json(updated))
-}
-
-/// `POST /product/analyses/{aid}/agents/{agent_id}/retry` — re-run a single
-/// failed or stuck analysis lens agent without re-running the full analysis.
-///
-/// Resolves the workspace via agent → analysis → story → workspace, performs
-/// an Editor role check, then spawns `retry_analysis_agent` as a background
-/// task and returns 202 Accepted immediately (exactly like a PR-review retry).
-async fn retry_analysis_agent(
-    Path((aid, agent_id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    // Resolve workspace: agent → analysis → story → workspace, then role-check.
-    let analysis = ctx
-        .product_repo
-        .get_analysis(&aid)
-        .await
-        .map_err(ApiError)?;
-    let story = ctx
-        .product_repo
-        .get_story(&analysis.story_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
-
-    // Resolve workspace domain object (needed by run_lens_session → session create).
-    let ws = ctx
-        .workspaces
-        .get(&story.workspace_id)
-        .await
-        .map_err(ApiError)?;
-
-    // Spawn background retry; errors are isolated inside retry_analysis_agent.
-    tokio::spawn(crate::product_run::retry_analysis_agent(
-        ctx.clone(),
-        ws,
-        user.id.clone(),
-        aid,
-        agent_id,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /product/analyses/{aid}/agents/{agent_id}/stop` — stop a running/waiting
-/// analysis agent on demand. Trips its cancel flag (so the recovery loop does NOT
-/// treat the kill as a failure and retry), kills the live session, and marks the
-/// agent errored ("stopped by user"). Idempotent.
-async fn stop_analysis_agent(
-    Path((aid, agent_id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    let analysis = ctx
-        .product_repo
-        .get_analysis(&aid)
-        .await
-        .map_err(ApiError)?;
-    let story = ctx
-        .product_repo
-        .get_story(&analysis.story_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
-
-    // Signal the in-flight recovery loop FIRST so the kill below is seen as
-    // intentional (no auto-retry).
-    crate::product_run::signal_cancel(&ctx.product_agent_cancels, &agent_id);
-
-    // Kill the current live session, if any.
-    if let Ok(agent) = ctx.product_repo.get_analysis_agent(&agent_id).await {
-        if let Some(sid) = agent.session_id.as_ref() {
-            let _ = ctx.manager.kill_session(sid).await;
-        }
-    }
-
-    // Mark terminal so the UI reflects it immediately.
-    let _ = ctx
-        .product_repo
-        .set_agent_status(&agent_id, "error", None, Some("stopped by user"), true)
-        .await;
-
-    Ok(StatusCode::ACCEPTED)
-}
-
 /// Per-request plan executor scoped to one workspace and acting user.
 struct ExecHelper {
     ctx: ServerCtx,
     ws_id: Id,
     user: User,
+    /// The caller's own agent session when the plan arrived on an agent
+    /// credential: its broadcast/command steps reach only that session and its
+    /// workers (S11-305).
+    agent: Option<Id>,
+}
+
+impl ExecHelper {
+    fn typist(&self) -> Typist<'_> {
+        Typist {
+            user_id: &self.user.id,
+            agent: self.agent.as_ref(),
+        }
+    }
 }
 
 impl PlanSpawner for ExecHelper {
@@ -1713,7 +1402,7 @@ impl PlanIo for ExecHelper {
         // Funnel through the one shared implementation so the AI/palette path and
         // the dedicated /broadcast endpoint can't drift. `None` = all live agents.
         Box::pin(async move {
-            broadcast_sessions(&self.ctx, &self.user.id, &self.ws_id, text, None).await
+            broadcast_sessions(&self.ctx, self.typist(), &self.ws_id, text, None).await
         })
     }
 
@@ -1727,7 +1416,7 @@ impl PlanIo for ExecHelper {
             }
             // Submit as a real keypress (paste + Enter), not "{text}\n" in one
             // burst — otherwise bracketed-paste TUIs paste the text but never send.
-            submit_session_text(&self.ctx, &self.user.id, session_id, text).await?;
+            submit_session_text(&self.ctx, self.typist(), session_id, text).await?;
             Ok(())
         })
     }
@@ -1767,149 +1456,6 @@ pub(crate) async fn resolve_provider_remote(
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))?;
     Ok((otto_git::make_provider(&account, token), remote_ref))
-}
-
-/// Render a `DiffResp` into a unified-diff string capped at `cap` chars.
-fn render_diff(diff: &otto_core::api::DiffResp, cap: usize) -> (String, bool) {
-    use otto_core::api::LineOrigin;
-    let mut out = String::with_capacity(cap.min(65536));
-    let mut truncated = false;
-    'outer: for file in &diff.files {
-        let header = format!("--- a/{}\n+++ b/{}\n", file.path, file.path);
-        if out.len() + header.len() > cap {
-            truncated = true;
-            break;
-        }
-        out.push_str(&header);
-        for hunk in &file.hunks {
-            let hunk_header = format!("{}\n", hunk.header);
-            if out.len() + hunk_header.len() > cap {
-                truncated = true;
-                break 'outer;
-            }
-            out.push_str(&hunk_header);
-            for line in &hunk.lines {
-                let prefix = match line.origin {
-                    LineOrigin::Add => '+',
-                    LineOrigin::Del => '-',
-                    LineOrigin::Context => ' ',
-                };
-                let text = format!("{}{}", prefix, line.content);
-                if out.len() + text.len() > cap {
-                    truncated = true;
-                    break 'outer;
-                }
-                out.push_str(&text);
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-            }
-        }
-    }
-    (out, truncated)
-}
-
-/// Append every `references/*.md` file sitting beside `skill_md` to `out`
-/// (sorted for determinism), so agents that cannot read files still get the
-/// skill's full method. Best-effort: a missing/unreadable dir is ignored.
-#[allow(clippy::disallowed_methods)] // pre-existing sync fs reached from async code without offload (perf2 N3 follow-up)
-fn append_skill_references(out: &mut String, skill_md: &std::path::Path) {
-    let Some(refs_dir) = skill_md.parent().map(|d| d.join("references")) else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&refs_dir) else {
-        return;
-    };
-    let mut files: Vec<std::path::PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
-        .collect();
-    files.sort();
-    for p in files {
-        if let Ok(content) = std::fs::read_to_string(&p) {
-            let fname = p
-                .file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            out.push_str("\n\n---\n\n# Reference: ");
-            out.push_str(&fname);
-            out.push_str("\n\n");
-            out.push_str(&content);
-        }
-    }
-}
-
-/// Resolve a skill's full instructional text for inlining into a review prompt:
-/// its `SKILL.md` body plus every `references/*.md` beside it, so the method
-/// travels *in the prompt* and runs on any provider (claude/codex/agy/…), not
-/// only ones with a native skill loader. Mirrors how `product_run` feeds skills
-/// to its agents. Looked up in order: the Otto Library (canonical store), the
-/// compiled-in bundled skills (body only), then the operator's global Claude
-/// skills dir (`~/.claude/skills/<name>/`) so skills authored there — e.g.
-/// `golang-feature-implementation` — work too. Empty/unknown → empty string.
-pub(crate) fn resolve_skill_inline(library: &otto_context::Library, name: &str) -> String {
-    // Skill names come from user-editable review configs and are used as path
-    // components below (the library lookups re-check, but fail closed here too).
-    if otto_core::paths::safe_component(name).is_none() {
-        return String::new();
-    }
-    // 1. Otto Library (multi-file skills with references on disk).
-    if let Some(skill) = library.get_skill(name) {
-        let mut out = skill.body;
-        if let Some(md) = library.skill_path(name) {
-            append_skill_references(&mut out, &md);
-        }
-        return out;
-    }
-    // 2. Compiled-in bundled skill body (no separate references).
-    if let Some(body) = otto_product::skill_body(name) {
-        return body.to_string();
-    }
-    // 2b. `otto-skills` bundles (`otto-design-2d`, `otto-design-3d`, …). These
-    //     are never auto-installed into the Library, so the assist prompts inline
-    //     them from the compiled-in asset when the user hasn't installed them.
-    if let Some(body) = otto_skills::bundled_body(name) {
-        return body;
-    }
-    // 3. Operator's global Claude skills dir, for skills authored outside the
-    //    Library (e.g. `golang-feature-implementation`). Inline the `SKILL.md`
-    //    body ONLY — these are general skills, not review-tuned, and their
-    //    `references/` can be hundreds of KB of implementation templates that
-    //    would bloat every review prompt (and are about *writing* code, not
-    //    reviewing it). Reject path-y names so we stay inside ~/.claude/skills.
-    if !name.contains(['/', '\\']) && !name.contains("..") {
-        if let Some(home) = std::env::var_os("HOME") {
-            let md = std::path::Path::new(&home)
-                .join(".claude/skills")
-                .join(name)
-                .join("SKILL.md");
-            if let Ok(body) = std::fs::read_to_string(&md) {
-                return body;
-            }
-        }
-    }
-    String::new()
-}
-
-/// Slugify a review agent's display name into a skill name: lowercase, runs of
-/// non-alphanumerics collapse to a single `-`, trimmed. "Correctness review" →
-/// `correctness-review`, "Grill" → `grill`. Used to find the lens skill when a
-/// review agent leaves its `skill` field empty and carries the lens in its name
-/// (which matches how the bundled lens skills are named).
-fn slug_skill_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut prev_dash = false;
-    for ch in name.trim().chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !out.is_empty() && !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    out.trim_end_matches('-').to_string()
 }
 
 /// Materialize complete skill packages into `bundle`, with two views:
@@ -2064,40 +1610,9 @@ pub(crate) fn stage_review_skills(
     stage_skill_packages_at(library, names, &bundle).map(|staged| staged.root)
 }
 
-/// Registry key for one review agent's cancel flag ("{review_id}:{index}").
-fn review_agent_cancel_key(review_id: &str, index: usize) -> String {
-    format!("{review_id}:{index}")
-}
-
 /// Register (or replace) the cancel flag for one review agent. Returns the
 /// fresh, un-tripped flag — replacing matters on retry, where a stale tripped
 /// flag would short-circuit the new run instantly.
-/// Default cap on review agents (claude/codex PTYs) running at once across
-/// the daemon — `OTTO_REVIEWER_CONCURRENCY` overrides (≥ 1). Each lens is a CLI
-/// process + whole-diff read + transcript watcher; a 10-lens review next to a
-/// workflow's `review_run` node used to start them all at once (perf SI-11).
-const DEFAULT_REVIEWER_CONCURRENCY: usize = 4;
-
-fn reviewer_concurrency(env: Option<&str>) -> usize {
-    env.and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(DEFAULT_REVIEWER_CONCURRENCY)
-}
-
-/// The daemon-wide reviewer slots. A reviewer takes its permit INSIDE its
-/// spawned task, so queued lenses cost nothing but a parked future; its own
-/// timeout starts only once it runs.
-fn reviewer_slots() -> Arc<tokio::sync::Semaphore> {
-    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    SLOTS
-        .get_or_init(|| {
-            let n =
-                reviewer_concurrency(std::env::var("OTTO_REVIEWER_CONCURRENCY").ok().as_deref());
-            Arc::new(tokio::sync::Semaphore::new(n))
-        })
-        .clone()
-}
-
 fn register_review_agent_cancel(
     reg: &crate::skill_eval::CancelRegistry,
     review_id: &str,
@@ -2135,68 +1650,20 @@ fn unregister_review_agent_cancel(
     }
 }
 
-/// The default config used when no `pr_review` setting has been stored. The
-/// reviewer agents follow the configured default agent (`default_provider`);
-/// the summarizer stays on claude because its run path is hard-wired to the
-/// claude PTY driver (see `run_review_core`).
-fn default_review_config(default_provider: &str) -> ReviewConfig {
-    ReviewConfig {
-        agents: vec![
-            ReviewAgentCfg {
-                name: "Correctness & bugs".to_string(),
-                provider: default_provider.to_string(),
-                providers: vec![default_provider.to_string()],
-                model: "".to_string(),
-                prompt: "You are reviewing a pull request diff. Output ONLY a JSON array \
-                         (no prose, no markdown fence) of objects \
-                         {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\
-                         \"body\":string}. Focus on correctness and bugs: logic errors, off-by-one, \
-                         nullability, panics, data races, incorrect assumptions."
-                    .to_string(),
-                skill: "correctness-review".to_string(),
-            },
-            ReviewAgentCfg {
-                name: "Security & error handling".to_string(),
-                provider: default_provider.to_string(),
-                providers: vec![default_provider.to_string()],
-                model: "".to_string(),
-                prompt: "You are reviewing a pull request diff. Output ONLY a JSON array \
-                         (no prose, no markdown fence) of objects \
-                         {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\
-                         \"body\":string}. Focus on security and error handling: injection, \
-                         unhandled errors, missing auth checks, sensitive data exposure."
-                    .to_string(),
-                skill: "security-review".to_string(),
-            },
-        ],
-        summarizer: ReviewAgentCfg {
-            name: "Summarizer".to_string(),
-            provider: "claude".to_string(),
-            providers: vec![],
-            model: "".to_string(),
-            prompt: "You are deduplicating and prioritizing code review comments. Output ONLY \
-                     a JSON array (no prose, no markdown fence) of objects \
-                     {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\
-                     \"category\":string,\"title\":string,\"body\":string,\"evidence\":string,\
-                     \"reasoning\":string,\"suggested_fix\":string}. `title` is a short one-line \
-                     summary; `category` is one of security|correctness|performance|architecture|\
-                     devex|test|docs|style|other; `evidence` is the offending code excerpt or quote \
-                     that proves the issue; `reasoning` is why it is a problem; `suggested_fix` is a \
-                     concrete fix. Deduplicate: merge findings that describe the SAME defect at \
-                     the same file:line into the single best-evidenced version, and drop trivial \
-                     duplicates. There is NO cap on the number of items — return EVERY distinct \
-                     verified finding, however many that is (on a large diff, 100+ is normal). \
-                     Never drop a finding merely to shorten the list, and never drop one just \
-                     because other findings are more severe. Rank by severity (bug first). \
-                     Here are the batches of comments from each agent:"
-                .to_string(),
-            skill: String::new(),
-        },
-        custom_presets: vec![],
-        max_attempts: None,
-        timeout_secs: None,
-        mode: None,
+/// Remove the review's `otto-review-<id>*` temp files when NO agent of it is
+/// registered any more (no original run, no other retry in flight). Checked
+/// and swept under the registry lock, so a retry registering concurrently
+/// either sees its files kept or writes them after the sweep. Sync: run it on
+/// the blocking pool (the temp-dir walk blocks).
+fn sweep_review_temp_files_if_idle(reg: &crate::skill_eval::CancelRegistry, review_id: &str) {
+    let Ok(m) = reg.lock() else {
+        return;
+    };
+    let mine = format!("{review_id}:");
+    if m.keys().any(|k| k.starts_with(&mine)) {
+        return;
     }
+    remove_review_temp_files_in(&std::env::temp_dir(), &format!("otto-review-{review_id}"));
 }
 
 /// Load ReviewConfig from settings or fall back to the default. The default
@@ -2216,11 +1683,6 @@ async fn load_review_config(ctx: &ServerCtx) -> ReviewConfig {
         }),
         _ => default_review_config(&default_provider),
     }
-}
-
-/// Settings key holding one repo's review-config binding.
-fn repo_review_binding_key(repo_id: &Id) -> String {
-    format!("pr_review_repo:{repo_id}")
 }
 
 /// Load the named review-config presets (settings key `pr_review_presets`).
@@ -2288,260 +1750,14 @@ pub(crate) async fn effective_review_mode(
     mode_source(&cfg)
 }
 
-/// `(mode, source tag)` for a loaded review config: an explicitly stored mode
-/// keeps its tag so the step log can say WHERE the mode came from, which is the
-/// whole point of `ReviewConfig.mode` being an `Option`. Pure — the ctx-bound
-/// lookup above is the only I/O.
-pub(crate) fn mode_source(cfg: &ReviewConfig) -> (otto_core::domain::ReviewMode, &'static str) {
-    match cfg.mode {
-        Some(m) => (m, "stored config"),
-        None => (otto_core::domain::ReviewMode::default(), "default"),
-    }
-}
-
-/// Per-agent grace period before an agent is marked stuck/failed. 30 min for
-/// large diffs, scaled down for small ones so short PRs fail fast. An explicit
-/// `override_secs` (from `ReviewConfig.timeout_secs`) wins over the heuristic.
-fn review_agent_timeout(diff_len: usize, override_secs: Option<u64>) -> Duration {
-    if let Some(s) = override_secs {
-        return Duration::from_secs(s);
-    }
-    // The top tier used to be a flat 30 min for "≥ 20k chars", which lumped a
-    // 20 KB diff together with a 1 MB one — and a reviewer told to sweep EVERY
-    // changed file (see the coverage mandate in the agent prompt) cannot do that
-    // for 170 files in 30 minutes. Scale the ceiling with the diff instead, so
-    // the grace period tracks the work actually being asked for.
-    let secs = if diff_len < 4_000 {
-        600 // ≲ small diff: 10 min
-    } else if diff_len < 20_000 {
-        1_200 // medium: 20 min
-    } else if diff_len < 100_000 {
-        1_800 // large: 30 min
-    } else if diff_len < 400_000 {
-        3_600 // very large: 1 h
-    } else {
-        7_200 // huge (a whole module landing at once): 2 h
-    };
-    Duration::from_secs(secs)
-}
-
-/// Display name of the engine's synthesized CI-gate reviewer — the one lens
-/// that is ALLOWED to run commands. Must match `checks_review_agent` in
-/// `workflow_engine.rs`.
-pub(crate) const CHECKS_REVIEWER_NAME: &str = "Required checks";
-
-/// Gap between two reviewer spawns (R3). The JoinSet stays uncapped — the only
-/// thing being bounded is the cold-start storm: a dozen CLIs booting in the same
-/// second is what pushes a codex launch past two minutes.
-const REVIEW_SPAWN_STAGGER: Duration = Duration::from_millis(1_500);
-
-/// The order `run_review_core` does its per-agent work in: `(register step,
-/// spawn step)` per reviewer. EVERY cancel flag is registered before the first
-/// session is spawned, so a Stop landing during the stagger reaches reviewers
-/// that have not started yet. Pure, so the ordering guarantee is testable
-/// without a ctx.
-#[cfg(test)]
-fn spawn_plan(run_count: usize) -> Vec<(usize, usize)> {
-    (0..run_count).map(|i| (i, run_count + i)).collect()
-}
-
-/// Hard ceiling on an orchestrator reviewer's grace period. It runs every lens,
-/// so its budget scales with the lens count — but never past this.
-const ORCHESTRATOR_BUDGET_CAP: Duration = Duration::from_secs(18_000);
-
-/// One reviewer session to run: a single lens on a single provider (fan-out),
-/// or one provider's ORCHESTRATOR running every lens as its own sub-agents.
-pub(crate) struct AgentRun {
-    pub display_name: String,
-    /// The configured reviewer name — shared by every provider expansion of
-    /// the same `ReviewAgentCfg`, so siblings can find each other. EMPTY for an
-    /// orchestrator run, which covers every lens at once: `lens_covered_by`
-    /// must never retire it because one lens finished somewhere else.
-    pub lens: String,
-    pub provider: String,
-    pub model: String,
-    /// Fan-out: the composed lens prompt. Orchestrator: empty — the prompt
-    /// names per-lens output paths, which need the run's index, so it is
-    /// composed in the spawn loop from `lenses`.
-    pub prompt_lens: String,
-    /// Orchestrator only: every lens this run delegates to a sub-agent.
-    pub lenses: Vec<OrchestratorLens>,
-}
-
-impl AgentRun {
-    /// Lens slugs whose per-lens files the watch guard tracks for the row's
-    /// progress note. Empty for fan-out (one lens, no sub-agents).
-    fn lens_slugs(&self) -> Vec<String> {
-        self.lenses.iter().map(|l| l.slug.clone()).collect()
-    }
-}
-
-/// One lens an orchestrator reviewer hands to a sub-agent of its own.
-#[derive(Clone)]
-pub(crate) struct OrchestratorLens {
-    pub name: String,
-    /// Sanitised `[a-z0-9-]{1,40}` — a path component and the finding label.
-    pub slug: String,
-    /// The lens method, inlined. Empty when it could not be resolved (claude
-    /// can still load it by name from the `--add-dir` bundle).
-    pub skill_text: String,
-    /// The reviewer's own instructions from the config.
-    pub instructions: String,
-    /// False for the CI-gate lens, which must be allowed to RUN its commands.
-    pub read_only: bool,
-}
-
-/// The providers a reviewer runs on: its explicit list, else its single one.
-fn effective_providers(a: &ReviewAgentCfg) -> Vec<String> {
-    if a.providers.is_empty() {
-        vec![a.provider.clone()]
-    } else {
-        a.providers.clone()
-    }
-}
-
-/// The lens SKILL name for a reviewer: the explicit `skill` field, falling back
-/// to the slugified agent name ("Grill" -> grill, "Correctness review" ->
-/// correctness-review) since configs usually carry the lens in the name with
-/// `skill` empty.
-fn lens_of(a: &ReviewAgentCfg) -> String {
-    if a.skill.trim().is_empty() {
-        slug_skill_name(&a.name)
-    } else {
-        a.skill.clone()
-    }
-}
-
-/// An orchestrator reviewer's grace period: the fan-out budget stretched by
-/// half the lens count (its sub-agents run in parallel, so the lenses cost far
-/// less than serially), capped so a wedged one still fails.
-pub(crate) fn orchestrator_budget(base: Duration, n_lenses: usize) -> Duration {
-    let factor = n_lenses.div_ceil(2).max(1) as u32;
-    base.saturating_mul(factor).min(ORCHESTRATOR_BUDGET_CAP)
-}
-
-/// Expand a review config into the sessions to run.
-///
-/// `FanOut` (the default) is one session per lens × provider — byte-for-byte
-/// what reviews have always done. `Orchestrator` is one session per provider,
-/// each running EVERY lens as its own sub-agent and merging the per-lens files
-/// (§1.3): N sessions instead of N × lenses, which is what makes a 6-lens
-/// 2-provider review survivable on file descriptors and CPU.
-///
-/// Takes the library (not a ctx) so the expansion is testable on its own.
-pub(crate) fn expand_agent_runs(
-    cfg: &ReviewConfig,
-    mode: otto_core::domain::ReviewMode,
-    library: &otto_context::Library,
-) -> Vec<AgentRun> {
-    if mode == otto_core::domain::ReviewMode::Orchestrator {
-        return orchestrator_runs(cfg, library);
-    }
-    cfg.agents
-        .iter()
-        .flat_map(|a| {
-            let providers = effective_providers(a);
-            let multi = providers.len() > 1;
-            // Inline the agent's skill (body + references) ahead of its lens
-            // prompt so EVERY provider runs the full method, not just claude (which
-            // also gets it registered out-of-tree via `--add-dir`; codex/agy do
-            // not register `--add-dir` skills and would otherwise have to scavenge
-            // the bundle). Resolved once per agent, reused per provider.
-            let lens = lens_of(a);
-            let skill_text = resolve_skill_inline(library, &lens);
-            providers.into_iter().map(move |p| {
-                let display_name = if multi {
-                    format!("{} \u{00b7} {}", a.name, p)
-                } else {
-                    a.name.clone()
-                };
-                let prompt_lens = compose_review_lens_prompt(&lens, &skill_text, &a.prompt);
-                AgentRun {
-                    display_name,
-                    lens: a.name.clone(),
-                    provider: p,
-                    model: a.model.clone(),
-                    prompt_lens,
-                    lenses: Vec::new(),
-                }
-            })
-        })
-        .collect()
-}
-
-/// The orchestrator expansion: one run per DISTINCT provider (in first-seen
-/// order), each carrying every lens.
-fn orchestrator_runs(cfg: &ReviewConfig, library: &otto_context::Library) -> Vec<AgentRun> {
-    let lenses: Vec<OrchestratorLens> = cfg
-        .agents
-        .iter()
-        .enumerate()
-        .map(|(i, a)| {
-            let lens = lens_of(a);
-            let slug = {
-                let s = crate::review_session::sanitize_lens_slug(&lens);
-                if s.is_empty() {
-                    format!("lens{i}")
-                } else {
-                    s
-                }
-            };
-            OrchestratorLens {
-                name: a.name.clone(),
-                slug,
-                skill_text: resolve_skill_inline(library, &lens),
-                instructions: a.prompt.clone(),
-                // The CI gate is the one lens told to RUN things; every other
-                // lens keeps the read-only contract.
-                read_only: a.name != CHECKS_REVIEWER_NAME,
-            }
-        })
-        .collect();
-
-    let mut providers: Vec<String> = Vec::new();
-    for a in &cfg.agents {
-        for p in effective_providers(a) {
-            if !providers.contains(&p) {
-                providers.push(p);
-            }
-        }
-    }
-
-    let n = lenses.len();
-    providers
-        .into_iter()
-        .map(|p| {
-            // The first configured model that actually applies to this provider
-            // (a per-lens model on another provider must not leak across).
-            let model = cfg
-                .agents
-                .iter()
-                .find(|a| !a.model.trim().is_empty() && effective_providers(a).contains(&p))
-                .map(|a| a.model.clone())
-                .unwrap_or_default();
-            AgentRun {
-                display_name: format!("{p} \u{00b7} orchestrator ({n} lenses)"),
-                lens: String::new(),
-                provider: p,
-                model,
-                prompt_lens: String::new(),
-                lenses: lenses.clone(),
-            }
-        })
-        .collect()
-}
-
-/// Background wrapper: runs `run_review_core` for a PR and sets the final
-/// status on the review row.
-#[allow(clippy::too_many_arguments)]
-/// The source (head) and destination (base) branch names a review is about.
-/// Surfaced to reviewers so they know what they're looking at, and (for PR
-/// reviews) used to materialize the source branch's real code into an isolated
-/// worktree. Either field may be empty when a flow can't resolve it.
-#[derive(Clone, Default)]
-pub(crate) struct ReviewBranches {
-    pub source: String,
-    pub dest: String,
+/// How long a caller that BLOCKS on a review (Run with Otto's review stage)
+/// may wait before declaring it overdue: the per-agent grace period the run
+/// will actually use (config override / diff heuristic, orchestrator-scaled)
+/// plus the summarizer's ceiling plus slack for spawn + persistence. Waiting
+/// any less reads the finding counts mid-run and reports a false "0 findings".
+pub(crate) async fn review_wait_budget(ctx: &ServerCtx, repo_id: &Id, diff_len: usize) -> Duration {
+    let cfg = load_review_config_for_repo(ctx, repo_id).await;
+    review_wait_budget_for(&cfg, diff_len)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2592,6 +1808,8 @@ async fn run_review(
     {
         return;
     }
+    // The run is over (done or error): its temp artifacts are spent.
+    remove_review_temp_files(&review_id).await;
     match result {
         Ok(()) => {
             tracing::info!(review = %review_id, "review complete");
@@ -2632,6 +1850,33 @@ async fn run_review(
                 review_id: review_id.clone(),
                 status: ReviewStatus::Error.as_str().to_string(),
             });
+        }
+    }
+}
+
+/// Remove a review's `$TMPDIR/otto-review-<id>*` files (diff, per-agent
+/// prompts, findings JSON). A finished run's durable copies live in the DB
+/// (0100) and a retry re-materializes what it needs, so leaving them behind
+/// only grew the temp dir (100+ files per few days of reviews).
+pub(crate) async fn remove_review_temp_files(review_id: &str) {
+    let prefix = format!("otto-review-{review_id}");
+    let () = crate::offload::blocking(move || {
+        remove_review_temp_files_in(&std::env::temp_dir(), &prefix)
+    })
+    .await;
+}
+
+/// [`remove_review_temp_files`] over an explicit dir — FILES only, so the
+/// `otto-review-wt-<id>` worktree directory is never touched.
+#[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool via offload::blocking (or a test)
+pub(crate) fn remove_review_temp_files_in(dir: &std::path::Path, prefix: &str) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(prefix)
+                && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
 }
@@ -2677,12 +1922,22 @@ async fn run_review_core(
             } else {
                 format!(" targeting `{}`", b.dest)
             };
-            format!(
-                "These changes are from branch `{}`{}. You are running inside a checkout of that \
-                 source branch's latest code — the ACTUAL files are on disk around you; open and \
-                 read them to verify your findings.\n\n",
-                b.source, target
-            )
+            if b.checked_out {
+                format!(
+                    "These changes are from branch `{}`{}. You are running inside a checkout of that \
+                     source branch's latest code — the ACTUAL files are on disk around you; open and \
+                     read them to verify your findings.\n\n",
+                    b.source, target
+                )
+            } else {
+                format!(
+                    "These changes are from branch `{}`{}. That branch could NOT be checked out: the \
+                     files on disk around you are a DIFFERENT revision, not the code under review. \
+                     Judge the change from the diff itself; do not treat a file on disk that \
+                     disagrees with the diff as evidence.\n\n",
+                    b.source, target
+                )
+            }
         }
         _ => String::new(),
     };
@@ -2717,6 +1972,7 @@ async fn run_review_core(
             findings: Vec::new(),
             fallback: false,
             lens: r.lens.clone(),
+            lens_slugs: r.lens_slugs(),
         })
         .collect();
     agent_states.push(ReviewAgentState {
@@ -2730,6 +1986,7 @@ async fn run_review_core(
         findings: Vec::new(),
         fallback: false,
         lens: String::new(),
+        lens_slugs: Vec::new(),
     });
     ctx.reviews_store
         .set_agents(review_id, &agent_states)
@@ -2755,7 +2012,11 @@ async fn run_review_core(
 
     // Pre-trust the repo folder for every provider we'll run (reviewers + the
     // claude summarizer) so no agent stalls on the interactive "trust this
-    // folder?" prompt and silently times out with zero findings.
+    // folder?" prompt and silently times out with zero findings. Trust does NOT
+    // hand the checkout's own config to the reviewer: every review session is
+    // `read_only` (forced Seatbelt, no shell) with `project_settings: false`
+    // (`--setting-sources user`, so a PR's `.claude/settings.json` hooks never
+    // load) — see `otto_review::session::review_session_meta`.
     {
         let mut trusted = std::collections::HashSet::<String>::new();
         for provider in agent_runs
@@ -2780,6 +2041,25 @@ async fn run_review_core(
     // retry after a reboot/temp-sweep re-materializes the file from this row.
     if let Err(e) = ctx.reviews_store.set_diff(review_id, &diff_text).await {
         tracing::warn!(review = %review_id, "could not persist review diff: {e}");
+    }
+    // Where this run reads the code: the source branch scopes local finding
+    // resolution (S2-05) and the checkout + head are what a Retry re-enters
+    // instead of the user's main checkout (S2-06).
+    let run_context = otto_state::ReviewRunContext {
+        source_branch: branches.map(|b| b.source.clone()).filter(|b| !b.is_empty()),
+        cwd: Some(repo_path.to_string()),
+        head_sha: otto_git::LocalGit::new(repo_path)
+            .rev_parse("HEAD")
+            .await
+            .ok()
+            .filter(|s| !s.is_empty()),
+    };
+    if let Err(e) = ctx
+        .reviews_store
+        .set_run_context(review_id, &run_context)
+        .await
+    {
+        tracing::warn!(review = %review_id, "could not persist review run context: {e}");
     }
     let diff_path_str = diff_path.to_string_lossy().to_string();
 
@@ -3015,6 +2295,7 @@ async fn run_review_core(
         &cfg.summarizer,
         &agent_findings,
         &format!("{user_ctx}{jira_ctx}"),
+        resolve_blocker(pr_number, branches, &diff_text),
     )
     .await;
 
@@ -3032,88 +2313,6 @@ async fn run_review_core(
         crate::review_session::remove_lens_findings_files(&rid, i);
     }
     result
-}
-
-/// Prefix each finding's body with its lens when it carries one. An
-/// orchestrator batch is one provider's SIX lenses merged into a single array,
-/// so without the label the summarizer cannot tell which method produced what
-/// (fan-out batches are one lens each and are unaffected — their findings have
-/// no `lens`).
-fn label_findings_with_lens(
-    findings: &[otto_core::domain::ReviewFinding],
-) -> Vec<otto_core::domain::ReviewFinding> {
-    findings
-        .iter()
-        .map(|f| match f.lens.as_deref() {
-            Some(lens) if !lens.is_empty() => otto_core::domain::ReviewFinding {
-                body: format!("[lens: {lens}] {}", f.body),
-                ..f.clone()
-            },
-            _ => f.clone(),
-        })
-        .collect()
-}
-
-/// A draft review comment as emitted by the summarizer.
-#[derive(Deserialize)]
-pub(crate) struct DraftComment {
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    line: Option<u32>,
-    /// Optional end of a multi-line finding range. Anchors the finding to a
-    /// span, not just a single line, when the agent reports one.
-    #[serde(default)]
-    line_end: Option<u32>,
-    #[serde(default = "default_draft_severity")]
-    severity: String,
-    body: String,
-    // Enriched workflow fields (optional; derived from `body` when absent).
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    evidence: Option<String>,
-    #[serde(default)]
-    reasoning: Option<String>,
-    #[serde(default)]
-    suggested_fix: Option<String>,
-}
-fn default_draft_severity() -> String {
-    "info".to_string()
-}
-
-/// Whether a freshly summarized comment is the same one as an already-decided
-/// comment of this review: same file and either the same anchored line or the
-/// same (whitespace-normalized) text. The summarizer re-words between runs, so
-/// the line is the primary key and the text covers path-/line-less comments.
-fn same_draft_comment(kept: &ReviewComment, c: &DraftComment) -> bool {
-    if kept.path != c.path {
-        return false;
-    }
-    if kept.line.is_some() && kept.line == c.line {
-        return true;
-    }
-    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    norm(&kept.body) == norm(&c.body)
-}
-
-/// Parse the summarizer's reply into draft comments (tolerates fences/prose).
-fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment> {
-    let stripped = summary_text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    let start = stripped.find('[').unwrap_or(0);
-    let end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
-    let slice = &stripped[start..end];
-    serde_json::from_str(slice).unwrap_or_else(|e| {
-        tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
-        vec![]
-    })
 }
 
 /// Drops a review's cancel flag from `review_cancels` when the attempt that
@@ -3197,6 +2396,10 @@ async fn summarize_and_persist(
     // do: without it, "documented, intentional, already-ticketed behavior" is
     // indistinguishable from a defect this change introduced, and it keeps it.
     context: &str,
+    // `Some(reason)` ⇒ this run cannot vouch for what it did NOT see (partial
+    // diff, wrong checkout, a retry anchoring outside the reviewed tree), so
+    // absent findings are left alone. See [`resolve_blocker`].
+    resolve_blocked: Option<&str>,
 ) -> Result<()> {
     // Reclaim the live states (updated by the reviewer tasks) and mark the
     // summarizer (always the LAST row) running.
@@ -3435,7 +2638,7 @@ async fn summarize_and_persist(
         if is_cancelled().await {
             return Ok(());
         }
-        let sev = CommentSeverity::parse(&c.severity).unwrap_or(CommentSeverity::Info);
+        let sev = CommentSeverity::normalize(&c.severity);
         // A summarizer RE-RUN (retry_summarizer) replaces only the drafts; a
         // comment the user already approved/declined (or that is on the PR)
         // must not come back as a fresh draft — approving that copy posted a
@@ -3577,7 +2780,9 @@ async fn summarize_and_persist(
     } else {
         None
     };
-    if !complete {
+    if let Some(why) = resolve_blocked {
+        tracing::info!(review = %review_id, "{why} — not resolving absent findings");
+    } else if !complete {
         tracing::info!(review = %review_id, "partial review run — not resolving absent findings");
     } else if pr_number == 0 && local_scope.is_none() {
         tracing::info!(review = %review_id, "local review without a stored diff — not resolving absent findings");
@@ -3585,7 +2790,23 @@ async fn summarize_and_persist(
         let scope_refs: Option<Vec<&str>> = local_scope
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        if let Err(e) = ctx
+        // Local runs share `pr_number = 0` across branches: only this run's
+        // source branch's findings are its to resolve (S2-05).
+        let branch = if pr_number == 0 {
+            ctx.reviews_store
+                .get_run_context(review_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|c| c.source_branch)
+        } else {
+            None
+        };
+        if pr_number == 0 && branch.is_none() {
+            // No recorded branch (detached HEAD, or a pre-context review):
+            // which branch's findings these are is unknown — resolve nothing.
+            tracing::info!(review = %review_id, "local review without a source branch — not resolving absent findings");
+        } else if let Err(e) = ctx
             .findings_store
             .resolve_absent_scoped(
                 &workspace.id,
@@ -3594,6 +2815,7 @@ async fn summarize_and_persist(
                 &seen_refs,
                 review_id,
                 scope_refs.as_deref(),
+                branch.as_deref(),
             )
             .await
         {
@@ -3605,97 +2827,6 @@ async fn summarize_and_persist(
     assemble_review_proof(ctx, review_id, &workspace.id).await;
 
     Ok(())
-}
-
-/// Whether every reviewer row finished cleanly and the real summarizer ran —
-/// the precondition for treating "absent this run" as "resolved". `skipped`
-/// counts as finished (a sibling row covered that lens); a row whose note
-/// starts with `partial` (an orchestrator adopted at its cap with lenses still
-/// running) does not.
-fn review_run_complete(
-    reviewers: &[otto_core::domain::ReviewAgentState],
-    summary_fallback: bool,
-) -> bool {
-    !summary_fallback
-        && reviewers.iter().all(|a| {
-            matches!(a.status.as_str(), "done" | "skipped") && !a.note.starts_with("partial")
-        })
-}
-
-/// Repo-relative paths a unified diff touches (both sides, so a deleted or
-/// renamed file's findings are in scope too). Reads the `--- a/…` + `+++ b/…`
-/// header PAIR (a lone `--- ` is a removed `-- …` content line, not a header)
-/// and git's `rename from/to` lines; `/dev/null` is skipped and a quoted
-/// header is unquoted.
-fn diff_file_paths(diff: &str) -> Vec<String> {
-    fn push(out: &mut Vec<String>, raw: &str, strip_side: bool) {
-        // Drop a trailing tab-separated timestamp (plain `diff -u` output).
-        let raw = raw.split('\t').next().unwrap_or(raw).trim();
-        let raw = raw
-            .strip_prefix('"')
-            .and_then(|r| r.strip_suffix('"'))
-            .unwrap_or(raw);
-        if raw == "/dev/null" || raw.is_empty() {
-            return;
-        }
-        let path = if strip_side {
-            raw.strip_prefix("a/")
-                .or_else(|| raw.strip_prefix("b/"))
-                .unwrap_or(raw)
-        } else {
-            raw
-        };
-        let path = otto_state::review_findings::normalize_finding_path(path);
-        if !path.is_empty() && !out.iter().any(|p| p == path) {
-            out.push(path.to_string());
-        }
-    }
-    let lines: Vec<&str> = diff.lines().collect();
-    let mut out: Vec<String> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if let Some(old) = line.strip_prefix("--- ") {
-            if let Some(new) = lines.get(i + 1).and_then(|n| n.strip_prefix("+++ ")) {
-                push(&mut out, old, true);
-                push(&mut out, new, true);
-            }
-        } else if let Some(p) = line
-            .strip_prefix("rename from ")
-            .or_else(|| line.strip_prefix("rename to "))
-        {
-            push(&mut out, p, false);
-        }
-    }
-    out
-}
-
-/// Text of 1-based `line` in the repo-relative `path` under `repo_path`, for
-/// fingerprint anchoring. Absolute or `..` paths are refused (the path comes
-/// from agent output). Each file is read at most once per run via `cache`.
-async fn anchored_line_text(
-    repo_path: &str,
-    path: &str,
-    line: u32,
-    cache: &mut std::collections::HashMap<String, Option<Vec<String>>>,
-) -> Option<String> {
-    let rel = otto_state::review_findings::normalize_finding_path(path);
-    let rel_path = std::path::Path::new(rel);
-    if rel.is_empty()
-        || rel_path.is_absolute()
-        || rel_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return None;
-    }
-    if !cache.contains_key(rel) {
-        let lines = tokio::fs::read_to_string(std::path::Path::new(repo_path).join(rel_path))
-            .await
-            .ok()
-            .map(|s| s.lines().map(str::to_string).collect::<Vec<String>>());
-        cache.insert(rel.to_string(), lines);
-    }
-    let idx = (line as usize).checked_sub(1)?;
-    cache.get(rel)?.as_ref()?.get(idx).cloned()
 }
 
 /// Open/blocker/total finding counts for a review, from the persistent store.
@@ -3718,229 +2849,6 @@ pub(crate) async fn review_findings_counts(ctx: &ServerCtx, review_id: &Id) -> (
         .filter(|f| is_blocking_severity(&f.severity) && is_open(f))
         .count() as u64;
     (total, open, blocker)
-}
-
-/// Whether a stored finding severity is a blocker (critical/high). Rows are
-/// persisted in the normalized vocabulary (`critical|high|medium|low|info`,
-/// see [`otto_core::finding::FindingSeverity::normalize`]), so comparing the
-/// raw string against the reviewer token `"bug"` never matched and every
-/// review reported 0 blockers. Normalizing first also covers legacy
-/// `bug`/`blocker` rows.
-pub(crate) fn is_blocking_severity(severity: &str) -> bool {
-    use otto_core::finding::FindingSeverity;
-    matches!(
-        FindingSeverity::normalize(severity),
-        FindingSeverity::Critical | FindingSeverity::High
-    )
-}
-
-/// Sort rank for a stored severity: critical first, info last. Shares
-/// [`is_blocking_severity`]'s normalization so legacy `bug`/`warn` rows and the
-/// normalized `high`/`medium` rows rank the same.
-fn severity_rank(severity: &str) -> u8 {
-    use otto_core::finding::FindingSeverity;
-    match FindingSeverity::normalize(severity) {
-        FindingSeverity::Critical => 0,
-        FindingSeverity::High => 1,
-        FindingSeverity::Medium => 2,
-        FindingSeverity::Low => 3,
-        FindingSeverity::Info => 4,
-    }
-}
-
-#[cfg(test)]
-mod reviewer_slot_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn concurrency_env_parses_with_a_floor_of_one() {
-        assert_eq!(reviewer_concurrency(None), DEFAULT_REVIEWER_CONCURRENCY);
-        assert_eq!(reviewer_concurrency(Some("2")), 2);
-        assert_eq!(reviewer_concurrency(Some(" 7 ")), 7);
-        assert_eq!(
-            reviewer_concurrency(Some("0")),
-            DEFAULT_REVIEWER_CONCURRENCY
-        );
-        assert_eq!(
-            reviewer_concurrency(Some("lots")),
-            DEFAULT_REVIEWER_CONCURRENCY
-        );
-    }
-
-    /// The fan-out pattern (permit taken inside the spawned task) never runs
-    /// more than N reviewers at once, however many lenses are spawned.
-    #[tokio::test]
-    async fn spawned_reviewers_never_exceed_the_cap() {
-        let slots = Arc::new(tokio::sync::Semaphore::new(reviewer_concurrency(Some("3"))));
-        let live = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..12 {
-            let (slots, live, peak) = (slots.clone(), live.clone(), peak.clone());
-            set.spawn(async move {
-                let _slot = slots.acquire_owned().await.ok();
-                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
-                peak.fetch_max(now, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-                live.fetch_sub(1, Ordering::SeqCst);
-            });
-        }
-        while set.join_next().await.is_some() {}
-        assert_eq!(peak.load(Ordering::SeqCst), 3);
-        assert!(
-            reviewer_slots().available_permits() >= 1,
-            "the daemon pool exists and is non-empty"
-        );
-    }
-}
-
-#[cfg(test)]
-mod review_scope_tests {
-    use super::{diff_file_paths, review_run_complete};
-
-    fn agent(status: &str, note: &str) -> otto_core::domain::ReviewAgentState {
-        serde_json::from_value(serde_json::json!({
-            "name": "lens", "provider": "claude", "model": "",
-            "status": status, "note": note, "comment_count": 0
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn diff_paths_cover_both_sides_and_skip_content_lines() {
-        let diff = "diff --git a/src/a.rs b/src/a.rs\n\
-                    index 1..2 100644\n\
-                    --- a/src/a.rs\n\
-                    +++ b/src/a.rs\n\
-                    @@ -1,2 +1,2 @@\n\
-                    --- a removed SQL comment line\n\
-                    +new\n\
-                    diff --git a/gone.rs b/gone.rs\n\
-                    deleted file mode 100644\n\
-                    --- a/gone.rs\n\
-                    +++ /dev/null\n\
-                    diff --git a/old name.rs b/new name.rs\n\
-                    similarity index 100%\n\
-                    rename from old name.rs\n\
-                    rename to new name.rs\n";
-        assert_eq!(
-            diff_file_paths(diff),
-            vec!["src/a.rs", "gone.rs", "old name.rs", "new name.rs"]
-        );
-    }
-
-    fn kept(path: Option<&str>, line: Option<u32>, body: &str) -> otto_core::domain::ReviewComment {
-        otto_core::domain::ReviewComment {
-            id: "c1".into(),
-            review_id: "r1".into(),
-            path: path.map(str::to_string),
-            line,
-            severity: otto_core::domain::CommentSeverity::Warn,
-            body: body.into(),
-            state: otto_core::domain::CommentState::Approved,
-            posted: true,
-            created_at: chrono::Utc::now(),
-        }
-    }
-
-    fn draft(path: Option<&str>, line: Option<u32>, body: &str) -> super::DraftComment {
-        serde_json::from_value(serde_json::json!({
-            "path": path, "line": line, "severity": "warn", "body": body
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn decided_comments_are_not_redrafted_by_a_summarizer_rerun() {
-        use super::same_draft_comment;
-        let k = kept(Some("a.rs"), Some(10), "Unchecked unwrap");
-        // Re-worded on the same line → the same comment.
-        assert!(same_draft_comment(
-            &k,
-            &draft(Some("a.rs"), Some(10), "unwrap may panic")
-        ));
-        // Another line / file → a different comment.
-        assert!(!same_draft_comment(
-            &k,
-            &draft(Some("a.rs"), Some(11), "unwrap may panic")
-        ));
-        assert!(!same_draft_comment(
-            &k,
-            &draft(Some("b.rs"), Some(10), "Unchecked unwrap")
-        ));
-        // A general comment matches on its text.
-        let g = kept(None, None, "Overall:  add tests");
-        assert!(same_draft_comment(
-            &g,
-            &draft(None, None, "Overall: add tests")
-        ));
-    }
-
-    #[test]
-    fn only_an_anchor_rejection_falls_back_to_a_general_comment() {
-        use super::{general_comment_body, inline_anchor_rejected};
-        use otto_core::Error;
-        assert!(inline_anchor_rejected(&Error::Conflict(
-            "github 422: pull_request_review_thread.line must be part of the diff".into()
-        )));
-        assert!(inline_anchor_rejected(&Error::Upstream(
-            "gitlab 400: position is invalid".into()
-        )));
-        // Auth / 5xx are not anchor problems — never re-post on those.
-        assert!(!inline_anchor_rejected(&Error::Forbidden(
-            "github 403: bad token".into()
-        )));
-        assert!(!inline_anchor_rejected(&Error::Upstream(
-            "github 502: bad gateway".into()
-        )));
-        assert_eq!(
-            general_comment_body(&kept(Some("a.rs"), Some(3), "x")),
-            "**`a.rs:3`**\n\nx"
-        );
-    }
-
-    #[test]
-    fn only_clean_runs_are_complete() {
-        let ok = [agent("done", "3 findings"), agent("skipped", "skipped — x")];
-        assert!(review_run_complete(&ok, false));
-        assert!(
-            !review_run_complete(&ok, true),
-            "fallback summarizer = partial"
-        );
-        assert!(!review_run_complete(&[agent("error", "timed out")], false));
-        assert!(!review_run_complete(
-            &[agent("done", "partial — 1 lens still running")],
-            false
-        ));
-    }
-}
-
-#[cfg(test)]
-mod severity_tests {
-    use super::{is_blocking_severity, severity_rank};
-
-    #[test]
-    fn blockers_are_counted_in_the_stored_vocabulary() {
-        // What the store actually holds (normalized on write)…
-        assert!(is_blocking_severity("critical"));
-        assert!(is_blocking_severity("high"));
-        assert!(!is_blocking_severity("medium"));
-        assert!(!is_blocking_severity("low"));
-        assert!(!is_blocking_severity("info"));
-        // …and legacy reviewer tokens on older rows.
-        assert!(is_blocking_severity("bug"));
-        assert!(is_blocking_severity("blocker"));
-        assert!(!is_blocking_severity("warn"));
-    }
-
-    #[test]
-    fn rank_orders_highest_first() {
-        assert!(severity_rank("critical") < severity_rank("high"));
-        assert!(severity_rank("high") < severity_rank("medium"));
-        assert!(severity_rank("medium") < severity_rank("info"));
-        assert_eq!(severity_rank("bug"), severity_rank("high"));
-    }
 }
 
 /// Short, human-facing one-liners for a review's OPEN findings (severity dot + a
@@ -4005,162 +2913,6 @@ pub(crate) async fn default_review_provider(ctx: &ServerCtx) -> String {
     otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
         global_default.as_ref(),
     )])
-}
-
-/// Prettify a lens skill name for display: "correctness-review" → "Correctness
-/// review", "test_review" → "Test review".
-fn title_case_lens(s: &str) -> String {
-    let spaced = s.replace(['-', '_'], " ");
-    let mut chars = spaced.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-/// Build a [`ReviewConfig`] for a workflow `review_run` step from its declared
-/// providers + lenses, reusing the same reviewer/summarizer prompts as the
-/// default PR-review config — so a workflow review fans out exactly like a PR
-/// review (multi-provider × multi-lens agents, one summarizer that consolidates +
-/// scores the findings). `providers` empty → the resolved global default;
-/// `lenses` empty → the two default lenses (correctness + security) retargeted to
-/// `providers`.
-/// The lens prompt shared by every workflow-review reviewer: it pins the JSON
-/// output contract; the per-lens `skill` text is prepended at run time.
-pub(crate) const WORKFLOW_REVIEW_LENS_PROMPT: &str =
-    "You are reviewing a pull request diff. Output ONLY a JSON array \
-     (no prose, no markdown fence) of objects \
-     {\"path\":string,\"line\":number,\"severity\":\"info\"|\"warn\"|\"bug\",\"body\":string}. \
-     Review through your lens — the skill prepended above defines what to look for. Open and \
-     read the real files around you to verify each finding before reporting it.";
-
-pub(crate) fn workflow_review_config(
-    default_provider: &str,
-    providers: &[String],
-    lenses: &[String],
-) -> ReviewConfig {
-    let mut base = default_review_config(default_provider);
-    let provs: Vec<String> = if providers.is_empty() {
-        vec![default_provider.to_string()]
-    } else {
-        providers.to_vec()
-    };
-    if lenses.is_empty() {
-        for a in base.agents.iter_mut() {
-            a.provider = provs[0].clone();
-            a.providers = provs.clone();
-        }
-    } else {
-        base.agents = lenses
-            .iter()
-            .map(|lens| ReviewAgentCfg {
-                name: title_case_lens(lens),
-                provider: provs[0].clone(),
-                providers: provs.clone(),
-                model: String::new(),
-                prompt: WORKFLOW_REVIEW_LENS_PROMPT.to_string(),
-                skill: lens.clone(),
-            })
-            .collect();
-    }
-    base
-}
-
-/// Rich workflow-review config (PR-review parity): each reviewer carries its OWN
-/// provider set + optional custom instructions, plus a configurable summarizer —
-/// the same model the PR-review pipeline uses. Built from the `review_run` node's
-/// `reviewers`/`summarizer` JSON params. Reviewers with no providers fall back to
-/// `default_provider`; an empty `reviewers` returns the default config.
-pub(crate) fn workflow_review_config_from_json(
-    default_provider: &str,
-    reviewers: &[Value],
-    summarizer: Option<&Value>,
-) -> ReviewConfig {
-    let mut base = default_review_config(default_provider);
-    let str_list = |v: &Value, k: &str| -> Vec<String> {
-        v.get(k)
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let agents: Vec<ReviewAgentCfg> = reviewers
-        .iter()
-        .filter_map(|r| {
-            let lens = r
-                .get("lens")
-                .or_else(|| r.get("skill"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let mut provs = str_list(r, "providers");
-            if provs.is_empty() {
-                provs = vec![default_provider.to_string()];
-            }
-            let instr = r.get("instructions").and_then(Value::as_str).unwrap_or("").trim().to_string();
-            let name = r
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    if lens.is_empty() {
-                        "Reviewer".to_string()
-                    } else {
-                        title_case_lens(&lens)
-                    }
-                });
-            let model = r.get("model").and_then(Value::as_str).unwrap_or("").to_string();
-            let prompt = if instr.is_empty() {
-                WORKFLOW_REVIEW_LENS_PROMPT.to_string()
-            } else {
-                format!("{WORKFLOW_REVIEW_LENS_PROMPT}\n\n--- Reviewer-specific instructions ---\n{instr}")
-            };
-            // A reviewer with neither a lens nor a name nor providers is noise.
-            if lens.is_empty() && instr.is_empty() {
-                return None;
-            }
-            Some(ReviewAgentCfg {
-                name,
-                provider: provs[0].clone(),
-                providers: provs,
-                model,
-                prompt,
-                skill: lens,
-            })
-        })
-        .collect();
-    if !agents.is_empty() {
-        base.agents = agents;
-    }
-    if let Some(s) = summarizer {
-        if let Some(p) = s
-            .get("provider")
-            .and_then(Value::as_str)
-            .filter(|x| !x.is_empty())
-        {
-            base.summarizer.provider = p.to_string();
-            base.summarizer.providers = vec![];
-        }
-        if let Some(m) = s.get("model").and_then(Value::as_str) {
-            base.summarizer.model = m.to_string();
-        }
-        if let Some(instr) = s
-            .get("instructions")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-        {
-            base.summarizer.prompt = format!(
-                "{}\n\n--- Additional summarizer guidance ---\n{instr}",
-                base.summarizer.prompt
-            );
-        }
-    }
-    base
 }
 
 /// Open-finding counts for a review bucketed by the reviewer severity vocabulary
@@ -4248,6 +3000,141 @@ async fn assemble_review_proof(ctx: &ServerCtx, review_id: &Id, workspace_id: &I
     let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
 }
 
+/// Resolve the repo's git token (the fetch must reach a private origin) and
+/// materialize the PR head via [`otto_review::worktree::materialize_pr_worktree`].
+async fn materialize_pr_worktree(
+    ctx: &ServerCtx,
+    repo: &otto_core::domain::Repo,
+    review_id: &Id,
+    pr_number: u64,
+    source: Option<&str>,
+    head_sha: Option<&str>,
+    suffix: &str,
+) -> Option<PrWorktree> {
+    // Re-read the git token (resolve_provider_remote consumed it) so the fetch
+    // can reach a private origin. Fetch is metadata-only (updates refs) and
+    // never touches a working tree.
+    let git_token: Option<String> = match repo.git_account_id.as_ref() {
+        Some(aid) => match ctx.git_store.get_account(aid).await {
+            Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    otto_review::worktree::materialize_pr_worktree(
+        repo, review_id, pr_number, source, head_sha, suffix, git_token,
+    )
+    .await
+}
+
+/// Re-materialize a PR review's head for a RETRY (the original run's worktree
+/// was torn down when it finished). Best-effort: `None` when the provider or
+/// the head is unreachable — the caller then falls back to repo.path.
+async fn pr_retry_worktree(
+    ctx: &ServerCtx,
+    user: &otto_core::domain::User,
+    repo: &otto_core::domain::Repo,
+    review_id: &Id,
+    pr_number: u64,
+    suffix: &str,
+) -> Option<PrWorktree> {
+    let (provider, remote) = resolve_provider_remote(ctx, user, repo).await.ok()?;
+    let pr = provider.get_pr(&remote, pr_number).await.ok();
+    materialize_pr_worktree(
+        ctx,
+        repo,
+        review_id,
+        pr_number,
+        pr.as_ref().map(|p| p.summary.source_branch.as_str()),
+        pr.as_ref().and_then(|p| p.summary.head_sha.as_deref()),
+        suffix,
+    )
+    .await
+}
+
+/// The checkout a BRANCH review's (pr #0) retry runs in: the run's recorded
+/// checkout when it still exists at the recorded head, else a throwaway
+/// worktree at that head (returned so the caller tears it down), else — no
+/// context recorded (pre-context reviews) or the head is gone — the repo path,
+/// as before. Never returns a tear-down handle for a checkout Otto didn't make.
+async fn branch_retry_checkout(
+    ctx: &ServerCtx,
+    repo: &otto_core::domain::Repo,
+    review_id: &Id,
+    suffix: &str,
+) -> (String, Option<PrWorktree>) {
+    let Some(rc) = ctx
+        .reviews_store
+        .get_run_context(review_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return (repo.path.clone(), None);
+    };
+    let head = rc.head_sha.as_deref().filter(|h| !h.is_empty());
+    if let Some(cwd) = rc
+        .cwd
+        .as_deref()
+        .filter(|c| std::path::Path::new(c).is_dir())
+    {
+        // A LOCAL review ran in the user's own checkout and diffed its working
+        // tree (uncommitted + untracked included). Committing those changes
+        // moves HEAD, and a worktree at the OLD head would not contain them
+        // at all — the checkout itself is still where the reviewed code lives
+        // (S2-310). Only Run/workflow worktrees fall back to the recorded head.
+        if same_dir(cwd, &repo.path) {
+            return (cwd.to_string(), None);
+        }
+        let at = otto_git::LocalGit::new(cwd).rev_parse("HEAD").await.ok();
+        let same = match (head, at.as_deref()) {
+            (None, _) => true,
+            (Some(h), Some(a)) => otto_review::worktree::sha_matches(a, h),
+            (Some(_), None) => false,
+        };
+        if same {
+            return (cwd.to_string(), None);
+        }
+    }
+    if let Some(h) = head {
+        let git = otto_git::LocalGit::new(&repo.path);
+        let path = std::env::temp_dir()
+            .join(format!("otto-review-wt-{review_id}{suffix}"))
+            .to_string_lossy()
+            .into_owned();
+        let branch = format!("otto-review-{review_id}{suffix}");
+        let _ = git.worktree_remove(&path).await;
+        match git.worktree_add(&path, &branch, h).await {
+            Ok(()) => {
+                return (
+                    path.clone(),
+                    Some(PrWorktree {
+                        path,
+                        branch,
+                        review_ref: None,
+                    }),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(review = %review_id, "retry worktree at {h} failed: {e}; using repo path")
+            }
+        }
+    }
+    (repo.path.clone(), None)
+}
+
+/// True when `a` and `b` name the same directory (symlinks / trailing `/`
+/// resolved; falls back to a plain string compare when either is missing).
+fn same_dir(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a.trim_end_matches('/') == b.trim_end_matches('/'),
+    }
+}
+
 /// Fetch PR diff + Jira context and delegate to `run_review_core`.
 ///
 /// `user` is the caller that started the review; their ownership of the repo's
@@ -4279,7 +3166,7 @@ async fn run_pr_review_inner(
     let (diff_for_agents, diff_truncated) = render_diff(&diff_resp, DIFF_RENDER_CAP);
     if diff_truncated {
         tracing::warn!(
-            "diff truncated to {} chars for review {}",
+            "diff partial (cap {} chars / binary / too-large files omitted) for review {}",
             DIFF_RENDER_CAP,
             review_id
         );
@@ -4322,64 +3209,39 @@ async fn run_pr_review_inner(
     };
 
     // 4. Resolve the PR's source/destination branches and materialize the LATEST
-    //    source branch into an ISOLATED worktree, so reviewers verify against the
-    //    real code being merged — never the user's working tree (which may be on a
-    //    different branch and must NOT be mutated). All best-effort: any failure
-    //    falls back to reviewing in repo.path with whatever context we resolved.
-    let branches = match provider.get_pr(&remote, pr_number).await {
-        Ok(pr) => Some(ReviewBranches {
-            source: pr.summary.source_branch,
-            dest: pr.summary.target_branch,
-        }),
+    //    source into an ISOLATED worktree, so reviewers verify against the real
+    //    code being merged — never the user's working tree (which may be on a
+    //    different branch and must NOT be mutated). A fork PR's branch is not on
+    //    `origin`, so the PR head ref / head sha is the fallback. If no checkout
+    //    can be built the review still runs in repo.path, but the prompt stops
+    //    claiming a source checkout and the run is partial (resolves nothing).
+    let pr_detail = match provider.get_pr(&remote, pr_number).await {
+        Ok(pr) => Some(pr),
         Err(e) => {
             tracing::warn!(review = %review_id, "get_pr (for branch names) failed: {e}");
             None
         }
     };
-
-    let git = otto_git::LocalGit::new(&repo.path);
-    let mut review_cwd = repo.path.clone();
-    // (worktree_path, throwaway_branch) torn down after the review finishes.
-    let mut wt_cleanup: Option<(String, String)> = None;
-    if let Some(src) = branches
+    let pr_wt = materialize_pr_worktree(
+        ctx,
+        &repo,
+        review_id,
+        pr_number,
+        pr_detail.as_ref().map(|p| p.summary.source_branch.as_str()),
+        pr_detail
+            .as_ref()
+            .and_then(|p| p.summary.head_sha.as_deref()),
+        "",
+    )
+    .await;
+    let branches = pr_detail.map(|pr| ReviewBranches {
+        source: pr.summary.source_branch,
+        dest: pr.summary.target_branch,
+        checked_out: pr_wt.is_some(),
+    });
+    let review_cwd = pr_wt
         .as_ref()
-        .map(|b| b.source.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        // Re-read the git token (resolve_provider_remote consumed it) so the
-        // fetch can reach a private origin. Fetch is metadata-only (updates
-        // refs/remotes) and never touches a working tree.
-        let git_token: Option<String> = match repo.git_account_id.as_ref() {
-            Some(aid) => match ctx.git_store.get_account(aid).await {
-                Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
-                    .await
-                    .ok()
-                    .flatten(),
-                Err(_) => None,
-            },
-            None => None,
-        };
-        if let Err(e) = git.fetch(git_token).await {
-            tracing::warn!(review = %review_id, "fetch before review failed: {e}; using cached refs");
-        }
-        let wt_path = std::env::temp_dir()
-            .join(format!("otto-review-wt-{review_id}"))
-            .to_string_lossy()
-            .into_owned();
-        let wt_branch = format!("otto-review-{review_id}");
-        let base = format!("origin/{src}");
-        let _ = git.worktree_remove(&wt_path).await; // clear any stale tree
-        match git.worktree_add(&wt_path, &wt_branch, &base).await {
-            Ok(()) => {
-                tracing::info!(review = %review_id, "reviewing source branch `{src}` in isolated worktree");
-                review_cwd = wt_path.clone();
-                wt_cleanup = Some((wt_path, wt_branch));
-            }
-            Err(e) => {
-                tracing::warn!(review = %review_id, "worktree of {base} failed: {e}; reviewing in repo path");
-            }
-        }
-    }
+        .map_or_else(|| repo.path.clone(), |w| w.path.clone());
 
     let result = run_review_core(
         ctx,
@@ -4399,9 +3261,8 @@ async fn run_pr_review_inner(
 
     // Tear down the throwaway worktree + branch (best-effort; leaves no litter in
     // the user's branch list). The branch is review-only, so force-delete is safe.
-    if let Some((wt_path, wt_branch)) = wt_cleanup {
-        let _ = git.worktree_remove(&wt_path).await;
-        let _ = git.delete_branch(&wt_branch, true).await;
+    if let Some(wt) = pr_wt {
+        teardown_pr_worktree(&repo.path, wt).await;
     }
     result
 }
@@ -4417,6 +3278,7 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
         .route("/repos/{id}/local-reviews", get(list_local_reviews))
         .route("/pr-review-comments/{cid}/approve", post(approve_comment))
         .route("/pr-review-comments/{cid}/decline", post(decline_comment))
+        .route("/pr-review-comments/{cid}", patch(edit_review_comment))
         .route(
             "/repos/{id}/local-review",
             post(start_local_review).get(get_local_review),
@@ -4825,111 +3687,6 @@ pub(crate) fn compose_draft_prompt(skill_text: &str, base_prompt: &str) -> Strin
     }
 }
 
-/// Compose a review agent's prompt body: prepend the inlined lens method
-/// (`skill_text`) ahead of the agent's lens prompt, fronted by a directive that
-/// makes the indicated lens AUTHORITATIVE on every provider.
-///
-/// This directive is the load-bearing fix for the codex skill-propagation bug:
-/// codex has no first-class skills, so without it codex reflexively goes looking
-/// for "a review skill" and runs the wrong one. The wording NAMES the lens and
-/// forbids substituting a *different* skill, while explicitly permitting the
-/// named lens itself — so it never suppresses the correct skill on claude (which
-/// may still invoke `Skill(<lens>)`, the same method). Empty `skill_text` ⇒ the
-/// agent prompt is returned unchanged (mirrors [`compose_draft_prompt`]).
-pub(crate) fn compose_review_lens_prompt(
-    lens: &str,
-    skill_text: &str,
-    agent_prompt: &str,
-) -> String {
-    if skill_text.trim().is_empty() {
-        return agent_prompt.to_string();
-    }
-    let lens = lens.trim();
-    let directive = if lens.is_empty() {
-        "Use the review method specified in full below. Do not search for, switch to, or \
-         substitute a different review skill or style — everything you need is already here."
-            .to_string()
-    } else {
-        format!(
-            "Use the `{lens}` review method specified in full below. Do not search for, switch \
-             to, or substitute a *different* review skill or style — its full method is already \
-             here. (Invoking `{lens}` itself is fine.)"
-        )
-    };
-    format!("{directive}\n\n{skill_text}\n\n---\n\n{agent_prompt}")
-}
-
-/// The ORCHESTRATOR reviewer's prompt: one agent, every lens, each lens run as
-/// its own sub-agent writing its own file, then a single merge into the path
-/// the watch loop polls (design §1.3).
-///
-/// The merge — not the lenses — is what the watch loop keys on, so the prompt
-/// is explicit that the merged file is written LAST; the R1 guard in
-/// [`crate::agent_run::watch_for_result_guarded`] enforces the same rule from
-/// the outside. `per_lens_path` maps a lens slug to that lens's output path,
-/// and `merged_path` is the reviewer's own findings file.
-pub(crate) fn compose_orchestrator_prompt(
-    lenses: &[OrchestratorLens],
-    provider: &str,
-    per_lens_path: impl Fn(&str) -> std::path::PathBuf,
-    merged_path: &std::path::Path,
-) -> String {
-    let mut out = format!(
-        "MULTI-LENS CODE REVIEW \u{2014} you are the review ORCHESTRATOR for provider {provider}. \
-         READ-ONLY (same rules as below).\n\
-         Run EACH lens below as its own sub-agent, all in parallel where your CLI allows it \
-         (Claude Code: the Agent tool, one per lens, general-purpose; Codex: spawn sub-agents if \
-         available, otherwise run the lenses one after another yourself).\n\
-         Give every sub-agent: the lens method verbatim (below), the diff file path, the checkout \
-         path, the read-only rules, and its OWN output path (named in its section) \u{2014} a JSON \
-         array of {{path,line,severity,body,lens:\"<lens-slug>\"}}.\n\
-         Wait for ALL sub-agents to finish. Then read every per-lens file, drop exact duplicates, \
-         keep the `lens` field, and write the merged array to:\n  {}\n\
-         Writing that merged file is the LAST thing you do; never write it while a sub-agent is \
-         still running.\n",
-        merged_path.display()
-    );
-    for (i, l) in lenses.iter().enumerate() {
-        out.push_str(&format!(
-            "\n--- lens {}: {} ({}) ---\n",
-            i + 1,
-            l.name,
-            l.slug
-        ));
-        // claude loads the staged lens bundle via `--add-dir`, so an
-        // unresolvable method is still reachable there BY NAME; codex/agy have
-        // only what the prompt carries.
-        let method = if l.skill_text.trim().is_empty() {
-            if provider == "claude" {
-                format!("use the `{}` skill (registered via --add-dir)", l.slug)
-            } else {
-                String::new()
-            }
-        } else {
-            l.skill_text.trim().to_string()
-        };
-        if !method.is_empty() {
-            out.push_str(&method);
-            out.push_str("\n\n");
-        }
-        if !l.instructions.trim().is_empty() {
-            out.push_str(l.instructions.trim());
-            out.push('\n');
-        }
-        if !l.read_only {
-            out.push_str(
-                "This lens is the CI gate: you MAY run the listed check commands (and nothing \
-                 else that modifies the repo).\n",
-            );
-        }
-        out.push_str(&format!(
-            "Sub-agent output path: {}\n",
-            per_lens_path(&l.slug).display()
-        ));
-    }
-    out
-}
-
 #[cfg(test)]
 mod commit_pr_draft_tests {
     use super::{compose_draft_prompt, jira_key_from_branch};
@@ -4993,314 +3750,6 @@ mod commit_pr_draft_tests {
             compose_draft_prompt("SKILL", "BASE"),
             "SKILL\n\n---\n\nBASE"
         );
-    }
-}
-
-#[cfg(test)]
-mod review_lens_prompt_tests {
-    use super::compose_review_lens_prompt;
-
-    #[test]
-    fn empty_skill_returns_agent_prompt_unchanged() {
-        // No lens method resolved ⇒ the agent prompt is returned byte-for-byte
-        // (no directive, no separator), identical to the prior behaviour.
-        assert_eq!(
-            compose_review_lens_prompt("grill", "", "DO REVIEW"),
-            "DO REVIEW"
-        );
-        assert_eq!(
-            compose_review_lens_prompt("", "   ", "DO REVIEW"),
-            "DO REVIEW"
-        );
-    }
-
-    #[test]
-    fn names_lens_permits_it_and_forbids_substitution() {
-        let out = compose_review_lens_prompt("correctness-review", "METHOD BODY", "AGENT TASK");
-        let lower = out.to_lowercase();
-        // Names the indicated lens so it is authoritative on every provider.
-        assert!(out.contains("correctness-review"));
-        // Forbids substituting a DIFFERENT skill (this is what stops codex
-        // scavenging the wrong one)...
-        assert!(lower.contains("do not search for"));
-        assert!(lower.contains("different"));
-        // ...but explicitly PERMITS invoking the named lens itself, so it can't
-        // suppress the correct skill on claude (superpowers "must use a skill").
-        assert!(lower.contains("invoking `correctness-review`"));
-        // Method body precedes the agent task, separated by the divider.
-        let m = out.find("METHOD BODY").expect("method body present");
-        let t = out.find("AGENT TASK").expect("agent task present");
-        assert!(m < t, "the lens method must precede the agent task");
-        assert!(out.contains("\n\n---\n\n"));
-    }
-
-    #[test]
-    fn blank_lens_name_still_forbids_substitution() {
-        // A lens with no resolvable name still gets the anti-substitution guard
-        // (just without a name to reference).
-        let out = compose_review_lens_prompt("", "METHOD", "TASK");
-        let lower = out.to_lowercase();
-        assert!(lower.contains("do not search for"));
-        assert!(out.contains("METHOD"));
-        assert!(out.contains("TASK"));
-    }
-}
-
-#[cfg(test)]
-mod orchestrator_tests {
-    use super::*;
-    use otto_core::domain::{ReviewAgentCfg, ReviewMode};
-
-    fn agent(name: &str, providers: &[&str], model: &str) -> ReviewAgentCfg {
-        ReviewAgentCfg {
-            name: name.to_string(),
-            provider: providers.first().copied().unwrap_or("claude").to_string(),
-            providers: providers.iter().map(|p| p.to_string()).collect(),
-            model: model.to_string(),
-            prompt: format!("{name} instructions"),
-            skill: String::new(),
-        }
-    }
-
-    /// Lens names no bundled or user-installed skill answers to, so the prompt
-    /// text under test is the same everywhere.
-    const UNRESOLVED_A: &str = "Alpha lens";
-    const UNRESOLVED_B: &str = "Beta lens";
-
-    fn cfg_with(agents: Vec<ReviewAgentCfg>) -> ReviewConfig {
-        let mut cfg = default_review_config("claude");
-        cfg.agents = agents;
-        cfg
-    }
-
-    /// A library with nothing installed on disk. NOTE it does not mean "no
-    /// skill resolves": `resolve_skill_inline` falls through to the compiled-in
-    /// bundles and `~/.claude/skills`, so a REAL lens name (`security-review`)
-    /// still inlines its method here. Tests that assert on prompt text use
-    /// [`UNRESOLVED_A`]/[`UNRESOLVED_B`] instead, so they read the same on any
-    /// machine.
-    fn empty_library() -> (tempfile::TempDir, otto_context::Library) {
-        let tmp = tempfile::tempdir().unwrap();
-        let lib = otto_context::Library::new(tmp.path().join("library"));
-        (tmp, lib)
-    }
-
-    #[test]
-    fn effective_review_mode_tags_stored_vs_default() {
-        let mut cfg = default_review_config("claude");
-        // Nothing stored ⇒ fan-out, tagged as the default (so the step log can
-        // say the user never chose it).
-        assert_eq!(mode_source(&cfg), (ReviewMode::FanOut, "default"));
-        cfg.mode = Some(ReviewMode::Orchestrator);
-        assert_eq!(
-            mode_source(&cfg),
-            (ReviewMode::Orchestrator, "stored config")
-        );
-        // An explicitly stored fan-out is still "stored", not "default".
-        cfg.mode = Some(ReviewMode::FanOut);
-        assert_eq!(mode_source(&cfg), (ReviewMode::FanOut, "stored config"));
-    }
-
-    #[test]
-    fn orchestrator_mode_expands_one_run_per_provider() {
-        let (_tmp, lib) = empty_library();
-        let cfg = cfg_with(vec![
-            agent("Correctness review", &["claude", "codex"], ""),
-            agent("Security review", &["claude", "codex"], "gpt-5"),
-            agent("Test review", &["claude"], ""),
-        ]);
-        let runs = expand_agent_runs(&cfg, ReviewMode::Orchestrator, &lib);
-        // One session per DISTINCT provider, in first-seen order — not per
-        // lens × provider (which would be five).
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].provider, "claude");
-        assert_eq!(runs[1].provider, "codex");
-        assert_eq!(
-            runs[0].display_name,
-            "claude \u{00b7} orchestrator (3 lenses)"
-        );
-        assert_eq!(
-            runs[1].display_name,
-            "codex \u{00b7} orchestrator (3 lenses)"
-        );
-        // Empty lens: `lens_covered_by` must never retire an orchestrator row
-        // because one lens finished on the other provider.
-        assert!(runs.iter().all(|r| r.lens.is_empty()));
-        // Every run carries every lens, slugified from the agent names.
-        assert_eq!(
-            runs[0].lens_slugs(),
-            vec!["correctness-review", "security-review", "test-review"]
-        );
-        // The model is the first configured one that applies to THIS provider.
-        assert_eq!(runs[0].model, "gpt-5");
-        assert_eq!(runs[1].model, "gpt-5");
-        // The prompt is composed per index in the spawn loop, not here.
-        assert!(runs.iter().all(|r| r.prompt_lens.is_empty()));
-    }
-
-    #[test]
-    fn orchestrator_prompt_lists_every_lens_and_per_lens_paths() {
-        let (_tmp, lib) = empty_library();
-        let cfg = cfg_with(vec![
-            agent(UNRESOLVED_A, &["claude"], ""),
-            agent(UNRESOLVED_B, &["claude"], ""),
-        ]);
-        let runs = expand_agent_runs(&cfg, ReviewMode::Orchestrator, &lib);
-        let dir = std::path::PathBuf::from("/tmp");
-        let compose = |provider: &str| {
-            compose_orchestrator_prompt(
-                &runs[0].lenses,
-                provider,
-                |slug| crate::review_session::lens_findings_path_in(&dir, "R1", 0, slug),
-                &crate::review_session::findings_path_in(&dir, "R1", 0),
-            )
-        };
-        let out = compose("claude");
-        assert!(out.starts_with("MULTI-LENS CODE REVIEW"));
-        assert!(out.contains("ORCHESTRATOR for provider claude"));
-        // Every lens gets its own numbered section AND its own output path.
-        assert!(out.contains("--- lens 1: Alpha lens (alpha-lens) ---"));
-        assert!(out.contains("--- lens 2: Beta lens (beta-lens) ---"));
-        assert!(out.contains("/tmp/otto-review-R1-0-alpha-lens.json"));
-        assert!(out.contains("/tmp/otto-review-R1-0-beta-lens.json"));
-        // The merged file is the one the watch loop polls, and it is written LAST.
-        assert!(out.contains("/tmp/otto-review-R1-0.json"));
-        assert!(out.contains("LAST thing you do"));
-        // Unresolvable method ⇒ claude is pointed at the `--add-dir` bundle it
-        // alone can load…
-        assert!(out.contains("use the `alpha-lens` skill (registered via --add-dir)"));
-        // …while codex/agy, which never register those skills, are not sent
-        // after a bundle they cannot open.
-        let codex = compose("codex");
-        assert!(!codex.contains("--add-dir"));
-        // The per-reviewer instructions travel with their lens either way.
-        assert!(out.contains("Beta lens instructions"));
-        assert!(codex.contains("Beta lens instructions"));
-    }
-
-    #[test]
-    fn orchestrator_prompt_inlines_a_resolved_lens_method() {
-        // A lens whose method resolved gets the METHOD verbatim, not a pointer
-        // to it — that is what lets codex/agy run the same review as claude.
-        let lenses = vec![OrchestratorLens {
-            name: "Alpha lens".into(),
-            slug: "alpha-lens".into(),
-            skill_text: "  ALPHA METHOD BODY  ".into(),
-            instructions: "alpha instructions".into(),
-            read_only: true,
-        }];
-        let dir = std::path::PathBuf::from("/tmp");
-        let out = compose_orchestrator_prompt(
-            &lenses,
-            "claude",
-            |slug| crate::review_session::lens_findings_path_in(&dir, "R1", 0, slug),
-            &crate::review_session::findings_path_in(&dir, "R1", 0),
-        );
-        assert!(out.contains("ALPHA METHOD BODY"));
-        assert!(!out.contains("registered via --add-dir"));
-        assert!(out.contains("alpha instructions"));
-    }
-
-    #[test]
-    fn checks_lens_is_not_read_only_in_orchestrator_prompt() {
-        let (_tmp, lib) = empty_library();
-        let cfg = cfg_with(vec![
-            agent(UNRESOLVED_A, &["claude"], ""),
-            agent(CHECKS_REVIEWER_NAME, &["claude"], ""),
-        ]);
-        let runs = expand_agent_runs(&cfg, ReviewMode::Orchestrator, &lib);
-        assert!(runs[0].lenses[0].read_only);
-        // The CI gate is the ONE lens that must be allowed to run commands.
-        assert!(!runs[0].lenses[1].read_only);
-        let dir = std::path::PathBuf::from("/tmp");
-        let out = compose_orchestrator_prompt(
-            &runs[0].lenses,
-            "claude",
-            |slug| crate::review_session::lens_findings_path_in(&dir, "R1", 0, slug),
-            &crate::review_session::findings_path_in(&dir, "R1", 0),
-        );
-        assert!(out.contains("you MAY run the listed check commands"));
-        // …and only once: the read-only lens must not inherit the licence.
-        assert_eq!(
-            out.matches("you MAY run the listed check commands").count(),
-            1
-        );
-    }
-
-    #[test]
-    fn orchestrator_budget_scales_with_lenses_and_caps() {
-        // 6 lenses ⇒ ceil(6/2) = 3 × the fan-out budget.
-        assert_eq!(
-            orchestrator_budget(Duration::from_secs(600), 6),
-            Duration::from_secs(1_800)
-        );
-        // Odd counts round up (5 lenses ⇒ 3×).
-        assert_eq!(
-            orchestrator_budget(Duration::from_secs(600), 5),
-            Duration::from_secs(1_800)
-        );
-        // A single lens still gets at least the fan-out budget.
-        assert_eq!(
-            orchestrator_budget(Duration::from_secs(600), 1),
-            Duration::from_secs(600)
-        );
-        assert_eq!(
-            orchestrator_budget(Duration::from_secs(600), 0),
-            Duration::from_secs(600)
-        );
-        // Capped: a 5h base × 4 is still 5h.
-        assert_eq!(
-            orchestrator_budget(Duration::from_secs(18_000), 8),
-            Duration::from_secs(18_000)
-        );
-    }
-
-    #[test]
-    fn fan_out_is_default_and_unchanged() {
-        let (_tmp, lib) = empty_library();
-        let cfg = cfg_with(vec![
-            agent(UNRESOLVED_A, &["claude", "codex"], "sonnet"),
-            agent(UNRESOLVED_B, &["claude"], ""),
-        ]);
-        let runs = expand_agent_runs(&cfg, ReviewMode::default(), &lib);
-        // One run per lens × provider, with the provider suffixed only on the
-        // multi-provider lens — exactly the pre-batch expansion.
-        assert_eq!(runs.len(), 3);
-        assert_eq!(runs[0].display_name, "Alpha lens \u{00b7} claude");
-        assert_eq!(runs[1].display_name, "Alpha lens \u{00b7} codex");
-        assert_eq!(runs[2].display_name, "Beta lens");
-        // `lens` is the CONFIGURED name (shared by the provider expansions) so
-        // siblings can cover for each other.
-        assert_eq!(runs[0].lens, "Alpha lens");
-        assert_eq!(runs[1].lens, "Alpha lens");
-        assert_eq!(runs[0].model, "sonnet");
-        assert_eq!(runs[2].model, "");
-        // No sub-agent lenses, and the lens prompt is composed up front — with
-        // an unresolvable method that is the reviewer's own instructions alone,
-        // exactly as `compose_review_lens_prompt` has always returned.
-        assert!(runs.iter().all(|r| r.lenses.is_empty()));
-        assert!(runs.iter().all(|r| r.lens_slugs().is_empty()));
-        assert_eq!(runs[2].prompt_lens, "Beta lens instructions");
-    }
-
-    #[test]
-    fn cancel_flags_registered_before_staggered_spawns() {
-        for n in [1usize, 2, 7] {
-            let plan = spawn_plan(n);
-            assert_eq!(plan.len(), n);
-            let last_register = plan.iter().map(|(r, _)| *r).max().unwrap();
-            let first_spawn = plan.iter().map(|(_, s)| *s).min().unwrap();
-            // R3: a Stop that lands mid-stagger must reach every reviewer, so
-            // no flag may be registered after the first spawn.
-            assert!(
-                last_register < first_spawn,
-                "register must precede every spawn"
-            );
-            // One stagger sleep between consecutive spawns, none before the first.
-            assert_eq!(plan.iter().filter(|(_, s)| *s > first_spawn).count(), n - 1);
-        }
-        // No cap and no semaphore — the stagger is the only pacing (R3).
-        assert_eq!(REVIEW_SPAWN_STAGGER, Duration::from_millis(1_500));
     }
 }
 
@@ -5453,7 +3902,16 @@ async fn draft_pr(
         .get(&repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
-    let resp = draft_pr_core(&ctx, &ws, &user, &repo.path, want)
+    // `head` = the branch the PR is FOR (the modal's Source). Absent ⇒ the
+    // checked-out branch, as before. A named head is diffed as
+    // merge-base(base, head)..head, so drafting a PR for a branch that isn't
+    // checked out describes THAT branch, not whatever HEAD is.
+    let head = body
+        .head
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty());
+    let resp = draft_pr_core_for(&ctx, &ws, &user, &repo.path, want, head, None)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(resp))
@@ -5472,6 +3930,24 @@ pub(crate) async fn draft_pr_core(
     user: &otto_core::domain::User,
     repo_path: &str,
     base: Option<&str>,
+    run_id: Option<&Id>,
+) -> Result<otto_core::api::DraftPrResp> {
+    draft_pr_core_for(ctx, ws, user, repo_path, base, None, run_id).await
+}
+
+/// [`draft_pr_core`] for an explicit source branch `head` (`None` ⇒ the
+/// checkout's current branch). The reply's `source_branch` is `head`.
+/// `run_id` (Run with Otto) is stamped into the drafting session's meta so a
+/// run cancel can find and stop it — dropping this future does not kill a
+/// manager-owned session.
+pub(crate) async fn draft_pr_core_for(
+    ctx: &ServerCtx,
+    ws: &otto_core::domain::Workspace,
+    user: &otto_core::domain::User,
+    repo_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+    run_id: Option<&Id>,
 ) -> Result<otto_core::api::DraftPrResp> {
     // Runs as a REAL Otto session, not a throwaway orchestrator PTY. Drafting
     // blocks a modal for as long as it takes, and the old headless PTY gave the
@@ -5486,13 +3962,16 @@ pub(crate) async fn draft_pr_core(
     //
     // The workflow git_pr node uses `pr_draft_prompt` + `run_node_agent` instead
     // so it can honor the node's chosen Provider/Model.
-    let (prompt, source, base_branch) = pr_draft_prompt(ctx, repo_path, base).await?;
+    let (prompt, source, base_branch) = pr_draft_prompt_for(ctx, repo_path, base, head).await?;
     let model = pr_draft_model(ctx).await;
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "source": "pr-draft",
         "model": model,
         "lean_turn": true,
     });
+    if let Some(run_id) = run_id {
+        meta["run_id"] = serde_json::json!(run_id);
+    }
     let title = format!("PR draft · {source}");
     let (reply, session_id) = crate::agent_session::run_session_turn(
         ctx,
@@ -5550,8 +4029,24 @@ pub(crate) async fn pr_draft_prompt(
     repo_path: &str,
     base: Option<&str>,
 ) -> Result<(String, String, String)> {
+    pr_draft_prompt_for(ctx, repo_path, base, None).await
+}
+
+/// [`pr_draft_prompt`] for an explicit source branch `head`: the diff is
+/// `merge-base(base, head)..head` (committed work on that branch only), and
+/// the prompt/`source` name `head`. `None` ⇒ the checked-out branch + its
+/// working tree, exactly as before.
+pub(crate) async fn pr_draft_prompt_for(
+    ctx: &ServerCtx,
+    repo_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+) -> Result<(String, String, String)> {
     let git = otto_git::LocalGit::new(repo_path);
-    let source = git.current_branch().await?;
+    let source = match head {
+        Some(h) => h.to_string(),
+        None => git.current_branch().await?,
+    };
     let resolved = git.resolve_base(base).await?;
     let base = resolved.branch.as_str();
     // Cap the diff fed to the drafting agent — a title/description doesn't need
@@ -5559,12 +4054,32 @@ pub(crate) async fn pr_draft_prompt(
     // stopped at twice the cap (enough to know it was cut) instead of the whole
     // patch being buffered just to keep 40 KB of it.
     const MAX_DIFF: usize = 40_000;
-    let (diff, _) = git
-        .diff_text_capped(Some(&resolved.diff_ref), 2 * MAX_DIFF)
-        .await?;
+    let (diff, _) = match head {
+        Some(h) => {
+            git.range_diff_text_capped(&resolved.diff_ref, h, 2 * MAX_DIFF)
+                .await?
+        }
+        None => {
+            git.diff_text_capped(Some(&resolved.diff_ref), 2 * MAX_DIFF)
+                .await?
+        }
+    };
     if diff.trim().is_empty() {
-        return Err(Error::Invalid(format!(
-            "no changes between '{source}' and '{base}'"
+        // An explicit head drafts from COMMITS only. When that head is the
+        // checked-out branch and the work is still in the working tree, say so
+        // — a bare "no changes" reads as a bug to someone looking at their
+        // edits (S15-307).
+        let uncommitted = match head {
+            Some(h) => {
+                git.current_branch().await.is_ok_and(|cur| cur == h)
+                    && git.status().await.is_ok_and(|st| !st.changes.is_empty())
+            }
+            None => false,
+        };
+        return Err(Error::Invalid(no_pr_changes_message(
+            &source,
+            base,
+            uncommitted,
         )));
     }
     let truncated = diff.len() > MAX_DIFF;
@@ -5617,6 +4132,20 @@ pub(crate) async fn pr_draft_prompt(
     Ok((prompt, source, base.to_string()))
 }
 
+/// The PR-draft "nothing to draft" error. `uncommitted`: the source is the
+/// checked-out branch and its working tree has changes that are not in any
+/// commit yet — the PR would carry none of them.
+pub(crate) fn no_pr_changes_message(source: &str, base: &str, uncommitted: bool) -> String {
+    if uncommitted {
+        format!(
+            "no commits between '{source}' and '{base}' — your changes are not committed yet. \
+             Commit your changes first: the PR includes commits only"
+        )
+    } else {
+        format!("no changes between '{source}' and '{base}'")
+    }
+}
+
 /// Launch an AI review on a specific branch/worktree (Run with Otto's `reviewing`
 /// stage and the workflow `review_run` node). Resolves `base` (an explicit
 /// ref/SHA, or `None` ⇒ the repo's detected default branch — never a
@@ -5649,17 +4178,67 @@ pub(crate) async fn run_review_for_branch(
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool)> {
+    run_review_for_branch_sized(
+        ctx,
+        repo_id,
+        worktree_path,
+        base,
+        cfg_override,
+        jira_context,
+        run_context,
+        mode_override,
+        None,
+    )
+    .await
+    .map(|(id, resolved, no_changes, _)| (id, resolved, no_changes))
+}
+
+/// [`run_review_for_branch`] that also returns the reviewed diff's byte
+/// length — the caller's wait budget is sized off it, and recomputing the
+/// whole review diff (one git spawn per untracked file) just for its length
+/// doubled the stage's git work.
+///
+/// `for_run`: a Run-with-Otto run to record the new `review_id` on BEFORE the
+/// background review is spawned. A run cancel drops the stage future at any
+/// await; recording it afterwards (in the stage) left a window where the
+/// review was running but the run did not name it, so cancel could not stop
+/// its reviewers (S2-302 / S15-306).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_review_for_branch_sized(
+    ctx: &ServerCtx,
+    repo_id: &Id,
+    worktree_path: &str,
+    base: Option<&str>,
+    cfg_override: Option<ReviewConfig>,
+    jira_context: Option<String>,
+    run_context: Option<String>,
+    mode_override: Option<otto_core::domain::ReviewMode>,
+    for_run: Option<&Id>,
+) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
+    review_budget_gate(ctx, &repo.workspace_id).await?;
     let git = otto_git::LocalGit::new(worktree_path);
     let resolved = git.resolve_base(base).await?;
-    let diff_text = git.diff_text_against(&resolved.diff_ref).await?;
+    let diff_text = git.review_diff_text(&resolved.diff_ref).await?;
     let review = ctx
         .reviews_store
         .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
         .await?;
     let review_id = review.id.clone();
+    if let Some(run_id) = for_run {
+        ctx.runs
+            .set_fields(
+                run_id,
+                &otto_state::runs::RunPatch {
+                    review_id: Some(review_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
     let no_changes = diff_text.trim().is_empty();
+    let diff_len = diff_text.len();
 
     if no_changes {
         // No changes vs base — complete immediately with no findings. Loud,
@@ -5697,7 +4276,11 @@ pub(crate) async fn run_review_for_branch(
             .await
             .ok()
             .filter(|c| !c.is_empty())
-            .map(|source| ReviewBranches { source, dest });
+            .map(|source| ReviewBranches {
+                source,
+                dest,
+                checked_out: true,
+            });
         tokio::spawn(async move {
             run_review(
                 ctx_bg,
@@ -5716,7 +4299,7 @@ pub(crate) async fn run_review_for_branch(
             .await;
         });
     }
-    Ok((review_id, resolved, no_changes))
+    Ok((review_id, resolved, no_changes, diff_len))
 }
 
 /// Tolerantly extract a commit message from an agent reply. The agent is asked
@@ -5882,6 +4465,36 @@ async fn draft_commit_message(
     }))
 }
 
+/// Agent rows a Retry may restart: settled ones only (`pending` / `running` /
+/// `waiting` still belong to a live recovery loop).
+pub(crate) fn agent_retryable(status: &str) -> bool {
+    matches!(status, "done" | "error" | "skipped")
+}
+
+/// Why a single-agent Retry is refused (`None` ⇒ allowed). Besides the agent
+/// itself being settled, the REVIEW must be: while it is still Running, the
+/// original run's end-of-review temp sweep deletes the retried agent's
+/// re-materialised `.diff` / `.prompt` / findings file mid-read, and its
+/// summarizer runs without the retried agent's findings (S2-303) — the same
+/// rule the summarizer retry already applies.
+pub(crate) fn agent_retry_block(
+    review_status: ReviewStatus,
+    index: usize,
+    agent_status: &str,
+) -> Option<String> {
+    if !agent_retryable(agent_status) {
+        return Some(format!(
+            "agent {index} is still {agent_status} — stop it before retrying"
+        ));
+    }
+    if review_status == ReviewStatus::Running {
+        return Some(
+            "the review is still running — retry this agent once the review has finished".into(),
+        );
+    }
+    None
+}
+
 /// Re-run a single review agent (e.g. one that never received its prompt). Uses
 /// the prompt persisted when the review started, kills the agent's old (stuck)
 /// session, and spawns a fresh one in the background.
@@ -5918,6 +4531,16 @@ async fn retry_review_agent(
             "no review agent at index {index}"
         ))));
     }
+    // Only a SETTLED agent is retried. Retrying a live one archived its session
+    // and replaced its cancel flag: the original recovery loop then respawned
+    // into the same index + findings file, and its orphaned flag left neither
+    // Stop nor Cancel able to reach it. A stuck agent is Stopped first.
+    if let Some(why) = agent_retry_block(review.status, index, &review.agents[index].status) {
+        return Err(crate::error::ApiError(Error::Conflict(why)));
+    }
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
     // DB-first (durable across reboot / temp-sweep / redeploy); the temp file
     // is the legacy fallback for reviews that predate migration 0100.
     let prompt = match ctx.reviews_store.get_agent_prompt(&review_id, index).await {
@@ -5969,15 +4592,24 @@ async fn retry_review_agent(
     }
 
     let provider = review.agents[index].provider.clone();
+    // An orchestrator row re-spawns as an orchestrator (sub-agent tool + the
+    // per-lens findings files its persisted prompt names) — S2-304.
+    let lens_slugs = review.agents[index].lens_slugs.clone();
     // Retry this reviewer with the SAME model it was configured with (empty →
     // provider default) so the retry matches the original run.
     let model = review.agents[index].model.clone();
-    let cwd = repo.path.clone();
+    let pr_number = review.pr_number;
     // The prompt references the diff via an absolute temp path — re-materialize
     // it from the durable row if a reboot/temp-sweep removed it (best-effort;
     // pre-0100 reviews have no stored diff and keep the old behavior). The
     // restored length also feeds the grace-period heuristic, which previously
     // collapsed to the 10-minute floor whenever the temp file was gone.
+    // Register a FRESH per-agent cancel flag (replacing any tripped one from a
+    // prior Stop) so the retried agent is stoppable exactly like the original.
+    // Registered BEFORE the diff is re-materialised: a sibling retry's
+    // end-of-retry temp sweep (below) skips while any agent of this review is
+    // registered, so it can never delete the file this retry is about to use.
+    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let diff_file = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
     let mut diff_len = std::fs::metadata(&diff_file)
         .map(|m| m.len() as usize)
@@ -6007,13 +4639,27 @@ async fn retry_review_agent(
             .collect();
         stage_review_skills(&ctx.context_library, &names)
     };
-    // Register a FRESH per-agent cancel flag (replacing any tripped one from a
-    // prior Stop) so the retried agent is stoppable exactly like the original.
-    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
     let slots = reviewer_slots();
+    let ctx_bg = ctx.clone();
     tokio::spawn(async move {
         let _slot = slots.acquire_owned().await.ok(); // SI-11 reviewer cap
+                                                      // A PR reviewer must verify against the PR head, not the user's
+                                                      // checkout (the original run's worktree is gone) — rebuild one, unique
+                                                      // per retry so concurrent retries never tear down each other's tree.
+        let suffix = format!("-a{index}-{}", chrono::Utc::now().timestamp_millis());
+        let (cwd, pr_wt) = if pr_number != 0 {
+            let wt =
+                pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, &suffix).await;
+            let cwd = wt
+                .as_ref()
+                .map_or_else(|| repo.path.clone(), |w| w.path.clone());
+            (cwd, wt)
+        } else {
+            // A branch review re-enters the checkout it ran in (S2-06), not
+            // the user's main checkout on whatever branch it is on now.
+            branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, &suffix).await
+        };
         crate::review_session::run_agent_session_with_recovery(
             &manager,
             &reviews,
@@ -6030,12 +4676,19 @@ async fn retry_review_agent(
             None,
             Some(&agent_cancel), // per-agent Stop works on retried agents too
             review_skills_dir.as_deref(),
-            // The persisted prompt carries the lens list, but the retry route
-            // does not parse it — the guard's note falls back to today's text.
-            &[],
+            &lens_slugs,
         )
         .await;
+        if let Some(wt) = pr_wt {
+            teardown_pr_worktree(&repo.path, wt).await;
+        }
         unregister_review_agent_cancel(&agent_cancels_reg, &review_id_bg, index);
+        // The last retry of this (settled) review out sweeps the temp files it
+        // re-materialised — only `run_review` swept them before (S2-310).
+        let () = crate::offload::blocking(move || {
+            sweep_review_temp_files_if_idle(&agent_cancels_reg, &review_id_bg)
+        })
+        .await;
     });
 
     Ok(Json(
@@ -6082,6 +4735,9 @@ async fn retry_summarizer(
             "this review has no summarizer stage to retry".into(),
         )));
     }
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
 
     // The reviewers' findings are durable on the agent rows — the summarizer is
     // always the last row and contributes none.
@@ -6102,17 +4758,27 @@ async fn retry_summarizer(
         )));
     }
 
+    // Flip the run back to running so the UI tracks the re-summarize live —
+    // atomically: the status check above is a fast-path, this is the guard.
+    // Two quick clicks must not both re-summarize (each would persist a full
+    // set of drafts).
+    if !ctx
+        .reviews_store
+        .try_begin_rerun(&review_id)
+        .await
+        .map_err(crate::error::ApiError)?
+    {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "review is still running — wait for it to finish first".into(),
+        )));
+    }
     // Each retry has its own cancellation flag; a cancelled earlier attempt
-    // must not poison the new session, and Cancel must cover this task too.
+    // must not poison the new session, and Cancel must cover this task too
+    // (registered only once this attempt owns the review).
     let attempt_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Ok(mut map) = ctx.review_cancels.lock() {
         map.insert(review_id.clone(), attempt_cancel.clone());
     }
-    // Flip the run back to running so the UI tracks the re-summarize live.
-    ctx.reviews_store
-        .set_status(&review_id, ReviewStatus::Running, None)
-        .await
-        .map_err(crate::error::ApiError)?;
     let _ = ctx.events.send(Event::ReviewChanged {
         workspace_id: workspace.id.clone(),
         session_id: None,
@@ -6122,12 +4788,26 @@ async fn retry_summarizer(
 
     let ctx_bg = ctx.clone();
     let review_id_bg = review_id.clone();
-    let repo_path = repo.path.clone();
     let repo_id = review.repo_id.clone();
     let pr_number = review.pr_number;
     tokio::spawn(async move {
         let _cancel_guard =
             ReviewCancelGuard::new(&ctx_bg.review_cancels, &review_id_bg, &attempt_cancel);
+        // Fingerprints anchor on the flagged line's TEXT; a PR review's lines
+        // are in the PR head, not the user's checkout. Rebuild a head worktree
+        // for anchoring so the retry re-keys onto the original findings.
+        let (repo_path, pr_wt) = if pr_number != 0 {
+            let wt =
+                pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, "-sum").await;
+            let path = wt
+                .as_ref()
+                .map_or_else(|| repo.path.clone(), |w| w.path.clone());
+            (path, wt)
+        } else {
+            // Anchor on the branch review's own checkout/head (S2-06): the
+            // user's checkout holds other line text and would re-key nothing.
+            branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, "-sum").await
+        };
         // The summarizer follows the repo's EFFECTIVE config (per-repo binding
         // resolution included), same as a fresh run would.
         let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
@@ -6160,8 +4840,15 @@ async fn retry_summarizer(
             // run that produced them is long gone, so there is no context to
             // re-render. The findings themselves are unchanged either way.
             "",
+            // The original run's cwd/head is gone (a PR worktree is torn down
+            // after the run; the head may have moved since), so this attempt
+            // cannot prove a finding absent — it only re-summarizes.
+            Some("summarizer retry"),
         )
         .await;
+        if let Some(wt) = pr_wt {
+            teardown_pr_worktree(&repo.path, wt).await;
+        }
         if attempt_cancel.load(std::sync::atomic::Ordering::SeqCst)
             || review_is_cancelled(&ctx_bg, &review_id_bg).await
         {
@@ -6289,6 +4976,22 @@ async fn stop_review_agent(
     ))
 }
 
+/// Point-of-action budget gate for EVERY path that spawns reviewer sessions —
+/// PR and local reviews, agent/summarizer retries and branch reviews (Run with
+/// Otto, workflow `review_run`); it used to guard the PR path only. Checks
+/// the workspace-level cap (the provider isn't known yet). A blocked budget is
+/// `Invalid` (400) like every other budget gate in the daemon.
+pub(crate) async fn review_budget_gate(ctx: &ServerCtx, workspace_id: &str) -> Result<()> {
+    let verdict = crate::routes::usage::check_budget(ctx, workspace_id, "").await;
+    if verdict.blocked {
+        return Err(Error::Invalid(format!(
+            "Budget exceeded — review blocked: {}",
+            verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+        )));
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct RepoPrPath {
     id: Id,
@@ -6314,23 +5017,10 @@ async fn start_review(
 
     let req = body.map(|b| b.0).unwrap_or_default();
 
-    // Point-of-action budget gate (A1/A2): check the workspace budget before
-    // spawning any agent sessions. If enforcement is on and the cap is exceeded,
-    // reject with 402 before touching the DB.
-    {
-        let verdict = crate::routes::usage::check_budget(
-            &ctx,
-            &repo.workspace_id,
-            "", // provider not yet known at start — check workspace-level cap
-        )
-        .await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — review blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
+    // Point-of-action budget gate (A1/A2), before touching the DB.
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     // Create the review row (status=running) and return it immediately.
     let review = ctx
@@ -6515,18 +5205,7 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
     // 4. Best-effort cleanup: temp files (diff + per-agent prompt/json) AND the
     //    durable prompt/diff rows (0100) — same lifecycle, cancelled runs are
     //    not retryable.
-    let prefix = format!("otto-review-{review_id}");
-    #[allow(clippy::disallowed_methods)] // runs on the blocking pool via offload::blocking
-    let () = crate::offload::blocking(move || {
-        if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
-            for entry in rd.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    })
-    .await;
+    remove_review_temp_files(&review_id).await;
     let _ = ctx.reviews_store.delete_run_artifacts(&review_id).await;
 
     // 5. Broadcast the terminal status to subscribers.
@@ -6629,6 +5308,15 @@ async fn approve_comment(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
+    // A DECLINED comment is not approvable: a decline that lands while a
+    // "Post all" loop is still walking its snapshot must not be posted anyway.
+    // Restoring it to draft (`PATCH … {restore_draft:true}`) is the way back.
+    if comment.state == CommentState::Declined {
+        return Err(crate::error::ApiError(Error::Conflict(
+            "comment was declined — restore it to draft before approving".into(),
+        )));
+    }
+
     // Post the comment to the PR provider — at most once.
     // - A LOCAL review (pr #0 sentinel) has no PR: approving it is a local
     //   decision; calling the forge only 404'd against "PR #0".
@@ -6648,6 +5336,14 @@ async fn approve_comment(
         // Another request holds (or completed) the post.
         true
     } else {
+        // Re-read under the claim: a decline that raced the check above wins.
+        let fresh = ctx.reviews_store.get_comment(&cid).await;
+        if matches!(&fresh, Ok(c) if c.state == CommentState::Declined) {
+            let _ = ctx.reviews_store.release_comment_post(&cid).await;
+            return Err(crate::error::ApiError(Error::Conflict(
+                "comment was declined — restore it to draft before approving".into(),
+            )));
+        }
         let posted = post_review_comment(&ctx, &user, &repo, review.pr_number, &comment).await;
         if !posted {
             let _ = ctx.reviews_store.release_comment_post(&cid).await;
@@ -6726,26 +5422,6 @@ async fn post_review_comment(
     }
 }
 
-/// Whether a failed inline post was the forge rejecting the ANCHOR (the line
-/// is not in the PR's current diff) rather than the request as a whole.
-fn inline_anchor_rejected(e: &Error) -> bool {
-    match e {
-        Error::Conflict(_) => true,
-        Error::Upstream(m) | Error::Invalid(m) => m.contains(" 400:"),
-        _ => false,
-    }
-}
-
-/// Body of the general-comment fallback: the location it was meant for, then
-/// the finding.
-fn general_comment_body(comment: &ReviewComment) -> String {
-    match (&comment.path, comment.line) {
-        (Some(p), Some(l)) => format!("**`{p}:{l}`**\n\n{}", comment.body),
-        (Some(p), None) => format!("**`{p}`**\n\n{}", comment.body),
-        _ => comment.body.clone(),
-    }
-}
-
 async fn decline_comment(
     Path(cid): Path<Id>,
     State(ctx): State<ServerCtx>,
@@ -6779,6 +5455,96 @@ async fn decline_comment(
     Ok(Json(updated))
 }
 
+/// `PATCH /pr-review-comments/{cid}` body.
+#[derive(Deserialize)]
+struct EditReviewCommentReq {
+    /// New body for a DRAFT comment (a person's edit of the agent's draft).
+    #[serde(default)]
+    body: Option<String>,
+    /// Move a DECLINED comment back to draft.
+    #[serde(default)]
+    restore_draft: bool,
+    /// Record an APPROVED-but-unposted comment as posted WITHOUT sending it:
+    /// the client found the copy an earlier failed (5xx) attempt created on
+    /// the PR, so it must stop being offered as postable (S15-302). Claimed
+    /// atomically (posted 0→1), so it can't race a concurrent approve.
+    #[serde(default)]
+    mark_posted: bool,
+}
+
+/// `PATCH /pr-review-comments/{cid}` — a person edits an agent-drafted
+/// comment before approving it, or restores a declined one to draft. Never
+/// touches a posted comment (409); nothing is sent anywhere.
+async fn edit_review_comment(
+    Path(cid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<EditReviewCommentReq>,
+) -> crate::error::ApiResult<Json<ReviewComment>> {
+    let comment = ctx
+        .reviews_store
+        .get_comment(&cid)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let review = ctx
+        .reviews_store
+        .get_review(&comment.review_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let repo = ctx
+        .git_store
+        .get_repo(&review.repo_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    if req.mark_posted {
+        if req.body.is_some() || req.restore_draft {
+            return Err(crate::error::ApiError(Error::Invalid(
+                "`mark_posted` stands alone — no `body` / `restore_draft`".into(),
+            )));
+        }
+        let claimed = comment.state == CommentState::Approved
+            && !comment.posted
+            && ctx
+                .reviews_store
+                .claim_comment_post(&cid)
+                .await
+                .map_err(crate::error::ApiError)?;
+        if !claimed {
+            return Err(crate::error::ApiError(Error::Conflict(
+                "only an approved, unposted comment can be marked posted".into(),
+            )));
+        }
+        return ctx
+            .reviews_store
+            .get_comment(&cid)
+            .await
+            .map(Json)
+            .map_err(crate::error::ApiError);
+    }
+    let body = req.body.as_deref().map(str::trim);
+    if body.is_some_and(str::is_empty) {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "comment body cannot be empty".into(),
+        )));
+    }
+    if body.is_none() && !req.restore_draft {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "nothing to change — send `body` and/or `restore_draft`".into(),
+        )));
+    }
+    ctx.reviews_store
+        .edit_unposted_comment(&cid, body, req.restore_draft)
+        .await
+        .map_err(crate::error::ApiError)?
+        .map(Json)
+        .ok_or_else(|| {
+            crate::error::ApiError(Error::Conflict(
+                "only an unposted draft can be edited, and only a declined comment restored".into(),
+            ))
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Local review routes
 // ---------------------------------------------------------------------------
@@ -6798,6 +5564,9 @@ async fn start_local_review(
         .await
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
 
     let git = otto_git::LocalGit::new(&repo.path);
     // Resolve the user-picked base first: a ref that doesn't exist locally
@@ -6809,7 +5578,7 @@ async fn start_local_review(
         .resolve_base(want)
         .await
         .map_err(crate::error::ApiError)?;
-    let diff_text = match git.diff_text_against(&resolved.diff_ref).await {
+    let diff_text = match git.review_diff_text(&resolved.diff_ref).await {
         Ok(d) => d,
         Err(e) => {
             return Err(crate::error::ApiError(Error::Invalid(format!(
@@ -6881,6 +5650,7 @@ async fn start_local_review(
             .map(|source| ReviewBranches {
                 source,
                 dest: body.base.clone(),
+                checked_out: true,
             });
         tokio::spawn(async move {
             // Local/working-tree review: no PR, so pr_number = 0 (the fingerprint
@@ -7087,10 +5857,12 @@ async fn get_review_config(
 
 async fn put_review_config(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<ReviewConfig>,
 ) -> crate::error::ApiResult<Json<ReviewConfig>> {
     crate::auth::require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
     let value = serde_json::to_value(&body).map_err(|e| {
         crate::error::ApiError(otto_core::Error::Internal(format!("serialize: {e}")))
@@ -7110,10 +5882,12 @@ async fn get_review_presets(
 
 async fn put_review_presets(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<Vec<ReviewConfigPreset>>,
 ) -> crate::error::ApiResult<Json<Vec<ReviewConfigPreset>>> {
     crate::auth::require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     // Reject blank/duplicate ids up front — a dangling or ambiguous id would
     // silently fall repos back to the global config.
     let mut seen = std::collections::HashSet::new();
@@ -7273,46 +6047,6 @@ pub fn review_config_routes() -> Router<ServerCtx> {
         )
 }
 
-/// Append an approved review comment as a markdown bullet to
-/// `<repo_path>/.otto/pr-<n>-review.md`, creating the file and header if needed.
-async fn append_to_review_file(
-    repo_path: &str,
-    pr_number: u64,
-    comment: &ReviewComment,
-) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let otto_dir = std::path::Path::new(repo_path).join(".otto");
-    tokio::fs::create_dir_all(&otto_dir).await?;
-    let file_path = otto_dir.join(format!("pr-{pr_number}-review.md"));
-
-    let file_exists = tokio::fs::metadata(&file_path).await.is_ok();
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file_path)
-        .await?;
-
-    if !file_exists {
-        let header = format!("# PR #{pr_number} Review\n\n");
-        file.write_all(header.as_bytes()).await?;
-    }
-
-    let loc = match (&comment.path, comment.line) {
-        (Some(p), Some(l)) => format!(" (`{p}` line {l})"),
-        (Some(p), None) => format!(" (`{p}`)"),
-        _ => String::new(),
-    };
-    let bullet = format!(
-        "- **[{}]**{} {}\n",
-        comment.severity.as_str(),
-        loc,
-        comment.body
-    );
-    file.write_all(bullet.as_bytes()).await?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Provider update route
 // ---------------------------------------------------------------------------
@@ -7419,6 +6153,7 @@ async fn open_agent_session(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::OpenAgentSessionReq>,
 ) -> ApiResult<Json<otto_core::api::OpenAgentSessionResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -7435,6 +6170,17 @@ async fn open_agent_session(
     if meta.get("work").is_none() {
         meta["work"] = serde_json::json!({ "origin": "delegation" });
     }
+    // The delegating lead, stamped by the server from the credential (never
+    // the body): `/sessions/{id}/message` lets an agent's own token reach
+    // only itself and the workers it opened here (S11-02).
+    match crate::feature_guard::agent_session_of(&auth) {
+        Some(lead) => meta[DELEGATED_BY_META] = serde_json::json!(lead),
+        None => {
+            if let Some(m) = meta.as_object_mut() {
+                m.remove(DELEGATED_BY_META);
+            }
+        }
+    }
     let create = otto_core::api::CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider),
@@ -7448,6 +6194,14 @@ async fn open_agent_session(
         .get(&ws_id)
         .await
         .map_err(ApiError)?;
+    // S11-302: an agent's own credential opens workers only inside the
+    // workspace, its own folder or a worktree of the same repo.
+    if let Some(lead) = crate::feature_guard::agent_session_of(&auth) {
+        ctx.manager
+            .check_agent_cwd(&ws, lead, create.cwd.as_deref())
+            .await
+            .map_err(ApiError)?;
+    }
     let session = ctx
         .manager
         .create(&ws, &user.id, create, None)
@@ -7479,6 +6233,16 @@ async fn open_agent_session(
     }))
 }
 
+/// Session meta key naming the agent session that opened this one through
+/// `POST /workspaces/{id}/sessions/open` (server-owned: PATCH cannot set it).
+pub const DELEGATED_BY_META: &str = otto_sessions::http::DELEGATED_BY_META;
+
+/// Confinement of an agent session's OWN credential on the REST twins of the
+/// terminal (S11-02 / S1-11) and on broadcast/relay (S11-305 / S1-303). The
+/// one rule lives with the sessions router, which applies it to the lifecycle
+/// routes (PATCH, restart, kill, archive, …) too.
+pub use otto_sessions::http::agent_input_rule;
+
 /// `POST /sessions/{id}/message` — deliver ONE message to ONE live agent
 /// session as if typed + Enter: the targeted counterpart of
 /// `/workspaces/{id}/broadcast`, for a lead driving a single worker. Same
@@ -7487,6 +6251,7 @@ async fn session_message(
     Path(session_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::SessionMessageReq>,
 ) -> ApiResult<Json<otto_core::api::SessionMessageResp>> {
     let text = req.text.trim();
@@ -7496,6 +6261,13 @@ async fn session_message(
     let session = input_session(&ctx, &user.id, &session_id)
         .await
         .map_err(ApiError)?;
+    agent_input_rule(
+        crate::feature_guard::agent_session_of(&auth),
+        &session.id,
+        &session.meta,
+        true,
+    )
+    .map_err(ApiError)?;
     if session.kind != SessionKind::Agent {
         return Err(ApiError(Error::Invalid(
             "messages can only be sent to agent sessions".into(),
@@ -7512,7 +6284,7 @@ async fn session_message(
             session.status.as_str()
         ))));
     }
-    submit_session_text(&ctx, &user.id, &session_id, text)
+    submit_session_text(&ctx, Typist::new(&user.id, &auth), &session_id, text)
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::SessionMessageResp {
@@ -7561,13 +6333,19 @@ async fn wait_session(
                 reached: true,
             }));
         }
-        if tokio::time::Instant::now() >= deadline {
+        // A daemon shutdown answers the long-poll now (callers loop on
+        // `reached: false`) instead of holding the HTTP drain open past
+        // launchd's exit timeout.
+        if tokio::time::Instant::now() >= deadline || crate::shutdown::is_shutting_down() {
             return Ok(Json(otto_core::api::WaitSessionResp {
                 session,
                 reached: false,
             }));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = crate::shutdown::cancelled() => {}
+        }
         session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     }
 }
@@ -7586,6 +6364,13 @@ async fn send_input(
     let session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
     crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
+    agent_input_rule(
+        crate::feature_guard::agent_session_of(&auth),
+        &session.id,
+        &session.meta,
+        false,
+    )
+    .map_err(ApiError)?;
 
     // `submit` omitted/true: paste + a real Enter via `submit_text` — writing
     // `"{text}\n"` in one burst makes bracketed-paste TUIs (Claude Code, Codex)
@@ -7628,27 +6413,170 @@ async fn send_input(
 }
 
 // ---------------------------------------------------------------------------
-// Browser proxy route  (GET /browser/proxy?url=…&token=…)
+// Browser proxy route  (GET /browser/proxy?url=…&ticket=…)
 // ---------------------------------------------------------------------------
+//
+// The take-over iframe can't send an `Authorization` header, so the proxy used
+// to accept the owner's bearer as `?token=` — which leaked it into the iframe
+// URL (history, Referer, the proxied page's `location.href`) and ran arbitrary
+// third-party HTML on the daemon origin, where it could read that token back.
+// Now the UI mints a single-use, short-lived ticket bound to ONE url via an
+// authed POST (`/api/v1/browser/proxy-ticket`), and every proxy response is
+// served with `Content-Security-Policy: sandbox allow-scripts` (no
+// `allow-same-origin`): the proxied page runs in an opaque origin and can
+// neither read the daemon's storage nor make credentialed same-origin calls.
 
 /// Picker script injected before </body>.
 const PICKER_SCRIPT: &str = r#"<script>(function(){var on=false;function sel(el){if(!el||el===document.body||el.nodeType!==1)return 'body';var parts=[],e=el,d=0;while(e&&e.nodeType===1&&e!==document.body&&d<5){var p=e.tagName.toLowerCase();if(e.id){parts.unshift('#'+e.id);break;}var cls=[].slice.call(e.classList||[]).filter(function(c){return !/[0-9]/.test(c)&&c.length<24;}).slice(0,2);if(cls.length)p+='.'+cls.join('.');parts.unshift(p);e=e.parentElement;d++;}return parts.join(' > ');}function desc(el){var s=sel(el);var a=['aria-label','placeholder','name','href'].map(function(k){var v=el.getAttribute&&el.getAttribute(k);return v?'['+k+'="'+String(v).slice(0,60)+'"]':'';}).join('');var t=((el.textContent||'').trim()).slice(0,50);return s+a+(t?' "'+t+'"':'');}window.addEventListener('message',function(ev){if(ev.data&&ev.data.type==='otto-takeover'){on=!!ev.data.enabled;document.documentElement.style.cursor=on?'crosshair':'';}});document.addEventListener('click',function(e){if(!on)return;e.preventDefault();e.stopPropagation();try{parent.postMessage({type:'otto-element',desc:desc(e.target),x:Math.round(e.clientX),y:Math.round(e.clientY),url:location.href},'*');}catch(_){}},true);})();</script>"#;
 
+/// CSP sent on EVERY proxy response (HTML, pass-through bytes, errors): the
+/// document is sandboxed into an opaque origin — scripts run (the picker needs
+/// them) but the page is never same-origin with the daemon.
+const PROXY_CSP: &str = "sandbox allow-scripts";
+
+/// How long a minted proxy ticket stays redeemable.
+const PROXY_TICKET_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Cap on outstanding tickets (each mint prunes expired ones first; this only
+/// bounds a caller hammering the mint route).
+const PROXY_TICKET_MAX: usize = 1024;
+
+struct ProxyTicket {
+    url: String,
+    expires: std::time::Instant,
+}
+
+/// In-memory single-use ticket store. Process-local on purpose: a ticket only
+/// needs to survive the ~instant between the UI minting it and the iframe
+/// loading it, and a daemon restart invalidating every ticket is harmless.
+static PROXY_TICKETS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ProxyTicket>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Mint a ticket for `url`, valid for `ttl`.
+fn mint_proxy_ticket(url: &str, ttl: std::time::Duration) -> String {
+    use rand::rand_core::UnwrapErr;
+    use rand::rngs::SysRng;
+    use rand::Rng;
+    let mut bytes = [0u8; 32];
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
+    let ticket = hex::encode(bytes);
+    let now = std::time::Instant::now();
+    let mut map = PROXY_TICKETS.lock().unwrap_or_else(|p| p.into_inner());
+    map.retain(|_, t| t.expires > now);
+    if map.len() >= PROXY_TICKET_MAX {
+        // Drop the soonest-to-expire ticket rather than refusing the mint.
+        if let Some(k) = map
+            .iter()
+            .min_by_key(|(_, t)| t.expires)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&k);
+        }
+    }
+    map.insert(
+        ticket.clone(),
+        ProxyTicket {
+            url: url.to_owned(),
+            expires: now + ttl,
+        },
+    );
+    ticket
+}
+
+/// Redeem (and consume) a ticket for `url`. Single-use: the ticket is removed
+/// whether or not it matches, so a leaked/guessed ticket can't be retried
+/// against a different URL.
+fn redeem_proxy_ticket(ticket: &str, url: &str) -> bool {
+    let mut map = PROXY_TICKETS.lock().unwrap_or_else(|p| p.into_inner());
+    match map.remove(ticket) {
+        Some(t) => t.expires > std::time::Instant::now() && t.url == url,
+        None => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct ProxyTicketReq {
+    url: String,
+}
+
+#[derive(serde::Serialize)]
+struct ProxyTicketResp {
+    ticket: String,
+    expires_in_secs: u64,
+}
+
+/// `POST /browser/proxy-ticket` — authed (bearer + `Browser`/Edit policy);
+/// returns a single-use ticket the take-over iframe passes as `?ticket=`.
+/// Share-link and MCP-restricted tokens never get one
+/// (`RootRoute::BrowserProxy`: the proxy itself only sees the ticket).
+async fn browser_proxy_ticket(
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Json(req): Json<ProxyTicketReq>,
+) -> ApiResult<Json<ProxyTicketResp>> {
+    crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::BrowserProxy,
+        &auth,
+        None,
+    )
+    .await
+    .map_err(ApiError)?;
+    let url = req.url.trim();
+    let ok_scheme = reqwest::Url::parse(url)
+        .map(|u| matches!(u.scheme(), "http" | "https"))
+        .unwrap_or(false);
+    if !ok_scheme {
+        return Err(ApiError(Error::Invalid(
+            "url must be an absolute http(s) URL".into(),
+        )));
+    }
+    Ok(Json(ProxyTicketResp {
+        ticket: mint_proxy_ticket(url, PROXY_TICKET_TTL),
+        expires_in_secs: PROXY_TICKET_TTL.as_secs(),
+    }))
+}
+
+/// Authed API route that mints proxy tickets (mounted under `/api/v1`).
+pub fn browser_proxy_ticket_routes() -> Router<ServerCtx> {
+    Router::new().route("/browser/proxy-ticket", post(browser_proxy_ticket))
+}
+
 #[derive(serde::Deserialize)]
 struct BrowserProxyQuery {
     url: Option<String>,
-    token: Option<String>,
+    ticket: Option<String>,
 }
 
 /// State carried by the root-level browser proxy router.
 #[derive(Clone)]
 struct BrowserProxyState {
-    auth: Arc<dyn otto_core::auth::TokenAuthenticator>,
     http: reqwest::Client,
 }
 
-/// Root-level browser proxy router (self-authenticates via `?token=`).
-pub fn browser_proxy_router(authenticator: Arc<dyn otto_core::auth::TokenAuthenticator>) -> Router {
+/// Stamp the isolation headers onto every proxy response, whatever branch
+/// produced it (an error page or a pass-through image is still attacker-
+/// controlled content served from the daemon origin).
+async fn browser_proxy_headers(mut resp: axum::response::Response) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(PROXY_CSP),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
+/// Root-level browser proxy router (self-authenticates via a single-use
+/// `?ticket=` minted by `POST /api/v1/browser/proxy-ticket`).
+pub fn browser_proxy_router() -> Router {
     // SSRF guard: the guarded resolver vets the address actually dialled (no
     // DNS rebinding after the pre-flight check) and each redirect hop is capped
     // + re-validated so an upstream 30x can't bounce the proxy inward.
@@ -7660,10 +6588,62 @@ pub fn browser_proxy_router(authenticator: Arc<dyn otto_core::auth::TokenAuthent
 
     Router::new()
         .route("/browser/proxy", axum::routing::get(browser_proxy))
-        .with_state(BrowserProxyState {
-            auth: authenticator,
-            http,
-        })
+        .layer(axum::middleware::map_response(browser_proxy_headers))
+        .with_state(BrowserProxyState { http })
+}
+
+/// Escape text for an HTML attribute value / text node.
+fn proxy_html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn proxy_error_page(status: axum::http::StatusCode, msg: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let body = format!(
+        r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
+        proxy_html_escape(msg)
+    );
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+/// Inject `<base href>` (HTML-escaped — the URL is caller-supplied) after
+/// `<head>` and the picker script before `</body>`.
+fn proxy_transform_html(html: &str, url: &str) -> String {
+    let base_tag = format!(r#"<base href="{}">"#, proxy_html_escape(url));
+    let html = {
+        // Try to find <head> (case-insensitive). `to_ascii_lowercase` keeps
+        // byte offsets aligned with `html` (full Unicode lowercasing doesn't).
+        let lower = html.to_ascii_lowercase();
+        if let Some(pos) = lower.find("<head>") {
+            let insert_at = pos + "<head>".len();
+            format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
+        } else if let Some(pos) = lower.find("<head ") {
+            // <head …> with attributes: advance to the closing >.
+            if let Some(close) = lower[pos..].find('>') {
+                let insert_at = pos + close + 1;
+                format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
+            } else {
+                format!("{}{}", base_tag, html)
+            }
+        } else {
+            format!("{}{}", base_tag, html)
+        }
+    };
+    let lower = html.to_ascii_lowercase();
+    if let Some(pos) = lower.rfind("</body>") {
+        format!("{}{}{}", &html[..pos], PICKER_SCRIPT, &html[pos..])
+    } else {
+        format!("{}{}", html, PICKER_SCRIPT)
+    }
 }
 
 async fn browser_proxy(
@@ -7673,30 +6653,16 @@ async fn browser_proxy(
     use axum::http::{HeaderValue, StatusCode};
     use axum::response::IntoResponse;
 
-    // --- Auth: validate ?token= ---
-    let token = match q.token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(otto_core::api::Problem {
-                    code: "unauthorized".into(),
-                    message: "missing ?token= parameter".into(),
-                }),
-            )
-                .into_response();
-        }
-    };
-    if st.auth.authenticate(&token).await.is_err() {
-        return (
+    let unauthorized = |message: &str| {
+        (
             StatusCode::UNAUTHORIZED,
             axum::Json(otto_core::api::Problem {
                 code: "unauthorized".into(),
-                message: "invalid token".into(),
+                message: message.into(),
             }),
         )
-            .into_response();
-    }
+            .into_response()
+    };
 
     // --- Validate target URL ---
     let url = match q.url {
@@ -7713,6 +6679,15 @@ async fn browser_proxy(
         }
     };
 
+    // --- Auth: redeem the single-use ?ticket= (bound to this exact url) ---
+    let ticket = match q.ticket {
+        Some(t) if !t.is_empty() => t,
+        _ => return unauthorized("missing ?ticket= parameter"),
+    };
+    if !redeem_proxy_ticket(&ticket, &url) {
+        return unauthorized("invalid, expired or already-used ticket");
+    }
+
     // --- SSRF guard: resolve + classify before fetching ---
     if let Err(msg) = crate::routes::api_client::net_guard::check_url(&url).await {
         return (
@@ -7728,18 +6703,7 @@ async fn browser_proxy(
     // --- Fetch upstream ---
     let upstream = match st.http.get(&url).send().await {
         Ok(r) => r,
-        Err(e) => {
-            let body = format!(
-                r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
-                e
-            );
-            return (
-                StatusCode::BAD_GATEWAY,
-                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                body,
-            )
-                .into_response();
-        }
+        Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
 
     // Determine content-type before consuming the body.
@@ -7753,73 +6717,21 @@ async fn browser_proxy(
     let is_html = content_type.contains("text/html");
 
     if !is_html {
-        // Stream bytes through with the upstream content-type.
+        // Stream bytes through with the upstream content-type (the response
+        // layer still stamps the sandbox CSP + nosniff on it).
         let ct_val = HeaderValue::from_str(&content_type)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-        let bytes = match upstream.bytes().await {
+        let bytes = match read_capped(upstream, PROXY_BODY_CAP).await {
             Ok(b) => b,
-            Err(e) => {
-                let body = format!(
-                    r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
-                    e
-                );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    body,
-                )
-                    .into_response();
-            }
+            Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e),
         };
         return ([(axum::http::header::CONTENT_TYPE, ct_val)], bytes).into_response();
     }
 
     // --- HTML: read, transform, return ---
-    let html = match upstream.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            let body = format!(
-                r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
-                e
-            );
-            return (
-                StatusCode::BAD_GATEWAY,
-                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                body,
-            )
-                .into_response();
-        }
-    };
-
-    // (a) Inject <base href="…"> after <head> (case-insensitive).
-    let base_tag = format!(r#"<base href="{}">"#, url);
-    let html = {
-        // Try to find <head> (case-insensitive).
-        let lower = html.to_lowercase();
-        if let Some(pos) = lower.find("<head>") {
-            let insert_at = pos + "<head>".len();
-            format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
-        } else if let Some(pos) = lower.find("<head ") {
-            // <head …> with attributes: advance to the closing >.
-            if let Some(close) = lower[pos..].find('>') {
-                let insert_at = pos + close + 1;
-                format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
-            } else {
-                format!("{}{}", base_tag, html)
-            }
-        } else {
-            format!("{}{}", base_tag, html)
-        }
-    };
-
-    // (b) Inject picker script before </body> (case-insensitive).
-    let html = {
-        let lower = html.to_lowercase();
-        if let Some(pos) = lower.rfind("</body>") {
-            format!("{}{}{}", &html[..pos], PICKER_SCRIPT, &html[pos..])
-        } else {
-            format!("{}{}", html, PICKER_SCRIPT)
-        }
+    let html = match read_capped(upstream, PROXY_BODY_CAP).await {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e),
     };
 
     (
@@ -7827,9 +6739,196 @@ async fn browser_proxy(
             axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static("text/html; charset=utf-8"),
         )],
-        html,
+        proxy_transform_html(&html, &url),
     )
         .into_response()
+}
+
+/// Most bytes the take-over proxy buffers from one upstream response (S11-10).
+const PROXY_BODY_CAP: usize = 20 * 1024 * 1024;
+
+/// Read an upstream body chunk by chunk, refusing it once it passes `cap` —
+/// a ticketed take-over of a multi-GB URL must never be buffered whole in
+/// daemon memory (the 15 s timeout alone does not bound the size).
+async fn read_capped(
+    mut resp: reqwest::Response,
+    cap: usize,
+) -> std::result::Result<axum::body::Bytes, String> {
+    if resp.content_length().is_some_and(|n| n > cap as u64) {
+        return Err(format!("page too large (over {} MB)", cap / (1024 * 1024)));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if buf.len() + chunk.len() > cap {
+            return Err(format!("page too large (over {} MB)", cap / (1024 * 1024)));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.into())
+}
+
+#[cfg(test)]
+mod proxy_cap_tests {
+    /// S11-10: a body over the cap is refused (with or without a declared
+    /// length); one under it reads in full.
+    #[tokio::test]
+    async fn upstream_body_over_the_cap_is_refused() {
+        use axum::routing::get;
+        let app = axum::Router::new()
+            .route("/big", get(|| async { vec![b'x'; 4096] }))
+            .route(
+                "/chunked",
+                get(|| async {
+                    let parts = (0..8).map(|_| Ok::<_, std::io::Error>(vec![b'y'; 1024]));
+                    axum::body::Body::from_stream(futures_util::stream::iter(parts))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let get = |p: &str| reqwest::get(format!("http://{addr}{p}"));
+        assert!(super::read_capped(get("/big").await.unwrap(), 1024)
+            .await
+            .is_err());
+        assert!(super::read_capped(get("/chunked").await.unwrap(), 1024)
+            .await
+            .is_err());
+        assert_eq!(
+            super::read_capped(get("/big").await.unwrap(), 8192)
+                .await
+                .unwrap()
+                .len(),
+            4096
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn finished_review_temp_files_are_removed_but_not_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        for f in [
+            "otto-review-R1.diff",
+            "otto-review-R1-0.json",
+            "otto-review-R1-0.prompt",
+        ] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        std::fs::write(d.join("otto-review-R2.diff"), "other").unwrap();
+        std::fs::create_dir(d.join("otto-review-R1-wt")).unwrap();
+        remove_review_temp_files_in(d, "otto-review-R1");
+        assert!(!d.join("otto-review-R1.diff").exists());
+        assert!(!d.join("otto-review-R1-0.json").exists());
+        assert!(!d.join("otto-review-R1-0.prompt").exists());
+        assert!(
+            d.join("otto-review-R2.diff").exists(),
+            "another review's files stay"
+        );
+        assert!(
+            d.join("otto-review-R1-wt").is_dir(),
+            "directories are never removed"
+        );
+    }
+
+    #[test]
+    fn only_settled_review_agents_are_retryable() {
+        for s in ["done", "error", "skipped"] {
+            assert!(agent_retryable(s), "{s}");
+        }
+        for s in ["pending", "running", "waiting", ""] {
+            assert!(!agent_retryable(s), "{s}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod browser_proxy_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn assert_isolation_headers(resp: &axum::response::Response) {
+        let h = resp.headers();
+        assert_eq!(h[header::CONTENT_SECURITY_POLICY], "sandbox allow-scripts");
+        assert!(!h[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("allow-same-origin"));
+        assert_eq!(h[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    }
+
+    #[tokio::test]
+    async fn every_proxy_response_carries_sandbox_csp() {
+        let app = browser_proxy_router();
+        // Missing url, missing ticket, bogus ticket, and an SSRF-refused
+        // (loopback) target all still get the isolation headers.
+        let t = mint_proxy_ticket("http://127.0.0.1:7700/", PROXY_TICKET_TTL);
+        for uri in [
+            "/browser/proxy".to_string(),
+            "/browser/proxy?url=https%3A%2F%2Fexample.com%2F".to_string(),
+            "/browser/proxy?url=https%3A%2F%2Fexample.com%2F&ticket=nope".to_string(),
+            format!("/browser/proxy?url=http%3A%2F%2F127.0.0.1%3A7700%2F&ticket={t}"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert!(!resp.status().is_success(), "{uri} -> {}", resp.status());
+            assert_isolation_headers(&resp);
+        }
+    }
+
+    #[tokio::test]
+    async fn bearer_token_param_is_no_longer_accepted() {
+        let resp = browser_proxy_router()
+            .oneshot(
+                Request::get("/browser/proxy?url=https%3A%2F%2Fexample.com%2F&token=anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn ticket_is_single_use() {
+        let t = mint_proxy_ticket("https://example.com/a", PROXY_TICKET_TTL);
+        assert!(redeem_proxy_ticket(&t, "https://example.com/a"));
+        assert!(!redeem_proxy_ticket(&t, "https://example.com/a"));
+    }
+
+    #[test]
+    fn ticket_is_bound_to_its_url_and_burned_on_mismatch() {
+        let t = mint_proxy_ticket("https://example.com/a", PROXY_TICKET_TTL);
+        assert!(!redeem_proxy_ticket(&t, "https://evil.example/"));
+        // Burned by the failed attempt — can't be retried with the right url.
+        assert!(!redeem_proxy_ticket(&t, "https://example.com/a"));
+    }
+
+    #[test]
+    fn expired_ticket_is_rejected() {
+        let t = mint_proxy_ticket("https://example.com/a", std::time::Duration::ZERO);
+        assert!(!redeem_proxy_ticket(&t, "https://example.com/a"));
+    }
+
+    #[test]
+    fn base_href_is_html_escaped() {
+        let url = r#"https://x.example/"><script>alert(1)</script>"#;
+        let out = proxy_transform_html("<html><head></head><body></body></html>", url);
+        assert!(!out.contains("<script>alert(1)"), "{out}");
+        assert!(out.contains(
+            r#"<base href="https://x.example/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">"#
+        ));
+        assert!(out.contains("otto-element"), "picker still injected");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8178,8 +7277,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         // Design Hall — the artifact graph (`/design/*`, Feature::Design).
         otto_design::router::<ServerCtx>(),
         // The unified design-assist pipeline (agent turns, variants, learned
-        // rules) — needs the session runner, so it lives in the server.
-        crate::design_assist::routes(),
+        // rules) — otto-design-assist's; the turn runs via `DesignAssistCtx`.
+        otto_design_assist::routes::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
         otto_vault::router::<ServerCtx>(),
         crate::vault_docs_agent::routes(),
@@ -8191,10 +7290,10 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_context::router::<ServerCtx>(),
         otto_skills::http::router::<ServerCtx>(),
         otto_swarm::router::<ServerCtx>(),
-        crate::swarm_runtime::routes(),
+        otto_swarm::runtime::engine::routes::<ServerCtx>(),
         crate::routes::goal_loops::routes(),
         crate::routes::proof::routes(),
-        crate::insights::routes(),
+        otto_insights::routes::<ServerCtx>(),
         orchestrator_routes(),
         db_explorer_routes(),
         pr_review_routes(),
@@ -8226,6 +7325,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         // Runtime custom plugins: management + scoped host-API + reverse-proxy to
         // sidecar processes. (Asset/iframe routes are root-mounted; see root vec.)
         crate::plugins::api_routes(),
+        // Single-use tickets for the root-level `/browser/proxy` take-over frame.
+        browser_proxy_ticket_routes(),
     ];
     let root = vec![
         otto_sessions::ws_router(ctx.authenticator.clone(), ctx.clone()),
@@ -8233,7 +7334,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::api_stream::ws_router(ctx.clone()),
         // Remote live browser viewer socket (`/ws/browser/{tab_id}/live`).
         crate::routes::browser_live::ws_router(ctx.clone()),
-        browser_proxy_router(ctx.authenticator.clone()),
+        browser_proxy_router(),
         // Runtime-plugin iframe assets: /plugins/{slug}/ui/* served as public
         // static files (root-mounted, outside /api/v1; the iframe's API calls are
         // the gated part). Listed last so it doesn't shadow other root routes.
@@ -8515,5 +7616,134 @@ mod review_cancel_guard_tests {
         drop(guard);
         let map = reg.lock().unwrap();
         assert!(Arc::ptr_eq(map.get("r1").unwrap(), &newer));
+    }
+}
+
+#[cfg(test)]
+mod agent_input_rule_tests {
+    use super::{agent_input_rule, DELEGATED_BY_META};
+    use otto_core::Id;
+    use serde_json::json;
+
+    /// S11-02 / S1-11: the REST twins of `/ws/term` confine an agent
+    /// session's own token like the WS gate does.
+    #[test]
+    fn agent_token_reaches_only_its_own_session_and_its_workers() {
+        let me = Id::from("lead");
+        let sibling = Id::from("sibling-shell");
+        let worker = Id::from("worker");
+        let worker_meta = json!({ DELEGATED_BY_META: "lead" });
+        let other_worker_meta = json!({ DELEGATED_BY_META: "someone-else" });
+        // A person's credential is unaffected.
+        assert!(agent_input_rule(None, &sibling, &json!({}), false).is_ok());
+        // Own session: /input and /message.
+        assert!(agent_input_rule(Some(&me), &me, &json!({}), false).is_ok());
+        assert!(agent_input_rule(Some(&me), &me, &json!({}), true).is_ok());
+        // A sibling (the owner's unsandboxed shell): never.
+        assert!(agent_input_rule(Some(&me), &sibling, &json!({}), false).is_err());
+        assert!(agent_input_rule(Some(&me), &sibling, &json!({}), true).is_err());
+        // Its own worker: /message yes (otto_send_message), raw /input no.
+        assert!(agent_input_rule(Some(&me), &worker, &worker_meta, true).is_ok());
+        assert!(agent_input_rule(Some(&me), &worker, &worker_meta, false).is_err());
+        // Another lead's worker: no.
+        assert!(agent_input_rule(Some(&me), &worker, &other_worker_meta, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_retry_tests {
+    use super::{agent_retry_block, same_dir, sweep_review_temp_files_if_idle};
+    use otto_core::domain::{ReviewAgentState, ReviewStatus};
+
+    /// S2-303: a settled agent is retryable only once the review has settled.
+    #[test]
+    fn agent_retry_needs_a_settled_agent_and_a_settled_review() {
+        assert!(agent_retry_block(ReviewStatus::Done, 0, "done").is_none());
+        assert!(agent_retry_block(ReviewStatus::Error, 0, "error").is_none());
+        assert!(agent_retry_block(ReviewStatus::Cancelled, 0, "skipped").is_none());
+        let why = agent_retry_block(ReviewStatus::Running, 0, "done").unwrap();
+        assert!(why.contains("still running"), "{why}");
+        let why = agent_retry_block(ReviewStatus::Done, 2, "running").unwrap();
+        assert!(why.contains("agent 2 is still running"), "{why}");
+    }
+
+    /// S2-304: an orchestrator row carries its lens slugs through agents_json,
+    /// so the retry route re-spawns it WITH its sub-agent tool; fan-out rows
+    /// (and pre-field rows) stay without one.
+    #[test]
+    fn orchestrator_row_keeps_its_lens_slugs_for_retry() {
+        let row: ReviewAgentState = serde_json::from_value(serde_json::json!({
+            "name": "orchestrator", "provider": "claude", "model": "",
+            "status": "error", "note": "", "comment_count": 0,
+            "lens_slugs": ["correctness", "security"],
+        }))
+        .unwrap();
+        let back = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            back["lens_slugs"],
+            serde_json::json!(["correctness", "security"])
+        );
+        let meta = crate::review_session::review_session_meta("r1", 0, !row.lens_slugs.is_empty());
+        assert_eq!(meta["allow_subagents"], true);
+
+        let fan_out: ReviewAgentState = serde_json::from_value(serde_json::json!({
+            "name": "correctness", "provider": "claude", "model": "",
+            "status": "error", "note": "", "comment_count": 0,
+        }))
+        .unwrap();
+        assert!(fan_out.lens_slugs.is_empty());
+        assert!(serde_json::to_value(&fan_out)
+            .unwrap()
+            .get("lens_slugs")
+            .is_none());
+        let meta = crate::review_session::review_session_meta("r1", 0, false);
+        assert!(meta.get("allow_subagents").is_none());
+    }
+
+    /// S2-310: a local review's recorded cwd IS the repo checkout — matched
+    /// through symlinks / a trailing slash — so its retry stays there even
+    /// after HEAD moved; a Run worktree elsewhere is not the repo.
+    #[test]
+    fn local_review_checkout_is_recognised_as_the_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let r = repo.to_string_lossy().into_owned();
+        assert!(same_dir(&r, &format!("{r}/")));
+        assert!(same_dir(&link.to_string_lossy(), &r));
+        let wt = tmp.path().join("otto-run-1");
+        std::fs::create_dir_all(&wt).unwrap();
+        assert!(!same_dir(&wt.to_string_lossy(), &r));
+    }
+
+    /// S2-310: a retry's temp files are swept once no agent of the review is
+    /// registered — never while a sibling retry still is.
+    #[test]
+    fn retry_sweeps_temp_files_only_when_no_agent_is_left() {
+        let reg: crate::skill_eval::CancelRegistry = Default::default();
+        let rid = format!("t{}", otto_core::new_id());
+        let diff = std::env::temp_dir().join(format!("otto-review-{rid}.diff"));
+        std::fs::write(&diff, "d").unwrap();
+        let _flag = super::register_review_agent_cancel(&reg, &rid, 1);
+        sweep_review_temp_files_if_idle(&reg, &rid);
+        assert!(diff.exists(), "a sibling retry is still registered");
+        super::unregister_review_agent_cancel(&reg, &rid, 1);
+        sweep_review_temp_files_if_idle(&reg, &rid);
+        assert!(!diff.exists(), "the last retry out sweeps");
+    }
+
+    /// S15-307: an empty draft on the checked-out branch with uncommitted work
+    /// says to commit first; otherwise the plain "no changes".
+    #[test]
+    fn empty_pr_draft_names_uncommitted_work() {
+        let msg = super::no_pr_changes_message("feat", "main", true);
+        assert!(msg.contains("Commit your changes first"), "{msg}");
+        assert!(msg.contains("'feat'") && msg.contains("'main'"), "{msg}");
+        assert_eq!(
+            super::no_pr_changes_message("feat", "main", false),
+            "no changes between 'feat' and 'main'"
+        );
     }
 }

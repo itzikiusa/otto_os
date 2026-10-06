@@ -62,17 +62,23 @@
   let saved = $state<K8sPodAction[]>([]);
   let savedError = $state('');
   let savedLoading = $state(false);
+  // Latest-wins: switching workload / namespace / cluster while a list is in
+  // flight must not show the previous target's saved actions.
+  let savedSeq = 0;
   async function loadSaved(): Promise<void> {
+    const seq = ++savedSeq;
     if (!workload) return;
     savedLoading = true;
     try {
       const r = await k8sApi.podActions(clusterId, { namespace: ns, workload_kind: workload.kind, workload: workload.name });
+      if (seq !== savedSeq) return;
       saved = r.actions;
       savedError = '';
     } catch (e) {
+      if (seq !== savedSeq) return;
       savedError = loadErrorText(e);
     } finally {
-      savedLoading = false;
+      if (seq === savedSeq) savedLoading = false;
     }
   }
   $effect(() => {
@@ -245,7 +251,7 @@
         {#each METHODS as m (m)}<option value={m}>{m}</option>{/each}
       </select>
       <input class="input port mono" type="number" min="1" max="65535" bind:value={port} aria-label="Container port" title="Container port" />
-      <input class="input path mono" bind:value={path} placeholder="/actuator/health" aria-label="Path" data-testid="k8s-pod-http-path" onkeydown={(e) => { if (e.key === 'Enter') void run(); }} />
+      <input dir="ltr" class="input path mono" bind:value={path} placeholder="/actuator/health" aria-label="Path" data-testid="k8s-pod-http-path" onkeydown={(e) => { if (e.key === 'Enter') void run(); }} />
     </div>
 
     {#if varNames.length}
@@ -258,7 +264,7 @@
                 {#each LOG_LEVELS as l (l)}<option value={l}>{l === 'RESET' ? 'RESET (clear override)' : l}</option>{/each}
               </select>
             {:else}
-              <input class="input mono" bind:value={vars[v]} placeholder={v === 'logger' ? 'com.example.service' : v} aria-label={v} />
+              <input dir="ltr" class="input mono" bind:value={vars[v]} placeholder={v === 'logger' ? 'com.example.service' : v} aria-label={v} />
             {/if}
           </label>
         {/each}
@@ -267,9 +273,9 @@
 
     <details class="ph-more" open={!!headersText || mutating}>
       <summary>Headers{mutating ? ' & body' : ''}</summary>
-      <textarea class="input mono" rows="2" bind:value={headersText} placeholder="Accept: application/json" aria-label="Headers, one per line"></textarea>
+      <textarea dir="ltr" class="input mono" rows="2" bind:value={headersText} placeholder="Accept: application/json" aria-label="Headers, one per line"></textarea>
       {#if mutating}
-        <textarea class="input mono" rows="4" bind:value={body} placeholder={'{"configuredLevel":"DEBUG"}'} aria-label="Request body"></textarea>
+        <textarea dir="ltr" class="input mono" rows="4" bind:value={body} placeholder={'{"configuredLevel":"DEBUG"}'} aria-label="Request body"></textarea>
       {/if}
     </details>
 

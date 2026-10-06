@@ -80,6 +80,8 @@
 
   async function toggleNetwork(input: HTMLInputElement): Promise<void> {
     if (!netEnabled && portConflict) {
+      // One-way `checked`: the click already ticked the box — put it back.
+      input.checked = netEnabled;
       toasts.error(
         'Pick a different port',
         `The network port must differ from the daemon’s loopback port (${loopbackPort}).`,

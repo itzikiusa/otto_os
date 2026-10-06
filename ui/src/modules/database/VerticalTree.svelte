@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // One value of a Vertical-view record as nested `field: value` rows — the
   // sub-document counterpart of JsonTree, keyed to the same expansion plan.
   //
@@ -253,7 +254,7 @@
 {/snippet}
 
 {#if asLeaf}
-  <div
+  <div use:rowMenu
     class="vrow"
     class:dirty
     class:editable={canEdit}
@@ -293,7 +294,7 @@
     {@render moreButton()}
   </div>
 {:else}
-  <div
+  <div use:rowMenu
     class="vrow ctr"
     class:dirty-in={dirtyInside}
     class:dirty

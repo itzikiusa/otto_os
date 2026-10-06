@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latestOnly } from '../../lib/latest';
   import { toastError } from '../../lib/toastError';
   // Policy-as-code rules (global + this workspace). List / create / edit /
   // delete, export the whole ruleset to JSON, import a ruleset (append or
@@ -34,15 +35,23 @@
   let editing = $state<McpPolicy | null>(null);
   let formOpen = $state(false);
 
+  // A workspace switch mid-load must not show (or let you edit) the previous
+  // workspace's policies under the new one.
+  const loads = latestOnly();
   async function load(): Promise<void> {
+    const t = loads.begin();
+    const id = wsId;
     loading = true;
     try {
-      policies = await mcpCpApi.cpPolicies(wsId);
+      const rows = await mcpCpApi.cpPolicies(id);
+      if (!t.current) return;
+      policies = rows;
       loadError = null;
     } catch (e) {
+      if (!t.current) return;
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 
@@ -190,7 +199,7 @@
 
   {#if importOpen}
     <div class="import-panel">
-      <textarea
+      <textarea dir="ltr" aria-label="Policies JSON to import"
         bind:value={importText}
         rows="5"
         class="mono"
@@ -216,11 +225,11 @@
     <div class="eval-row">
       <Icon name="gauge" size={14} />
       <span class="el">Evaluate</span>
-      <select bind:value={evalServerId}>
+      <select aria-label="Server to evaluate" bind:value={evalServerId}>
         {#if servers.length === 0}<option value="">No servers</option>{/if}
         {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
       </select>
-      <input bind:value={evalTool} placeholder="tool name" class="mono" />
+      <input dir="ltr" aria-label="Tool name to evaluate" bind:value={evalTool} placeholder="tool name" class="mono" />
       <button class="btn small" onclick={() => void evaluate()} disabled={evaluating || servers.length === 0}>
         {evaluating ? '…' : 'Preview decision'}
       </button>

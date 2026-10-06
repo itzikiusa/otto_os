@@ -84,7 +84,7 @@
         </div>
       {/if}
       <p class="review-hint">Review and edit the statement before running. This will run against the connection.</p>
-      <textarea
+      <textarea dir="ltr" aria-label="Statement to run"
         class="review-sql mono"
         value={sql}
         oninput={(e) => onsql(e.currentTarget.value)}
@@ -211,7 +211,7 @@
     border-color: var(--accent-line-strong);
   }
   .review-sql:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .review-kbd {
     font-size: var(--fs-xs);

@@ -269,7 +269,8 @@ impl CredentialMonitor {
 
         self.check_agent(
             "codex",
-            codex_credentials_present(),
+            // File read: blocking pool too, not a runtime worker (S9-11).
+            crate::offload::blocking(codex_credentials_present).await,
             "Codex: re-login needed",
             "Codex credentials are missing. Run `codex login` to re-authenticate.",
             "agent_auth:codex",
@@ -439,16 +440,16 @@ pub fn spawn_usage_recorder(ctx: ServerCtx) {
                 }) => {
                     let provider = match providers.get(&session_id) {
                         Some(p) => p.clone(),
-                        None => {
-                            let p = ctx
-                                .manager
-                                .get(&session_id)
-                                .await
-                                .map(|s| s.provider)
-                                .unwrap_or_default();
-                            providers.insert(session_id.clone(), p.clone());
-                            p
-                        }
+                        // A failed lookup (row not yet visible, DB busy) is
+                        // NOT cached: the old `unwrap_or_default` pinned the
+                        // empty provider on that session for its lifetime.
+                        None => match ctx.manager.get(&session_id).await {
+                            Ok(s) => {
+                                providers.insert(session_id.clone(), s.provider.clone());
+                                s.provider
+                            }
+                            Err(_) => String::new(),
+                        },
                     };
                     if let Some(ev) = crate::routes::usage::trail_to_usage(
                         &workspace_id,
@@ -459,8 +460,19 @@ pub fn spawn_usage_recorder(ctx: ServerCtx) {
                         ctx.usage.record(ev);
                     }
                 }
-                Ok(Event::SessionRemoved { session_id, .. }) => {
+                // Evict once the session can no longer emit trail rows from
+                // its live child (exited / archived / removed); a resumed
+                // session simply re-resolves on its next entry.
+                Ok(Event::SessionRemoved { session_id, .. })
+                | Ok(Event::SessionStatus {
+                    session_id,
+                    status: otto_core::domain::SessionStatus::Exited,
+                    ..
+                }) => {
                     providers.remove(&session_id);
+                }
+                Ok(Event::SessionArchiveChanged { session }) => {
+                    providers.remove(&session.id);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -635,6 +647,13 @@ async fn handle_session_transition(
                 // running under the agent (build / tests / deploy) — it does
                 // NOT need the user yet. The eventual resume produces a fresh
                 // Working→Idle transition, so the notice isn't lost, just late.
+                // Cheap gates FIRST (S9-07): background sessions and a
+                // disabled `session_events` setting discard the notice anyway,
+                // so they must not pay `tree_active`'s two whole-machine `ps`
+                // scans + 750 ms for it. `emit_session_notice` re-checks both.
+                if !idle_notice_wanted(&ctx, &s).await {
+                    return;
+                }
                 if ctx.manager.tree_active(&id).await {
                     return;
                 }
@@ -649,6 +668,19 @@ async fn handle_session_transition(
         }
         _ => {}
     }
+}
+
+/// Whether an idle notice for `s` could be emitted at all: not a background
+/// session and session notices enabled. Checked before the expensive
+/// process-tree probe.
+async fn idle_notice_wanted(ctx: &ServerCtx, s: &otto_core::domain::Session) -> bool {
+    if is_background(s) {
+        return false;
+    }
+    matches!(
+        ctx.notifications().repo().get_settings().await,
+        Ok(settings) if settings.session_events
+    )
 }
 
 /// Build + create the idle/exited notice for a (already re-validated) session.
@@ -866,6 +898,22 @@ impl OutputScanner for AuthScanner {
                 .map_err(|e| tracing::warn!("mid-session auth notice: {e}"));
         });
     }
+
+    /// The session's output stream closed: forget its tail and debounce mark.
+    /// Both maps were insert-only before, so every session the daemon ever ran
+    /// kept up to `TAIL_CAP` bytes (+ its id) for the process lifetime. A
+    /// respawn (same id) scans afresh; the notice's `source_key` still
+    /// de-dupes a repeat alert.
+    fn on_session_end(&self, session_id: &Id) {
+        match self.tails.lock() {
+            Ok(mut g) => g.remove(session_id),
+            Err(p) => p.into_inner().remove(session_id),
+        };
+        match self.flagged.lock() {
+            Ok(mut g) => g.remove(session_id),
+            Err(p) => p.into_inner().remove(session_id),
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -922,7 +970,13 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
     if dedup.unchanged_since_last_check(&stamp) {
         return;
     }
-    let status = crate::routes::usage::budget_status_pub(ctx, cfg).await;
+    // Background read (S9-303): never resets ClickHouse's idle clock (each
+    // flush bumps the generation, so a stamping scan here kept an always-on
+    // agent's server up forever) and never wakes a parked one — no spend to
+    // judge yet means "check again next tick", so the stamp is not marked.
+    let Some(status) = crate::routes::usage::budget_status_background(ctx, cfg).await else {
+        return;
+    };
     dedup.mark_checked(stamp);
     for row in &status.rows {
         let signal = dedup.apply(&row.scope, &row.key, row.exceeded);
@@ -1008,5 +1062,26 @@ mod tests {
             scan_chunk(&mut tail, b"ged in\n", REAUTH_NEEDLES, TAIL_CAP),
             Some("you are not logged in")
         );
+    }
+
+    /// Perf P2: per-session scanner state is released when the stream ends —
+    /// both the rolling tail and the debounce mark (they used to grow with
+    /// every session for the daemon's lifetime).
+    #[tokio::test]
+    async fn session_end_releases_tail_and_flag() {
+        use otto_sessions::OutputScanner;
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let scanner = super::AuthScanner::new(pool, tx);
+        let (quiet, flagged) = ("s-quiet".to_string(), "s-flagged".to_string());
+        scanner.on_output(&quiet, "claude", b"working on it, you are not log");
+        scanner.on_output(&flagged, "claude", b"Session expired. Run `claude login`");
+        assert!(scanner.tails.lock().unwrap().contains_key(&quiet));
+        assert!(scanner.flagged.lock().unwrap().contains(&flagged));
+        scanner.on_session_end(&quiet);
+        scanner.on_session_end(&flagged);
+        assert!(scanner.tails.lock().unwrap().is_empty());
+        assert!(scanner.flagged.lock().unwrap().is_empty());
     }
 }

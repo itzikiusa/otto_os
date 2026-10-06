@@ -54,7 +54,10 @@ import {
   unmaskQueryPlaceholders,
   type VarSpec,
 } from '../../modules/database/sql-util';
-import { bsonScalar } from '../../modules/database/bson';
+import { condToSql, parseFilterValText, toFilterVal, type FilterCond } from '../../modules/database/filter-chips';
+import { obviousWriteVerb, tableRefFromNodeId } from '../../modules/database/sql-dialect';
+export { condLabel, condToSql, filterValMatches, parseFilterValText, toFilterVal } from '../../modules/database/filter-chips';
+export type { FilterCond, FilterVal } from '../../modules/database/filter-chips';
 import { normalizeDbError } from '../../modules/database/error-normalize';
 import { copyTextOrThrow } from '../clipboard';
 import { mapLimit, pollWhileVisible, type Poller } from '../poll';
@@ -65,6 +68,7 @@ import { clipHistory } from './clipHistory.svelte';
 import { loadErrorText } from '../loadError';
 import { announceModule } from '../lazyModule';
 import { toastError } from '../toastError';
+import { dbPrefs, loadFlag, saveFlag, type WarmMode } from './dbPrefs.svelte';
 
 /** Connection kinds the explorer can browse (the DB engines). */
 export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -109,30 +113,11 @@ function loadRowLimit(): number {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_ROW_LIMIT;
 }
 
-/** "Connect on click only" for restored tabs (see `warmRestored`). */
-const WARM_ON_CLICK_KEY = 'otto_db_warm_on_click';
-/** "Keep open connections alive" (see `keepAlive`). */
-const KEEP_ALIVE_KEY = 'otto_db_keep_alive';
 /** Restored tabs warmed at once (matches the bg lane's 3 app-wide sockets). */
 const WARM_CONCURRENCY = 3;
 /** Keep-alive period: under the daemon's 5-minute pool idle timeout. */
 const KEEP_ALIVE_MS = 4 * 60_000;
 
-/** Read a sticky boolean preference; missing/unreadable falls back to `def`. */
-function loadFlag(key: string, def: boolean): boolean {
-  if (typeof localStorage === 'undefined') return def;
-  const v = localStorage.getItem(key);
-  return v === null ? def : v === '1';
-}
-
-/** Persist a sticky boolean. Quota/private-mode failures are never fatal. */
-function saveFlag(key: string, on: boolean): void {
-  try {
-    localStorage.setItem(key, on ? '1' : '0');
-  } catch {
-    /* preference-only — losing it must not break the view */
-  }
-}
 
 /**
  * A fresh per-run id sent with a query so the server can register it and a later
@@ -193,72 +178,9 @@ export function parseExplicitLimit(sql: string): number | null {
 
 // ── Quick-filter helpers (module-level) ──────────────────────────────────────
 
-/** Derive a filter value from a result cell value. */
-export function toFilterVal(value: unknown): FilterVal {
-  if (value === null || value === undefined) return { raw: 'NULL', numeric: false, isNull: true };
-  if (typeof value === 'number' || typeof value === 'bigint')
-    return { raw: String(value), numeric: true, isNull: false };
-  if (typeof value === 'boolean') return { raw: value ? '1' : '0', numeric: true, isNull: false };
-  if (typeof value === 'object') {
-    // A BSON sentinel filters by its display form (ObjectId("…")/ISODate("…")),
-    // matching how the cell renders, so a "Filter: _id = …" actually narrows.
-    const b = bsonScalar(value);
-    if (b !== null) return { raw: b, numeric: false, isNull: false };
-    return { raw: JSON.stringify(value), numeric: false, isNull: false };
-  }
-  return { raw: String(value), numeric: false, isNull: false };
-}
-
-/** Parse a value typed into the filter bar (numbers stay bare, NULL → IS NULL). */
-export function parseFilterValText(text: string): FilterVal {
-  const t = text.trim();
-  if (t.toUpperCase() === 'NULL') return { raw: 'NULL', numeric: false, isNull: true };
-  if (/^-?\d+(\.\d+)?$/.test(t)) return { raw: t, numeric: true, isNull: false };
-  return { raw: text, numeric: false, isNull: false };
-}
-
-function quoteIdentSql(name: string): string {
-  return '`' + name.replace(/`/g, '``') + '`';
-}
-function quoteFilterVal(v: FilterVal, escapeBackslash = false): string {
-  if (v.numeric) return v.raw;
-  // MySQL/ClickHouse treat `\` as an escape inside string literals, so a value
-  // containing one must double it or the literal changes meaning (Postgres
-  // standard strings don't — the caller says which dialect it's building for).
-  const body = escapeBackslash ? v.raw.replace(/\\/g, '\\\\') : v.raw;
-  return `'${body.replace(/'/g, "''")}'`;
-}
-
-/** Render one filter condition as a SQL boolean expression (empty when it has
- * no usable values). Equals collapse to `IN`; NULLs become `IS [NOT] NULL`.
- * `escapeBackslash` doubles `\` in string literals for the dialects where it's
- * an escape character (mysql/clickhouse); defaults off (labels, postgres). */
-export function condToSql(c: FilterCond, escapeBackslash = false): string {
-  if (c.kind === 'raw') return c.text.trim();
-  const col = quoteIdentSql(c.column);
-  const quote = (v: FilterVal): string => quoteFilterVal(v, escapeBackslash);
-  const nonNull = c.values.filter((v) => !v.isNull);
-  const hasNull = c.values.some((v) => v.isNull);
-  const parts: string[] = [];
-  if (c.op === 'in') {
-    if (nonNull.length === 1) parts.push(`${col} = ${quote(nonNull[0])}`);
-    else if (nonNull.length > 1) parts.push(`${col} IN (${nonNull.map(quote).join(', ')})`);
-    if (hasNull) parts.push(`${col} IS NULL`);
-    if (parts.length === 0) return '';
-    return parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0];
-  } else {
-    if (nonNull.length === 1) parts.push(`${col} <> ${quote(nonNull[0])}`);
-    else if (nonNull.length > 1) parts.push(`${col} NOT IN (${nonNull.map(quote).join(', ')})`);
-    if (hasNull) parts.push(`${col} IS NOT NULL`);
-    return parts.join(' AND ');
-  }
-}
-
-/** Human label for a filter chip (e.g. `currency = 'EUR'`, `id IN (1, 2)`). */
-export function condLabel(c: FilterCond): string {
-  if (c.kind === 'raw') return c.text;
-  return condToSql(c) || `${c.column} …`;
-}
+// `toFilterVal` / `parseFilterValText` / `condToSql` / `condLabel` (and the
+// `FilterVal` / `FilterCond` types) live in `modules/database/filter-chips.ts`
+// — dialect-aware via `sql-dialect.ts` — and are re-exported at the top.
 
 // Top-level clause keywords that terminate a WHERE / mark where one is inserted.
 const BOUNDARY_KW = [
@@ -380,21 +302,15 @@ export function engineGlyph(kind: string): IconName {
   }
 }
 
-/** A single value in a column filter condition. */
-export interface FilterVal {
-  /** Literal text (already SQL-unquoted); rendered quoted unless `numeric`. */
-  raw: string;
-  numeric: boolean;
-  isNull: boolean;
+/** Dashboard widgets re-run unattended on every refresh, so they must be
+ *  read-only queries. An obvious write is refused at save time with the
+ *  reason; the daemon runs every widget read-only regardless (the gate). */
+function widgetStatementOk(statement: string): boolean {
+  const verb = obviousWriteVerb(statement);
+  if (!verb) return true;
+  toasts.error('Widgets must be read-only queries', `${verb} changes data — a widget re-runs it on every refresh.`);
+  return false;
 }
-/**
- * A quick-filter condition. `col` conditions group all values for one column +
- * direction so repeated equals collapse into IN / NOT IN. `raw` preserves a
- * pre-existing hand-written WHERE as a removable chip.
- */
-export type FilterCond =
-  | { kind: 'col'; column: string; op: 'in' | 'not_in'; values: FilterVal[] }
-  | { kind: 'raw'; text: string };
 
 // ── Result view mode ──────────────────────────────────────────────────────────
 // How a tab's result renders: a columnar grid, one record per block (Postgres
@@ -2322,25 +2238,26 @@ class DatabaseStore {
     return this.warming.has(id);
   }
 
-  /**
-   * Restored tabs other than the active one: `background` (default) connects
-   * them 3 at a time behind the active tab; `on-click` leaves them "Not
-   * connected yet" until the user opens one. Persisted.
-   */
-  warmRestored: 'background' | 'on-click' = $state(
-    loadFlag(WARM_ON_CLICK_KEY, false) ? 'on-click' : 'background',
-  );
-  setWarmRestored(mode: 'background' | 'on-click'): void {
-    this.warmRestored = mode;
-    saveFlag(WARM_ON_CLICK_KEY, mode === 'on-click');
+  /** Restored-tab warming mode — lives in `dbPrefs` (Settings reads it without
+   *  loading this store); see `DbPrefs.warmRestored`. */
+  get warmRestored(): WarmMode {
+    return dbPrefs.warmRestored;
+  }
+  setWarmRestored(mode: WarmMode): void {
+    dbPrefs.setWarmRestored(mode);
   }
 
-  /** Ping open, ready connections every 4 min so pools/tunnels don't idle out
-   *  and a dropped one turns red BEFORE the next query. Persisted, default on. */
-  keepAlive = $state(loadFlag(KEEP_ALIVE_KEY, true));
+  /** Connection keep-alive toggle — lives in `dbPrefs`; flipping it there (from
+   *  here or Settings) starts/stops the poller via the subscription below the
+   *  class. */
+  get keepAlive(): boolean {
+    return dbPrefs.keepAlive;
+  }
   setKeepAlive(on: boolean): void {
-    this.keepAlive = on;
-    saveFlag(KEEP_ALIVE_KEY, on);
+    dbPrefs.setKeepAlive(on);
+  }
+  /** React to a keep-alive toggle (wired to `dbPrefs.onKeepAliveChange`). */
+  applyKeepAlive(on: boolean): void {
     if (on) this.ensureKeepAlive();
     else this.stopKeepAlive();
   }
@@ -3701,27 +3618,14 @@ class DatabaseStore {
 
   // ── Table actions (schema-tree context menu) ──────────────────────────────
 
-  /** Backtick-quote a SQL identifier (works for MySQL + ClickHouse). */
-  private quoteIdent(name: string): string {
-    return '`' + name.replace(/`/g, '``') + '`';
-  }
-
   /**
    * Build a qualified SQL table reference from a tree node id like
-   * `db:configserver/table:props`. Returns the quoted `db`.`table` ref plus the
-   * raw parts, or null when the node isn't a SQL table/view.
+   * `db:configserver/table:props`, quoted for the selected connection's engine
+   * (`"public"."orders"` on Postgres, backticks on MySQL / ClickHouse). Returns
+   * the ref plus the raw parts, or null when the node isn't a SQL table/view.
    */
   tableRefFromNode(node: SchemaNode): { ref: string; db: string | null; table: string } | null {
-    const segs = node.id.split('/').map((s) => {
-      const i = s.indexOf(':');
-      return i < 0 ? ([s, ''] as const) : ([s.slice(0, i), s.slice(i + 1)] as const);
-    });
-    const find = (k: string) => segs.find(([kk]) => kk === k)?.[1];
-    const table = find('table') ?? find('view');
-    if (!table) return null;
-    const db = find('db') ?? find('schema') ?? null;
-    const ref = db ? `${this.quoteIdent(db)}.${this.quoteIdent(table)}` : this.quoteIdent(table);
-    return { ref, db, table };
+    return tableRefFromNodeId(this.selectedConn?.kind, node.id);
   }
 
   /** Open a statement in a new query tab; optionally run it immediately. `node`
@@ -3951,11 +3855,12 @@ class DatabaseStore {
   private applyFilters(): void {
     const t = this.tab;
     if (!t) return;
-    // Backslash is an escape char in mysql/clickhouse string literals only.
-    const kind = this.selectedConn?.kind;
-    const esc = kind === 'mysql' || kind === 'clickhouse';
+    // Identifier quoting, string escaping and boolean literals follow the
+    // connection's engine (`sql-dialect.ts`) — Postgres gets `"col"`, no
+    // backslash doubling and TRUE/FALSE.
+    const engine = this.selectedConn?.kind ?? null;
     const body = t.filters
-      .map((c) => condToSql(c, esc))
+      .map((c) => condToSql(c, engine))
       .filter((s) => s.trim())
       .join(' AND ');
     t.statement = rewriteWhere(t.statement, body);
@@ -4326,6 +4231,7 @@ class DatabaseStore {
       toasts.error('No connection selected');
       return null;
     }
+    if (!widgetStatementOk(input.statement)) return null;
     try {
       const w = await api.post<DbWidget>(`${base}/widgets`, {
         connection_id: connId,
@@ -4346,6 +4252,7 @@ class DatabaseStore {
   }
 
   async updateWidget(id: Id, patch: Partial<Pick<DbWidget, 'title' | 'statement' | 'viz' | 'mapping' | 'options' | 'dashboard_id'>>): Promise<void> {
+    if (patch.statement !== undefined && !widgetStatementOk(patch.statement)) return;
     try {
       const w = await api.patch<DbWidget>(`/db/widgets/${id}`, patch);
       this.widgets = this.widgets.map((x) => (x.id === id ? w : x));
@@ -4414,6 +4321,8 @@ export const database = new DatabaseStore();
 // Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
 // however it was first imported.
 announceModule('database', database);
+// Settings → Appearance flips the keep-alive pref without importing this store.
+dbPrefs.onKeepAliveChange((on) => database.applyKeepAlive(on));
 // Copies made while a masked tab is active never reach the clipboard ring.
 clipHistory.setGuard(() => database.tab?.mask === true);
 if (typeof window !== 'undefined') {

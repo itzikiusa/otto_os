@@ -20,6 +20,8 @@ function setup(fail: (title: string, attempt: number) => boolean) {
     providerReadiness: () => ({available: true}), extraDirs: ['/shared'], dirDraft: '/pending', title: 'Review', prompt: 'Check ownership', cwd: '~/repo',
     accountIds: {claude: 'account-a'}, networkProfileId: 'net-a', browser: true, supportsModel: true, model: 'model-a', scratchMode: true,
     pendingSpawns: [], batchFailures: [], batchSuccesses: [],
+    // The typed-folder pre-check (resume-missing-folder fix): the folder exists.
+    checkingCwd: false, cwdError: '', checkFolder: async () => ({ok: true}), api: {get: async () => ({})}, browsePath: (p: string) => p,
     ws: {scratch: {root_path: '/home/owner'}, openSessionWithPrompt: launch, createSessionQuiet: launch,
       setViewMode: () => {}, openSession: (id: string) => opened.push(id), navigateToSession: (id: string) => opened.push(id)},
     toasts: {error: (...args: unknown[]) => errors.push(args)}, toastError: (...args: unknown[]) => errors.push(args),

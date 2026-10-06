@@ -206,6 +206,39 @@ test('viewing another run is not stomped by an in-flight run started from the pa
   await expect(page.locator('.timeline .tl-step[data-status="error"]')).toHaveCount(0);
 });
 
+test('a run whose start response lands after its first live events still goes live', async ({
+  page,
+}) => {
+  // The engine starts the run before POST /run answers, so on a busy daemon
+  // its first workflow_run_updated events reach the page while the view has
+  // no run yet. The view must not then sit on the response's stale "Queued"
+  // until the run's NEXT event (CI: Queued for the whole 4 s step, then Failed).
+  const wfId = await createWorkflow(
+    'E2E Late start',
+    [node('trigger', 'manual_trigger'), node('w', 'delay', { ms: 6000 }), node('done', 'log')],
+    [edge('trigger', 'w'), edge('w', 'done')],
+  );
+  await gotoWorkflows(page);
+  await page.getByText('E2E Late start').first().click();
+  // Hold the start response until the run is demonstrably running (its first
+  // events have been broadcast), then hand the page the creation snapshot.
+  await page.route(`**/workflows/${wfId}/run`, async (route) => {
+    const response = await route.fetch();
+    const created = (await response.json()) as { id: string };
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const cur = await getRun(created.id);
+      if (cur.status === 'running' && (cur.rev ?? 0) > 1) break;
+      await new Promise((res) => setTimeout(res, 100));
+    }
+    await route.fulfill({ response, json: created });
+  });
+  await page.getByRole('button', { name: 'Run…' }).click();
+  await page.locator('.ri-actions').getByRole('button', { name: 'Run' }).click();
+  // Well inside the 6 s step: no further event arrives before it ends.
+  await expect(page.locator('.insp-bar .tl-label')).toContainText('Running', { timeout: 4_000 });
+});
+
 test('run rev is monotonic while running (stale-snapshot guard contract)', async () => {
   const wfId = await createWorkflow(
     'E2E Rev',

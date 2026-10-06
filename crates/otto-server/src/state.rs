@@ -110,7 +110,7 @@ pub struct ServerCtx {
     pub telemetry: Option<Arc<otto_telemetry::TelemetryService>>,
     pub product: std::sync::Arc<otto_product::ProductService>,
     pub product_repo: otto_state::ProductRepo,
-    /// Story attachments (files/images) repo — backs `product_media.rs`.
+    /// Story attachments (files/images) repo — backs `otto_product::media`.
     pub attachment_repo: otto_state::ProductAttachmentRepo,
     /// Discovery-run repo — repeatable discovery-swarm launches per story.
     pub discovery_repo: otto_state::ProductDiscoveryRepo,
@@ -124,7 +124,7 @@ pub struct ServerCtx {
     pub canvas_repo: otto_state::CanvasRepo,
     /// Per-run cancellation flags for in-flight product analysis agents (manual
     /// Stop). Mirrors `skill_eval_cancels`.
-    pub product_agent_cancels: crate::product_run::CancelRegistry,
+    pub product_agent_cancels: otto_core::cancel::CancelRegistry,
     /// Design arena: in-memory Blender render jobs (`design_blender.rs`). Not
     /// persisted — poll-only, like `vault_docs_runs`.
     pub design_jobs: crate::design_blender::JobRegistry,
@@ -143,9 +143,9 @@ pub struct ServerCtx {
     pub swarm: Arc<otto_swarm::SwarmService>,
     pub swarm_repo: otto_state::SwarmRepo,
     /// Per-swarm Coordinator runtime handles (start/pause/abort/resume).
-    pub swarm_coords: crate::swarm_runtime::CoordinatorRegistry,
+    pub swarm_coords: otto_swarm::runtime::engine::CoordinatorRegistry,
     /// Per-run cancellation flags for in-flight swarm runs (manual Stop / abort).
-    pub swarm_run_cancels: crate::swarm_run::CancelRegistry,
+    pub swarm_run_cancels: otto_swarm::runtime::run::CancelRegistry,
     // -- Goal Loops --------------------------------------------------------
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
     /// Per-loop controller runtime handles (start/pause/resume/stop).

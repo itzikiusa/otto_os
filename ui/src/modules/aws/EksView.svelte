@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
@@ -55,15 +56,22 @@
     return q ? list.filter((c) => c.name.toLowerCase().includes(q) || (c.version ?? '').includes(q)) : list;
   });
 
+  // Region-scoped, latest-wins: a slow region-A reply (or error) that lands
+  // after a switch to B must not overwrite B's error or end B's spinner.
+  let loadSeq = 0;
   async function load(): Promise<void> {
+    const seq = ++loadSeq;
+    const rg = region;
     loading = true;
     try {
-      await aws.loadEks(account.id, region);
+      await aws.loadEks(account.id, rg);
+      if (seq !== loadSeq) return;
       error = '';
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
@@ -135,7 +143,7 @@
   {loading}
   bind:auto
   {region}
-  onrefresh={() => void load()}
+  onrefresh={load}
 >
   <RegionPicker {account} service="eks" bind:region allowAll />
 </ViewToolbar>
@@ -153,7 +161,7 @@
       <thead><tr><th>Cluster</th>{#if allRegions}<th>Region</th>{/if}<th>Status</th><th>Version</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Created</th><th class="act"></th></tr></thead>
       <tbody>
         {#each shown as c (`${c.region ?? ''}/${c.name}`)}
-          <tr class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
+          <tr use:rowMenu class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
             <td class="strong"><Icon name="helm" size={13} /> {c.name}</td>
             {#if allRegions}<td class="mono">{c.region ?? '—'}</td>{/if}
             <td><Badge tone={c.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(c.status)} /></td>

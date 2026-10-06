@@ -1,0 +1,28 @@
+[package]
+name = "otto-review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The multi-agent code-review engine: reviewer sessions (`session`), the
+# managed summarizer (`summarizer`), the deterministic summarizer floor
+# (`fallback`) and the engine's pure core (`engine`: diff rendering, configs,
+# budgets, agent-run expansion, prompts, draft-comment parsing). otto-server
+# keeps the HTTP routes and the ctx-bound orchestration. Leaf crate: must not
+# depend on otto-server.
+
+[dependencies]
+otto-core.workspace = true
+otto-state.workspace = true
+otto-sessions.workspace = true
+otto-orchestrator.workspace = true
+otto-context.workspace = true
+otto-git.workspace = true
+otto-skills.workspace = true
+otto-agent-run.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true

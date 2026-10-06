@@ -311,6 +311,9 @@ impl Installer {
                     Duration::from_secs(600),
                 )
                 .await?;
+                let sums = fetch_text(&format!("{url}.sha256")).await?;
+                self.append_log(tool, "verifying sha256");
+                verify_sha256(&tmp, &sums, None)?;
                 install_file(&tmp, &dest)
             }
             Tool::K9s => {
@@ -329,6 +332,14 @@ impl Installer {
                     Duration::from_secs(600),
                 )
                 .await?;
+                // `latest/download` cannot pin both files to one release, but
+                // they are fetched back to back; a mismatch fails the install.
+                let sums = fetch_text(
+                    "https://github.com/derailed/k9s/releases/latest/download/checksums.sha256",
+                )
+                .await?;
+                self.append_log(tool, "verifying sha256");
+                verify_sha256(&tarball, &sums, Some(&format!("k9s_Darwin_{arch}.tar.gz")))?;
                 self.append_log(tool, "$ tar -xzf k9s.tar.gz k9s");
                 self.run_logged(
                     tool,
@@ -413,6 +424,49 @@ fn tempdir_in(dir: &Path) -> std::result::Result<PathBuf, String> {
     let p = dir.join(format!(".dl-{}", otto_core::new_id()));
     std::fs::create_dir_all(&p).map_err(|e| format!("create {}: {e}", p.display()))?;
     Ok(p)
+}
+
+/// GET a small text file (a checksum list) over HTTPS.
+async fn fetch_text(url: &str) -> std::result::Result<String, String> {
+    cli::run(
+        "curl",
+        &["-fsSL".into(), url.to_string()],
+        &[],
+        Duration::from_secs(60),
+        None,
+    )
+    .await
+    .map(|o| o.stdout)
+    .map_err(|e| format!("could not fetch checksum {url}: {e}"))
+}
+
+/// Verify a downloaded binary against its published SHA-256 before it is made
+/// executable (S6-17). `sums` is either a bare digest (`kubectl.sha256`) or a
+/// `<digest>  <file>` list (`checksums.sha256`), in which case the line for
+/// `file` is used. Any mismatch, or a missing entry, fails the install.
+fn verify_sha256(path: &Path, sums: &str, file: Option<&str>) -> std::result::Result<(), String> {
+    use sha2::Digest;
+    let expected = match file {
+        None => sums.split_whitespace().next(),
+        Some(name) => sums.lines().find_map(|l| {
+            let mut parts = l.split_whitespace();
+            let digest = parts.next()?;
+            let entry = parts.next()?.trim_start_matches('*');
+            (entry == name).then_some(digest)
+        }),
+    }
+    .map(str::to_ascii_lowercase)
+    .filter(|d| d.len() == 64 && d.chars().all(|c| c.is_ascii_hexdigit()))
+    .ok_or_else(|| "no usable sha256 published for the download".to_string())?;
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let actual = hex::encode(sha2::Sha256::digest(&bytes));
+    if actual != expected {
+        return Err(format!(
+            "sha256 mismatch for {} (expected {expected}, got {actual}) — refusing to install",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Move a downloaded file into place with mode 0755.
@@ -532,6 +586,24 @@ pub async fn tool_status(tool: Tool, data_dir: &Path) -> ToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S6-17: downloads are verified against the published digest.
+    #[test]
+    fn sha256_verification_accepts_matches_and_refuses_mismatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("kubectl");
+        std::fs::write(&f, b"hello").unwrap();
+        let good = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        verify_sha256(&f, &format!("{good}\n"), None).unwrap();
+        let list = format!(
+            "{}  k9s_Darwin_amd64.tar.gz\n{good}  k9s_Darwin_arm64.tar.gz\n",
+            "0".repeat(64)
+        );
+        verify_sha256(&f, &list, Some("k9s_Darwin_arm64.tar.gz")).unwrap();
+        assert!(verify_sha256(&f, &list, Some("k9s_Darwin_amd64.tar.gz")).is_err());
+        assert!(verify_sha256(&f, &list, Some("k9s_Linux_arm64.tar.gz")).is_err());
+        assert!(verify_sha256(&f, "<html>not found</html>", None).is_err());
+    }
 
     #[test]
     fn arch_labels() {

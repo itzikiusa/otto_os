@@ -761,6 +761,9 @@ impl DesignService {
             }
         }
 
+        // GC fence: the blob may already exist and be judged unreferenced by
+        // a concurrent prune; hold off its delete until the version commits.
+        let blob_ref = self.blobs.reference_guard().await?;
         let stored = self.blobs.put_hashed(&bytes, sha).await?;
         let version = self
             .store
@@ -780,6 +783,7 @@ impl DesignService {
                 opts.base.as_deref(),
             )
             .await?;
+        drop(blob_ref);
 
         // Mirror into the working copy (best-effort: the blob is the truth).
         if let Some(path) = self.work_file(&artifact) {
@@ -1335,6 +1339,9 @@ impl DesignService {
             merge_meta(&mut a.meta, m)?;
             a.meta = bound_json(a.meta.clone(), MAX_META_BYTES, "meta")?;
         }
+        // GC fence for a new thumbnail blob, held until the row references it.
+        let mut blob_ref = None;
+        let prev_thumb = a.thumb_blob.clone();
         if let Some(b64) = req.thumb_b64 {
             let bytes = decode_content(None, Some(b64))?.unwrap_or_default();
             if bytes.len() > MAX_THUMB_BYTES {
@@ -1342,9 +1349,16 @@ impl DesignService {
             }
             let png = format::spec("png").expect("png is a known format");
             format::validate(png, &bytes)?;
+            blob_ref = Some(self.blobs.reference_guard().await?);
             a.thumb_blob = Some(self.blobs.put(&bytes).await?);
         }
         let updated = self.store.write_artifact_meta(&a).await?;
+        drop(blob_ref);
+        // A replaced thumbnail is a cache, not history (S7-04): GC it like
+        // `set_thumbnail` does, once nothing references it any more.
+        if let Some(old) = prev_thumb.filter(|o| updated.thumb_blob.as_ref() != Some(o)) {
+            let _ = self.gc_blobs(vec![old]).await;
+        }
         if updated.status != prev_status {
             let (kind, payload) = if updated.status == "shipped" {
                 (
@@ -1393,12 +1407,18 @@ impl DesignService {
         Ok(updated)
     }
 
-    /// HARD delete (explicit `?hard=true`, workspace Admin). Versions' blobs
-    /// stay in the store (only the opt-in prune GC removes blobs); consumers'
+    /// HARD delete (explicit `?hard=true`, workspace Admin). The versions'
+    /// and thumbnail's blobs are GC'd once no other artifact references them
+    /// (S7-03 — a hard delete must not leave the bytes on disk); consumers'
     /// links are kept and flagged broken.
     pub async fn hard_delete(&self, artifact_id: &str) -> Result<()> {
         let a = self.store.require_artifact(artifact_id).await?;
-        self.store.delete_artifact(&a.id).await?;
+        let candidates = self.store.delete_artifact(&a.id).await?;
+        if let Err(e) = self.gc_blobs(candidates).await {
+            // The rows are gone; a blob left behind is reclaimed by the next
+            // orphan sweep, so the delete itself still succeeds.
+            tracing::warn!(artifact = %a.id, error = %e, "design: hard-delete blob GC failed");
+        }
         self.notify_consumers(&a, None, "target_deleted", None)
             .await;
         self.emit(Event::DesignArtifactUpdated {
@@ -1610,7 +1630,19 @@ impl DesignService {
             Some(id) => vec![self.store.require_artifact(id).await?.id],
             None => self.store.all_artifact_ids().await?,
         };
-        self.prune_ids(ids, apply, window_secs, None).await
+        let mut report = self.prune_ids(ids, apply, window_secs, None).await?;
+        if apply && artifact_id.is_none() {
+            self.add_orphans(&mut report).await?;
+        }
+        Ok(report)
+    }
+
+    /// Fold an orphan sweep into an applied whole-library report.
+    async fn add_orphans(&self, report: &mut PruneReport) -> Result<()> {
+        let orphans = self.sweep_orphan_blobs().await?;
+        report.reclaimable_blobs += orphans.len() as u64;
+        report.blobs.extend(orphans);
+        Ok(())
     }
 
     /// The scheduled pass (`retention::spawn_scheduler`): only artifacts with
@@ -1646,7 +1678,51 @@ impl DesignService {
             .store
             .prune_candidates(&crate::store::stamp(cutoff))
             .await?;
-        self.prune_ids(ids, apply, window_secs, Some(cutoff)).await
+        let mut report = self
+            .prune_ids(ids, apply, window_secs, Some(cutoff))
+            .await?;
+        if apply {
+            self.add_orphans(&mut report).await?;
+        }
+        Ok(report)
+    }
+
+    /// Remove each candidate blob no version/thumbnail references any more.
+    /// Re-checked under the exclusive GC fence, so a save that just
+    /// re-referenced the same bytes keeps its blob. Returns the removed shas.
+    pub(crate) async fn gc_blobs(&self, candidates: Vec<String>) -> Result<Vec<String>> {
+        let mut removed = Vec::new();
+        let candidates: Vec<String> = candidates
+            .into_iter()
+            .filter(|s| blobs::is_sha(s))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(removed);
+        }
+        let _gc = self.blobs.gc_guard().await?;
+        for sha in candidates {
+            if !self.store.blob_in_use(&sha).await? && self.blobs.remove(&sha).await? {
+                removed.push(sha);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Orphan sweep: delete every blob file no version/thumbnail references
+    /// (left by a crash between a blob write and its row, or by deletes that
+    /// predate blob GC). Under the exclusive GC fence every writer has either
+    /// committed its referencing row or not yet stored its blob, so the
+    /// keep-set read here is final. Returns the removed shas.
+    pub async fn sweep_orphan_blobs(&self) -> Result<Vec<String>> {
+        let _gc = self.blobs.gc_guard().await?;
+        let keep = self.store.referenced_blobs().await?;
+        let mut removed = Vec::new();
+        for sha in self.blobs.list().await {
+            if !keep.contains(&sha) && self.blobs.remove(&sha).await? {
+                removed.push(sha);
+            }
+        }
+        Ok(removed)
     }
 
     async fn prune_ids(
@@ -1689,10 +1765,16 @@ impl DesignService {
                 let (_, bytes) = self.store.reclaimable(&doomed).await?;
                 report.reclaimable_bytes += bytes.max(0) as u64;
                 let candidate_blobs = self.store.delete_versions(&doomed).await?;
-                for sha in candidate_blobs {
-                    if !self.store.blob_in_use(&sha).await? {
-                        self.blobs.remove(&sha).await?;
-                        report.blobs.push(sha);
+                if !candidate_blobs.is_empty() {
+                    // Exclusive GC fence: no save is between storing a blob
+                    // (a no-op when it exists) and committing the row that
+                    // references it, so `blob_in_use` is final here.
+                    let _gc = self.blobs.gc_guard().await?;
+                    for sha in candidate_blobs {
+                        if !self.store.blob_in_use(&sha).await? {
+                            self.blobs.remove(&sha).await?;
+                            report.blobs.push(sha);
+                        }
                     }
                 }
             }
@@ -1791,17 +1873,23 @@ impl DesignService {
         // The caller's snapshot can predate another thumbnail or metadata
         // publication. No-op detection and GC must use the durable row.
         let a = self.store.require_artifact(&a.id).await?;
+        let blob_ref = self.blobs.reference_guard().await?;
         let sha = self.blobs.put(bytes).await?;
         if a.thumb_blob.as_deref() == Some(sha.as_str()) {
             return Ok(a.clone());
         }
         self.store.set_thumb_blob(&a.id, &sha).await?;
+        drop(blob_ref);
         // The replaced thumbnail is a cache, not history: GC it now when no
         // version or other artifact references it (it used to linger until an
-        // admin ran the prune).
+        // admin ran the prune). Re-checked under the exclusive GC fence so a
+        // save that just re-referenced the same bytes keeps its blob.
         if let Some(old) = a.thumb_blob.as_deref() {
-            if blobs::is_sha(old) && !self.store.blob_in_use(old).await.unwrap_or(true) {
-                let _ = self.blobs.remove(old).await;
+            if blobs::is_sha(old) {
+                let _gc = self.blobs.gc_guard().await?;
+                if !self.store.blob_in_use(old).await.unwrap_or(true) {
+                    let _ = self.blobs.remove(old).await;
+                }
             }
         }
         let updated = self.store.require_artifact(&a.id).await?;
@@ -2660,5 +2748,99 @@ mod tests {
         assert!(s.storage().await.unwrap().auto_tidy);
         s.set_auto_tidy(false).await.unwrap();
         assert!(!s.auto_tidy_setting().await.unwrap());
+    }
+
+    /// S7-03: a hard delete GCs the versions' and thumbnail's blobs (they
+    /// used to stay on disk forever) — except bytes another artifact still
+    /// references; the orphan sweep reclaims blobs no row references.
+    #[tokio::test]
+    async fn hard_delete_gcs_its_blobs_but_keeps_shared_ones() {
+        let (s, _dir, _rx) = svc().await;
+        let doomed = s
+            .create_artifact(input("html", "Doomed", Some("<p>shared</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let doomed = s
+            .commit_bytes(
+                &doomed,
+                b"<p>secret</p>".to_vec(),
+                opts(None, Author::user("u1")),
+            )
+            .await
+            .unwrap()
+            .artifact;
+        let doomed = s
+            .set_thumbnail(&doomed, b"\x89PNG\r\n\x1a\ndoomed-thumb")
+            .await
+            .unwrap();
+        let keeper = s
+            .create_artifact(input("html", "Keeper", Some("<p>shared</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let shared = keeper.head_version_id.clone().unwrap();
+        let shared_sha = s
+            .store()
+            .get_version(&shared)
+            .await
+            .unwrap()
+            .unwrap()
+            .blob_sha256;
+        let secret_sha = blobs::sha256_hex(b"<p>secret</p>");
+        let thumb_sha = doomed.thumb_blob.clone().unwrap();
+        assert!(s.blobs().exists(&secret_sha).await);
+
+        s.hard_delete(&doomed.id).await.unwrap();
+        assert!(
+            !s.blobs().exists(&secret_sha).await,
+            "deleted bytes are gone"
+        );
+        assert!(!s.blobs().exists(&thumb_sha).await, "thumbnail is gone");
+        assert!(s.blobs().exists(&shared_sha).await, "shared blob is kept");
+
+        // An unreferenced blob (crash between blob write and row) is swept.
+        let orphan = s.blobs().put(b"orphaned bytes").await.unwrap();
+        let swept = s.sweep_orphan_blobs().await.unwrap();
+        assert_eq!(swept, vec![orphan.clone()]);
+        assert!(!s.blobs().exists(&orphan).await);
+        assert!(s.blobs().exists(&shared_sha).await);
+    }
+
+    /// S7-04: replacing the thumbnail through `PATCH` (thumb_b64) GCs the
+    /// old blob, as `set_thumbnail` does.
+    #[tokio::test]
+    async fn update_meta_thumbnail_replacement_gcs_the_old_blob() {
+        use base64::Engine as _;
+        let (s, _dir, _rx) = svc().await;
+        let a = s
+            .create_artifact(input("html", "Thumbs", Some("<p>x</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let old = b"\x89PNG\r\n\x1a\nold-thumb";
+        let a = s.set_thumbnail(&a, old).await.unwrap();
+        let old_sha = a.thumb_blob.clone().unwrap();
+        let updated = s
+            .update_meta(
+                &a.id,
+                UpdateArtifactReq {
+                    thumb_b64: Some(
+                        base64::engine::general_purpose::STANDARD
+                            .encode(b"\x89PNG\r\n\x1a\nnew-thumb"),
+                    ),
+                    ..Default::default()
+                },
+                &Author::user("u1"),
+            )
+            .await
+            .unwrap();
+        assert_ne!(updated.thumb_blob.as_deref(), Some(old_sha.as_str()));
+        assert!(!s.blobs().exists(&old_sha).await, "old thumbnail GC'd");
+        assert!(
+            s.blobs()
+                .exists(updated.thumb_blob.as_deref().unwrap())
+                .await
+        );
     }
 }

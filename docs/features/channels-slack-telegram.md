@@ -19,7 +19,7 @@
 
 A channel integration is **per-workspace** and **per-channel** — each Otto
 workspace can have at most one Slack integration and one Telegram integration.
-You configure them in **Settings → Channels** (`ui/src/modules/settings/Channels.svelte`).
+You configure them in **Settings → Slack, Telegram & webhooks** (`ui/src/modules/settings/Channels.svelte`).
 
 The runtime is the `otto-channels` crate. A long-lived supervisor
 (`ChannelManager`, `crates/otto-channels/src/manager.rs`) scans every enabled
@@ -42,7 +42,7 @@ Every listener reports its live state to an in-memory health registry
 (`crates/otto-channels/src/health.rs`): connecting, connected, reconnecting
 (with the reason), failing (the platform rejected the token or config), waiting
 for a token, or conflict (another workspace already listens with the token).
-**Settings → Channels** polls it (`GET /workspaces/{id}/integrations/status`)
+**Settings → Slack, Telegram & webhooks** polls it (`GET /workspaces/{id}/integrations/status`)
 and shows a badge on each enabled Slack/Telegram card — so a bot that is
 silently reconnecting, or whose `xapp-` token was revoked, is visible without
 reading the daemon log. The Socket Mode dial is bounded (20 s) and every
@@ -93,7 +93,7 @@ without restarting `ottod`.
 
 ### Per-integration settings (the `Integration` record)
 
-These map 1:1 to the **Settings → Channels** edit form and to
+These map 1:1 to the **Settings → Slack, Telegram & webhooks** edit form and to
 `UpsertIntegrationReq`:
 
 | Field | Meaning |
@@ -102,7 +102,7 @@ These map 1:1 to the **Settings → Channels** edit form and to
 | `bot_token` *(write-only)* | Slack `xoxb-…` / Telegram `123456:ABC…`. Stored in Keychain; never returned. |
 | `app_token` *(write-only, Slack only)* | Slack Socket Mode `xapp-…` token. Stored in Keychain; never returned. |
 | `channel_id` | **Default chat ID** — the chat the `/test` button and notifications post to (Slack `C…` channel id; Telegram numeric chat id). Not required for relaying inside a live thread. |
-| `allowed_users` | Comma-separated **channel-native** user IDs allowed to drive the bot. Blank = everyone. (Slack `U…` ids; Telegram numeric user ids.) |
+| `allowed_users` | Comma-separated **channel-native** user IDs allowed to drive the bot. Blank = **nobody**, unless the explicit "Open to everyone" opt-in (`open_to_all`) is set. (Slack `U…` ids; Telegram numeric user ids.) |
 | `agent_reply` | `false` (default) → **Otto relays** the agent's final reply for you. `true` → the agent marks the exact text to send; the agent never posts on its own (Otto still does the posting). See §5. |
 | `reply_instructions` | Free-text guidance injected into the trusted-context block (e.g. tone/format). Only surfaced in the UI when `agent_reply` is on. |
 | `preferred_cli` | Agent CLI for this channel's sessions (`claude`, `codex`, `shell`, …). Blank → workspace default → global default → `claude`. |
@@ -121,8 +121,12 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
    it, the message is silently dropped. Ids are trimmed and compared
    case-insensitively; a message with no sender id never passes a non-blank list.
    On Slack the gate runs **before** attachments are downloaded. A blank list
-   lets anyone who can message the bot run an agent on your Mac — the Channels
-   page flags such an integration **Open to everyone**.
+   admits **nobody** (fail closed) — unless the integration is explicitly opened
+   to everyone (`open_to_all`, a confirmed opt-in in the editor; integrations
+   that predate the flag with a blank list were migrated to it). An open
+   integration lets anyone who can message the bot run an agent on your Mac:
+   the Channels page flags it **Open to everyone** and the daemon logs a
+   `channel OPEN TO EVERYONE` warning on every listener start.
 3. **Quick commands.** A message that starts with `/` may be a quick command
    (`/help`, `/sessions`, `/who`, `/stop`, `/new`, `/restart`) and is handled
    locally without touching an agent — see §5.
@@ -347,7 +351,7 @@ settings:
 
 ### 3.3 Paste the tokens into Otto
 
-In Otto: **Settings → Channels → Slack → Edit**:
+In Otto: **Settings → Slack, Telegram & webhooks → Slack → Edit**:
 
 - **Bot token** → paste the `xoxb-…`.
 - **App token (Socket Mode)** → paste the `xapp-…`.
@@ -381,7 +385,7 @@ thread go to the same agent. Start a new top-level message to get a new agent.
 
 ### 3.5 Verify
 
-Use **Settings → Channels → Slack → Test** (requires a *Default channel ID*). It
+Use **Settings → Slack, Telegram & webhooks → Slack → Test** (requires a *Default channel ID*). It
 posts **"Otto is connected ✅"** to that channel via `chat.postMessage`. A failure
 surfaces the Slack API error string (e.g. `not_in_channel`, `invalid_auth`).
 
@@ -420,7 +424,7 @@ notifications (§7):
 
 ### 4.3 Paste the token into Otto
 
-**Settings → Channels → Telegram → Edit**:
+**Settings → Slack, Telegram & webhooks → Telegram → Edit**:
 
 - **Bot token** → paste `123456789:AAH…`.
 - **Default chat ID** *(optional)* → e.g. `-100123…` or your private chat id.
@@ -441,7 +445,7 @@ topics maps the whole chat to one agent.
 
 ### 4.5 Verify
 
-**Settings → Channels → Telegram → Test** (requires *Default chat ID*) posts
+**Settings → Slack, Telegram & webhooks → Telegram → Test** (requires *Default chat ID*) posts
 **"Otto is connected ✅"** via `sendMessage`. A failure surfaces the Telegram
 `description` (e.g. `chat not found`, `Unauthorized`).
 
@@ -672,7 +676,7 @@ rejected — fix it, the listener keeps retrying every 60 s), *Token in use*
 
 **Slack listener never starts / "app token missing".** Socket Mode needs the
 `xapp-` App-Level Token *in addition to* the `xoxb-` Bot token. Add it in
-**Settings → Channels → Slack → Edit → App token** and Save. The daemon log shows
+**Settings → Slack, Telegram & webhooks → Slack → Edit → App token** and Save. The daemon log shows
 `starting Slack Socket Mode listener` once both are present and the integration is
 enabled.
 

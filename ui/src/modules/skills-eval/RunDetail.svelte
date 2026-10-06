@@ -20,7 +20,7 @@
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -33,6 +33,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Scorecard from './Scorecard.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { latestOnly } from '../../lib/latest';
 
   // Run / iteration / validator status → the shared run vocabulary
   // (lib/status.ts). The eval's in-flight phases read as "running" (info,
@@ -79,12 +80,23 @@
   let promoteName = $state('');
   let promoting = $state(false);
 
+  // One generation for load + poll: opening run B while A's request is in
+  // flight used to render A, push A into the parent list via `onupdate`, and
+  // — since the in-flight poll re-armed its timer after the cleanup ran — keep
+  // polling after unmount, for hours on a long eval.
+  const seq = latestOnly();
+  let disposed = false;
   $effect(() => {
     const id = evalId;
     void load(id);
     return () => {
+      seq.cancel();
       if (pollTimer !== null) clearTimeout(pollTimer);
+      pollTimer = null;
     };
+  });
+  $effect(() => () => {
+    disposed = true;
   });
 
   // Live refresh: a `skill_eval_updated` WS event for this run triggers an
@@ -105,20 +117,23 @@
     loadError = null;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollCount = 0;
+    const t = seq.begin();
     try {
       const r = await skillsEvalApi.get(id);
+      if (!t.current || disposed) return;
       run = r;
       lastPolled = '';
       onupdate?.(r);
       if (isActive(r)) schedulePoll();
     } catch (e) {
+      if (!t.current || disposed) return;
       const msg = loadErrorText(e);
       // Keep a loaded report on screen and just toast; with nothing to show,
       // put the error (and Retry) in the pane itself.
       if (run) toasts.error('Couldn’t refresh the evaluation', msg);
       else loadError = msg;
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 
@@ -130,6 +145,7 @@
   }
 
   function schedulePoll(delay = 2000): void {
+    if (disposed) return;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = setTimeout(() => void poll(), delay);
   }
@@ -143,8 +159,13 @@
       return;
     }
     pollCount++;
+    // A poll never supersedes a load; a load (or unmount) supersedes the poll.
+    const gen = seq.gen;
+    const id = evalId;
+    const stale = () => seq.gen !== gen || disposed || id !== evalId;
     try {
-      const r = await skillsEvalApi.get(evalId);
+      const r = await skillsEvalApi.get(id);
+      if (stale()) return;
       const sig = JSON.stringify(r);
       if (sig !== lastPolled) {
         lastPolled = sig;
@@ -153,7 +174,7 @@
       }
       if (isActive(r)) schedulePoll(pollCount > 600 ? 5000 : 2000);
     } catch {
-      schedulePoll();
+      if (!stale()) schedulePoll();
     }
   }
 
@@ -498,7 +519,7 @@
           {#if it.impl_summary}<p class="impl-summary">{it.impl_summary}</p>{/if}
           {#if it.worktree_path}<p class="worktree mono">{it.worktree_path}</p>{/if}
           {#if it.impl_session_id && openTerminals.has(it.impl_session_id)}
-            <div class="term">{#key it.impl_session_id}<Terminal sessionId={it.impl_session_id} preferDom resumeOnOpen={false} />{/key}</div>
+            <div class="term">{#key it.impl_session_id}<LazyTerminal sessionId={it.impl_session_id} preferDom resumeOnOpen={false} />{/key}</div>
           {/if}
           {#if openImplDiffs.has(it.id)}
             {#if implDiffLoading.has(it.id)}
@@ -550,7 +571,7 @@
                 <p class="val-waiting"><Icon name="warning" size={12} /> Looks blocked on input — <strong>Open session</strong> to respond.</p>
               {/if}
               {#if a.session_id && openTerminals.has(a.session_id)}
-                <div class="term">{#key a.session_id}<Terminal sessionId={a.session_id} preferDom resumeOnOpen={false} />{/key}</div>
+                <div class="term">{#key a.session_id}<LazyTerminal sessionId={a.session_id} preferDom resumeOnOpen={false} />{/key}</div>
               {/if}
               {#if openFindings.has(key)}
                 <ul class="findings">
@@ -654,7 +675,7 @@
         under the name below (overwrites an existing skill of that name).
       </p>
       <label class="field-label" for="promote-name">Library skill name</label>
-      <input id="promote-name" class="input" bind:value={promoteName} placeholder="my-skill" aria-invalid={!!promoteNameError} aria-describedby="promote-name-err" />
+      <input dir="auto" id="promote-name" class="input" bind:value={promoteName} placeholder="my-skill" aria-invalid={!!promoteNameError} aria-describedby="promote-name-err" />
       {#if promoteNameError}<p class="field-err" id="promote-name-err">{promoteNameError}</p>{/if}
       {#if promoteIter?.skill_after}
         <div class="src-toggle">

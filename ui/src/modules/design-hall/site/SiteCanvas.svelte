@@ -14,6 +14,7 @@
   // library drops are handled by delegated listeners on the page root; the
   // outlines, name tags, insertion line and the floating section toolbar live
   // in an overlay measured from the DOM (clamped into the canvas, never off it).
+  import { scrollBehavior } from '../../../lib/motion';
   import { tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { flag, renderSection, str, type EmbedInfo } from './engine/render';
@@ -434,7 +435,7 @@
       if (!el || !sc) return;
       const r = el.getBoundingClientRect();
       const s = sc.getBoundingClientRect();
-      if (r.top < s.top + 40 || r.top > s.bottom - 80) sc.scrollBy({ top: r.top - s.top - 48, behavior: 'smooth' });
+      if (r.top < s.top + 40 || r.top > s.bottom - 80) sc.scrollBy({ top: r.top - s.top - 48, behavior: scrollBehavior() });
     });
   });
 

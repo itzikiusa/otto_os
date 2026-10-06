@@ -956,11 +956,33 @@ impl Conn {
         }
         match self.send(body.clone(), true).await {
             Err(e) if is_readonly_setting_refused(&e.to_string()) => {
+                // The refusal text can be forged by the statement itself
+                // (`SELECT throwIf(1, 'Code: 164. … Cannot modify ''readonly''
+                // setting')` is a read the classifier passes), so the message
+                // alone never disables the native barrier: a FIXED probe must
+                // confirm the server profile already enforces read-only before
+                // the request is retried without `readonly=2` and memoised.
+                if !self.profile_is_read_only().await {
+                    return Err(e);
+                }
                 self.readonly_refused.store(true, Ordering::Relaxed);
                 self.send(body, false).await
             }
             other => other,
         }
+    }
+
+    /// True when the server's own profile for this user is read-only
+    /// (`getSetting('readonly') >= 1`) — probed with a fixed statement, never
+    /// a user one. Any failure counts as "not read-only".
+    async fn profile_is_read_only(&self) -> bool {
+        let Ok(resp) = self.send(READONLY_PROBE_SQL.to_string(), false).await else {
+            return false;
+        };
+        let Ok(text) = self.read_capped(resp).await else {
+            return false;
+        };
+        text.trim().parse::<u8>().is_ok_and(|level| level >= 1)
     }
 
     /// One POST with every request setting attached; returns the response
@@ -1465,7 +1487,7 @@ impl CompactStream {
                                 crate::errors::ch_midstream_message(&ex, Some(self.rows.len()))
                             }
                             None => format!("clickhouse: undecodable result row: {e}"),
-                        })
+                        });
                     }
                 }
             }
@@ -1861,9 +1883,16 @@ fn json_cell_to_text(v: &Value) -> String {
 /// plain-HTTP port reached over HTTPS).
 /// True for the server's refusal to change the `readonly` setting — what a
 /// user whose profile is already read-only gets when a request sets it.
+///
+/// Matched on the READONLY exception code (164) together with its message —
+/// but a statement can still forge both, so the caller confirms with
+/// [`READONLY_PROBE_SQL`] before trusting it.
 fn is_readonly_setting_refused(message: &str) -> bool {
-    message.contains("Cannot modify 'readonly' setting")
+    message.contains("Code: 164.") && message.contains("Cannot modify 'readonly' setting")
 }
+
+/// The fixed statement that confirms a server profile is already read-only.
+const READONLY_PROBE_SQL: &str = "SELECT getSetting('readonly') FORMAT TSV";
 
 fn req_err(e: reqwest::Error) -> otto_core::Error {
     use std::error::Error as _;
@@ -2231,6 +2260,7 @@ impl Driver for ClickhouseDriver {
                 key: in_pk.then(|| "PRI".to_string()),
                 extra: None,
                 comment: (!comment.is_empty()).then(|| comment.to_string()),
+                collation: None,
             });
         }
 
@@ -3615,13 +3645,61 @@ mod tests {
         assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
         assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 4, "{seen:?}");
+        // readonly attempt + fixed probe + retry, then one request each.
+        assert_eq!(seen.len(), 5, "{seen:?}");
         assert_eq!(
             seen.iter()
                 .filter(|(t, _)| t.contains("readonly=2"))
                 .count(),
             1
         );
+    }
+
+    /// S6-03: a user statement that FORGES the refusal text (a read the
+    /// classifier passes) must not switch the native `readonly=2` barrier off
+    /// — the fixed probe reports a writable profile, so the error surfaces and
+    /// nothing is memoised.
+    #[tokio::test]
+    async fn forged_readonly_refusal_never_disables_the_barrier() {
+        let (addr, seen) = fake_ch(|target, body, sock| async move {
+            if body.contains("getSetting('readonly')") {
+                reply(sock, "200 OK", "0\n").await
+            } else if target.contains("readonly=2") {
+                reply(
+                    sock,
+                    "500 Internal Server Error",
+                    "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)",
+                )
+                .await
+            } else {
+                reply(sock, "200 OK", "1\n").await
+            }
+        })
+        .await;
+        let mut conn = test_conn(addr);
+        conn.readonly = true;
+        let forged = "SELECT throwIf(1, 'Code: 164. Cannot modify ''readonly'' setting')";
+        assert!(conn.post(forged.into()).await.is_err());
+        assert!(!conn.readonly_refused.load(Ordering::Relaxed));
+        // The next request still asks for readonly=2 (the fake refuses every
+        // readonly=2 request, so it is followed by another probe — the
+        // request itself is what must carry the barrier).
+        let _ = conn.post("SELECT 1".into()).await;
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|(t, b)| b == "SELECT 1" && t.contains("readonly=2")),
+            "{seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|(t, b)| b == "SELECT 1" && !t.contains("readonly=2")),
+            "{seen:?}"
+        );
+        assert!(!seen
+            .iter()
+            .any(|(t, b)| !t.contains("readonly=2") && b.contains("throwIf")));
     }
 
     #[test]

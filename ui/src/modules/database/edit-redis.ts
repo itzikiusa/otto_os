@@ -91,6 +91,16 @@ export function redisString(s: string): string {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+/** Whether a token can ride a one-line command at all. The driver splits a
+ *  statement on line breaks BEFORE it tokenizes, so a `\n` inside a quoted
+ *  token still ends the command — and whatever follows runs as the NEXT command
+ *  (a set member `x\nFLUSHALL` deleted via `SREM` would flush the keyspace). A
+ *  lone `\r` is stripped / read as whitespace. Every builder below refuses such
+ *  a key / field / member / value with a `#` note instead of emitting it. */
+export function redisLineSafe(s: string): boolean {
+  return !/[\r\n]/.test(s);
+}
+
 /** Parse a statement into the read command its rows came from. Null unless the
  *  statement is exactly ONE non-comment line naming a supported command with
  *  the argument count that command takes. */
@@ -189,7 +199,7 @@ function cellCommands(
   const rows = ctx.liveRows;
   const before = text(rows[rowIdx]?.[colIdx]);
   const line = (path: string, op: DiffLine['op'] = 'cell'): DiffLine => ({ row: rowIdx, path, op, before, after });
-  if (after.includes('\n')) {
+  if (!redisLineSafe(after)) {
     return { stmts: [note(rowIdx, 'the value contains a line break, which a one-line Redis command cannot carry')], diff: line('value') };
   }
   const add = (s: string): string => {
@@ -288,7 +298,15 @@ export const redisAdapter: EditAdapter = {
     for (const { rowIdx, patch } of rows) {
       for (const [ci, raw] of [...patch.cells.entries()].sort((a, b) => a[0] - b[0])) {
         const built = cellCommands(r, ctx, rowIdx, ci, draft(raw), verbs);
-        stmts.push(...built.stmts);
+        // The typed value is checked up front, but a rename / value-row edit
+        // also re-emits the row's OTHER cell (a field name, a value) straight
+        // from the data — one line-broken token there and the whole cell is
+        // refused (never half of a HDEL + HSET pair).
+        stmts.push(
+          ...(built.stmts.every(redisLineSafe)
+            ? built.stmts
+            : [note(rowIdx, 'a field, member or value on this row contains a line break, which a one-line Redis command cannot carry')]),
+        );
         diff.push(built.diff);
       }
     }
@@ -309,17 +327,22 @@ export const redisAdapter: EditAdapter = {
           ? { title: 'Review DEL', sql: `DEL ${key}` }
           : { title: 'Review HDEL', sql: `HDEL ${key} ${redisQuote(t.field ?? '')}` };
       case 'kv':
-      case 'pairs': {
-        const names = namesOf(layout, rows, idxs).map(redisQuote).join(' ');
-        return t.cmd === 'HGETALL'
-          ? { title: `Review HDEL (${plural(idxs.length, 'field')})`, sql: `HDEL ${key} ${names}` }
-          : { title: `Review ZREM (${plural(idxs.length, 'member')})`, sql: `ZREM ${key} ${names}` };
-      }
+      case 'pairs':
       case 'members': {
-        const names = namesOf(layout, rows, idxs).map(redisQuote).join(' ');
-        return t.cmd === 'SMEMBERS'
-          ? { title: `Review SREM (${plural(idxs.length, 'member')})`, sql: `SREM ${key} ${names}` }
-          : { title: `Review ZREM (${plural(idxs.length, 'member')})`, sql: `ZREM ${key} ${names}` };
+        // Field / member names come from DATA: one holding a line break would
+        // end the command mid-token and run the rest as a new command — those
+        // are left out (noted) and only the safe names are removed.
+        const all = namesOf(layout, rows, idxs);
+        const safe = all.filter(redisLineSafe);
+        const skipped = all.length - safe.length;
+        const skipNote =
+          skipped > 0
+            ? `# ${plural(skipped, 'selected name')} with a line break cannot be sent as a one-line Redis command — skipped`
+            : '';
+        const verb = t.cmd === 'HGETALL' ? 'HDEL' : t.cmd === 'SMEMBERS' ? 'SREM' : 'ZREM';
+        const noun = t.cmd === 'HGETALL' ? 'field' : 'member';
+        const sql = [skipNote, safe.length > 0 ? `${verb} ${key} ${safe.map(redisQuote).join(' ')}` : ''].filter(Boolean).join('\n');
+        return { title: `Review ${verb} (${plural(safe.length, noun)})`, sql };
       }
       case 'list': {
         // No delete-by-index: overwrite each element with a tombstone (every
@@ -346,9 +369,15 @@ export const redisAdapter: EditAdapter = {
     const r = resolve(ctx);
     if (!r || r.t.cmd !== 'HGETALL') return null;
     const key = redisQuote(r.t.key);
-    const lines = Object.entries(doc).map(
-      ([f, v]) => `HSET ${key} ${redisQuote(f)} ${redisString(typeof v === 'string' ? v : text(v))}`,
-    );
+    const entries = Object.entries(doc).map(([f, v]) => [f, typeof v === 'string' ? v : text(v)] as const);
+    // All or nothing: a line-broken field or value would split its HSET in
+    // two (a partial write, or a second command taken from the data), so the
+    // whole document is refused with a note naming the offending fields.
+    const bad = entries.filter(([f, v]) => !redisLineSafe(f) || !redisLineSafe(v)).map(([f]) => JSON.stringify(f));
+    if (bad.length > 0) {
+      return `# ${bad.join(', ').replace(/[\r\n]/g, ' ')}: a line break cannot be sent in a one-line Redis command — nothing inserted`;
+    }
+    const lines = entries.map(([f, v]) => `HSET ${key} ${redisQuote(f)} ${redisString(v)}`);
     return lines.length > 0 ? lines.join('\n') : null;
   },
 

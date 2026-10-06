@@ -10,6 +10,14 @@ use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
+/// Where a review run read the code — see [`ReviewsRepo::set_run_context`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewRunContext {
+    pub source_branch: Option<String>,
+    pub cwd: Option<String>,
+    pub head_sha: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ReviewsRepo {
     pool: DbPool,
@@ -107,6 +115,21 @@ impl ReviewsRepo {
             .await
             .map_err(dberr("set review status"))?;
         Ok(())
+    }
+
+    /// Atomically claim a finished review for a new attempt: flip it to
+    /// `running` ONLY if it is not running already. `false` ⇒ another attempt
+    /// won the race (two quick "Retry summarizer" clicks used to both pass a
+    /// read-then-write check and each persist a full set of drafts).
+    pub async fn try_begin_rerun(&self, id: &Id) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE pr_reviews SET status = 'running', error = NULL WHERE id = ? AND status != 'running'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("claim review rerun"))?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// Fail every review still marked `running`. Called on daemon startup: a
@@ -282,6 +305,46 @@ impl ReviewsRepo {
         self.get_comment(id).await
     }
 
+    /// Person edits of a not-yet-posted comment: replace a DRAFT's body and/or
+    /// move a DECLINED comment back to draft. Guarded in SQL so a comment that
+    /// is posted (or changed state meanwhile) is never touched. `Ok(None)` ⇒
+    /// nothing matched the guard (the caller reports a conflict).
+    pub async fn edit_unposted_comment(
+        &self,
+        id: &Id,
+        body: Option<&str>,
+        restore_draft: bool,
+    ) -> Result<Option<ReviewComment>> {
+        let mut tx = self.pool.begin().await.map_err(dberr("edit comment"))?;
+        if restore_draft {
+            let res = sqlx::query(
+                "UPDATE pr_review_comments SET state = 'draft' WHERE id = ? AND state = 'declined' AND posted = 0",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("restore comment"))?;
+            if res.rows_affected() != 1 {
+                return Ok(None);
+            }
+        }
+        if let Some(body) = body {
+            let res = sqlx::query(
+                "UPDATE pr_review_comments SET body = ? WHERE id = ? AND state = 'draft' AND posted = 0",
+            )
+            .bind(body)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("edit comment body"))?;
+            if res.rows_affected() != 1 {
+                return Ok(None);
+            }
+        }
+        tx.commit().await.map_err(dberr("edit comment"))?;
+        self.get_comment(id).await.map(Some)
+    }
+
     /// Atomically claim a comment for posting to the forge: flips `posted`
     /// 0→1 and returns `true` only for the ONE caller that flipped it. A double
     /// click / retried request sees `false` and must not post again (the
@@ -398,6 +461,43 @@ impl ReviewsRepo {
         Ok(row.map(|r| r.get("diff")))
     }
 
+    /// Record where this run reviews the code (`0176_git2_review_run_context`):
+    /// the source branch (scopes local finding resolution), the checkout path
+    /// and its head sha (what a Retry re-enters). Upsert; `None`s are stored
+    /// as NULL.
+    pub async fn set_run_context(&self, review_id: &Id, ctx: &ReviewRunContext) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO review_run_context (review_id, source_branch, cwd, head_sha)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (review_id) DO UPDATE SET source_branch = excluded.source_branch,
+               cwd = excluded.cwd, head_sha = excluded.head_sha",
+        )
+        .bind(review_id)
+        .bind(ctx.source_branch.as_deref())
+        .bind(ctx.cwd.as_deref())
+        .bind(ctx.head_sha.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set review run context"))?;
+        Ok(())
+    }
+
+    /// Read back [`Self::set_run_context`] (None for reviews that predate it).
+    pub async fn get_run_context(&self, review_id: &Id) -> Result<Option<ReviewRunContext>> {
+        let row = sqlx::query(
+            "SELECT source_branch, cwd, head_sha FROM review_run_context WHERE review_id = ?",
+        )
+        .bind(review_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("get review run context"))?;
+        Ok(row.map(|r| ReviewRunContext {
+            source_branch: r.get("source_branch"),
+            cwd: r.get("cwd"),
+            head_sha: r.get("head_sha"),
+        }))
+    }
+
     /// Drop every durable retry artifact for a review (prompts + diff) — used
     /// by the cancel cleanup, mirroring its temp-file sweep.
     pub async fn delete_run_artifacts(&self, review_id: &Id) -> Result<()> {
@@ -456,7 +556,26 @@ mod tests {
             findings: Vec::new(),
             fallback: false,
             lens: String::new(),
+            lens_slugs: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn run_context_round_trips_and_upserts() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let id = new_id();
+        assert_eq!(repo.get_run_context(&id).await.unwrap(), None);
+        let mut ctx = ReviewRunContext {
+            source_branch: Some("feature/a".into()),
+            cwd: Some("/tmp/wt".into()),
+            head_sha: None,
+        };
+        repo.set_run_context(&id, &ctx).await.unwrap();
+        assert_eq!(repo.get_run_context(&id).await.unwrap(), Some(ctx.clone()));
+        ctx.head_sha = Some("abc1234".into());
+        repo.set_run_context(&id, &ctx).await.unwrap();
+        assert_eq!(repo.get_run_context(&id).await.unwrap(), Some(ctx));
     }
 
     /// Regression for the "agents look capped/stuck at PENDING" bug: each agent
@@ -518,6 +637,77 @@ mod tests {
 
         let after = repo.get_review(&review.id).await.unwrap();
         assert_eq!(after.status, ReviewStatus::Cancelled);
+    }
+
+    /// Drafts are editable; declined comments restore to draft; posted or
+    /// approved comments are never touched.
+    #[tokio::test]
+    async fn edit_unposted_comment_respects_state_guards() {
+        use otto_core::domain::{CommentSeverity, CommentState};
+        let repo = ReviewsRepo::new(mem_pool().await);
+        let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
+        let c = repo
+            .add_comment(
+                &review.id,
+                Some("a.rs"),
+                Some(1),
+                CommentSeverity::Warn,
+                "orig",
+            )
+            .await
+            .unwrap();
+        let e = repo
+            .edit_unposted_comment(&c.id, Some("edited"), false)
+            .await
+            .unwrap();
+        assert_eq!(e.unwrap().body, "edited");
+        // Declined: body edit refused until restored, restore works.
+        repo.set_comment_state(&c.id, CommentState::Declined, false)
+            .await
+            .unwrap();
+        assert!(repo
+            .edit_unposted_comment(&c.id, Some("x"), false)
+            .await
+            .unwrap()
+            .is_none());
+        let r = repo
+            .edit_unposted_comment(&c.id, Some("again"), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((r.state, r.body.as_str()), (CommentState::Draft, "again"));
+        // Posted: untouchable.
+        repo.set_comment_state(&c.id, CommentState::Approved, true)
+            .await
+            .unwrap();
+        assert!(repo
+            .edit_unposted_comment(&c.id, Some("y"), false)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .edit_unposted_comment(&c.id, None, true)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Double "Retry summarizer": only the first claim wins.
+    #[tokio::test]
+    async fn try_begin_rerun_is_exclusive() {
+        use otto_core::domain::ReviewStatus;
+        let repo = ReviewsRepo::new(mem_pool().await);
+        let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
+        // Still running ⇒ no new attempt.
+        assert!(!repo.try_begin_rerun(&review.id).await.unwrap());
+        repo.set_status(&review.id, ReviewStatus::Error, Some("boom"))
+            .await
+            .unwrap();
+        assert!(repo.try_begin_rerun(&review.id).await.unwrap());
+        assert!(!repo.try_begin_rerun(&review.id).await.unwrap());
+        let after = repo.get_review(&review.id).await.unwrap();
+        assert_eq!(after.status, ReviewStatus::Running);
+        assert!(after.error.is_none());
     }
 
     #[tokio::test]

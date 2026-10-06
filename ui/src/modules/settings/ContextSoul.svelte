@@ -332,13 +332,13 @@
       <div class="card form">
       <div class="field">
         <label for="cs-goal">Goal</label>
-        <textarea id="cs-goal" class="input" rows={2} bind:value={cfg.goal_md} maxlength="32000" placeholder="Ship the v2 billing API by March"></textarea>
+        <textarea dir="auto" id="cs-goal" class="input" rows={2} bind:value={cfg.goal_md} maxlength="32000" placeholder="Ship the v2 billing API by March"></textarea>
         <span class="hint">What this workspace is working toward.</span>
       </div>
       <!-- Extra context -->
       <div class="field">
         <label for="cs-extra">Shared instructions</label>
-        <textarea
+        <textarea dir="auto"
           id="cs-extra"
           class="input mono"
           rows={6}
@@ -351,23 +351,23 @@
 
       <div class="field">
         <label for="cs-shared-memory">Workspace memory</label>
-        <textarea id="cs-shared-memory" class="input" rows={4} bind:value={cfg.memory_md} maxlength="32000" placeholder="The staging database is read-only."></textarea>
+        <textarea dir="auto" id="cs-shared-memory" class="input" rows={4} bind:value={cfg.memory_md} maxlength="32000" placeholder="The staging database is read-only."></textarea>
         <span class="hint">Curated facts every session should know.</span>
       </div>
       <div class="field">
         <label for="cs-decisions">Decisions</label>
-        <textarea id="cs-decisions" class="input" rows={3} bind:value={cfg.decisions_md} maxlength="32000" placeholder="Use Postgres, not MySQL — the team already runs it."></textarea>
+        <textarea dir="auto" id="cs-decisions" class="input" rows={3} bind:value={cfg.decisions_md} maxlength="32000" placeholder="Use Postgres, not MySQL — the team already runs it."></textarea>
         <span class="hint">Agreed decisions and their reasons.</span>
       </div>
       <div class="grid2">
         <div class="field">
           <label for="cs-references">References</label>
-          <textarea id="cs-references" class="input mono" rows={3} bind:value={references} spellcheck="false" placeholder="docs/architecture.md"></textarea>
+          <textarea dir="ltr" id="cs-references" class="input mono" rows={3} bind:value={references} spellcheck="false" placeholder="docs/architecture.md"></textarea>
           <span class="hint">Documents, Vault notes or repositories — one per line. Shared as text; listing a path does not read its contents.</span>
         </div>
         <div class="field">
           <label for="cs-artifacts">Artifacts</label>
-          <textarea id="cs-artifacts" class="input mono" rows={3} bind:value={artifacts} spellcheck="false" placeholder="https://example.com/design-doc"></textarea>
+          <textarea dir="ltr" id="cs-artifacts" class="input mono" rows={3} bind:value={artifacts} spellcheck="false" placeholder="https://example.com/design-doc"></textarea>
           <span class="hint">Links or paths to outputs — one per line.</span>
         </div>
       </div>

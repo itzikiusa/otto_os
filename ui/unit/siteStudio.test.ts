@@ -330,3 +330,16 @@ test('SD-17: ops path-copy — untouched pages, sections and blocks keep their i
   assert.equal(dropped.pages[0], d1.pages[0]);
   assert.deepEqual(validate.validateSite(d2), []);
 });
+
+test('S18-23: section classes built from doc fields cannot break out of the class attribute', () => {
+  const s = ops.makeSection('hero/split', new Set());
+  s.style = { ...(s.style ?? {}), spacing: 'm" onmouseover="alert(1)', align: '<img src=x onerror=alert(1)>', motion: 'fade x"y' };
+  s.responsive = { hide: ['phone" autofocus onfocus="alert(1)'], mobile_align: "center'><script>" };
+  const html = render.renderSection(s, ctx());
+  const open = html.slice(0, html.indexOf('>') + 1);
+  const attrs = [...open.matchAll(/\s([a-z-]+)=/g)].map((m) => m[1]);
+  assert.deepEqual(attrs.filter((a) => !['id', 'class', 'style'].includes(a)), [], `no injected attribute: ${open}`);
+  assert.ok(!/on(mouseover|error|focus)=/.test(open), open);
+  assert.ok(!/<(img|script)/i.test(html.slice(0, 200)), open);
+  for (const c of render.sectionClasses(s, T).classes) assert.match(c, /^[a-z0-9_-]+$/, c);
+});

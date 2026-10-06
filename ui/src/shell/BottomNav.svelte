@@ -115,13 +115,13 @@
           ui.openPalette('commands');
         }}
       >
-        <Icon name="command" size={22} />
+        <Icon name="command" size={20} />
         <span>Commands</span>
       </button>
       {#each overflow as m (m.id)}
         {@const b = navBadge(m.id)}
         <button class="sheet-item" class:active={current === m.id} aria-current={current === m.id ? 'page' : undefined} data-nav-id={m.id} aria-busy={navPending.id === m.id || undefined} aria-label="{m.label}{b?.spoken ?? ''}" onclick={() => go(m.id)}>
-          <Icon name={m.icon} size={22} />
+          <Icon name={m.icon} size={20} />
           <span>{m.label}</span>
           {#if b}<span class="bn-badge sheet-badge" class:needs={b.tone === 'needs'} aria-hidden="true">{b.count}</span>{/if}
         </button>
@@ -135,7 +135,7 @@
           moreOpen = false;
         }}
       >
-        <Icon name="info" size={22} />
+        <Icon name="info" size={20} />
         <span>Help</span>
       </button>
       <button
@@ -147,7 +147,7 @@
           moreOpen = false;
         }}
       >
-        <Icon name="gear" size={22} />
+        <Icon name="gear" size={20} />
         <span>Settings</span>
       </button>
     </div>

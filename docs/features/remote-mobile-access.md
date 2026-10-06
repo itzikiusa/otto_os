@@ -51,9 +51,10 @@ root.
 
 | Concern | Location |
 |---|---|
-| Loopback + optional `0.0.0.0` TLS listener | `crates/ottod/src/main.rs` (loopback bind ~L655; `network_listener` block ~L660-714; `load_or_make_tls_config` ~L806) |
+| Loopback + optional `0.0.0.0` TLS listener | `crates/ottod/src/main.rs` (loopback bind at the top of `run`; `serve_network_listener`; `load_or_make_tls_config`) |
 | SPA served same-origin (rust-embed) | `crates/ottod/src/ui_assets.rs` embeds `ui/dist` with the daemon's `embed-ui` feature; `crates/otto-server/src/spa.rs` serves the injected assets |
-| CORS allowlist (loopback / LAN / `*.ts.net`) | `crates/otto-server/src/lib.rs::is_allowed_origin` |
+| CORS allowlist (loopback / same-host LAN / `*.ts.net`) | `crates/otto-server/src/lib.rs::is_allowed_origin_for` |
+| `Host` allowlist (DNS-rebinding guard) | `crates/otto-server/src/host_guard.rs` |
 | Share token mint / list / revoke | `crates/otto-server/src/routes/share.rs` |
 | OTP verify / extend (public) | `crates/otto-server/src/routes/share.rs::{verify_share,extend_share}` |
 | Token issue / revoke / OTP gen / evict + constants | `crates/otto-rbac/src/tokens.rs` (`generate_otp`, `SHARE_*` consts, `AuthRepo`) |
@@ -134,6 +135,13 @@ What you get: a stable public URL, e.g. `https://otto.<your-domain>/`.
   share-link recipients have no SSO account, and Otto's own bearer/share token
   *is* the gate. (If you want SSO only on the owner login, gate just that path and
   leave the `/#/s/...` share path open.)
+- **Set the tunnel hostname as the Public link domain** (`share_base_url`, §4).
+  The daemon refuses requests whose `Host` is a DNS name it doesn't serve (a
+  DNS-rebinding guard, `crates/otto-server/src/host_guard.rs` → `421 bad_host`);
+  IP literals, `localhost`, `*.local`, `*.ts.net` and the Public link domain's
+  host are accepted. Any other name (a second domain, a reverse proxy) goes in
+  the `OTTO_ALLOWED_HOSTS` env var (comma-separated). Listing a `*.ts.net` name
+  there also pins Tailscale to exactly the listed names.
 - You do **not** need to add the Cloudflare hostname to Otto's CORS allowlist —
   same-origin serving means the browser's `Origin` matches the served host and no
   cross-origin request is made.
@@ -164,8 +172,9 @@ This is the right choice for trusted-LAN or self-hosted reach (e.g. behind your
 own reverse proxy). Because the cert is self-signed, mobile browsers will warn on
 the first connection and **PWA install may be blocked** until you trust the cert
 — which is why the Cloudflare tunnel (valid public cert) is preferred for phones.
-The CORS allowlist already trusts RFC-1918 LAN hosts and `*.ts.net` for this path
-(§11). Keep this **OFF** when you use the tunnel.
+The CORS allowlist trusts an RFC-1918 LAN or `*.ts.net` origin only for its own
+host (a page this machine serves on another port); same-origin serving needs no
+CORS at all (§11). Keep this **OFF** when you use the tunnel.
 
 > **Mac sleep kills remote control.** The host must stay awake — consider
 > `caffeinate` or Energy-Saver settings. This is inherent: every session runs on

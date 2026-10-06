@@ -18,25 +18,122 @@ use tokio::{
     process::{Child, Command},
 };
 pub const VERSION: &str = "0.162.0";
+/// The collector's own stderr (export failures, rejected batches). Rotated
+/// once at each start so it stays bounded across many short flush runs.
+const LOG_LIMIT: u64 = 1024 * 1024;
+/// Go heap soft limit, kept below the memory_limiter hard limit (192 MiB) so
+/// the runtime collects before the limiter starts refusing data.
+const GOMEMLIMIT: &str = "160MiB";
 pub(crate) struct Collector {
     child: Child,
     _owner_lock: Option<Arc<std::fs::File>>,
     pub endpoint: String,
     pub health: String,
+    /// Loopback Prometheus endpoint for the collector's own metrics.
+    pub metrics: String,
+}
+/// Exporter health scraped from the collector's internal metrics.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct ExporterStats {
+    /// Records the exporters gave up on (after retries) since this start.
+    pub send_failed: u64,
+    /// Records still waiting in the exporters' sending queues.
+    pub queue_size: u64,
+    /// Spans the traces exporter wrote / gave up on (S9-307): a batch a
+    /// consumer took off the queue and is still retrying is in NEITHER the
+    /// queue nor these counters, so only `sent + failed == accepted` proves
+    /// every accepted span was settled.
+    pub sent_spans: u64,
+    pub failed_spans: u64,
+}
+/// Sum the exporter counters out of a Prometheus text exposition. Unknown
+/// lines and malformed values are ignored, never treated as zero failures.
+pub(crate) fn parse_exporter_stats(text: &str) -> Option<ExporterStats> {
+    let mut stats = ExporterStats::default();
+    let mut seen = false;
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let name = line.split(['{', ' ']).next().unwrap_or_default();
+        let Some(value) = line
+            .rsplit(' ')
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+        else {
+            continue;
+        };
+        if name.starts_with("otelcol_exporter_send_failed_") {
+            stats.send_failed += value as u64;
+            if name.starts_with("otelcol_exporter_send_failed_spans") {
+                stats.failed_spans += value as u64;
+            }
+            seen = true;
+        } else if name.starts_with("otelcol_exporter_sent_spans") {
+            stats.sent_spans += value as u64;
+            seen = true;
+        } else if name == "otelcol_exporter_queue_size" {
+            stats.queue_size += value as u64;
+            seen = true;
+        }
+    }
+    seen.then_some(stats)
 }
 impl Collector {
-    pub fn pid(&self) -> Option<u32> {
-        self.child.id()
-    }
     pub fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+    /// `None` when the metrics endpoint is unreachable or exposes no exporter
+    /// series yet (they appear after the first export attempt).
+    pub async fn exporter_stats(&self, client: &reqwest::Client) -> Option<ExporterStats> {
+        let text = client
+            .get(&self.metrics)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .text()
+            .await
+            .ok()?;
+        parse_exporter_stats(&text)
+    }
+    /// SIGTERM first so the collector drains its sending queue into
+    /// ClickHouse, then SIGKILL after a bounded wait. The child is not yet
+    /// reaped, so its pid cannot have been reused.
     pub async fn stop(&mut self) {
+        if let Some(pid) = self.child.id().filter(|_| self.alive()) {
+            let pid = Pid::from_u32(pid);
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            if system
+                .process(pid)
+                .and_then(|p| p.kill_with(Signal::Term))
+                .unwrap_or(false)
+            {
+                let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+            }
+        }
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
         self._owner_lock.take();
     }
-    pub async fn start(dir: &Path, clickhouse: &str, config: &TelemetryConfig) -> Result<Self> {
+    /// `recover`: run the orphan/live-owner process scans (4 whole-machine
+    /// `sysinfo` scans). The service passes it only until one recovery has
+    /// succeeded (S9-04): afterwards every collector it starts is its own
+    /// `kill_on_drop` child, and the owner lock already excludes a concurrent
+    /// owner for as long as its collector runs.
+    pub async fn start(
+        dir: &Path,
+        clickhouse: &str,
+        config: &TelemetryConfig,
+        recover: bool,
+    ) -> Result<Self> {
         // A previous daemon may have died without running Child::drop. Never
         // rewrite a live owner's config or start a second exporter beside it.
         tokio::fs::create_dir_all(dir).await?;
@@ -47,10 +144,15 @@ impl Collector {
             .context("resolve telemetry directory")?;
         let dir = absolute_dir.as_path();
         let owner_lock = acquire_owner_lock(dir).await?;
-        recover_unlocked(dir, owner_lock.clone()).await?;
+        if recover {
+            recover_unlocked(dir, owner_lock.clone()).await?;
+        }
         let bin = install(dir).await?;
-        recover_unlocked(dir, owner_lock.clone()).await?;
+        if recover {
+            recover_unlocked(dir, owner_lock.clone()).await?;
+        }
         let health_port = port()?;
+        let metrics_port = port()?;
         let port = port()?;
         let endpoint = format!("http://127.0.0.1:{port}");
         let mut exporters = serde_json::Map::new();
@@ -61,10 +163,17 @@ impl Collector {
         ] {
             exporters.insert(format!("clickhouse/{signal}"),json!({
                 "endpoint":clickhouse,"database":"otto_telemetry","create_schema":true,
-                "ttl":format!("{}h",days*24),"async_insert":false,"compress":"none","timeout":"5s",
+                // The daemon hands over minutes of buffered records at once;
+                // server-side async inserts + large batches keep part count low.
+                "ttl":format!("{}h",days*24),"async_insert":true,"compress":"none","timeout":"5s",
                 "connection_params":{"max_open_conns":"2","max_idle_conns":"1"},
-                "sending_queue":{"enabled":true,"num_consumers":1,"queue_size":4096,"sizer":"items","batch":{"min_size":64,"max_size":256,"flush_timeout":"2s","sizer":"items"}},
-                "retry_on_failure":{"enabled":true,"initial_interval":"1s","max_interval":"10s","max_elapsed_time":"30s"}
+                "sending_queue":{"enabled":true,"num_consumers":1,"queue_size":16384,"sizer":"items","batch":{"min_size":2048,"max_size":8192,"flush_timeout":"10s","sizer":"items"}},
+                // Retries must give up before the daemon's drain deadline (S9-03):
+                // batch flush (10 s) + retries (≤ 6 s) + one 5 s attempt = 21 s,
+                // leaving DRAIN_DEADLINE (25 s) a 4 s margin for the final
+                // failure to reach the counters the drain polls every 500 ms
+                // (S9-307); anything left is reported, not lost silently.
+                "retry_on_failure":{"enabled":true,"initial_interval":"1s","max_interval":"4s","max_elapsed_time":"6s"}
             }));
         }
         let config = json!({
@@ -72,7 +181,7 @@ impl Collector {
             "processors":{"memory_limiter":{"check_interval":"1s","limit_mib":192,"spike_limit_mib":32}},
             "exporters":exporters,
             "extensions":{"health_check":{"endpoint":format!("127.0.0.1:{health_port}")}},
-            "service":{"extensions":["health_check"],"telemetry":{"logs":{"level":"error"},"metrics":{"level":"none"}},"pipelines":{
+            "service":{"extensions":["health_check"],"telemetry":{"logs":{"level":"warn","encoding":"json"},"metrics":{"level":"normal","readers":[{"pull":{"exporter":{"prometheus":{"host":"127.0.0.1","port":metrics_port}}}}]}},"pipelines":{
                 "traces":{"receivers":["otlp"],"processors":["memory_limiter"],"exporters":["clickhouse/traces"]},
                 "logs":{"receivers":["otlp"],"processors":["memory_limiter"],"exporters":["clickhouse/logs"]},
                 "metrics":{"receivers":["otlp"],"processors":["memory_limiter"],"exporters":["clickhouse/metrics"]}
@@ -80,13 +189,15 @@ impl Collector {
         });
         let path = dir.join("collector.json");
         tokio::fs::write(&path, serde_json::to_vec(&config)?).await?;
+        let log = open_log(dir).await?;
         let child = Command::new(bin)
             .arg("--config")
             .arg(path)
             .env("GOMAXPROCS", "2")
+            .env("GOMEMLIMIT", GOMEMLIMIT)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(log)
             .kill_on_drop(true)
             .spawn()
             .context("start telemetry collector")?;
@@ -95,6 +206,7 @@ impl Collector {
             _owner_lock: Some(owner_lock),
             endpoint,
             health: format!("http://127.0.0.1:{health_port}"),
+            metrics: format!("http://127.0.0.1:{metrics_port}/metrics"),
         };
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -117,6 +229,25 @@ impl Collector {
         collector.stop().await;
         bail!("collector readiness timed out")
     }
+}
+/// `telemetry/collector.log`, rotated to `collector.log.1` once it exceeds
+/// [`LOG_LIMIT`]; at most two bounded files ever exist.
+async fn open_log(dir: &Path) -> Result<std::fs::File> {
+    let path = dir.join("collector.log");
+    if tokio::fs::metadata(&path)
+        .await
+        .is_ok_and(|m| m.len() > LOG_LIMIT)
+    {
+        tokio::fs::rename(&path, dir.join("collector.log.1")).await?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).context("open collector log")
 }
 fn port() -> Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?
@@ -152,9 +283,18 @@ async fn install(dir: &Path) -> Result<std::path::PathBuf> {
     let bin = install_dir.join("otelcol-contrib");
     let stamp = install_dir.join("binary.sha256");
     if bin.is_file() && stamp.is_file() {
+        let stamped = tokio::fs::read_to_string(&stamp).await?;
+        // Re-hashing the 363 MB binary cost ~0.5 s per flush (S9-04): reuse
+        // a digest verified in this process while the file's identity
+        // (device, inode, size, mtime, ctime) is unchanged.
+        let key = file_key(&bin).await;
+        if key.is_some() && verified_digest(key) == Some(stamped.clone()) {
+            return Ok(bin);
+        }
         let path = bin.clone();
         let digest = tokio::task::spawn_blocking(move || hash_file(&path)).await??;
-        if tokio::fs::read_to_string(&stamp).await? == digest {
+        if stamped == digest {
+            remember_digest(key, digest);
             return Ok(bin);
         }
     }
@@ -197,6 +337,44 @@ async fn install(dir: &Path) -> Result<std::path::PathBuf> {
     tokio::fs::write(stamp, digest).await?;
     tokio::fs::remove_file(archive).await?;
     Ok(bin)
+}
+/// Identity of an on-disk file for the verified-digest cache. `ctime` cannot
+/// be set by user code, so an in-place rewrite never matches a stale entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FileKey([i64; 7]);
+#[cfg(unix)]
+pub(crate) async fn file_key(path: &Path) -> Option<FileKey> {
+    use std::os::unix::fs::MetadataExt;
+    let m = tokio::fs::metadata(path).await.ok()?;
+    Some(FileKey([
+        m.dev() as i64,
+        m.ino() as i64,
+        m.size() as i64,
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+    ]))
+}
+#[cfg(not(unix))]
+pub(crate) async fn file_key(_path: &Path) -> Option<FileKey> {
+    None
+}
+static VERIFIED: std::sync::Mutex<Option<(FileKey, String)>> = std::sync::Mutex::new(None);
+/// The digest last verified for exactly this file identity, if any.
+pub(crate) fn verified_digest(key: Option<FileKey>) -> Option<String> {
+    let key = key?;
+    VERIFIED
+        .lock()
+        .ok()?
+        .as_ref()
+        .filter(|(k, _)| *k == key)
+        .map(|(_, d)| d.clone())
+}
+pub(crate) fn remember_digest(key: Option<FileKey>, digest: String) {
+    if let (Some(key), Ok(mut slot)) = (key, VERIFIED.lock()) {
+        *slot = Some((key, digest));
+    }
 }
 fn hash_file(path: &Path) -> Result<String> {
     use std::io::Read;

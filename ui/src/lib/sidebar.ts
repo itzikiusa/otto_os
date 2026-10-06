@@ -104,7 +104,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'scheduled-tasks', icon: 'calendar', label: 'Scheduled Tasks', group: 'automate', feature: 'scheduled_tasks', keywords: 'cron recurring job report cadence hourly daily' },
   // Personal Agents share the scheduled_tasks feature gate (same RBAC axis on
   // the daemon: View for GET, Edit for writes).
-  { id: 'personal-agents', icon: 'user', label: 'Personal Agents', group: 'automate', feature: 'scheduled_tasks', keywords: 'persona soul bot room chat schedule recap' },
+  { id: 'personal-agents', icon: 'user', label: 'Personal Agents', group: 'automate', feature: 'scheduled_tasks', keywords: 'persona soul bot agent channels chat schedule recap' },
   // ── Build ──
   { id: 'git', icon: 'branch', label: 'Git', group: 'build', feature: 'git', keywords: 'repos prs pull requests diff commit' },
   { id: 'proof', icon: 'check', label: 'Proof', group: 'build', feature: 'proof_pack', keywords: 'proof pack evidence badge verified tests ci approval audit' },
@@ -169,6 +169,20 @@ export function availableModules(
     }),
   );
   return [...builtins, ...plugins.map((p): SidebarModule => ({ ...p, group: 'plugins' }))];
+}
+
+/**
+ * Whether the user may open the built-in module behind a route (its first
+ * segment), using the SAME gate {@link availableModules} applies — so a link
+ * list outside the sidebar (the Automate chooser, S20-307) never sends a user
+ * to a module their role or a disabled feature hides. A route with no
+ * registry entry is allowed (it has no gate of its own to check).
+ */
+export function routeAllowed(route: string, can: (feature: Feature) => boolean): boolean {
+  const id = route.split(/[/?]/)[0];
+  const m = SIDEBAR_MODULES.find((x) => x.id === id);
+  if (!m) return true;
+  return m.featureAny ? m.featureAny.some(can) : m.feature == null || can(m.feature);
 }
 
 /**

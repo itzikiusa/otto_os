@@ -63,10 +63,10 @@
       ? tools.filter((tool) => `${tool.name} ${tool.description}`.toLowerCase().includes(query))
       : tools;
   });
-  const groups = $derived.by(() => {
+  function groupByCategory(list: McpOttoToolInfo[]): { cat: string; tools: McpOttoToolInfo[] }[] {
     const order: string[] = [];
     const grouped = new Map<string, McpOttoToolInfo[]>();
-    for (const tool of filtered) {
+    for (const tool of list) {
       const category = tool.category || 'Other';
       if (!grouped.has(category)) {
         grouped.set(category, []);
@@ -75,7 +75,13 @@
       grouped.get(category)!.push(tool);
     }
     return order.map((cat) => ({ cat, tools: grouped.get(cat)! }));
-  });
+  }
+  /** What the list shows (narrowed by the search box). */
+  const groups = $derived(groupByCategory(filtered));
+  /** Every tool, unfiltered: the token picker and the category All/None act on
+   *  the WHOLE category — the search box used to silently narrow both. */
+  const allGroups = $derived(groupByCategory(tools));
+  const categoryTools = (cat: string) => allGroups.find((g) => g.cat === cat)?.tools ?? [];
 
   async function load(): Promise<void> {
     loading = true;
@@ -381,7 +387,7 @@
         audited. Policies govern registered external servers, not these tools.
       </p>
     </div>
-    <input
+    <input dir="ltr"
       class="input filter"
       type="search"
       placeholder="Filter tools…"
@@ -408,12 +414,12 @@
         <button
           class="btn small"
           disabled={saving || !status || !isMcpAdmin}
-          onclick={() => void setCategory(group.tools, true)}
+          onclick={() => void setCategory(categoryTools(group.cat), true)}
         >All</button>
         <button
           class="btn small"
           disabled={saving || !status || !isMcpAdmin}
-          onclick={() => void setCategory(group.tools, false)}
+          onclick={() => void setCategory(categoryTools(group.cat), false)}
         >None</button>
       </div>
       {#if gated.length}
@@ -530,7 +536,7 @@
       <span class:open={exposeOpen}><Icon name="chevronRight" noflip size={13} /></span>
       Connect an external client
     </button>
-    {#if exposeOpen}<ExposePanel {groups} {isMcpAdmin} />{/if}
+    {#if exposeOpen}<ExposePanel groups={allGroups} {isMcpAdmin} />{/if}
   </div>
 </div>
 

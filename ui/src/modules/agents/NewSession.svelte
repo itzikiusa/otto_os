@@ -10,9 +10,12 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ContextPreview from './ContextPreview.svelte';
   import { router } from '../../lib/router.svelte';
+  import { api } from '../../lib/api/client';
+  import { checkFolder } from '../../lib/folderCheck';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { allProviders, providerReadiness } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
@@ -81,6 +84,9 @@
   /** Optional opening message (A6) — delivered by the daemon once the CLI is ready. */
   let prompt = $state('');
   let cwd = $state('');
+  /** Inline reason a typed working folder was refused (missing / a file). */
+  let cwdError = $state('');
+  let checkingCwd = false;
   let browser = $state(false);
   let busy = $state(false);
   interface PendingSpawn {
@@ -320,6 +326,22 @@
     let dir = cwd.trim();
     const home = ws.scratch?.root_path;
     if (home && (dir === '~' || dir.startsWith('~/'))) dir = home + dir.slice(1);
+    // A typo must not start an agent in a fresh, empty stray folder (the
+    // daemon creates a missing cwd): check it exists first, like onboarding.
+    if (dir !== '') {
+      if (checkingCwd) return;
+      checkingCwd = true;
+      cwdError = '';
+      try {
+        const check = await checkFolder(dir, (url) => api.get(url));
+        if (!check.ok) {
+          cwdError = check.message;
+          return;
+        }
+      } finally {
+        checkingCwd = false;
+      }
+    }
     const options = {scratch: scratchMode};
     const workspaceId = ws.currentId;
     const sessionModel = supportsModel && model.trim() !== '' ? model.trim() : null;
@@ -380,11 +402,27 @@
     }
   }
 
+  /** Esc / backdrop / ✕: an opening message or title typed here must not
+   *  vanish on a stray key — ask first when something was entered. */
+  async function requestClose(): Promise<void> {
+    const edited = prompt.trim() !== '' || title.trim() !== '' || extraDirs.length > 0;
+    if (edited) {
+      const ok = await confirmer.ask('The title, opening message and folders you entered will be lost.', {
+        title: 'Discard this new session?',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep editing',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onclose();
+  }
+
 </script>
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" {onclose}>
+<Modal title="New session" onclose={requestClose} dismissable={!busy}>
   <!-- Workspace: the current one, or none (a workspace-less session in the
        daemon's hidden scratch workspace). With no workspace at all only "No
        workspace" exists, pre-selected. -->
@@ -502,7 +540,7 @@
 
   <div class="field">
     <label for="ns-title">Title <span class="dim">(optional)</span></label>
-    <input id="ns-title" class="input" bind:value={title} placeholder="Auto-named from your theme (Settings → Session Names)" />
+    <input dir="auto" id="ns-title" class="input" bind:value={title} placeholder="Auto-named from your theme (Settings → Session Names)" />
     {#if total > 1 && title.trim() !== ''}
       <span class="hint">Numbered per session — “{title.trim()} 1” … “{title.trim()} {total}”.</span>
     {/if}
@@ -511,7 +549,7 @@
   {#if chosen.some((p) => p !== 'shell')}
     <div class="field">
       <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
-      <textarea
+      <textarea dir="auto"
         id="ns-prompt"
         class="input prompt-input"
         rows="3"
@@ -527,10 +565,13 @@
   <div class="field">
     <label for="ns-cwd">Working folder</label>
     <div class="dir-add">
-      <input
+      <input dir="ltr"
         id="ns-cwd"
         class="input mono"
         bind:value={cwd}
+        oninput={() => (cwdError = '')}
+        aria-invalid={cwdError !== ''}
+        aria-describedby="ns-cwd-err"
         spellcheck="false"
         list="ns-recent-dirs"
         placeholder="/absolute/path/to/folder"
@@ -544,6 +585,7 @@
       Any folder on this machine — it does not have to be inside a workspace.
       {scratchMode ? 'Defaults to your home folder.' : 'Defaults to the workspace root.'}
     </span>
+    <span id="ns-cwd-err" class="hint cwd-err" role="status">{cwdError}</span>
     {#if isHome(cwd)}
       <!-- Trust and the sandbox follow the session cwd (not the workspace):
            a home-rooted session is trusted for, and may write under, all of ~. -->
@@ -566,13 +608,13 @@
               title="Remove directory"
               aria-label="Remove {dir}"
               onclick={() => removeDir(dir)}
-            ><Icon name="x" size={11} /></button>
+            ><Icon name="x" size={12} /></button>
           </li>
         {/each}
       </ul>
     {/if}
     <div class="dir-add">
-      <input
+      <input dir="ltr"
         id="ns-extra-dir"
         class="input mono"
         bind:value={dirDraft}
@@ -606,7 +648,7 @@
         onclick={() => (showPreview = !showPreview)}
         aria-expanded={showPreview}
       >
-        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" noflip size={11} /></span>
+        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" noflip size={12} /></span>
         Preview context
         <span class="hint">— exactly what Otto would inject before spawning</span>
       </button>
@@ -780,7 +822,7 @@
     border-color: var(--accent);
   }
   .cbtn:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   /* Touch: the ± targets have to be tappable on a phone, where the card is the
@@ -933,5 +975,11 @@
     background: var(--surface-2);
     max-height: 360px;
     overflow: auto;
+  }
+  .cwd-err {
+    color: var(--danger);
+  }
+  .cwd-err:empty {
+    display: none;
   }
 </style>

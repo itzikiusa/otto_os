@@ -23,10 +23,12 @@ pub async fn get_all(
 /// settings object.
 pub async fn put_all(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<Map<String, Value>>,
 ) -> ApiResult<Json<Map<String, Value>>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = SettingsRepo::new(ctx.pool.clone());
     for (key, value) in &body {
         repo.put(key, value).await?;
@@ -176,11 +178,13 @@ pub async fn db_stats(
 /// reclaims free pages incrementally. Never run automatically.
 pub async fn db_compact(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<CompactReq>,
 ) -> ApiResult<axum::response::Response> {
     use axum::response::IntoResponse;
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     if !body.confirm {
         return Err(
             otto_core::Error::Invalid("compact requires an explicit confirm: true".into()).into(),
@@ -268,15 +272,73 @@ fn secrets_control() -> ApiResult<std::sync::Arc<otto_keychain::SecretsControl>>
 /// (`locked` while a Keychain prompt waits). Root only. Never returns values
 /// or key names.
 pub async fn secrets_status(
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<otto_keychain::SecretsStatus>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let c = secrets_control()?;
     // Counting entries reads the plaintext file — keep it off the worker.
     let st = tokio::task::spawn_blocking(move || c.status())
         .await
         .map_err(|e| otto_core::Error::Internal(format!("secrets status task: {e}")))?;
     Ok(Json(st))
+}
+
+/// Response of `POST /admin/secrets/reset-store`.
+#[derive(serde::Serialize)]
+pub struct ResetSecretStoreResp {
+    /// Where the unreadable `secrets.enc` was moved (kept, never deleted);
+    /// `null` when there was no file.
+    pub set_aside: Option<String>,
+}
+
+/// `POST /admin/secrets/reset-store` — recovery for an orphaned encrypted
+/// store (S7-305): its Keychain master key is gone (or the file no longer
+/// decrypts), so every secret save 409s. Moves `secrets.enc` aside to
+/// `secrets.enc.orphaned-<secs>` (restoring the old key makes it readable
+/// again) so new secrets can be saved. Root + human + explicit `confirm`;
+/// audited. 409 when the store is readable or not encrypted.
+pub async fn secrets_reset_store(
+    State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<SecureSecretsReq>,
+) -> ApiResult<Json<ResetSecretStoreResp>> {
+    require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
+    if !body.confirm {
+        return Err(otto_core::Error::Invalid(
+            "resetting the secret store requires an explicit confirm: true".into(),
+        )
+        .into());
+    }
+    let c = secrets_control()?;
+    let res = tokio::task::spawn_blocking(move || c.reset_store())
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("secrets reset task: {e}")))?;
+    let set_aside = res
+        .as_ref()
+        .ok()
+        .and_then(|p| p.as_ref())
+        .map(|p| p.to_string_lossy().into_owned());
+    ctx.audit(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: if res.is_ok() {
+            "secrets.reset_store".into()
+        } else {
+            "secrets.reset_store_failed".into()
+        },
+        target: None,
+        detail: Some(match &res {
+            Ok(_) => serde_json::json!({ "set_aside": set_aside }),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        }),
+        ip: None,
+    })
+    .await;
+    res?;
+    Ok(Json(ResetSecretStoreResp { set_aside }))
 }
 
 /// Body of `POST /admin/secrets/secure`: `confirm: true` is required — the UI
@@ -296,10 +358,12 @@ pub struct SecureSecretsReq {
 /// is locked (`502`, nothing changed).
 pub async fn secrets_secure(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<SecureSecretsReq>,
 ) -> ApiResult<Json<otto_keychain::control::MigrationReport>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     if !body.confirm {
         return Err(otto_core::Error::Invalid(
             "securing secrets requires an explicit confirm: true".into(),
@@ -327,4 +391,73 @@ pub async fn secrets_secure(
     })
     .await;
     Ok(Json(res?))
+}
+
+#[cfg(test)]
+mod secrets_reset_tests {
+    use super::*;
+    use otto_core::auth::AuthContext;
+
+    fn person(is_root: bool) -> otto_core::domain::User {
+        otto_core::domain::User {
+            id: "u-reset".into(),
+            username: "u-reset".into(),
+            display_name: "u-reset".into(),
+            is_root,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn auth(user: &otto_core::domain::User, agent: bool) -> crate::auth::CurrentAuthContext {
+        crate::auth::CurrentAuthContext(AuthContext {
+            real_user: user.clone(),
+            effective_user: user.clone(),
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: agent.then(|| "agent-session".into()),
+        })
+    }
+
+    /// S7-305: the reset-store recovery is root + a person's own credential:
+    /// a non-root user and a root-owned AGENT token are both refused (403)
+    /// before the secret store is touched.
+    #[tokio::test]
+    async fn reset_store_refuses_non_root_and_agent_tokens() {
+        let pool = otto_state::db::test_pool().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
+        for (user, agent) in [(person(false), false), (person(true), true)] {
+            let err = secrets_reset_store(
+                State(ctx.clone()),
+                auth(&user, agent),
+                CurrentUser(user.clone()),
+                Json(SecureSecretsReq { confirm: true }),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err();
+            assert!(
+                matches!(err.0, otto_core::Error::Forbidden(_)),
+                "root={} agent={agent}: {:?}",
+                user.is_root,
+                err.0
+            );
+        }
+        // A person's root credential without `confirm` is a 400, never a reset.
+        let root = person(true);
+        let err = secrets_reset_store(
+            State(ctx.clone()),
+            auth(&root, false),
+            CurrentUser(root.clone()),
+            Json(SecureSecretsReq { confirm: false }),
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+        assert!(matches!(err.0, otto_core::Error::Invalid(_)), "{:?}", err.0);
+    }
 }

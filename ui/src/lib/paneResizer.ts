@@ -13,7 +13,8 @@
 //                           onReset: resetSideW, onDragStart: startDrag }}></div>
 //
 // `invert` is for a separator on the LEADING edge of the pane it sizes (the pane
-// grows when the divider moves toward the start, e.g. a right-hand rail).
+// grows when the divider moves toward the start, e.g. a right-hand rail); it
+// flips the arrows only — Home/End stay the value's min/max.
 /** One shared tooltip for every side-by-side pane separator. */
 export const RESIZE_TITLE = 'Drag or use ←/→ to resize · double-click or Enter to reset';
 /** The same for a horizontal bar between stacked panes (↑/↓). */
@@ -85,8 +86,12 @@ export function paneResizer(node: HTMLElement, initial: PaneResizerOptions) {
     else if (!horizontalBar && e.key === 'ArrowLeft') delta = rtl ? step : -step;
     else if (horizontalBar && e.key === 'ArrowDown') delta = step;
     else if (horizontalBar && e.key === 'ArrowUp') delta = -step;
-    else if (e.key === 'Home') { e.preventDefault(); o.onChange(o.invert ? o.max : o.min); return; }
-    else if (e.key === 'End') { e.preventDefault(); o.onChange(o.invert ? o.min : o.max); return; }
+    // Home/End are VALUE limits (APG window splitter: Home gives the sized pane
+    // its smallest size), whichever edge it sits on — `invert` only flips the
+    // arrows. Swapping them for an inverted separator announced "Home" as
+    // aria-valuemax.
+    else if (e.key === 'Home') { e.preventDefault(); o.onChange(o.min); return; }
+    else if (e.key === 'End') { e.preventDefault(); o.onChange(o.max); return; }
     else if (e.key === 'Enter' && o.onReset) { e.preventDefault(); o.onReset(); return; }
     else return;
     e.preventDefault();

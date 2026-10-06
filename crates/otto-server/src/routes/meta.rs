@@ -23,9 +23,92 @@ pub async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
+/// How long a `/meta` tool probe is reused (S8-04).
+const TOOLS_TTL: Duration = Duration::from_secs(60);
+
+/// The last tool probe: when, for which `name → program` specs, and the result.
+type ToolsCache = Option<(
+    std::time::Instant,
+    std::collections::BTreeMap<String, String>,
+    Vec<ToolStatus>,
+)>;
+
+/// Probe every tool at most once per [`TOOLS_TTL`] (S8-04). The async mutex is
+/// held across the probe, so concurrent callers single-flight onto one run
+/// instead of each forking `which` + `<tool> --version` (claude/codex are Node
+/// boots). A changed spec map — a provider added or its command overridden —
+/// misses the cache, so a `providers` settings change is picked up at once.
+async fn probe_tools_cached(specs: std::collections::BTreeMap<String, String>) -> Vec<ToolStatus> {
+    static CACHE: tokio::sync::Mutex<ToolsCache> = tokio::sync::Mutex::const_new(None);
+    let mut slot = CACHE.lock().await;
+    if let Some((at, cached_specs, tools)) = slot.as_ref() {
+        if at.elapsed() < TOOLS_TTL && *cached_specs == specs {
+            return tools.clone();
+        }
+    }
+    #[cfg(test)]
+    PROBE_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tools = futures_util::future::join_all(
+        specs
+            .iter()
+            .map(|(name, program)| detect_tool(name, program)),
+    )
+    .await;
+    *slot = Some((std::time::Instant::now(), specs, tools.clone()));
+    tools
+}
+
+/// Count of real probe passes run (test hook for the single-flight cache).
+#[cfg(test)]
+static PROBE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether the request carries a bearer that verifies as a full (unscoped,
+/// non-MCP) account credential. A share link — verified or still OTP-pending —
+/// and an MCP token are NOT "signed in" here (S8-308): a leaked share link
+/// must not learn tool/provider versions or the second loopback base.
+async fn caller_authenticated(ctx: &ServerCtx, headers: &axum::http::HeaderMap) -> bool {
+    let Some(token) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return false;
+    };
+    ctx.authenticator
+        .authenticate(token)
+        .await
+        .is_ok_and(|auth| !auth.is_scoped() && !auth.mcp_only)
+}
+
 /// `GET /api/v1/meta`
-pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
+///
+/// Public (the login / onboarding screens need it), but an UNAUTHENTICATED
+/// caller once onboarding is done gets only `{version, api_version,
+/// needs_onboarding}` — tool and provider versions, the listener flag and the
+/// second loopback base are for signed-in callers (S8-04: this route is
+/// reachable by anyone through the tunnel's public hostname). Before
+/// onboarding there is no account to protect, so the first-run screen still
+/// sees the tool checks.
+pub async fn meta(
+    State(ctx): State<ServerCtx>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Json<MetaResp>> {
     let needs_onboarding = UsersRepo::new(ctx.pool.clone()).count().await? == 0;
+    if !needs_onboarding && !caller_authenticated(&ctx, &headers).await {
+        return Ok(Json(MetaResp {
+            version: ctx.version.clone(),
+            api_version: API_VERSION,
+            needs_onboarding,
+            network_listener: false,
+            tools: Vec::new(),
+            providers: Vec::new(),
+            default_provider: None,
+            model_flags: Default::default(),
+            alt_loopback_base: None,
+        }));
+    }
 
     let settings = SettingsRepo::new(ctx.pool.clone());
     let network_listener = settings
@@ -52,7 +135,7 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
     // UI never labels an excluded provider as the default (and doesn't disagree
     // with what the daemon would actually spawn).
     let default_provider = settings
-        .get("default_provider")
+        .get(otto_state::settings::DEFAULT_PROVIDER_KEY)
         .await?
         .as_ref()
         .and_then(Value::as_str)
@@ -72,12 +155,7 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
             configure_provider_probe(&mut tool_specs, name, program);
         }
     }
-    let tools = futures_util::future::join_all(
-        tool_specs
-            .iter()
-            .map(|(name, program)| detect_tool(name, program)),
-    )
-    .await;
+    let tools = probe_tools_cached(tool_specs).await;
 
     Ok(Json(MetaResp {
         version: ctx.version.clone(),
@@ -242,6 +320,68 @@ mod walkthrough_tests {
         );
         configure_provider_probe(&mut probes, "custom-agent", "/bin/sh".into());
         assert_eq!(probes["custom-agent"], "/bin/sh");
+    }
+
+    /// S8-308: only a full account credential counts as "signed in" for
+    /// `/meta`'s detail — never a share link or an MCP token.
+    #[tokio::test]
+    async fn share_and_mcp_tokens_are_not_signed_in_for_meta() {
+        let pool = crate::test_support::mem_pool().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
+        let owner = otto_state::UsersRepo::new(pool.clone())
+            .create("s8308", "x", "Owner", true)
+            .await
+            .unwrap();
+        let repo = otto_rbac::AuthRepo::new(pool.clone());
+        let login = repo.issue(&owner.id).await.unwrap();
+        let (share, _) = repo
+            .issue_share_token(
+                &owner.id,
+                &otto_core::Id::from("S1"),
+                otto_core::domain::WorkspaceRole::Viewer,
+                3600,
+                None,
+            )
+            .await
+            .unwrap();
+        let mcp = repo.issue_mcp_token(&owner.id, None).await.unwrap();
+        let headers = |t: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {t}").parse().unwrap(),
+            );
+            h
+        };
+        assert!(caller_authenticated(&ctx, &headers(&login)).await);
+        assert!(!caller_authenticated(&ctx, &headers(&share)).await);
+        assert!(!caller_authenticated(&ctx, &headers(&mcp)).await);
+    }
+
+    /// S8-04: 50 concurrent `/meta` probes run the tool detection ONCE per
+    /// TTL (single-flight + cache); a changed spec map misses the cache.
+    #[tokio::test]
+    async fn tool_probe_is_single_flight_and_cached() {
+        use std::sync::atomic::Ordering;
+        let specs = std::collections::BTreeMap::from([(
+            "probe-cache-test".to_string(),
+            "/bin/sh".to_string(),
+        )]);
+        let before = PROBE_RUNS.load(Ordering::Relaxed);
+        let all =
+            futures_util::future::join_all((0..50).map(|_| probe_tools_cached(specs.clone())))
+                .await;
+        assert!(all.iter().all(|t| t.len() == 1 && t[0].found));
+        assert_eq!(
+            PROBE_RUNS.load(Ordering::Relaxed) - before,
+            1,
+            "concurrent callers share one probe"
+        );
+        let mut changed = specs.clone();
+        changed.insert("probe-cache-test-2".into(), "/bin/sh".into());
+        assert_eq!(probe_tools_cached(changed).await.len(), 2);
+        assert_eq!(PROBE_RUNS.load(Ordering::Relaxed) - before, 2);
     }
 
     #[tokio::test]

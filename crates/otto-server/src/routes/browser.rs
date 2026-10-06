@@ -24,6 +24,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use otto_core::api::Problem;
 use otto_core::domain::WorkspaceRole;
@@ -1045,6 +1046,10 @@ async fn summarize_page(
     let nonce = otto_core::new_id();
     let prompt = build_summarize_prompt(&page.url, &page.title, &capped, &nonce);
     let meta = serde_json::json!({ "source": "browser_summarize", "url": page.url });
+    // Stop: the page's Stop button aborts this request; the client going away
+    // drops this future mid-turn, and the guard then kills the agent session so
+    // the turn really stops (not just the spinner). Disarmed once the turn ends.
+    let mut stop_guard = KillSessionOnDrop::new(Arc::clone(&ctx.manager));
     let turn = crate::agent_session::run_session_turn(
         &ctx,
         &ws,
@@ -1056,9 +1061,10 @@ async fn summarize_page(
         meta,
         &prompt,
         crate::agent_session::STUCK_IDLE,
-        |_| {},
+        |sid| stop_guard.arm(sid),
     )
     .await;
+    stop_guard.disarm();
     let _ = tokio::fs::remove_dir_all(&dir).await;
     let (raw, _sid) = turn?;
 
@@ -1067,6 +1073,39 @@ async fn summarize_page(
         engine: page.engine.clone(),
         degraded: page.degraded,
     }))
+}
+
+/// Kills an agent session if dropped while armed — i.e. when the HTTP request
+/// driving its turn is cancelled (client Stop / disconnect) before the turn
+/// finished. `arm` records the session id as soon as it exists.
+struct KillSessionOnDrop {
+    manager: Arc<otto_sessions::SessionManager>,
+    sid: Option<Id>,
+}
+
+impl KillSessionOnDrop {
+    fn new(manager: Arc<otto_sessions::SessionManager>) -> Self {
+        Self { manager, sid: None }
+    }
+    fn arm(&mut self, sid: &Id) {
+        self.sid = Some(sid.clone());
+    }
+    fn disarm(&mut self) {
+        self.sid = None;
+    }
+}
+
+impl Drop for KillSessionOnDrop {
+    fn drop(&mut self) {
+        if let Some(sid) = self.sid.take() {
+            let manager = Arc::clone(&self.manager);
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    let _ = manager.kill_session(&sid).await;
+                });
+            }
+        }
+    }
 }
 
 /// The summarize-turn prompt. `capped_markdown` is already truncated to
@@ -1333,7 +1372,7 @@ fn build_context_block(annotation: &BrowserAnnotation, title: &str, nonce: &str)
 /// `{note_path}`. Writes an OKF-flavored note (front-matter + summary + one
 /// `## Mark N` section per annotation on the URL) through the vault engine's
 /// own `write_note` — the same call `otto_vault_write` lands on
-/// (`crates/otto-server/src/mcp_outward.rs`).
+/// (`crates/otto-mcp/src/outward/exec.rs`).
 async fn vault_save(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
@@ -1715,9 +1754,13 @@ async fn delete_credential(
 async fn reveal_credential(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RevealCredentialReq>,
 ) -> ApiResult<Json<RevealCredentialResp>> {
+    // S11-03: a plaintext password is for the person only — `browser_login`
+    // is how an agent signs in without ever seeing it.
+    crate::auth::require_human(&auth.0)?;
     let existing = ctx
         .browser_credentials
         .get(&id)
@@ -2070,7 +2113,7 @@ pub(crate) mod tests {
             mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
             discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
             canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-            product_agent_cancels: crate::product_run::new_cancel_registry(),
+            product_agent_cancels: otto_core::cancel::new_cancel_registry(),
             design_jobs: crate::design_blender::new_job_registry(),
             memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
             vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
@@ -2078,8 +2121,8 @@ pub(crate) mod tests {
             vault_docs_refine: crate::vault_docs_agent::new_refine_registry(),
             swarm,
             swarm_repo,
-            swarm_coords: crate::swarm_runtime::new_registry(),
-            swarm_run_cancels: crate::swarm_run::new_cancel_registry(),
+            swarm_coords: otto_swarm::runtime::engine::new_registry(),
+            swarm_run_cancels: otto_swarm::runtime::run::new_cancel_registry(),
             goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
             goal_loops: crate::goal_loop::new_registry(),
             workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
@@ -2203,6 +2246,18 @@ pub(crate) mod tests {
         };
         let mut req = req;
         req.extensions_mut().insert(AuthUser(user.clone()));
+        // The full auth context `auth_middleware` inserts — a human token
+        // (handlers like `reveal_credential` refuse agent credentials).
+        req.extensions_mut().insert(otto_core::auth::AuthContext {
+            real_user: user.clone(),
+            effective_user: user.clone(),
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        });
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let body = resp

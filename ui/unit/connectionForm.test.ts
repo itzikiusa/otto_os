@@ -48,3 +48,36 @@ test('explicit field clears preserve unrelated advanced TLS and tunnel settings'
   c.tlsMode = 'disabled';
   assert.equal(c.buildParams().secure, undefined);
 });
+test('Mongo URI: an encodable-character password never stays in the visible string (S16-15)', () => {
+  // `^`, `{`, `|` and a space are re-encoded by WHATWG URL — the old replace on
+  // `url.password` missed them and left the cleartext in fConnString.
+  const c = form(); c.parseDsn('mongodb://alice:p^a{s|s w@h1:27017/app?authSource=admin');
+  assert.equal(c.secret, 'p^a{s|s w');
+  assert.equal(c.fConnString, 'mongodb://alice:{secret}@h1:27017/app?authSource=admin');
+  assert.ok(!c.fConnString.includes('p^a'));
+  // A malformed escape is kept raw instead of throwing out of the import.
+  const m = form(); m.parseDsn('mongodb://bob:bad%zz@db/app');
+  assert.equal(m.secret, 'bad%zz');
+  assert.equal(m.fConnString, 'mongodb://bob:{secret}@db/app');
+  // No password: unchanged.
+  const n = form(); n.parseDsn('mongodb://db/app');
+  assert.equal(n.secret, '');
+  assert.equal(n.fConnString, 'mongodb://db/app');
+  const p = form(); assert.doesNotThrow(() => p.parseDsn('postgres://u%zz:pw%zz@db/a%zz'));
+  assert.equal(p.fUser, 'u%zz');
+});
+test('Mongo URI: an unencoded `/` in the password never stays visible (S16-307)', () => {
+  const c = form(); c.parseDsn('mongodb://app:12/ss@h1:27017/db?authSource=admin');
+  assert.equal(c.secret, '12/ss');
+  assert.equal(c.fConnString, 'mongodb://app:{secret}@h1:27017/db?authSource=admin');
+  // An `@` inside the query is an option value, not credentials.
+  const q = form(); q.parseDsn('mongodb://h1:27017/db?appName=a@b');
+  assert.equal(q.secret, '');
+  assert.equal(q.fConnString, 'mongodb://h1:27017/db?appName=a@b');
+  // An unparsable URI with credentials says how to fix it.
+  let msg = '';
+  const r = form({ toasts: { error: (_t: string, m: string) => (msg = m), success: () => {} } });
+  r.parseDsn('mongodb://app:pa/ss@h/db');
+  assert.match(msg, /percent-encode/);
+  assert.equal(r.fConnString, '');
+});

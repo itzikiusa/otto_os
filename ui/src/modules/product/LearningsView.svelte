@@ -288,19 +288,19 @@
       </div>
       <div class="form-row col">
         <label class="field-label" for="add-title">Title *</label>
-        <input id="add-title" class="field-input" type="text" bind:value={addTitle} placeholder="Short title" />
+        <input dir="auto" id="add-title" class="field-input" type="text" bind:value={addTitle} placeholder="Short title" />
       </div>
       <div class="form-row col">
         <label class="field-label" for="add-body">Body</label>
-        <textarea id="add-body" class="field-textarea" bind:value={addBody} placeholder="Detailed description (markdown)"></textarea>
+        <textarea dir="auto" id="add-body" class="field-textarea" bind:value={addBody} placeholder="Detailed description (markdown)"></textarea>
       </div>
       <div class="form-row col">
         <label class="field-label" for="add-tags">Tags <span class="hint">(comma-separated)</span></label>
-        <input id="add-tags" class="field-input" type="text" bind:value={addTags} placeholder="api, auth, performance" />
+        <input dir="auto" id="add-tags" class="field-input" type="text" bind:value={addTags} placeholder="api, auth, performance" />
       </div>
       <div class="form-row col">
         <label class="field-label" for="add-refs">Refs <span class="hint">(JSON array of &#123;type,ref,label&#125;)</span></label>
-        <textarea id="add-refs" class="field-textarea mono" bind:value={addRefs} rows={3} placeholder="JSON array, e.g. type/ref/label objects"></textarea>
+        <textarea dir="ltr" id="add-refs" class="field-textarea mono" bind:value={addRefs} rows={3} placeholder="JSON array, e.g. type/ref/label objects"></textarea>
       </div>
       <div class="form-actions">
         <button class="btn primary" onclick={addLearning} disabled={adding || !addTitle.trim()}>
@@ -336,7 +336,7 @@
           <div class="learning-card" class:inactive={!l.active}>
             {#if !l.active}
               <div class="suggested-banner">
-                <Icon name="zap" size={11} />
+                <Icon name="zap" size={12} />
                 AI-suggested · pending acceptance
               </div>
             {/if}
@@ -353,19 +353,19 @@
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="et-{l.id}">Title</label>
-                  <input id="et-{l.id}" class="field-input" type="text" bind:value={editTitle} />
+                  <input dir="auto" id="et-{l.id}" class="field-input" type="text" bind:value={editTitle} />
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="eb-{l.id}">Body</label>
-                  <textarea id="eb-{l.id}" class="field-textarea" bind:value={editBody}></textarea>
+                  <textarea dir="auto" id="eb-{l.id}" class="field-textarea" bind:value={editBody}></textarea>
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="etg-{l.id}">Tags</label>
-                  <input id="etg-{l.id}" class="field-input" type="text" bind:value={editTags} />
+                  <input dir="auto" id="etg-{l.id}" class="field-input" type="text" bind:value={editTags} />
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="er-{l.id}">Refs (JSON)</label>
-                  <textarea id="er-{l.id}" class="field-textarea mono" rows={3} bind:value={editRefs}></textarea>
+                  <textarea dir="ltr" id="er-{l.id}" class="field-textarea mono" rows={3} bind:value={editRefs}></textarea>
                 </div>
                 <div class="form-actions">
                   <button class="btn primary small" onclick={() => saveEdit(l.id)} disabled={editSaving}>{editSaving ? 'Saving…' : 'Save'}</button>
@@ -413,7 +413,7 @@
               {#if tags.length > 0}
                 <div class="tags-row">
                   {#each tags as tag}
-                    <span class="tag-chip"><Icon name="tag" size={10} />{tag}</span>
+                    <span class="tag-chip"><Icon name="tag" size={12} />{tag}</span>
                   {/each}
                 </div>
               {/if}
@@ -424,7 +424,7 @@
                     {@const href = refHref(r)}
                     {#if href}
                       <a class="ref-badge {refClass(r.type)}" href={href} target="_blank" rel="noopener noreferrer">
-                        <Icon name="link" size={10} />
+                        <Icon name="link" size={12} />
                         {r.label || r.ref}
                       </a>
                     {:else}
@@ -460,7 +460,7 @@
           <div class="learning-card avoid-card" class:inactive={!l.active}>
             {#if !l.active}
               <div class="suggested-banner">
-                <Icon name="zap" size={11} />
+                <Icon name="zap" size={12} />
                 AI-suggested · pending acceptance
               </div>
             {/if}
@@ -477,19 +477,19 @@
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="et2-{l.id}">Title</label>
-                  <input id="et2-{l.id}" class="field-input" type="text" bind:value={editTitle} />
+                  <input dir="auto" id="et2-{l.id}" class="field-input" type="text" bind:value={editTitle} />
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="eb2-{l.id}">Body</label>
-                  <textarea id="eb2-{l.id}" class="field-textarea" bind:value={editBody}></textarea>
+                  <textarea dir="auto" id="eb2-{l.id}" class="field-textarea" bind:value={editBody}></textarea>
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="etg2-{l.id}">Tags</label>
-                  <input id="etg2-{l.id}" class="field-input" type="text" bind:value={editTags} />
+                  <input dir="auto" id="etg2-{l.id}" class="field-input" type="text" bind:value={editTags} />
                 </div>
                 <div class="form-row col">
                   <label class="field-label" for="er2-{l.id}">Refs (JSON)</label>
-                  <textarea id="er2-{l.id}" class="field-textarea mono" rows={3} bind:value={editRefs}></textarea>
+                  <textarea dir="ltr" id="er2-{l.id}" class="field-textarea mono" rows={3} bind:value={editRefs}></textarea>
                 </div>
                 <div class="form-actions">
                   <button class="btn primary small" onclick={() => saveEdit(l.id)} disabled={editSaving}>{editSaving ? 'Saving…' : 'Save'}</button>
@@ -537,7 +537,7 @@
               {#if tags.length > 0}
                 <div class="tags-row">
                   {#each tags as tag}
-                    <span class="tag-chip"><Icon name="tag" size={10} />{tag}</span>
+                    <span class="tag-chip"><Icon name="tag" size={12} />{tag}</span>
                   {/each}
                 </div>
               {/if}
@@ -548,7 +548,7 @@
                     {@const href = refHref(r)}
                     {#if href}
                       <a class="ref-badge {refClass(r.type)}" href={href} target="_blank" rel="noopener noreferrer">
-                        <Icon name="link" size={10} />
+                        <Icon name="link" size={12} />
                         {r.label || r.ref}
                       </a>
                     {:else}
@@ -835,7 +835,7 @@
   }
   .icon-act:hover { background: var(--hover); color: var(--text); }
   .icon-act.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
-  .icon-act:disabled { opacity: 0.4; cursor: not-allowed; }
+  .icon-act:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 
   /* Card body (markdown) */
   .card-body {

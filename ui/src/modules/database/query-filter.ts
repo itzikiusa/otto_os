@@ -2,10 +2,11 @@
 // condition into the CURRENT query text — powering the "Query by value" (replace
 // the WHERE / find-filter) and "Add to query" (AND it on) cell actions.
 //
-// SQL (MySQL + ClickHouse): delegates to the SAME top-level parser the
-// quick-filter chips use (`splitStatement` / `rewriteWhere` / `condToSql` /
-// `toFilterVal` from the database store) so there is ONE WHERE-splicer, one
-// keyword list, and one set of quoting rules — no second implementation to drift.
+// SQL (MySQL / ClickHouse / Postgres): delegates to the SAME top-level parser
+// the quick-filter chips use (`splitStatement` / `rewriteWhere` from the
+// database store, `condToSql` / `toFilterVal` from `filter-chips.ts`) so there
+// is ONE WHERE-splicer, one keyword list, and one set of per-engine quoting
+// rules (`sql-dialect.ts`) — no second implementation to drift.
 // The only genuinely new SQL logic here is ANDing a condition onto an existing
 // freeform WHERE (with OR-precedence parenthesization).
 //
@@ -18,28 +19,19 @@
 // clipboard and lets the user press Run (the filter bar runs its rewrite
 // itself — that is its whole point).
 
-import { splitStatement, rewriteWhere, condToSql, toFilterVal } from '../../lib/stores/database.svelte';
+import { splitStatement, rewriteWhere } from '../../lib/stores/database.svelte';
+import { condToSql, toFilterVal } from './filter-chips';
 import { looksLikeMongoshScript } from './sql-util';
 
 export type FilterMode = 'set' | 'and';
 
 // ── SQL ──────────────────────────────────────────────────────────────────────
 
-/** `\`col\` = <literal>` (or `\`col\` IS NULL`) — reuses the chip quoting so a
- *  string is `'escaped'`, a number is bare, NULL becomes `IS NULL`, identically
- *  to a quick-filter chip. */
-function sqlEquals(column: string, value: unknown, escapeBackslash: boolean): string {
-  return condToSql({ kind: 'col', column, op: 'in', values: [toFilterVal(value)] }, escapeBackslash);
-}
-
-/** Postgres equals — double-quoted identifier (backticks are invalid in PG) with
- *  a standard-SQL value literal. Single-equals is all "Query by value" needs. */
-function pgEquals(column: string, value: unknown): string {
-  const q = '"' + column.replace(/"/g, '""') + '"';
-  if (value === null || value === undefined) return `${q} IS NULL`;
-  if (typeof value === 'number' || typeof value === 'bigint') return `${q} = ${value}`;
-  if (typeof value === 'boolean') return `${q} = ${value ? 'TRUE' : 'FALSE'}`;
-  return `${q} = '${String(value).replace(/'/g, "''")}'`;
+/** `col = <literal>` (or `col IS NULL`) for the engine — the chip renderer,
+ *  so "Query by value" quotes identifiers, strings and booleans exactly like a
+ *  quick-filter chip (`"col"` / no backslash doubling / TRUE on Postgres). */
+function sqlEquals(column: string, value: unknown, engine: 'mysql' | 'clickhouse' | 'postgres'): string {
+  return condToSql({ kind: 'col', column, op: 'in', values: [toFilterVal(value)] }, engine);
 }
 
 /** True when `body` has a top-level (depth-0, outside strings/comments) ` OR ` —
@@ -118,12 +110,7 @@ export function applySqlFilter(
   const core = sql.trim().replace(/;\s*$/, '');
   const parts = splitStatement(core);
   if (!parts) return null;
-  // Backslash is an escape char in mysql/clickhouse string literals only —
-  // mirror the store's applyFilters so both splicers quote identically.
-  const cond =
-    engine === 'postgres'
-      ? pgEquals(column, value)
-      : sqlEquals(column, value, engine === 'mysql' || engine === 'clickhouse');
+  const cond = sqlEquals(column, value, engine);
   if (!cond) return null;
   let newBody: string;
   if (mode === 'and' && parts.whereBody) {

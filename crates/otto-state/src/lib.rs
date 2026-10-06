@@ -100,7 +100,7 @@ pub use browser_credentials::{
 };
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};
-pub use db::{open, open_existing};
+pub use db::open;
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
 pub use db_explorer::{
@@ -177,7 +177,7 @@ pub use review_findings::{
     ReviewFindingsRepo,
 };
 pub use review_proof_packs::ReviewProofPacksRepo;
-pub use reviews::ReviewsRepo;
+pub use reviews::{ReviewRunContext, ReviewsRepo};
 pub use runs::RunsRepo;
 pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use scheduled_tasks::{
@@ -188,8 +188,8 @@ pub use sessions::{
     UsageLabelRow,
 };
 pub use settings::{
-    otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,
-    PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,
+    otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, DEFAULT_PROVIDER_KEY,
+    OTTO_MCP_ENABLED_KEY, PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,
 };
 pub use skill_evals::{SkillEvalSummary, SkillEvalSummaryPage, SkillEvalsRepo};
 pub use skill_reviews::SkillReviewsRepo;
@@ -198,10 +198,10 @@ pub use vault_docs_runs::{VaultDocsRunRow, VaultDocsRunsRepo};
 // Note: `swarm::NewTask` collides with `activity::NewTask`; access it via the
 // module path (`otto_state::swarm::NewTask`). The rest are re-exported here.
 pub use swarm::{
-    AgentPatch, GoalPatch, NewAgent, NewGoal, NewMessage, NewProject, NewRun, NewSwarm, NewTrigger,
-    ProjectPatch, RunFilter, RunPatch, Swarm, SwarmAgent, SwarmChannelTrigger, SwarmGoal,
-    SwarmMessage, SwarmPatch, SwarmProject, SwarmRepo, SwarmRun, SwarmTask, TaskPatch,
-    TriggerPatch,
+    merge_agent_schedule, AgentPatch, GoalPatch, NewAgent, NewGoal, NewMessage, NewProject, NewRun,
+    NewSwarm, NewTrigger, ProjectPatch, RunFilter, RunPatch, Swarm, SwarmAgent,
+    SwarmChannelTrigger, SwarmGoal, SwarmMessage, SwarmPatch, SwarmProject, SwarmRepo, SwarmRun,
+    SwarmTask, TaskPatch, TriggerPatch,
 };
 pub use users::{UserRecord, UsersRepo};
 pub use workflow_triggers::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger};

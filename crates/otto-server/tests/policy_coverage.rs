@@ -9,10 +9,11 @@
 //! gap is caught in CI rather than silently 403-ing in production.
 //!
 //! ## Route enumeration
-//! Reuses the same file-scanner from `route_inventory.rs`: walks every `*.rs`
-//! source file under `crates/` (skipping `target/` and `tests/` dirs, just as
-//! that test does) and extracts the first string argument from each `.route(`
-//! call.  The scanner correctly handles both single-line and multi-line
+//! Reuses the source scanner from `route_inventory.rs`
+//! (`daemon_sources`): every `*.rs` file under `crates/` minus `target/` and
+//! `tests/` dirs and minus `#[cfg(test)]` code (unit tests mount mock upstream
+//! servers — Telegram, Jira, Confluence — whose routes are not daemon routes),
+//! then extracts the first string argument from each `.route(` call.  The scanner correctly handles both single-line and multi-line
 //! `.route(` calls.
 //!
 //! ## Methods tested
@@ -25,7 +26,7 @@
 //!
 //! ## Exclusions
 //! - `/ws/*` and `/browser/proxy` — WebSocket / proxy routes that
-//!   self-authenticate via `?token=` and never reach the central feature guard.
+//!   self-authenticate (WS subprotocol bearer / proxy ticket) and never reach the central feature guard.
 //!   Documented in `policy.rs` and route_inventory's exclusion comment.
 //! - `/auth/tokens` (bare path) — handled under the `/auth/tokens` Exempt rule
 //!   whether the method is GET or POST; covered correctly.
@@ -33,10 +34,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-// Re-implement the same helpers as route_inventory.rs so this file compiles
-// independently (Rust integration-test files each compile as a separate crate).
+// `repo_root` mirrors route_inventory.rs; the source walk is shared with it
+// (both suites are modules of the single `it` test binary).
 
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         if dir.join("crates").is_dir() && dir.join("docs/contracts/api.md").is_file() {
@@ -44,25 +45,6 @@ fn repo_root() -> PathBuf {
         }
         if !dir.pop() {
             panic!("could not locate repo root from CARGO_MANIFEST_DIR");
-        }
-    }
-}
-
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name();
-            if name.map(|n| n == "target" || n == "tests").unwrap_or(false) {
-                continue;
-            }
-            rust_files(&path, out);
-        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            out.push(path);
         }
     }
 }
@@ -108,16 +90,13 @@ fn extract_route_paths(src: &str) -> Vec<String> {
     paths
 }
 
-fn registered_routes(root: &Path) -> BTreeSet<String> {
-    let mut files = Vec::new();
-    rust_files(&root.join("crates"), &mut files);
+pub(crate) fn registered_routes(root: &Path) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
-    for f in &files {
-        let src = std::fs::read_to_string(f).unwrap_or_default();
+    for (_, src) in &super::route_inventory::daemon_sources(root) {
         if !src.contains(".route(") {
             continue;
         }
-        for p in extract_route_paths(&src) {
+        for p in extract_route_paths(src) {
             set.insert(p);
         }
     }
@@ -127,12 +106,12 @@ fn registered_routes(root: &Path) -> BTreeSet<String> {
 /// Routes that are legitimately outside the bearer-auth / feature-policy
 /// surface and must be excluded from the coverage check.
 ///
-/// `/ws/*` and `/browser/proxy` use per-session `?token=` authentication and
+/// `/ws/*` and `/browser/proxy` self-authenticate (subprotocol bearer / ticket) and
 /// never reach the central feature guard (documented in `policy.rs`).  The
 /// route-inventory test also skips `tests/` directories, so test-stub routes
 /// are never included in the source set.
 fn is_policy_exempt_by_design(path: &str) -> bool {
-    // `/ws/*` and `/browser/proxy` self-authenticate via `?token=`. The runtime
+    // `/ws/*` and `/browser/proxy` self-authenticate (bearer / ticket). The runtime
     // plugin reverse-proxy + iframe-asset routes (`/plugins/{slug}/…`) are
     // feature-gated by the dedicated plugin branch in `feature_guard` BEFORE
     // `policy_for` is consulted, so they intentionally have no policy-table entry.
@@ -209,5 +188,220 @@ fn every_protected_route_has_a_policy_entry() {
             .map(|(m, p)| format!("  {m} {p}"))
             .collect::<Vec<_>>()
             .join("\n"),
+    );
+}
+
+/// Snapshot file for [`policy_decisions_match_the_golden_snapshot`].
+const POLICY_SNAPSHOT: &str = "tests/snapshots/policy_decisions.txt";
+/// Set to `1` to rewrite [`POLICY_SNAPSHOT`] from the current `policy_for`.
+const POLICY_SNAPSHOT_UPDATE_ENV: &str = "OTTO_UPDATE_POLICY_SNAPSHOT";
+
+/// Golden snapshot of the WHOLE policy table: `(method, route template) →
+/// decision [credential class]` for every registered route ×
+/// GET/POST/PUT/PATCH/DELETE.
+///
+/// `policy_for` is a long ORDERED if-chain, so an innocent-looking new rule
+/// can shadow a later one and silently change another route's capability
+/// tier — something the "not Deny" check above can never see. Any change to
+/// any decision fails here with a line diff; the author reviews it and, if
+/// intended, regenerates with
+/// `OTTO_UPDATE_POLICY_SNAPSHOT=1 cargo test -p otto-server --test it policy_coverage::`
+/// and commits the snapshot alongside the policy change.
+#[test]
+fn policy_decisions_match_the_golden_snapshot() {
+    use axum::http::Method;
+    use otto_server::policy::{policy_for, route_class};
+
+    let root = repo_root();
+    let routes = registered_routes(&root);
+    assert!(routes.len() >= 100, "scanner likely broke");
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+    ];
+    let mut lines = Vec::new();
+    for template in &routes {
+        // Same mount rule as the coverage test above.
+        let full = if template.starts_with("/ws/")
+            || template == "/browser/proxy"
+            || template == "/health"
+            || template == "/meta"
+        {
+            template.clone()
+        } else {
+            format!("/api/v1{template}")
+        };
+        for m in &methods {
+            // The credential class (Admin / Secret / Outward) rides on the same
+            // line, so a route that silently loses its "person only" tag shows
+            // up in the diff just like a capability-tier change.
+            let class = route_class(m, &full)
+                .map(|c| format!(" [{c:?}]"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{m:<6} {full} => {:?}{class}",
+                policy_for(m, &full)
+            ));
+        }
+    }
+    let current = format!(
+        "# Generated by policy_coverage::policy_decisions_match_the_golden_snapshot.\n\
+         # Do not edit by hand: set {POLICY_SNAPSHOT_UPDATE_ENV}=1 and re-run the test.\n{}\n",
+        lines.join("\n")
+    );
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(POLICY_SNAPSHOT);
+    if std::env::var(POLICY_SNAPSHOT_UPDATE_ENV).as_deref() == Ok("1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &current).unwrap();
+        return;
+    }
+    let golden = std::fs::read_to_string(&path).unwrap_or_default();
+    if golden == current {
+        return;
+    }
+    let old: BTreeSet<&str> = golden.lines().filter(|l| !l.starts_with('#')).collect();
+    let new: BTreeSet<&str> = current.lines().filter(|l| !l.starts_with('#')).collect();
+    let removed: Vec<_> = old.difference(&new).map(|l| format!("  - {l}")).collect();
+    let added: Vec<_> = new.difference(&old).map(|l| format!("  + {l}")).collect();
+    panic!(
+        "RBAC policy decisions changed vs {POLICY_SNAPSHOT} ({} removed, {} added):\n{}\n{}\n\n\
+         Review every line: a `-`/`+` pair on the same route is a capability-tier change.\n\
+         If intended, regenerate and commit the snapshot:\n  \
+         {POLICY_SNAPSHOT_UPDATE_ENV}=1 cargo test -p otto-server --test it \
+         policy_coverage::policy_decisions_match_the_golden_snapshot",
+        removed.len(),
+        added.len(),
+        removed.join("\n"),
+        added.join("\n"),
+    );
+}
+
+/// S8-305: a governed `otto.*` tool replays its REST call through
+/// `self_call` with the CALLER's credential class — bound to the calling agent
+/// session for an agent, so `credential_class_gate` and the other agent rules
+/// see the agent behind it. A tool whose target is a person-only (Admin /
+/// Secret) route would therefore simply not work for agents, except the
+/// reviewed [`otto_mcp::outward::PERSON_ONLY_TOOLS`]: the governed path always
+/// files a human approval for an agent caller and replays only the approved
+/// call as that person. This pins every OTHER `route_for` target to a route
+/// that is neither Admin nor Secret, and each person-only tool to an
+/// approval-gated (`DANGEROUS`) tool whose target really is person-only.
+#[test]
+fn governed_self_call_targets_are_never_person_only_routes() {
+    use axum::http::Method;
+    use otto_mcp::outward::{otto_tool_specs, route_for};
+    use otto_server::policy::{route_class, RouteClass};
+    use serde_json::{json, Map, Value};
+
+    let templates: Vec<String> = registered_routes(&repo_root()).into_iter().collect();
+    // The registered template a concrete `/api/v1/...` path resolves to: the
+    // one with the most literal segments matching (axum's precedence).
+    let resolve = |path: &str| -> Option<String> {
+        let p = path.split('?').next().unwrap_or(path);
+        let p = p.strip_prefix("/api/v1").unwrap_or(p);
+        let segs: Vec<&str> = p.split('/').collect();
+        let mut best: Option<(usize, &String)> = None;
+        for t in &templates {
+            let ts: Vec<&str> = t.split('/').collect();
+            let wildcard = ts.last().is_some_and(|s| s.starts_with("{*"));
+            if !(ts.len() == segs.len() || (wildcard && segs.len() >= ts.len())) {
+                continue;
+            }
+            let mut literal = 0;
+            let ok = ts.iter().zip(&segs).all(|(t, s)| {
+                if t.starts_with('{') {
+                    true
+                } else if t == s {
+                    literal += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+            if ok && best.is_none_or(|(n, _)| literal > n) {
+                best = Some((literal, t));
+            }
+        }
+        best.map(|(_, t)| format!("/api/v1{t}"))
+    };
+    // Plausible arguments from a tool's input schema.
+    let synth = |schema: &Value| -> Value {
+        let mut args = Map::new();
+        if let Some(props) = schema["properties"].as_object() {
+            for (k, p) in props {
+                let v = if let Some(first) = p["enum"].as_array().and_then(|e| e.first()) {
+                    first.clone()
+                } else {
+                    match p["type"].as_str() {
+                        Some("integer" | "number") => json!(1),
+                        Some("boolean") => json!(true),
+                        Some("array") => json!([]),
+                        Some("object") => json!({}),
+                        _ => json!("x1"),
+                    }
+                };
+                args.insert(k.clone(), v);
+            }
+        }
+        Value::Object(args)
+    };
+
+    let mut checked = 0usize;
+    let mut wrong = Vec::new();
+    let mut person_only_seen = Vec::new();
+    for spec in otto_tool_specs() {
+        let Some(bare) = spec["name"].as_str().and_then(|n| n.strip_prefix("otto.")) else {
+            continue;
+        };
+        let Ok(call) = route_for(bare, &synth(&spec["inputSchema"])) else {
+            continue; // handled before the self-call, or needs richer args
+        };
+        let method = Method::from_bytes(format!("{:?}", call.method).to_uppercase().as_bytes())
+            .expect("method");
+        let Some(template) = resolve(&call.path) else {
+            wrong.push(format!("{bare}: {method} {} matches no route", call.path));
+            continue;
+        };
+        checked += 1;
+        if let Some(c @ (RouteClass::Admin | RouteClass::Secret)) = route_class(&method, &template)
+        {
+            // Reviewed exceptions: the improvement-edit decisions are the
+            // governed twin of an Admin-tagged gate (S11-308). An agent's
+            // call always files a human approval first (forced, never
+            // auto-approved) and only the approved call replays as the person.
+            let reviewed = otto_mcp::outward::tool_is_person_only(bare)
+                && otto_mcp::outward::tool_is_dangerous(bare);
+            if !reviewed {
+                wrong.push(format!("{bare}: {method} {template} is {c:?}"));
+            }
+            person_only_seen.push(bare.to_string());
+        } else if otto_mcp::outward::tool_is_person_only(bare) {
+            wrong.push(format!(
+                "{bare}: listed in PERSON_ONLY_TOOLS but {method} {template} is not person-only"
+            ));
+        }
+    }
+    assert!(
+        checked >= 40,
+        "only {checked} tools resolved — synth broke?"
+    );
+    assert!(
+        wrong.is_empty(),
+        "governed self-calls must not target person-only routes:\n{}",
+        wrong.join("\n")
+    );
+    person_only_seen.sort();
+    let mut expected: Vec<String> = otto_mcp::outward::PERSON_ONLY_TOOLS
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        person_only_seen, expected,
+        "every PERSON_ONLY_TOOLS entry must resolve to its person-only route"
     );
 }

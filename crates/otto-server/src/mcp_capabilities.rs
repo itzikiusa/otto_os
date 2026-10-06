@@ -334,7 +334,7 @@ fn valid_ref(s: &str) -> bool {
 /// Fixed-argv git on tokio's process driver — `status` on a large repo can take
 /// seconds, which must not park a runtime worker.
 async fn safe_git(path: &Path, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new("git")
+    let out = otto_git::hardened_command()
         .arg("-C")
         .arg(path)
         .args(args)

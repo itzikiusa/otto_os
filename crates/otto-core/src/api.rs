@@ -208,6 +208,11 @@ pub struct ShareInfo {
     pub created_at: DateTime<Utc>,
     /// FIXED expiry (`created_at + ttl`); never slid for share tokens.
     pub expires_at: DateTime<Utc>,
+    /// An email-OTP share whose window has lapsed but which the link holder can
+    /// still revive with `POST /share/extend` (until its 7-day absolute
+    /// lifetime). Listed so the owner can see — and revoke — it (S8-06).
+    #[serde(default)]
+    pub dormant: bool,
 }
 
 /// `POST /api/v1/sessions/{id}/share` — mint a scoped share-link token.
@@ -287,6 +292,31 @@ pub struct CreateShareResp {
     pub url: String,
     /// Metadata for the newly-minted share.
     pub info: ShareInfo,
+    /// Whether another device can open `url` — false when its origin is
+    /// loopback or empty (no Public link domain, no network listener). The UI
+    /// shows a "only works on this Mac" warning instead of the phone QR hint.
+    #[serde(default)]
+    pub reachable_remotely: bool,
+    /// Who can open `url` (S20-303): `remote` (a public/routable origin),
+    /// `lan` (a private/link-local address — the LAN listener — so only
+    /// devices on this Mac's network, behind a self-signed-certificate
+    /// warning) or `local` (loopback/empty: this Mac only).
+    #[serde(default)]
+    pub reach: ShareReach,
+}
+
+/// How far a share link's origin reaches (see [`CreateShareResp::reach`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareReach {
+    /// Any device on the internet (a public domain / routable address).
+    Remote,
+    /// Only devices on this Mac's local network (RFC 1918, link-local, ULA,
+    /// `.local`).
+    Lan,
+    /// This Mac only (loopback or no origin).
+    #[default]
+    Local,
 }
 
 /// `GET /api/v1/sessions/{id}/shares` response.
@@ -427,6 +457,11 @@ pub struct UpdateUserReq {
     pub display_name: Option<String>,
     pub password: Option<String>,
     pub disabled: Option<bool>,
+    /// REQUIRED when a caller changes its OWN password (S8-310): a stolen UI
+    /// token must not be able to set a new password without knowing the old
+    /// one. Ignored otherwise (root resetting another user's password).
+    #[serde(default)]
+    pub current_password: Option<String>,
 }
 
 /// `POST /api/v1/workspaces`
@@ -1101,9 +1136,15 @@ pub struct UpdateIssueAccountReq {
     pub base_url: Option<String>,
     /// Non-empty → rotate Keychain secret; empty/absent → keep existing.
     pub token: Option<String>,
-    /// Set the user-entered token expiry; absent (None) → keep current.
-    #[serde(default)]
-    pub token_expires_at: Option<DateTime<Utc>>,
+    /// Tri-state user-entered token expiry: absent → keep current, `null` →
+    /// clear it, a timestamp → set it. (A plain `Option` read `null` as "keep",
+    /// so the "Token expired" chip could never be cleared.)
+    #[serde(
+        default,
+        deserialize_with = "de_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub token_expires_at: Option<Option<DateTime<Utc>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1980,10 +2021,16 @@ pub struct CreatePrReq {
 }
 
 /// `POST /repos/{id}/pr/draft` — ask an agent to draft a PR title + description
-/// from the current branch's diff against `base`.
+/// from a branch's diff against `base`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DraftPrReq {
     pub base: String,
+    /// The PR's source branch. When set the draft describes
+    /// `merge-base(base, head)..head` — that branch's committed work — and
+    /// `DraftPrResp::source_branch` echoes it. Absent/empty ⇒ the checked-out
+    /// branch (plus its working tree), as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2071,6 +2118,12 @@ pub struct MergePrReq {
     /// Bitbucket: `close_source_branch`). Additive — absent means "keep it".
     #[serde(default)]
     pub delete_source_branch: bool,
+    /// The PR head the caller reviewed (`PrSummary::head_sha` at dialog load).
+    /// When set, a PR whose head has moved since is refused with 409 "PR
+    /// changed — re-check" (GitHub/GitLab: forwarded as the forge's `sha` pin;
+    /// Bitbucket: compared by prefix before merging). Absent ⇒ unpinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head_sha: Option<String>,
 }
 
 fn default_merge_strategy() -> MergeStrategy {
@@ -2090,6 +2143,10 @@ pub struct UpsertIntegrationReq {
     /// Write-only; Slack app-level token (slack only).
     pub app_token: Option<String>,
     pub allowed_users: String,
+    /// The explicit "open to everyone" opt-in (see `Integration::open_to_all`).
+    /// Omitted ⇒ the stored value is kept.
+    #[serde(default)]
+    pub open_to_all: Option<bool>,
     pub agent_reply: bool,
     pub reply_instructions: String,
     pub channel_id: String,
@@ -2528,6 +2585,10 @@ pub struct WriteSkillFileReq {
     /// Path relative to the skill dir (validated: no absolute, no `..`).
     pub path: String,
     pub content: String,
+    /// "New file": refuse (409) instead of overwriting when `path` already
+    /// exists — a typed existing path used to truncate it (even `SKILL.md`).
+    #[serde(default)]
+    pub create_only: bool,
 }
 
 /// `POST /library/skills` — create a new (empty-ish) library skill. When `body`
@@ -3891,4 +3952,22 @@ pub struct ApiClientStorage {
     pub run_bytes: i64,
     /// The largest run count held by any one automation.
     pub max_runs_per_automation: i64,
+}
+
+#[cfg(test)]
+mod update_issue_account_tests {
+    use super::*;
+
+    /// S17-18: `token_expires_at` is tri-state — absent keeps, `null` clears.
+    #[test]
+    fn token_expiry_absent_null_and_value_are_distinct() {
+        let absent: UpdateIssueAccountReq = serde_json::from_str(r#"{"label":"x"}"#).unwrap();
+        assert_eq!(absent.token_expires_at, None);
+        let cleared: UpdateIssueAccountReq =
+            serde_json::from_str(r#"{"token_expires_at":null}"#).unwrap();
+        assert_eq!(cleared.token_expires_at, Some(None));
+        let set: UpdateIssueAccountReq =
+            serde_json::from_str(r#"{"token_expires_at":"2026-01-02T00:00:00Z"}"#).unwrap();
+        assert!(matches!(set.token_expires_at, Some(Some(_))));
+    }
 }

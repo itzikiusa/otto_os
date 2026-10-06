@@ -12,7 +12,7 @@ behind each item.
 
 | Step | Fails on |
 |---|---|
-| `node scripts/ui-guards.mjs` | **Native dialogs:** any `confirm(` / `prompt(` / `alert(` call (they are silent no-ops in the Tauri WKWebView). **Undefined CSS variables:** any `var(--x)` whose `--x` isn't defined anywhere under `ui/src/`, *even with a fallback*. |
+| `node scripts/ui-guards.mjs` | **Native dialogs:** any `confirm(` / `prompt(` / `alert(` call (they are silent no-ops in the Tauri WKWebView). **Undefined CSS variables:** any `var(--x)` whose `--x` isn't defined anywhere under `ui/src/`, *even with a fallback*. Plus the **ratcheted** rules listed in the script header (an increase per file fails), including `icon-size`, `inline-retry`, `local-tablist`, `smooth-scroll` and `disabled-opacity`. |
 | `svelte-check` (`tsconfig.app.json`) | Type errors, including **unknown icon names** (`IconName`), wrong component props, and Svelte a11y warnings that aren't suppressed |
 | `tsc` (node, e2e, unit tsconfigs) | Type errors in config, e2e specs and unit tests |
 
@@ -96,10 +96,16 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
 
 - [ ] Font sizes come from `--fs-*`. Nothing a user must read is under 11 px.
       Weights are 400, 500 or 600.
-- [ ] Spacing is on the 4 px grid. Radius uses `--radius-s/m/l` or pill.
+- [ ] Spacing is on the scale: 2 px steps to 24 px, 4 px above
+      ([foundations §3](./foundations.md#3-spacing-and-sizing)). Radius uses `--radius-s/m/l` or pill.
       `--glass-shadow` only on floating layers.
-- [ ] Icons: `Icon` with a typed name, sizes 12/14/16 (24–26 only in empty
-      states), no glyph characters as icons, `ProviderIcon` for providers.
+- [ ] Icons: `Icon` with a typed name, sizes 12 / 13–14 / 16 (20 only in
+      phone touch chrome, 24–26 only in empty states), no glyph characters as
+      icons, `ProviderIcon` for providers.
+- [ ] Disabled controls fade with `var(--disabled-opacity)`; touch sizes use
+      `var(--hit-min)`, not a local px value.
+- [ ] Failed loads use `LoadState`, in-pane tab strips use `Tabs`, JS scrolls
+      use `scrollBehavior()`.
 - [ ] Any animation has a `prefers-reduced-motion` override. Continuous
       animation only for live state.
 

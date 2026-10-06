@@ -10,6 +10,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Switch from '../../lib/components/Switch.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import GoalEditor from './GoalEditor.svelte';
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -153,7 +154,15 @@
         reply: triggerForm.reply,
         enabled: triggerForm.enabled,
       };
-      if (triggerEditId) await swarm.updateTrigger(triggerEditId, body);
+      // An edit must CLEAR what the user emptied: '' for the text filters
+      // and `null` for the repo path (an omitted key leaves it unchanged).
+      if (triggerEditId)
+        await swarm.updateTrigger(triggerEditId, {
+          ...body,
+          match_chat: triggerForm.match_chat?.trim() ?? '',
+          keyword: triggerForm.keyword?.trim() ?? '',
+          repo_path: triggerForm.repo_path?.trim() || null,
+        });
       else await swarm.createTrigger(detail.id, body);
       toasts.success(triggerEditId ? 'Trigger updated' : 'Trigger added');
       triggerForm = null;
@@ -195,28 +204,11 @@
 </script>
 
 <Modal title="Swarm settings{detail ? ` — ${detail.name}` : ''}" width={640} {onclose}>
-  <div
-    class="tabs"
-    role="tablist"
-    aria-label="Swarm settings section"
-    tabindex="-1"
-    onkeydown={(e) => {
-      const i = TABS.findIndex((t) => t.id === tab);
-      const n = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : null;
-      if (n === null) return;
-      e.preventDefault();
-      const j = (n + TABS.length) % TABS.length;
-      tab = TABS[j].id;
-      (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]')[j]?.focus();
-    }}
-  >
-    {#each TABS as t (t.id)}
-      <button class="tab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1} onclick={() => (tab = t.id)}>
-        <Icon name={t.icon} size={13} /> {t.label}
-      </button>
-    {/each}
+  <div class="settings-tabs">
+    <Tabs label="Swarm settings section" tabs={TABS} value={tab} onchange={(id) => (tab = id)} idBase="swarm-settings" />
   </div>
 
+  <div role="tabpanel" id="swarm-settings-panel-{tab}" aria-labelledby="swarm-settings-tab-{tab}">
   {#if tab === 'goals'}
     <p class="hint">Standing goals are the swarm’s quality bar — verified on every task in addition to the task’s own goals.</p>
     <div class="bar">
@@ -265,15 +257,15 @@
           </div>
           <div class="field">
             <label for="t-chat">Match chat / channel <span class="dim">(blank = any)</span></label>
-            <input id="t-chat" class="input" bind:value={triggerForm.match_chat} placeholder="e.g. #builds or chat id" />
+            <input dir="auto" id="t-chat" class="input" bind:value={triggerForm.match_chat} placeholder="e.g. #builds or chat id" />
           </div>
           <div class="field">
             <label for="t-kw">Keyword <span class="dim">(blank = any)</span></label>
-            <input id="t-kw" class="input" bind:value={triggerForm.keyword} placeholder="e.g. /swarm" />
+            <input dir="ltr" id="t-kw" class="input" bind:value={triggerForm.keyword} placeholder="e.g. /swarm" />
           </div>
           <div class="field">
             <label for="t-repo">Repository path <span class="dim">(optional)</span></label>
-            <PathField bind:value={triggerForm.repo_path}><input id="t-repo" class="input" bind:value={triggerForm.repo_path} placeholder="/path/to/repo" /></PathField>
+            <PathField bind:value={triggerForm.repo_path}><input dir="ltr" id="t-repo" class="input" bind:value={triggerForm.repo_path} placeholder="/path/to/repo" /></PathField>
           </div>
         </div>
         <div class="toggles">
@@ -323,6 +315,7 @@
       </LoadState>
     {/if}
   {/if}
+  </div>
 
   {#snippet footer()}
     <button class="btn ghost" onclick={onclose}>Close</button>
@@ -338,30 +331,8 @@
 {/if}
 
 <style>
-  .tabs {
-    display: flex;
-    gap: 4px;
-    border-bottom: 1px solid var(--border);
+  .settings-tabs {
     margin-bottom: 12px;
-  }
-  .tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 6px 10px;
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .tab:hover {
-    color: var(--text);
-  }
-  .tab.active {
-    color: var(--accent-text);
-    border-bottom-color: var(--accent);
   }
   .hint {
     font-size: var(--fs-s);

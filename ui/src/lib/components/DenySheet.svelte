@@ -26,7 +26,7 @@
 <Modal {title} width={440} {onclose}>
   <div class="field">
     <label for="deny-reason">Reason (optional)</label>
-    <textarea
+    <textarea dir="auto"
       id="deny-reason"
       class="input deny-reason"
       rows="3"

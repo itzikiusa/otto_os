@@ -953,7 +953,8 @@ impl SessionsRepo {
     /// whose `meta.<meta_key>` equals `value` — filtered in SQL so a lookup
     /// never decodes the workspace's whole session history (the swarm's
     /// per-turn agent-session reuse used to load ~2k rows / 345 KB of
-    /// `meta_json`). `meta_key` is a compile-time identifier, never input.
+    /// `meta_json`). `meta_key` is a compile-time identifier (or a dotted
+    /// path of them, e.g. `work.story_id`), never input.
     pub async fn list_live_by_meta(
         &self,
         ws: &Id,
@@ -963,7 +964,7 @@ impl SessionsRepo {
     ) -> Result<Vec<Session>> {
         debug_assert!(meta_key
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_'));
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'));
         let q = format!(
             "SELECT * FROM sessions WHERE workspace_id = ? AND archived = 0 \
              AND status != 'exited' AND (? IS NULL OR kind = ?) \
@@ -978,6 +979,26 @@ impl SessionsRepo {
             .await
             .map_err(dberr("sessions by meta"))?;
         rows.iter().map(row_to_session).collect()
+    }
+
+    /// The cwds of every NON-ARCHIVED session (any status — an exited session
+    /// is still resumable from the Agents list) under the directory `prefix`
+    /// (a trailing `/` is implied). A scratch sweeper must keep these: removing
+    /// one breaks the session's resume (S4-304).
+    pub async fn unarchived_cwds_under(
+        &self,
+        prefix: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let dir = format!("{}/", prefix.trim_end_matches('/'));
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT cwd FROM sessions WHERE archived = 0 \
+             AND substr(cwd, 1, length(?1)) = ?1",
+        )
+        .bind(&dir)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("sessions cwds under"))?;
+        Ok(rows.into_iter().map(|(c,)| c).collect())
     }
 }
 
@@ -1076,6 +1097,36 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    /// S4-304: only non-archived sessions under the prefix (as a directory,
+    /// not a string prefix) are reported.
+    #[tokio::test]
+    async fn unarchived_cwds_under_lists_only_live_children() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let mk = |cwd: &str| NewSession {
+            workspace_id: ws.clone(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            cwd: cwd.into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: user.clone(),
+            meta: serde_json::json!({}),
+        };
+        repo.create(mk("/t/scratch/live")).await.unwrap();
+        let gone = repo.create(mk("/t/scratch/archived")).await.unwrap();
+        repo.set_archived(&gone.id, true).await.unwrap();
+        repo.create(mk("/t/scratch-sibling/x")).await.unwrap();
+        repo.create(mk("/elsewhere")).await.unwrap();
+        let got = repo.unarchived_cwds_under("/t/scratch").await.unwrap();
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            vec!["/t/scratch/live".to_string()]
+        );
     }
 
     #[tokio::test]

@@ -532,6 +532,13 @@ pub struct ColumnDef {
     pub extra: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The column's collation when the engine reports one per column (MySQL
+    /// string columns: `information_schema.columns.collation_name`). The Table
+    /// Designer re-states it, because MySQL's `CHANGE COLUMN` restates the
+    /// whole column and would otherwise silently re-collate it to the table
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1484,9 +1491,19 @@ pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
         return true;
     }
     let upper = statement.to_ascii_uppercase();
-    (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
+    // `SELECT … INTO TEMP t` (PostgreSQL: a session temp table) and
+    // `SELECT … INTO @v` / `SELECT @v := …` (MySQL: a session user variable).
+    // Any `INTO` word in a SELECT/WITH counts — over-flagging only costs a
+    // fresh pooled connection; under-flagging leaks state to the next request.
+    let select_writes_session = matches!(kw.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES")
+        && (upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .any(|w| w == "INTO")
+            || upper.contains(":="));
+    select_writes_session
+        || (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
         || upper.contains("GET_LOCK(")
-        || upper.contains("PG_ADVISORY_LOCK")
+        || upper.contains("ADVISORY_LOCK")
         || upper.contains("SET_CONFIG(")
 }
 
@@ -2807,5 +2824,30 @@ mod tests {
         assert!(is_write("UPDATE users SET a = 1"));
         assert!(is_write("DROP TABLE users"));
         assert!(is_write("INSERT INTO users VALUES (1)"));
+    }
+
+    /// The per-column collation (S16-302) is on the wire only when the engine
+    /// reported one — the Table Designer re-states it on MySQL CHANGE COLUMN.
+    #[test]
+    fn column_def_collation_serializes_only_when_known() {
+        let mut c = ColumnDef {
+            name: "code".into(),
+            data_type: "varchar(10)".into(),
+            nullable: true,
+            default: None,
+            key: None,
+            extra: None,
+            comment: None,
+            collation: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("collation").is_none());
+        c.collation = Some("utf8mb4_bin".into());
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["collation"], "utf8mb4_bin");
+        // Older payloads without the field still deserialize.
+        let back: ColumnDef =
+            serde_json::from_str(r#"{"name":"a","data_type":"int","nullable":false}"#).unwrap();
+        assert_eq!(back.collation, None);
     }
 }

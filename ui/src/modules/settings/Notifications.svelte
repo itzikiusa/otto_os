@@ -17,7 +17,7 @@
 
   // Load once on mount if the store hasn't fetched yet.
   $effect(() => {
-    if (!notifications.loaded) void notifications.load();
+    void notifications.ensureLoaded();
   });
 
   function save(patch: Partial<NotificationSettings>): void {
@@ -136,20 +136,28 @@
       label="Native macOS notifications for important alerts"
       hint="Show system notifications for warnings and errors."
       checked={notifications.settings.native_enabled}
+      disabled={!auth.isRoot}
+      title={auth.isRoot ? undefined : 'These settings apply to the whole Otto daemon — only the root user can change them'}
       onchange={(v) => save({ native_enabled: v })}
     />
     <SettingToggle
       label="Banner when a session is waiting on you"
       hint="A native notification when an agent finishes its turn and waits for input — only for sessions you are not looking at."
       checked={notifications.settings.native_on_waiting !== false}
-      disabled={!notifications.settings.native_enabled}
-      title={notifications.settings.native_enabled ? undefined : 'Turn on native macOS notifications first'}
+      disabled={!auth.isRoot || !notifications.settings.native_enabled}
+      title={!auth.isRoot
+        ? 'These settings apply to the whole Otto daemon — only the root user can change them'
+        : notifications.settings.native_enabled
+          ? undefined
+          : 'Turn on native macOS notifications first'}
       onchange={(v) => save({ native_on_waiting: v })}
     />
     <SettingToggle
       label="Notify on session events"
       hint="A heads-up when a session finishes or is waiting for your input."
       checked={notifications.settings.session_events}
+      disabled={!auth.isRoot}
+      title={auth.isRoot ? undefined : 'These settings apply to the whole Otto daemon — only the root user can change them'}
       onchange={(v) => save({ session_events: v })}
     />
   </div>
@@ -165,6 +173,7 @@
         min="1"
         max="30"
         value={notifications.settings.expiry_threshold_days}
+        disabled={!auth.isRoot}
         onchange={onThreshold}
       />
       <span class="hint">1–30 days (default 3). Covers Git and Jira account tokens and agent CLI sign-ins.</span>
@@ -175,7 +184,7 @@
     <div class="section-title">Channel notifications</div>
     <p class="section-note">
       Each one posts a one-line message to this workspace’s Slack or Telegram channel (set up in
-      <button class="link" onclick={() => router.go('settings/channels')}>Channels</button>). All are off by default.
+      <button class="link" onclick={() => router.go('settings/channels')}>Slack, Telegram &amp; webhooks</button>). All are off by default.
     </p>
     {#if flagsError}
       <div class="flags-error">

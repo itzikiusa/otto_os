@@ -65,21 +65,44 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
     fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
         None
     }
+    /// The workspace's root folder, for validating a story `cwd` on PATCH
+    /// (S4-13). Default `None` (then only temp dirs / git checkouts pass).
+    fn workspace_root<'a>(
+        &'a self,
+        _ws: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>> {
+        Box::pin(async { None })
+    }
+    /// Stop every live agent of `story_id` — analysis agents AND the
+    /// rewrite / test-generation / plan sessions (trip their cancel flags so
+    /// the recovery loop does not retry, then kill the sessions) — called by
+    /// `DELETE /product/stories/{sid}` BEFORE the rows go (S4-23), so deleted
+    /// stories don't keep agents burning budget until the next restart.
+    /// Default: no-op (hosts without sessions).
+    fn stop_story_agents<'a>(
+        &'a self,
+        _story_id: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Error → response
 // ---------------------------------------------------------------------------
 
-pub(crate) struct ApiErr(pub Error);
+/// `otto_core::Error` as an RFC-7807-ish `Problem` response (same status
+/// mapping as `otto-server`'s `ApiError`).
+#[derive(Debug)]
+pub struct ApiError(pub Error);
 
-impl From<Error> for ApiErr {
+impl From<Error> for ApiError {
     fn from(e: Error) -> Self {
-        ApiErr(e)
+        ApiError(e)
     }
 }
 
-impl IntoResponse for ApiErr {
+impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self.0 {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
@@ -92,6 +115,9 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!("internal error: {}", self.0);
+        }
         let problem = Problem {
             code: self.0.code().to_string(),
             message: self.0.to_string(),
@@ -100,7 +126,31 @@ impl IntoResponse for ApiErr {
     }
 }
 
-type ApiResult<T> = std::result::Result<T, ApiErr>;
+pub type ApiResult<T> = std::result::Result<T, ApiError>;
+
+/// Extractor for the authenticated user (the [`AuthUser`] extension the
+/// host's auth middleware inserts); rejects with 401 when absent. Mirrors
+/// `otto-server`'s `auth::CurrentUser` for the handlers that moved here.
+#[derive(Debug, Clone)]
+pub struct CurrentUser(pub otto_core::domain::User);
+
+impl<S> axum::extract::FromRequestParts<S> for CurrentUser
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthUser>()
+            .map(|a| CurrentUser(a.0.clone()))
+            .ok_or(ApiError(Error::Unauthorized))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Path extractors — collection tier (workspace-scoped)
@@ -394,7 +444,17 @@ async fn patch_story<S: ProductCtx>(
                 url: None,
                 issue_type: None,
                 stage: req.stage,
-                cwd: req.cwd.map(Some),
+                cwd: match req.cwd {
+                    // Agents are spawned (and pre-trusted) here — validate (S4-13).
+                    Some(c) if !c.trim().is_empty() => {
+                        let root = ctx.workspace_root(&ws).await;
+                        Some(Some(crate::service::validate_agent_cwd(
+                            &c,
+                            root.as_deref(),
+                        )?))
+                    }
+                    other => other.map(Some),
+                },
                 watch_enabled: req.watch_enabled,
                 watch_cadence_min: req.watch_cadence_min,
                 confluence_tests_page_id: None,
@@ -427,6 +487,9 @@ async fn delete_story<S: ProductCtx>(
     Path(StoryId { sid }): Path<StoryId>,
 ) -> ApiResult<StatusCode> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // Stop the story's running agents first (S4-23): once the rows are gone
+    // their writes fail silently while they keep spending.
+    ctx.stop_story_agents(&sid).await;
     // Attachment ids BEFORE the rows go: each may own an assist scratch dir.
     let attachment_ids: Vec<Id> = match ctx.attachment_repo() {
         Some(repo) => repo

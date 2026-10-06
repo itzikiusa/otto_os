@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { focusOnMount } from '../../lib/focusOnMount';
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
@@ -50,6 +51,7 @@
     type SplitMode,
     type VarSpec,
   } from './sql-util';
+  import { splitModeFor } from './sql-dialect';
   import { api } from '../../lib/api/client';
   import type { MongoshInfo } from '../../lib/api/types';
   import { paneResizer } from '../../lib/paneResizer';
@@ -146,8 +148,12 @@
       { filter: entries.length > 0, filterPlaceholder: 'Filter copies made in Otto…', maxVisible: 30 },
     );
   }
-  // Statement separator: redis is one command per line; others use `;`.
-  const splitMode = $derived<SplitMode>(database.queryLanguage === 'redis' ? 'line' : 'sql');
+  // Statement separator + lexing: redis is one command per line; others use
+  // `;`, lexed per engine (Postgres: dollar quotes, no `#` comments, `\` only
+  // escapes in E'…') — `sql-dialect.ts`. Variables render per engine too.
+  const splitMode = $derived<SplitMode>(
+    database.queryLanguage === 'redis' ? 'line' : splitModeFor(database.selectedConn?.kind),
+  );
   // Live selection + cursor (from CodeEditor) → run only the selected/current
   // statement instead of the whole buffer. Plain (non-reactive) on purpose:
   // only run() reads it, and `text` is a lazy getter — nothing re-renders or
@@ -763,9 +769,13 @@
       persistEditorH();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    // A cancelled gesture (system gesture, focus loss) ends the drag too —
+    // else pointermove stays attached and the pane follows the cursor.
+    window.addEventListener('pointercancel', onUp);
   }
   function setEditorH(h: number): void {
     editorH = h;
@@ -1009,14 +1019,17 @@
       window.removeEventListener('keydown', onKey);
     };
   });
-  // Clamp the popover into the viewport (never off the right/left edge); the
-  // CSS max-height + overflow cap the vertical side.
+  // Clamp the popover into the viewport: never off the right/left edge, and
+  // its height capped to the room below its top so the list scrolls instead
+  // of running off the bottom (AGENTS.md "Floating UI must survive long content").
   $effect(() => {
     const el = kbdPopEl;
     if (!shortcutsOpen || !el) return;
     el.style.transform = '';
-    const r = el.getBoundingClientRect();
     const vw = window.innerWidth;
+    el.style.maxWidth = `${Math.max(160, vw - 16)}px`;
+    el.style.maxHeight = `${Math.max(120, window.innerHeight - el.getBoundingClientRect().top - 8)}px`;
+    const r = el.getBoundingClientRect();
     let dx = 0;
     if (r.right > vw - 8) dx = vw - 8 - r.right;
     if (r.left + dx < 8) dx = 8 - r.left;
@@ -1027,7 +1040,7 @@
 <div class="query-editor" bind:this={rootEl}>
   <div class="qe-tabs scroll-thin" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
-      <div
+      <div use:rowMenu
         class="qe-tab"
         class:active={i === database.activeTab}
         class:agent={!!t.agent}
@@ -1059,16 +1072,16 @@
         }}
       >
         {#if t.pinned}
-          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={10} /></span>
+          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={12} /></span>
         {/if}
         {#if t.agent}
           <!-- Opened by an agent session over UI control: always attributed. -->
           <span class="qe-tab-agent" title="Opened by {t.agent.label}" aria-label="Opened by {t.agent.label}">
-            <Icon name="sparkle" size={10} />
+            <Icon name="sparkle" size={12} />
           </span>
         {/if}
         {#if renaming === i}
-          <input
+          <input dir="ltr" aria-label="Rename query tab"
             class="qe-tab-rename mono"
             bind:value={renameText}
             use:focusOnMount
@@ -1094,7 +1107,7 @@
                 void closeTabAt(i);
               }}
             >
-              <Icon name="x" size={10} />
+              <Icon name="x" size={12} />
             </button>
           {/if}
         {/if}
@@ -1166,6 +1179,7 @@
       <button
         class="btn small ghost"
         class:on={database.planOpen}
+        aria-expanded={database.planOpen}
         onclick={() => void database.explainPlan()}
         disabled={!hasStatement || tab.running}
         title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
@@ -1177,6 +1191,7 @@
     <button
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'ask'}
+      aria-expanded={database.assistOpen && database.assistMode === 'ask'}
       onclick={() => database.openAssist('ask')}
       disabled={!canQuery || !auth.can('agents','edit')}
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
@@ -1187,6 +1202,7 @@
     <button
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'nl'}
+      aria-expanded={database.assistOpen && database.assistMode === 'nl'}
       onclick={() => database.openAssist('nl')}
       disabled={!canQuery || !auth.can('agents','edit')}
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Describe what you want in plain English — the DB Assistant drafts a query you can insert or run'}
@@ -1347,7 +1363,7 @@
         {@const spec = tab.vars[name] ?? defaultVarSpec()}
         <div class="qe-var">
           <span class="qe-var-name mono">{name}</span>
-          <input
+          <input dir="auto" aria-label={`Value for ${name}`}
             class="input qe-var-input"
             value={spec.value}
             placeholder={spec.type === 'number' ? '123' : 'value'}
@@ -1410,7 +1426,7 @@
           onclick={() => void probeMongosh()}
           title="Probe the daemon for the mongosh CLI again"
         >
-          <Icon name="refresh" size={10} /> Retry
+          <Icon name="refresh" size={12} /> Retry
         </button>
       {/if}
     </div>
@@ -1418,7 +1434,7 @@
 
   {#if saving}
     <div class="save-bar">
-      <input
+      <input dir="auto" aria-label="Query name"
         class="input grow"
         placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}
@@ -1846,14 +1862,13 @@
     inset-inline-start: 0;
     z-index: var(--z-popover);
     min-width: 220px;
-    /* Never off-screen: cap to the viewport and scroll inside (the JS clamp
-       handles the horizontal side). */
-    max-width: calc(100vw - 16px);
-    max-height: min(60vh, calc(100vh - 120px));
+    /* Never off-screen: the JS clamp below caps both sides against
+       window.innerWidth/innerHeight (vh lies on iOS and in split panes);
+       the list scrolls inside. */
     overflow-y: auto;
     padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l);
     background: var(--surface);
     box-shadow: var(--glass-shadow);
     display: flex;

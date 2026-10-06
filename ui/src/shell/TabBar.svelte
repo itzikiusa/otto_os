@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../lib/rowMenu';
   // Session tabs: click activates, middle-click closes, ⌘W closes active,
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
@@ -243,7 +244,7 @@
 
   async function archiveTab(id: string): Promise<void> {
     try {
-      await ws.archiveSession(id);
+      await ws.requestArchive(id); // confirms first when the agent is mid-turn
     } catch (e) {
       toastError('Couldn’t archive the session', e);
     }
@@ -327,7 +328,7 @@
       >
         {#if renamingId === id}
           {#if id !== DB_PANE_ID}<StatusDot state={tabState(id)} size={6} />{/if}
-          <input
+          <input dir="auto"
             class="tab-rename"
             bind:value={draft}
             use:focusOnMount
@@ -339,7 +340,7 @@
             }}
           />
         {:else}
-          <button
+          <button use:rowMenu
             class="tab-main"
             role="tab"
             aria-selected={ws.activeSessionId === id}
@@ -363,12 +364,12 @@
             oncontextmenu={(e) => ctxMenu.show(e, tabMenu(id, tabIdx))}
           >
             {#if id === DB_PANE_ID}
-              <Icon name="db" size={11} />
+              <Icon name="db" size={12} />
             {:else}
               {@const st = tabState(id)}
               {#if st.resumable}
                 <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-                  <Icon name="refresh" size={9} />
+                  <Icon name="refresh" size={12} />
                 </span>
               {:else}
                 <StatusDot state={st} size={6} />
@@ -377,7 +378,7 @@
             <span class="tab-title" title={tabTooltip(id)}>{title(id)}</span>
             {#if needsYou(id)}
               <span class="tab-needs-you" title="Waiting on you" role="img" aria-label="Needs you">
-                <Icon name="bell" size={9} />
+                <Icon name="bell" size={12} />
               </span>
             {:else if ws.unread[id] === true}
               <span class="tab-unread" title="New activity since you last looked" role="img" aria-label="Unread activity"></span>
@@ -391,7 +392,7 @@
           aria-label="Close {title(id)}"
           title={ws.closeTabTitle(id)}
         >
-          <Icon name="x" size={9} />
+          <Icon name="x" size={12} />
         </button>
       </div>
     {/each}

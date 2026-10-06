@@ -17,7 +17,7 @@
     {#if confirmer.message}<p class="cf-msg">{confirmer.message}</p>{/if}
     {#if confirmer.isPrompt}
       {#snippet promptInput()}
-      <input
+      <input dir="auto"
         class="input cf-input"
         aria-label={confirmer.message || confirmer.title}
         bind:value={confirmer.inputValue}

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { originChanged } from './credentialOrigin';
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
@@ -32,6 +34,15 @@
   let tokenExpiresAt = $state('');
 
   const isEdit = $derived(editing !== null);
+  /** Repointing an account at another origin (scheme, host or port) must not
+   *  carry the stored token there (it would be sent as Basic auth to the new
+   *  origin): a changed origin needs a fresh token — the daemon's own rule. */
+  const hostChanged = $derived.by(() => {
+    // (cast: TS narrows the `$state(null)` initializer to `null` at this point)
+    const e = editing as IssueAccount | null;
+    return !!e && originChanged(e.base_url, baseUrl);
+  });
+  const needsToken = $derived(hostChanged && token === '');
 
   // ── Token-expiry helpers ───────────────────────────────────────────────────
   /** ISO timestamp → yyyy-mm-dd for an <input type="date"> (UTC date part). */
@@ -150,7 +161,7 @@
   }
 
   async function save(): Promise<void> {
-    if (!editing) return;
+    if (!editing || needsToken) return;
     busy = true;
     try {
       const body: Record<string, string | null | undefined> = {
@@ -179,7 +190,7 @@
 
   async function remove(a: IssueAccount): Promise<void> {
     if (deleting[a.id]) return;
-    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', confirmLabel: 'Delete account' }))) return;
+    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', danger: true, confirmLabel: 'Delete account' }))) return;
     deleting = { ...deleting, [a.id]: true };
     try {
       await api.del(`/issue/accounts/${a.id}`);
@@ -223,7 +234,7 @@
         {@const warn = expiryWarning(a.token_expires_at)}
         {@const r = testResults[a.id]}
         <!-- Right-click is a pointer shortcut; Test / Edit / Delete are buttons on the card. -->
-        <div
+        <div use:rowMenu
           role="presentation"
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
@@ -288,11 +299,11 @@
   <Modal title={isEdit ? 'Edit Jira account' : 'Add Jira account'} onclose={closeModal}>
     <div class="field">
       <label for="ia-label">Label</label>
-      <input id="ia-label" class="input" bind:value={label} placeholder="Work Jira" />
+      <input dir="auto" id="ia-label" class="input" bind:value={label} placeholder="Work Jira" />
     </div>
     <div class="field">
       <label for="ia-base">Base URL</label>
-      <input
+      <input dir="ltr"
         id="ia-base"
         class="input mono"
         bind:value={baseUrl}
@@ -303,7 +314,7 @@
     </div>
     <div class="field">
       <label for="ia-email">Email</label>
-      <input
+      <input dir="ltr"
         id="ia-email"
         class="input"
         type="email"
@@ -323,7 +334,9 @@
         autocomplete="off"
         placeholder={isEdit ? '•••••• (leave blank to keep)' : ''}
       />
-      {#if isEdit}
+      {#if isEdit && hostChanged}
+        <span class="hint warn-hint" role="alert">The site changed — paste a token for the new site. The stored token is never sent to a different host.</span>
+      {:else if isEdit}
         <span class="hint">Leave blank to keep the existing token.</span>
       {:else}
         <span class="hint">
@@ -343,7 +356,7 @@
       {#if isEdit}
         <button
           class="btn primary"
-          disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === ''}
+          disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === '' || needsToken}
           onclick={save}
         >
           {busy ? 'Saving…' : 'Save changes'}
@@ -435,6 +448,9 @@
   }
   .test-result.ok {
     color: var(--success);
+  }
+  .hint.warn-hint {
+    color: var(--danger);
   }
   .test-result.bad {
     color: var(--danger);

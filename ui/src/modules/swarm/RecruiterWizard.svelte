@@ -119,7 +119,7 @@
 
   function stopRecruit() {
     // Kill the live recruiter session server-side, then abandon the UI wait.
-    if (swarm.detail) void swarm.stopAgentRun(swarm.detail.id);
+    if (swarm.detail) void swarm.stopAgentRun(swarm.detail.id, 'recruit');
     recruitCtl?.abort();
   }
 
@@ -172,7 +172,7 @@
   {#if step === 0}
     <div class="field">
       <label for="rc-role">What role do you want to hire?</label>
-      <input
+      <input dir="auto"
         id="rc-role"
         class="input"
         placeholder="e.g. CTO, Backend Dev, UX Researcher"
@@ -182,7 +182,7 @@
     </div>
     <div class="field">
       <label for="rc-ctx">Any specifics? (optional)</label>
-      <textarea id="rc-ctx" class="input" rows="3" bind:value={context} placeholder="Context to guide the recruiter…"></textarea>
+      <textarea dir="auto" id="rc-ctx" class="input" rows="3" bind:value={context} placeholder="Context to guide the recruiter…"></textarea>
     </div>
     <div class="field">
       <label for="rc-theme">Naming theme <span class="dim">(optional — names the agent after it)</span></label>
@@ -194,8 +194,8 @@
     <p class="dim small">The recruiter proposes a soul, skills, provider and schedule — you can edit everything before hiring.</p>
   {:else}
     <div class="grid2">
-      <div class="field"><label for="rc-name">Name</label><input id="rc-name" class="input" bind:value={name} /></div>
-      <div class="field"><label for="rc-title">Title</label><input id="rc-title" class="input" bind:value={title} /></div>
+      <div class="field"><label for="rc-name">Name</label><input dir="auto" id="rc-name" class="input" bind:value={name} /></div>
+      <div class="field"><label for="rc-title">Title</label><input dir="auto" id="rc-title" class="input" bind:value={title} /></div>
       <div class="field">
         <label for="rc-prov">Provider</label>
         <select id="rc-prov" class="input" bind:value={provider}>
@@ -212,9 +212,9 @@
         </select>
       </div>
     </div>
-    <div class="field"><label for="rc-spec">Specialization</label><input id="rc-spec" class="input" bind:value={specialization} /></div>
-    <div class="field"><label for="rc-soul">Soul</label><textarea id="rc-soul" class="input" rows="3" bind:value={soulMd}></textarea></div>
-    <div class="field"><label for="rc-scope">Scope</label><textarea id="rc-scope" class="input" rows="2" bind:value={scopeMd}></textarea></div>
+    <div class="field"><label for="rc-spec">Specialization</label><input dir="auto" id="rc-spec" class="input" bind:value={specialization} /></div>
+    <div class="field"><label for="rc-soul">Soul</label><textarea dir="auto" id="rc-soul" class="input" rows="3" bind:value={soulMd}></textarea></div>
+    <div class="field"><label for="rc-scope">Scope</label><textarea dir="auto" id="rc-scope" class="input" rows="2" bind:value={scopeMd}></textarea></div>
     <div class="field">
       <span class="label">Skills <span class="dim">(filled star = must use)</span></span>
       <div class="skills">

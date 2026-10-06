@@ -2,6 +2,7 @@
   import { plural } from '../../lib/plural';
   import PathField from '../../lib/components/PathField.svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   // Docs agents — fan 1-4 writer agents out over a prompt to author notes into
   // the vault (a summarizer consolidates drafts when >1 writer), plus the
   // vault's RUN HISTORY (docs runs + per-note refine turns, server-persisted
@@ -16,7 +17,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Switch from '../../lib/components/Switch.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { api } from '../../lib/api/client';
   import { contextApi } from '../../lib/api/context';
   import type {
@@ -37,6 +38,7 @@
   } from '../../lib/api/vault';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { kindLabel, runStateLabel, severityLabel } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import type { BadgeTone } from '../../lib/status';
@@ -215,6 +217,12 @@
     });
   }
 
+  // Status refresh failures were swallowed forever: the run then looked frozen.
+  // One miss is transient (the next tick retries); three in a row are shown
+  // inline until a refresh succeeds again.
+  let pollFailures = 0;
+  let pollError = $state('');
+
   async function poll(): Promise<void> {
     const r = vault.docsRun;
     try {
@@ -231,8 +239,11 @@
       // Keep the history list in step (it also carries refine turns that
       // complete server-side without this view's involvement).
       await vault.refreshDocsRuns();
-    } catch {
-      /* transient — next tick retries */
+      pollFailures = 0;
+      pollError = '';
+    } catch (e) {
+      // Transient misses retry on the next tick; a streak is surfaced.
+      if (++pollFailures >= 3) pollError = loadErrorText(e);
     }
     if (!anyActive) stopPoll();
   }
@@ -321,6 +332,11 @@
   async function cancel(): Promise<void> {
     const r = vault.docsRun;
     if (!r || cancelling) return;
+    // Stopping a multi-agent run throws away its in-progress work — ask first.
+    const ok = await confirmer.ask('Stop this documentation run? Agents still working stop now and their unfinished work is discarded.', {
+      title: 'Stop the run?', confirmLabel: 'Stop run', cancelLabel: 'Keep running', danger: true,
+    });
+    if (!ok || vault.docsRun?.id !== r.id) return;
     cancelling = true;
     try {
       await cancelDocsRun(r.id);
@@ -366,6 +382,10 @@
 
   async function deleteRun(r: VaultDocsRun): Promise<void> {
     if (deleting) return;
+    const ok = await confirmer.ask('Delete this run from the history? Its log and findings go with it; documents it already wrote are kept.', {
+      title: 'Delete the run?', confirmLabel: 'Delete', danger: true,
+    });
+    if (!ok || deleting) return;
     deleting = r.id;
     try {
       await deleteDocsRun(r.id);
@@ -477,7 +497,14 @@
 
 <div class="docs-agents">
   <div class="inner">
-    <h2><Icon name="zap" size={15} /> Docs agent</h2>
+    <h2><Icon name="zap" size={14} /> Docs agent</h2>
+    {#if pollError}
+      <div class="poll-err" role="alert">
+        <Icon name="warning" size={13} />
+        <span>Couldn’t refresh the docs agent’s status — it may still be running. {pollError}</span>
+        <button class="btn small" onclick={() => void poll()}>Retry</button> <!-- ui-guards: allow — re-polls a live agent; the view keeps its data -->
+      </div>
+    {/if}
 
     {#if !run}
       <!-- ── form ─────────────────────────────────────────────────────────── -->
@@ -491,7 +518,7 @@
             {/each}
           </select>
           {#if tpl?.needsRepo}
-            <PathField bind:value={tplRepo}><input class="input tpl-repo" bind:value={tplRepo} placeholder="e.g. ~/code/payments-service" aria-label="Repository folder" /></PathField>
+            <PathField bind:value={tplRepo}><input dir="ltr" class="input tpl-repo" bind:value={tplRepo} placeholder="e.g. ~/code/payments-service" aria-label="Repository folder" /></PathField>
           {/if}
           <button
             class="tpl-use"
@@ -515,7 +542,7 @@
 
       <div class="field">
         <label for="da-prompt">What should be documented?</label>
-        <textarea
+        <textarea dir="auto"
           id="da-prompt"
           class="input da-prompt"
           bind:value={prompt}
@@ -525,7 +552,7 @@
       </div>
       <div class="field">
         <label for="da-target">Target folder (vault-relative, blank = root)</label>
-        <input id="da-target" class="input" bind:value={targetDir} placeholder="e.g. runbooks/deploys" />
+        <input dir="ltr" id="da-target" class="input" bind:value={targetDir} placeholder="e.g. runbooks/deploys" />
       </div>
 
       <div class="field" role="group" aria-labelledby="da-writers">
@@ -537,7 +564,7 @@
                 <option value={p}>{p}</option>
               {/each}
             </select>
-            <input class="input model" bind:value={agent.model} placeholder="Model (optional)" aria-label={`Writer agent ${i + 1} model`} />
+            <input dir="ltr" class="input model" bind:value={agent.model} placeholder="Model (optional)" aria-label={`Writer agent ${i + 1} model`} />
             <button
               class="icon-btn"
               title="Remove agent" aria-label="Remove agent"
@@ -600,7 +627,7 @@
                         <option value={p}>{p}</option>
                       {/each}
                     </select>
-                    <input
+                    <input dir="ltr"
                       class="input"
                       bind:value={reviewer.model}
                       placeholder="Model (optional)"
@@ -621,7 +648,7 @@
                       <Icon name="x" size={12} />
                     </button>
                   </div>
-                  <input
+                  <input dir="auto"
                     class="input review-focus"
                     bind:value={reviewer.focus}
                     placeholder="Optional focus — e.g. request/response bodies"
@@ -646,7 +673,7 @@
           <div class="skill-chips">
             {#each runSkills as s (s)}
               <button class="skill-chip" title="Open {s}" onclick={() => void viewSkill(s)}>
-                <Icon name="function" size={11} />
+                <Icon name="function" size={12} />
                 {s}
               </button>
             {/each}
@@ -756,7 +783,7 @@
             {#if agent.session_id && openTerminals.has(agent.session_id)}
               <div class="term">
                 {#key agent.session_id}
-                  <Terminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
@@ -802,7 +829,7 @@
             {#if run.summarizer.session_id && openTerminals.has(run.summarizer.session_id)}
               <div class="term">
                 {#key run.summarizer.session_id}
-                  <Terminal sessionId={run.summarizer.session_id} preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={run.summarizer.session_id} preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
@@ -896,7 +923,7 @@
                         <p class="agent-err">{reviewer.error}</p>
                       {/if}
                       {#if reviewer.findings.length === 0 && reviewer.state === 'done'}
-                        <p class="clean-verdict"><Icon name="check" size={11} /> No findings</p>
+                        <p class="clean-verdict"><Icon name="check" size={12} /> No findings</p>
                       {:else if reviewer.findings.length > 0}
                         <div class="finding-list">
                           {#each reviewer.findings as finding, findingIndex (`${reviewer.index}-${findingIndex}`)}
@@ -922,7 +949,7 @@
                       {#if reviewer.session_id && openTerminals.has(reviewer.session_id)}
                         <div class="term">
                           {#key reviewer.session_id}
-                            <Terminal sessionId={reviewer.session_id} preferDom resumeOnOpen={false} />
+                            <LazyTerminal sessionId={reviewer.session_id} preferDom resumeOnOpen={false} />
                           {/key}
                         </div>
                       {/if}
@@ -933,7 +960,7 @@
                 {#if round.revision.state !== 'skipped'}
                   <div class="revision-card">
                     <div class="agent-top">
-                      <span class="revision-mark"><Icon name="edit" size={11} /></span>
+                      <span class="revision-mark"><Icon name="edit" size={12} /></span>
                       <span class="agent-name">Final author revision</span>
                       <span class="grow"></span>
                       {#if round.revision.session_id}
@@ -974,7 +1001,7 @@
                     {#if round.revision.session_id && openTerminals.has(round.revision.session_id)}
                       <div class="term">
                         {#key round.revision.session_id}
-                          <Terminal sessionId={round.revision.session_id} preferDom resumeOnOpen={false} />
+                          <LazyTerminal sessionId={round.revision.session_id} preferDom resumeOnOpen={false} />
                         {/key}
                       </div>
                     {/if}
@@ -1046,6 +1073,19 @@
 {/if}
 
 <style>
+  .poll-err {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    margin-block-end: 10px;
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-m);
+    background: var(--danger-soft);
+    font-size: var(--fs-s);
+  }
+  .poll-err > span { flex: 1 1 220px; min-width: 0; }
   .docs-agents {
     overflow-y: auto;
     min-height: 0;
@@ -1093,7 +1133,7 @@
     white-space: nowrap;
   }
   .tpl-use:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .tpl-hint {
@@ -1300,7 +1340,7 @@
     cursor: pointer;
   }
   .primary:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 
@@ -1340,7 +1380,7 @@
     border-color: var(--accent);
   }
   .ghost:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .rows {
@@ -1674,7 +1714,7 @@
     background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .run-del:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .run-row {

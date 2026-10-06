@@ -120,7 +120,7 @@ async function saveAsNew(page: Page, name: string): Promise<void> {
 }
 
 async function openSideTab(page: Page, label: 'Saved' | 'History'): Promise<void> {
-  await page.locator('.side-switch .ss', { hasText: label }).first().click();
+  await page.locator('.side-switch [role="tab"]', { hasText: label }).first().click();
 }
 
 const savedRows = (page: Page): Locator => page.locator('.saved-row');

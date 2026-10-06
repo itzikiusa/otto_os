@@ -186,18 +186,18 @@
     <div class="field-row">
       <div class="field grow">
         <label for="{uid}-name">Name</label>
-        <input id="{uid}-name" class="input" bind:value={fName} placeholder="Daily Recap" />
+        <input dir="auto" id="{uid}-name" class="input" bind:value={fName} placeholder="Daily Recap" />
       </div>
       <div class="field narrow">
         <label for="{uid}-avatar">Avatar (optional)</label>
-        <input id="{uid}-avatar" class="input" bind:value={fAvatar} maxlength="8" />
+        <input dir="auto" id="{uid}-avatar" class="input" bind:value={fAvatar} maxlength="8" />
         <span class="hint">Empty shows the name’s initial.</span>
       </div>
     </div>
 
     <div class="field">
       <label for="{uid}-soul">Persona (soul) — who this agent is, materialized into its workspace</label>
-      <textarea id="{uid}-soul" class="input" bind:value={fSoul} rows="6" placeholder="You are a diligent chronicler…"></textarea>
+      <textarea dir="auto" id="{uid}-soul" class="input" bind:value={fSoul} rows="6" placeholder="You are a diligent chronicler…"></textarea>
     </div>
 
     <div class="field-row">
@@ -221,13 +221,13 @@
     {#if !PROVIDERS.includes(fProvider)}
       <div class="field">
         <label for="{uid}-slug">Custom provider slug</label>
-        <input id="{uid}-slug" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
+        <input dir="ltr" id="{uid}-slug" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
       </div>
     {/if}
 
     <div class="field">
       <label for="{uid}-cwd">Working folder (optional — empty = a private per-agent folder)</label>
-      <PathField bind:value={fCwd}><input id="{uid}-cwd" class="input" bind:value={fCwd} placeholder="defaults to the agent’s own workspace" /></PathField>
+      <PathField bind:value={fCwd}><input dir="ltr" id="{uid}-cwd" class="input" bind:value={fCwd} placeholder="defaults to the agent’s own workspace" /></PathField>
     </div>
 
     <div class="field-row">
@@ -244,17 +244,17 @@
       {#if fDestType === 'slack' || fDestType === 'telegram'}
         <div class="field">
           <label for="{uid}-chat">Chat / channel id (optional)</label>
-          <input id="{uid}-chat" class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
+          <input dir="auto" id="{uid}-chat" class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
         </div>
       {:else if fDestType === 'email'}
         <div class="field">
           <label for="{uid}-email">Send to (email)</label>
-          <input id="{uid}-email" class="input" bind:value={fEmailTo} placeholder="you@example.com" />
+          <input dir="ltr" id="{uid}-email" class="input" bind:value={fEmailTo} placeholder="you@example.com" />
         </div>
       {:else if fDestType === 'webhook'}
         <div class="field">
           <label for="{uid}-url">Webhook URL</label>
-          <input id="{uid}-url" class="input" bind:value={fUrl} placeholder="https://…" />
+          <input dir="ltr" id="{uid}-url" class="input" bind:value={fUrl} placeholder="https://…" />
         </div>
       {/if}
     </div>

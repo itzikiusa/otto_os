@@ -29,7 +29,9 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { obviousWriteVerb } from './sql-dialect';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
+  import { filterValMatches, type FilterVal } from './filter-chips';
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import type { QueryResult, DbForeignKey } from '../../lib/api/types';
@@ -485,12 +487,8 @@
   const activeChips = $derived(
     (hosted ? database.filters : []).filter((c) => c.kind === 'col' && c.values.length > 0),
   );
-  function cellMatchesVal(cell: unknown, val: { raw: string; isNull: boolean }): boolean {
-    if (val.isNull) return cell === null || cell === undefined;
-    if (cell === null || cell === undefined) return false;
-    const s = cellStr(cell);
-    return s === val.raw;
-  }
+  // Typed match (a boolean chip compares by value — see filterValMatches).
+  const cellMatchesVal = (cell: unknown, val: FilterVal): boolean => filterValMatches(cell, val, cellStr);
   function chipMatches(row: unknown[]): boolean {
     for (const c of activeChips) {
       if (c.kind !== 'col') continue;
@@ -1115,7 +1113,7 @@
     // the CSV lands in a spreadsheet — neutralize with a leading apostrophe.
     // Non-string values (a bare -5 is data, not a formula) are left alone.
     if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; // not-sql: CSV field quoting
   }
 
   const exportScope = $derived.by(() => {
@@ -1195,12 +1193,17 @@
       { label: `Download JSON${exportScope}`, icon: 'download', disabled: !canExport, action: exportJson },
     ];
     if (connectionId && statement) {
+      // Export RE-RUNS the statement uncapped — for an obvious write
+      // (`UPDATE … RETURNING *`) that would apply it twice, so it's disabled
+      // with the reason (the daemon runs exports read-only regardless).
+      const writeVerb = obviousWriteVerb(statement);
       items.push(
         { separator: true },
         {
           label: result?.truncated ? 'Export all rows… (result is capped)' : 'Export all rows…',
           icon: 'arrowDown',
-          disabled: !canExport,
+          disabled: !canExport || !!writeVerb,
+          title: writeVerb ? `Export re-runs the statement — not available for a write (${writeVerb})` : undefined,
           action: openExportDialog,
         },
       );
@@ -1324,7 +1327,7 @@
       <span class="rg-overlay-text">Running… {elapsed}s</span>
       {#if cancelQuery}
         <button class="rg-cancel" onclick={cancelQuery} title="Cancel the running query">
-          <Icon name="x" size={11} />Cancel
+          <Icon name="x" size={12} />Cancel
         </button>
       {/if}
     </div>
@@ -1338,7 +1341,7 @@
        of the whole results area re-laying out when the data arrives. -->
   <div class="grid-wrap" data-state="loading">
     <div class="grid-toolbar" aria-hidden="true">
-      <div class="gt-search skel-box"><Icon name="search" size={11} /></div>
+      <div class="gt-search skel-box"><Icon name="search" size={12} /></div>
     </div>
     <div class="grid-body">
       <div class="grid-skeleton" data-grid-frame role="status" aria-live="polite" aria-label="Running query">
@@ -1396,9 +1399,7 @@
       {@render loadingFrame()}
     {:else}
       <div class="grid-empty idle">
-        <Icon name="grid" size={22} />
-        <span class="ge-title">No results yet</span>
-        <span class="ge-body">Run a query with <kbd>⌘↵</kbd> — the statement under the cursor, or your selection.</span>
+        <EmptyState icon="grid" title="No results yet" body="Run a query with ⌘↵ — the statement under the cursor, or your selection." />
       </div>
     {/if}
   {/if}
@@ -1426,7 +1427,7 @@
     <div class="grid-empty">{@render runningCard()}</div>
   {:else}
     <div class="grid-empty">
-      <Icon name="check" size={mini ? 16 : 22} />
+      <Icon name="check" size={mini ? 16 : 24} />
       <span>{emptyResultLabel}</span>
       {#if !mini && result}
         <span class="ge-meta">{result.stats.duration_ms} ms{#if result.rows_affected != null} · {result.rows_affected} affected{/if}</span>
@@ -1441,8 +1442,8 @@
     {#if !mini}
       <div class="grid-toolbar">
         <div class="gt-search">
-          <Icon name="search" size={11} />
-          <input
+          <Icon name="search" size={12} />
+          <input dir="ltr"
             class="gt-search-input mono"
             type="text"
             placeholder="Filter rows…"
@@ -1456,7 +1457,7 @@
           />
           {#if filtering || searchInput}
             <button class="gt-search-clear" title="Clear filter" aria-label="Clear filter" onclick={() => setSearch('')}>
-              <Icon name="x" size={10} />
+              <Icon name="x" size={12} />
             </button>
           {/if}
         </div>
@@ -1494,10 +1495,10 @@
           <Icon name="search" size={13} />
         </button>
         <button class="btn small" onclick={copyMenu} title="Copy the result{exportScope}" aria-haspopup="menu">
-          <Icon name="copy" size={11} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={10} />
+          <Icon name="copy" size={12} /><span class="tb-label">Copy</span><Icon name="chevronDown" size={12} />
         </button>
         <button class="btn small" class:export-nudge={result?.truncated} onclick={exportMenu} title="Download, export all rows, or import a file" aria-haspopup="menu">
-          <Icon name="download" size={11} /><span class="tb-label">Export</span><Icon name="chevronDown" size={10} />
+          <Icon name="download" size={12} /><span class="tb-label">Export</span><Icon name="chevronDown" size={12} />
         </button>
         <button class="icon-btn" onclick={moreMenu} aria-label="More result actions" title="More — pipeline, compare, insert, expand JSON, send to agent, examine with AI" aria-haspopup="menu">
           <Icon name="more" size={14} />
@@ -1516,7 +1517,7 @@
               ? 'Open the selected rows as an insertMany(…) in a new tab (not run)'
               : 'Open the selected rows as INSERT statements in a new tab (not run)'}
           >
-            <Icon name="file" size={11} />Copy as INSERT
+            <Icon name="file" size={12} />Copy as INSERT
           </button>
         {/if}
         {#if flow.editable && engine !== 'redis'}
@@ -1525,15 +1526,15 @@
             onclick={() => flow.copySelectedWhere()}
             title="Copy a `pk IN (…)` predicate for the selected rows to the clipboard"
           >
-            <Icon name="file" size={11} />WHERE pk IN (…)
+            <Icon name="file" size={12} />WHERE pk IN (…)
           </button>
         {/if}
         {#if flow.selected.size === 2}
-          <button class="sel-gen" onclick={() => (compare = [...flow.selected] as [number, number])} title="Compare the two selected records side by side"><Icon name="split" size={11} />Compare</button>
+          <button class="sel-gen" onclick={() => (compare = [...flow.selected] as [number, number])} title="Compare the two selected records side by side"><Icon name="split" size={12} />Compare</button>
         {/if}
         {#if flow.editable}
         <button class="sel-del" onclick={() => flow.deleteSelected()} title="Delete selected rows (you review before it runs)">
-          <Icon name="trash" size={11} />Delete…
+          <Icon name="trash" size={12} />Delete…
         </button>
         {/if}
         <button class="sel-clear" onclick={() => flow.clearSelection()}>Clear</button>
@@ -1543,12 +1544,12 @@
 
     {#if !mini && hosted && database.filters.length > 0}
       <div class="filter-bar">
-        <span class="fb-label"><Icon name="search" size={11} />Filters</span>
+        <span class="fb-label"><Icon name="search" size={12} />Filters</span>
         {#each database.filters as cond, ci (ci)}
           {#if cond.kind === 'raw'}
             <span class="cond raw" title="Existing WHERE condition">
               <span class="cond-text mono">{cond.text}</span>
-              <button class="cond-x" title="Remove" aria-label="Remove" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
+              <button class="cond-x" title="Remove" aria-label="Remove" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={12} /></button>
             </span>
           {:else}
             <span class="cond" class:exclude={cond.op === 'not_in'}>
@@ -1561,17 +1562,17 @@
               {#each cond.values as val, vi (vi)}
                 <span class="cond-val mono">
                   {val.isNull ? 'NULL' : val.raw}
-                  <button class="val-x" aria-label="Remove value" title="Remove value" onclick={() => database.removeFilterValue(ci, vi)}><Icon name="x" size={9} /></button>
+                  <button class="val-x" aria-label="Remove value" title="Remove value" onclick={() => database.removeFilterValue(ci, vi)}><Icon name="x" size={12} /></button>
                 </span>
               {/each}
-              <input
+              <input dir="ltr"
                 class="cond-add mono"
                 placeholder="+ value"
                 aria-label="Add a value to the {cond.column} filter"
                 bind:value={addValText[ci]}
                 onkeydown={(e) => { if (e.key === 'Enter') submitFilterValue(ci); }}
               />
-              <button class="cond-x" title="Remove filter" aria-label="Remove filter" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={9} /></button>
+              <button class="cond-x" title="Remove filter" aria-label="Remove filter" onclick={() => database.removeFilterCond(ci)}><Icon name="x" size={12} /></button>
             </span>
           {/if}
         {/each}
@@ -1685,9 +1686,9 @@
         {/if}
         {#if sorting && sortCol !== null}
           <button class="sort-chip" title="Clear sort on {result.columns[sortCol].name}" onclick={() => { sortCol = null; sortDir = null; }}>
-            <Icon name={sortDir === 'asc' ? 'arrowUp' : 'arrowDown'} size={10} />
+            <Icon name={sortDir === 'asc' ? 'arrowUp' : 'arrowDown'} size={12} />
             <span class="sort-chip-name">{result.columns[sortCol].name}</span>
-            <Icon name="x" size={9} />
+            <Icon name="x" size={12} />
           </button>
         {/if}
         <span class="dot">·</span>
@@ -1716,16 +1717,16 @@
         {#if showPager}
           <span class="dot">·</span>
           <span class="pager">
-            <button class="pg-btn" disabled={offset <= 0} onclick={() => database.runPage(-1)} title="Previous page" aria-label="Previous page"><Icon name="chevronLeft" size={10} />Prev</button>
+            <button class="pg-btn" disabled={offset <= 0} onclick={() => database.runPage(-1)} title="Previous page" aria-label="Previous page"><Icon name="chevronLeft" size={12} />Prev</button>
             <span class="pg-range mono">rows {pageFrom.toLocaleString()}–{pageTo.toLocaleString()}</span>
-            <button class="pg-btn" disabled={!hasNextPage} onclick={() => database.runPage(1)} title="Next page" aria-label="Next page">Next<Icon name="chevronRight" size={10} /></button>
+            <button class="pg-btn" disabled={!hasNextPage} onclick={() => database.runPage(1)} title="Next page" aria-label="Next page">Next<Icon name="chevronRight" size={12} /></button>
             {#if !hasOrderBy}<span class="pg-unordered" title="Without an ORDER BY, row order can shift between pages">unordered</span>{/if}
           </span>
         {/if}
         <span class="grow"></span>
         {#if result?.masked}
           <span class="tb-masked" title="Server-side PII masking was applied — sensitive values were redacted before leaving the server">
-            <Icon name="lock" size={10} />Masked
+            <Icon name="lock" size={12} />Masked
           </span>
         {/if}
         {#if flow.editable}
@@ -1733,7 +1734,7 @@
             class="gt-edit-hint"
             title="Double-click a cell to edit (you review the SQL before it runs). Primary key {flow.editPkCols.length > 1 ? 'columns' : 'column'} ({flow.editPkCols.join(', ')}) {flow.editPkCols.length > 1 ? 'are' : 'is'} read-only."
           >
-            <Icon name="edit" size={10} />Editable · double-click a cell
+            <Icon name="edit" size={12} />Editable · double-click a cell
           </span>
         {:else if statement && flow.editReason}
           <span class="edit-note" title={flow.editReason}>{flow.editReason}</span>
@@ -1751,7 +1752,7 @@
           <span class="rg-overlay-text">Running… {elapsed}s</span>
           {#if cancelQuery}
             <button class="rg-cancel" onclick={cancelQuery} title="Cancel the running query">
-              <Icon name="x" size={11} />Cancel
+              <Icon name="x" size={12} />Cancel
             </button>
           {/if}
         </div>
@@ -1952,7 +1953,7 @@
     color: var(--accent-text);
   }
   .pg-btn:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .pg-range {
@@ -1990,23 +1991,9 @@
     padding-top: 12vh;
     text-align: center;
   }
-  .ge-title {
-    color: var(--text);
-    font-size: var(--fs-m);
-    font-weight: 500;
-  }
-  .ge-body,
   .ge-meta {
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .ge-body kbd {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    padding: 0 4px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
   }
   .grid-error {
     color: var(--danger);

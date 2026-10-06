@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
-import { openPage } from './helpers';
+import { openNewSessionSheet, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Custom agent providers are first-class EVERYWHERE (desktop-browser only).
@@ -62,14 +62,8 @@ test('custom provider appears in /meta and the ⌘K planner', async () => {
 test('New Session sheet lists the custom provider', async ({ page }) => {
   await openPage(page, 'agents');
 
-  // Open the ⌘T sheet; fall back to the TabBar + button if the shortcut doesn't
-  // reach the app in this browser build (mirrors desktop-new-session-keys).
-  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
-  await page.keyboard.press('Meta+t');
-  if (!(await dialog.isVisible().catch(() => false))) {
-    await page.getByTitle('New session', { exact: true }).click();
-  }
-  await expect(dialog).toBeVisible();
+  // Open the sheet via ⌘T (falls back to the TabBar + button).
+  const dialog = await openNewSessionSheet(page);
 
   // The custom provider has its own selectable card…
   await expect(
@@ -223,7 +217,7 @@ test('prepare_context node exposes a Provider selector', async ({ page }) => {
 });
 
 test('loop sub-steps expose a Provider selector (not raw JSON only)', async ({ page }) => {
-  await addWfNode(page, 'Loop (Until)');
+  await addWfNode(page, 'Repeat (Until)');
   // Add an agent sub-step → its Provider select appears with the default label.
   await page.getByRole('button', { name: 'Add step' }).click();
   const prov = page.locator('.inspector .ls-prov').first();
@@ -257,12 +251,8 @@ test('Excluding a provider hides it from /meta and every picker', async ({ page 
 
     // The New Session sheet drops the agy card while keeping claude + grok.
     await openPage(page, 'agents');
-    const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
-    await page.keyboard.press('Meta+t');
-    if (!(await dialog.isVisible().catch(() => false))) {
-      await page.getByTitle('New session', { exact: true }).click();
-    }
-    await expect(dialog).toBeVisible();
+    // Open the sheet via ⌘T (falls back to the TabBar + button).
+    const dialog = await openNewSessionSheet(page);
     await expect(dialog.locator('.provider-card', { hasText: 'claude' })).toHaveCount(1);
     await expect(dialog.locator('.provider-card', { hasText: 'grok' })).toHaveCount(1);
     await expect(dialog.locator('.provider-card', { hasText: /^agy$/ })).toHaveCount(0);

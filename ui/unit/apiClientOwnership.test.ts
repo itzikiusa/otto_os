@@ -5,8 +5,10 @@ import {runInNewContext} from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
+import { strictRequire } from './strictRequire.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
+import * as graphqlVars from '../src/modules/api/graphqlVars.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
@@ -19,17 +21,22 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
     $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v, raw: (v: unknown) => v}), $derived: (v: unknown) => v,
     crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout, performance, encodeURIComponent,
     localStorage: {getItem() {return null;},setItem() {}},
-    require: (p: string) => p.endsWith('/client') ? {api, isAbortError: () => false}
-      : p.includes('workspace.svelte') ? {ws}
-      : p.includes('toast') ? {toasts: {error: (message: string) => { notices.push(message); },success() {},info() {}}}
-      : p.endsWith('/apiHistory') ? {HistoryRefresh, HistoryDetail}
-      : p.endsWith('/apiSecretShapes') ? secretShapes
-      : p.endsWith('/scriptRunner') ? {runScript}
-      : p.endsWith('/lazyModule') ? {announceModule() {}}
-      : p.endsWith('/plural') ? {plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`}
-      : p.endsWith('/scripts') ? scriptRuntime
-      : p.endsWith('/importers') ? {isImportedEnvironment: (d: any) => d.format === 'postman-env'}
-      : p.endsWith('/types') ? {isSecretRef: (v: any) => !!v?.$secret} : {},
+    require: strictRequire([
+      ['/api/client', {api, isAbortError: () => false}],
+      ['/workspace.svelte', {ws}],
+      ['/toast.svelte', {toasts: {error: (message: string) => { notices.push(message); },success() {},info() {}}}],
+      // No flow here confirms; a call would be an untested path, so fail loudly.
+      ['/confirm.svelte', {confirmer: new Proxy({}, {get: (_t, k) => () => { throw new Error(`unexpected confirmer.${String(k)}`); }})}],
+      ['/apiHistory', {HistoryRefresh, HistoryDetail}],
+      ['/apiSecretShapes', secretShapes],
+      ['/scriptRunner', {runScript}],
+      ['/graphqlVars', graphqlVars],
+      ['/lazyModule', {announceModule() {}}],
+      ['/plural', {plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`}],
+      ['/api/scripts', scriptRuntime],
+      ['/importers', {isImportedEnvironment: (d: any) => d.format === 'postman-env'}],
+      ['/api/types', {isSecretRef: (v: any) => !!v?.$secret}],
+    ]),
   };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts',import.meta.url),'utf8'),
     {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
@@ -538,4 +545,25 @@ test('loadAll: obsolete A failure cannot clear the loading state of a newer A vi
     currentResponse.resolve([ownedRow('A', '-current')]); await current;
   }
   assert.equal(v.loading, false); assert.equal(v.environments[0]?.id, 'A-current');
+});
+
+test('lists stay pending until this workspace settles once — a refetch never re-enters "not loaded"', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(r => {release = r;});
+  let held = true;
+  const {v,ws} = setup({get: async () => { if (held) await gate; return []; }});
+  // Before the page's effect starts loadAll, `loading` is still false; the store
+  // must not read as "loaded and empty" (that flashed onboarding).
+  assert.equal(v.loading, false);
+  assert.equal(v.listsPending, true);
+  const first = v.loadAll();
+  assert.equal(v.listsPending, true);
+  release(); await first;
+  assert.equal(v.listsPending, false);
+  held = false;
+  await v.loadAll({force: true});
+  assert.equal(v.listsPending, false);
+  // Another workspace has not settled yet.
+  ws.currentId = 'B';
+  assert.equal(v.listsPending, true);
 });

@@ -59,6 +59,56 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
     };
     (c, r)
 }
+
+/// Hard bounds for a LIVE resize (WS viewers, rooms, the holder's RESIZE
+/// frame). Wider than the restore bounds above — a big monitor can exceed 200
+/// rows — but finite: the emulator allocates `cols × rows` cells eagerly, so
+/// 65535×65535 is a ~137 GB allocation abort, and a zero dimension underflows
+/// the grid math and panics the reader thread (frozen output).
+///
+/// The column floor is 2, not 1: a wide (emoji / CJK) glyph occupies two
+/// cells, and the emulator's wrap math (`cols - width`) underflows on a
+/// one-column grid — a panic in debug, a wrapped 65535 and an `unwrap` panic
+/// in release — freezing the reader thread just like a zero dimension did.
+/// xterm's FitAddon never proposes fewer than 2 columns either.
+///
+/// The row floor is 2 for the same reason: on a one-row grid a wrapping
+/// write scrolls the row it wrapped from away (`prev_pos.row -= scrolled`
+/// underflows in the emulator's `col_wrap`) — any line longer than the width
+/// panicked the reader thread.
+pub const RESIZE_MIN_COLS: u16 = 2;
+pub const RESIZE_MIN_ROWS: u16 = 2;
+pub const RESIZE_MAX_COLS: u16 = 500;
+pub const RESIZE_MAX_ROWS: u16 = 300;
+
+/// Reject a live grid outside
+/// `RESIZE_MIN_COLS..=RESIZE_MAX_COLS × RESIZE_MIN_ROWS..=RESIZE_MAX_ROWS`.
+pub fn validate_resize(cols: u16, rows: u16) -> Result<()> {
+    if (RESIZE_MIN_COLS..=RESIZE_MAX_COLS).contains(&cols)
+        && (RESIZE_MIN_ROWS..=RESIZE_MAX_ROWS).contains(&rows)
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "terminal dimensions out of range: {cols}x{rows} \
+             (min {RESIZE_MIN_COLS}x{RESIZE_MIN_ROWS}, max {RESIZE_MAX_COLS}x{RESIZE_MAX_ROWS})"
+        )))
+    }
+}
+
+/// Clamp a grid reported by a PTY holder (adoption, reconnect, lag resync)
+/// into the live-resize bounds. The holder's emulator is authoritative — it
+/// may legitimately be up to [`RESIZE_MAX_ROWS`] tall — so this only guards
+/// against nonsense; clamping to the narrower RESTORE bounds mirrored a
+/// 201–300-row session at 200 rows and then treated the next identical
+/// re-push as "same size" (review S1-19).
+pub fn clamp_live_grid(cols: u16, rows: u16) -> (u16, u16) {
+    (
+        cols.clamp(RESIZE_MIN_COLS, RESIZE_MAX_COLS),
+        rows.clamp(RESIZE_MIN_ROWS, RESIZE_MAX_ROWS),
+    )
+}
+
 /// Capacity of the output broadcast channel (chunks).
 const BROADCAST_CAPACITY: usize = 1024;
 /// Largest single PTY read (and the smallest block remainder worth reading into).
@@ -359,15 +409,28 @@ impl Mirror {
     }
 
     /// Replace the emulator with one rebuilt from a holder snapshot (a fresh
-    /// adoption, or a resync after the holder dropped a lagging stream). Live
-    /// viewers get the snapshot bytes too — it is a full repaint.
-    pub(crate) fn reset_to(&self, cols: u16, rows: u16, snapshot: &[u8]) {
+    /// adoption, or a resync after the holder dropped a lagging stream). The
+    /// grid is clamped with [`clamp_live_grid`].
+    ///
+    /// `initial` (adoption): the raw ring is empty, so the snapshot seeds it
+    /// (search after a daemon restart). A RESYNC (reconnect, lag) must not
+    /// touch the ring, and live viewers get a SCREEN-ONLY repaint: the full
+    /// snapshot carries up to 4000 history rows, and broadcasting it appended
+    /// the whole history again to every open xterm (and to search) on every
+    /// resync (review S1-18).
+    pub(crate) fn reset_to(&self, cols: u16, rows: u16, snapshot: &[u8], initial: bool) {
+        let (cols, rows) = clamp_live_grid(cols, rows);
         let mut parser = lock_unpoisoned(&self.parser);
         let mut fresh = vt100::Parser::new(rows, cols, EMULATOR_SCROLLBACK_LINES);
         fresh.process(snapshot);
         *parser = fresh;
-        lock_unpoisoned(&self.ring).push(snapshot);
-        let _ = self.tx.send(Bytes::copy_from_slice(snapshot));
+        if initial {
+            lock_unpoisoned(&self.ring).push(snapshot);
+            let _ = self.tx.send(Bytes::copy_from_slice(snapshot));
+        } else {
+            let repaint = PtyHandle::format_snapshot(parser.screen(), 0);
+            let _ = self.tx.send(Bytes::from(repaint));
+        }
     }
 }
 
@@ -421,8 +484,9 @@ impl PtyHandle {
 
     /// Spawn `spec` at the given `cols × rows` grid size, restoring a
     /// previously-saved terminal size on resume so the session reopens at
-    /// exactly the dimensions the user had. Values are **not** clamped here —
-    /// call [`resolve_grid`] first to sanitise raw metadata.
+    /// exactly the dimensions the user had. A grid outside the live-resize
+    /// bounds ([`validate_resize`]) falls back to the default; call
+    /// [`resolve_grid`] first to apply the stricter restore bounds.
     pub fn spawn_sized(spec: &CommandSpec, cols: u16, rows: u16) -> Result<PtyHandle> {
         Self::spawn_local(spec, cols, rows, RingBuffer::default())
     }
@@ -435,6 +499,13 @@ impl PtyHandle {
         rows: u16,
         ring: RingBuffer,
     ) -> Result<PtyHandle> {
+        // Defensive: a zero/huge spawn grid has the same failure modes as a
+        // bad resize (callers normally pass `resolve_grid` output already).
+        let (cols, rows) = if validate_resize(cols, rows).is_ok() {
+            (cols, rows)
+        } else {
+            (DEFAULT_COLS, DEFAULT_ROWS)
+        };
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -611,6 +682,15 @@ impl PtyHandle {
         }
     }
 
+    /// Test hook: drop a held PTY's current write connection, as if it were
+    /// mid-reconnect (sends then fail until a reconnect re-establishes it).
+    #[doc(hidden)]
+    pub fn simulate_holder_reconnecting(&self) {
+        if let Backend::Held(conn) = &self.backend {
+            conn.drop_writer();
+        }
+    }
+
     /// The holder's socket path, when held.
     pub fn holder_socket(&self) -> Option<&std::path::Path> {
         match &self.backend {
@@ -666,7 +746,7 @@ impl PtyHandle {
             })
             .map_err(|_| input_closed())?;
         match rx.recv() {
-            Ok(res) => res.map_err(|e| Error::Internal(format!("pty write: {e}"))),
+            Ok(res) => res.map_err(write_error),
             Err(_) => Err(input_closed()),
         }
     }
@@ -707,13 +787,7 @@ impl PtyHandle {
             Err(TrySendError::Disconnected(_)) => return Err(input_closed()),
         }
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(res)) => res.map_err(|e| {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    Error::Forbidden("terminal control changed".into())
-                } else {
-                    Error::Internal(format!("pty write: {e}"))
-                }
-            }),
+            Ok(Ok(res)) => res.map_err(write_error),
             Ok(Err(_)) => Err(input_closed()),
             Err(_) => Err(Error::Conflict(format!(
                 "session is not accepting input (not drained within {}s; still queued)",
@@ -749,9 +823,15 @@ impl PtyHandle {
     /// CPU work, so on a multi-threaded tokio runtime it runs inside
     /// `block_in_place`: the calling worker hands its other tasks to the pool
     /// instead of stalling them (r3-06-02).
+    ///
+    /// Out-of-range grids are rejected ([`validate_resize`]) before anything
+    /// is touched — this is the single choke point every resize path funnels
+    /// through (WS viewers, rooms, the holder's RESIZE frame).
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        validate_resize(cols, rows)?;
         let mut parser = lock_unpoisoned(&self.mirror.parser);
-        if parser.screen().size() == (rows, cols) {
+        let (old_rows, old_cols) = parser.screen().size();
+        if (old_rows, old_cols) == (rows, cols) {
             return Ok(());
         }
         let multi_thread = tokio::runtime::Handle::try_current()
@@ -762,7 +842,7 @@ impl PtyHandle {
             parser.screen_mut().set_size(rows, cols);
         }
         drop(parser);
-        match &self.backend {
+        let res = match &self.backend {
             Backend::Local { master, .. } => lock_unpoisoned(master)
                 .resize(PtySize {
                     rows,
@@ -773,10 +853,23 @@ impl PtyHandle {
                 .map_err(|e| Error::Internal(format!("pty resize: {e}"))),
             // The holder applies TIOCSWINSZ to the real PTY and reflows its
             // own emulator (the one future adoptions are rebuilt from).
-            Backend::Held(conn) => conn
-                .resize(cols, rows)
+            // A blocking socket write (5 s timeout) under the holder write
+            // lock: hand the worker's other tasks to the pool meanwhile
+            // (S1-22), like the reflow above.
+            Backend::Held(conn) => off_worker(multi_thread, || conn.resize(cols, rows))
                 .map_err(|e| Error::Internal(format!("pty resize (holder): {e}"))),
+        };
+        if res.is_err() {
+            // The PTY kept its old size: put the mirror back too. Leaving it
+            // at the new size made every later identical resize a "same
+            // size" no-op, so the PTY and the mirror stayed out of sync
+            // (review S1-20).
+            let mut parser = lock_unpoisoned(&self.mirror.parser);
+            if parser.screen().size() == (rows, cols) {
+                parser.screen_mut().set_size(old_rows, old_cols);
+            }
         }
+        res
     }
 
     /// Change the emulator's scrollback cap (see
@@ -795,7 +888,10 @@ impl PtyHandle {
         }
         drop(parser);
         if let Backend::Held(conn) = &self.backend {
-            conn.set_history_cap(lines);
+            // Same blocking holder write as `resize` (S1-22).
+            let multi_thread = tokio::runtime::Handle::try_current()
+                .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+            off_worker(multi_thread, || conn.set_history_cap(lines));
         }
     }
 
@@ -906,6 +1002,11 @@ impl PtyHandle {
         out
     }
 
+    /// Daemon-unique spawn counter for THIS process incarnation (see field doc).
+    pub fn spawn_seq(&self) -> u64 {
+        self.spawn_seq
+    }
+
     /// A snapshot that prepends up to `lines` rows of scrollback *history*
     /// (the rows that have scrolled off above the visible screen) before the
     /// coherent current-screen frame, so reconnecting doesn't lose history.
@@ -926,11 +1027,6 @@ impl PtyHandle {
     /// history. `lines == 0` is equivalent to [`screen_snapshot`].
     ///
     /// [`screen_snapshot`]: Self::screen_snapshot
-    /// Daemon-unique spawn counter for THIS process incarnation (see field doc).
-    pub fn spawn_seq(&self) -> u64 {
-        self.spawn_seq
-    }
-
     ///
     /// The parser lock is held only to copy the emulator state; formatting
     /// runs after it is released (see [`ScreenCapture`]).
@@ -1045,6 +1141,18 @@ impl PtyHandle {
     }
 }
 
+/// Run a blocking holder write without stalling the calling async worker's
+/// other tasks: `block_in_place` on a multi-thread runtime (the worker hands
+/// them to the pool), a plain call elsewhere (current-thread runtimes and
+/// sync callers, where `block_in_place` would panic).
+fn off_worker<T>(multi_thread: bool, f: impl FnOnce() -> T) -> T {
+    if multi_thread {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 /// Daemon-unique spawn counter (see [`PtyHandle::spawn_seq`]).
 fn next_spawn_seq() -> u64 {
     static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -1055,9 +1163,10 @@ fn next_spawn_seq() -> u64 {
 /// (child gone → EIO) ends it; queued and later jobs then fail fast with
 /// "input closed" instead of blocking. Two error kinds do NOT end it: a
 /// revoked room authority (`PermissionDenied`) rejects only that job, and a
-/// held PTY's transient loss of its holder connection (`ConnectionReset`)
-/// fails only the in-flight job — the connection is re-established and later
-/// input flows again.
+/// held PTY's transient loss of its holder connection (`ConnectionReset`, or
+/// [`held::DELIVERY_UNKNOWN`] once the frame was sent) fails only the
+/// in-flight job — the connection is re-established and later input flows
+/// again.
 fn spawn_writer(
     writer: Box<dyn std::io::Write + Send>,
     echo: Arc<echo::EchoClock>,
@@ -1078,7 +1187,7 @@ fn spawn_writer(
                 !matches!(
                     e.kind(),
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ConnectionReset
-                )
+                ) && e.kind() != held::DELIVERY_UNKNOWN
             });
             match job.done {
                 WriteDone::Blocking(tx) => {
@@ -1094,6 +1203,21 @@ fn spawn_writer(
         }
     });
     input_tx
+}
+
+/// A failed input job as the API reports it. A revoked room authority is a
+/// 403; a held write whose ack was lost with the holder connection is a
+/// distinct `Conflict` saying delivery is UNKNOWN (S1-23) — the bytes may
+/// already be in the terminal, so the caller must not blindly resend them —
+/// unlike a plain failure (`Internal`), where nothing was delivered.
+fn write_error(e: std::io::Error) -> Error {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => Error::Forbidden("terminal control changed".into()),
+        k if k == held::DELIVERY_UNKNOWN => Error::Conflict(format!(
+            "input delivery unknown — check the terminal before resending ({e})"
+        )),
+        _ => Error::Internal(format!("pty write: {e}")),
+    }
 }
 
 fn input_closed() -> Error {
@@ -1138,6 +1262,51 @@ impl Drop for PtyHandle {
 mod tests {
     use super::*;
 
+    /// S1-23: a held write whose ack was lost reports a distinct "delivery
+    /// unknown" `Conflict` (not the `Internal` of a failed write), and — like
+    /// a reconnect — fails only that job: the writer keeps serving input.
+    #[test]
+    fn delivery_unknown_is_a_distinct_conflict_and_keeps_the_writer() {
+        struct LosesFirstAck(bool);
+        impl std::io::Write for LosesFirstAck {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if std::mem::replace(&mut self.0, false) {
+                    return Err(std::io::Error::new(held::DELIVERY_UNKNOWN, "ack lost"));
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let tx = spawn_writer(
+            Box::new(LosesFirstAck(true)),
+            Arc::new(echo::EchoClock::new()),
+        );
+        let job = |data: &[u8]| {
+            let (done, rx) = sync_channel(1);
+            tx.send(WriteJob {
+                data: data.to_vec(),
+                authorization: None,
+                done: WriteDone::Blocking(done),
+            })
+            .unwrap();
+            rx.recv().unwrap()
+        };
+        let err = job(b"first").unwrap_err();
+        assert_eq!(err.kind(), held::DELIVERY_UNKNOWN);
+        let mapped = write_error(err);
+        assert!(
+            matches!(&mapped, Error::Conflict(m) if m.contains("delivery unknown")),
+            "{mapped:?}"
+        );
+        assert!(job(b"second").is_ok(), "the writer survives the lost ack");
+        assert!(matches!(
+            write_error(std::io::Error::other("eio")),
+            Error::Internal(_)
+        ));
+    }
+
     #[test]
     fn backdate_moves_the_last_output_clock_not_the_feed() {
         let mut m = Mirror::new(80, 24, RingBuffer::default());
@@ -1173,6 +1342,104 @@ mod tests {
         // Same size again: a no-op on every runtime flavour.
         handle.resize(90, 30).expect("same-size resize");
         assert_eq!(handle.size(), (90, 30));
+    }
+
+    /// A zero or huge grid is rejected before the emulator is touched: rows=0
+    /// used to underflow the grid math (reader-thread panic → frozen output)
+    /// and 65535×65535 was a ~137 GB eager allocation that aborted the daemon.
+    #[tokio::test]
+    async fn resize_rejects_zero_and_huge_grids() {
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 100, 30).expect("spawn");
+        for (c, r) in [
+            (0, 30),
+            (100, 0),
+            (0, 0),
+            (65535, 65535),
+            (501, 30),
+            (100, 301),
+        ] {
+            let err = handle.resize(c, r).expect_err("out-of-range resize");
+            assert!(matches!(err, Error::Invalid(_)), "{c}x{r}: {err:?}");
+            assert_eq!(handle.size(), (100, 30), "{c}x{r} must not touch the grid");
+        }
+        // The bounds themselves are accepted, and the PTY still works.
+        handle
+            .resize(RESIZE_MAX_COLS, RESIZE_MAX_ROWS)
+            .expect("max grid");
+        handle
+            .resize(RESIZE_MIN_COLS, RESIZE_MIN_ROWS)
+            .expect("min grid");
+        assert_eq!(handle.size(), (RESIZE_MIN_COLS, RESIZE_MIN_ROWS));
+        // One column / one row are below the floor (emulator wrap panics).
+        for (c, r) in [(1, 24), (80, 1)] {
+            let err = handle.resize(c, r).expect_err("below the floor");
+            assert!(matches!(err, Error::Invalid(_)), "{c}x{r}: {err:?}");
+        }
+        let _ = handle.kill();
+    }
+
+    /// A wide glyph at the narrowest accepted grid must not panic the
+    /// emulator (review S1-04: `cols - width` underflowed on a 1-column grid
+    /// and froze the reader thread). Exercised through the real reader, then
+    /// directly on the emulator for every width the bound admits.
+    #[tokio::test]
+    async fn wide_glyph_after_minimum_width_resize_does_not_panic() {
+        for rows in [RESIZE_MIN_ROWS, RESIZE_MIN_ROWS + 1, 24] {
+            for cols in RESIZE_MIN_COLS..RESIZE_MIN_COLS + 4 {
+                let mut p = vt100::Parser::new(rows, cols, 100);
+                p.process(
+                    "\u{1F600}x\u{4E2D}\u{6587}\u{1F600}\r\nlong-line-wraps\u{1F600}\u{1F600}"
+                        .as_bytes(),
+                );
+            }
+        }
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 80, 24).expect("spawn");
+        handle
+            .resize(RESIZE_MIN_COLS, 24)
+            .expect("minimum width accepted");
+        assert!(handle.resize(1, 24).is_err(), "1 column is rejected");
+        handle
+            .write("\u{1F600}x\u{1F600}\n".as_bytes())
+            .expect("write");
+        // The reader thread survives: output keeps flowing after the glyphs.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut alive = false;
+        while std::time::Instant::now() < deadline {
+            handle.write(b"PING\n").expect("write");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if handle.screen_rows().join("").contains("NG") {
+                alive = true;
+                break;
+            }
+        }
+        assert!(alive, "reader thread kept parsing after a wide glyph");
+        let _ = handle.kill();
+    }
+
+    /// A bad spawn grid falls back to the default instead of panicking.
+    #[tokio::test]
+    async fn spawn_with_zero_grid_uses_default() {
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 0, 0).expect("spawn");
+        assert_eq!(handle.size(), (DEFAULT_COLS, DEFAULT_ROWS));
+        let _ = handle.kill();
     }
 
     #[tokio::test]

@@ -68,12 +68,11 @@
 //!   write-guard; the other read POSTs are `…/memory/search`, the vault
 //!   `…/vault/vaults/{id}/search` / `…/okf/validate`, `…/browser/summarize`
 //!   (Editor-gated but doesn't persist anything — the summarize session is
-//!   ephemeral and never saved; see `routes/browser.rs`), and the SQS
-//!   `…/sqs/queues/peek` (a `receive-message` with visibility timeout 0 —
-//!   graded `aws_sqs:View` by the policy table because nothing is consumed).
+//!   ephemeral and never saved; see `routes/browser.rs`).
 //!   `canvas_create_scene`/`canvas_update_scene`, `otto_vault_write`/
 //!   `otto_vault_rename`/`otto_vault_delete`, `browser_navigate`, and the
-//!   cloud-console writers `aws_athena_query`/`aws_sqs_send`/`k8s_action`, plus
+//!   cloud-console writers `aws_athena_query`/`aws_sqs_send`/`aws_sqs_peek`
+//!   (a receive bumps each message's receive count — it can dead-letter)/`k8s_action`, plus
 //!   `otto_api_execute` (ONE real HTTP request through a saved workspace request;
 //!   Editor-gated, SSRF-guarded, secrets resolved server-side and scrubbed from
 //!   the result), `otto_api_upsert_request` (persists a saved request), and
@@ -1543,7 +1542,7 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "aws_sqs_peek",
-                "description": "Read-only: peek up to `max` (1..10, default 10) messages on an SQS queue WITHOUT consuming them (receive with visibility timeout 0) — message_id, body, attributes, message_attributes. Use it to inspect a queue or a DLQ; the messages stay in the queue.",
+                "description": "MUTATING (aws_sqs Edit): peek up to `max` (1..10) SQS messages (visibility timeout 0, they stay visible). Each peek bumps their receive count — can dead-letter.",
                 "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "url": { "type": "string", "description": "Queue URL from aws_sqs_list_queues." }, "max": { "type": "integer" }, "region": { "type": "string" } }, "required": ["account_id", "url"] }
             },
             {
@@ -2032,14 +2031,14 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "design_get",
     "design_links",
     "design_search",
-    // AWS console reads (`aws_sqs_peek` is the one read-only POST: a
-    // receive-message with visibility timeout 0, graded View by the policy table).
+    // AWS console reads. (`aws_sqs_peek` is NOT here: a receive-message bumps
+    // each message's receive count — it can dead-letter — so it is Edit-gated
+    // and dispatched by its own arm, like `aws_sqs_send`.)
     "aws_list_accounts",
     "aws_s3_list_buckets",
     "aws_s3_list_objects",
     "aws_s3_preview",
     "aws_sqs_list_queues",
-    "aws_sqs_peek",
     "aws_ec2_list_instances",
     "aws_athena_list_tables",
     "aws_athena_get_query",
@@ -2724,8 +2723,8 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             opt_query(args, &[("prefix", "prefix"), ("region", "region")]).trim_start_matches('&')
         )),
         "aws_sqs_peek" => {
-            // Read-only POST: `receive-message --visibility-timeout 0` — nothing
-            // is consumed or deleted (the policy table grades `/peek` as View).
+            // `receive-message --visibility-timeout 0`: nothing is hidden or
+            // deleted, but the receive count rises (Edit-gated server-side).
             let mut body = json!({ "url": arg_str(args, "url")?, "visibility_timeout": 0 });
             if let Some(max) = args.get("max").and_then(u64_lenient) {
                 body["max"] = json!(max.clamp(1, 10));
@@ -3013,20 +3012,9 @@ fn u64_lenient(v: &Value) -> Option<u64> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
-/// Percent-encode a path segment so an id with `/` or spaces can't break out of
-/// the intended route (defense-in-depth; ids are normally opaque tokens).
-fn seg(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
+// Path segments are encoded by the ONE shared `seg` (otto-mcp): an id with
+// `/`, spaces or a whole-segment `..` can't break out of the intended route.
+use otto_server::mcp_outward::seg;
 
 /// Run one tool by name. Returns the capped+redacted result `Value` and the
 /// audited row count, or an error string surfaced to the agent.
@@ -3154,7 +3142,10 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                     .to_string()
             };
 
-            let mut body = json!({ "shape": "agent" });
+            let mut body = json!({
+                "workspace_id": ctx.workspace_id.clone(),
+                "request_id": request_id,
+            });
             if let Some(environment) = arg_optional_string(args, "environment")?
                 .filter(|environment| !environment.is_empty())
             {
@@ -3206,14 +3197,17 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .and_then(u64_lenient)
                 .unwrap_or(30_000)
                 .min(60_000);
-            let raw = ctx
-                .post_json_within(
-                    &format!("{base}/requests/{}/execute", seg(&request_id)),
+            // Resolved here (names → ids in this session's workspace), executed
+            // through the governed path: approval + guardrail + audit.
+            Ok(finalize(
+                governed_native_write(
+                    ctx,
+                    "api_execute",
                     &body,
                     Duration::from_millis(budget_ms) + Duration::from_secs(15),
                 )
-                .await?;
-            Ok(finalize(raw))
+                .await?,
+            ))
         }
         "otto_api_upsert_request" => {
             let base = api_base(ctx)?;
@@ -3323,14 +3317,16 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                     .ok_or("matched automation has no id")?
                     .to_string()
             };
-            let raw = ctx
-                .post_json_within(
-                    &format!("{base}/automations/{}/run", seg(&automation_id)),
-                    &json!({}),
+            Ok(finalize(
+                governed_native_write(
+                    ctx,
+                    "api_run_automation",
+                    &json!({"workspace_id": ctx.workspace_id.clone(),
+                            "automation_id": automation_id}),
                     Duration::from_secs(180),
                 )
-                .await?;
-            Ok(finalize(raw))
+                .await?,
+            ))
         }
         // Otto Assistant tools: forward the arguments plus this session's id;
         // the daemon resolves the session to its thread (the token's own
@@ -4133,6 +4129,14 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             let (v, _) = finalize(json!({ "text": text, "truncated": truncated }));
             Ok((v, Some(lines)))
         }
+        "aws_sqs_peek" => {
+            // Edit-gated server-side: the receive bumps the receive count.
+            let call = read_route("aws_sqs_peek", args, None)?;
+            let raw = ctx
+                .post_json(&call.path, call.body.as_ref().unwrap_or(&json!({})))
+                .await?;
+            Ok(finalize(raw))
+        }
         "aws_athena_query" => {
             let acc = arg_str(args, "account_id")?;
             let mut body = json!({ "sql": arg_str(args, "sql")? });
@@ -4154,78 +4158,38 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             Ok(finalize(raw))
         }
         "aws_sqs_send" => {
-            let acc = arg_str(args, "account_id")?;
-            let mut body = json!({ "url": arg_str(args, "url")?, "body": arg_str(args, "body")? });
-            if let Some(d) = args.get("delay_seconds").and_then(u64_lenient) {
-                body["delay_seconds"] = json!(d);
+            // Required arguments checked here for a fast, clear error; the
+            // send runs through the governed path (approval + guardrail +
+            // audit), whose executor builds the same route body.
+            for k in ["account_id", "url", "body"] {
+                arg_str(args, k)?;
             }
-            for k in ["group_id", "dedup_id"] {
-                if let Some(v) = arg_optional_string(args, k)?.filter(|s| !s.is_empty()) {
-                    body[k] = json!(v);
-                }
-            }
-            if let Some(attrs) = args.get("message_attributes").filter(|v| v.is_object()) {
-                body["message_attributes"] = attrs.clone();
-            }
-            let raw = ctx
-                .post_json(
-                    &format!(
-                        "/aws/accounts/{}/sqs/queues/send?{}",
-                        seg(&acc),
-                        opt_query(args, &[("region", "region")]).trim_start_matches('&')
-                    ),
-                    &body,
-                )
-                .await?;
-            Ok(finalize(raw))
+            Ok(finalize(
+                governed_native_write(ctx, "aws_sqs_send", args, Duration::from_secs(30)).await?,
+            ))
         }
         "k8s_action" => {
-            let cluster = arg_str(args, "cluster_id")?;
-            let body = json!({
-                "action": arg_str(args, "action")?,
-                "kind": arg_str(args, "kind")?,
-                "ns": arg_str(args, "namespace")?,
-                "name": arg_str(args, "name")?,
-                // Forwarded verbatim: the route owns the confirm_name / replicas /
-                // prune / revision semantics (§3.3, §4.6).
-                "params": args.get("params").cloned().unwrap_or(json!({})),
-            });
-            let raw = ctx
-                .post_json(&format!("/k8s/clusters/{}/actions", seg(&cluster)), &body)
-                .await?;
-            Ok(finalize(raw))
+            for k in ["cluster_id", "action", "kind", "namespace", "name"] {
+                arg_str(args, k)?;
+            }
+            // The governed executor forwards `params` verbatim: the route owns
+            // the confirm_name / replicas / prune / revision semantics.
+            Ok(finalize(
+                governed_native_write(ctx, "k8s_action", args, Duration::from_secs(75)).await?,
+            ))
         }
         "k8s_pod_http" => {
-            let cluster = arg_str(args, "cluster_id")?;
-            let port = args
-                .get("port")
+            for k in ["cluster_id", "namespace", "method", "path"] {
+                arg_str(args, k)?;
+            }
+            args.get("port")
                 .and_then(u64_lenient)
                 .ok_or("missing argument 'port'")?;
-            let mut body = json!({
-                "namespace": arg_str(args, "namespace")?,
-                "port": port,
-                "method": arg_str(args, "method")?,
-                "path": arg_str(args, "path")?,
-            });
-            // Forwarded verbatim: the route owns validation and the prod
-            // confirm_name guard.
-            for k in [
-                "pod",
-                "workload",
-                "headers",
-                "body",
-                "timeout_ms",
-                "max_concurrency",
-                "confirm_name",
-            ] {
-                if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
-                    body[k] = v.clone();
-                }
-            }
-            let raw = ctx
-                .post_json(&format!("/k8s/clusters/{}/pod-http", seg(&cluster)), &body)
-                .await?;
-            Ok(finalize(raw))
+            // The governed executor forwards the rest verbatim: the route owns
+            // validation and the prod confirm_name guard.
+            Ok(finalize(
+                governed_native_write(ctx, "k8s_pod_http", args, Duration::from_secs(90)).await?,
+            ))
         }
         "otto_open_session" => {
             let ws = ctx
@@ -4383,6 +4347,58 @@ async fn governed_call(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, bo
     Ok((v, is_error))
 }
 
+/// Run one of this surface's NATIVE irreversible writers
+/// (`otto_mcp::outward::NATIVE_SESSION_WRITERS`: `k8s_action`,
+/// `k8s_pod_http`, `aws_sqs_send`, `api_execute`, `api_run_automation`)
+/// through the governed choke point instead of straight at its daemon route:
+/// the same approval gate, IRREVERSIBLE guardrail (an auto-approve rule needs
+/// `allow_irreversible`) and audit as `otto.<tool>` — the agent filling in
+/// `confirm_name` itself is no human approval. `tool` is the governed short
+/// name; `args` its governed arguments. Executed → the tool's own result;
+/// pending → the envelope (approval id, "resubmit after it is approved");
+/// denied / failed → an error.
+async fn governed_native_write(
+    ctx: &Ctx,
+    tool: &str,
+    args: &Value,
+    run_budget: Duration,
+) -> Result<Value, String> {
+    let body = json!({
+        "tool": format!("otto.{tool}"),
+        "arguments": args,
+        "wait_seconds": GOVERNED_WAIT_SECS,
+    });
+    let v = ctx
+        .post_json_within(
+            "/mcp/otto-tools/invoke",
+            &body,
+            Duration::from_secs(GOVERNED_WAIT_SECS) + run_budget,
+        )
+        .await?;
+    governed_native_result(tool, v)
+}
+
+/// The native result of a governed envelope (see [`governed_native_write`]).
+/// Pure — unit-tested.
+fn governed_native_result(tool: &str, v: Value) -> Result<Value, String> {
+    let executed = v.get("executed").and_then(Value::as_bool) == Some(true);
+    let is_error = v.get("is_error").and_then(Value::as_bool) == Some(true);
+    match v.get("decision").and_then(Value::as_str) {
+        _ if executed && !is_error => Ok(v.get("content").cloned().unwrap_or(Value::Null)),
+        Some("pending_approval") | Some("dry_run") => Ok(v),
+        Some("denied") => Err(format!(
+            "{tool} denied: {}",
+            v.get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("refused by policy")
+        )),
+        _ => Err(v
+            .pointer("/content/error")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("{tool} failed: {v}"), str::to_string)),
+    }
+}
+
 /// [`UI_REQUEST_CONTROL_TOOL`]: run the read-only `otto.ui_state` through the
 /// governed path — the UI bridge raises the owner's "Allow UI control" prompt
 /// and waits briefly for the decision — then re-read the grant and, when it
@@ -4446,9 +4462,11 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
 /// (or `None` for a notification, which gets no reply).
 async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    // Notifications carry no `id` and MUST NOT be answered — nor executed:
+    // a notification-form `tools/call` would run a tool (possibly a writer)
+    // whose result nobody receives.
     let id = msg.get("id").cloned();
-    // Notifications carry no `id` and MUST NOT be answered.
-    let is_notification = id.is_none();
+    id.as_ref()?;
 
     match method {
         "initialize" => {
@@ -4578,7 +4596,6 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                 }
             }
         }
-        _ if is_notification => None,
         _ => Some(rpc_err(
             id.unwrap_or(Value::Null),
             -32601,
@@ -4742,6 +4759,66 @@ fn answered_inline(msg: &Value) -> bool {
     )
 }
 
+/// The longest request line the bridge buffers (8 MiB). A huge or newline-
+/// free input used to grow `read_line`'s buffer without limit; an over-long
+/// line is discarded up to its newline and answered with -32700.
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// What [`read_bounded_line`] read.
+#[derive(Debug, PartialEq)]
+enum BoundedLine {
+    /// A whole line (newline included) is in the buffer.
+    Line,
+    /// The line was over the cap — consumed and dropped; the buffer is empty.
+    TooLong,
+    /// End of input before any byte.
+    Eof,
+}
+
+/// `read_line` with a cap: buffers at most `max` bytes of one line, and
+/// past that keeps CONSUMING (without storing) up to the newline, so memory
+/// stays bounded whatever the peer sends.
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<BoundedLine> {
+    buf.clear();
+    let (mut any, mut too_long) = (false, false);
+    loop {
+        let avail = reader.fill_buf().await?;
+        if avail.is_empty() {
+            return Ok(match (any, too_long) {
+                (false, _) => BoundedLine::Eof,
+                (true, true) => BoundedLine::TooLong,
+                (true, false) => BoundedLine::Line,
+            });
+        }
+        any = true;
+        let (used, done) = match avail.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (avail.len(), false),
+        };
+        if !too_long {
+            if buf.len() + used > max {
+                too_long = true;
+                buf.clear();
+                buf.shrink_to_fit();
+            } else {
+                buf.extend_from_slice(&avail[..used]);
+            }
+        }
+        reader.consume(used);
+        if done {
+            return Ok(if too_long {
+                BoundedLine::TooLong
+            } else {
+                BoundedLine::Line
+            });
+        }
+    }
+}
+
 /// The JSON-RPC loop: read newline-delimited requests from `reader`, answer
 /// them on `writer`, until EOF.
 ///
@@ -4769,17 +4846,26 @@ where
     });
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CALLS));
     let mut inflight = tokio::task::JoinSet::new();
-    let mut line = String::new();
+    let mut buf = Vec::new();
     let result = loop {
-        line.clear();
-        let n = match reader.read_line(&mut line).await {
-            Ok(n) => n,
+        match read_bounded_line(&mut reader, &mut buf, MAX_LINE_BYTES).await {
+            Ok(BoundedLine::Line) => {}
+            Ok(BoundedLine::Eof) => break Ok(()), // the client closed the pipe.
+            Ok(BoundedLine::TooLong) => {
+                let _ = tx.send(rpc_err(
+                    Value::Null,
+                    -32700,
+                    format!("parse error: request line exceeds {MAX_LINE_BYTES} bytes"),
+                ));
+                continue;
+            }
             Err(e) => break Err(format!("read stdin: {e}")),
-        };
-        if n == 0 {
-            break Ok(()); // EOF: the client closed the pipe.
         }
         while inflight.try_join_next().is_some() {}
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            let _ = tx.send(rpc_err(Value::Null, -32700, "parse error: invalid UTF-8"));
+            continue;
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -4843,6 +4929,63 @@ async fn write_line<W: AsyncWrite + Unpin>(stdout: &mut W, value: &Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S5-20: an over-long line is dropped (to its newline) and the next one
+    /// still reads; memory never holds more than the cap.
+    #[tokio::test]
+    async fn bounded_lines_drop_an_oversized_line_and_continue() {
+        let input = format!("{}\n{{\"ok\":1}}\ntail", "x".repeat(100));
+        let mut r = BufReader::with_capacity(16, input.as_bytes());
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::TooLong
+        );
+        assert!(buf.capacity() <= 32);
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::Line
+        );
+        assert_eq!(buf, b"{\"ok\":1}\n");
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::Line
+        );
+        assert_eq!(buf, b"tail");
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf, 32).await.unwrap(),
+            BoundedLine::Eof
+        );
+    }
+
+    /// S5-07: a native irreversible writer's governed envelope maps back to
+    /// the native result — executed → the tool's content; pending → the
+    /// envelope (no error, the agent resubmits); denied / failed → an error.
+    #[test]
+    fn governed_native_results_map_back() {
+        let ok = governed_native_result(
+            "k8s_action",
+            json!({"decision":"allowed","executed":true,"content":{"ok":true}}),
+        );
+        assert_eq!(ok.unwrap(), json!({"ok":true}));
+        let pending = json!({"decision":"pending_approval","executed":false,"approval_id":"a1"});
+        assert_eq!(
+            governed_native_result("k8s_action", pending.clone()).unwrap(),
+            pending
+        );
+        let denied = governed_native_result(
+            "aws_sqs_send",
+            json!({"decision":"denied","executed":false,"reason":"human denied the request"}),
+        )
+        .unwrap_err();
+        assert!(denied.contains("human denied"), "{denied}");
+        let failed = governed_native_result(
+            "api_execute",
+            json!({"decision":"error","executed":true,"is_error":true,"content":{"error":"404"}}),
+        )
+        .unwrap_err();
+        assert_eq!(failed, "404");
+    }
 
     #[test]
     fn cap_rows_truncates_and_marks() {
@@ -5227,6 +5370,22 @@ mod tests {
         .unwrap();
         assert_eq!(resp["result"]["protocolVersion"], json!(PROTOCOL_VERSION));
         assert_eq!(resp["result"]["serverInfo"]["name"], json!("otto"));
+    }
+
+    /// S5-10: a notification-form `tools/call` (no `id`) is neither executed
+    /// nor answered — not even the argument check runs.
+    #[tokio::test]
+    async fn a_notification_tools_call_is_not_executed_or_answered() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "method": "tools/call",
+                    "params": { "name": "otto_api_execute", "arguments": {} } }),
+        )
+        .await;
+        assert!(resp.is_none(), "no reply to a notification: {resp:?}");
+        let resp = handle(&ctx, json!({ "jsonrpc": "2.0", "method": "ping" })).await;
+        assert!(resp.is_none());
     }
 
     #[tokio::test]
@@ -6438,7 +6597,7 @@ mod tests {
         }
         // The writers advertise themselves as mutating so an agent reads it
         // before calling.
-        for w in ["aws_athena_query", "aws_sqs_send"] {
+        for w in ["aws_athena_query", "aws_sqs_send", "aws_sqs_peek"] {
             let d = tools.iter().find(|x| x["name"] == w).unwrap()["description"]
                 .as_str()
                 .unwrap();
@@ -6540,7 +6699,7 @@ mod tests {
             .path,
             "/aws/accounts/a1/sqs/queues?prefix=orders"
         );
-        // Peek is the one read-only POST: visibility_timeout is pinned to 0 and
+        // Peek POSTs with visibility_timeout pinned to 0 and
         // `max` clamped into SQS's 1..10 window.
         let peek = read_route(
             "aws_sqs_peek",

@@ -419,7 +419,7 @@
             </div>
             <div class="repo-search">
               <Icon name="search" size={13} />
-              <input
+              <input dir="ltr"
                 class="repo-search-input"
                 type="search"
                 bind:value={repoFilter}
@@ -511,7 +511,7 @@
       <div class="field">
         <label for="ar-path">Path</label>
         <div class="path-row">
-          <input id="ar-path" class="input mono" bind:value={addPath} placeholder="/Users/you/code/repo" spellcheck="false" />
+          <input dir="ltr" id="ar-path" class="input mono" bind:value={addPath} placeholder="/Users/you/code/repo" spellcheck="false" />
           <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
         </div>
       </div>
@@ -536,7 +536,7 @@
         </div>
         <div class="field">
           <label for="ar-bq">Search repositories</label>
-          <input id="ar-bq" class="input" bind:value={browseQuery} oninput={scheduleRemoteSearch} placeholder="api-gateway" spellcheck="false" />
+          <input dir="auto" id="ar-bq" class="input" bind:value={browseQuery} oninput={scheduleRemoteSearch} placeholder="api-gateway" spellcheck="false" />
         </div>
         <div class="remote-list">
           {#if remoteLoading}
@@ -569,7 +569,7 @@
     {:else}
       <div class="field">
         <label for="ar-url">Clone URL</label>
-        <input id="ar-url" class="input mono" bind:value={addUrl} placeholder="git@github.com:org/repo.git" spellcheck="false" />
+        <input dir="ltr" id="ar-url" class="input mono" bind:value={addUrl} placeholder="git@github.com:org/repo.git" spellcheck="false" />
       </div>
       <div class="field">
         <label for="ar-acct">Git account <span class="dim">(for HTTPS auth)</span></label>
@@ -586,7 +586,7 @@
       <div class="field">
         <label for="ar-clonedir">Clone into</label>
         <div class="path-row">
-          <input
+          <input dir="ltr"
             id="ar-clonedir"
             class="input mono"
             bind:value={cloneDir}
@@ -602,7 +602,7 @@
     {#if addMode !== 'browse'}
       <div class="field">
         <label for="ar-name">Name <span class="dim">(optional)</span></label>
-        <input id="ar-name" class="input" bind:value={addName} />
+        <input dir="auto" id="ar-name" class="input" bind:value={addName} />
       </div>
     {/if}
 

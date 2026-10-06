@@ -31,7 +31,12 @@
   const origin = new URL(baseUrl()).origin;
   /** Display name: the manifest name once the nav list has it, else the slug. */
   const name = $derived(plugins.get(slug)?.name ?? slug);
-  const src = $derived(`${origin}/plugins/${slug}/ui/`);
+  /** Plugin slugs are plain identifiers. Anything else (`..`, `/`, `%2e`) is
+   *  never interpolated into a URL: `/plugins/../ui/` resolves to Otto's own
+   *  SPA (served 200), which would then load inside the frame and receive
+   *  `otto:init` with the viewer's token. */
+  const slugOk = $derived(/^[a-z][a-z0-9-]{0,63}$/.test(slug)); // = plugins.rs `valid_slug`
+  const src = $derived(`${origin}/plugins/${encodeURIComponent(slug)}/ui/`);
   let frame = $state<HTMLIFrameElement | undefined>();
 
   // 'missing' = the daemon has no UI for this slug (disabled, uninstalled or
@@ -47,6 +52,11 @@
     const url = src;
     probe = 'loading';
     frameLoaded = false;
+    if (!slugOk) {
+      probeError = null;
+      probe = 'missing';
+      return;
+    }
     try {
       // HEAD (V8): the probe only needs the status; a GET downloaded the whole
       // entry once here and again when the iframe loaded it. Axum answers HEAD
@@ -95,11 +105,12 @@
 
   function onload() {
     frameLoaded = true;
+    if (!slugOk) return;
     frame?.contentWindow?.postMessage(
       {
         type: 'otto:init',
         slug,
-        apiBase: `${baseUrl()}/api/v1/plugins/${slug}`,
+        apiBase: `${baseUrl()}/api/v1/plugins/${encodeURIComponent(slug)}`,
         token: getToken(),
         theme: themeVars(),
         scheme: ui.resolvedScheme,
@@ -128,11 +139,11 @@
   function onMessage(ev: MessageEvent) {
     const m = ev.data;
     if (!m || m.type !== 'otto:keydown' || typeof m.key !== 'string') return;
-    // Only accept from OUR plugin frame. Some webviews (Tauri/WKWebView)
-    // deliver iframe messages with `source === null`, so we can't require a
-    // strict source match — fall back to the same-origin check when it is.
-    const bySource = ev.source != null && ev.source === frame?.contentWindow;
-    if (!bySource && ev.origin !== origin) return;
+    // Only accept from OUR plugin frame, by window identity. An origin check
+    // is not enough: every plugin (and any other daemon-served document) shares
+    // the daemon origin, so it would let a different frame synthesize app
+    // shortcuts here. A message without a matching `source` is dropped.
+    if (!frame || ev.source == null || ev.source !== frame.contentWindow) return;
     // Re-dispatch as a real keydown so the shell's global key map (keys.ts,
     // capture-phase window listener) handles it exactly as if the app itself
     // were focused — an external plugin inherits every app shortcut.

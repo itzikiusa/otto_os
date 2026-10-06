@@ -42,6 +42,7 @@
   import { library } from '../library.svelte';
   import { asks } from './asks.svelte';
   import { acceptVariant, getLearned, listTurns, listVariantRuns } from './api';
+  import { interruptSession } from '../../../lib/api/interrupt';
   import { askError, sendAsk } from './run';
   import {
     QUICK_ACTIONS,
@@ -66,6 +67,7 @@
   } from './model';
   import TurnMessage from './TurnMessage.svelte';
   import VariantsTray from './VariantsTray.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
     artifact: DesignArtifact;
@@ -257,6 +259,23 @@
   const busy = $derived(!!running || !!runningRun);
   const versionOf = (id: string | null) => (id ? (versions.find((v) => v.id === id) ?? null) : null);
   const liveSession = $derived(running?.session_id ?? runningRun?.turns.find((t) => t.session_id && !isTerminal(t.status))?.session_id ?? null);
+
+  // Stop: interrupt the live turn's agent (Esc into its PTY) — the turn then
+  // settles through its normal status events; the session itself is kept.
+  let stopping = $state(false);
+  async function stopTurn(): Promise<void> {
+    const sid = liveSession;
+    if (!sid || stopping) return;
+    stopping = true;
+    try {
+      await interruptSession(sid);
+      toasts.info('Stopped Otto', 'The agent’s current turn was interrupted.');
+    } catch (e) {
+      toastError('Couldn’t stop Otto', e);
+    } finally {
+      stopping = false;
+    }
+  }
   const stale = $derived(events.state !== 'connected');
 
   // Context Otto is given besides the ask (the server builds it from links;
@@ -340,15 +359,28 @@
     });
   }
 
+  /** Turns whose conflict draft is being applied — a double-click (or a
+   *  second click during the confirm) must not create two forced versions. */
+  let applyingConflict = $state<ReadonlySet<string>>(new Set());
   async function applyConflict(turn: DesignAssistTurn): Promise<void> {
-    if (!turn.version_id) return;
+    if (!turn.version_id || applyingConflict.has(turn.turn_id)) return;
+    applyingConflict = new Set([...applyingConflict, turn.turn_id]);
+    try {
+      await applyConflictNow(turn, turn.version_id);
+    } finally {
+      const next = new Set(applyingConflict);
+      next.delete(turn.turn_id);
+      applyingConflict = next;
+    }
+  }
+  async function applyConflictNow(turn: DesignAssistTurn, versionId: string): Promise<void> {
     const ok = await confirmer.ask(
       `Apply Otto’s draft on top of ${head ? `v${head.seq}` : 'the current version'}? It becomes a new version; ${head ? `v${head.seq}` : 'the current version'} and everything before it stay in history.`,
       { title: 'Apply Otto’s draft', confirmLabel: 'Apply on top', danger: false },
     );
     if (!ok) return;
     try {
-      const res = await acceptVariant(artifact.id, turn.version_id, true);
+      const res = await acceptVariant(artifact.id, versionId, true);
       appliedNote = `Applied Otto’s draft as v${res.version.seq}.`;
       void loadRuns().catch(() => {});
     } catch (e) {
@@ -451,16 +483,17 @@
       <button class="picker" onclick={() => (pickerOpen = !pickerOpen)} aria-expanded={pickerOpen} title="Choose the agent for the next turn"
         data-testid="design-otto-agent">
         <strong>Otto</strong> <span class="dim">{effectiveProvider}{model ? ` · ${model}` : ''}</span>
-        <Icon name={pickerOpen ? 'chevronUp' : 'chevronDown'} size={11} />
+        <Icon name={pickerOpen ? 'chevronUp' : 'chevronDown'} size={12} />
       </button>
       <span class="grow"></span>
       {#if liveSession}
         <button class="linkbtn" onclick={() => openSession(liveSession!)} data-testid="design-otto-live">View live session</button>
+        <button class="linkbtn" onclick={() => void stopTurn()} disabled={stopping} aria-busy={stopping} data-testid="design-otto-stop"><Icon name="stop" size={12} /> {stopping ? 'Stopping…' : 'Stop'}</button>
       {/if}
     </div>
     <div class="state" role="status">
       {#if stale}
-        <span class="warnc"><Icon name="warning" size={11} /> Reconnecting — live updates paused</span>
+        <span class="warnc"><Icon name="warning" size={12} /> Reconnecting — live updates paused</span>
       {:else if running || runningRun}
         <LiveWorkingDot /> {runningRun && !running ? 'Drawing variants' : running?.status === 'starting' ? 'Starting' : 'Working'} on
         {head ? `v${head.seq}` : 'this design'}
@@ -487,11 +520,7 @@
     {#if phase === 'loading'}
       <Skeleton rows={3} height={48} />
     {:else if phase === 'error'}
-      <div class="inline-err" role="alert">
-        <Icon name="warning" size={14} />
-        <span>Couldn’t load Otto’s turns. <span class="dim">{loadError}</span></span>
-        <button class="btn small" onclick={() => void loadAll()}>Retry</button>
-      </div>
+      <LoadState variant="compact" what="Otto’s turns" error={loadError || 'No details were reported.'} empty onretry={() => void loadAll()} />
     {:else if thread.length === 0}
       <div class="intro">
         {#if brief}
@@ -529,7 +558,7 @@
             {#if ask}
               <div class="msg human">
                 <div class="who"><span class="av" aria-hidden="true">Y</span> <strong>You</strong></div>
-                {#if ask.selectionLabel}<span class="chip ctx"><Icon name="target" size={11} /> {ask.selectionLabel}</span>{/if}
+                {#if ask.selectionLabel}<span class="chip ctx"><Icon name="target" size={12} /> {ask.selectionLabel}</span>{/if}
                 <p class="bubble" title={ask.display && ask.display !== ask.prompt ? ask.prompt : undefined}>{ask.display ?? ask.prompt}</p>
               </div>
             {/if}
@@ -574,30 +603,30 @@
       <div class="ctx-chips" aria-label="Context Otto will see">
         {#if sel}
           <span class="chip ctx" data-testid="design-otto-selection">
-            <Icon name="target" size={11} /> <span class="ct" title={selLabel}>{selLabel}</span>
-            <button class="x" onclick={() => (useSelection = false)} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={10} /></button>
+            <Icon name="target" size={12} /> <span class="ct" title={selLabel}>{selLabel}</span>
+            <button class="x" onclick={() => (useSelection = false)} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={12} /></button>
           </span>
         {/if}
         {#if brandKit}
-          <span class="chip ctx" title="The brand kit is always part of Otto’s context brief"><Icon name="palette" size={11} /> <span class="ct">{brandKit.title}</span></span>
+          <span class="chip ctx" title="The brand kit is always part of Otto’s context brief"><Icon name="palette" size={12} /> <span class="ct">{brandKit.title}</span></span>
         {/if}
         {#each stories as s (s.link.id)}
-          <span class="chip ctx" title="The story this design implements is always part of the brief"><Icon name="ticket" size={11} /> <span class="ct">{s.label}</span></span>
+          <span class="chip ctx" title="The story this design implements is always part of the brief"><Icon name="ticket" size={12} /> <span class="ct">{s.label}</span></span>
         {/each}
         {#each refs.slice(0, 4) as r (r.link.id)}
-          <span class="chip ctx" title="Linked as a reference — Otto may cite it as [R…]"><Icon name="link" size={11} /> <span class="ct">{r.label}</span></span>
+          <span class="chip ctx" title="Linked as a reference — Otto may cite it as [R…]"><Icon name="link" size={12} /> <span class="ct">{r.label}</span></span>
         {/each}
         {#if refs.length > 4}<span class="chip ctx">+{refs.length - 4} references</span>{/if}
       </div>
       <div class="quick scroll-thin" role="group" aria-label="Quick actions">
         {#each QUICK_ACTIONS as q (q.id)}
           <button class="chip as-btn" disabled={busy || sending} title={q.hint} onclick={() => quick(q.id)} data-testid={`design-quick-${q.id}`}>
-            <Icon name={asIcon(q.icon)} size={11} /> {q.label}
+            <Icon name={asIcon(q.icon)} size={12} /> {q.label}
           </button>
         {/each}
       </div>
       <div class="box">
-        <textarea
+        <textarea dir="auto"
           class="input"
           rows="2"
           bind:value={text}
@@ -721,16 +750,6 @@
     background: var(--surface-2);
     border-radius: var(--radius-s);
     white-space: pre-wrap;
-  }
-  .inline-err {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .inline-err > :global(svg) {
-    color: var(--danger);
   }
   .exchange {
     display: flex;

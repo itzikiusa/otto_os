@@ -5,6 +5,7 @@
   // recomposed file (context + chosen lines), with "conflict k of m" navigation
   // that scrolls the hunk list. When every conflict has a choice the file can
   // be "marked resolved" — we recompose the full file text and POST it.
+  import { scrollBehavior } from '../../lib/motion';
   import type { ConflictFile, ConflictSegment } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
   import { git } from '../../lib/stores/git.svelte';
@@ -15,6 +16,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import ConflictHunk from './ConflictHunk.svelte';
+  import { fileIsCrlf, markAction } from './conflictEdit';
 
   interface Props {
     repoId: string;
@@ -86,6 +88,14 @@
   );
   const decidedCount = $derived(choices.filter((c) => c !== null).length);
   const allDecided = $derived(conflictCount > 0 && decidedCount === conflictCount);
+  /** Markable: every conflict decided (`compose`) — or a readable text file
+   *  with NO markers left, fixed by hand (`keep`: stage its bytes as-is). A
+   *  binary or absent working file is never markable: its segments are empty
+   *  and the recomposition was `""` (S15-301) — it resolves by taking a side. */
+  const mark = $derived(markAction(file, conflictCount, decidedCount));
+  const canMark = $derived(mark !== null);
+  /** The file's line endings, for hunks whose own sides can't tell (S15-308). */
+  const crlfFile = $derived(file ? fileIsCrlf(file.segments) : false);
 
   function setChoice(ordinal: number, lines: string[] | null): void {
     if (choices[ordinal] === lines) return;
@@ -104,7 +114,7 @@
     if (conflictCount === 0) return;
     const next = ((ord % conflictCount) + conflictCount) % conflictCount;
     current = next;
-    hunkEls[next]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    hunkEls[next]?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
   }
 
   // ── Output preview ──────────────────────────────────────────────────────────
@@ -187,7 +197,8 @@
   }
 
   async function markResolved(): Promise<void> {
-    if (!file || !allDecided || saving) return;
+    if (!file || !canMark || saving) return;
+    if (mark === 'keep') return takeSide('keep');
     saving = true;
     try {
       const content = composeContent();
@@ -213,9 +224,13 @@
     {/if}
     <button
       class="btn small primary"
-      disabled={!allDecided || saving}
+      disabled={!canMark || saving}
       onclick={markResolved}
-      title={allDecided ? 'Mark this file resolved' : 'Resolve every conflict first'}
+      title={canMark
+        ? 'Mark this file resolved'
+        : file && (file.is_binary || !file.worktree_present)
+          ? 'Choose a whole side or delete the file above'
+          : 'Resolve every conflict first'}
     >
       {saving ? 'Saving…' : 'Mark file resolved'}
     </button>
@@ -254,6 +269,7 @@
                 {path}
                 {oursLabel}
                 {theirsLabel}
+                fileCrlf={crlfFile}
                 onresolve={(lines) => setChoice(ord, lines)}
               />
             </div>
@@ -261,7 +277,11 @@
         {/each}
         {#if conflictCount === 0}
           <div class="dim" style="padding: 16px; font-size: var(--fs-s)">
-            No conflict markers in this file. Mark it resolved to continue.
+            {#if file.worktree_present}
+              No conflict markers in this file. Mark it resolved to continue.
+            {:else}
+              This file is deleted in the working tree — take a side or delete it above.
+            {/if}
           </div>
         {/if}
       {/if}
@@ -314,7 +334,7 @@
               {/if}
             {:else}
               <button class="out-unresolved" onclick={() => goTo(seg.ord)} title="Jump to conflict {seg.ord + 1}">
-                <Icon name="merge" size={11} />
+                <Icon name="merge" size={12} />
                 conflict {seg.ord + 1} — unresolved
               </button>
             {/if}

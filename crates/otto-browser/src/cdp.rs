@@ -38,6 +38,35 @@ pub enum CdpError {
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
+/// Removes a call's `pending` entry when the call ends — however it ends: a
+/// reply (the reader already took it: a no-op), a timeout, a send failure,
+/// or the caller's future being DROPPED mid-wait (page request aborted, route
+/// future cancelled), which used to leak the entry for the connection's life.
+struct PendingGuard {
+    pending: PendingMap,
+    id: u64,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let id = self.id;
+        match self.pending.try_lock() {
+            Ok(mut map) => {
+                map.remove(&id);
+            }
+            // Contended (the reader is delivering): remove it off-thread.
+            Err(_) => {
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    let pending = self.pending.clone();
+                    rt.spawn(async move {
+                        pending.lock().await.remove(&id);
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// One WebSocket connection to a lightpanda CDP endpoint, with a background
 /// reader task that demuxes command replies (by `id`) from events.
 ///
@@ -126,19 +155,29 @@ impl CdpClient {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        let _entry = PendingGuard {
+            pending: self.pending.clone(),
+            id,
+        };
 
         let mut frame = json!({"id": id, "method": method, "params": params});
         if let Some(sid) = session_id {
             frame["sessionId"] = json!(sid);
         }
-        self.out
+        if self
+            .out
             .send(Message::Text(frame.to_string().into()))
-            .map_err(|_| CdpError::Closed)?;
+            .is_err()
+        {
+            return Err(CdpError::Closed); // `_entry` drops the pending entry
+        }
 
-        let resp = tokio::time::timeout(Duration::from_secs(PAGE_TIMEOUT_SECS), rx)
-            .await
-            .map_err(|_| CdpError::Timeout(method.to_string()))?
-            .map_err(|_| CdpError::Closed)?;
+        let resp = match tokio::time::timeout(Duration::from_secs(PAGE_TIMEOUT_SECS), rx).await {
+            Ok(r) => r.map_err(|_| CdpError::Closed)?,
+            // No reply will ever be awaited for this id: `_entry` drops its
+            // sender, or every timed-out call would leak a `pending` entry.
+            Err(_) => return Err(CdpError::Timeout(method.to_string())),
+        };
         if let Some(err) = resp.get("error") {
             return Err(CdpError::Protocol(err.to_string()));
         }
@@ -926,6 +965,29 @@ impl BrowserEngine for LightpandaEngine {
 
     fn is_usable(&self) -> bool {
         self.interception_ok()
+    }
+}
+
+#[cfg(test)]
+mod pending_guard_tests {
+    use super::*;
+
+    /// S5-21: a call future dropped mid-wait leaves no `pending` entry.
+    #[tokio::test]
+    async fn a_dropped_call_leaves_no_pending_entry() {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let p = pending.clone();
+        let call = async move {
+            let (tx, rx) = oneshot::channel::<Value>();
+            p.lock().await.insert(7, tx);
+            let _entry = PendingGuard {
+                pending: p.clone(),
+                id: 7,
+            };
+            let _ = rx.await; // never answered
+        };
+        let _ = tokio::time::timeout(Duration::from_millis(50), call).await;
+        assert!(pending.lock().await.is_empty(), "entry removed on drop");
     }
 }
 

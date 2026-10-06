@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../lib/rowMenu';
   import { plural } from '../lib/plural';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
@@ -791,7 +792,7 @@
     {#if !ui.sidebarEditMode}
       <div class="nav-search">
         <Icon name="search" size={12} />
-        <input
+        <input dir="ltr"
           class="nav-search-input"
           placeholder="Filter sessions…"
           aria-label="Filter sessions"
@@ -806,7 +807,7 @@
         />
         {#if sessionQuery}
           <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search" title="Clear search">
-            <Icon name="x" size={11} />
+            <Icon name="x" size={12} />
           </button>
         {/if}
       </div>
@@ -817,10 +818,11 @@
         <button
           class="needs-you-filter"
           class:active={ws.needsYouFilter}
+          aria-pressed={ws.needsYouFilter}
           onclick={() => (ws.needsYouFilter = !ws.needsYouFilter)}
           title="Show only sessions waiting on you"
         >
-          <Icon name="bell" size={11} />
+          <Icon name="bell" size={12} />
           <span class="grow">Needs you</span>
           {#if ws.needsYouCount > 0}
             <span class="needs-you-count">{ws.needsYouCount}</span>
@@ -873,7 +875,7 @@
             {#if secMovable}
               <span class="grip sec-grip" title="Drag to reorder sections" aria-hidden="true"><Icon name="grip" size={12} /></span>
             {/if}
-            <button
+            <button use:rowMenu
               class="group-head"
               class:pinned
               aria-expanded={open}
@@ -883,12 +885,12 @@
               data-testid={`sidebar-group-head-${sec.group.id}`}
             >
               <span class="group-label">{sec.group.label}</span>
-              {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={11} /></span>{/if}
+              {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={12} /></span>{/if}
               {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
                 <span class="count-chip working" title="Working sessions">{ws.workingCount}</span>
               {/if}
               {#if !pinned}
-                <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+                <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               {/if}
             </button>
             {#if secMovable}
@@ -942,7 +944,7 @@
       {#if showWsFilter}
         <div class="nav-search ws-filter">
           <Icon name="search" size={12} />
-          <input
+          <input dir="ltr"
             class="nav-search-input"
             placeholder="Filter workspaces…"
             aria-label="Filter workspaces"
@@ -952,7 +954,7 @@
           />
           {#if wsQuery}
             <button class="search-clear" onclick={() => (wsQuery = '')} aria-label="Clear workspace filter" title="Clear workspace filter">
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           {/if}
         </div>
@@ -961,7 +963,7 @@
         <div class="nested-empty">No matching workspaces</div>
       {/if}
       {#each fWorkspaces as w (w.id)}
-        <button
+        <button use:rowMenu
           class="nav-item"
           class:active-ws={ws.currentId === w.id}
           onclick={() => ws.select(w.id)}
@@ -1066,7 +1068,7 @@
 {/snippet}
 
 {#snippet simpleRow(m: SidebarModule)}
-  <button
+  <button use:rowMenu
     class="nav-item"
     class:active={isActive(m.id)}
     aria-current={isActive(m.id) ? 'page' : undefined}
@@ -1093,7 +1095,7 @@
 {#snippet editRow(m: SidebarModule, first: boolean, last: boolean)}
   {@const fav = isFav(m.id)}
   <!-- Drag is the pointer path (presentation); the row’s ↑/↓ buttons and ⌥↑/⌥↓ reorder from the keyboard. -->
-  <div
+  <div use:rowMenu
     role="presentation"
     class="edit-row"
     class:hidden-row={isHidden(m.id)}
@@ -1172,7 +1174,7 @@
     class:drop-after={dragOverId === m.id && dropSide === 'after'}
     class:dragging={dragId === m.id}
   >
-    <button
+    <button use:rowMenu
       class="nav-item"
       class:active={router.module === 'agents' || router.module === ''}
       aria-current={router.module === 'agents' || router.module === '' ? 'page' : undefined}
@@ -1265,9 +1267,9 @@
         aria-label={`Current workspace: ${ws.current.name}. Switch workspace`}
         data-testid="agents-current-ws"
       >
-        <Icon name="folder" size={11} />
+        <Icon name="folder" size={12} />
         <span class="ellipsis">{ws.current.name}</span>
-        <Icon name="chevronDown" size={10} />
+        <Icon name="chevronDown" size={12} />
       </button>
     {/if}
     {#if q ? fAgents.length > 0 : agentsOpen}
@@ -1279,10 +1281,10 @@
               <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
             </label>
             <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
-              <Icon name="archive" size={11} /><span>Archive</span>
+              <Icon name="archive" size={12} /><span>Archive</span>
             </button>
             <button class="row-action danger arch-del-sel" disabled={agentSelIds.length === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="agents-delete-selected" onclick={() => void deleteSelectedAgents()}>
-              <Icon name="trash" size={11} /><span>Delete</span>
+              <Icon name="trash" size={12} /><span>Delete</span>
             </button>
           </div>
         {/if}
@@ -1299,7 +1301,7 @@
          already in `ws.sessions`, so open / rename / archive work as above. -->
     {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
       <!-- Right-click is a pointer shortcut (⌘T → “No workspace” is the keyboard path). -->
-      <div
+      <div use:rowMenu
         role="presentation"
         class="ws-group-label"
         title="Sessions not tied to any workspace"
@@ -1308,7 +1310,7 @@
           { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
       >
-        <Icon name="home" size={11} />
+        <Icon name="home" size={12} />
         <span class="ellipsis">No workspace</span>
       </div>
       <div class="nested">
@@ -1328,7 +1330,7 @@
         {@const rows = g.sessions.filter(matches)}
         {#if rows.length > 0}
           <div class="ws-group-label" title="Sessions in workspace “{g.ws.name}”">
-            <Icon name="folder" size={11} />
+            <Icon name="folder" size={12} />
             <span class="ellipsis">{g.ws.name}</span>
           </div>
           <div class="nested">
@@ -1415,7 +1417,7 @@
         {#if ws.archivedLoaded}
           <span class="count-chip">{ws.archivedSessions.length}{ws.archivedHasMore ? '+' : ''}</span>
         {/if}
-        <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+        <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
       {#if archivedOpen}
         <div class="nested">
@@ -1426,7 +1428,7 @@
                 <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
               </label>
               <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
-                <Icon name="trash" size={11} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
+                <Icon name="trash" size={12} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
               </button>
             </div>
           {/if}
@@ -1436,7 +1438,7 @@
                 <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
               {/if}
               <!-- Right-click is a pointer shortcut for the Restore / Delete buttons in the row. -->
-              <div
+              <div use:rowMenu
                 role="presentation"
                 class="nav-item nested-item archived"
                 title={s.title}
@@ -1460,10 +1462,10 @@
               </div>
               {#if ws.canEditSession(s)}
                 <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
-                  <Icon name="refresh" size={11} />
+                  <Icon name="refresh" size={12} />
                 </button>
                 <button class="row-action danger" title="Delete" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
-                  <Icon name="trash" size={11} />
+                  <Icon name="trash" size={12} />
                 </button>
               {/if}
             </div>
@@ -1513,7 +1515,7 @@
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
     {#if renamingId === s.id}
-      <input
+      <input dir="auto" aria-label="Rename session"
         class="nav-rename"
         bind:value={draft}
         use:focusOnMount
@@ -1524,7 +1526,7 @@
         }}
       />
     {:else}
-      <button
+      <button use:rowMenu
         class="nav-item nested-item"
         class:active={!otherWs && router.module === 'agents' && ws.activeSessionId === s.id}
         class:resumable
@@ -1546,7 +1548,7 @@
             ...(s.kind === 'agent' && (status === 'running' || status === 'working')
               ? [{ label: 'Restart session', icon: 'refresh', action: () => void restartAgent(s.id) }]
               : []),
-            { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
+            { label: 'Archive', icon: 'archive', action: () => void ws.requestArchive(s.id).catch((e: unknown) => toastError('Couldn’t archive the session', e)) },
             { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
           ] : []),
           { separator: true },
@@ -1561,7 +1563,7 @@
              hover / the active row so the list stays scannable. -->
         {#if resumable}
           <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-            <Icon name="refresh" size={10} />
+            <Icon name="refresh" size={12} />
           </span>
         {:else}
           <StatusDot state={st} />
@@ -1569,7 +1571,7 @@
         <span class="grow ellipsis">{s.title}</span>
         {#if st.key === 'needs-you'}
           <span class="needs-you-dot" role="img" title="Waiting on you" aria-label="Needs you">
-            <Icon name="bell" size={10} />
+            <Icon name="bell" size={12} />
           </span>
         {/if}
         {#if (sum && sum.total > 0) || proofRow}
@@ -1657,7 +1659,7 @@
     flex-shrink: 0;
   }
   .nav-head :global(.icon-btn:disabled) {
-    opacity: 0.3;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .nav-title {
@@ -1855,7 +1857,7 @@
     }
   }
   .group-head-row .row-action:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .sec-grip {
@@ -1963,7 +1965,7 @@
   .edit-row:focus-within .row-action.mv:disabled,
   .group-head-row:hover .row-action.mv:disabled,
   .group-head-row:focus-within .row-action.mv:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
   }
   @media (hover: none) {
     .edit-row .row-action.mv,
@@ -1973,7 +1975,7 @@
     }
     .edit-row .row-action.mv:disabled,
     .group-head-row .row-action.mv:disabled {
-      opacity: 0.25;
+      opacity: var(--disabled-opacity);
     }
   }
   .edit-row:hover {
@@ -2031,7 +2033,7 @@
     opacity: 1;
   }
   .edit-row .row-action:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .nested {
@@ -2200,7 +2202,7 @@
     padding: 0 6px; flex-shrink: 0; opacity: 1;
     border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap;
   }
-  .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
+  .arch-tools .row-action:disabled { opacity: var(--disabled-opacity); cursor: default; }
   .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
   .nav-item.subtle {
     color: var(--text-dim);

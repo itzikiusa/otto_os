@@ -54,17 +54,24 @@
   async function loadRepos(id: string): Promise<void> {
     reposLoading = true;
     try {
-      repos = await api.get<Repo[]>(`/workspaces/${id}/repos`);
+      const list = await api.get<Repo[]>(`/workspaces/${id}/repos`);
+      if (id !== wsId) return; // a newer workspace's load owns the list
+      repos = list;
+      // A pick that isn't one of THIS workspace's repos must never launch.
+      if (repoId && !list.some((r) => r.id === repoId)) repoId = '';
       reposError = '';
     } catch (e) {
-      reposError = loadErrorText(e);
+      if (id === wsId) reposError = loadErrorText(e);
     } finally {
-      reposLoading = false;
+      if (id === wsId) reposLoading = false;
     }
   }
   $effect(() => {
     const id = wsId;
     repos = [];
+    // The previous workspace's repo pick would otherwise survive the switch
+    // (blank select) and launch a run in another workspace's repository.
+    repoId = '';
     void loadRepos(id);
   });
 
@@ -170,7 +177,9 @@
         mode,
         provider: effectiveProvider,
         model: model.trim() || undefined,
-        repo_id: repoId || undefined,
+        // Only a repo of the workspace being launched in (belt and braces —
+        // the daemon rejects a foreign repo too).
+        repo_id: repoId && repos.some((r) => r.id === repoId) ? repoId : undefined,
       });
       query = '';
       detected = null;
@@ -220,7 +229,7 @@
     <span class="src-free">…or just describe what you want</span>
   </div>
 
-  <textarea
+  <textarea dir="auto"
     class="big-input"
     bind:this={inputEl}
     bind:value={query}

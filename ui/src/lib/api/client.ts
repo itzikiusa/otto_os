@@ -22,7 +22,7 @@ import type {
   ReviewProofPack,
   ReviewProofPackExport,
 } from './types';
-import { apiComponent, startMeasurement } from '../telemetry';
+import { apiComponent, clientSpanName, startMeasurement } from '../telemetry';
 import { serviceHealth } from '../stores/serviceHealth.svelte';
 import { inheritedLane, type Lane } from './lane';
 
@@ -72,8 +72,43 @@ function defaultBase(): string {
   return location.origin;
 }
 
+/** sessionStorage key of THIS tab's impersonation bearer (S13-303). It used
+ *  to overwrite the shared `localStorage.otto_token`, so every other window
+ *  and tab silently started acting as the impersonated user while still
+ *  rendering the admin. Per tab, like the admin token it overlays. */
+const IMP_TOKEN_KEY = 'otto_imp_token';
+let impTokenMem: string | null = null;
+
+function sessionItem(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** This tab's impersonation bearer, or null when not impersonating. */
+export function getImpersonationToken(): string | null {
+  return impTokenMem ?? sessionItem(IMP_TOKEN_KEY);
+}
+
+/** Start (token) or end (null) THIS tab's impersonation. Never touches the
+ *  shared `otto_token`, so other windows keep their own identity. */
+export function setImpersonationToken(token: string | null): void {
+  impTokenMem = token;
+  try {
+    if (token === null) sessionStorage.removeItem(IMP_TOKEN_KEY);
+    else sessionStorage.setItem(IMP_TOKEN_KEY, token);
+  } catch {
+    /* blocked storage: the in-memory copy still drives this document */
+  }
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('otto:auth-changed'));
+}
+
+/** The bearer every request sends: this tab's impersonation token when one is
+ *  active, else the shared sign-in token. */
 export function getToken(): string | null {
-  return storedItem('otto_token');
+  return getImpersonationToken() ?? storedItem('otto_token');
 }
 
 export function setToken(token: string | null): void {
@@ -280,10 +315,12 @@ export async function laneFetch(lane: Lane, path: string, init: RequestInit = {}
     init = { ...init, headers };
   }
   let status = 0;
+  let route: string | null = null;
   try {
     const resp = await fetch(`${base}/api/v1${path}`, init);
     if (base !== baseUrl()) altRetryMs = ALT_RETRY_MIN_MS;
     status = resp.status;
+    route = resp.headers.get('x-otto-route');
     return resp;
   } catch (e) {
     if (base === baseUrl() || isAbortError(e)) throw e;
@@ -292,10 +329,51 @@ export async function laneFetch(lane: Lane, path: string, init: RequestInit = {}
     if (method !== 'GET' && method !== 'HEAD') throw e;
     const resp = await fetch(`${baseUrl()}/api/v1${path}`, init);
     status = resp.status;
+    route = resp.headers.get('x-otto-route');
     return resp;
   } finally {
-    measured?.finish(status > 0 && status < 400 ? 'ok' : 'error', { 'http.request.method': (init.method ?? 'GET').toUpperCase(), ...(status ? { 'http.response.status_code': status } : {}), 'otto.lane': lane });
+    const method = (init.method ?? 'GET').toUpperCase();
+    measured?.finish(status > 0 && status < 400 ? 'ok' : 'error', { 'http.request.method': method, ...(status ? { 'http.response.status_code': status } : {}), 'otto.lane': lane }, clientSpanName(method, route));
   }
+}
+
+/** Default deadline for an `int` / `bg` READ (S13-05). Without one, a daemon
+ *  that accepted the connection but stalled (runtime lag, sleep/wake, a
+ *  wedged handler) left the promise pending forever: pollers with an
+ *  in-flight guard never ticked again and spinners spun until a reload.
+ *  Writes get none (a timed-out write may still have been applied — a retry
+ *  could duplicate it), nor does the `long` lane (slow by design) or a
+ *  stream (`laneFetch` direct callers). */
+export const READ_DEADLINE_MS = 20_000;
+
+/** `caller` combined with a `ms` deadline. `timedOut()` tells the deadline
+ *  apart from the caller's own abort; `done()` clears the timer. */
+export function withDeadline(
+  ms: number,
+  caller?: AbortSignal,
+): { signal: AbortSignal; timedOut: () => boolean; done: () => void } {
+  const ctl = new AbortController();
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+    ctl.abort(new DOMException('The request timed out.', 'TimeoutError'));
+  }, ms);
+  const onAbort = (): void => ctl.abort(caller?.reason);
+  if (caller?.aborted) ctl.abort(caller.reason);
+  else caller?.addEventListener('abort', onAbort, { once: true });
+  return {
+    signal: ctl.signal,
+    timedOut: () => fired && !caller?.aborted,
+    done: () => {
+      clearTimeout(timer);
+      caller?.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+/** The ApiError a deadline expiry surfaces as (status 0, code `timeout`). */
+function timeoutError(): ApiError {
+  return new ApiError(0, { code: 'timeout', message: 'The Otto daemon didn’t answer in time.' } as Problem);
 }
 
 function resolveLane(path: string, signal: AbortSignal | undefined, lane: Lane | undefined): Lane {
@@ -303,6 +381,61 @@ function resolveLane(path: string, signal: AbortSignal | undefined, lane: Lane |
 }
 
 async function request<T>(
+  method: string,
+  path: string,
+  body: unknown,
+  signal: AbortSignal | undefined,
+  lane: Lane,
+  cond?: ConditionalOpts,
+): Promise<T> {
+  const isRead = method === 'GET' || method === 'HEAD';
+  if (!isRead || lane === 'long') return requestOnce<T>(method, path, body, signal, lane, cond);
+  const deadline = withDeadline(READ_DEADLINE_MS, signal);
+  try {
+    return await requestOnce<T>(method, path, body, deadline.signal, lane, cond);
+  } catch (e) {
+    if (deadline.timedOut()) throw timeoutError();
+    throw e;
+  } finally {
+    deadline.done();
+  }
+}
+
+/** Shared auth + 401 + provider-health handling for every daemon call that
+ *  goes through `fetch` (S13-10): the JSON `request` and the raw helpers
+ *  (text / blob / ndjson). Returns the Response when it is OK; throws the
+ *  parsed Problem as an `ApiError` otherwise. */
+async function rawRequest(
+  lane: Lane,
+  path: string,
+  init: { method?: string; body?: BodyInit | null; contentType?: string; accept?: string; signal?: AbortSignal; headers?: Record<string, string> } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = { ...(init.headers ?? {}) };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (init.contentType) headers['Content-Type'] = init.contentType;
+  if (init.accept) headers['Accept'] = init.accept;
+  const resp = await laneFetch(lane, path, { method: init.method ?? 'GET', headers, body: init.body, signal: init.signal });
+  if (isProviderPath(path)) serviceHealth.report(resp.status);
+  if (resp.status === 401 && token && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: { token } }));
+  }
+  if (!resp.ok) throw await problemOf(resp);
+  return resp;
+}
+
+/** The `ApiError` for a non-OK response (JSON Problem body, else statusText). */
+async function problemOf(resp: Response): Promise<ApiError> {
+  let problem: Problem = { code: 'internal', message: resp.statusText };
+  try {
+    problem = await resp.json();
+  } catch {
+    // non-JSON error body — keep statusText
+  }
+  return new ApiError(resp.status, problem);
+}
+
+async function requestOnce<T>(
   method: string,
   path: string,
   body: unknown,
@@ -340,15 +473,7 @@ async function request<T>(
     if (resp.status === 304) return undefined as T;
   }
 
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  if (!resp.ok) throw await problemOf(resp);
 
   // Accepted responses may carry a job/review object. Only an actually empty
   // successful body is void; an empty error must still reject above.
@@ -581,18 +706,11 @@ export function isAbortError(e: unknown): boolean {
 
 /**
  * Fetch a text resource (e.g. a `text/markdown` report) from /api/v1<path> with
- * the stored Bearer token. Throws `ApiError` on a non-2xx response.
+ * the stored Bearer token. Throws `ApiError` on a non-2xx response; a 401
+ * sends the user back to login like any `api.*` call (via `rawRequest`).
  */
 export async function authedText(path: string): Promise<string> {
-  const token = getToken();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { headers });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try { problem = await resp.json(); } catch { /* non-JSON error body */ }
-    throw new ApiError(resp.status, problem);
-  }
-  return resp.text();
+  return (await rawRequest('int', path)).text();
 }
 
 /**
@@ -601,37 +719,16 @@ export async function authedText(path: string): Promise<string> {
  * URL.revokeObjectURL() when done (e.g. on component unmount).
  */
 export async function authedBlobUrl(path: string): Promise<string> {
-  const token = getToken();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { headers });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try { problem = await resp.json(); } catch { /* non-JSON error body */ }
-    throw new ApiError(resp.status, problem);
-  }
-  return URL.createObjectURL(await resp.blob());
+  return URL.createObjectURL(await (await rawRequest('int', path)).blob());
 }
 
 /**
  * POST a raw binary body (e.g. an `image/png` Blob) to /api/v1<path> and parse
  * the JSON reply. Skips JSON/base64 framing entirely — a 15 MB PNG goes over
- * the wire as 15 MB, not ~20 MB of base64 inside a JSON string. Mirrors
- * `postForText`'s auth + error handling.
+ * the wire as 15 MB, not ~20 MB of base64 inside a JSON string.
  */
 export async function postBlob<T>(path: string, body: Blob, contentType: string): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': contentType };
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { method: 'POST', headers, body });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  const resp = await rawRequest('int', path, { method: 'POST', body, contentType });
   return (await resp.json()) as T;
 }
 
@@ -640,32 +737,18 @@ export async function postBlob<T>(path: string, body: Blob, contentType: string)
  * response body as text. For download/export endpoints that reply with a
  * non-JSON body (e.g. `text/csv`) — which the JSON-parsing `request()` helper
  * cannot read (it would `resp.json()` the CSV and throw a SyntaxError).
- * Mirrors `authedBlobUrl`'s error handling; skips `serviceHealth.report` for the
- * same reason `request()` does on infra paths.
  */
 export async function postForText(
   path: string,
   body: unknown,
   signal?: AbortSignal,
 ): Promise<string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, {
+  const resp = await rawRequest('int', path, {
     method: 'POST',
-    headers,
     body: JSON.stringify(body),
+    contentType: 'application/json',
     signal,
   });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
   return resp.text();
 }
 
@@ -673,8 +756,7 @@ export async function postForText(
  * POST a JSON body to /api/v1<path> and read a streamed NDJSON response,
  * invoking `onLine` for each parsed JSON line as it arrives. For long-running
  * endpoints that emit incremental progress (e.g. the streaming DB export) so the
- * caller can drive a progress bar and the connection never idles out. Mirrors
- * `postForText`'s auth + error handling.
+ * caller can drive a progress bar and the connection never idles out.
  */
 export async function postNdjsonStream(
   path: string,
@@ -682,26 +764,15 @@ export async function postNdjsonStream(
   onLine: (obj: unknown) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
   // DB export-to-path / import run for minutes: the long lane (alias host),
   // never one of the six interactive sockets.
-  const resp = await laneFetch('long', path, {
+  const resp = await rawRequest('long', path, {
     method: 'POST',
-    headers,
     body: JSON.stringify(body),
+    contentType: 'application/json',
     signal,
   });
-  if (!resp.ok || !resp.body) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  if (!resp.body) throw new ApiError(resp.status, { code: 'internal', message: 'empty response stream' } as Problem);
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -919,12 +990,14 @@ export function exportProofPack(
   return api.post<ReviewProofPackExport>(`/reviews/${reviewId}/proof-pack/export`, { format });
 }
 
-/** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */
+/** Build a daemon WS URL, e.g. wsUrl('/ws/term/SESSION_ID'). It never carries
+ *  the token: the daemon accepts the bearer ONLY in the `otto-bearer`
+ *  subprotocol (S11-312) — open it with {@link wsConnect}, or pass
+ *  `[WS_BEARER_SUBPROTOCOL, token]` yourself for a non-stored token. */
 export function wsUrl(path: string): string {
   const base = new URL(baseUrl());
   const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = getToken() ?? '';
-  return `${proto}//${base.host}${path}?token=${encodeURIComponent(token)}`;
+  return `${proto}//${base.host}${path}`;
 }
 
 /** Fixed first subprotocol paired with the bearer token on auth-by-subprotocol
@@ -934,8 +1007,8 @@ export const WS_BEARER_SUBPROTOCOL = 'otto-bearer';
 
 /**
  * Open a WebSocket whose bearer token travels in the `Sec-WebSocket-Protocol`
- * header instead of the `?token=` query string — the URL (and the token) then
- * never lands in access logs. The browser offers `[WS_BEARER_SUBPROTOCOL, token]`;
+ * header — the only place the daemon accepts it (a `?token=` query is refused),
+ * so the token never lands in access logs. The browser offers `[WS_BEARER_SUBPROTOCOL, token]`;
  * the daemon validates the token and echoes `WS_BEARER_SUBPROTOCOL` back.
  *
  * Tokens are not valid `Sec-WebSocket-Protocol` values if they contain spaces or

@@ -654,16 +654,35 @@ impl ScheduledTasksRepo {
 
     /// Mark every still-`running` run as `error` — called once at scheduler start
     /// to clear zombie rows left by a daemon restart. Returns the count.
+    ///
+    /// A workflow hand-off (`workflow_run_id` set) is NOT reaped: the workflow
+    /// itself survives the restart (boot recovery resumes or settles it), so
+    /// the engine re-attaches a waiter instead and records its REAL outcome
+    /// (S3-303) — see [`Self::list_running_workflow_handoffs`].
     pub async fn reap_running(&self) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE scheduled_task_runs SET status = 'error', \
-             error = 'interrupted by daemon restart', finished_at = ? WHERE status = 'running'",
+             error = 'interrupted by daemon restart', finished_at = ? \
+             WHERE status = 'running' AND workflow_run_id IS NULL",
         )
         .bind(fmt(Utc::now()))
         .execute(&self.pool)
         .await
         .map_err(dberr("reap running scheduled task runs"))?;
         Ok(res.rows_affected())
+    }
+
+    /// `running` rows that handed off to a workflow run — left alone by
+    /// [`Self::reap_running`] so boot can re-attach their waiters (S3-303).
+    pub async fn list_running_workflow_handoffs(&self) -> Result<Vec<ScheduledTaskRun>> {
+        let rows = sqlx::query(
+            "SELECT * FROM scheduled_task_runs WHERE status = 'running' \
+             AND workflow_run_id IS NOT NULL ORDER BY started_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("list running workflow hand-offs"))?;
+        rows.iter().map(row_to_run).collect()
     }
 }
 
@@ -937,9 +956,27 @@ mod tests {
             })
             .await
             .unwrap();
+        // S3-303: a workflow hand-off survives the reap (its waiter is
+        // re-attached at boot instead).
+        let handoff = repo
+            .create_run(NewRun {
+                task_id: t.id.clone(),
+                workspace_id: "ws1".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        repo.set_run_workflow_run(&handoff.id, "wf-run-1")
+            .await
+            .unwrap();
         let n = repo.reap_running().await.unwrap();
         assert_eq!(n, 1);
         assert_eq!(repo.get_run(&r.id).await.unwrap().status, "error");
+        assert_eq!(repo.get_run(&handoff.id).await.unwrap().status, "running");
+        let live = repo.list_running_workflow_handoffs().await.unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, handoff.id);
+        assert_eq!(live[0].workflow_run_id.as_deref(), Some("wf-run-1"));
     }
 
     #[tokio::test]

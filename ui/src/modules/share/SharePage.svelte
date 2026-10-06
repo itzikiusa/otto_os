@@ -3,7 +3,8 @@
   // No rail, no navigator, no right panel — just the session header + terminal.
   //
   // The share token was captured from the URL fragment by the router (Task 3.1)
-  // and stored in-memory; we read it here via getShareToken(sessionId).
+  // and stored in-memory (mirrored into this tab's sessionStorage so a reload
+  // keeps access); we read it here via getShareToken(sessionId).
   // All API calls use the scoped token directly (not the owner login token).
   //
   // Task 7.5: Email-OTP gate. When the session load returns a 403 with the
@@ -16,7 +17,7 @@
   import { PRIMARY_SCROLLBACK } from '../../lib/components/termFlow';
   import Icon from '../../lib/components/Icon.svelte';
   import { getSharedSession, getShareWhoami, verifyShareOtp, extendShare } from '../../lib/api/share';
-  import { getShareToken } from '../../lib/router.svelte';
+  import { forgetStoredShareToken, getShareToken } from '../../lib/router.svelte';
   import type { Session, SessionStatus } from '../../lib/api/types';
   import { ApiError } from '../../lib/api/client';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -101,15 +102,24 @@
       } else {
         loadError = loadErrorText(e);
         loadCause = shareErrorCause(e);
+        linkDead = isDeadLink(e);
+        if (linkDead) forgetStoredShareToken(id);
         viewState = 'error';
       }
     }
   }
 
+  /** A revoked / expired / unknown link: retrying can never succeed, so the
+   *  error card drops its Retry (it only invited a pointless loop). */
+  let linkDead = $state(false);
+  function isDeadLink(e: unknown): boolean {
+    return e instanceof ApiError && [401, 403, 404, 410].includes(e.status);
+  }
+
   /** What a guest can act on: a dead link vs. a host that's unreachable/busy. */
   function shareErrorCause(e: unknown): string {
     if (e instanceof ApiError) {
-      if (e.status === 401 || e.status === 403 || e.status === 404 || e.status === 410) {
+      if (isDeadLink(e)) {
         return 'This share link was revoked or has expired. Ask the person who shared it for a new link.';
       }
       return 'The host had a problem opening this session. Try again in a moment.';
@@ -142,6 +152,7 @@
   // comes back into focus): an OTP window that lapsed needs a fresh code, and
   // a revoked/expired link must say so — not leave a terminal that silently
   // stopped updating.
+  let termView = $state<{ reconnect: () => void } | null>(null);
   async function recheckAccess(): Promise<void> {
     const t = token;
     if (!t || viewState !== 'ok') return;
@@ -149,6 +160,9 @@
     const seq = generation;
     try {
       await getSharedSession(id, t);
+      // The link answers again: a terminal whose reconnects gave up during
+      // a long daemon restart picks back up on its own (S14-303).
+      if (isCurrent(seq, id, t) && viewState === 'ok') termView?.reconnect();
     } catch (e: unknown) {
       if (!isCurrent(seq, id, t) || viewState !== 'ok') return;
       if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
@@ -156,9 +170,13 @@
         otpInput = '';
         otpError = null;
         viewState = 'otp';
-      } else if (e instanceof ApiError && [401, 403, 404, 410].includes(e.status)) {
+      } else if (isDeadLink(e)) {
         loadError = null;
         loadCause = shareErrorCause(e);
+        // Revoked mid-view: no Retry (it can never succeed), and a reload
+        // must not resurrect the stored token.
+        linkDead = true;
+        forgetStoredShareToken(id);
         viewState = 'error';
       }
       // A network blip keeps the terminal (it reconnects on its own).
@@ -284,8 +302,8 @@
       <div class="error-icon"><Icon name="warning" size={26} /></div>
       <h2>This link is invalid or has expired</h2>
       <p>
-        This share link is missing a token or has already expired.
-        Ask the owner to send you a new link.
+        This page has no access token. Open the original link again (from
+        your message or email) — or, if it has expired, ask the owner for a new one.
       </p>
     </div>
   </div>
@@ -316,7 +334,7 @@
         {/if}
       </p>
       <div class="otp-input-row">
-        <input
+        <input dir="ltr"
           class="otp-input"
           type="text"
           inputmode="numeric"
@@ -352,7 +370,9 @@
       <h2>Couldn’t open this session</h2>
       <p>{loadCause}</p>
       {#if loadError}<p class="hint">{loadError}</p>{/if}
-      <button class="btn ec-retry" onclick={() => void loadSession()}><Icon name="refresh" size={13} /> Retry</button>
+      {#if !linkDead}
+        <button class="btn ec-retry" onclick={() => void loadSession()}><Icon name="refresh" size={13} /> Retry</button>
+      {/if}
     </div>
   </div>
 
@@ -382,6 +402,7 @@
         <!-- Pass shareToken so Terminal opens the WS with the otto-bearer
              subprotocol (Task 3.2). readOnly mirrors the viewer badge. -->
         <Terminal
+          bind:this={termView}
           {sessionId}
           readOnly={isViewer}
           forceDark
@@ -527,7 +548,7 @@
     text-decoration: underline;
   }
   .otp-link:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

@@ -585,6 +585,9 @@ impl DbViewerService {
                 plan.write_count
             )));
         }
+        if plan.needs_confirm && req.confirm_write && !super::person_confirmed(true) {
+            return Err(Error::Forbidden(super::AGENT_CONFIRM_REFUSED.into()));
+        }
         if plan.needs_confirm && !req.confirm_write {
             let mut names: Vec<&str> = plan
                 .runs
@@ -684,7 +687,7 @@ impl DbViewerService {
                     None => {
                         return Err(Error::Conflict(format!(
                             "{MAX_JOBS} multi-runs are already running — wait for one to finish"
-                        )))
+                        )));
                     }
                 }
             }
@@ -693,10 +696,12 @@ impl DbViewerService {
         let view = lock(&job).view();
         let svc = self.clone();
         let runner_user = user_id.clone();
-        tokio::spawn(async move {
+        // Carry the request credential: each item's `guard_write` re-checks
+        // that a PERSON confirmed (S6-304); without it the job fails closed.
+        tokio::spawn(otto_core::auth::carry_request_credential(async move {
             svc.run_job(job, runner_user, opts, concurrency, cancel_rx)
                 .await;
-        });
+        }));
         Ok((view, plan))
     }
 

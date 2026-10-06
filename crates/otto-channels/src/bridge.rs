@@ -37,26 +37,177 @@ type ConvKey = (String, String, Option<String>);
 /// so every inbound message for ANY chat queued behind one chat's spawn. Now a
 /// conversation serializes only against itself; the map lock is held for a
 /// get / insert / remove and never across an await on the manager.
-#[derive(Default)]
-struct ConvLocks {
-    locks: std::sync::Mutex<HashMap<ConvKey, Arc<Mutex<()>>>>,
+///
+/// The same keyed-lock map, keyed by session id, serializes TURNS on one agent
+/// session (`turn_locks`): see [`Bridge::handle`] step 4.
+struct KeyedLocks<K> {
+    locks: std::sync::Mutex<HashMap<K, Arc<Mutex<()>>>>,
 }
 
-impl ConvLocks {
+type ConvLocks = KeyedLocks<ConvKey>;
+
+impl<K> Default for KeyedLocks<K> {
+    fn default() -> Self {
+        Self {
+            locks: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone> KeyedLocks<K> {
     /// Idle locks (held by the map alone) are pruned once the map grows.
     const PRUNE_AT: usize = 256;
 
-    async fn lock(&self, key: &ConvKey) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut m = self.locks.lock().unwrap_or_else(|e| e.into_inner());
-            if m.len() >= Self::PRUNE_AT {
-                m.retain(|_, l| Arc::strong_count(l) > 1);
-            }
-            m.entry(key.clone()).or_default().clone()
+    /// The lock for `key` (created on first use).
+    fn handle(&self, key: &K) -> Arc<Mutex<()>> {
+        let mut m = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() >= Self::PRUNE_AT {
+            m.retain(|_, l| Arc::strong_count(l) > 1);
+        }
+        m.entry(key.clone()).or_default().clone()
+    }
+
+    async fn lock(&self, key: &K) -> tokio::sync::OwnedMutexGuard<()> {
+        self.handle(key).lock_owned().await
+    }
+
+    /// Join `key`'s FIFO queue NOW (tokio's mutex enqueues a waiter on its
+    /// first poll) and wait for the guard later with [`Queued::acquire`] —
+    /// queue position is fixed by call order, not by who awaits first.
+    async fn enqueue(&self, key: &K) -> Queued {
+        let mut wait: QueuedWait = Box::pin(self.handle(key).lock_owned());
+        let now = match futures_util::poll!(wait.as_mut()) {
+            std::task::Poll::Ready(guard) => Some(guard),
+            std::task::Poll::Pending => None,
         };
-        lock.lock_owned().await
+        Queued { wait, now }
     }
 }
+
+type QueuedWait =
+    std::pin::Pin<Box<dyn std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + Send>>;
+
+/// A place in a [`KeyedLocks`] queue (see `enqueue`).
+struct Queued {
+    wait: QueuedWait,
+    now: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Queued {
+    /// Wait for the place without a notice (the bridge always uses
+    /// [`Queued::acquire_or_notify`]; the queue-order tests use this).
+    #[cfg(test)]
+    async fn acquire(self) -> tokio::sync::OwnedMutexGuard<()> {
+        match self.now {
+            Some(guard) => guard,
+            None => self.wait.await,
+        }
+    }
+
+    /// [`Queued::acquire`], running `on_wait` once when the place has not come
+    /// up within `after` — the "queued behind the running turn" notice, so a
+    /// message waiting on a long turn is not met with silence.
+    async fn acquire_or_notify<F>(
+        self,
+        after: Duration,
+        on_wait: F,
+    ) -> tokio::sync::OwnedMutexGuard<()>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if let Some(guard) = self.now {
+            return guard;
+        }
+        let mut wait = self.wait;
+        tokio::select! {
+            guard = wait.as_mut() => return guard,
+            _ = tokio::time::sleep(after) => {}
+        }
+        on_wait.await;
+        wait.await
+    }
+}
+
+/// Hold a turn until `turn_done` resolves (its Final, a stopped tailer, the
+/// cap) OR an `idle` poll reads the session idle — a turn that ends WITHOUT
+/// a Final (Esc in the app, a CLI crash, a usage-limit stop) then frees the
+/// next message within a poll instead of at the 10-minute cap. Returns
+/// whether the idle probe released it. Pure plumbing — tested.
+async fn hold_until_done_or_idle<D, P, Fut>(turn_done: D, mut idle: P, poll: Duration) -> bool
+where
+    D: std::future::Future<Output = ()>,
+    P: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    tokio::pin!(turn_done);
+    let mut tick = tokio::time::interval(poll);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // the immediate first tick: the turn just started
+    loop {
+        tokio::select! {
+            () = &mut turn_done => return false,
+            _ = tick.tick() => {
+                if idle().await {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+/// Keep `session_id`'s turn lock until its turn is over — see
+/// [`hold_until_done_or_idle`]. "Idle" is the session manager's own
+/// would-a-restart-interrupt-work probe (status, engine holds, 30 s of PTY
+/// quiet, an open transcript turn), so a live turn is never cut short.
+async fn hold_turn(manager: &Arc<SessionManager>, mirror: &Mirror, session_id: &Id, label: &str) {
+    let released_idle = hold_until_done_or_idle(
+        mirror.wait_turn_done(session_id, crate::mirror::TURN_HOLD_CAP),
+        move || async move { !manager.busy_for_restart(session_id).await },
+        TURN_IDLE_POLL,
+    )
+    .await;
+    if released_idle {
+        info!(channel = %label, session = %session_id, "bridge: turn ended without a final reply (interrupted?) — releasing the next message");
+    }
+}
+
+/// Whether an inbound message goes on to an agent session: a fresh message
+/// always does (it may create one); an EDIT only when its conversation
+/// already has a live session (S5-304). Pure — tested.
+fn edit_forwards(edited: bool, has_live_session: bool) -> bool {
+    !edited || has_live_session
+}
+
+/// Where a bridge-side failure is reported back to the human: a short
+/// in-thread reply (the same path `/sessions` uses for its error), so a
+/// message that never reached an agent doesn't just vanish.
+#[derive(Clone)]
+struct ChatReply {
+    adapter: Arc<dyn Adapter>,
+    chat: String,
+    thread: Option<String>,
+}
+
+impl ChatReply {
+    async fn say(&self, text: &str) {
+        if let Err(e) = self
+            .adapter
+            .send_notice(&self.chat, self.thread.as_deref(), text)
+            .await
+        {
+            warn!("bridge: could not post the failure notice: {e}");
+        }
+    }
+}
+
+/// Reply posted when the message could not be delivered to the agent. Kept
+/// generic: a channel is shared with people who can't see the app, so the
+/// underlying error (paths, sandbox detail) stays in the daemon log.
+const DELIVERY_FAILED_REPLY: &str =
+    "Otto couldn't deliver this message to the agent session. Please try again, or check the Otto app.";
+/// Reply posted when no agent session could be started for the message.
+const CREATE_FAILED_REPLY: &str =
+    "Otto couldn't start an agent session for this message. Please try again, or check the Otto app.";
 
 /// A session that can still take this conversation's next message: not
 /// archived, not exited (idle / working / running / reconnectable all resume).
@@ -117,6 +268,20 @@ const TUI_SETTLE: Duration = Duration::from_millis(600);
 // before we assume the Enter was dropped and retry it once.
 const DISPATCH_WAIT: Duration = Duration::from_secs(5);
 const DISPATCH_POLL: Duration = Duration::from_millis(200);
+/// How often a held turn re-checks whether its session went idle without a
+/// Final (see [`hold_until_done_or_idle`]).
+const TURN_IDLE_POLL: Duration = Duration::from_secs(5);
+/// How long a message waits on the previous turn before the thread is told
+/// it is queued.
+const QUEUED_NOTICE_AFTER: Duration = Duration::from_secs(5);
+/// Posted (once) when a message is queued behind a running turn.
+const QUEUED_REPLY: &str =
+    "⏳ Queued behind the turn that is still running — this message goes in as soon as it finishes.";
+/// Posted when an EDIT arrives for a message that has no live conversation
+/// (it started a workflow / run / swarm, or its session is gone): edits are
+/// never re-run.
+const EDIT_NOT_RERUN_REPLY: &str =
+    "✏️ Edits aren't re-run — send a new message to start or re-trigger this.";
 
 fn agent_paste_input(text: &str) -> Vec<u8> {
     let text = sanitize_paste_text(text);
@@ -159,23 +324,52 @@ fn neutralize_markers(text: &str) -> String {
 }
 
 /// The allowed-users gate. `allowed_users` is the integration's comma-separated
-/// list of channel-native user ids; blank = everyone. Entries are trimmed and
+/// list of channel-native user ids; blank = everyone ONLY when
+/// `open_when_blank` (the integration's explicit `open_to_all` opt-in, or a
+/// webhook — authenticated by its own secret), else blank = NOBODY (fail
+/// closed: a Telegram bot is reachable by anyone who finds its username, and
+/// a sender drives an agent session as the owner). Entries are trimmed and
 /// empty ones (a trailing comma) ignored, and ids compare case-insensitively —
 /// Slack ids are upper-case (`U0123ABC`) and a hand-typed `u0123abc` used to
 /// lock its owner out silently. A message with no sender id never passes a
 /// non-blank list. Shared by the bridge and the Slack listener, which checks it
 /// BEFORE downloading a message's attachments.
-pub fn user_allowed(allowed_users: &str, user: &str) -> bool {
+pub fn user_allowed(allowed_users: &str, open_when_blank: bool, user: &str) -> bool {
     let mut entries = allowed_users
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .peekable();
     if entries.peek().is_none() {
-        return true;
+        return open_when_blank;
     }
     let user = user.trim();
     !user.is_empty() && entries.any(|a| a.eq_ignore_ascii_case(user))
+}
+
+/// [`user_allowed`] for an integration: a blank list is open only under the
+/// explicit `open_to_all` opt-in, or for a webhook (whose caller already
+/// proved the integration's secret).
+pub fn integration_admits(integ: &Integration, user: &str) -> bool {
+    user_allowed(
+        &integ.allowed_users,
+        integ.open_to_all || integ.channel == Channel::Webhook,
+        user,
+    )
+}
+
+/// True when an integration admits every sender (a blank allow-list under
+/// the `open_to_all` opt-in) — the listeners warn about it on every start.
+pub fn open_to_everyone(integ: &Integration) -> bool {
+    integ.channel != Channel::Webhook
+        && integ.open_to_all
+        && integ.allowed_users.split(',').all(|s| s.trim().is_empty())
+}
+
+/// The agent prompt for a human EDIT of an earlier message: marked, so the
+/// agent treats it as a correction to what it already saw, not a new task.
+fn edit_prompt(text: &str) -> String {
+    format!("[edited earlier message]\n{text}")
 }
 
 /// Derive a session title from the first inbound message so the sidebar pane is
@@ -258,12 +452,21 @@ async fn agent_dispatched(
 /// Wait for the agent TUI to be ready, paste the prompt, submit it, then
 /// monitor that it actually started — retrying Enter once if it didn't. Runs
 /// in its own task so a slow TUI never stalls the channel receive loop.
+///
+/// `_turn` is this session's turn lock (see [`Bridge::handle`] step 4): held
+/// from the paste through the dispatch confirmation AND until the turn's
+/// final reply (capped at [`crate::mirror::TURN_HOLD_CAP`]), so a second
+/// message in the same thread can't paste into the box before this one was
+/// submitted (the two used to merge into one prompt), nor re-point the mirror
+/// while this turn is still answering.
 async fn submit_to_agent(
     manager: Arc<SessionManager>,
     mirror: Arc<Mirror>,
     session_id: Id,
     label: String,
     input: Vec<u8>,
+    reply: ChatReply,
+    _turn: tokio::sync::OwnedMutexGuard<()>,
 ) {
     // 0. A reused thread session may have been idle-suspended (its PTY freed,
     //    status `reconnectable`): resume it with `--resume` so the follow-up
@@ -279,6 +482,7 @@ async fn submit_to_agent(
     if wait_for_tui(&manager, &session_id).await == Readiness::Gone {
         warn!(channel = %label, session = %session_id, "bridge: session not live before input could be sent");
         mirror.cancel(&session_id).await;
+        reply.say(DELIVERY_FAILED_REPLY).await;
         return;
     }
 
@@ -286,6 +490,7 @@ async fn submit_to_agent(
     if let Err(e) = manager.input(&session_id, &input).await {
         warn!(channel = %label, session = %session_id, "bridge: paste input failed: {e}");
         mirror.cancel(&session_id).await;
+        reply.say(DELIVERY_FAILED_REPLY).await;
         return;
     }
     tokio::time::sleep(PASTE_TO_ENTER).await;
@@ -297,6 +502,7 @@ async fn submit_to_agent(
     if let Err(e) = manager.input(&session_id, AGENT_SUBMIT_KEY).await {
         warn!(channel = %label, session = %session_id, "bridge: submit key failed: {e}");
         mirror.cancel(&session_id).await;
+        reply.say(DELIVERY_FAILED_REPLY).await;
         return;
     }
     info!(
@@ -308,8 +514,11 @@ async fn submit_to_agent(
 
     // 4. Monitor: confirm the agent actually started. If the prompt is still
     //    sitting in the box after the grace window, press Enter once more.
+    //    Then keep the turn lock until THIS turn's Final reply (capped): the
+    //    next message's attach / begin_turn must not reset the mirror mid-turn.
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed — session is processing the relay");
+        hold_turn(&manager, &mirror, &session_id, &label).await;
         return;
     }
     warn!(channel = %label, session = %session_id, "bridge: agent did not start within {DISPATCH_WAIT:?}; re-sending Enter");
@@ -319,6 +528,7 @@ async fn submit_to_agent(
     }
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed after retry");
+        hold_turn(&manager, &mirror, &session_id, &label).await;
     } else {
         warn!(channel = %label, session = %session_id, "bridge: agent still not dispatched — prompt may be sitting in the input box");
     }
@@ -334,6 +544,8 @@ pub struct Bridge {
     /// only — conversation-level serialization is `conv_locks`.
     sessions: Mutex<HashMap<ConvKey, Id>>,
     conv_locks: ConvLocks,
+    /// Per-session turn serialization (see `submit_to_agent`).
+    turn_locks: KeyedLocks<Id>,
     /// Optional hook: if an inbound message matches a configured swarm trigger,
     /// launch that swarm instead of starting a normal session. Injected by
     /// otto-server (which owns the swarm runtime).
@@ -363,6 +575,7 @@ impl Bridge {
             root_user_id,
             sessions: Mutex::new(HashMap::new()),
             conv_locks: ConvLocks::default(),
+            turn_locks: KeyedLocks::default(),
             swarm_trigger: None,
             run_trigger: None,
             workflow_trigger: None,
@@ -390,6 +603,7 @@ impl Bridge {
             root_user_id,
             sessions: Mutex::new(HashMap::new()),
             conv_locks: ConvLocks::default(),
+            turn_locks: KeyedLocks::default(),
             swarm_trigger,
             run_trigger,
             workflow_trigger,
@@ -503,7 +717,7 @@ impl Bridge {
     }
 
     /// Handle one inbound message.
-    pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, msg: Inbound) {
+    pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, mut msg: Inbound) {
         info!(
             channel = %adapter.channel().as_str(),
             workspace = %msg.workspace_id,
@@ -514,13 +728,21 @@ impl Bridge {
         );
 
         // --- 1. Allowed-users check ---
-        if !user_allowed(&integ.allowed_users, &msg.user) {
+        if !integration_admits(integ, &msg.user) {
             info!(
                 channel = %adapter.channel().as_str(),
                 workspace = %msg.workspace_id,
                 chat = %msg.chat,
                 user = %msg.user,
                 "bridge: user not in allowed_users, dropping"
+            );
+            // Listed in Settings → Channels with an "Allow" action, so the
+            // owner can find the (invisible) Telegram id to admit.
+            crate::health::rejected(
+                &msg.workspace_id,
+                adapter.channel(),
+                &msg.user,
+                msg.user_name.as_deref(),
             );
             return;
         }
@@ -530,8 +752,14 @@ impl Bridge {
         // normal prompt rather than a control command. Command replies go via
         // `adapter.send`, which the webhook adapter no-ops, and a stray `/stop`
         // could disrupt a session — so skip interception for webhooks entirely.
+        // An EDIT of an earlier message re-fires nothing: no quick command,
+        // no swarm / run / workflow trigger (fixing a typo in an `Action:
+        // Workflow` post must not start a second run). It goes to the
+        // conversation's agent, marked as an edit.
+        let fresh = !msg.edited;
         let trimmed = msg.text.trim();
-        if adapter.channel() != Channel::Webhook
+        if fresh
+            && adapter.channel() != Channel::Webhook
             && trimmed.starts_with('/')
             && self
                 .handle_command(integ, adapter.clone(), &msg, trimmed)
@@ -553,7 +781,7 @@ impl Bridge {
         // --- 3b. Swarm trigger: a message on a swarm-bound channel launches the
         // team instead of starting a normal session. Webhook callers can launch
         // via the dedicated /webhooks/swarm route, so only chat channels route here.
-        if adapter.channel() != Channel::Webhook {
+        if fresh && adapter.channel() != Channel::Webhook {
             if let Some(trigger) = &self.swarm_trigger {
                 if let Some(ack) = trigger
                     .try_launch(
@@ -584,7 +812,7 @@ impl Bridge {
         // launches the one-button pipeline, and an `approve`/`reject` reply
         // resolves an awaiting run's gate. Like the swarm trigger, chat channels
         // only (webhook has its dedicated /webhooks/{ws}/run route).
-        if adapter.channel() != Channel::Webhook {
+        if fresh && adapter.channel() != Channel::Webhook {
             if let Some(trigger) = &self.run_trigger {
                 if let Some(ack) = trigger
                     .handle(
@@ -616,7 +844,7 @@ impl Bridge {
         // Action:Workflow trigger so a control word in a live run's thread isn't
         // mistaken for a new run; a non-command reply (or no matching active run)
         // returns None and falls through to normal routing.
-        if let Some(trigger) = &self.workflow_trigger {
+        if let Some(trigger) = self.workflow_trigger.as_ref().filter(|_| fresh) {
             if let Some(ack) = trigger
                 .try_control(
                     &msg.workspace_id,
@@ -644,7 +872,7 @@ impl Bridge {
         // --- 3d. Workflow trigger: a structured `Action: Workflow` message starts
         // a workflow run (resolved by Name within the workspace). Available on all
         // channels, including webhook.
-        if let Some(trigger) = &self.workflow_trigger {
+        if let Some(trigger) = self.workflow_trigger.as_ref().filter(|_| fresh) {
             if let Some(ack) = trigger
                 .try_start(
                     &msg.workspace_id,
@@ -669,13 +897,17 @@ impl Bridge {
             }
         }
 
+        if msg.edited {
+            msg.text = edit_prompt(&msg.text);
+        }
+
         // --- 4. Find or create a session ---
         let key: ConvKey = (
             msg.workspace_id.clone(),
             msg.chat.clone(),
             msg.thread.clone(),
         );
-        let session_id = {
+        let (session_id, turn) = {
             // Serialize THIS conversation only (two quick messages must not
             // both spawn an agent); other chats proceed in parallel.
             let _conv = self.conv_locks.lock(&key).await;
@@ -683,8 +915,25 @@ impl Bridge {
             let existing = self
                 .lookup_live_session(&key, adapter.channel().as_str())
                 .await;
+            // An edit only ever reaches a conversation that is already live:
+            // with none bound (the original was a workflow / run / swarm
+            // trigger, or its session is gone) it would spawn a brand-new
+            // agent seeded with the trigger text — drop it and say so.
+            if !edit_forwards(msg.edited, existing.is_some()) {
+                info!(
+                    channel = %adapter.channel().as_str(),
+                    workspace = %msg.workspace_id,
+                    chat = %msg.chat,
+                    "bridge: edit of a message with no live session — not re-run"
+                );
+                drop(_conv);
+                let _ = adapter
+                    .send_notice(&msg.chat, msg.thread.as_deref(), EDIT_NOT_RERUN_REPLY)
+                    .await;
+                return;
+            }
 
-            if let Some(sid) = existing {
+            let sid = if let Some(sid) = existing {
                 // A follow-up is activity. `last_active_at` only moves on a
                 // status transition, so without this a thread answered inside
                 // one long turn looked idle to the channel reaper and was
@@ -720,7 +969,12 @@ impl Bridge {
                 // workspace's default → the global default → "claude". Guard
                 // against a stale/removed provider so the session still spawns
                 // rather than erroring out.
-                let global_default = self.settings.get("default_provider").await.ok().flatten();
+                let global_default = self
+                    .settings
+                    .get(otto_state::settings::DEFAULT_PROVIDER_KEY)
+                    .await
+                    .ok()
+                    .flatten();
                 let mut provider = otto_core::provider::resolve_provider(&[
                     &integ.preferred_cli,
                     otto_core::provider::workspace_default(&ws.settings),
@@ -758,6 +1012,10 @@ impl Bridge {
                     Ok(s) => s,
                     Err(e) => {
                         warn!("bridge: failed to create session: {e}");
+                        drop(_conv);
+                        let _ = adapter
+                            .send_notice(&msg.chat, msg.thread.as_deref(), CREATE_FAILED_REPLY)
+                            .await;
                         return;
                     }
                 };
@@ -771,8 +1029,29 @@ impl Bridge {
                 );
                 self.map_session(key.clone(), session.id.clone()).await;
                 session.id
-            }
+            };
+            // Join this session's TURN queue while the conversation lock is
+            // still held, so messages queue in arrival order; the wait
+            // itself happens after the conversation lock is released (a
+            // `/stop` must not stall behind an in-flight submit). Tokio's
+            // mutex is FIFO and enqueues the waiter on the first poll.
+            let turn = self.turn_locks.enqueue(&sid).await;
+            (sid, turn)
         };
+        // One turn at a time on this session: the previous message's paste →
+        // submit → dispatch confirmation completes before this one attaches
+        // its turn and pastes (two quick messages used to merge into one
+        // prompt). Held by `submit_to_agent` until the turn's final reply.
+        let queued = ChatReply {
+            adapter: Arc::clone(&adapter),
+            chat: msg.chat.clone(),
+            thread: msg.thread.clone(),
+        };
+        let turn = turn
+            .acquire_or_notify(QUEUED_NOTICE_AFTER, async move {
+                queued.say(QUEUED_REPLY).await;
+            })
+            .await;
 
         // --- 5. Compose the message text ---
         // Always wrap the user's message in a trusted-context block telling the
@@ -859,12 +1138,19 @@ impl Bridge {
             .await;
 
         let input = agent_paste_input(&text);
+        let reply = ChatReply {
+            adapter: Arc::clone(&adapter),
+            chat: msg.chat.clone(),
+            thread: msg.thread.clone(),
+        };
         tokio::spawn(submit_to_agent(
             Arc::clone(&self.manager),
             Arc::clone(&self.mirror),
             session_id.clone(),
             adapter.channel().as_str().to_string(),
             input,
+            reply,
+            turn,
         ));
     }
 
@@ -1051,6 +1337,94 @@ mod conv_lock_tests {
             .unwrap();
     }
 
+    /// S5-303: a turn that ends WITHOUT its Final (the watch never goes idle)
+    /// releases the next message on the first idle poll, not at the cap; a
+    /// busy session keeps holding until its Final.
+    #[tokio::test]
+    async fn a_turn_without_a_final_releases_on_idle() {
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p = Arc::clone(&polls);
+        let started = std::time::Instant::now();
+        let released = tokio::time::timeout(
+            Duration::from_secs(2),
+            hold_until_done_or_idle(
+                std::future::pending::<()>(), // no Final ever
+                move || {
+                    let n = p.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move { n >= 1 } // busy once, then idle
+                },
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("released by the idle probe, not the cap");
+        assert!(released);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // A busy session: the Final releases it, and the probe says so.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let hold = tokio::spawn(hold_until_done_or_idle(
+            async move {
+                let _ = rx.await;
+            },
+            || async { false },
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(!hold.is_finished(), "a busy turn keeps the lock");
+        tx.send(()).unwrap();
+        let by_idle = tokio::time::timeout(Duration::from_secs(1), hold)
+            .await
+            .expect("released on the Final")
+            .unwrap();
+        assert!(!by_idle);
+    }
+
+    /// S5-303: a message queued behind a running turn is told so once; one
+    /// whose place comes up at once is not.
+    #[tokio::test]
+    async fn a_queued_message_gets_one_notice() {
+        let turns: KeyedLocks<Id> = KeyedLocks::default();
+        let sid: Id = "s1".into();
+        let notices = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = Arc::clone(&notices);
+        let first = turns
+            .enqueue(&sid)
+            .await
+            .acquire_or_notify(Duration::from_millis(10), async move {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let second = turns.enqueue(&sid).await;
+        let n = Arc::clone(&notices);
+        let waiter = tokio::spawn(async move {
+            let _g = second
+                .acquire_or_notify(Duration::from_millis(20), async move {
+                    n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!waiter.is_finished());
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("acquired once the first turn ends")
+            .unwrap();
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// S5-304: an edit is forwarded only to a live conversation — never
+    /// turned into a new session.
+    #[test]
+    fn an_edit_without_a_live_session_is_not_forwarded() {
+        assert!(edit_forwards(false, false), "a fresh message may spawn");
+        assert!(edit_forwards(false, true));
+        assert!(edit_forwards(true, true), "an edit reaches its live agent");
+        assert!(!edit_forwards(true, false), "an edit never spawns one");
+    }
+
     #[tokio::test]
     async fn idle_locks_are_pruned() {
         let locks = ConvLocks::default();
@@ -1060,6 +1434,44 @@ mod conv_lock_tests {
         let _g = locks.lock(&key("fresh")).await;
         let n = locks.locks.lock().unwrap().len();
         assert!(n < ConvLocks::PRUNE_AT, "idle entries dropped (have {n})");
+    }
+
+    #[tokio::test]
+    async fn turns_on_one_session_run_one_at_a_time_in_arrival_order() {
+        // Two quick messages in one thread: the second may not paste until
+        // the first's turn (paste → submit → dispatch) released the lock, and
+        // queue order is the order they were enqueued, not awaited.
+        let turns: Arc<KeyedLocks<Id>> = Arc::new(KeyedLocks::default());
+        let sid: Id = "s1".into();
+        let first = turns.enqueue(&sid).await.acquire().await;
+        let second = turns.enqueue(&sid).await;
+        let third = turns.enqueue(&sid).await;
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Await the LATER ticket first: it must still go last.
+        let o3 = Arc::clone(&order);
+        let t3 = tokio::spawn(async move {
+            let _g = third.acquire().await;
+            o3.lock().unwrap().push(3);
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let o2 = Arc::clone(&order);
+        let t2 = tokio::spawn(async move {
+            let _g = second.acquire().await;
+            o2.lock().unwrap().push(2);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(order.lock().unwrap().is_empty(), "first turn still running");
+        drop(first);
+        t2.await.unwrap();
+        t3.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![2, 3]);
+        // Another session is never queued behind this one.
+        let other: Id = "s2".into();
+        let _held = turns.lock(&sid).await;
+        tokio::time::timeout(Duration::from_millis(200), turns.lock(&other))
+            .await
+            .expect("independent session");
     }
 }
 
@@ -1193,19 +1605,69 @@ mod tests {
 
     #[test]
     fn allowed_users_gate() {
-        // Blank (or only separators) = everyone.
-        assert!(user_allowed("", "U1"));
-        assert!(user_allowed(" , ", "U1"));
+        // Blank (or only separators) = everyone ONLY under the opt-in…
+        assert!(user_allowed("", true, "U1"));
+        assert!(user_allowed(" , ", true, "U1"));
+        // …and NOBODY without it (fail closed — review S5-02).
+        assert!(!user_allowed("", false, "U1"));
+        assert!(!user_allowed(" , ", false, "U1"));
         // Listed ids pass, trimmed, case-insensitively; others don't.
-        assert!(user_allowed("U0123ABC, U0456", "U0123ABC"));
-        assert!(user_allowed("u0123abc", "U0123ABC"));
-        assert!(!user_allowed("U0123ABC,", "U0456"));
-        assert!(!user_allowed("U0123ABC", "U0123AB"), "no prefix match");
-        // A sender-less event never passes a real list.
-        assert!(!user_allowed("U0123ABC", ""));
-        assert!(!user_allowed("U0123ABC,", "  "));
-        // Telegram numeric ids work the same way.
-        assert!(user_allowed("12345, 678", "678"));
+        for open in [false, true] {
+            assert!(user_allowed("U0123ABC, U0456", open, "U0123ABC"));
+            assert!(user_allowed("u0123abc", open, "U0123ABC"));
+            assert!(!user_allowed("U0123ABC,", open, "U0456"));
+            assert!(
+                !user_allowed("U0123ABC", open, "U0123AB"),
+                "no prefix match"
+            );
+            // A sender-less event never passes a real list.
+            assert!(!user_allowed("U0123ABC", open, ""));
+            assert!(!user_allowed("U0123ABC,", open, "  "));
+            // Telegram numeric ids work the same way.
+            assert!(user_allowed("12345, 678", open, "678"));
+        }
+    }
+
+    #[test]
+    fn an_edit_is_marked_for_the_agent() {
+        assert_eq!(
+            edit_prompt("Action: Workflow\nName: PR Reviewer"),
+            "[edited earlier message]\nAction: Workflow\nName: PR Reviewer"
+        );
+    }
+
+    #[test]
+    fn a_blank_allow_list_admits_nobody_unless_opened() {
+        let mut integ = Integration {
+            workspace_id: "ws".into(),
+            channel: Channel::Telegram,
+            enabled: true,
+            allowed_users: String::new(),
+            open_to_all: false,
+            agent_reply: true,
+            reply_instructions: String::new(),
+            channel_id: String::new(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: false,
+            updated_at: chrono::Utc::now(),
+        };
+        // A new Telegram bot with no list: a stranger is refused.
+        assert!(!integration_admits(&integ, "424242"));
+        assert!(!open_to_everyone(&integ));
+        // The explicit opt-in (migrated pre-flag bots) keeps it open, flagged.
+        integ.open_to_all = true;
+        assert!(integration_admits(&integ, "424242"));
+        assert!(open_to_everyone(&integ));
+        // A real list wins over the opt-in.
+        integ.allowed_users = "7".into();
+        assert!(!integration_admits(&integ, "424242"));
+        assert!(!open_to_everyone(&integ));
+        // A webhook's caller proved the secret: blank stays open.
+        integ.channel = Channel::Webhook;
+        integ.allowed_users.clear();
+        integ.open_to_all = false;
+        assert!(integration_admits(&integ, "caller"));
     }
 
     #[test]

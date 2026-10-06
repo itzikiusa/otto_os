@@ -26,6 +26,8 @@ export function apiComponent(path: string): string {
   return telemetryComponent(root ?? 'other');
 }
 
+const SAFE_NAME = /^[a-z0-9._-]{1,96}$/;
+
 type Sender = (spans: UiSpan[], signal: AbortSignal) => Promise<void>;
 
 type Context = { traceId: string; spanId: string };
@@ -118,7 +120,7 @@ export function startMeasurement(name: string, component: string, kind = 'intern
   let done = false;
   return {
     traceparent: `00-${context.traceId}-${context.spanId}-01`,
-    finish(status = 'ok', attributes = {}) {
+    finish(status = 'ok', attributes = {}, rename?: string) {
       if (done || !enabled || generation !== epoch) return;
       done = true;
       if (status === 'canceled') return;
@@ -131,7 +133,7 @@ export function startMeasurement(name: string, component: string, kind = 'intern
         ? attributes['otto.duration_ms'] : performance.now() - start;
       if (!Number.isFinite(duration) || duration < 0) return;
       queue.push({ trace_id: context.traceId, span_id: context.spanId, parent_span_id: parentId,
-        name, component: telemetryComponent(component), kind,
+        name: rename && SAFE_NAME.test(rename) ? rename : name, component: telemetryComponent(component), kind,
         start_unix_nano: Math.round((performance.timeOrigin + start) * 1e6),
         duration_ms: Math.min(duration, 3600000), status: status === 'ok' ? 'ok' : 'error', attributes: safe });
       scheduleFullBatch();

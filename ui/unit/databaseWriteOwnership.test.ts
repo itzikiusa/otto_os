@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
 import * as resultBudget from '../src/lib/stores/db-result-budget.ts';
+import { strictRequire, unused } from './strictRequire.ts';
 
 class ApiError extends Error {}
 const result = { columns: [], rows: [], affected_rows: 1, elapsed_ms: 1 };
@@ -52,10 +53,17 @@ function setup() {
       if (path.endsWith('/toast.svelte')) return { toasts: { error() {}, info() {}, warn() {} } };
       if (path.endsWith('/router.svelte')) return { router: { module: 'database' } };
       if (path.endsWith('/clipHistory.svelte')) return { clipHistory: { setGuard() {} } };
+      if (path.endsWith('/dbPrefs.svelte')) return {
+        dbPrefs: { warmRestored: 'background', keepAlive: true, onKeepAliveChange() {}, setKeepAlive() {}, setWarmRestored() {} },
+        loadFlag: (_key: string, def: boolean) => def,
+        saveFlag() {},
+      };
       if (path.endsWith('/lazyModule')) return { announceModule() {} };
       if (path.endsWith('/db-result-budget')) return resultBudget;
       if (path.endsWith('/grid-tab-state')) return { parkedEditCount: () => 0 };
-      return {};
+      // Reachable only from flows this file doesn't drive: any use throws.
+      return strictRequire(['/api/types', '/components/exporters', '/mongo-format', '/sql-util', '/bson', '/filter-chips', '/sql-dialect', '/error-normalize',
+        '/clipboard', '/poll', '/editor-history', '/loadError', '/toastError'].map((p) => [p, unused(p)] as const))(path);
     },
   };
   runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);

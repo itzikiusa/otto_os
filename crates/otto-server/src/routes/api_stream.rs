@@ -1,5 +1,6 @@
 //! Streaming API-client transports: a single WebSocket the UI opens to the
-//! daemon (`GET /ws/api-client/stream?token=…`) which then bridges to an
+//! daemon (`GET /ws/api-client/stream`, bearer in the `otto-bearer`
+//! subprotocol only — no `?token=`) which then bridges to an
 //! upstream **SSE** (`text/event-stream`) or **WebSocket** endpoint. Running
 //! the upstream connection in the daemon (like the HTTP proxy) dodges webview
 //! CORS/CSP and keeps secrets server-side.
@@ -34,7 +35,6 @@ use serde_json::{json, Value};
 
 #[derive(Deserialize)]
 struct StreamQuery {
-    token: Option<String>,
     workspace_id: Id,
 }
 
@@ -56,8 +56,12 @@ async fn stream_ws(
     ws: WebSocketUpgrade,
     Query(q): Query<StreamQuery>,
     State(ctx): State<ServerCtx>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    let token = match q.token {
+    // The bearer travels only in the `otto-bearer` subprotocol (token out of
+    // the URL — S11-11); the legacy `?token=` fallback is gone (S11-312).
+    let ws = ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL]);
+    let token = match crate::ws_events::token_from_subprotocol(&headers) {
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "missing token").into_response(),
     };
@@ -65,6 +69,16 @@ async fn stream_ws(
         Ok(auth) => auth,
         Err(_) => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
     };
+    // Share / MCP-restricted tokens and read-only agent sessions never stream.
+    if let Err(e) = crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::ApiStream,
+        &auth,
+        Some(&ctx.pool),
+    )
+    .await
+    {
+        return (StatusCode::FORBIDDEN, e.to_string()).into_response();
+    }
     let user = &auth.effective_user;
     if auth.scope.is_some()
         || auth.mcp_only

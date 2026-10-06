@@ -519,6 +519,23 @@ impl Http {
         Self { client, provider }
     }
 
+    /// [`new`](Self::new) for a forge that authenticates with a CUSTOM header
+    /// (GitLab's `PRIVATE-TOKEN`). reqwest's default redirect policy strips
+    /// only `Authorization` / `Cookie` / proxy headers on a cross-host hop, so
+    /// a self-hosted GitLab behind an SSO proxy answering `302 → sso.corp`
+    /// would hand the PAT to the SSO host (S2-305). This client follows
+    /// same-origin redirects only; a cross-origin one is returned as-is (and
+    /// classified as the error it is).
+    pub fn new_same_origin_redirects(provider: &'static str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .user_agent("otto-ade/0.1")
+            .redirect(same_origin_redirect_policy())
+            .build()
+            .expect("reqwest client");
+        Self { client, provider }
+    }
+
     pub fn client(&self) -> &reqwest::Client {
         &self.client
     }
@@ -547,7 +564,29 @@ impl Http {
     /// created PR into 422 "already exists" (skipping the after-create
     /// steps). A write is re-sent only when the forge provably did nothing:
     /// a quota refusal (429 / quota-403) or a connection that never opened.
+    ///
+    /// A WRITE invalidates its repo's cached reads whatever its outcome: a
+    /// 5xx / read timeout is exactly the "created it anyway" case, and a
+    /// cached comment list without that comment made the duplicate-post
+    /// guard answer "no copy on the PR" for the next ~15 s (S15-302).
     async fn send_classified(
+        &self,
+        rb: reqwest::RequestBuilder,
+        allow_304: bool,
+    ) -> Result<reqwest::Response> {
+        let write_url = rb
+            .try_clone()
+            .and_then(|c| c.build().ok())
+            .filter(|req| !is_idempotent_read(req.method()))
+            .map(|req| req.url().to_string());
+        let out = self.send_classified_once(rb, allow_304).await;
+        if let (Err(_), Some(url)) = (&out, &write_url) {
+            invalidate_scope(url);
+        }
+        out
+    }
+
+    async fn send_classified_once(
         &self,
         rb: reqwest::RequestBuilder,
         allow_304: bool,
@@ -1008,10 +1047,29 @@ pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     None
 }
 
+/// Redirect policy for [`Http::new_same_origin_redirects`]: follow up to 10
+/// hops that keep the FIRST request's scheme, host and port; stop (returning
+/// the 3xx) on anything else.
+fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        let Some(first) = attempt.previous().first() else {
+            return attempt.stop();
+        };
+        if same_origin(Some(first), attempt.url().as_str()) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 /// True when `next` has the same scheme, host and port as the first page.
 /// An unknown origin (the first request couldn't be inspected) or an
 /// unparsable link follows nothing.
-fn same_origin(origin: Option<&reqwest::Url>, next: &str) -> bool {
+pub(crate) fn same_origin(origin: Option<&reqwest::Url>, next: &str) -> bool {
     let (Some(o), Ok(n)) = (origin, reqwest::Url::parse(next)) else {
         return false;
     };
@@ -1381,5 +1439,50 @@ mod tests {
         assert_eq!(count("POST"), 1, "a 5xx write is never re-sent");
         assert_eq!(count("PUT"), 1, "a 5xx write is never re-sent");
         assert_eq!(count("GET"), 2, "a 5xx read is retried exactly once");
+    }
+
+    /// S15-302: a comment POST answered 502 may have landed. The repo's
+    /// cached comment list must not survive it, or the duplicate-post lookup
+    /// reads the stale list and reposts.
+    #[tokio::test]
+    async fn failed_write_still_invalidates_the_repo_cache() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        super::enable_cache_for_tests(&server.uri());
+        let list = "/repos/acme/app/pulls/7/comments";
+        Mock::given(method("GET"))
+            .and(path(list))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(list))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[{\"id\":1}]"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(list))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+
+        let http = Http::new("github");
+        let url = format!("{}{list}", server.uri());
+        assert_eq!(
+            http.get_cached(http.client().get(&url)).await.unwrap(),
+            "[]"
+        );
+        let post = http
+            .client()
+            .post(&url)
+            .json(&serde_json::json!({ "body": "hi" }));
+        assert!(http.send(post).await.is_err());
+        assert_eq!(
+            http.get_cached(http.client().get(&url)).await.unwrap(),
+            "[{\"id\":1}]",
+            "the read after a failed write goes to the forge, not the cache"
+        );
     }
 }

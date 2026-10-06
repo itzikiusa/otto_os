@@ -257,6 +257,46 @@
   }
 
   // ── DSN / URI paste import ──────────────────────────────────────────────────
+  /** `decodeURIComponent` that never throws: a malformed escape (`%zz`) keeps
+   *  the raw text instead of aborting the import with an uncaught error. */
+  function safeDecode(v: string): string {
+    try {
+      return decodeURIComponent(v);
+    } catch {
+      return v;
+    }
+  }
+  /** Split the password out of a URI's RAW text (scheme://user:PASS@hosts/…):
+   *  the template keeps every other byte as pasted. `URL.password` can't be
+   *  used to find it — WHATWG re-encodes characters like `^ { } | " < > \` and
+   *  space, so a replace on its form missed and left the cleartext password in
+   *  the visible connection-string field. */
+  function splitUriPassword(text: string): { template: string; password: string } | null {
+    const start = text.indexOf('://');
+    if (start < 0) return null;
+    const authStart = start + 3;
+    const rest = text.slice(authStart);
+    const end = rest.search(/[/?#]/);
+    const authority = end < 0 ? rest : rest.slice(0, end);
+    let at = authority.lastIndexOf('@');
+    if (at < 0 && end >= 0) {
+      // An unencoded `/` in the password (`app:12/ss@h/db` — WHATWG parses
+      // it as host `app`, port `12`) ends the authority early. The real
+      // separator is then the first `@` past that cut which comes before any
+      // query: an `@` inside `?appName=a@b` is an option value, not userinfo.
+      const query = rest.search(/[?#]/);
+      const later = rest.indexOf('@', end);
+      if (later >= 0 && (query < 0 || later < query)) at = later;
+    }
+    if (at < 0) return null;
+    const userinfo = rest.slice(0, at);
+    const colon = userinfo.indexOf(':');
+    if (colon < 0) return null;
+    return {
+      template: text.slice(0, authStart) + userinfo.slice(0, colon) + ':{secret}' + text.slice(authStart + at),
+      password: safeDecode(userinfo.slice(colon + 1)),
+    };
+  }
   // Parses a standard connection URI (mysql://, redis://, mongodb://, etc.) and
   // fills the form fields in-place. Unrecognized schemes are ignored with a toast.
   function parseDsn(raw: string): void {
@@ -267,7 +307,14 @@
     try {
       url = new URL(s);
     } catch {
-      toasts.error('Invalid URI', 'Could not parse as a connection URL');
+      // The usual cause with credentials: an unencoded `/ ? # @` in the
+      // password cuts the authority short (`app:pa/ss@h` → port `pa`).
+      toasts.error(
+        'Invalid URI',
+        s.includes('@')
+          ? 'Could not parse as a connection URL — percent-encode / ? # @ in the password (e.g. %2F for /).'
+          : 'Could not parse as a connection URL',
+      );
       return;
     }
 
@@ -297,16 +344,17 @@
 
     if (mapped === 'mongodb') {
       // Keep topology/options intact but move credentials to the secret field.
-      secret = url.password ? decodeURIComponent(url.password) : '';
-      fConnString = url.password ? s.replace(`:${url.password}@`, ':{secret}@') : s;
+      const split = splitUriPassword(s);
+      secret = split?.password ?? '';
+      fConnString = split ? split.template : s;
     } else {
       if (url.hostname) fHost = url.hostname;
       if (url.port)     fPort = url.port;
-      if (url.username) fUser = decodeURIComponent(url.username);
-      if (url.password) secret = decodeURIComponent(url.password);
+      if (url.username) fUser = safeDecode(url.username);
+      if (url.password) secret = safeDecode(url.password);
       // The first path segment is the database/db-index.
       const dbPart = url.pathname.replace(/^\//, '').split('/')[0];
-      if (dbPart) fDb = decodeURIComponent(dbPart);
+      if (dbPart) fDb = safeDecode(dbPart);
     }
 
     if (scheme === 'rediss' || scheme === 'clickhouse+https') tlsMode = 'required';
@@ -442,7 +490,7 @@
   {#if !existing}
     {#if showDsnInput}
       <div class="field dsn-row">
-        <input
+        <input dir="ltr" aria-label="Connection string"
           class="input mono"
           bind:value={dsnValue}
           placeholder="mysql://user:pass@host:3306/db"
@@ -467,7 +515,7 @@
   <!-- Name -->
   <div class="field">
     <label for="cf-name">Name</label>
-    <input id="cf-name" class="input" bind:value={name} placeholder="staging mysql" />
+    <input dir="auto" id="cf-name" class="input" bind:value={name} placeholder="staging mysql" />
   </div>
 
   <!-- Section (workspace connections only) -->
@@ -476,7 +524,7 @@
       <label for="cf-section">Section <span class="dim">(optional)</span></label>
       {#if creatingSection}
         <div class="section-new">
-          <input
+          <input dir="auto" aria-label="New section name"
             class="input"
             bind:value={newSectionName}
             placeholder="New section name"
@@ -570,7 +618,7 @@
   {#if kind === 'mongodb'}
     <div class="field">
       <label for="cf-conn-string">Connection string</label>
-      <input
+      <input dir="ltr"
         id="cf-conn-string"
         class="input mono"
         bind:value={fConnString}
@@ -583,7 +631,7 @@
   {:else if kind === 'custom'}
     <div class="field">
       <label for="cf-template">Command template</label>
-      <input
+      <input dir="ltr"
         id="cf-template"
         class="input mono"
         bind:value={fTemplate}
@@ -596,7 +644,7 @@
   {:else}
     <div class="field">
       <label for="cf-host">Host</label>
-      <input
+      <input dir="ltr"
         id="cf-host"
         class="input mono"
         bind:value={fHost}
@@ -621,7 +669,7 @@
       </div>
       <div class="field grow">
         <label for="cf-user">User <span class="dim">(optional)</span></label>
-        <input
+        <input dir="ltr"
           id="cf-user"
           class="input mono"
           bind:value={fUser}
@@ -640,7 +688,7 @@
           {kind === 'redis' ? 'DB index' : 'Database'}
           <span class="dim">(optional)</span>
         </label>
-        <input
+        <input dir="ltr"
           id="cf-db"
           class="input mono"
           bind:value={fDb}
@@ -655,7 +703,7 @@
   {#if tzKinds.has(kind)}
     <div class="field">
       <label for="cf-tz">Timezone <span class="dim">(session; default UTC)</span></label>
-      <input
+      <input dir="ltr"
         id="cf-tz"
         class="input mono"
         list="cf-tz-list"
@@ -718,21 +766,21 @@
         </div>
         <div class="field">
           <label for="cf-tls-ca">CA certificate path <span class="dim">(optional)</span></label>
-          <PathField bind:value={tlsCaCert} files><input id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem" spellcheck="false" /></PathField>
+          <PathField bind:value={tlsCaCert} files><input dir="ltr" id="cf-tls-ca" class="input mono" bind:value={tlsCaCert} placeholder="~/certs/ca.pem" spellcheck="false" /></PathField>
         </div>
         <div class="field-row">
           <div class="field grow">
             <label for="cf-tls-cert">Client cert <span class="dim">(optional)</span></label>
-            <PathField bind:value={tlsClientCert} files><input id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem" spellcheck="false" /></PathField>
+            <PathField bind:value={tlsClientCert} files><input dir="ltr" id="cf-tls-cert" class="input mono" bind:value={tlsClientCert} placeholder="~/certs/client.pem" spellcheck="false" /></PathField>
           </div>
           <div class="field grow">
             <label for="cf-tls-key">Client key <span class="dim">(optional)</span></label>
-            <PathField bind:value={tlsClientKey} files><input id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem" spellcheck="false" /></PathField>
+            <PathField bind:value={tlsClientKey} files><input dir="ltr" id="cf-tls-key" class="input mono" bind:value={tlsClientKey} placeholder="~/certs/client-key.pem" spellcheck="false" /></PathField>
           </div>
         </div>
         <div class="field">
           <label for="cf-tls-sni">Server name (SNI) <span class="dim">(optional)</span></label>
-          <input id="cf-tls-sni" class="input mono" bind:value={tlsServerName} placeholder="db.example.com" spellcheck="false" />
+          <input dir="ltr" id="cf-tls-sni" class="input mono" bind:value={tlsServerName} placeholder="db.example.com" spellcheck="false" />
         </div>
       </div>
     {/if}
@@ -749,7 +797,7 @@
         <div class="field-row">
           <div class="field grow">
             <label for="cf-tun-host">Tunnel host</label>
-            <input id="cf-tun-host" class="input mono" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
+            <input dir="ltr" id="cf-tun-host" class="input mono" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
             {#if !tunHost.trim()}
               <span class="hint">Required — without a host the tunnel isn’t saved.</span>
             {/if}
@@ -761,12 +809,12 @@
         </div>
         <div class="field">
           <label for="cf-tun-user">Tunnel user <span class="dim">(optional)</span></label>
-          <input id="cf-tun-user" class="input mono" bind:value={tunUser} placeholder="ec2-user" spellcheck="false" />
+          <input dir="ltr" id="cf-tun-user" class="input mono" bind:value={tunUser} placeholder="ec2-user" spellcheck="false" />
         </div>
         <div class="field">
           <label for="cf-tun-identity">Identity file <span class="dim">(optional)</span></label>
           <div class="file-input-row">
-            <input id="cf-tun-identity" class="input mono grow" bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
+            <input dir="ltr" id="cf-tun-identity" class="input mono grow" bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
             <button class="btn browse-btn" onclick={() => (showTunnelFilePicker = true)}>Browse…</button>
           </div>
           <span class="hint">Key file must be private (<span class="mono">chmod 600</span>) or ssh ignores it.</span>
@@ -794,7 +842,7 @@
           {kind === 'ssh' ? 'Jump host' : 'SSH bastion / jump host'}
           <span class="dim">(optional)</span>
         </label>
-        <input
+        <input dir="ltr"
           id="cf-jump"
           class="input mono"
           bind:value={fJump}
@@ -806,7 +854,7 @@
       <div class="field">
         <label for="cf-identity">Identity file <span class="dim">(optional)</span></label>
         <div class="file-input-row">
-          <input
+          <input dir="ltr"
             id="cf-identity"
             class="input mono grow"
             bind:value={fIdentity}
@@ -830,7 +878,7 @@
   <!-- First command -->
   <div class="field">
     <label for="cf-first">First command <span class="dim">(optional)</span></label>
-    <input
+    <input dir="ltr"
       id="cf-first"
       class="input mono"
       bind:value={firstCommand}

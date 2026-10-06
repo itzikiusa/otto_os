@@ -66,7 +66,7 @@ test('opens on the film + Getting started; an unreachable film shows Retry, not 
   await expect(film).toBeVisible();
   const unavailable = page.getByTestId('tour-film-unavailable');
   await expect(unavailable).toBeVisible({ timeout: 20_000 });
-  await expect(unavailable).toContainText("can't load");
+  await expect(unavailable).toContainText('can’t load');
   await unavailable.getByRole('button', { name: 'Retry' }).click();
   await expect(page.getByTestId('tour-film-unavailable')).toBeVisible({ timeout: 20_000 });
 

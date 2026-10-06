@@ -66,22 +66,9 @@ async fn finding_agent_provider(ctx: &ServerCtx, workspace_id: &Id) -> String {
             return p.trim().to_string();
         }
     }
-    let ws_default = ctx
-        .workspaces
-        .get(workspace_id)
+    let ws = ctx.workspaces.get(workspace_id).await.ok();
+    ctx.resolve_provider_or_fallback(ws.as_ref(), None, "findings.agent")
         .await
-        .ok()
-        .map(|ws| otto_core::provider::workspace_default(&ws.settings).to_string())
-        .unwrap_or_default();
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[
-        ws_default.as_str(),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,6 +1023,10 @@ struct SeedReviewReq {
     /// Optional durable diff (E2E proves diff re-materialization on retry).
     #[serde(default)]
     diff: Option<String>,
+    /// Optional review status (`running` by default) — E2E seeds a settled
+    /// review to exercise per-agent retry, which refuses a mid-run review.
+    #[serde(default)]
+    status: Option<String>,
 }
 
 /// `POST /workspaces/{ws}/__e2e/review` — create a real review row so the
@@ -1072,6 +1063,14 @@ async fn e2e_seed_review(
     if let Some(diff) = &b.diff {
         ctx.reviews_store
             .set_diff(&review.id, diff)
+            .await
+            .map_err(ApiError)?;
+    }
+    if let Some(status) = b.status.as_deref() {
+        let status = otto_core::domain::ReviewStatus::parse(status)
+            .ok_or_else(|| ApiError(Error::Invalid(format!("unknown review status {status:?}"))))?;
+        ctx.reviews_store
+            .set_status(&review.id, status, None)
             .await
             .map_err(ApiError)?;
     }

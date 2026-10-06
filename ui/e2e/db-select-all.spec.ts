@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ test('Cmd/Ctrl+A selects the whole query, not just the visible viewport', async 
   await ensureEditorOpen(page);
 
   const content = page.locator('.qe-edit .cm-content');
-  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const selectAll = await editorSelectAll(page);
 
   // A long document — far taller than the editor viewport + CM's render margin —
   // so a viewport-only select-all would leave most of it behind.
@@ -89,7 +90,7 @@ test('Cmd/Ctrl+A selects the whole query, not just the visible viewport', async 
   // Select-all, then replace the whole selection with a short sentinel.
   await content.click();
   await expect(content).toBeFocused({ timeout: 5_000 });
-  await page.keyboard.press(`${mod}+A`);
+  await page.keyboard.press(selectAll);
   await page.keyboard.insertText('SELECT 1');
 
   // If select-all covered the whole document, the editor now holds ONLY the

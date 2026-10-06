@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -23,7 +24,10 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import { latestOnly } from '../../lib/latest';
   import type { Tone } from '../../lib/status';
+  import type { RejectedSender } from '../../lib/api/types';
+  import { pendingRejected, senderLabel, withAllowed } from './channelAllow';
 
   // ---------------------------------------------------------------------------
   // State
@@ -54,6 +58,9 @@
   let fChannelId = $state('');
   let fAllowedUsers = $state('');
   let fAgentReply = $state(false);
+  /** Explicit "open to everyone" opt-in for a blank allow-list (otherwise a
+   *  blank list admits nobody — the daemon fails closed). */
+  let fOpenToAll = $state(false);
   let fReplyInstructions = $state('');
   let fPreferredCli = $state('');
 
@@ -138,18 +145,32 @@
     setTimeout(() => statusPoll?.now({ background: true }), 16_000);
   }
 
+  // Generation guard + owner: after a workspace switch the previous
+  // workspace's cards used to stay rendered (and clickable) during the reload —
+  // toggling one PUT A's channel/allow-list/agent settings into B — and a slow
+  // response for A could land over B's.
+  const loads = latestOnly();
+  let integrationsFor = '';
   async function load(id: string): Promise<void> {
+    const t = loads.begin();
+    if (integrationsFor !== id) {
+      integrations = [];
+      integrationsFor = id;
+    }
     loading = true;
     loadError = '';
     try {
-      integrations = await api.get<Integration[]>(`/workspaces/${id}/integrations`);
+      const rows = await api.get<Integration[]>(`/workspaces/${id}/integrations`);
+      if (!t.current || wsId !== id) return;
+      integrations = rows;
     } catch (e) {
+      if (!t.current || wsId !== id) return;
       // Inline, not a toast: the cards would otherwise all read "Not
       // configured" — one Save away from overwriting a real integration.
       loadError = loadErrorText(e);
       integrations = [];
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 
@@ -166,6 +187,7 @@
     fChannelId = existing?.channel_id ?? '';
     fAllowedUsers = existing?.allowed_users ?? '';
     fAgentReply = existing?.agent_reply ?? false;
+    fOpenToAll = existing?.open_to_all ?? false;
     fReplyInstructions = existing?.reply_instructions ?? '';
     fPreferredCli = existing?.preferred_cli ?? '';
     editOpen = true;
@@ -177,11 +199,29 @@
 
   async function save(): Promise<void> {
     if (!wsId) return;
+    const blank = fAllowedUsers.trim() === '';
+    const listened = editChannel !== 'webhook';
+    if (listened && blank && fEnabled && !fOpenToAll) {
+      toasts.error(
+        `Add an allowed user before enabling ${channelLabel(editChannel)}`,
+        'A blank list admits nobody. Add user IDs, or explicitly open the bot to everyone.',
+      );
+      return;
+    }
+    const wasOpen = integrations.find((i) => i.channel === editChannel)?.open_to_all ?? false;
+    if (listened && blank && fOpenToAll && !wasOpen) {
+      const ok = await confirmer.ask(
+        `Anyone who can message this ${channelLabel(editChannel)} bot will be able to run an agent on this Mac as you — reading code and running commands — and receive its output.`,
+        { title: 'Open the bot to everyone?', confirmLabel: 'Open to everyone', danger: true },
+      );
+      if (!ok) return;
+    }
     editBusy = true;
     try {
       const body: UpsertIntegrationReq = {
         enabled: fEnabled,
         allowed_users: fAllowedUsers.trim(),
+        open_to_all: listened && blank && fOpenToAll,
         agent_reply: fAgentReply,
         reply_instructions: fReplyInstructions.trim(),
         channel_id: fChannelId.trim(),
@@ -218,10 +258,20 @@
 
   async function toggleEnabled(intg: Integration): Promise<void> {
     if (!wsId) return;
+    if (!intg.enabled && intg.channel !== 'webhook' && intg.allowed_users.trim() === '' && !intg.open_to_all) {
+      // Fail closed: enabling needs an allow-list (or the explicit opt-in).
+      toasts.error(
+        `Add an allowed user before enabling ${channelLabel(intg.channel)}`,
+        'A blank list admits nobody.',
+      );
+      openEdit(intg.channel);
+      return;
+    }
     try {
       const body: UpsertIntegrationReq = {
         enabled: !intg.enabled,
         allowed_users: intg.allowed_users,
+        open_to_all: intg.open_to_all,
         agent_reply: intg.agent_reply,
         reply_instructions: intg.reply_instructions,
         channel_id: intg.channel_id,
@@ -241,6 +291,47 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Allow a turned-away sender (S5-308) — the Telegram id the owner can't see
+  // in the app, so the bot can be restricted instead of opened to everyone.
+  // ---------------------------------------------------------------------------
+
+  /** The sender whose "Allow" save is in flight (that button disables). */
+  let allowing = $state<string | null>(null);
+
+  async function allowSender(intg: Integration, r: RejectedSender): Promise<void> {
+    if (!wsId || allowing) return;
+    const label = channelLabel(intg.channel);
+    const ok = await confirmer.ask(
+      `${senderLabel(r)} will be able to message the ${label} bot and run an agent on this Mac as you — reading code and running commands — and receive its output.`,
+      { title: `Allow ${senderLabel(r)}?`, confirmLabel: 'Allow', danger: true },
+    );
+    if (!ok) return;
+    allowing = r.user;
+    try {
+      const body: UpsertIntegrationReq = {
+        enabled: intg.enabled,
+        allowed_users: withAllowed(intg.allowed_users, r.user),
+        // A non-blank list replaces any "open to everyone" opt-in.
+        open_to_all: false,
+        agent_reply: intg.agent_reply,
+        reply_instructions: intg.reply_instructions,
+        channel_id: intg.channel_id,
+        preferred_cli: intg.preferred_cli,
+        bot_token: null, // keep existing
+        ...(intg.channel === 'slack' ? { app_token: null } : {}),
+      };
+      const updated = await api.put<Integration>(`/workspaces/${wsId}/integrations/${intg.channel}`, body);
+      integrations = integrations.map((i) => (i.channel === updated.channel ? updated : i));
+      refreshStatusSoon();
+      toasts.success(`${senderLabel(r)} can now message the ${label} bot`);
+    } catch (e) {
+      toasts.error(`Couldn’t allow ${senderLabel(r)}`, loadErrorText(e));
+    } finally {
+      allowing = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Delete
   // ---------------------------------------------------------------------------
 
@@ -251,7 +342,7 @@
     if (!wsId || removing[channel]) return;
     const label = channelLabel(channel);
     const secretWord = channel === 'webhook' ? 'The key' : 'Tokens';
-    if (!(await confirmer.ask(`Remove the ${label} integration? ${secretWord} will be deleted from the Keychain.`, { title: 'Remove integration?', confirmLabel: 'Remove' }))) return;
+    if (!(await confirmer.ask(`Remove the ${label} integration? ${secretWord} will be deleted from the Keychain.`, { title: 'Remove integration?', confirmLabel: 'Remove', danger: true }))) return;
     removing = { ...removing, [channel]: true };
     try {
       await api.del(`/workspaces/${wsId}/integrations/${channel}`);
@@ -340,10 +431,16 @@
     }
   }
 
-  /** Blank allowed users = anyone who can message the bot drives an agent on
-   *  this Mac. Webhooks are key-protected, so a blank caller list is fine. */
+  /** Blank allowed users under the explicit opt-in = anyone who can message
+   *  the bot drives an agent on this Mac. Webhooks are key-protected, so a
+   *  blank caller list is fine. */
   function openToEveryone(intg: Integration | null, channel: Channel): boolean {
-    return !!intg?.enabled && channel !== 'webhook' && intg.allowed_users.trim() === '';
+    return !!intg?.enabled && channel !== 'webhook' && intg.open_to_all && intg.allowed_users.trim() === '';
+  }
+
+  /** Blank allowed users WITHOUT the opt-in: the daemon admits nobody. */
+  function admitsNobody(intg: Integration | null, channel: Channel): boolean {
+    return !!intg?.enabled && channel !== 'webhook' && !intg.open_to_all && intg.allowed_users.trim() === '';
   }
 
   function statusLine(intg: Integration | null, channel: Channel): string {
@@ -378,7 +475,7 @@
         {@const h = health(intg, channel)}
         <!-- Right-click is a pointer shortcut; Enabled, Test, Edit, Remove and
              Set up are controls on the card itself. -->
-        <div
+        <div use:rowMenu
           role="presentation"
           class="channel-card card"
           class:off={configured && !intg?.enabled}
@@ -404,6 +501,9 @@
               {#if openToEveryone(intg, channel)}
                 <StatusBadge tone="warning" label="Open to everyone" dot={false}
                   title="No allowed users set: anyone who can message the bot can run an agent on this Mac. Edit to restrict it." />
+              {:else if admitsNobody(intg, channel)}
+                <StatusBadge tone="warning" label="No allowed users" dot={false}
+                  title="The allow-list is blank, so every message is ignored. Edit to add user IDs." />
               {/if}
             </div>
             <div class="ch-status" title={statusLine(intg, channel)}>{statusLine(intg, channel)}</div>
@@ -413,6 +513,28 @@
               </div>
             {:else if h?.lastEvent && h.tone === 'success'}
               <div class="ch-status">Last message <RelTime iso={h.lastEvent} /></div>
+            {/if}
+            {#if intg && h}
+              {@const turnedAway = pendingRejected(statuses.find((x) => x.channel === channel)?.rejected_senders, intg.allowed_users)}
+              {#if turnedAway.length}
+                <div class="ch-rejected" data-testid="channel-rejected-{channel}">
+                  <div class="ch-status">Recently turned away (not on the allowed list):</div>
+                  <ul>
+                    {#each turnedAway as r (r.user)}
+                      <li>
+                        <span class="mono" dir="ltr">{senderLabel(r)}</span>
+                        <span class="dim">· <RelTime iso={r.at} /></span>
+                        <button
+                          class="btn small"
+                          title="Add {r.user} to the {label} allowed users"
+                          disabled={allowing !== null}
+                          onclick={() => void allowSender(intg, r)}
+                        >{allowing === r.user ? 'Allowing…' : 'Allow…'}</button>
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
+              {/if}
             {/if}
           </div>
           <div class="ch-actions">
@@ -488,7 +610,7 @@
       <div class="field">
         <label for="ch-url">Inbound URL</label>
         <div class="row-inline">
-          <input id="ch-url" class="input mono inline-field" value={webhookUrl} readonly spellcheck="false" />
+          <input dir="ltr" id="ch-url" class="input mono inline-field" value={webhookUrl} readonly spellcheck="false" />
           <button class="btn small inline-btn" type="button" onclick={() => void copyText(webhookUrl)}>Copy</button>
         </div>
         <span class="hint">
@@ -564,7 +686,7 @@
             ? 'Default chat ID'
             : 'Default reply callback URL'}
       </label>
-      <input
+      <input dir="ltr"
         id="ch-chid"
         class="input mono"
         bind:value={fChannelId}
@@ -587,7 +709,7 @@
     <!-- Allowed users -->
     <div class="field">
       <label for="ch-users">{editChannel === 'webhook' ? 'Allowed callers' : 'Allowed users'}</label>
-      <input
+      <input dir="auto"
         id="ch-users"
         class="input"
         bind:value={fAllowedUsers}
@@ -601,13 +723,19 @@
           Leave blank to allow everyone.
         {:else}
           Comma-separated {channelLabel(editChannel)} user IDs{editChannel === 'slack' ? ' (Profile → ⋯ → Copy member ID)' : ''}.
-          Leave blank to allow everyone.
+          Required: a blank list admits nobody.
         {/if}
       </span>
       {#if editChannel !== 'webhook' && fAllowedUsers.trim() === ''}
-        <span class="hint warn" role="note">
-          Blank means anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
-        </span>
+        <label class="checkbox-row modal-check">
+          <input id="ch-open" type="checkbox" bind:checked={fOpenToAll} />
+          Open to everyone
+        </label>
+        {#if fOpenToAll}
+          <span class="hint warn" role="note">
+            Anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
+          </span>
+        {/if}
       {/if}
     </div>
 
@@ -638,7 +766,7 @@
     {#if fAgentReply}
       <div class="field">
         <label for="ch-reply">Reply instructions</label>
-        <textarea
+        <textarea dir="auto"
           id="ch-reply"
           class="input reply-area"
           rows={4}
@@ -722,6 +850,28 @@
   }
   .hint.warn {
     color: var(--warning);
+  }
+  .ch-rejected ul {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ch-rejected li {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: var(--fs-s);
+    min-width: 0;
+  }
+  .ch-rejected .mono {
+    overflow-wrap: anywhere;
+  }
+  .ch-rejected .dim {
+    color: var(--text-dim);
   }
   .ch-status {
     font-size: var(--fs-s);

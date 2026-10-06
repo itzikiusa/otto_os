@@ -20,6 +20,7 @@ import { router } from '../router.svelte';
 import { parseNoticeRoute } from '../noticeRoute';
 import { isEmbedded } from '../desktop';
 import { toastError } from '../toastError';
+import { confirmer } from '../confirm.svelte';
 
 /** Most ids one bulk read / dismiss call may carry (daemon `BULK_MAX`). */
 const BULK_MAX = 500;
@@ -188,6 +189,25 @@ export function capNotices(list: Notice[], cap = NOTICE_CAP): Notice[] {
   return kept.length > cap ? kept.slice(0, cap) : kept;
 }
 
+/** Merge notices the event stream delivered while a `/notifications` GET was
+ *  in flight (`ingested`, oldest first) into its snapshot (`fetched`, newest
+ *  first). The snapshot may predate them: an ingested notice the snapshot
+ *  lacks — or carries an OLDER copy of (a re-fired `:waiting` keeps its id
+ *  with a newer `created_at`) — goes back on top; a snapshot copy at least as
+ *  new is the server's truth (read state included) and wins. */
+export function mergeInFlight(fetched: Notice[], ingested: Notice[]): Notice[] {
+  let out = fetched;
+  for (const n of ingested) {
+    const have = out.find((x) => x.id === n.id);
+    if (have && have.created_at >= n.created_at) continue;
+    out = [n, ...out.filter((x) => x.id !== n.id)];
+  }
+  return capNotices(out);
+}
+
+/** Internal marker: a load answered for a previous identity (dropped). */
+const STALE = Symbol('stale-identity');
+
 class NotificationStore {
   /** Raw: every write replaces the array (and edited notices) wholesale. */
   notices: Notice[] = $state.raw([]);
@@ -197,6 +217,11 @@ class NotificationStore {
   /** Last load failure (null once a load succeeds) — the bell shows it with a
    *  Retry instead of an empty "all caught up" that would be a lie. */
   error: string | null = $state(null);
+  /** A load has FINISHED for this identity — succeeded or failed. The bell's
+   *  spinner keys on this, not `loaded`: a failed first load while the event
+   *  stream ingested rows left `loaded` false with rows present and no error
+   *  pane, so the panel spun forever (S12-305). */
+  settled = $state(false);
 
   /** Number of unread notices. */
   unread: number = $derived(this.notices.filter((n) => !n.read).length);
@@ -227,8 +252,39 @@ class NotificationStore {
   /** Whether we've already asked the OS for notification permission this run. */
   private permissionRequested = false;
 
+  /** The first load in flight, for {@link ensureLoaded} to join. */
+  private inflight: Promise<void> | null = null;
+
+  /** Make sure notices are loaded at least once: joins a load already in
+   *  flight instead of queueing a second fetch (Home and Settings mount while
+   *  the bell's first load is still out — a queued reload doubled boot's
+   *  `/notifications` + `/notifications/settings` requests). Use {@link load}
+   *  when newer server state is wanted (reconnect resync, Retry). */
+  ensureLoaded(): Promise<void> {
+    if (untrack(() => this.loaded)) return Promise.resolve();
+    const running = untrack(() => this.inflight);
+    if (running) return running;
+    return this.load();
+  }
+
   /** Load notices + settings from the daemon. Safe to call more than once. */
-  async load(): Promise<void> {
+  load(): Promise<void> {
+    // Already fetching: loadOnce queues one trailing reload; hand back the
+    // running load rather than recording the queued no-op as "in flight".
+    const running = untrack(() => this.inflight);
+    if (running && untrack(() => this.loading)) {
+      void this.loadOnce();
+      return running;
+    }
+    const p = this.loadOnce();
+    this.inflight = p;
+    void p.finally(() => {
+      if (this.inflight === p) this.inflight = null;
+    });
+    return p;
+  }
+
+  private async loadOnce(): Promise<void> {
     // Read the re-entrancy guard UNtracked: callers like NotificationBell wrap
     // this in a bare `$effect(() => void notifications.load())` intending a
     // load-once-on-mount. Reading `this.loading` inside that effect's tracking
@@ -236,14 +292,28 @@ class NotificationStore {
     // false }` below would then re-trigger the effect after every fetch — an
     // infinite `GET /notifications` loop that pegs the webview + daemon. untrack
     // keeps the overlap guard working without leaking it as a dependency.
-    if (untrack(() => this.loading)) return;
+    // A load requested while one is in flight (a reconnect resync racing the
+    // bell's mount) may carry newer server state: queue ONE trailing reload
+    // instead of dropping it.
+    if (untrack(() => this.loading)) {
+      this.reloadQueued = true;
+      return;
+    }
     this.loading = true;
+    // Notices ingested from the event stream while the GET is in flight may
+    // be newer than its snapshot — merged back below, never overwritten.
+    const since = this.ingestSeq;
+    const epoch = this.identityEpoch;
     try {
       const [notices, settings] = await Promise.all([
         api.get<Notice[]>('/notifications'),
         api.get<NotificationSettings>('/notifications/settings').catch(() => this.settings),
       ]);
-      this.notices = notices.filter((n) => !this.isChannelSessionNotice(n));
+      // Answered for the previous identity: drop it (the queued reload
+      // below fetches the new identity's notices).
+      if (epoch !== this.identityEpoch) throw STALE;
+      const fetched = notices.filter((n) => !this.isChannelSessionNotice(n));
+      this.notices = mergeInFlight(fetched, this.ingestedSince(since));
       this.settings = settings;
       this.loaded = true;
       try {
@@ -252,13 +322,48 @@ class NotificationStore {
         /* a best-effort re-derivation — never fail the load over it */
       }
       this.error = null;
+      this.settled = true;
     } catch (e) {
-      // Backend may not be ready yet (the events WS reloads on connect) — keep
-      // whatever we had and surface the failure so the bell can offer Retry.
-      this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+      // A previous identity's answer (or failure) is dropped; the queued
+      // reload below runs for the new one.
+      if (e !== STALE && epoch === this.identityEpoch) {
+        // Backend may not be ready yet (the events WS reloads on connect) — keep
+        // whatever we had and surface the failure so the bell can offer Retry.
+        this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+        this.settled = true;
+      }
     } finally {
       this.loading = false;
     }
+    if (this.reloadQueued) {
+      this.reloadQueued = false;
+      await this.load();
+    }
+  }
+
+  private reloadQueued = false;
+  /** Bumped on an identity change; a load answered for the old one is dropped. */
+  private identityEpoch = 0;
+
+  /** The signed-in identity changed (impersonate / stop / re-login, S13-02):
+   *  notices are per user on the daemon, so the previous identity's list,
+   *  in-flight load and ingest log must not mix with the new one's. Clears
+   *  (a load in flight is dropped); the caller then calls `load()`, which
+   *  queues behind a dropped in-flight one. */
+  resetForIdentity(): void {
+    this.identityEpoch += 1;
+    this.notices = [];
+    this.ingestLog = [];
+    this.loaded = false;
+    this.settled = false;
+    this.error = null;
+  }
+  /** Event-stream ingests, in order, for {@link load}'s in-flight merge. */
+  private ingestSeq = 0;
+  private ingestLog: { seq: number; notice: Notice }[] = [];
+
+  private ingestedSince(seq: number): Notice[] {
+    return this.ingestLog.filter((e) => e.seq > seq).map((e) => e.notice);
   }
 
   /** The live "needs you" flag is raised from the `:waiting` WS notice (see
@@ -308,6 +413,7 @@ class NotificationStore {
     const known = this.notices.find((n) => n.id === notice.id);
     if (known && known.created_at === notice.created_at) return;
     if (this.isChannelSessionNotice(notice)) return;
+    this.ingestLog = [...this.ingestLog.slice(-49), { seq: ++this.ingestSeq, notice }];
     this.notices = capNotices([notice, ...this.notices.filter((n) => n.id !== notice.id)]);
     if (this.wantsNative(notice)) void this.fireNative(notice);
   }
@@ -470,16 +576,9 @@ class NotificationStore {
       case 'open_url':
         await openExternal(action.url);
         break;
-      case 'open_session': {
-        // The main list carries only sidebar sessions — fetch others by id.
-        const found = ws.getSession(action.session_id) ?? (await ws.ensureSession(action.session_id));
-        if (!found || !ws.getSession(action.session_id)) {
-          toasts.warn('Session unavailable', 'It may have been closed or belongs to another workspace.');
-          return;
-        }
-        ws.navigateToSession(action.session_id);
+      case 'open_session':
+        await this.openSession(action.session_id);
         break;
-      }
       case 'reauth':
         this.guideReauth(action.target);
         break;
@@ -487,6 +586,39 @@ class NotificationStore {
         await this.openRoute(action.route, action.workspace_id ?? null);
         break;
     }
+  }
+
+  /** A session notice ("needs you", finished, …): open the session wherever it
+   *  is. The main list carries only this workspace's sidebar sessions, so
+   *  fetch others by id — then switch to ITS workspace, or (archived since
+   *  the notice fired) offer to bring it back. */
+  private async openSession(id: string): Promise<void> {
+    const row = ws.getSession(id) ?? (await ws.ensureSession(id));
+    if (!row) {
+      toasts.warn('Session unavailable', 'It may have been deleted, or you no longer have access.');
+      return;
+    }
+    const elsewhere = !ws.getSession(id) && row.workspace_id !== ws.currentId;
+    if (elsewhere && !ws.workspaces.some((w) => w.id === row.workspace_id)) {
+      toasts.warn('Workspace unavailable', 'It may have been removed, or you no longer have access.');
+      return;
+    }
+    if (row.archived) {
+      const name = row.title?.trim() || 'This session';
+      const ok = await confirmer.ask(
+        `“${name}” was archived. Unarchive it and open it? It resumes its saved conversation where it can.`,
+        { title: 'Session archived', confirmLabel: 'Unarchive and open' },
+      );
+      if (!ok) return;
+      try {
+        await ws.unarchiveSession(id);
+      } catch (e) {
+        toastError('Couldn’t unarchive the session', e);
+        return;
+      }
+    }
+    if (elsewhere) await ws.openInWorkspace(row.workspace_id, id);
+    else ws.navigateToSession(id);
   }
 
   /** Automation notices (failed task / workflow run / goal loop, workflow

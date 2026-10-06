@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiCtx, seedVaultDir, seedWorkspace } from './seed';
 import { openPage } from './helpers';
-import { domCount, isDesktopProject, requestLog } from './perf';
+import { domCount, isDesktopProject, requestLog, type RequestLog } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Docs, visual editors and orchestration — perf regression gates (I6,
@@ -157,6 +157,25 @@ async function postJson(ctx: APIRequestContext, url: string, data: unknown): Pro
   return r.json();
 }
 
+/** Resolve once `log` has seen no new request for `quietMs` (bounded by `timeout`). */
+async function settled(log: RequestLog, quietMs = 1000, timeout = 20_000): Promise<void> {
+  let last = -1;
+  let since = Date.now();
+  await expect
+    .poll(
+      () => {
+        const n = log.stats().count;
+        if (n !== last) {
+          last = n;
+          since = Date.now();
+        }
+        return Date.now() - since >= quietMs;
+      },
+      { timeout, intervals: [100] },
+    )
+    .toBe(true);
+}
+
 test('design hall: a metadata change patches one card, no full library reload', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   let id = '';
@@ -171,10 +190,17 @@ test('design hall: a metadata change patches one card, no full library reload', 
       });
       id = res.artifact.id; // the newest: shown in "Recent"
     }
+    // Every Design Hall request from the first paint on: the measurement must
+    // start only once the lobby is QUIET. A fixed 1 s sleep raced the
+    // slot-limited card thumbnails (each fetches its artifact's content —
+    // the same `/artifacts/{id}` URL counted below) and the initial library
+    // load on a slow runner, so stray mount traffic landed in the window.
+    const mountLog = requestLog(page, /\/api\/v1\/design\//);
     await page.goto('/#/design');
     await expect(page.getByTestId('design-lobby')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText('Perf frame 11').first()).toBeVisible({ timeout: 15_000 });
-    await page.waitForTimeout(1000);
+    await settled(mountLog);
+    mountLog.stop();
     const search = requestLog(page, /\/api\/v1\/design\/search/);
     const one = requestLog(page, new RegExp(`/api/v1/design/artifacts/${id}(\\?|$)`));
     const r = await ctx.patch(`${base}${V1}/design/artifacts/${id}`, { data: { title: 'Perf frame renamed' } });

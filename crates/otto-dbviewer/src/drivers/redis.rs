@@ -94,7 +94,7 @@ impl Driver for RedisDriver {
                     latency_ms: Some(started.elapsed().as_millis() as u64),
                     message: e.to_string(),
                     server_version: None,
-                })
+                });
             }
         };
 
@@ -302,6 +302,9 @@ impl Driver for RedisDriver {
 
         if commands.is_empty() {
             return Err(types::invalid("redis: no command provided"));
+        }
+        for parts in &commands {
+            refuse_connection_state_command(parts)?;
         }
 
         let db = keyspace_for(cfg, req)?;
@@ -1145,6 +1148,104 @@ fn split_args(line: &str) -> Vec<String> {
 // --- Command table ----------------------------------------------------------
 
 /// ~80 common Redis commands with one-line summaries for autocomplete.
+/// Refuse commands that change the state of the CONNECTION rather than the
+/// data. The console runs over a shared, multiplexed connection: a `SELECT 3`
+/// would silently re-point every later command (from any tab) at db 3, a
+/// `MULTI` would queue everyone's commands into one transaction, a
+/// `SUBSCRIBE`/`MONITOR` turns the connection into a push stream, and
+/// `AUTH`/`HELLO`/`RESET`/`QUIT`/`CLIENT REPLY` swap or break it outright.
+fn refuse_connection_state_command(parts: &[String]) -> Result<()> {
+    let Some(head) = parts.first() else {
+        return Ok(());
+    };
+    let name = head.to_ascii_uppercase();
+    let sub = parts.get(1).map(|s| s.to_ascii_uppercase());
+    let why = match name.as_str() {
+        "SELECT" => "switch the database with the connection's database picker instead",
+        "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH" => {
+            "transactions are not supported in the console"
+        }
+        "SUBSCRIBE" | "PSUBSCRIBE" | "SSUBSCRIBE" | "UNSUBSCRIBE" | "PUNSUBSCRIBE"
+        | "SUNSUBSCRIBE" | "MONITOR" => {
+            "pub/sub and MONITOR streams are not supported in the console"
+        }
+        "RESET" | "QUIT" | "HELLO" | "AUTH" => {
+            "connection credentials and protocol are managed by the connection settings"
+        }
+        "CLIENT" if sub.as_deref() == Some("REPLY") => {
+            "CLIENT REPLY would desynchronise the shared connection"
+        }
+        // Per-connection modes: tracking turns on push invalidations, the
+        // eviction / LRU flags and the name would apply to every tab's and
+        // agent's commands, and CACHING only makes sense with TRACKING.
+        "CLIENT"
+            if matches!(
+                sub.as_deref(),
+                Some("TRACKING" | "CACHING" | "NO-EVICT" | "NO-TOUCH" | "SETNAME" | "SETINFO")
+            ) =>
+        {
+            "per-connection client modes would apply to every tab and agent sharing it"
+        }
+        // CLIENT KILL with filters skips the caller (SKIPME yes, the
+        // default), so it can only end OTHER clients — an admin action the
+        // native ACL governs. The legacy `CLIENT KILL addr:port` form and an
+        // explicit `SKIPME no` can kill the shared connection itself.
+        "CLIENT"
+            if sub.as_deref() == Some("KILL")
+                && (parts.len() == 3
+                    || parts.windows(2).any(|w| {
+                        w[0].eq_ignore_ascii_case("SKIPME") && w[1].eq_ignore_ascii_case("no")
+                    })) =>
+        {
+            "it can drop the shared connection itself — use a filter (ID / TYPE / USER / ADDR) \
+             with the default SKIPME yes"
+        }
+        // Cluster read routing for this connection.
+        "READONLY" | "READWRITE" => "cluster read routing is fixed for the shared connection",
+        _ => return refuse_blocking_command(&name, sub.as_deref(), parts),
+    };
+    Err(types::invalid(format!(
+        "redis: {name}{} changes the shared connection's state and is not allowed here — {why}",
+        match (name.as_str(), sub.as_deref()) {
+            ("CLIENT", Some(sub)) => format!(" {sub}"),
+            _ => String::new(),
+        }
+    )))
+}
+
+/// Refuse commands that BLOCK the connection server-side. The console's
+/// multiplexed connection is shared per `cfg|db`: a `BLPOP jobs 0` keeps it
+/// blocked after the client-side timeout fires, and every later command from
+/// any tab, widget or agent queues behind it. Their non-blocking forms
+/// (`LPOP`, `XREAD` without `BLOCK`, …) are fine.
+fn refuse_blocking_command(name: &str, sub: Option<&str>, parts: &[String]) -> Result<()> {
+    let blocking = match name {
+        "BLPOP" | "BRPOP" | "BLMOVE" | "BRPOPLPUSH" | "BLMPOP" | "BZPOPMIN" | "BZPOPMAX"
+        | "BZMPOP" | "WAIT" | "WAITAOF" => true,
+        // Options precede `STREAMS`; everything after it is key names and
+        // IDs, so a stream literally named "block" is not the option.
+        "XREAD" | "XREADGROUP" => parts
+            .iter()
+            .skip(1)
+            .take_while(|a| !a.eq_ignore_ascii_case("STREAMS"))
+            .any(|a| a.eq_ignore_ascii_case("BLOCK")),
+        "CLIENT" => sub == Some("PAUSE"),
+        "DEBUG" => sub == Some("SLEEP"),
+        _ => false,
+    };
+    if !blocking {
+        return Ok(());
+    }
+    Err(types::invalid(format!(
+        "redis: {name}{} blocks the shared connection server-side and is not allowed here — \
+         use the non-blocking form (e.g. LPOP / ZPOPMIN, or XREAD without BLOCK)",
+        match (name, sub) {
+            ("CLIENT" | "DEBUG", Some(sub)) => format!(" {sub}"),
+            _ => String::new(),
+        }
+    )))
+}
+
 const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("GET", "GET key — get the value of a key"),
     ("SET", "SET key value — set a key to a string value"),
@@ -1296,7 +1397,6 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
         "INFO [section] — server statistics and configuration",
     ),
     ("DBSIZE", "DBSIZE — number of keys in the current database"),
-    ("SELECT", "SELECT index — switch to a logical database"),
     (
         "FLUSHDB",
         "FLUSHDB — remove all keys from the current database",
@@ -1315,14 +1415,6 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ),
     ("COMMAND", "COMMAND [COUNT|INFO|DOCS] — command metadata"),
     ("MEMORY", "MEMORY USAGE key — estimate memory used by a key"),
-    ("WAIT", "WAIT numreplicas timeout — wait for replication"),
-    ("MULTI", "MULTI — start a transaction"),
-    ("EXEC", "EXEC — execute a queued transaction"),
-    ("DISCARD", "DISCARD — discard a queued transaction"),
-    (
-        "SUBSCRIBE",
-        "SUBSCRIBE channel [channel ...] — subscribe to channels",
-    ),
     ("PUBLISH", "PUBLISH channel message — publish to a channel"),
 ];
 
@@ -1331,6 +1423,93 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_state_commands_are_refused() {
+        let p = |line: &str| split_args(line);
+        for line in [
+            "SELECT 3",
+            "select 1",
+            "MULTI",
+            "EXEC",
+            "DISCARD",
+            "WATCH k",
+            "UNWATCH",
+            "SUBSCRIBE ch",
+            "psubscribe news.*",
+            "SSUBSCRIBE s",
+            "UNSUBSCRIBE",
+            "MONITOR",
+            "CLIENT REPLY OFF",
+            "client reply skip",
+            "RESET",
+            "QUIT",
+            "HELLO 3",
+            "AUTH user pass",
+            // S6-305: per-connection modes and self-kill.
+            "CLIENT TRACKING ON",
+            "client caching yes",
+            "CLIENT NO-EVICT on",
+            "CLIENT NO-TOUCH on",
+            "CLIENT SETNAME tab-1",
+            "CLIENT SETINFO LIB-NAME x",
+            "CLIENT KILL 127.0.0.1:6379",
+            "CLIENT KILL ID 7 SKIPME no",
+            "client kill type normal skipme NO",
+            "READONLY",
+            "readwrite",
+        ] {
+            let e = refuse_connection_state_command(&p(line)).unwrap_err();
+            assert!(e.to_string().contains("shared connection"), "{line}: {e}");
+        }
+        let e = refuse_connection_state_command(&p("SELECT 2")).unwrap_err();
+        assert!(e.to_string().contains("database picker"), "{e}");
+        for ok in ["GET k", "CLIENT LIST", "PUBLISH ch m", "INFO", "DBSIZE"] {
+            assert!(refuse_connection_state_command(&p(ok)).is_ok(), "{ok}");
+        }
+        // S6-06: server-side BLOCKING forms would wedge the shared connection.
+        for line in [
+            "BLPOP jobs 0",
+            "brpop jobs 5",
+            "BLMOVE a b LEFT RIGHT 0",
+            "BRPOPLPUSH a b 0",
+            "BLMPOP 0 1 a LEFT",
+            "BZPOPMIN z 0",
+            "BZPOPMAX z 0",
+            "BZMPOP 0 1 z MIN",
+            "WAIT 1 0",
+            "WAITAOF 1 1 0",
+            "XREAD BLOCK 0 STREAMS s $",
+            "XREADGROUP GROUP g c block 0 STREAMS s >",
+            "CLIENT PAUSE 100000",
+            "DEBUG SLEEP 60",
+        ] {
+            let e = refuse_connection_state_command(&p(line)).unwrap_err();
+            assert!(
+                e.to_string().contains("blocks the shared connection"),
+                "{line}: {e}"
+            );
+        }
+        for ok in [
+            "LPOP jobs",
+            "XREAD COUNT 10 STREAMS s 0",
+            "ZPOPMIN z",
+            "CLIENT ID",
+            // A stream key literally named "block" after STREAMS is not the
+            // option (S6-305).
+            "XREAD STREAMS block 0",
+            "XREADGROUP GROUP g c COUNT 1 STREAMS BLOCK >",
+            // Filtered CLIENT KILL skips the caller by default.
+            "CLIENT KILL TYPE normal",
+            "CLIENT KILL ID 7",
+        ] {
+            assert!(refuse_connection_state_command(&p(ok)).is_ok(), "{ok}");
+        }
+        // The console's completions no longer offer them.
+        for gone in ["SELECT", "MULTI", "EXEC", "DISCARD", "SUBSCRIBE"] {
+            assert!(REDIS_COMMANDS.iter().all(|(c, _)| *c != gone), "{gone}");
+        }
+    }
 
     #[test]
     fn binary_bulk_string_renders_base64_not_placeholder() {

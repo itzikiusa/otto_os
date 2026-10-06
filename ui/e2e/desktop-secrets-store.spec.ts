@@ -1,9 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
+import { apiCtx } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings ▸ Trust & safety ▸ Secret storage (root only).
 //   • the isolated test daemon runs OTTO_SECRETS=file → the real status says
-//     "plaintext store active" with no migration offered (no secrets.json yet);
+//     "plaintext store active" with no migration offered while it holds no
+//     secrets, and the warning + "Secure secrets…" once another spec (the
+//     daemon is shared) has stored some;
 //   • with plaintext secrets present (mocked status) a warning banner and the
 //     explicit "Secure secrets…" action appear; it confirms first, POSTs
 //     {confirm: true} and the card then shows the encrypted store;
@@ -46,11 +49,27 @@ const encrypted = {
 };
 
 test('real daemon: plaintext store active, nothing to migrate yet', async ({ page }) => {
+  // The daemon is shared by every spec, so whether it holds secrets yet
+  // depends on run order: read its real status and hold the card to it.
+  const { ctx, base } = await apiCtx();
+  const r = await ctx.get(`${base}/api/v1/admin/secrets/status`);
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const status = (await r.json()) as { mode: string; plaintext_entries: number };
+  await ctx.dispose();
+  expect(status.mode).toBe('plaintext');
   await boot(page);
   await expect(card(page)).toBeVisible();
-  await expect(card(page).getByText('The plaintext secret store is active.')).toBeVisible();
   await expect(card(page).getByText('Plaintext file (not encrypted)')).toBeVisible();
-  await expect(card(page).getByRole('button', { name: /Secure secrets/ })).toHaveCount(0);
+  if (status.plaintext_entries === 0) {
+    await expect(card(page).getByText('The plaintext secret store is active.')).toBeVisible();
+    await expect(card(page).getByRole('button', { name: /Secure secrets/ })).toHaveCount(0);
+  } else {
+    const n = status.plaintext_entries;
+    await expect(card(page).getByRole('alert')).toContainText(
+      `${n} secret${n === 1 ? ' is' : 's are'} in a plaintext file`,
+    );
+    await expect(card(page).getByRole('button', { name: /Secure secrets/ })).toBeVisible();
+  }
 });
 
 test('plaintext secrets: banner, confirm, migrate, encrypted', async ({ page }) => {

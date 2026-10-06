@@ -21,7 +21,7 @@ function component(path: string, state: Record<string, any>) {
       d.initializer && [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NumericLiteral].includes(d.initializer.kind),
     );
   }).map(node => node.getText(file)).join('\n');
-  const context: Record<string, any> = { plural, pluralNoun, toastError: (message: string, cause: unknown) => { state.toasts?.error(message, cause); }, Error, DOMException, AbortController, onDestroy: (callback: () => void) => lifecycle.push(callback), destroy: () => { for (const callback of lifecycle) callback(); }, ws: { currentId: 'workspace-A' }, $state: { snapshot: (v: unknown) => structuredClone(v) }, ...state };
+  const context: Record<string, any> = { plural, pluralNoun, toastError: (message: string, cause: unknown) => { state.toasts?.error(message, cause); }, Error, DOMException, AbortController, onDestroy: (callback: () => void) => lifecycle.push(callback), destroy: () => { for (const callback of lifecycle) callback(); }, ws: { currentId: 'workspace-A' }, lsGet: () => null, lsSet: () => {}, LS_FORMAT: 'fmt', LS_DIR: 'dir', $state: { snapshot: (v: unknown) => structuredClone(v) }, ...state };
   runInNewContext(ts.transpileModule(functions, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return context;
 }
@@ -343,4 +343,15 @@ test('environment A-B-A return preserves actual new typing and reconciles saved 
   pending.resolve({ ...original, secret_keys: ['first_token'] }); await saving;
   assert.equal(c.dirty, true); assert.equal(c.rows[0].value, 'new typing after returning');
   assert.equal(c.rows[1].key, 'second_token'); assert.equal(c.rows[1].storedKey, 'first_token');
+});
+
+test('database dialogs + page reach storage only through the guarded helpers (S16-304)', () => {
+  // A throwing accessor (blocked storage) broke the Database page at mount and
+  // turned a finished import/export into "Couldn’t …" (skipping ondone/onclose).
+  for (const f of ['ImportDialog.svelte', 'ExportDialog.svelte', 'DatabasePage.svelte']) {
+    const code = readFileSync(new URL(`../src/modules/database/${f}`, import.meta.url), 'utf8')
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/<!--[\s\S]*?-->/g, '');
+    assert.doesNotMatch(code, /\blocalStorage\s*\./, f);
+  }
 });

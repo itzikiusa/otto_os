@@ -57,9 +57,12 @@
     try {
       const page = await mcpCpApi.cpAudit(query(0));
       if (gen !== generation) return;
-      rows = page;
-      nextOffset = PAGE;
-      hasMore = page.length === PAGE;
+      rows = page.rows;
+      // The server reads PAGE ledger rows and THEN drops the ones this caller
+      // can't see, so a short (even empty) page doesn't mean the end: it says
+      // where the ledger continues and whether it has more (S17-304).
+      nextOffset = page.next_offset;
+      hasMore = page.has_more;
       loadError = null;
     } catch (e) {
       if (gen === generation) loadError = loadErrorText(e);
@@ -78,9 +81,9 @@
       const page = await mcpCpApi.cpAudit(query(nextOffset));
       if (gen !== generation) return;
       const seen = new Set(rows.map((r) => r.id));
-      rows = [...rows, ...page.filter((r) => !seen.has(r.id))];
-      nextOffset += PAGE;
-      hasMore = page.length === PAGE;
+      rows = [...rows, ...page.rows.filter((r) => !seen.has(r.id))];
+      nextOffset = page.next_offset;
+      hasMore = page.has_more;
       moreError = null;
     } catch (e) {
       if (gen === generation) moreError = loadErrorText(e);
@@ -151,17 +154,17 @@
       </button>
       {#if filtersOpen}
         <div class="bar">
-          <select bind:value={fServer}>
+          <select aria-label="Server" bind:value={fServer}>
             <option value="">All servers</option>
             {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
           </select>
-          <input
+          <input dir="ltr" aria-label="Filter by tool"
             bind:value={fTool}
             placeholder="Filter tool…"
             class="mono"
             onkeydown={(e) => e.key === 'Enter' && void load()}
           />
-          <select bind:value={fDecision}>
+          <select aria-label="Decision" bind:value={fDecision}>
             <option value="">All decisions</option>
             <option value="allowed">{sentenceCase('allowed')}</option>
             <option value="approved">{sentenceCase('approved')}</option>

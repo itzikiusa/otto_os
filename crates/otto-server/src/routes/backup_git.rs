@@ -707,10 +707,12 @@ async fn preview(
 }
 async fn export(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ExportRequest>,
 ) -> ApiResult<Json<ExportPreview>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = canonical_repo(&req.repo_path).await?;
     let guard = repo_lock(&repo).await;
     tokio::spawn(async move {
@@ -731,10 +733,12 @@ async fn export(
 }
 async fn commit(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<CommitRequest>,
 ) -> ApiResult<Json<Value>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = canonical_repo(&req.repo_path).await?;
     let guard = repo_lock(&repo).await;
     tokio::spawn(async move {
@@ -761,10 +765,12 @@ async fn commit(
 }
 async fn sync(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<SyncRequest>,
 ) -> ApiResult<Json<Value>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = canonical_repo(&req.repo_path).await?;
     let guard = repo_lock(&repo).await;
     tokio::spawn(async move {
@@ -805,10 +811,12 @@ async fn restore_preview(
 }
 async fn restore(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RestoreRequest>,
 ) -> ApiResult<Json<crate::state_archive::RestoreResult>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = canonical_repo(&req.repo_path).await?;
     let guard = repo_lock(&repo).await;
     tokio::spawn(async move {

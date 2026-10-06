@@ -44,7 +44,7 @@
         aria-label="Close tab {tab.title || tab.url}"
         title="Close tab {tab.title || tab.url}"
       >
-        <Icon name="x" size={11} />
+        <Icon name="x" size={12} />
       </button>
     </div>
   {/each}

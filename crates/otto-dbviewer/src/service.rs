@@ -35,6 +35,41 @@ use serde_json::Value;
 use crate::config::{self};
 use crate::driver::Driver;
 use crate::registry::Registry;
+/// The refusal for a guarded write an agent credential "confirmed" (S6-304).
+pub(crate) const AGENT_CONFIRM_REFUSED: &str =
+    "an agent session's credential cannot confirm a write to a production / read-only \
+     connection — a person signed in to Otto must run it";
+
+/// `confirm_write` as a PERSON asserted it: the flag is a body field the
+/// client sets, so a non-human credential (an agent session's own token, a
+/// session MCP credential) never counts as having confirmed (S6-304). Outside
+/// an HTTP request (no request credential — e.g. a spawned task that did not
+/// carry it) nobody confirmed: it fails closed.
+pub(crate) fn person_confirmed(confirm_write: bool) -> bool {
+    confirm_write && !otto_core::auth::request_is_agent()
+}
+
+#[cfg(test)]
+mod person_confirm_tests {
+    use otto_core::auth::{with_request_credential, RequestCredential};
+
+    #[tokio::test]
+    async fn an_agent_credential_never_confirms_a_guarded_write() {
+        assert!(
+            !super::person_confirmed(true),
+            "no request credential: nobody confirmed (fails closed)"
+        );
+        assert!(!super::person_confirmed(false));
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        assert!(!with_request_credential(agent, async { super::person_confirmed(true) }).await);
+        let human = RequestCredential::default();
+        assert!(with_request_credential(human, async { super::person_confirmed(true) }).await);
+    }
+}
+
 #[cfg(test)]
 use crate::types::QueryHandle;
 use crate::types::{
@@ -138,6 +173,30 @@ fn classify_read_only(engine: Engine, statement: &str, prefix: &str, why: &str) 
         )));
     }
     Ok(())
+}
+
+/// The export gate (S16-303): an export re-runs its statement, so only a
+/// read may be exported, on every connection. Tagged [`READ_ONLY_PREFIX`]
+/// like a read-only run; the UI explains that export re-runs the statement.
+pub fn ensure_export_read_only(engine: Engine, statement: &str) -> Result<()> {
+    classify_read_only(
+        engine,
+        statement,
+        READ_ONLY_PREFIX,
+        "an export re-runs the statement, so it must be a read",
+    )
+}
+
+/// Set the server-derived `__read_only_execution` flag on resolved driver
+/// params (config parsing strips `__` keys from stored params, and the flag
+/// is excluded from the pool cache key).
+fn force_read_only_execution(params: &mut Value) {
+    if !params.is_object() {
+        *params = Value::Object(serde_json::Map::new());
+    }
+    if let Some(map) = params.as_object_mut() {
+        map.insert("__read_only_execution".into(), Value::Bool(true));
+    }
 }
 
 /// Evict cached SSH tunnels idle longer than this — dropping them kills the
@@ -871,15 +930,22 @@ impl DbViewerService {
         Ok(())
     }
 
-    async fn require_local_path_access(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
-        if self.is_enforced(conn_id).await? {
-            let conn = self.connections.get(conn_id).await?;
-            if !crate::access::current_user(&self.connections.pool(), &conn, user_id)
-                .await?
-                .is_root
-            {
-                return Err(Error::Forbidden("daemon-local file paths require root for governed connections; use browser export".into()));
-            }
+    /// Export-to-path / import-from-path name a file ON THE DAEMON HOST: an
+    /// export can overwrite `~/.zshenv` or plant a LaunchAgent, an import reads
+    /// `~/.ssh/id_ed25519` into a table the caller controls. That is the host
+    /// owner's power, so it is root-only for EVERY connection, Legacy included
+    /// (S6-302); everyone else uses the browser export / upload.
+    pub async fn require_local_path_access(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
+        let conn = self.connections.get(conn_id).await?;
+        if !crate::access::current_user(&self.connections.pool(), &conn, user_id)
+            .await?
+            .is_root
+        {
+            return Err(Error::Forbidden(
+                "Only the root user can read or write files on the Otto host computer; \
+                 use the browser export or file upload instead"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -1138,7 +1204,9 @@ impl DbViewerService {
                 }
             }
             if profile.kind != logical.kind || profile_params != logical_params {
-                return Err(crate::native_access::setup_error("credential profile must match the logical engine, endpoint, database, TLS and SSH configuration"));
+                return Err(crate::native_access::setup_error(
+                    "credential profile must match the logical engine, endpoint, database, TLS and SSH configuration",
+                ));
             }
             profile
         };
@@ -1693,23 +1761,43 @@ impl DbViewerService {
                     .object_detail_with_opts(&r.config, &node, approx_row_count),
             )
             .await?;
-        if self.is_enforced(conn_id).await? {
-            let mut foreign_keys = Vec::new();
-            for key in result.foreign_keys {
-                if self
-                    .authorize(
-                        conn_id,
-                        user_id,
-                        key.ref_schema.as_deref().or(child.as_deref()),
-                        "db_browse",
-                    )
-                    .await
-                    .is_ok()
-                {
-                    foreign_keys.push(key);
-                }
-            }
-            result.foreign_keys = foreign_keys;
+        let snap = self.access_snapshot(conn_id).await?;
+        if snap.enforced() {
+            // Many keys usually reference the same database. Load membership
+            // once and evaluate each distinct scope, not once per FK.
+            let scopes: Vec<_> = result
+                .foreign_keys
+                .iter()
+                .map(|key| crate::access::child(key.ref_schema.as_deref().or(child.as_deref())))
+                .collect();
+            let unique: Vec<_> = scopes
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let allowed = crate::access::check_many(
+                &self.connections.pool(),
+                &snap.conn,
+                &snap.policy,
+                user_id,
+                &unique,
+                "db_browse",
+            )
+            .await?;
+            let decisions: HashMap<_, _> = unique.into_iter().zip(allowed).collect();
+            result.foreign_keys = result
+                .foreign_keys
+                .into_iter()
+                .zip(scopes)
+                .filter_map(|(key, scope)| {
+                    decisions
+                        .get(&scope)
+                        .copied()
+                        .unwrap_or(false)
+                        .then_some(key)
+                })
+                .collect();
             if self
                 .authorize(conn_id, user_id, None, "db_browse")
                 .await
@@ -1737,7 +1825,7 @@ impl DbViewerService {
     /// and passes the `is_write` check below; only raw writes carrying
     /// `explain:true` are blocked.
     async fn guard_write(&self, conn_id: &Id, req: &QueryRequest) -> Result<()> {
-        if req.confirm_write {
+        if person_confirmed(req.confirm_write) {
             return Ok(());
         }
         let conn = self.connections.get(conn_id).await?;
@@ -1746,7 +1834,7 @@ impl DbViewerService {
 
     /// [`Self::guard_write`] against an already-loaded connection row.
     fn guard_write_conn(conn: &Connection, req: &QueryRequest) -> Result<()> {
-        if req.confirm_write {
+        if person_confirmed(req.confirm_write) {
             return Ok(());
         }
         if !conn.is_write_guarded() {
@@ -1765,6 +1853,11 @@ impl DbViewerService {
             engine == Some(Engine::Redis) && crate::types::redis_uses_keys(&req.statement);
         if !is_write && !blocking_keys {
             return Ok(());
+        }
+        if req.confirm_write {
+            // `confirm_write` from an agent credential (S6-304): the typed
+            // confirmation is a PERSON's, so it never lifts the guard here.
+            return Err(Error::Forbidden(AGENT_CONFIRM_REFUSED.into()));
         }
         let reason = if conn.environment.is_production() {
             format!("production connection '{}'", conn.name)
@@ -2545,9 +2638,13 @@ impl DbViewerService {
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
-        let r = self
+        let mut r = self
             .resolve(conn_id, user_id, child.as_deref(), "db_export")
             .await?;
+        // Native barrier behind the classifier (S16-303): ClickHouse runs it
+        // `readonly=2`; MySQL/PostgreSQL exports already use a READ ONLY
+        // transaction.
+        force_read_only_execution(&mut r.config.params);
         self.verify_native(conn_id, user_id, &r).await?;
         let started = Instant::now();
         let result = self
@@ -2619,9 +2716,13 @@ impl DbViewerService {
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
-        let r = self
+        let mut r = self
             .resolve(conn_id, user_id, child.as_deref(), "db_export")
             .await?;
+        // Native barrier behind the classifier (S16-303): ClickHouse runs it
+        // `readonly=2`; MySQL/PostgreSQL exports already use a READ ONLY
+        // transaction.
+        force_read_only_execution(&mut r.config.params);
         self.verify_native(conn_id, user_id, &r).await?;
         let started = Instant::now();
         let result = self
@@ -2703,6 +2804,13 @@ impl DbViewerService {
         };
         self.authorize_snap(snap, user_id, node, "db_export")
             .await?;
+        // An export RE-RUNS the statement (S16-303): "Export all rows…" on an
+        // `UPDATE … RETURNING *` grid would apply the write a second time. On
+        // EVERY connection — not only guarded/enforced ones — an export must
+        // be a read; there is no confirm path.
+        let engine = Engine::from_kind(snap.conn.kind)
+            .ok_or_else(|| Error::Invalid("not a database".into()))?;
+        ensure_export_read_only(engine, statement)?;
         if snap.enforced() {
             let engine = Engine::from_kind(snap.conn.kind)
                 .ok_or_else(|| Error::Invalid("not a database".into()))?;
@@ -3341,7 +3449,25 @@ impl DbViewerService {
     pub async fn create_widget(&self, w: NewWidget) -> Result<Widget> {
         self.authorize(&w.connection_id, &w.created_by, None, "db_query")
             .await?;
+        self.ensure_widget_statement_reads(&w.connection_id, &w.statement)
+            .await?;
         self.repo.create_widget(w).await
+    }
+
+    /// Widgets re-run unattended on every refresh, so only a statement the
+    /// read-only classifier accepts may be saved as one (S16-08) — a widget
+    /// holding `UPDATE counters …` would otherwise re-execute the write every
+    /// `refresh_secs`. [`Self::run_widget`] enforces it again at run time
+    /// (with the engine's native read-only mode) for widgets saved earlier.
+    async fn ensure_widget_statement_reads(&self, conn_id: &Id, statement: &str) -> Result<()> {
+        let conn = self.connections.get(conn_id).await?;
+        let Some(engine) = Engine::from_kind(conn.kind) else {
+            return Err(Error::Invalid(format!(
+                "connection '{}' is not a queryable database (kind {:?})",
+                conn.name, conn.kind
+            )));
+        };
+        ensure_widget_statement(engine, statement)
     }
     #[allow(clippy::too_many_arguments)]
     pub async fn update_widget(
@@ -3354,6 +3480,11 @@ impl DbViewerService {
         mapping: Option<&Value>,
         options: Option<&Value>,
     ) -> Result<Widget> {
+        if let Some(statement) = statement {
+            let widget = self.repo.get_widget(id).await?;
+            self.ensure_widget_statement_reads(&widget.connection_id, statement)
+                .await?;
+        }
         self.repo
             .update_widget(id, dashboard_id, title, statement, viz, mapping, options)
             .await
@@ -3367,13 +3498,27 @@ impl DbViewerService {
     /// `user_id` is threaded through to history recording (since migration 0042).
     pub async fn run_widget(&self, id: &Id, user_id: &Id) -> Result<QueryResult> {
         let widget = self.repo.get_widget(id).await?;
-        let req = QueryRequest {
-            statement: widget.statement,
-            max_rows: Some(5000),
-            ..Default::default()
-        };
+        let req = widget_request(widget.statement);
         self.run(&widget.connection_id, user_id, &req).await
     }
+}
+
+/// The request a dashboard widget runs with. An unattended re-run must never
+/// write (S16-08): `read_only` classifies the statement first and then runs it
+/// in the engine's native read-only mode, on ANY connection.
+fn widget_request(statement: String) -> QueryRequest {
+    QueryRequest {
+        statement,
+        max_rows: Some(5000),
+        read_only: true,
+        ..Default::default()
+    }
+}
+
+/// Save-time gate for a widget statement (create / update).
+fn ensure_widget_statement(engine: Engine, statement: &str) -> Result<()> {
+    ensure_read_only_request(engine, statement)
+        .map_err(|e| Error::Invalid(format!("widgets must be read-only queries — {e}")))
 }
 
 /// Render a plan `QueryResult` as compact text for display + drafter feedback.
@@ -3503,6 +3648,46 @@ mod tests {
     //! query leaves no stale entry a later cancel could hit.
 
     use super::*;
+
+    /// S16-08: widgets re-run unattended, so they always run read-only and a
+    /// write/DDL statement is refused when saved.
+    #[test]
+    fn widgets_run_read_only_and_refuse_writes_at_save() {
+        assert!(widget_request("SELECT 1".into()).read_only);
+        for sql in [
+            "UPDATE counters SET n = n + 1",
+            "DELETE FROM sessions WHERE expired",
+            "SELECT pg_terminate_backend(1)",
+            "DROP TABLE t",
+        ] {
+            let e = ensure_widget_statement(Engine::Postgres, sql).unwrap_err();
+            assert!(e.to_string().contains("read-only"), "{sql}: {e}");
+        }
+        assert!(ensure_widget_statement(Engine::Redis, "DEL k").is_err());
+        assert!(ensure_widget_statement(Engine::Postgres, "SELECT count(*) FROM t").is_ok());
+        assert!(ensure_widget_statement(Engine::Mysql, "SHOW TABLES").is_ok());
+    }
+
+    /// S16-08: a dashboard widget re-runs unattended on every refresh, so its
+    /// request is read-only — and the read-only gate refuses a saved write.
+    #[test]
+    fn widget_request_is_read_only_and_refuses_writes() {
+        let req = widget_request("UPDATE counters SET n = n + 1".into());
+        assert!(req.read_only);
+        assert_eq!(req.max_rows, Some(5000));
+        for (engine, write) in [
+            (Engine::Mysql, "UPDATE counters SET n = n + 1"),
+            (Engine::Postgres, "DELETE FROM sessions WHERE id = 1"),
+            (Engine::Redis, "DEL k"),
+        ] {
+            let err = ensure_read_only_request(engine, write).unwrap_err();
+            assert!(
+                err.to_string().contains(READ_ONLY_PREFIX),
+                "{engine:?} {write}: {err}"
+            );
+        }
+        ensure_read_only_request(Engine::Postgres, "SELECT count(*) FROM orders").unwrap();
+    }
 
     /// DB2-07: the reaper's sweep drops expired schema graphs without anyone
     /// requesting a diagram, and keeps fresh ones.

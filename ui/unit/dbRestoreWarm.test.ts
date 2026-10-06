@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 import * as resultBudgetMod from '../src/lib/stores/db-result-budget.ts';
+import * as filterChips from '../src/modules/database/filter-chips.ts';
+import * as sqlDialect from '../src/modules/database/sql-dialect.ts';
 
 type Call = { method: string; path: string; lane: 'int' | 'bg' };
 
@@ -79,6 +81,8 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
         unmaskQueryPlaceholders: (s: string) => s,
       },
       '../../modules/database/bson': { bsonScalar: (v: unknown) => v },
+      '../../modules/database/filter-chips': filterChips,
+      '../../modules/database/sql-dialect': sqlDialect,
       '../clipboard': { copyTextOrThrow: async () => {} },
       '../poll': poll,
       '../editor-history': {
@@ -90,6 +94,20 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
       './db-result-budget': resultBudgetMod,
       '../../modules/database/error-normalize': { normalizeDbError: (_e: unknown, msg: string) => ({ title: msg }) },
       './clipHistory.svelte': { clipHistory: { setGuard: noop } },
+      './dbPrefs.svelte': (() => {
+        const prefs = {
+          warmRestored: 'background' as 'background' | 'on-click',
+          keepAlive: true,
+          setWarmRestored(mode: 'background' | 'on-click') { prefs.warmRestored = mode; },
+          setKeepAlive(on: boolean) { prefs.keepAlive = on; },
+          onKeepAliveChange: () => noop,
+        };
+        return {
+          dbPrefs: prefs,
+          loadFlag: (key: string, def: boolean) => { const v = localStorage.getItem(key); return v === null ? def : v === '1'; },
+          saveFlag: (key: string, on: boolean) => localStorage.setItem(key, on ? '1' : '0'),
+        };
+      })(),
       '../lazyModule': { announceModule: noop },
       '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
     },

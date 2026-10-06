@@ -3,7 +3,8 @@
   // Handles account selection, project selection, and debounced search.
   import { api } from '../../lib/api/client';
   import { toastError } from '../../lib/toastError';
-  import type { IssueAccount, IssueProject, IssueSummary } from '../../lib/api/types';
+  import type { IssueAccount, IssueProject, IssueSummary, ListingPage } from '../../lib/api/types';
+  import { truncatedNote, unwrapListing } from '../../lib/listingPage';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { router } from '../../lib/router.svelte';
@@ -26,6 +27,8 @@
 
   let projects: IssueProject[] = $state([]);
   let projectsLoading = $state(false);
+  /** The project list stopped at its page cap (S5-22). */
+  let projectsTruncated = $state(false);
   let selectedProjectKey = $state(''); // '' = All projects
 
   let query = $state('');
@@ -61,13 +64,18 @@
   async function loadProjects(accountId: string): Promise<void> {
     projectsLoading = true;
     projects = [];
+    projectsTruncated = false;
     selectedProjectKey = '';
     results = [];
     query = '';
     try {
-      projects = await api.get<IssueProject[]>(
-        `/issue/projects?account_id=${encodeURIComponent(accountId)}`,
+      const page = unwrapListing(
+        await api.get<ListingPage<IssueProject>>(
+          `/issue/projects?account_id=${encodeURIComponent(accountId)}&meta=1`,
+        ),
       );
+      projects = page.items;
+      projectsTruncated = page.truncated;
     } catch {
       // Non-fatal: user can still search without a project filter.
       projects = [];
@@ -178,13 +186,16 @@
           <option value={p.key}>{p.name} ({p.key})</option>
         {/each}
       </select>
+      {#if projectsTruncated}
+        <p class="trunc-note" role="note">{truncatedNote('projects', projects.length)} Search by issue key to reach the others.</p>
+      {/if}
     {/if}
   </div>
 
   <!-- Search input -->
   <div class="picker-field">
     <label class="picker-label" for="jp-query">Search issues</label>
-    <input
+    <input dir="auto"
       id="jp-query"
       class="picker-input"
       bind:value={query}
@@ -221,6 +232,11 @@
 {/if}
 
 <style>
+  .trunc-note {
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+  }
   .picker-empty {
     display: flex;
     align-items: center;

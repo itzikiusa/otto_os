@@ -1,0 +1,41 @@
+[package]
+name = "otto-apiclient"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The API client's heavy engines, split out of otto-server so editing the
+# server no longer recompiles (or re-checks) the gRPC + JS-scripting paths:
+#  - `grpc`: dynamic gRPC describe / reflect / invoke (protox parses .proto
+#    without `protoc`, prost-reflect builds dynamic messages, tonic dials).
+#  - `scripts`: server-side pre-request / post-response `pm` scripts for
+#    automations (boa_engine — pure-Rust JS, no native build deps).
+# The axum handlers (auth, workspace lookups) stay in otto-server.
+
+[dependencies]
+otto-core.workspace = true
+otto-netguard.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures-util.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tempfile.workspace = true
+# `Uri` / `PathAndQuery` — the same `http` 1.x that tonic and axum resolve.
+http = "1.5.0"
+protox.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+boa_engine = "0.22.0"
+libc = "0.2.190"
+
+[dev-dependencies]
+# The gRPC endpoint test builds a TLS config, which needs the process-level
+# rustls provider `ottod` installs at startup. Same version/feature ottod pins.
+rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
+# The gRPC channel-reuse test (perf N5) dials a minimal h2c server. Same
+# version tonic/hyper already resolve.
+h2 = "0.4.19"

@@ -25,7 +25,7 @@ test('personal agents: keyboard tab selection moves focus to the selected tab', 
   await page.route('**/api/v1/workspaces', r => r.fulfill({ json: [] }));
   await page.goto('/#/personal-agents');
   const agents = page.getByRole('tab', { name: 'Agents', exact: true });
-  const rooms = page.getByRole('tab', { name: 'Rooms', exact: true });
+  const rooms = page.getByRole('tab', { name: 'Agent channels', exact: true });
   await agents.focus();
   await page.keyboard.press('ArrowRight');
   await expect(rooms).toHaveAttribute('aria-selected', 'true');

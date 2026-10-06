@@ -23,6 +23,14 @@
 //!
 //! RBAC is unchanged: the token is still an ordinary API token of the same
 //! effective user, presented to the same routes.
+//!
+//! The credential CLASS follows the caller (S8-305): a self-call made for an
+//! agent session is minted bound to that session (`session_scope`, so the
+//! route sees `managed_session_id` and `ui_bridge::is_human` is false) — the
+//! credential-class gate, root withholding and every agent-credential rule
+//! apply to the agent behind a governed tool exactly as to its own token. Only
+//! a person's own call (or a person-only tool a person just approved, see
+//! `mcp_outward::SelfCallAs`) replays as a person-classed token.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -56,11 +64,14 @@ pub(crate) fn client() -> &'static reqwest::Client {
     })
 }
 
-/// (database id, daemon base URL, user, purpose).
-type Key = (u64, String, Id, &'static str);
+/// (database id, daemon base URL, user, purpose, bound agent session).
+type Key = (u64, String, Id, &'static str, Option<Id>);
 
 struct Entry {
     token: String,
+    /// The credential's `auth_sessions.id` — a session-bound one is revoked
+    /// with its session, so the fast path re-checks it still exists.
+    row_id: String,
     minted: Instant,
     in_flight: usize,
 }
@@ -131,14 +142,54 @@ fn spawn_revoke(pool: DbPool, token: String) {
 }
 
 /// Take a self-call token for `user_id` (minting one when none is fresh).
+/// `session` binds it to that agent session (a non-human credential, see the
+/// module doc); `None` is a person-classed token, for a person's own calls.
 pub(crate) async fn lease(
     pool: &DbPool,
     base_url: &str,
     user_id: &Id,
     label: &'static str,
+    session: Option<&Id>,
 ) -> Result<Lease, Error> {
     sweep_leftovers(pool).await;
-    let key: Key = (pool.id(), base_url.to_string(), user_id.clone(), label);
+    let key: Key = (
+        pool.id(),
+        base_url.to_string(),
+        user_id.clone(),
+        label,
+        session.cloned(),
+    );
+    // A session-bound credential dies with its session (removal, respawn's
+    // `revoke_session_tokens`): drop a cached one that no longer exists so
+    // the fast path never hands out a revoked token.
+    if session.is_some() {
+        let cached = {
+            let t = tokens().lock().unwrap_or_else(|e| e.into_inner());
+            t.live
+                .get(&key)
+                .filter(|e| e.minted.elapsed() < TOKEN_REUSE)
+                .map(|e| e.row_id.clone())
+        };
+        if let Some(row_id) = cached {
+            let alive: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM auth_sessions WHERE id = ? AND revoked = 0)",
+            )
+            .bind(&row_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+            if !alive {
+                let mut t = tokens().lock().unwrap_or_else(|e| e.into_inner());
+                if t.live.get(&key).is_some_and(|e| e.row_id == row_id) {
+                    if let Some(old) = t.live.remove(&key) {
+                        if old.in_flight > 0 {
+                            t.retiring.insert(old.token, (old.in_flight, pool.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Fast path: a fresh token.
     {
         let mut t = tokens().lock().unwrap_or_else(|e| e.into_inner());
@@ -155,14 +206,20 @@ pub(crate) async fn lease(
     }
     // Mint outside the lock; two racing callers may both mint — the loser's
     // token is retired right away below.
-    let (token, _) = AuthRepo::new(pool.clone())
-        .issue_api_token(user_id, Some(label))
-        .await?;
+    let repo = AuthRepo::new(pool.clone());
+    let (token, info) = match session {
+        Some(sid) => {
+            repo.issue_session_api_token_labeled(user_id, sid, label)
+                .await?
+        }
+        None => repo.issue_api_token(user_id, Some(label)).await?,
+    };
     let mut revoke_now = Vec::new();
     {
         let mut t = tokens().lock().unwrap_or_else(|e| e.into_inner());
         let fresh = Entry {
             token: token.clone(),
+            row_id: info.id,
             minted: Instant::now(),
             in_flight: 1,
         };
@@ -227,23 +284,23 @@ mod tests {
     async fn reuses_one_token_per_user_and_purpose() {
         let (pool, user) = db().await;
         let base = "http://127.0.0.1:1";
-        let a = lease(&pool, base, &user, LABEL_EXEC).await.unwrap();
-        let b = lease(&pool, base, &user, LABEL_EXEC).await.unwrap();
+        let a = lease(&pool, base, &user, LABEL_EXEC, None).await.unwrap();
+        let b = lease(&pool, base, &user, LABEL_EXEC, None).await.unwrap();
         assert_eq!(a.token(), b.token());
         drop((a, b));
         for _ in 0..20 {
-            let l = lease(&pool, base, &user, LABEL_EXEC).await.unwrap();
+            let l = lease(&pool, base, &user, LABEL_EXEC, None).await.unwrap();
             drop(l);
         }
         assert_eq!(api_tokens(&pool, &user).await, 1);
-        let l = lease(&pool, base, &user, LABEL_EXEC).await.unwrap();
+        let l = lease(&pool, base, &user, LABEL_EXEC, None).await.unwrap();
         let ctx = AuthRepo::new(pool.clone())
             .authenticate(l.token())
             .await
             .unwrap();
         assert_eq!(ctx.effective_user.id, user);
         // A different purpose gets its own credential.
-        let r = lease(&pool, base, &user, LABEL_REFS).await.unwrap();
+        let r = lease(&pool, base, &user, LABEL_REFS, None).await.unwrap();
         assert_ne!(r.token(), l.token());
     }
 
@@ -253,15 +310,15 @@ mod tests {
     async fn rotation_never_revokes_a_token_in_use() {
         let (pool, user) = db().await;
         let base = "http://127.0.0.1:2";
-        let held = lease(&pool, base, &user, LABEL_EXEC).await.unwrap();
+        let held = lease(&pool, base, &user, LABEL_EXEC, None).await.unwrap();
         let old = held.token().to_string();
         // Age it out.
         {
             let mut t = tokens().lock().unwrap();
-            let key: Key = (pool.id(), base.to_string(), user.clone(), LABEL_EXEC);
+            let key: Key = (pool.id(), base.to_string(), user.clone(), LABEL_EXEC, None);
             t.live.get_mut(&key).unwrap().minted = Instant::now() - TOKEN_REUSE * 2;
         }
-        let next = lease(&pool, base, &user, LABEL_EXEC).await.unwrap();
+        let next = lease(&pool, base, &user, LABEL_EXEC, None).await.unwrap();
         assert_ne!(next.token(), old);
         // The old one still authenticates while `held` is in flight…
         assert!(AuthRepo::new(pool.clone()).authenticate(&old).await.is_ok());
@@ -298,7 +355,7 @@ mod tests {
             .issue_api_token(&user, Some("my laptop"))
             .await
             .unwrap();
-        let l = lease(&pool, "http://127.0.0.1:3", &user, LABEL_EXEC)
+        let l = lease(&pool, "http://127.0.0.1:3", &user, LABEL_EXEC, None)
             .await
             .unwrap();
         assert!(repo.authenticate(&stale).await.is_err(), "leftover swept");
@@ -307,5 +364,71 @@ mod tests {
             "user's own token kept"
         );
         assert!(repo.authenticate(l.token()).await.is_ok());
+    }
+
+    /// S8-305: a self-call made for an agent session carries that session's
+    /// binding (non-human), is cached per session, and is never handed out
+    /// again once the session's credentials were revoked.
+    #[tokio::test]
+    async fn session_bound_tokens_are_agent_credentials() {
+        let (pool, user) = db().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let ws = otto_core::new_id();
+        let sid = otto_core::new_id();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)",
+        )
+        .bind(&ws)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd, created_by, created_at, last_active_at)
+             VALUES (?, ?, 'agent', 'claude', 't', 'idle', '/tmp', ?, ?, ?)",
+        )
+        .bind(&sid)
+        .bind(&ws)
+        .bind(&user)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let base = "http://127.0.0.1:4";
+        let repo = AuthRepo::new(pool.clone());
+        let bound = lease(&pool, base, &user, LABEL_EXEC, Some(&sid))
+            .await
+            .unwrap();
+        let ctx = repo.authenticate(bound.token()).await.unwrap();
+        assert_eq!(ctx.managed_session_id.as_ref(), Some(&sid));
+        assert!(!crate::ui_bridge::is_human(&ctx), "agent-classed");
+        // A person's own self-call stays person-classed, and separate.
+        let person = lease(&pool, base, &user, LABEL_EXEC, None).await.unwrap();
+        assert_ne!(person.token(), bound.token());
+        let pctx = repo.authenticate(person.token()).await.unwrap();
+        assert!(crate::ui_bridge::is_human(&pctx));
+        // Reused while the session lives…
+        let again = lease(&pool, base, &user, LABEL_EXEC, Some(&sid))
+            .await
+            .unwrap();
+        assert_eq!(again.token(), bound.token());
+        let old = bound.token().to_string();
+        drop((bound, again));
+        // …and replaced once the session's credentials are revoked.
+        repo.revoke_session_tokens(&user, &sid).await.unwrap();
+        let fresh = lease(&pool, base, &user, LABEL_EXEC, Some(&sid))
+            .await
+            .unwrap();
+        assert_ne!(fresh.token(), old);
+        assert!(repo.authenticate(fresh.token()).await.is_ok());
+        // A session the user does not own cannot be bound.
+        let other = otto_state::UsersRepo::new(pool.clone())
+            .create("other", "hash", "Other", false)
+            .await
+            .unwrap();
+        assert!(lease(&pool, base, &other.id, LABEL_EXEC, Some(&sid))
+            .await
+            .is_err());
     }
 }

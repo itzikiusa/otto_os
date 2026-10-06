@@ -162,6 +162,7 @@
 
   async function connect(t: BrowserTab): Promise<void> {
     const mine = ++gen;
+    pendingFrame = null; // an old connection's queued frame is never drawn/acked here
     dispatch({ type: 'connect' });
     try {
       const vp = currentViewport();
@@ -220,6 +221,7 @@
 
   function disconnect(): void {
     gen++;
+    pendingFrame = null;
     moves.cancel();
     wheels.cancel();
     const s = sock;
@@ -446,25 +448,29 @@
   // are skipped rather than queued. The ack goes out after the frame is
   // DRAWN — that is what paces the daemon's screencast to this viewer.
 
-  let pendingFrame: { blob: Blob; header: FrameHeader } | null = null;
+  // Each pending frame carries the connection generation it arrived on: a
+  // reconnect (`++gen`) must not let an old connection's frame be drawn and
+  // its seq acked on the NEW socket (S18-304) — the daemon never sent that
+  // seq on this connection and would mis-pace on it.
+  let pendingFrame: { blob: Blob; header: FrameHeader; gen: number } | null = null;
   let decoding = false;
 
   function enqueueFrame(blob: Blob, h: FrameHeader): void {
-    pendingFrame = { blob, header: h };
+    pendingFrame = { blob, header: h, gen };
     if (!decoding) void pump();
   }
 
   async function pump(): Promise<void> {
     decoding = true;
-    const mine = gen;
     while (pendingFrame) {
       const f = pendingFrame;
       pendingFrame = null;
+      if (f.gen !== gen) continue; // an old connection's frame: drop it
       try {
         const bmp = await createImageBitmap(f.blob);
-        if (mine !== gen) {
+        if (f.gen !== gen) {
           bmp.close();
-          break;
+          continue;
         }
         bitmap?.close();
         bitmap = bmp;
@@ -481,6 +487,7 @@
       } catch {
         /* a corrupt frame: skip it, the next one repaints */
       }
+      if (f.gen !== gen) continue; // never ack an old connection's seq on the new one
       send({ type: 'ack', seq: f.header.seq });
     }
     decoding = false;
@@ -867,7 +874,7 @@
   <div class="surface" class:stale class:kbd={kbdFocused} style:cursor={inputLive ? cursor : 'default'} bind:this={surfaceEl}>
     <canvas bind:this={canvasEl} aria-hidden="true"></canvas>
 
-    <textarea
+    <textarea dir="auto"
       class="sink"
       bind:this={sinkEl}
       aria-label={`Live page${session?.title ? `: ${session.title}` : ''}. Typing goes to the page; Escape gives the keyboard back to Otto.`}

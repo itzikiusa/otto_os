@@ -8,6 +8,7 @@
   import { verdictLabel } from '../../lib/labels';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
   import { prDiffFile, prDiffSummary } from './diff-load';
+  import { alreadyOnPr } from './reviewPost';
   import type {
     Review,
     ReviewComment,
@@ -21,6 +22,8 @@
     DiffLine,
     MergeReadiness,
     ReviewFindingRow,
+    EditReviewCommentReq,
+    PrDetail,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -135,7 +138,9 @@
   }
 
   // Per-comment action busy state keyed by comment id
-  let actionBusy: Record<string, 'approve' | 'decline'> = $state({});
+  let actionBusy: Record<string, 'approve' | 'decline' | 'edit'> = $state({});
+  /** Comment id → the body being edited (a person's edit of the agent draft). */
+  let editingBody: Record<string, string> = $state({});
 
   // Jira story attachment state
   let showJiraPicker = $state(false);
@@ -568,12 +573,22 @@
 
   /** `quiet` (bulk post): no per-comment toasts — the caller reports one summary. */
   async function postComment(c: ReviewComment, confirmed = false, quiet = false): Promise<boolean> {
+    // An open edit is unsent text: posting now would send the STORED body,
+    // not what the box shows. Save (or cancel) the edit first.
+    if (c.id in editingBody) {
+      if (!quiet) toasts.warn('Save your edit first', 'The comment has unsaved edits — Save or Cancel them before posting.');
+      return false;
+    }
+    const retry = c.state === 'approved' && !c.posted;
+    if (retry && (await lookupOnPr(c, quiet))) return false;
     if (!confirmed) {
       const ok = await confirmOutward({
         verb: 'Post to PR',
         title: `Post comment to PR #${prNumber}?`,
         where: prWhere,
-        what: commentPreview(c),
+        what: retry
+          ? `${commentPreview(c)}\n\nA previous attempt failed — the provider may have created it anyway; no copy was found on the PR.`
+          : commentPreview(c),
         who: PR_WHO,
       });
       if (!ok) return false;
@@ -604,9 +619,49 @@
     }
   }
 
+  /** Retry guard: true when a copy of `c` is already on the PR (a forge 5xx
+   *  that created it). A failed lookup refuses the retry — a duplicate is the
+   *  outward mistake this exists to prevent. */
+  async function lookupOnPr(c: ReviewComment, quiet: boolean): Promise<boolean> {
+    try {
+      const pr = await api.get<PrDetail>(`/repos/${repoId}/prs/${prNumber}`);
+      if (alreadyOnPr(c, pr.comments ?? [])) {
+        if (!quiet) toasts.info('Already on the PR', 'The earlier attempt did post this comment — not posting it again.');
+        // Record it posted (nothing is sent), or it stays "postable" forever
+        // and every Post-all re-runs this lookup (S15-302).
+        try {
+          const updated = await api.patch<ReviewComment>(`/pr-review-comments/${c.id}`, { mark_posted: true });
+          if (review) {
+            review = patchCommentInReview(review, updated);
+            if (history.length > 0) history = [review, ...history.slice(1)];
+          }
+        } catch {
+          // Best effort: the guard above still blocks a duplicate next time.
+        }
+        return true;
+      }
+      return false;
+    } catch (e) {
+      if (!quiet) toastError('Couldn’t check the PR for this comment', e);
+      return true;
+    }
+  }
+
   let postingAll = $state(false);
+  /** Any draft with an open (unsaved) edit — bulk post would send stale text. */
+  const editingAny = $derived(Object.keys(editingBody).length > 0);
+  /** Drafts, plus approved comments the provider refused (re-post is safe:
+   *  the daemon claims `posted` atomically and never re-posts a posted one). */
+  function isPostable(c: ReviewComment): boolean {
+    return c.state === 'draft' || (c.state === 'approved' && !c.posted);
+  }
+
   async function postAllDrafts(): Promise<void> {
-    const drafts = (review?.comments ?? []).filter((c) => c.state === 'draft');
+    if (editingAny) {
+      toasts.warn('Save your edits first', 'Some comments have unsaved edits — Save or Cancel them before posting.');
+      return;
+    }
+    const drafts = (review?.comments ?? []).filter(isPostable);
     if (drafts.length === 0) return;
     const ok = await confirmOutward({
       verb: `Post ${drafts.length} comments`,
@@ -619,7 +674,12 @@
     postingAll = true;
     let posted = 0;
     try {
-      for (const c of drafts) if (await postComment(c, true, true)) posted++;
+      // Re-read each comment's CURRENT state: one declined mid-run is skipped.
+      for (const d of drafts) {
+        const c = review?.comments.find((x) => x.id === d.id);
+        if (!c || !isPostable(c)) continue;
+        if (await postComment(c, true, true)) posted++;
+      }
     } finally {
       postingAll = false;
     }
@@ -651,6 +711,42 @@
       delete next[c.id];
       actionBusy = next;
     }
+  }
+
+  /** PATCH a not-yet-posted comment: a draft's edited body and/or restoring a
+   *  declined comment to draft. Local only — nothing is sent to the PR. */
+  async function editComment(c: ReviewComment, req: EditReviewCommentReq): Promise<boolean> {
+    actionBusy = { ...actionBusy, [c.id]: 'edit' };
+    try {
+      const updated = await api.patch<ReviewComment>(`/pr-review-comments/${c.id}`, req);
+      if (review) {
+        review = patchCommentInReview(review, updated);
+        if (history.length > 0) history = [review, ...history.slice(1)];
+      }
+      return true;
+    } catch (e) {
+      toastError(req.restore_draft ? 'Couldn’t restore the comment' : 'Couldn’t save the edit', e);
+      return false;
+    } finally {
+      const next = { ...actionBusy };
+      delete next[c.id];
+      actionBusy = next;
+    }
+  }
+
+  function stopEditing(id: string): void {
+    const next = { ...editingBody };
+    delete next[id];
+    editingBody = next;
+  }
+
+  async function saveEdit(c: ReviewComment): Promise<void> {
+    const body = (editingBody[c.id] ?? '').trim();
+    if (body === '') {
+      toasts.error('Comment can’t be empty');
+      return;
+    }
+    if (body === c.body.trim() || (await editComment(c, { body }))) stopEditing(c.id);
   }
 
   // --- Config modal ---
@@ -1014,6 +1110,7 @@
     const cs = review?.comments ?? [];
     return cs.filter((c: ReviewComment) => c.state === 'draft').length;
   });
+  const postableCount = $derived.by(() => (review?.comments ?? []).filter(isPostable).length);
   const totalCount = $derived.by(() => review?.comments?.length ?? 0);
   /** Who drafted the comments: the summarizer (last agent row) plus the lenses
    *  it merged. Null for reviews without agent rows. */
@@ -1085,7 +1182,7 @@
         {/if}
       </div>
       <div class="rp-context-row">
-        <textarea
+        <textarea dir="auto" aria-label="Review focus"
           class="rp-context-input"
           rows={2}
           placeholder="What should the reviewers focus on? (optional)"
@@ -1133,7 +1230,7 @@
       <Icon name="warning" size={14} />
       <span class="rp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
       <button class="btn small" disabled={starting} onclick={startReview}>
-        {starting ? 'Starting…' : 'Try again'}
+        {starting ? 'Starting…' : 'Try again'}<!-- ui-guards: allow — re-runs the review (an action), not a failed load -->
       </button>
     </div>
     <div class="rp-jira-row">
@@ -1167,9 +1264,15 @@
           <span class="chip">{draftCount} draft</span>
         {/if}
       </span>
-      {#if draftCount > 1}
-        <button class="btn small" disabled={postingAll} data-testid="rp-post-all" onclick={() => void postAllDrafts()}>
-          {postingAll ? 'Posting…' : `Post ${draftCount} drafts to PR…`}
+      {#if postableCount > 1}
+        <button
+          class="btn small"
+          disabled={postingAll || editingAny}
+          title={editingAny ? 'Save or cancel the open edits first' : undefined}
+          data-testid="rp-post-all"
+          onclick={() => void postAllDrafts()}
+        >
+          {postingAll ? 'Posting…' : `Post ${postableCount} comments to PR…`}
         </button>
       {/if}
       <button class="btn small ghost" onclick={openConfig}>
@@ -1194,7 +1297,7 @@
       {/if}
     </div>
     <div class="rp-context-row">
-      <textarea
+      <textarea dir="auto" aria-label="Review focus"
         class="rp-context-input"
         rows={2}
         placeholder="What should the reviewers focus on? (optional)"
@@ -1303,31 +1406,80 @@
               {#if c.state === 'draft'}
                 <button
                   class="btn small"
-                  disabled={!!actionBusy[c.id] || postingAll}
+                  disabled={!!actionBusy[c.id] || postingAll || c.id in editingBody}
                   data-testid="rp-post-comment"
-                  title="Post this comment to {prWhere}"
+                  title={c.id in editingBody ? 'Save or cancel your edit first' : `Post this comment to ${prWhere}`}
                   onclick={() => void postComment(c)}
                 >
                   {actionBusy[c.id] === 'approve' ? 'Posting…' : 'Post to PR…'}
                 </button>
+                {#if !(c.id in editingBody)}
+                  <button
+                    class="btn small ghost"
+                    disabled={!!actionBusy[c.id] || postingAll}
+                    data-testid="rp-edit-comment"
+                    title="Edit the drafted text before posting"
+                    onclick={() => (editingBody = { ...editingBody, [c.id]: c.body })}
+                  >
+                    Edit
+                  </button>
+                {/if}
                 <button
                   class="btn small ghost"
-                  disabled={!!actionBusy[c.id]}
+                  disabled={!!actionBusy[c.id] || postingAll}
                   onclick={() => declineComment(c)}
                 >
                   {actionBusy[c.id] === 'decline' ? 'Declining…' : 'Decline'}
                 </button>
               {:else if c.state === 'approved' && c.posted}
                 <span class="chip ok rp-badge">
-                  <Icon name="check" size={10} /> posted
+                  <Icon name="check" size={12} /> posted
                 </span>
               {:else if c.state === 'approved'}
                 <span class="chip rp-badge dim" title="Approved in Otto, but the provider refused the post">not posted</span>
+                <button
+                  class="btn small"
+                  disabled={!!actionBusy[c.id] || postingAll}
+                  data-testid="rp-retry-post"
+                  title="Post this comment to {prWhere} again"
+                  onclick={() => void postComment(c)}
+                >
+                  {actionBusy[c.id] === 'approve' ? 'Posting…' : 'Retry post…'} <!-- ui-guards: allow — an action retry (re-post), not a failed load -->
+                </button>
               {:else}
                 <span class="chip rp-badge dim">declined</span>
+                {#if !c.posted}
+                  <button
+                    class="btn small ghost"
+                    disabled={!!actionBusy[c.id]}
+                    data-testid="rp-restore-comment"
+                    title="Move this comment back to draft"
+                    onclick={() => void editComment(c, { restore_draft: true })}
+                  >
+                    {actionBusy[c.id] === 'edit' ? 'Restoring…' : 'Restore to draft'}
+                  </button>
+                {/if}
               {/if}
             </div>
-            <p class="rp-comment-body">{c.body}</p>
+            {#if c.state === 'draft' && c.id in editingBody}
+              <textarea dir="auto"
+                class="rp-edit-body"
+                rows={5}
+                aria-label="Comment text"
+                data-testid="rp-edit-body"
+                bind:value={editingBody[c.id]}
+              ></textarea>
+              <div class="rp-edit-actions">
+                <button class="btn small" disabled={!!actionBusy[c.id]} onclick={() => void saveEdit(c)}>
+                  {actionBusy[c.id] === 'edit' ? 'Saving…' : 'Save'}
+                </button>
+                <button class="btn small ghost" disabled={!!actionBusy[c.id]} onclick={() => stopEditing(c.id)}>
+                  Cancel
+                </button>
+              </div>
+            {:else}
+              <p class="rp-comment-body">{c.body}</p>
+            {/if}
 
             <!-- Diff snippet -->
             {#if snippetLines !== null}
@@ -1407,7 +1559,7 @@
                           {/if}
                           <span class="grow"></span>
                           {#if c.state === 'approved' && c.posted}
-                            <span class="chip ok rp-badge"><Icon name="check" size={10} /> posted</span>
+                            <span class="chip ok rp-badge"><Icon name="check" size={12} /> posted</span>
                           {:else if c.state === 'approved'}
                             <span class="chip rp-badge dim">not posted</span>
                           {:else if c.state === 'declined'}
@@ -1442,11 +1594,11 @@
         </p>
 
         <!-- Scope: the global default vs. a config bound to THIS repository. -->
-        <div class="segmented cfg-scope">
-          <button class:active={configScope === 'global'} onclick={() => setConfigScope('global')}>
+        <div class="segmented cfg-scope" role="group" aria-label="Review config scope">
+          <button class:active={configScope === 'global'} aria-pressed={configScope === 'global'} onclick={() => setConfigScope('global')}>
             Global default
           </button>
-          <button class:active={configScope === 'repo'} onclick={() => setConfigScope('repo')}>
+          <button class:active={configScope === 'repo'} aria-pressed={configScope === 'repo'} onclick={() => setConfigScope('repo')}>
             This repository
           </button>
         </div>
@@ -1460,7 +1612,7 @@
           {/if}
         {:else}
           <div class="cfg-repo-row">
-            <select
+            <select aria-label="Review preset"
               class="cfg-select cfg-preset-select"
               value={selectedPresetId}
               onchange={(e) => pickNamedPreset((e.currentTarget as HTMLSelectElement).value)}
@@ -1481,7 +1633,7 @@
           </div>
           {#if presetSaveOpen}
             <div class="cfg-repo-row cfg-preset-save-row">
-              <input
+              <input dir="auto" aria-label="Preset name"
                 class="cfg-input"
                 bind:value={presetNameDraft}
                 placeholder="Preset name (e.g. Backend services)"
@@ -1513,7 +1665,7 @@
             <div class="cfg-agent-fields">
               <div class="cfg-field">
                 <span class="cfg-label">Name</span>
-                <input class="cfg-input" bind:value={editAgents[i].name} />
+                <input dir="auto" aria-label="Reviewer name" class="cfg-input" bind:value={editAgents[i].name} />
               </div>
               <div class="cfg-field">
                 <span class="cfg-label">Run on (CLIs)</span>
@@ -1532,7 +1684,7 @@
               </div>
               <div class="cfg-field">
                 <span class="cfg-label">Lens / instructions</span>
-                <textarea class="cfg-textarea" rows={3} bind:value={editAgents[i].prompt}></textarea>
+                <textarea dir="auto" aria-label="Reviewer lens / instructions" class="cfg-textarea" rows={3} bind:value={editAgents[i].prompt}></textarea>
               </div>
             </div>
             <div class="cfg-agent-actions">
@@ -1579,11 +1731,11 @@
           <div class="cfg-agent-fields">
             <div class="cfg-field">
               <span class="cfg-label">Name</span>
-              <input class="cfg-input" bind:value={editSummarizer.name} />
+              <input dir="auto" aria-label="Summarizer name" class="cfg-input" bind:value={editSummarizer.name} />
             </div>
             <div class="cfg-field">
               <span class="cfg-label">Provider <span class="dim">(uses its default model)</span></span>
-              <select class="cfg-select" bind:value={editSummarizer.provider}>
+              <select aria-label="Summarizer provider" class="cfg-select" bind:value={editSummarizer.provider}>
                 {#each PROVIDER_OPTIONS as p}
                   <option value={p}>{p}</option>
                 {/each}
@@ -1591,7 +1743,7 @@
             </div>
             <div class="cfg-field">
               <span class="cfg-label">Merge / dedupe instructions</span>
-              <textarea class="cfg-textarea" rows={3} bind:value={editSummarizer.prompt}></textarea>
+              <textarea dir="auto" aria-label="Summarizer merge / dedupe instructions" class="cfg-textarea" rows={3} bind:value={editSummarizer.prompt}></textarea>
             </div>
           </div>
         </div>
@@ -1885,6 +2037,19 @@
     margin-bottom: 6px;
     flex-wrap: wrap;
   }
+  .rp-edit-body {
+    inline-size: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    font-size: var(--fs-s);
+    line-height: 1.55;
+    resize: vertical;
+  }
+  .rp-edit-actions {
+    display: flex;
+    gap: 6px;
+    margin-block-start: 6px;
+  }
   .rp-comment-body {
     margin: 0;
     font-size: var(--fs-s);
@@ -2128,9 +2293,8 @@
       align-items: center;
       align-self: stretch;
     }
-    .cfg-agent-actions .btn { min-height: 34px; }
     .cfg-add-row { flex-wrap: wrap; }
-    .cfg-add-row .btn { min-height: 36px; flex: 1 1 auto; }
+    .cfg-add-row .btn { flex: 1 1 auto; }
     .cfg-check-label { padding: 4px 0; }
   }
 
@@ -2255,10 +2419,7 @@
       overflow-wrap: anywhere;
       word-break: break-word;
     }
-    /* Bigger touch targets across the panel's action buttons. */
-    .rp-header .btn,
-    .rp-running-header .btn,
-    .rp-comment-head .btn { min-height: 32px; }
+    /* Action .btn hit areas come from the global coarse-pointer rule (app.css). */
     .rp-loc { max-width: 100%; }
     /* Tiny ✕ icon buttons (dismiss / remove-Jira / preset add+delete) are ~12px
        on desktop — far below a tappable size; grow them to a real touch target
@@ -2266,30 +2427,26 @@
     .rp-precheck-dismiss,
     .rp-jira-remove,
     .cfg-preset-action {
-      min-width: 36px;
-      min-height: 36px;
+      min-width: var(--hit-min);
+      min-height: var(--hit-min);
       display: inline-flex;
       align-items: center;
       justify-content: center;
     }
     /* The "Past reviews" disclosure is a zero-padding text button — give it real
        tap height. */
-    .rp-history-toggle { padding: 6px 0; min-height: 36px; }
+    .rp-history-toggle { padding: 6px 0; min-height: var(--hit-min); }
     /* 16px input text prevents iOS Safari from auto-zooming on focus. */
     .rp-context-input { font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
   }
   @media (max-width: 640px) {
-    .rp-header .btn,
-    .rp-running-header .btn,
-    .rp-comment-head .btn,
-    .rp-error .btn { min-height: 38px; }
     /* The absolutely-positioned Configure button collides with the empty-state
        title on a narrow phone — drop it back into normal flow, full-width. */
     .rp-cfg-btn {
       position: static;
       width: 100%;
       margin-top: 8px;
-      min-height: 38px;
+      min-height: var(--hit-min);
     }
     /* Comment action buttons (Approve / Decline) span the row so they're easy
        to tap once the head has wrapped them to their own line. */

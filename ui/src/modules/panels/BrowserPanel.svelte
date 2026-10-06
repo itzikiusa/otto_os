@@ -20,12 +20,12 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { openExternal as openExternalUrl } from '../../lib/external';
   import { nativeBrowser, nativeBrowserAvailable } from '../../lib/nativeBrowser';
-  import { api, baseUrl, getToken } from '../../lib/api/client';
+  import { api, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
-  import type { AttachedIssue } from '../../lib/api/types';
+  import type { AttachedIssue, BrowserProxyTicket } from '../../lib/api/types';
 
   // `active` = this panel is the one on screen. The right panel keeps the
   // browser MOUNTED while another tab (or the collapsed strip) is showing, so
@@ -262,13 +262,33 @@
   });
 
   // ── Derived iframe src (web build / take-over) ──────────────────────────────
-  const frameSrc = $derived(
-    current
-      ? takeover
-        ? `${baseUrl()}/browser/proxy?url=${encodeURIComponent(current)}&token=${encodeURIComponent(getToken() ?? '')}`
-        : current
-      : '',
-  );
+  // Take-over loads the page through the daemon proxy with a SINGLE-USE ticket
+  // bound to the URL (minted per load) — never the bearer token, which would
+  // otherwise sit in the iframe URL where the proxied page can read it. The
+  // proxy serves the page sandboxed (opaque origin), and the iframe carries a
+  // matching `sandbox` attribute.
+  let proxySrc = $state('');
+  let proxySeq = 0;
+  $effect(() => {
+    const url = current;
+    const on = takeover;
+    void reloadTick; // a reload needs a fresh ticket (the last one is spent)
+    const seq = ++proxySeq;
+    proxySrc = '';
+    if (!on || !url) return;
+    api
+      .post<BrowserProxyTicket>('/browser/proxy-ticket', { url })
+      .then((r) => {
+        if (seq !== proxySeq) return;
+        proxySrc = `${baseUrl()}/browser/proxy?url=${encodeURIComponent(url)}&ticket=${encodeURIComponent(r.ticket)}`;
+      })
+      .catch((e) => {
+        if (seq !== proxySeq) return;
+        toastError('Couldn’t take over this page', e);
+        takeover = false;
+      });
+  });
+  const frameSrc = $derived(current ? (takeover ? proxySrc : current) : '');
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function normalize(u: string): string {
@@ -354,12 +374,16 @@
       if (ev.data.type === 'otto-element' && takeover) {
         // Only the take-over frame's own picker may open the comment popover.
         if (!frame || ev.source !== frame.contentWindow) return;
-        const { desc, x, y, url } = ev.data as {
-          desc: string;
-          x: number;
-          y: number;
-          url: string;
-        };
+        // The framed page is untrusted and can post these at will: never let
+        // one wipe a comment the user is writing, and never take its `url`
+        // (it becomes the "while reviewing {url}" line sent to the agent) —
+        // the tab's own loaded URL is the truth (S18-19).
+        if (popover.open && popoverComment.trim()) return;
+        const raw = ev.data as { desc?: unknown; x?: unknown; y?: unknown };
+        const desc = String(raw.desc ?? '').slice(0, 2000);
+        const x = Number(raw.x) || 0;
+        const y = Number(raw.y) || 0;
+        const url = current;
 
         // x/y are the click's clientX/Y inside the iframe; the popover is
         // positioned in .browser, where the frame starts below the tab strip
@@ -413,6 +437,10 @@
   // ── Global Esc handler ────────────────────────────────────────────────────
   $effect(() => {
     function onKeydown(e: KeyboardEvent): void {
+      // Only an Esc meant for THIS panel: not when it's off screen, not one a
+      // Modal/menu/terminal already handled, and not with focus elsewhere —
+      // it used to close the comment box (losing the draft) from anywhere.
+      if (!active || e.defaultPrevented || !browserEl?.contains(document.activeElement)) return;
       if (e.key === 'Escape') {
         if (popover.open) closePopover();
         else if (takeover) releaseTakeover();
@@ -506,7 +534,7 @@
               closeTab(t.id);
             }}
           >
-            <Icon name="x" size={9} />
+            <Icon name="x" size={12} />
           </button>
         </div>
       {/each}
@@ -524,7 +552,7 @@
     <button class="icon-btn" title="Start page" aria-label="Start page" disabled={!current} onclick={home}>
       <Icon name="home" size={13} />
     </button>
-    <input
+    <input dir="ltr" aria-label="Address"
       class="input url-input"
       bind:value={urlInput}
       placeholder="Search or enter URL…"
@@ -583,7 +611,8 @@
       <div class="frame native-host" bind:this={hostEl}></div>
     {:else}
       <!-- key forces a full iframe reload when frameSrc changes (proxy ↔ direct) -->
-      {#key frameSrc + '#' + reloadTick}
+      <!-- (take-over: each reload mints a new ticket, so frameSrc alone changes) -->
+      {#key frameSrc + '#' + (takeover ? '' : reloadTick)}
         <iframe
           bind:this={frame}
           class="frame"
@@ -591,6 +620,7 @@
           src={frameSrc}
           title="Browser"
           referrerpolicy="no-referrer"
+          sandbox={takeover ? 'allow-scripts' : undefined}
           onload={onFrameLoad}
         ></iframe>
       {/key}
@@ -608,7 +638,7 @@
         onkeydown={popoverKeydown}
       >
         <div class="popover-desc" title={popover.desc}>{popover.desc}</div>
-        <textarea
+        <textarea dir="auto" aria-label="Comment"
           class="input popover-textarea"
           bind:value={popoverComment}
           placeholder="Your comment…"
@@ -647,7 +677,7 @@
     <div class="frame-foot">
       <span class="dim ellipsis" title={current}>{current}</span>
       <button class="link" onclick={() => openExternal(current)}>
-        <Icon name="external" size={11} /> Open externally
+        <Icon name="external" size={12} /> Open externally
       </button>
     </div>
   {:else}

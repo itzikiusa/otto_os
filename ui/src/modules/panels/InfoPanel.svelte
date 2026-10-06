@@ -131,7 +131,7 @@
         <div class="row">
           <span class="key">Default agent</span>
           <span class="val">
-            <select class="ws-select" value={wsDefaultAgent} onchange={onDefaultAgentChange}>
+            <select aria-label="Default agent" class="ws-select" value={wsDefaultAgent} onchange={onDefaultAgentChange}>
               <option value="">Global default</option>
               {#each providers as p (p)}
                 <option value={p}>{p}</option>

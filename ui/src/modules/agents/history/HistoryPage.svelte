@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../../lib/rowMenu';
   import { toastError } from '../../../lib/toastError';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   // History (`#/history[/<sessionId>]`) — every past Claude/Codex conversation,
@@ -160,12 +161,24 @@
       { id: 'history.rescan', title: 'Rescan conversation history', group: 'History', keywords: 'refresh import disk transcripts', run: () => void rescan() },
       { id: 'history.scope-workspace', title: 'Show this workspace’s conversations', group: 'History', keywords: 'scope filter', run: () => (scope = 'workspace') },
       { id: 'history.scope-scratch', title: 'Show conversations with no workspace', group: 'History', keywords: 'scope scratch filter', run: () => (scope = 'scratch') },
-      ...(sel && canEdit ? [{ id: 'history.resume', title: resumeLabel(sel), detail: entryTitle(sel), group: 'History', keywords: 'continue resume conversation', run: () => void resume(sel) }] : []),
+      // Same predicate as the header's Resume button — never offer a resume
+      // the button would refuse (archived / nothing resumable).
+      ...(sel && canEdit && canResume(sel) ? [{ id: 'history.resume', title: resumeLabel(sel), detail: entryTitle(sel), group: 'History', keywords: 'continue resume conversation', run: () => void resume(sel) }] : []),
+      ...(sel && canEdit && sel.archived && sel.session_id ? [{ id: 'history.unarchive', title: 'Unarchive conversation', detail: entryTitle(sel), group: 'History', keywords: 'restore archived resume', run: () => void unarchive(sel) }] : []),
     ]),
   );
 
   function isLiveStatus(status: HistoryStatus): boolean {
     return status === 'working' || status === 'running' || status === 'idle';
+  }
+
+  /** "Resume in Otto" is possible: live, resumable (an ended conversation
+   *  with a provider id counts — the daemon resumes it), or an on-disk
+   *  transcript to import. Never for an archived row: resume refuses it
+   *  (409) — Unarchive first. */
+  function canResume(e: HistoryEntry): boolean {
+    if (e.archived) return false;
+    return isLiveStatus(e.status) || e.resumable || e.status === 'on_disk';
   }
 
   /** Import if needed, safely ensure the session is live, then open in Chat. */
@@ -232,10 +245,25 @@
     if (!e.session_id || busy) return;
     busy = true;
     try {
-      await ws.archiveSession(e.session_id);
-      history.patchSession(e.session_id, { status: 'exited' });
+      // Asks first when the agent is mid-turn (archive stops it).
+      if (await ws.requestArchive(e.session_id)) history.patchSession(e.session_id, { status: 'exited', archived: true });
     } catch (err) {
       toastError('Couldn’t archive', err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Archived rows come back here (History had no way out before). */
+  async function unarchive(e: HistoryEntry): Promise<void> {
+    if (!e.session_id || busy) return;
+    busy = true;
+    try {
+      await ws.unarchiveSession(e.session_id);
+      history.patchSession(e.session_id, { archived: false });
+      toasts.success('Session unarchived', 'You can resume it now.');
+    } catch (err) {
+      toastError('Couldn’t unarchive', err);
     } finally {
       busy = false;
     }
@@ -246,14 +274,10 @@
   }
 
   function menuFor(e: HistoryEntry): MenuItem[] {
-    const live = isLiveStatus(e.status);
     return [
-      {
-        label: resumeLabel(e),
-        icon: 'play',
-        disabled: !canEdit || (!live && !e.resumable && e.status !== 'on_disk'),
-        action: () => void resume(e),
-      },
+      e.archived
+        ? { label: 'Unarchive', icon: 'archive', disabled: !canEdit || !e.session_id, action: () => void unarchive(e) }
+        : { label: resumeLabel(e), icon: 'play', disabled: !canEdit || !canResume(e), action: () => void resume(e) },
       { label: 'Open folder', icon: 'folder', action: () => void openFolder(e) },
       { label: 'Copy transcript path', icon: 'copy', action: () => void copyText(e.transcript_path) },
       { label: 'Copy folder path', icon: 'copy', action: () => void copyText(e.cwd) },
@@ -261,7 +285,7 @@
       {
         label: 'Archive',
         icon: 'archive',
-        disabled: !canEdit || !e.session_id || e.status === 'on_disk',
+        disabled: !canEdit || !e.session_id || e.status === 'on_disk' || !!e.archived,
         action: () => void archive(e),
       },
     ];
@@ -408,7 +432,7 @@
     {/if}
     {#if headSel}
       {@const cur = headSel}
-      {#if canEdit && cur.session_id && cur.status !== 'on_disk'}
+      {#if canEdit && cur.session_id && cur.status !== 'on_disk' && !cur.archived}
         <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive session" onclick={() => void archive(cur)} disabled={busy}
           aria-label="Archive" title="Archive the session — restore it any time from the sidebar’s Archived list">
           <Icon name="archive" size={14} />
@@ -421,13 +445,25 @@
         <Icon name="folder" size={12} /> Open folder
       </button>
       <!-- The primary is last (the trailing edge is where the eye lands). -->
-      {#if canEdit}
-        {@const resumable = isLiveStatus(cur.status) || cur.resumable || cur.status === 'on_disk'}
+      {#if canEdit && cur.archived && cur.session_id}
+        <button
+          class="btn small primary"
+          onclick={() => void unarchive(cur)}
+          disabled={busy}
+          title="Archived — unarchive it to resume this conversation"
+          data-icon="archive"
+          data-label="Unarchive"
+          data-testid="history-unarchive"
+        >
+          <Icon name="archive" size={12} /> Unarchive
+        </button>
+      {:else if canEdit}
+        {@const resumable = canResume(cur)}
         <button
           class="btn small primary"
           onclick={() => void resume(cur)}
           disabled={busy || !resumable}
-          title={resumable ? (cur.status === 'on_disk' ? 'Import this transcript as an Otto session and continue it' : 'Continue this conversation in Otto') : 'This conversation can’t be resumed (the CLI left no resumable state)'}
+          title={resumable ? (cur.status === 'on_disk' ? 'Import this transcript as an Otto session and continue it' : 'Continue this conversation in Otto') : 'This conversation can’t be resumed — the CLI never recorded a session id for it'}
           data-icon="play"
           data-label={resumeLabel(cur)}
           data-testid="history-resume"
@@ -454,7 +490,7 @@
     <div class="toolbar">
       <div class="search-wrap">
         <Icon name="search" size={12} />
-        <input
+        <input dir="auto"
           class="search"
           bind:this={searchEl}
           placeholder="Search titles and first prompts…"
@@ -532,7 +568,7 @@
                   data-status={e.status}
                   data-session-id={e.session_id}
                 >
-                  <button
+                  <button use:rowMenu
                     class="row-main"
                     aria-current={selKey === entryKey(e) ? 'true' : undefined}
                     onclick={() => pick(e)}
@@ -547,6 +583,7 @@
                         <span title={new Date(e.last_active_at).toLocaleString()}>{rel(e.last_active_at)}</span>
                         {#if e.turns != null}<span>· {e.turns} {e.turns === 1 ? 'turn' : 'turns'}</span>{/if}
                         {#if e.status === 'on_disk'}<span class="on-disk" title="A transcript on disk that no Otto session owns">on disk</span>{/if}
+                        {#if e.archived}<span class="on-disk" title="Archived — unarchive it to resume">archived</span>{/if}
                       </span>
                     </span>
                   </button>

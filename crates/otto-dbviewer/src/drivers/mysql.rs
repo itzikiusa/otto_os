@@ -444,7 +444,8 @@ impl Driver for MysqlDriver {
                     CAST(column_default AS CHAR) AS column_default, \
                     CAST(column_key AS CHAR) AS column_key, \
                     CAST(extra AS CHAR) AS extra, \
-                    CAST(column_comment AS CHAR) AS column_comment \
+                    CAST(column_comment AS CHAR) AS column_comment, \
+                    CAST(collation_name AS CHAR) AS collation_name \
              FROM information_schema.columns \
              WHERE table_schema = ? AND table_name = ? \
              ORDER BY ordinal_position",
@@ -486,6 +487,7 @@ impl Driver for MysqlDriver {
                 key: c.column_key.filter(|s| !s.is_empty()),
                 extra: c.extra.filter(|s| !s.is_empty()),
                 comment: c.column_comment.filter(|s| !s.is_empty()),
+                collation: c.collation_name.filter(|s| !s.is_empty()),
             });
         }
 
@@ -1362,6 +1364,7 @@ impl MysqlDriver {
                     p.parameter_mode.filter(|s| !s.is_empty())
                 },
                 comment: None,
+                collation: None,
             });
         }
 
@@ -2566,6 +2569,7 @@ struct ColumnRow {
     column_key: Option<String>,
     extra: Option<String>,
     column_comment: Option<String>,
+    collation_name: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -3080,6 +3084,8 @@ mod cache_isolation_tests {
             "CREATE TEMPORARY TABLE t (id INT)",
             "SELECT GET_LOCK('x', 10)",
             "CALL refresh_stats()",
+            "SELECT id INTO @last FROM t LIMIT 1",
+            "SELECT @n := COUNT(*) FROM t",
         ] {
             assert!(types::sql_leaves_session_state(sql), "{sql}");
         }
@@ -3087,6 +3093,8 @@ mod cache_isolation_tests {
             "SELECT * FROM t",
             "DELETE FROM t WHERE id = 1",
             "SHOW TABLES",
+            "SELECT into_count FROM t",
+            "INSERT INTO t VALUES (1)",
         ] {
             assert!(!types::sql_leaves_session_state(sql), "{sql}");
         }

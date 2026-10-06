@@ -46,7 +46,7 @@ files, PRs and images a session produced are listed with previews in an
 | History index | migration 0123 `transcript_index`, background walker | Head+tail scan of both provider roots; `history_index_progress` |
 | Conversation UI | `ui/src/modules/agents/conversation/` + `SessionView.svelte`, `ui/src/lib/stores/transcript.svelte.ts` | `ConversationView` (`sessionId` or `transcriptPath` mode, `readonly`), the view toggle, composer |
 | History UI | `ui/src/modules/agents/history/` | `HistoryPage.svelte`, the `history` store, the ⌘K command |
-| Tasks / board UI | `ui/src/modules/panels/ActivityPanel.svelte`, `ui/src/modules/agents/MissionControl.svelte`, `ui/src/lib/stores/activity.svelte.ts` | Add task, badges, done/total strip, sub-tasks |
+| Tasks / board UI | `ui/src/modules/panels/ActivityPanel.svelte`, `ui/src/modules/agents/WorkQueue.svelte`, `ui/src/lib/stores/activity.svelte.ts` | Add task, badges, done/total strip, sub-tasks |
 | Outputs UI | `ui/src/modules/panels/OutputsPanel.svelte`, `ui/src/shell/RightPanel.svelte` | The **Outputs** tab and the embedded History variant |
 | Types | `ui/src/lib/api/types.ts` (`// ── Transcript` section) | Mirror of `otto-transcript/src/model.rs` |
 | Contracts (authoritative) | `docs/contracts/api.md`, `docs/contracts/ws.md` | Routes, RBAC, event scopes |

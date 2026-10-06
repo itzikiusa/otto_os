@@ -9,7 +9,7 @@
   // to the global Agents panel. Nothing here is a general/all-workflows list.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
@@ -103,16 +103,23 @@
   );
   // Suspended sessions may be absent from the workspace's live list. Load
   // metadata once for titles/provider and an elapsed clock that survives reload.
+  // Keyed on the joined id set, not on `groups` (rebuilt on every live merge —
+  // up to once per log line): each id is fetched at most once per mount, and a
+  // 404 (deleted session) is remembered instead of re-requested forever.
+  const sessionIdsKey = $derived([...new Set(groups.flatMap((g) => g.sessions))].sort().join('\n'));
+  const attemptedSessions = new Set<string>();
+  let mounted = true;
+  $effect(() => () => { mounted = false; });
   $effect(() => {
-    const ids = groups.flatMap((g) => g.sessions);
-    let alive = true;
-    void Promise.all(ids.filter((id) => !sessOf(id)).map(async (id) => {
+    const ids = sessionIdsKey ? sessionIdsKey.split('\n') : [];
+    const todo = untrack(() => ids.filter((id) => !attemptedSessions.has(id) && !sessOf(id)));
+    for (const id of todo) attemptedSessions.add(id);
+    void Promise.all(todo.map(async (id) => {
       try {
         const session = await api.get<Session>(`/sessions/${id}`);
-        if (alive) sessionDetails[id] = session;
+        if (mounted) sessionDetails[id] = session;
       } catch { /* An old deleted session still retains its review label. */ }
     }));
-    return () => { alive = false; };
   });
   const runActive = $derived(run.status === 'running' || run.status === 'pending');
 
@@ -269,7 +276,7 @@
             {#if expanded[sid]}
               <div class="term">
                 {#key sid}
-                  <Terminal sessionId={sid} resumable preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={sid} resumable preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}

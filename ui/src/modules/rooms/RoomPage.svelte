@@ -115,7 +115,7 @@
   </PageHeader>
   <PageBody fill padded={false}>
     {#if needsName}<div class="join-form"><h2>Join this session</h2><p>Connecting to <strong>{origin}</strong></p><p>The host will see your display name and decide whether to admit you. Admitted participants can see your messages and shared media.</p>
-      <form onsubmit={(event) => { event.preventDefault(); void join(); }}><label>Your display name <input bind:value={name} maxlength="80" autocomplete="nickname" /></label>
+      <form onsubmit={(event) => { event.preventDefault(); void join(); }}><label>Your display name <input dir="auto" bind:value={name} maxlength="80" autocomplete="nickname" /></label>
         {#if error}<p role="alert">{error}</p>{/if}<button class="btn primary" disabled={joining || !name.trim()}>{joining ? 'Requesting entry…' : 'Request entry'}</button>
       </form></div>
     {:else if ended}<EmptyState variant="page" icon="people" title="Room closed" body={ended} />
@@ -140,7 +140,7 @@
 {#if inviteOpen}<Modal title="Invite someone" onclose={() => inviteOpen = false}>
   <p>A single-use invitation expires after ten minutes. You still approve admission and terminal control.</p>
   <label>Maximum access <select bind:value={inviteRole}><option value="viewer">View only</option><option value="editor">Can control when granted</option></select></label>
-  {#if invitation}<label>Invitation link <input readonly value={invitation.url} aria-label="Invitation link" /></label><p>Expires {new Date(invitation.expires_at).toLocaleTimeString()}.</p>{/if}
+  {#if invitation}<label>Invitation link <input dir="ltr" readonly value={invitation.url} aria-label="Invitation link" /></label><p>Expires {new Date(invitation.expires_at).toLocaleTimeString()}.</p>{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#snippet footer()}<button class="btn" onclick={() => inviteOpen = false}>Done</button>{#if invitation}<button class="btn primary" onclick={copyInvite}>{copied ? 'Copied' : 'Copy invitation'}</button>{:else}<button class="btn primary" disabled={inviting} onclick={makeInvite}>{inviting ? 'Creating…' : 'Create invitation'}</button>{/if}{/snippet}
 </Modal>{/if}

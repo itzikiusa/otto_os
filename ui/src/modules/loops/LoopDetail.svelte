@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { loops } from '../../lib/stores/loops.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import SessionView from '../agents/SessionView.svelte';
@@ -31,7 +32,7 @@
   async function openSession(sid: string): Promise<void> {
     openSessionId = sid;
     await tick();
-    sessEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    sessEl?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
   }
 
   // Load + poll the open detail; stop polling when this view goes away.
@@ -106,7 +107,7 @@
   }
   // Stop is terminal (a stopped loop can't be resumed), unlike Pause.
   async function stop(): Promise<void> {
-    if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', confirmLabel: 'Stop loop' }))) return;
+    if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', danger: true, confirmLabel: 'Stop loop' }))) return;
     await act(() => loops.stop(id), 'Couldn’t stop the goal loop');
   }
   /** ⋯ next to Pause/Resume: the destructive verbs stay one step away from the primary. */
@@ -177,7 +178,7 @@
 <PageHeader title={loop?.name ?? 'Goal loop'}>
   {#snippet leading()}
     <button class="icon-btn" title="Back to Goal Loops" aria-label="Back to Goal Loops" onclick={onback}>
-      <Icon name="chevronLeft" size={15} />
+      <Icon name="chevronLeft" size={14} />
     </button>
   {/snippet}
   {#snippet badge()}
@@ -243,7 +244,7 @@
         {#each PHASES as p, i (p)}
           {@const cur = loop.status === 'running' ? phaseIndex(loop) : -1}
           <li class="step" class:active={cur === i} class:past={cur > i} aria-current={cur === i ? 'step' : undefined}>
-            <span class="step-dot">{#if cur > i}<Icon name="check" size={10} />{/if}</span>{PHASE_LABEL[p]}
+            <span class="step-dot">{#if cur > i}<Icon name="check" size={12} />{/if}</span>{PHASE_LABEL[p]}
           </li>
         {/each}
         {#if loop.status === 'running' && loop.phase === 'waiting'}<li class="step waiting">Waiting on an agent</li>{/if}
@@ -270,7 +271,7 @@
       <section class="decision" aria-label="Decision needed">
         <h3 class="section-title"><Icon name="warning" size={12} /> Decision needed</h3>
         <p class="q">{q.question}</p>
-        <textarea class="input answer" rows="2" aria-label="Answer question" placeholder="Your answer — the agents read it on Resume" bind:value={answers[q.id]}></textarea>
+        <textarea dir="auto" class="input answer" rows="2" aria-label="Answer question" placeholder="Your answer — the agents read it on Resume" bind:value={answers[q.id]}></textarea>
         <div class="row-end">
           <button class="btn small" disabled={!answers[q.id]?.trim() || loop.status !== 'blocked' || acting}
             title={loop.status !== 'blocked' ? 'Answers are recorded while the loop is blocked' : undefined}
@@ -306,7 +307,7 @@
                 {@const approval = humanVerification(c, loop.ledger)}
                 {#if approval}<p class="verified"><Icon name="userCheck" size={12} /> Verified by {approval.verified_by}: {approval.evidence}</p>
                 {:else}
-                  <textarea class="input answer" rows="2" aria-label={`Evidence for ${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
+                  <textarea dir="auto" class="input answer" rows="2" aria-label={`Evidence for ${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
                   <div class="row-end">
                     <button class="btn small" disabled={!evidence[c.id]?.trim() || !canVerify || acting}
                       title={canVerify ? undefined : 'Record verification while the loop is paused, blocked or exhausted'}

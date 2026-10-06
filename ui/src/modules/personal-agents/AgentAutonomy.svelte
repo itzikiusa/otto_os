@@ -203,7 +203,7 @@
           {#each goals as g, i (g.id ?? `new-${i}`)}
             <li class="item">
               <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label="Goal enabled" title="Enabled" />
-              <input class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
+              <input dir="auto" class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
               <span class="meta">Worked <RelTime iso={g.last_run_at} fallback="never" /></span>
               {#if editable && g.id}
                 <button class="btn small" disabled={workingGoal !== null || dirty || saving} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
@@ -235,10 +235,10 @@
         <ul class="list">
           {#each rules as r, i (r.id ?? `new-${i}`)}
             <li class="item rule">
-              <input class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
+              <input dir="auto" class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
               {#if r.id && saved?.rules.some((x) => x.id === r.id && x.text === r.text.trim())}
                 <span class="chip" class:pa-enf={!!r.enforce} title="Derived by Otto from the rule’s wording">
-                  {#if r.enforce}<Icon name="lock" size={11} />{/if}{enforceLabel(r)}
+                  {#if r.enforce}<Icon name="lock" size={12} />{/if}{enforceLabel(r)}
                 </span>
               {:else}
                 <span class="meta">Save to see what Otto enforces</span>
@@ -256,7 +256,7 @@
 
     <section class="pa-panel" aria-labelledby="primary-h">
       <h2 id="primary-h">Your agent</h2>
-      <p class="hint">Your primary assistant: it handles general requests and routes specialist work to your other agents through a shared room. One per workspace.</p>
+      <p class="hint">Your primary assistant: it handles general requests and routes specialist work to your other agents through a shared agent channel. One per workspace.</p>
       <label class="chk"><input type="checkbox" bind:checked={primary} disabled={!editable || saving} /> Make this my primary agent</label>
     </section>
 

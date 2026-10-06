@@ -15,11 +15,12 @@
 //! goes to the reader pool, everything else — DML, DDL, `PRAGMA`, anything
 //! ambiguous — to the writer. So `query.fetch_all(&pool)` needs no call-site
 //! change and every repo is routed by one rule, not per method. Explicit
-//! transactions ([`DbPool::begin`]) and raw connections ([`DbPool::acquire`])
-//! always come from the writer, and statements run on a transaction never
-//! pass through the router. The reader connections are opened read-only, so a
-//! mis-routed write fails loudly (`attempt to write a readonly database`)
-//! instead of silently racing the writer.
+//! write transactions ([`DbPool::begin`], `BEGIN IMMEDIATE`) and raw
+//! connections ([`DbPool::acquire`]) always come from the writer; snapshot
+//! reads ([`DbPool::begin_read`]) come from the reader. Statements run on a
+//! transaction never pass through the router. The reader connections are
+//! opened read-only, so a mis-routed write fails loudly (`attempt to write a
+//! readonly database`) instead of silently racing the writer.
 //!
 //! Tests and tools that build their own (often `sqlite::memory:`) pool convert
 //! it with `DbPool::from(pool)`: one pool serves both roles, exactly as before.
@@ -180,10 +181,29 @@ impl DbPool {
         &self.read
     }
 
-    /// Begin a transaction on the WRITER.
+    /// Begin a WRITE transaction on the WRITER, as `BEGIN IMMEDIATE`.
+    ///
+    /// Writer-pool transactions exist to write, and most read first (a
+    /// lookup, a reference check, a FTS rowid map probe). A DEFERRED
+    /// transaction starts as a reader and upgrades at its first write; when
+    /// another connection committed in between, that upgrade fails AT ONCE
+    /// with `SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT` — the busy handler never
+    /// runs for a read→write upgrade, so `busy_timeout` can't wait it out and
+    /// the caller 500s under ordinary concurrency. IMMEDIATE takes the write
+    /// lock up front, where the busy handler DOES apply. Pure snapshot reads
+    /// use [`Self::begin_read`] instead and never hold the write lock.
     pub async fn begin(&self) -> sqlx::Result<Transaction<'static, Sqlite>> {
         self.tick();
-        self.write.begin().await
+        self.write.begin_with("BEGIN IMMEDIATE").await
+    }
+
+    /// Begin a READ-ONLY snapshot transaction on the READER pool (`BEGIN`,
+    /// deferred): several statements see one consistent snapshot without
+    /// occupying a writer connection or the write lock. Any write on it fails
+    /// (`attempt to write a readonly database`) when the pools are split.
+    pub async fn begin_read(&self) -> sqlx::Result<Transaction<'static, Sqlite>> {
+        self.tick();
+        self.read.begin().await
     }
 
     /// Begin a transaction on the WRITER with a custom statement (e.g.
@@ -343,10 +363,13 @@ impl<'a> sqlx::Acquire<'a> for &'_ DbPool {
         Box::pin(self.write.acquire())
     }
 
+    /// `BEGIN IMMEDIATE`, like [`DbPool::begin`]: a generic `Acquire` caller
+    /// gets the same write-lock-up-front invariant (a DEFERRED begin here
+    /// was a latent `SQLITE_BUSY_SNAPSHOT` on the read→write upgrade).
     fn begin(self) -> BoxFuture<'static, Result<Transaction<'a, Sqlite>, sqlx::Error>> {
         self.tick();
         let write = self.write.clone();
-        Box::pin(async move { write.begin().await })
+        Box::pin(async move { write.begin_with("BEGIN IMMEDIATE").await })
     }
 }
 
@@ -522,6 +545,32 @@ mod tests {
         assert_eq!(after, 2);
     }
 
+    /// S7-08: `Acquire::begin` on `&DbPool` takes the write lock at BEGIN
+    /// (IMMEDIATE), before any statement runs — an independent connection
+    /// can't start a write transaction while it is open.
+    #[tokio::test]
+    async fn acquire_begin_is_immediate() {
+        use sqlx::{ConnectOptions as _, Connection as _};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let pool = crate::open(&path).await.unwrap();
+        // Explicitly the TRAIT method (the inherent `begin` would win `.begin()`).
+        let tx = sqlx::Acquire::begin(&pool).await.unwrap();
+        let mut other = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .busy_timeout(std::time::Duration::ZERO)
+            .connect()
+            .await
+            .unwrap();
+        let err = sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut other)
+            .await
+            .expect_err("the Acquire transaction must already hold the write lock");
+        assert!(err.to_string().to_lowercase().contains("locked"), "{err}");
+        drop(tx);
+        other.close().await.unwrap();
+    }
+
     /// The point of the split: while a writer holds SQLite's write lock (and
     /// other writers queue behind it), reads still complete immediately.
     #[tokio::test]
@@ -571,5 +620,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 7);
+    }
+
+    /// r10: two read-then-write transactions racing on a real WAL file. With
+    /// a DEFERRED `begin()` the second committed while the first still held
+    /// only a read snapshot, and the first's write then failed at once with
+    /// SQLITE_BUSY(_SNAPSHOT) — the busy handler never runs for a read→write
+    /// upgrade. `begin()` is `BEGIN IMMEDIATE` now: the second waits for the
+    /// write lock in the busy handler and both succeed.
+    #[tokio::test]
+    async fn racing_read_then_write_transactions_both_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::open(&dir.path().join("t.db")).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS race (id INTEGER PRIMARY KEY, n INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO race (id, n) VALUES (1, 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        async fn bump(tx: &mut Transaction<'static, Sqlite>, n: i64) -> sqlx::Result<()> {
+            sqlx::query("UPDATE race SET n = ? WHERE id = 1")
+                .bind(n + 1)
+                .execute(&mut **tx)
+                .await
+                .map(|_| ())
+        }
+        let mut a = pool.begin().await.unwrap();
+        let seen_a: i64 = sqlx::query_scalar("SELECT n FROM race WHERE id = 1")
+            .fetch_one(&mut *a)
+            .await
+            .unwrap();
+        let p = pool.clone();
+        let b = tokio::spawn(async move {
+            let mut b = p.begin().await?;
+            let seen: i64 = sqlx::query_scalar("SELECT n FROM race WHERE id = 1")
+                .fetch_one(&mut *b)
+                .await?;
+            bump(&mut b, seen).await?;
+            b.commit().await
+        });
+        // Under DEFERRED, `b` runs to completion here.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        bump(&mut a, seen_a)
+            .await
+            .expect("first writer's upgrade must not fail with SQLITE_BUSY");
+        a.commit().await.unwrap();
+        b.await.unwrap().expect("second writer waits, then commits");
+        let n: i64 = sqlx::query_scalar("SELECT n FROM race WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "serialized read-modify-write: no lost update");
+    }
+
+    /// `begin_read()` is a snapshot on the read-only reader: it never takes
+    /// the write lock, so a writer commits while it is open.
+    #[tokio::test]
+    async fn begin_read_is_a_snapshot_that_never_blocks_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::open(&dir.path().join("t.db")).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS snap (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut r = pool.begin_read().await.unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM snap")
+            .fetch_one(&mut *r)
+            .await
+            .unwrap();
+        let mut w = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO snap DEFAULT VALUES")
+            .execute(&mut *w)
+            .await
+            .unwrap();
+        w.commit().await.unwrap();
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM snap")
+            .fetch_one(&mut *r)
+            .await
+            .unwrap();
+        assert_eq!(before, after, "one consistent snapshot");
+        assert!(sqlx::query("INSERT INTO snap DEFAULT VALUES")
+            .execute(&mut *r)
+            .await
+            .is_err());
+        r.rollback().await.unwrap();
     }
 }

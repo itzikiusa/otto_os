@@ -244,3 +244,114 @@ async fn note_wire_metadata_reports_index_limit_without_truncating_source() {
         }
     }
 }
+
+async fn send(
+    app: &Router,
+    method: Method,
+    uri: String,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder().method(method).uri(uri);
+    let body = match body {
+        Some(b) => {
+            req = req.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&b).unwrap())
+        }
+        None => Body::empty(),
+    };
+    let response = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
+    (status, body)
+}
+
+/// S7-01: a non-root Editor can't root a vault at `/`, `$HOME`, Otto's data
+/// dir (or inside it), or an ancestor of it / of the credential dirs — that
+/// would hand every Viewer the state DB, backups and the login Keychain.
+#[tokio::test]
+async fn non_root_register_refuses_root_home_data_dir_and_their_ancestors() {
+    let (app, _td, _id) = fixture(WorkspaceRole::Editor).await;
+    let home = std::env::var("HOME").expect("HOME");
+    let data_dir = format!("{home}/Library/Application Support/Otto");
+    let backups = format!("{data_dir}/backups-s7-01-probe");
+    let backups_existed = std::path::Path::new(&backups).exists();
+    for root in [
+        "/".to_string(),
+        "~".to_string(),
+        home.clone(),
+        format!("{home}/"),
+        data_dir.clone(),
+        backups.clone(),
+        format!("{home}/Library"),
+        format!("{home}/.ssh"),
+        format!("{home}/Library/Keychains"),
+        format!("{home}/Documents/../Library/Application Support/Otto"),
+        "relative/vault".to_string(),
+    ] {
+        let (status, body) = send(
+            &app,
+            Method::POST,
+            format!("/workspaces/{WS}/vault/vaults"),
+            Some(json!({ "name": "Probe", "root_path": root })),
+        )
+        .await;
+        assert!(
+            status == StatusCode::FORBIDDEN || status == StatusCode::BAD_REQUEST,
+            "{root}: {status} {body}"
+        );
+    }
+    assert!(
+        backups_existed || !std::path::Path::new(&backups).exists(),
+        "a refused root must not be created"
+    );
+    let (status, list) = send(
+        &app,
+        Method::GET,
+        format!("/workspaces/{WS}/vault/vaults"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        list.as_array().unwrap().len(),
+        1,
+        "only the fixture vault: {list}"
+    );
+
+    // An ordinary directory still registers for a non-root Editor.
+    let ok = tempfile::tempdir().unwrap();
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        format!("/workspaces/{WS}/vault/vaults"),
+        Some(json!({ "name": "Fine", "root_path": ok.path().join("notes") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// S7-01: every canonical asset path is vetted — a key-like file inside a
+/// vault is never streamed, even to an Editor.
+#[tokio::test]
+async fn asset_route_refuses_key_like_files() {
+    let (app, td, id) = fixture(WorkspaceRole::Editor).await;
+    std::fs::write(td.path().join("id_rsa"), b"-----BEGIN KEY-----").unwrap();
+    std::fs::write(td.path().join("deploy.pem"), b"pem").unwrap();
+    std::fs::write(td.path().join("logo.png"), b"png").unwrap();
+    for (path, want) in [
+        ("id_rsa", StatusCode::FORBIDDEN),
+        ("deploy.pem", StatusCode::FORBIDDEN),
+        ("logo.png", StatusCode::OK),
+    ] {
+        let (status, body) = send(
+            &app,
+            Method::GET,
+            format!("/workspaces/{WS}/vault/vaults/{id}/asset?path={path}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, want, "{path}: {body}");
+    }
+}

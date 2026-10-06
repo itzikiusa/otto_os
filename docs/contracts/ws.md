@@ -10,20 +10,25 @@ room credentials are never accepted by ordinary terminal/event sockets.
   `Sec-WebSocket-Protocol` request header — the client offers
   `["otto-bearer", "<token>"]` and the server echoes back `otto-bearer` on
   success. This keeps the token out of the URL/query string (which is logged by
-  proxies and servers). A `?token=<bearer token>` query parameter is still
-  accepted as a backward-compatible fallback.
+  proxies and servers). A `?token=<bearer token>` query parameter is **not**
+  accepted (401) — on this or any other daemon socket (S11-312).
 - The terminal stream (`/ws/term/{session_id}`) accepts the token the same way:
   prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes back
-  `otto-bearer` on success, keeping the share token out of the URL). A
-  `?token=<bearer token>` query parameter is still accepted as a
-  backward-compatible fallback for existing clients.
+  `otto-bearer` on success, keeping the share token out of the URL). `?token=`
+  is refused (401); so are `/ws/lsp`, `/ws/api-client/stream` and
+  `/ws/browser/{tab_id}/live`, which take the bearer the same way.
 
 ## 1. Terminal stream — `WS /ws/term/{session_id}`
 
-Auth: prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
+Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
 `otto-bearer` subprotocol on success, keeping the bearer token out of the URL).
-`?token=<bearer token>` query parameter is accepted as a backward-compatible
-fallback. An IP that fails token validation too many times is locked out (429).
+A `?token=<bearer token>` query parameter is refused (401). A token that verifies is never refused; an IP whose tokens fail
+validation too many times gets 429 (instead of 401) for further FAILED attempts.
+The IP is the tunnel-aware client IP (the `trusted_client_ip_header` setting's
+header — by default `CF-Connecting-IP` for a loopback request naming a non-Funnel
+Public link domain — else the socket peer; IPv6 is keyed by /64, and a full
+throttle map fails closed for untracked IPs). A store error is 503 and
+never counted.
 
 **Attach intent — `?view=1` (optional).** By default an attach that may type
 resumes an exited-but-resumable agent session (`ensure_live`: the provider CLI
@@ -64,7 +69,10 @@ connection session, where a revoked grant must drop the socket promptly). The
 capability only ever **narrows** for a live connection: a share downgraded from
 editor to viewer stops accepting input within one interval and never regains it
 without reconnecting. Revocation (share token revoked/expired, session access
-withdrawn) closes the socket within one interval — and immediately, regardless of
+withdrawn) closes THAT viewer's socket within one interval — the session itself
+keeps running (a lapsed share, an expired impersonation or a logout elsewhere
+never kills the owner's agent; a transient store error keeps the last verdict) —
+and immediately, regardless of
 cadence, when the server force-terminates the session (`{"type":"terminated"}`,
 below). Clients need no change: keep sending, and treat a dropped socket or a
 `forbidden` error frame as the authoritative answer.
@@ -302,7 +310,7 @@ must already exist (`POST /api/v1/browser/tabs/{id}/live`); otherwise the
 upgrade is refused with 404.
 
 **Auth** (validated BEFORE the upgrade): `Sec-WebSocket-Protocol: otto-bearer,
-<token>` (server echoes `otto-bearer`), `?token=` accepted as a fallback.
+<token>` (server echoes `otto-bearer`); `?token=` is refused (401).
 Share-scoped and MCP-only tokens → 403. The caller must hold `Feature::Browser`
 ≥ View **and** be the session's owner, a workspace Admin of the tab's workspace,
 or root (anyone else → 404, so a session's existence doesn't leak). Driving
@@ -400,6 +408,13 @@ are delivered to all authenticated clients.
 
 Ping/pong handled by the transport layer (axum auto-responds to pings; server
 sends a ping every 30s).
+
+**Credential re-validation.** The socket's token is re-checked every 60 s and
+within ~1 s of any token revocation (logout, "revoke all", API/MCP/session
+token revoke). If it no longer verifies as the same user (revoked, expired —
+e.g. an impersonation past its TTL — or the user disabled), the server sends a
+Close frame with code **4401** (`credential revoked`) and drops the socket.
+Clients must treat 4401 as "signed out", not as a transient drop.
 
 ### Agent UI control frames (per connection)
 
@@ -536,9 +551,11 @@ every member with `viewer`+ on the event's `workspace_id` (root receives all);
 `assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
 `notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
-`mcp_approval_changed`) reach every authenticated client. There are 74
+`mcp_approval_changed`) reach every authenticated client. There are 79
 variants (the sections below cover them; each `## …`/`### …` heading is one
-feature family).
+feature family). `ui/unit/eventContract.test.ts` checks every variant's tag is
+documented here and that its fields match the `OttoEvent` union in
+`ui/src/lib/api/types.ts`.
 
 Session lifecycle (session-family — owner/admin/root, viewer-gated):
 
@@ -769,7 +786,7 @@ persisted + verified findings ingested into memory):
 
 ## Goal-loop progress (Goal Loops)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/goal_loop.rs` on every loop
+Workspace-scoped. Emitted by `crates/otto-automation/src/goal_loop.rs` on every loop
 transition: status change, phase change (Plan → Execute → Evaluate → Digest), a new
 iteration, after each evaluation, and when an executor's live state flips (e.g.
 → `waiting`). The Loops UI updates the list row directly from these fields and
@@ -802,7 +819,7 @@ a loop is active, covering any missed event).
 
 ## Product AI-run completion (A3)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs` at the end of every
+Workspace-scoped. Emitted by `crates/otto-product/src/run.rs` at the end of every
 AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ```json
@@ -828,7 +845,7 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ## Multi-agent plan kickoff (A3)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs::run_generate_plan` each
+Workspace-scoped. Emitted by `crates/otto-product/src/run.rs::run_generate_plan` each
 time a planning (or the summarizer) session is created during a `plan/generate` run, carrying
 the live session ids known so far. Lets the Plan tab tile the planning sessions side-by-side so
 the user can watch them (and answer questions when `interactive`).
@@ -996,7 +1013,7 @@ blind timer.
 }
 ```
 
-- Emitted by `otto-server/src/insights.rs` after a scheduled insights run
+- Emitted by `otto-insights/src/lib.rs` after a scheduled insights run
   completes (conditioned on `period_done()` returning `true`).
 - `period` — human-readable label combining the kind (`daily|weekly|monthly`)
   and the run's start date.
@@ -1043,7 +1060,7 @@ blind timer.
 - Emitted by the `workgraph_projector` when a Mission Control work item is
   created or its normalized status changes (cost/title-only refreshes stay
   quiet). `kind` is the work kind (`session|swarm|goal_loop|workflow|review|
-  product_story|pr|external_trigger`); `status` is the normalized lifecycle.
+  product_story|pr|external_trigger|otto_run`); `status` is the normalized lifecycle.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Mission Control page re-fetches the workspace summary/list on a matching
   tick instead of polling.
@@ -1081,12 +1098,28 @@ blind timer.
   "run_id": "<Id>", "status": "running|ok|error|canceled" }
 ```
 
-- Emitted by `otto_server::scheduled_tasks_engine` when a scheduled-task run
+- Emitted by `otto_automation::scheduled_tasks_engine` when a scheduled-task run
   starts, finishes (`ok`), errors, or is stopped from Otto (`canceled`).
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick
   instead of polling.
 - TypeScript type: `{ type: 'scheduled_task_run_updated'; workspace_id: Id; task_id: Id; run_id: Id; status: string }`.
+
+---
+
+### `personal_agent_run_updated`
+
+```json
+{ "type": "personal_agent_run_updated", "workspace_id": "<Id>", "agent_id": "<Id>",
+  "run_id": "<Id>", "status": "running|ok|error" }
+```
+
+- Emitted by `otto_assistant::personal_agents_engine` when a personal-agent run
+  starts, finishes (`ok`) or errors.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- The Personal Agents page re-fetches the agent's run history on a matching
+  tick instead of polling.
+- TypeScript type: `{ type: 'personal_agent_run_updated'; workspace_id: Id; agent_id: Id; run_id: Id; status: string }`.
 
 ---
 
@@ -1267,7 +1300,7 @@ coalesce before refetching.
 
 ### `canvas_updated` / `canvas_session_started`
 
-Workspace-scoped. Emitted by `crates/otto-server/src/canvas_assist.rs` while an
+Workspace-scoped. Emitted by `crates/otto-canvas/src/assist.rs` while an
 Ask-AI agent turn edits a scene's backing source file (live, per-poll) and once
 more with the committed result; `canvas_session_started` fires at the START of
 the turn so the Canvas Assistant panel can attach the agent's shell immediately
@@ -1290,7 +1323,7 @@ instead of waiting for it to finish.
 
 Workspace-scoped. Emitted by `crates/otto-server/src/mockup_assist.rs` (live
 per-poll while the design agent edits the file, and once with the committed
-result), by `product_media.rs` on every `PUT /product/attachments/{aid}/content`
+result), by `otto_product::media` on every `PUT /product/attachments/{aid}/content`
 save from the UI, by `routes/swarm_ingest.rs` when a swarm agent publishes an
 artifact, and by `design_blender.rs` for each output a Blender render job
 attaches — same shape and timing as the canvas pair above, but for a product
@@ -1368,7 +1401,7 @@ their own routes.
 ### `design_assist_updated` / `design_variants_ready`
 
 Workspace-scoped states of the unified design-assist pipeline
-(`crates/otto-server/src/design_assist.rs`).
+(`crates/otto-design-assist/src/lib.rs`).
 
 ```json
 { "type": "design_assist_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "turn_id": "<Id>", "status": "starting|running|done|unchanged|conflict|failed", "mode": "generate|refine|critique|a11y|variant", "branch": "main|variant/<run>/<k>", "session_id": "<Id>" | null, "version_id": "<Id>" | null, "error": "..." | null }
@@ -1626,7 +1659,7 @@ saved Context, while existing sessions retain their initial context.
 Otto Assistant (`api.md` "Otto Assistant"). **Owner-scoped**: each event carries
 the assistant owner's `user_id` and is delivered ONLY to that user's
 connections — not to workspace members and not to root (the assistant is
-personal). Emitted by `crates/otto-server/src/assistant.rs` and its submodules.
+personal). Emitted by `crates/otto-assistant/src/assistant.rs` and its submodules.
 Reply prose still streams over the session-family `transcript_live` /
 `transcript_appended` events of `thread.session_id`; these four events carry the
 assistant's own index and queue.
@@ -1723,8 +1756,11 @@ and, if the doc is open in this window and `client_id` is not this window's
 own (the `client_id` the PATCH sent), refetch the doc.
 
 ```json
-{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
+{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"content_hash":"9f2c…","updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
 ```
+
+`content_hash` is the doc's hash after the change: a coalesced autosave keeps
+`rev`, so a window compares the hash (not just `rev`) to know its copy is stale.
 
 `action` ∈ `created` | `updated` (content, metadata or a revision restore) |
 `trashed` | `restored` | `deleted` (permanent). `client_id` is omitted unless

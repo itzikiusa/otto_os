@@ -41,7 +41,7 @@ Casino Reviewer Player (login via Keychain).
 
 ## 2. Runs
 
-The scheduler (60s tick, `crates/otto-server/src/personal_agents_scheduler.rs`)
+The scheduler (60s tick, `crates/otto-assistant/src/personal_agents_scheduler.rs`)
 fires due schedules; the engine (`personal_agents_engine.rs`) runs each as a
 **fresh agent session** (`CreateSessionReq` with the pinned provider/model,
 `meta.browser`, the agent's cwd, and `meta.personal_agent = <id>`), pastes the

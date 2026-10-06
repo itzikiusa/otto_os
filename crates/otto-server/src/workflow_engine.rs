@@ -19,7 +19,7 @@
 //! "(cached)" log line. The cache is upserted on every successful node execution
 //! so subsequent re-runs can skip unchanged steps.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -27,9 +27,10 @@ use otto_brokers::types::{ConsumeReq, ValueFormat};
 use otto_channels::adapter::Adapter;
 use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
+use otto_core::text::{clip_bytes as truncate, extract_json};
 use otto_core::workflows::{
-    NodeActivity, NodeRunState, NodeStatus, NodeTypeSpec, RunScope, RunStatus, SubagentActivity,
-    Workflow, WorkflowCheckpoint, WorkflowGraph, WorkflowNode, WorkflowRun,
+    NodeActivity, NodeRunState, NodeStatus, RunScope, RunStatus, SubagentActivity, Workflow,
+    WorkflowCheckpoint, WorkflowGraph, WorkflowNode, WorkflowRun,
 };
 use otto_core::{Id, Result};
 use otto_dbviewer::QueryRequest;
@@ -38,6 +39,9 @@ use serde_json::{json, Value};
 
 use crate::state::ServerCtx;
 use crate::turn_oracle::{self, cap_node_logs, CompleteVia, Phase};
+use otto_workflows::catalog::validate_node_output;
+pub use otto_workflows::catalog::{is_known_kind, node_catalog};
+use otto_workflows::retry::retry_backoff;
 
 /// Session and review associations share the ordered progress stream. Reviews
 /// are recorded as soon as they exist, even when the step does not await them.
@@ -343,12 +347,26 @@ impl ProgressSink {
 /// Where a run reports back to: the chat integration + channel/thread the trigger
 /// arrived on. Resolved once from the run input.
 struct ChatTarget {
-    /// Workspace whose integration received the trigger (workflows are global, so
-    /// this may differ from the workflow's own workspace).
+    /// Workspace whose integration reports the run — always the workflow's own
+    /// (see `result_workspace`; chat triggers only start workflows of the
+    /// receiving workspace, S3-03).
     ws: String,
     channel: Channel,
     chat: String,
     thread: Option<String>,
+}
+
+/// The workspace whose Slack/Telegram integration reports a run: always the
+/// workflow's own. Chat triggers only start workflows of the receiving
+/// workspace (S3-03), so a legitimate `origin_workspace_id` equals it; any
+/// other value is a forged/legacy input and must not borrow another
+/// workspace's bot token (S3-02).
+fn result_workspace(workflow: &Workflow, origin: Option<&str>) -> String {
+    if let Some(o) = origin.filter(|o| *o != workflow.workspace_id) {
+        tracing::warn!(workflow_id = %workflow.id, origin = o,
+              "run input names another workspace as its origin — reporting via the workflow's own");
+    }
+    workflow.workspace_id.clone()
 }
 
 /// Resolve the chat target for live progress + result delivery from the run input.
@@ -358,9 +376,7 @@ struct ChatTarget {
 fn resolve_chat_target(workflow: &Workflow, input: &Value) -> Option<ChatTarget> {
     let obj = input.as_object()?;
     let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-    let ws = str_at("origin_workspace_id")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| workflow.workspace_id.clone());
+    let ws = result_workspace(workflow, str_at("origin_workspace_id"));
     let (channel, chat, thread) = match str_at("result_chat") {
         Some(c) => (
             str_at("result_channel").or_else(|| str_at("channel")),
@@ -956,8 +972,7 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                 // Tell the chat thread that started it — its last message was
                 // otherwise "▶ … started" forever.
                 if let Ok((wf, _)) = &loaded {
-                    deliver_run_result(ctx, wf, &nodes, RunStatus::Error, None, &run.input, None)
-                        .await;
+                    spawn_recovery_delivery(ctx, wf, &nodes, RunStatus::Error, &run.input);
                 }
                 settled += 1;
             }
@@ -982,13 +997,32 @@ pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
                     false,
                 );
                 if let Ok((wf, _)) = &loaded {
-                    deliver_run_result(ctx, wf, &nodes, status, None, &run.input, None).await;
+                    spawn_recovery_delivery(ctx, wf, &nodes, status, &run.input);
                 }
                 settled += 1;
             }
         }
     }
     (resumed, settled)
+}
+
+/// Report a run settled by boot recovery back to its chat/webhook origin in
+/// the BACKGROUND. Recovery runs before the listener serves; delivering inline
+/// (a Keychain read + Slack/Telegram/webhook HTTP per run, serially) kept the
+/// daemon and UI unreachable for as long as a post-reboot network flap or a
+/// slow webhook lasted, multiplied by the interrupted runs (S3-06). Only the
+/// DB writes stay on the boot path.
+fn spawn_recovery_delivery(
+    ctx: &ServerCtx,
+    wf: &Workflow,
+    nodes: &[NodeRunState],
+    status: RunStatus,
+    input: &Value,
+) {
+    let (ctx, wf, nodes, input) = (ctx.clone(), wf.clone(), nodes.to_vec(), input.clone());
+    tokio::spawn(async move {
+        deliver_run_result(&ctx, &wf, &nodes, status, None, &input, None).await;
+    });
 }
 
 /// If the resume entry is an `agent_prompt` whose handoff `.md` exists in the
@@ -1209,6 +1243,44 @@ fn clear_skip_markers(ctx: &ServerCtx, run_id: &str) {
     }
 }
 
+/// The daemon side of the `otto-workflows` seam: the pieces of the workflow
+/// subsystem that already live there (event triggers) reach the server
+/// through these handles only.
+impl otto_workflows::WorkflowCtx for ServerCtx {
+    fn pool(&self) -> &otto_state::DbPool {
+        &self.pool
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<Event> {
+        &self.events
+    }
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    fn issues_store(&self) -> &otto_state::IssuesRepo {
+        &self.issues_store
+    }
+    fn spawn_run(&self, ws: Workspace, wf: Workflow, run_id: Id, input: Value, scope: RunScope) {
+        spawn_run(self.clone(), ws, wf, run_id, input, scope, None);
+    }
+    fn request_skip_current(&self, run_id: &str, node_id: &str) {
+        if let Ok(mut s) = self.wf_skip_current.lock() {
+            s.insert(skip_marker_key(run_id, node_id));
+        }
+    }
+    async fn check_run_location(
+        &self,
+        ws: &Workspace,
+        input: &Value,
+    ) -> std::result::Result<(), String> {
+        ensure_run_location(self, ws, input)
+            .await
+            .map_err(|e| match e {
+                otto_core::Error::Invalid(m) => m,
+                other => other.to_string(),
+            })
+    }
+}
+
 /// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
 /// way to launch [`run_workflow`] — every trigger path (manual run, retry,
 /// webhook, schedule/event trigger, chat, scheduled task) goes through it so
@@ -1246,16 +1318,21 @@ pub fn spawn_run(
             {
                 tracing::error!(%run_id, "persisting run scope failed: {e}");
                 let nodes = prior_nodes.as_deref().unwrap_or(&[]);
-                let rev = WorkflowsRepo::new(ctx.pool.clone())
-                    .update_run(
+                // Conditional: a user Cancel that landed first stays canceled
+                // (no error overwrite, no misleading "error" event).
+                let Ok(Some(rev)) = WorkflowsRepo::new(ctx.pool.clone())
+                    .update_run_if(
                         &run_id,
+                        &[RunStatus::Pending, RunStatus::Running],
                         RunStatus::Error,
                         nodes,
                         Some(&format!("cannot persist execution scope: {e}")),
                         true,
                     )
                     .await
-                    .unwrap_or(0);
+                else {
+                    return;
+                };
                 // Announce it: open run views otherwise kept showing "queued".
                 emit_run_updated(
                     &ctx,
@@ -1306,16 +1383,21 @@ pub fn spawn_run(
                 match pinned_repo.definition_for_run(&r).await {
                     Ok(definition) => definition,
                     Err(error) => {
-                        let rev = pinned_repo
-                            .update_run(
+                        // Conditional: never overwrite a cancel that landed
+                        // after the Pending read above.
+                        let Ok(Some(rev)) = pinned_repo
+                            .update_run_if(
                                 &run_id,
+                                &[RunStatus::Pending, RunStatus::Running],
                                 RunStatus::Error,
                                 &r.nodes,
                                 Some(&error.to_string()),
                                 true,
                             )
                             .await
-                            .unwrap_or(0);
+                        else {
+                            return;
+                        };
                         emit_run_updated(
                             &ctx,
                             &workflow.workspace_id,
@@ -1397,6 +1479,116 @@ pub fn driver_alive(run_id: &Id) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .get(run_id)
         .is_some_and(|n| *n > 0)
+}
+
+/// A run's TERMINAL CAS write, retried briefly: a transient failure (a busy
+/// or locked DB) used to be logged and ignored — the row stayed
+/// `pending`/`running` with no driver, and one-at-a-time admission refused
+/// every later trigger of the workflow until a restart (S3-07). A write that
+/// still fails is left to [`sweep_orphaned_runs`] once this driver exits.
+async fn write_terminal(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    expected: &[RunStatus],
+    status: RunStatus,
+    nodes: &[NodeRunState],
+    error: Option<&str>,
+) -> otto_core::Result<Option<i64>> {
+    let mut attempt = 0u64;
+    loop {
+        match repo
+            .update_run_if(run_id, expected, status, nodes, error, true)
+            .await
+        {
+            Ok(r) => return Ok(r),
+            Err(e) if attempt < 3 => {
+                attempt += 1;
+                tracing::warn!(%run_id, attempt, "workflow terminal write failed, retrying: {e}");
+                tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// How often [`start_orphan_run_sweep`] looks for driverless live runs.
+const ORPHAN_SWEEP: Duration = Duration::from_secs(60);
+
+/// Runs errored as orphaned since boot (metric; also logged per sweep).
+pub static ORPHANED_RUNS_SWEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Start the runtime orphan-run sweep (post-listen): a `pending`/`running`
+/// row with no live driver — even a queued run holds one, see [`spawn_run`]
+/// — can never finish, and blocks its workflow's triggers (S3-07).
+pub fn start_orphan_run_sweep(ctx: &ServerCtx) {
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut suspects = HashSet::new();
+        loop {
+            tokio::time::sleep(ORPHAN_SWEEP).await;
+            suspects = sweep_orphaned_runs(&ctx, &suspects).await;
+        }
+    });
+}
+
+/// One sweep pass. A live row must be driverless on TWO consecutive passes
+/// before it is errored, so a row created an instant before its
+/// [`spawn_run`] is never mistaken for an orphan. Returns this pass's
+/// suspects (driverless, first sighting).
+pub(crate) async fn sweep_orphaned_runs(ctx: &ServerCtx, prev: &HashSet<Id>) -> HashSet<Id> {
+    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    let Ok(ids) = repo.list_active_run_ids_global().await else {
+        return prev.clone();
+    };
+    let mut suspects = HashSet::new();
+    for id in ids {
+        if driver_alive(&id) {
+            continue;
+        }
+        if !prev.contains(&id) {
+            suspects.insert(id);
+            continue;
+        }
+        let Ok(run) = repo.get_run(&id).await else {
+            continue;
+        };
+        let nodes = settle_interrupted_nodes(run.nodes.clone());
+        if let Ok(Some(rev)) = repo
+            .update_run_if(
+                &id,
+                &[RunStatus::Pending, RunStatus::Running],
+                RunStatus::Error,
+                &nodes,
+                Some("The run lost its engine driver and can't finish — re-run the workflow."),
+                true,
+            )
+            .await
+        {
+            let total = ORPHANED_RUNS_SWEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            tracing::warn!(run = %id, orphaned_total = total, "workflow orphan sweep: errored a driverless run");
+            emit_run_updated(
+                ctx,
+                &run.workspace_id,
+                &id,
+                "error",
+                None,
+                rev,
+                None,
+                &nodes,
+                false,
+            );
+            // The same cleanup a cancel gets (S3-305): a panicked driver left
+            // its agents running, its chat/webhook origin on "▶ started" and
+            // its worktrees provisioned.
+            kill_run_sessions(ctx, &nodes).await;
+            if let Ok(wf) = repo.get(&run.workflow_id).await {
+                spawn_recovery_delivery(ctx, &wf, &nodes, RunStatus::Error, &run.input);
+            }
+            clear_skip_markers(ctx, &id);
+            reap_run_worktrees(ctx, &id).await;
+        }
+    }
+    suspects
 }
 
 /// Holds a run's [`live_drivers`] entry for the life of its driver task —
@@ -1497,223 +1689,8 @@ pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
     resumed
 }
 
-/// The node-kind catalog: drives the editor palette and validates generated
-/// graphs. Keep in sync with `execute_node` below.
-pub fn node_catalog() -> Vec<NodeTypeSpec> {
-    let n = |kind: &str,
-             label: &str,
-             category: &str,
-             description: &str,
-             inputs: u8,
-             outputs: u8,
-             color: &str,
-             icon: &str| NodeTypeSpec {
-        kind: kind.to_string(),
-        label: label.to_string(),
-        category: category.to_string(),
-        description: description.to_string(),
-        inputs,
-        outputs,
-        color: color.to_string(),
-        icon: icon.to_string(),
-        output_schema: output_schema_for(kind),
-        params_schema: None,
-    };
-    let mut specs = vec![
-        n("manual_trigger", "Manual Trigger", "Triggers",
-          "Starts the workflow and emits its input payload.", 0, 1, "#6b7bff", "play"),
-        n("agent_prompt", "Agent", "AI",
-          "Run an agent turn with a prompt (params: provider, skill/skills to inject, cwd); outputs its reply.", 1, 1, "#d97cff", "command"),
-        n("prepare_context", "Prepare relevant data", "AI",
-          "App-side context gathering: fetches a referenced Jira ticket (params: key/account_id/require) into jira-<KEY>.md, then optionally runs an analysis agent (params: prompt/provider).", 1, 1, "#d97cff", "download"),
-        n("http_request", "HTTP Request", "Network",
-          "Call an HTTP endpoint and capture the response.", 1, 1, "#46c0a0", "globe"),
-        n("transform", "Set / Transform", "Data",
-          "Merge static JSON into the data flowing through.", 1, 1, "#9aa0aa", "edit"),
-        n("delay", "Delay", "Flow",
-          "Wait a number of milliseconds, then continue.", 1, 1, "#9aa0aa", "clock"),
-        n("log", "Log", "Flow",
-          "Record the incoming data in the run log; pass it through.", 1, 1, "#9aa0aa", "note"),
-        n("game_engine", "Game Engine", "Game",
-          "Assemble a slot game from approved assets (RNG, paytable, reels).", 1, 1, "#57b9ff", "box"),
-        n("verifier", "Verifier", "Game",
-          "Verify the built game (RNG fairness, RTP, asset integrity).", 1, 1, "#57d98b", "check"),
-        // --- Module-native nodes (wired into in-process services) -----------
-        n("db_query", "DB Query", "Data",
-          "Run a read-only SQL query against a saved DB-Explorer connection.", 1, 1, "#5aafdf", "database"),
-        n("broker_peek", "Broker Peek", "Data",
-          "Consume up to N recent messages from a Kafka topic.", 1, 1, "#f0a040", "list"),
-        n("channel_notify", "Channel Notify", "Integrations",
-          "Send a message to a configured Slack/Telegram integration.", 1, 1, "#46c56a", "message-square"),
-        n("budget_gate", "Budget Gate", "Flow",
-          "Check spend caps: continue if under budget, stop (error) if blocked.", 1, 1, "#e04c4c", "shield"),
-        n("human_approval", "Human Approval", "Flow",
-          "Pause the run until an operator calls the resume endpoint.", 1, 1, "#f0c040", "user-check"),
-        n("condition", "Condition", "Flow",
-          "Evaluate an expression on the input; outputs { result, value }. Pair with edge conditions to branch.", 1, 1, "#f0c040", "git-branch"),
-        n("loop", "Loop (Until)", "Flow",
-          "Re-run inner steps until an expression holds or max iterations (e.g. fix → review until score ≥ 80).", 1, 1, "#f0c040", "repeat"),
-        // Swarm task: wired — enqueues via SwarmRepo. Requires swarm_id +
-        // project_id in params; the task is created in "todo" status so the
-        // swarm coordinator picks it up on its next tick.
-        n("swarm_task", "Swarm Task", "AI",
-          "Enqueue a task in a running Agent Swarm project.", 1, 1, "#a070ff", "users"),
-        // --- Product nodes (wired: run a real single-agent turn over the story's
-        // context + the matching product skill, as a visible session). ---------
-        n("product_analyze", "Product Analyze", "Product",
-          "Analyze a product story (grill lens) over its real context; outputs the analysis.", 1, 1, "#ff8c42", "file-text"),
-        n("product_rewrite", "Product Rewrite", "Product",
-          "Rewrite a product story (jira-story-writer); optionally save a new version.", 1, 1, "#ff8c42", "edit"),
-        n("product_plan", "Product Plan", "Product",
-          "Break a story into an implementation plan (story-task-breakdown); optional version.", 1, 1, "#ff8c42", "map"),
-        n("product_publish", "Product Publish", "Product",
-          "Publish a story as a Confluence RFC or a Jira issue (dry-run by default).", 1, 1, "#ff8c42", "upload"),
-        n("canvas", "Canvas Diagram", "Product",
-          "Generate/update a Canvas scene (mermaid/excalidraw) from a prompt via an agent.", 1, 1, "#57b9ff", "image"),
-        // review_run: wired to the local-review engine (run_review_for_branch).
-        n("review_run", "Review Run", "AI",
-          "Multi-agent code review (params: providers[], lenses[]/skills[], threshold, require_pass) — fans out like PR review, summarizer scores; outputs findings + a 0–100 score + passed.", 1, 1, "#c080ff", "search"),
-        n("git_pr", "Git PR", "Network",
-          "Draft a PR; with open=true (gate the incoming edge on the review passing) opens it on the remote.", 1, 1, "#46c0a0", "git-pull-request"),
-        // api_run: executes an HTTP request via the api-client engine so
-        // environment variable substitution and auth apply.  Wired.
-        n("api_run", "API Run", "Network",
-          "Execute an API-client request with env-var substitution.", 1, 1, "#46c0a0", "send"),
-        // self_improve: runs the self-improvement engine in OFFER-ONLY mode
-        // (Autonomy::Propose → every edit is queued for approval, never applied)
-        // and posts the offered improvements to the trigger's chat thread.
-        n("self_improve", "Self-Improve (offer)", "AI",
-          "Reflect on recent sessions and OFFER skill/memory improvements (never auto-applied — queued for approval). Posts the offered list to the chat thread.", 1, 1, "#d97cff", "zap"),
-    ];
-    // `review_run` is the one kind with a declared PARAM schema today: the
-    // inspector renders the execution-mode picker from it (R2). Assigned after
-    // the fact so the shared `n(…)` closure stays untouched.
-    if let Some(spec) = specs.iter_mut().find(|s| s.kind == "review_run") {
-        spec.params_schema = Some(json!({
-            "type": "object",
-            "properties": {
-                "mode": {
-                    "type": "string",
-                    "enum": ["fan_out", "orchestrator"],
-                    "description": "Execution mode; absent = follow the run override / stored config / fan_out"
-                }
-            }
-        }));
-    }
-    specs
-}
-
-/// True when `kind` is a node the executor understands.
-pub fn is_known_kind(kind: &str) -> bool {
-    node_catalog().iter().any(|s| s.kind == kind)
-}
-
-/// Declared output shape per node kind (drives UI expression hints + warn-only
-/// runtime validation). Keys map to JSON types; `None` means free-form output.
-fn output_schema_for(kind: &str) -> Option<Value> {
-    let obj = |pairs: &[(&str, &str)]| {
-        let mut m = serde_json::Map::new();
-        for (k, t) in pairs {
-            m.insert((*k).to_string(), json!(t));
-        }
-        Some(json!({ "type": "object", "fields": Value::Object(m) }))
-    };
-    match kind {
-        "agent_prompt" => obj(&[("reply", "string"), ("working_directory", "string")]),
-        "prepare_context" => obj(&[("jira", "object")]),
-        "http_request" | "api_run" => obj(&[("status", "number"), ("body", "any")]),
-        "db_query" => obj(&[
-            ("columns", "array"),
-            ("rows", "array"),
-            ("rows_returned", "number"),
-        ]),
-        "broker_peek" => obj(&[
-            ("topic", "string"),
-            ("messages", "array"),
-            ("count", "number"),
-        ]),
-        "budget_gate" => obj(&[("exceeded", "boolean"), ("blocked", "boolean")]),
-        "human_approval" => obj(&[("approved", "boolean"), ("approved_by", "string")]),
-        "condition" => obj(&[("result", "boolean"), ("value", "any")]),
-        "loop" => obj(&[
-            ("iterations", "number"),
-            ("satisfied", "boolean"),
-            ("last", "any"),
-        ]),
-        "review_run" => obj(&[
-            ("review_id", "string"),
-            ("status", "string"),
-            ("repo_id", "string"),
-            ("base", "string"),
-            ("worktree", "string"),
-            ("blocking", "number"),
-            ("advisory", "number"),
-            ("checks_requested", "array"),
-            ("score", "number"),
-            ("threshold", "number"),
-            ("passed", "boolean"),
-        ]),
-        "product_analyze" => obj(&[("story_id", "string"), ("analysis", "string")]),
-        "product_rewrite" => obj(&[("story_id", "string"), ("body_md", "string")]),
-        "product_plan" => obj(&[("story_id", "string"), ("plan_md", "string")]),
-        "product_publish" => obj(&[
-            ("story_id", "string"),
-            ("kind", "string"),
-            ("dry_run", "boolean"),
-        ]),
-        "git_pr" => obj(&[
-            ("prs", "array"),
-            ("opened", "boolean"),
-            ("opened_count", "number"),
-            ("title", "string"),
-            ("description", "string"),
-        ]),
-        "self_improve" => obj(&[
-            ("run_id", "string"),
-            ("summary", "string"),
-            ("offered", "number"),
-            ("edits", "array"),
-        ]),
-        "canvas" => obj(&[("scene_id", "string"), ("summary", "string")]),
-        "swarm_task" => obj(&[("task_id", "string"), ("title", "string")]),
-        _ => None,
-    }
-}
-
-/// Warn-only validation of a node's output against its declared schema. Returns a
-/// list of human-readable warnings (missing keys / wrong types). Never fails a run.
-fn validate_node_output(kind: &str, output: &Value) -> Vec<String> {
-    let Some(schema) = output_schema_for(kind) else {
-        return vec![];
-    };
-    let Some(fields) = schema.get("fields").and_then(Value::as_object) else {
-        return vec![];
-    };
-    let Some(obj) = output.as_object() else {
-        return vec![format!("{kind}: expected an object output")];
-    };
-    let mut warns = Vec::new();
-    for (key, ty) in fields {
-        let ty = ty.as_str().unwrap_or("any");
-        match obj.get(key) {
-            None => warns.push(format!("{kind}: missing output field '{key}'")),
-            Some(v) => {
-                let ok = match ty {
-                    "string" => v.is_string(),
-                    "number" => v.is_number(),
-                    "boolean" => v.is_boolean(),
-                    "array" => v.is_array(),
-                    "object" => v.is_object(),
-                    _ => true,
-                };
-                if !ok && !v.is_null() {
-                    warns.push(format!("{kind}: output field '{key}' is not {ty}"));
-                }
-            }
-        }
-    }
-    warns
-}
+// The node-kind catalog (`node_catalog`, `is_known_kind`, output schemas) lives in
+// `otto_workflows::catalog`; re-exported above so `workflow_engine::node_catalog` keeps working.
 
 /// Run a workflow to completion in the current task, persisting progress to the
 /// `workflow_runs` row after every node. Spawn this on a background task.
@@ -1746,10 +1723,21 @@ pub async fn run_workflow(
     {
         Ok(o) => o,
         Err(e) => {
-            let rev = repo
-                .update_run(&run_id, RunStatus::Error, &[], Some(&e), true)
+            // Conditional: an invalid graph must not turn a user's cancel
+            // into an error (nor announce one).
+            let Ok(Some(rev)) = repo
+                .update_run_if(
+                    &run_id,
+                    &[RunStatus::Pending, RunStatus::Running],
+                    RunStatus::Error,
+                    &[],
+                    Some(&e),
+                    true,
+                )
                 .await
-                .unwrap_or(0);
+            else {
+                return;
+            };
             emit_run_updated(
                 &ctx,
                 &workflow.workspace_id,
@@ -2921,25 +2909,27 @@ pub async fn run_workflow(
         );
         // Terminal writes are CAS on in-flight: a cancel that landed after the
         // last boundary check wins, and is finalized as a cancel.
-        let rev = match repo
-            .update_run_if(
-                &run_id,
-                &[RunStatus::Pending, RunStatus::Running],
-                RunStatus::Error,
-                &states,
-                Some(&msg),
-                true,
-            )
-            .await
+        let rev = match write_terminal(
+            &repo,
+            &run_id,
+            &[RunStatus::Pending, RunStatus::Running],
+            RunStatus::Error,
+            &states,
+            Some(&msg),
+        )
+        .await
         {
             Ok(Some(rev)) => rev,
             Ok(None) => {
                 finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
                 return;
             }
+            // The row is still live: delivering a result now would disagree
+            // with the `error` the orphan sweep writes once this driver exits
+            // — the sweep delivers and cleans up instead (S3-305).
             Err(e) => {
-                tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
-                0
+                tracing::warn!(%run_id, "workflow run finalize write failed (left to the orphan sweep): {e}");
+                return;
             }
         };
         deliver_run_result(
@@ -2979,16 +2969,15 @@ pub async fn run_workflow(
     } else {
         None
     };
-    let rev = match repo
-        .update_run_if(
-            &run_id,
-            &[RunStatus::Pending, RunStatus::Running],
-            final_status,
-            &states,
-            err_msg.as_deref(),
-            true,
-        )
-        .await
+    let rev = match write_terminal(
+        &repo,
+        &run_id,
+        &[RunStatus::Pending, RunStatus::Running],
+        final_status,
+        &states,
+        err_msg.as_deref(),
+    )
+    .await
     {
         Ok(Some(rev)) => rev,
         // Canceled after the last node boundary: the cancel wins (it used to
@@ -2997,9 +2986,12 @@ pub async fn run_workflow(
             finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
             return;
         }
+        // The row is still live: delivering a result now would disagree with
+        // the `error` the orphan sweep writes once this driver exits — the
+        // sweep delivers and cleans up instead (S3-305).
         Err(e) => {
-            tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
-            0
+            tracing::warn!(%run_id, "workflow run finalize write failed (left to the orphan sweep): {e}");
+            return;
         }
     };
     // The run's deliverable: a copy of the last content-bearing step's handoff
@@ -3050,12 +3042,6 @@ pub async fn run_workflow(
     sweep_stale_run_worktrees(&ctx).await;
 }
 
-/// The canceled finalize of [`run_workflow`]: cancel the run's reviews, kill
-/// every session it spawned, mark unfinished steps skipped, write the
-/// `canceled` terminal state (CAS — it never overwrites a run that settled
-/// otherwise), report back and reap the worktrees. Shared by the in-loop
-/// cancel, a cancel that landed during startup, and one that landed after the
-/// last node boundary (the success/error CAS lost).
 /// Sleep a retry backoff of `total`, polling the run row every couple of
 /// seconds; `true` as soon as the run is canceled (also when it already is).
 async fn backoff_canceled(repo: &WorkflowsRepo, run_id: &Id, total: Duration) -> bool {
@@ -3072,6 +3058,12 @@ async fn backoff_canceled(repo: &WorkflowsRepo, run_id: &Id, total: Duration) ->
     }
 }
 
+/// The canceled finalize of [`run_workflow`]: cancel the run's reviews, kill
+/// every session it spawned, mark unfinished steps skipped, write the
+/// `canceled` terminal state (CAS — it never overwrites a run that settled
+/// otherwise), report back and reap the worktrees. Shared by the in-loop
+/// cancel, a cancel that landed during startup, and one that landed after the
+/// last node boundary (the success/error CAS lost).
 async fn finalize_canceled_run(
     ctx: &ServerCtx,
     repo: &WorkflowsRepo,
@@ -3087,20 +3079,7 @@ async fn finalize_canceled_run(
             crate::modules::cancel_running_review(ctx, &review, &workflow.workspace_id).await;
         }
     }
-    // Stop every agent session this run spawned — a cancel must halt the live
-    // agents (each is a real claude/codex PTY that would otherwise keep working
-    // and burning tokens), not just flip the run row. Includes agent steps AND
-    // review reviewers/summarizer (their ids are harvested into `sessions`).
-    // Best-effort: a failure on one session is logged and never blocks the rest.
-    let session_ids: Vec<Id> = states
-        .iter()
-        .flat_map(|s| s.sessions.iter().cloned())
-        .collect();
-    for sid in session_ids {
-        if let Err(e) = ctx.manager.kill_session(&sid).await {
-            tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
-        }
-    }
+    kill_run_sessions(ctx, states).await;
     for s in states.iter_mut() {
         if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
             s.status = NodeStatus::Skipped;
@@ -3110,16 +3089,15 @@ async fn finalize_canceled_run(
     // canceled. Accepting pending/running too let a stale driver overwrite a
     // RETRY the user started meanwhile (its fresh `pending` row got this
     // driver's old node states and a canceled status: the retry died silently).
-    let rev = match repo
-        .update_run_if(
-            run_id,
-            &[RunStatus::Canceled],
-            RunStatus::Canceled,
-            states,
-            Some("canceled"),
-            true,
-        )
-        .await
+    let rev = match write_terminal(
+        repo,
+        run_id,
+        &[RunStatus::Canceled],
+        RunStatus::Canceled,
+        states,
+        Some("canceled"),
+    )
+    .await
     {
         Ok(Some(rev)) => rev,
         Ok(None) => {
@@ -3154,6 +3132,24 @@ async fn finalize_canceled_run(
     );
     clear_skip_markers(ctx, run_id);
     reap_run_worktrees(ctx, run_id).await;
+}
+
+/// Stop every agent session a run spawned — a cancel (or an orphaned run)
+/// must halt the live agents (each is a real claude/codex PTY that would
+/// otherwise keep working and burning tokens), not just flip the run row.
+/// Includes agent steps AND review reviewers/summarizer (their ids are
+/// harvested into `sessions`). Best-effort: a failure on one session is
+/// logged and never blocks the rest.
+async fn kill_run_sessions(ctx: &ServerCtx, states: &[NodeRunState]) {
+    let session_ids: Vec<Id> = states
+        .iter()
+        .flat_map(|s| s.sessions.iter().cloned())
+        .collect();
+    for sid in session_ids {
+        if let Err(e) = ctx.manager.kill_session(&sid).await {
+            tracing::warn!("workflow: failed to kill run session {sid}: {e}");
+        }
+    }
 }
 
 /// Assemble the proof pack for a completed workflow run: each node's output is a
@@ -3398,11 +3394,9 @@ async fn deliver_run_result(
     // `result_channel`/`result_thread`) — e.g. to post results to a #releases
     // channel, or to give a manual UI run a destination.
     let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-    // Token comes from the workspace whose integration received the message
-    // (workflows are global, so that may differ from the workflow's workspace).
-    let result_ws: String = str_at("origin_workspace_id")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| workflow.workspace_id.clone());
+    // Token comes from the workflow's OWN workspace integration (see
+    // `result_workspace`).
+    let result_ws: String = result_workspace(workflow, str_at("origin_workspace_id"));
     let (channel, chat, thread) = match str_at("result_chat") {
         Some(c) => (
             str_at("result_channel").or_else(|| str_at("channel")),
@@ -5128,7 +5122,7 @@ async fn execute_node(
                 // repos. Never a bare "missing repo_id" for a workflow that was
                 // given a working directory.
                 let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
-                    .await
+                    .await?
                     .ok_or_else(|| {
                         otto_core::Error::Invalid(
                             "review_run: no repo_id; pass repo_id or a working_directory/worktree_path \
@@ -5955,7 +5949,7 @@ async fn execute_node(
             if targets.is_empty() {
                 // One implicit target from the run context (the common case).
                 let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
-                    .await
+                    .await?
                     .ok_or_else(|| {
                         otto_core::Error::Invalid(
                         "git_pr: no repo_id; pass repo_id or a working_directory/worktree_path \
@@ -6018,7 +6012,15 @@ async fn execute_node(
             let mut opened_n: u64 = 0;
             for (repo_id, worktree, base) in &resolved {
                 let repo = match ctx.git_store.get_repo(repo_id).await {
-                    Ok(r) => r,
+                    // S3-302: only this workflow's workspace's repos (and their
+                    // git accounts) — a target's repo_id may come from run input.
+                    Ok(r) if r.workspace_id == ws.id => r,
+                    Ok(_) => {
+                        notes.push(format!(
+                            "{repo_id}: not registered in this workflow's workspace — skipped"
+                        ));
+                        continue;
+                    }
                     Err(e) => {
                         notes.push(format!("{repo_id}: repo missing: {e}"));
                         continue;
@@ -6532,56 +6534,7 @@ fn is_retryable(kind: &str) -> bool {
     !matches!(kind, "human_approval" | "manual_trigger")
 }
 
-/// Classify a step error into a retry CLASS (and its human label). These are the
-/// failures a longer pause actually cures — the provider is overloaded or the
-/// daemon is out of file descriptors — as opposed to a bad prompt, which no
-/// amount of waiting fixes. Case-insensitive substring match on the error text
-/// (the provider strings are not structured). R5.2.
-fn retry_class(err: &str) -> Option<&'static str> {
-    let e = err.to_ascii_lowercase();
-    if e.contains("529") {
-        return Some("provider overloaded: 529");
-    }
-    if e.contains("overloaded") {
-        return Some("provider overloaded");
-    }
-    if e.contains("rate limit") {
-        return Some("rate limit");
-    }
-    if e.contains("too many open files") || e.contains("dup of fd") {
-        return Some("fd exhaustion");
-    }
-    if e.contains("spawn") {
-        return Some("spawn failure");
-    }
-    None
-}
-
-/// The next retry for a failed attempt: `(sleep_ms, effective_max_attempts,
-/// reason)`, or `None` when the budget is spent. A classified failure gets a
-/// ≥ 20 s jittered pause and a floor of 4 attempts; everything else keeps the
-/// node's own policy verbatim. R5.2.
-pub(crate) fn retry_backoff(
-    err: &str,
-    policy: &otto_core::workflows::RetryPolicy,
-    attempt: u32,
-    cur_backoff_ms: u64,
-    jitter_ms: u64,
-) -> Option<(u64, u32, String)> {
-    // An explicit zero is a hard no-retry policy, including transient errors.
-    if policy.max_attempts == 0 {
-        return None;
-    }
-    let (sleep_ms, max_eff, reason) = match retry_class(err) {
-        Some(label) => (
-            cur_backoff_ms.max(20_000) + jitter_ms,
-            policy.max_attempts.max(4),
-            label.to_string(),
-        ),
-        None => (cur_backoff_ms, policy.max_attempts, truncate(err, 120)),
-    };
-    (attempt <= max_eff).then_some((sleep_ms, max_eff, reason))
-}
+// Retry classification + backoff live in `otto_workflows::retry` (imported above).
 
 /// R5.1: whether the engine stops the sessions a SUCCESSFUL step spawned.
 /// `review_run`'s sessions belong to the review engine (it tears them down
@@ -7260,21 +7213,26 @@ fn expand_tilde(p: &str) -> String {
 /// the step's `worktree_path`, the run's `working_directory`, or `run_cwd`.
 /// See design §B — this is what makes such steps resilient instead of failing
 /// with a bare "missing repo_id".
+///
+/// An explicit `repo_id` must be registered in the workflow's OWN workspace
+/// (S3-302): a run never drives another workspace's checkout or git account,
+/// the same rule Run-with-Otto enforces (S15-05).
 async fn resolve_step_repo_id(
     ctx: &ServerCtx,
     ws: &Workspace,
     p: &Value,
     input: &Value,
     run_cwd: &str,
-) -> Option<String> {
+) -> otto_core::Result<Option<String>> {
     let explicit = p
         .get("repo_id")
         .and_then(Value::as_str)
         .or_else(|| input.get("repo_id").and_then(Value::as_str))
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty());
-    if explicit.is_some() {
-        return explicit;
+    if let Some(id) = explicit {
+        ensure_repo_in_workspace(ctx, &ws.id, &id).await?;
+        return Ok(Some(id));
     }
     let hint = p
         .get("worktree_path")
@@ -7282,7 +7240,147 @@ async fn resolve_step_repo_id(
         .or_else(|| input.get("working_directory").and_then(Value::as_str))
         .map(str::to_string)
         .unwrap_or_else(|| run_cwd.to_string());
-    resolve_repo_id_for_path(ctx, &ws.id, &hint).await
+    Ok(resolve_repo_id_for_path(ctx, &ws.id, &hint).await)
+}
+
+/// `repo_id` names a repo registered in `workspace_id` — else `Invalid` (a
+/// foreign or unknown id reads the same, so ids of other workspaces don't
+/// leak). S3-302.
+pub(crate) async fn ensure_repo_in_workspace(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    repo_id: &str,
+) -> otto_core::Result<()> {
+    match ctx.git_store.get_repo(&repo_id.to_string()).await {
+        Ok(r) if &r.workspace_id == workspace_id => Ok(()),
+        _ => Err(otto_core::Error::Invalid(format!(
+            "repo '{repo_id}' is not registered in this workflow's workspace"
+        ))),
+    }
+}
+
+/// S3-302: where a run may work. Its `working_directory` (comma-separated
+/// paths), `repos` declarations (repo, worktree path, `repo_id`) and an
+/// explicit `repo_id` must all stay inside the workflow's OWN workspace — one
+/// of its registered repos (or a linked worktree of one) or the workspace
+/// root, and paths inside them. Checked where a run starts from caller input
+/// (the manual-run route, chat); the error names the offending value.
+pub(crate) async fn ensure_run_location(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    input: &Value,
+) -> otto_core::Result<()> {
+    let repos = ctx.git_store.list_repos(&ws.id).await?;
+    let pairs: Vec<(String, String)> = repos
+        .iter()
+        .map(|r| (r.id.clone(), r.path.clone()))
+        .collect();
+    let text = |k: &str, v: &Value| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(rid) = text("repo_id", input) {
+        ensure_repo_in_workspace(ctx, &ws.id, &rid).await?;
+    }
+    if let Some(wd) = text("working_directory", input) {
+        for path in wd.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            ensure_path_in_workspace(ws, &pairs, path).await?;
+        }
+    }
+    for e in crate::workflow_context::parse_repo_entries(input.get("repos").unwrap_or(&Value::Null))
+    {
+        let registered = repos.iter().any(|r| r.id == e.repo || r.name == e.repo);
+        if !registered {
+            if e.repo.contains('/') || e.repo.starts_with('~') {
+                ensure_path_in_workspace(ws, &pairs, &e.repo).await?;
+            } else {
+                return Err(otto_core::Error::Invalid(format!(
+                    "repo '{}' is not registered in workspace '{}'",
+                    e.repo, ws.name
+                )));
+            }
+        }
+        if let Some(rid) = &e.repo_id {
+            ensure_repo_in_workspace(ctx, &ws.id, rid).await?;
+        }
+        if e.kind == "worktree" {
+            ensure_path_in_workspace(ws, &pairs, &e.name).await?;
+        }
+        if let Some(wt) = &e.worktree {
+            ensure_path_in_workspace(ws, &pairs, wt).await?;
+        }
+    }
+    Ok(())
+}
+
+/// One path of [`ensure_run_location`]: absolute (`~` expanded), and inside
+/// the workspace root, one of `repos` (`(id, path)` of the workspace's
+/// registered repos), or a linked worktree whose origin is one of them.
+async fn ensure_path_in_workspace(
+    ws: &Workspace,
+    repos: &[(String, String)],
+    raw: &str,
+) -> otto_core::Result<()> {
+    let expanded = expand_tilde(raw.trim());
+    let path = std::path::Path::new(&expanded);
+    if !path.is_absolute() {
+        return Err(otto_core::Error::Invalid(format!(
+            "working directory '{raw}' must be an absolute path"
+        )));
+    }
+    // A path that does not exist yet is judged by its deepest existing
+    // ancestor (canonical) plus the rest — so it may not climb out with `..`.
+    let target = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_)
+            if path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir) =>
+        {
+            return Err(otto_core::Error::Invalid(format!(
+                "working directory '{raw}' may not contain '..'"
+            )));
+        }
+        Err(_) => {
+            let mut base = path.to_path_buf();
+            let mut rest = Vec::new();
+            let canon = loop {
+                if let Ok(c) = std::fs::canonicalize(&base) {
+                    break c;
+                }
+                match (base.file_name().map(|n| n.to_os_string()), base.parent()) {
+                    (Some(name), Some(parent)) => {
+                        rest.push(name);
+                        base = parent.to_path_buf();
+                    }
+                    _ => break base,
+                }
+            };
+            rest.iter().rev().fold(canon, |acc, n| acc.join(n))
+        }
+    };
+    let root = std::fs::canonicalize(&ws.root_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&ws.root_path));
+    if target.starts_with(&root) {
+        return Ok(());
+    }
+    let target_s = target.to_string_lossy().into_owned();
+    if match_repo_path(&target_s, repos).is_some() {
+        return Ok(());
+    }
+    if let Some(main) = git_main_worktree(&target_s).await {
+        if match_repo_path(&main, repos).is_some() {
+            return Ok(());
+        }
+    }
+    Err(otto_core::Error::Invalid(format!(
+        "working directory '{raw}' is outside workspace '{}' — a run may only work in this \
+         workspace's registered repos or its root folder ({})",
+        ws.name, ws.root_path
+    )))
 }
 
 /// Gather the set of PR targets a `git_pr` node should open — one per changed
@@ -7706,7 +7804,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         return; // nothing provisioned
     };
     if run_worktrees_in_use(ctx, run_id, &dir).await {
-        tracing::info!(
+        tracing::debug!(
             "wf reap: keeping {} — a step session there can still be reopened",
             dir.display()
         );
@@ -7761,14 +7859,8 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
             .await
             .map(|out| !out.trim().is_empty())
             .unwrap_or(false);
-        let pushed = repo_git
-            .run(&[
-                "rev-parse",
-                "--verify",
-                &format!("refs/remotes/origin/{branch}"),
-            ])
-            .await
-            .is_ok();
+        // Quiet probe: a deleted remote ref is the common case, not an error.
+        let pushed = repo_git.origin_branch_exists(&branch).await;
         if merged || pushed {
             let _ = repo_git.run(&["branch", "-D", &branch]).await;
         } else {
@@ -7886,13 +7978,19 @@ async fn resolve_repo_entries(
         // The origin repo's display name — filled from whichever registered repo
         // we resolve to, so `repos.json` names the repo even for a worktree-only run.
         let mut repo_name: Option<String> = None;
-        if let Ok(r) = ctx.git_store.get_repo(&e.repo).await {
+        // Only the workflow's OWN workspace's repos (S3-302): a declared id or
+        // name never resolves to another workspace's checkout + git account.
+        let by_id = ctx
+            .git_store
+            .get_repo(&e.repo)
+            .await
+            .ok()
+            .filter(|r| &r.workspace_id == workspace_id);
+        if let Some(r) = by_id {
             rid = Some(r.id.clone());
             repo_name = Some(r.name.clone());
             root = Some(r.path);
-        } else if let Ok(repos) = ctx.git_store.list_all_repos().await {
-            // Match a declared repo NAME across ALL workspaces (git accounts are
-            // global; a repo the user names may be registered in another workspace).
+        } else if let Ok(repos) = ctx.git_store.list_repos(workspace_id).await {
             if let Some(r) = repos.into_iter().find(|r| r.name == e.repo) {
                 rid = Some(r.id);
                 repo_name = Some(r.name.clone());
@@ -7984,23 +8082,28 @@ async fn resolve_repo_id_for_path(
     workspace_id: &Id,
     path: &str,
 ) -> Option<String> {
-    // Match by PATH across ALL workspaces, not just the run's. Repos are
-    // workspace-scoped, but a `Working Directory:` the user points at should
-    // resolve to whatever repo is registered THERE — with its (global) git
-    // account — even when that repo lives in a different workspace. Otherwise a
-    // path nested under a repo registered in the RUN's workspace (e.g. the home
-    // dir) wins over the exact repo registered elsewhere, giving the wrong repo
-    // and "no git account". `match_repo_path` picks the deepest/exact match, so
-    // ~/proj/app → the app repo, not a containing parent-dir repo.
+    // Match by PATH against ALL registered repos, then keep the winner only
+    // when it is registered in the RUN's workspace (S3-302, S15-05: a run
+    // never drives another workspace's checkout or git account). Matching
+    // globally first matters: otherwise a path nested under a repo registered
+    // in the run's workspace (e.g. the home dir) would win over the exact repo
+    // registered elsewhere and silently target the wrong repo — a foreign
+    // winner resolves to `None` instead. `match_repo_path` picks the
+    // deepest/exact match, so ~/proj/app → the app repo, not a parent-dir repo.
     let expanded = expand_tilde(path);
     let all = ctx.git_store.list_all_repos().await.ok()?;
     let pairs: Vec<(String, String)> = all.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
+    let own = |id: String| -> Option<String> {
+        all.iter()
+            .any(|r| r.id == id && &r.workspace_id == workspace_id)
+            .then_some(id)
+    };
     if let Some(id) = match_repo_path(&expanded, &pairs) {
-        return Some(id);
+        return own(id);
     }
     if let Some(main) = git_main_worktree(&expanded).await {
         if let Some(id) = match_repo_path(&main, &pairs) {
-            return Some(id);
+            return own(id);
         }
     }
     // Last resort (unchanged): a run workspace with exactly one repo → use it.
@@ -8042,7 +8145,7 @@ fn match_repo_path(target: &str, repos: &[(String, String)]) -> Option<String> {
 async fn git_main_worktree(path: &str) -> Option<String> {
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new("git")
+        let out = otto_git::hardened_std_command()
             .arg("-C")
             .arg(&path)
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
@@ -8147,21 +8250,6 @@ fn harvest_session_ids(output: &Value, into: &mut Vec<String>) {
     }
 }
 
-/// Tolerantly extract a JSON value from an agent reply: try the whole string,
-/// else the first balanced `{ … }` span.
-fn extract_json(text: &str) -> Option<Value> {
-    if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
-        return Some(v);
-    }
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end > start {
-        serde_json::from_str(&text[start..=end]).ok()
-    } else {
-        None
-    }
-}
-
 /// Extract the body of the first fenced code block (preferring the `lang` fence).
 fn extract_code_block(text: &str, lang: &str) -> Option<String> {
     let fence = format!("```{lang}");
@@ -8172,17 +8260,6 @@ fn extract_code_block(text: &str, lang: &str) -> Option<String> {
     let rest = &text[start..];
     let end = rest.find("```")?;
     Some(rest[..end].trim().to_string())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 /// File extension for a `canvas` workflow node's written diagram artifact,
@@ -8767,6 +8844,77 @@ mod tests {
         }
     }
 
+    /// S3-07: a live run row with no driver (its terminal write failed, its
+    /// driver panicked) is errored by the runtime sweep on its SECOND
+    /// driverless sighting — never on the first, and never while a driver
+    /// (even a queued one) holds it.
+    #[tokio::test]
+    async fn orphan_sweep_errors_driverless_runs_after_two_passes() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "orphan-ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let repo = WorkflowsRepo::new(ctx.pool.clone());
+        let wf = repo
+            .create(
+                &"orphan-ws".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u".into(),
+            )
+            .await
+            .unwrap();
+        let orphan = repo
+            .create_run(&wf.id, &"orphan-ws".into(), &json!({}), None)
+            .await
+            .unwrap();
+        let driven = repo
+            .create_run(&wf.id, &"orphan-ws".into(), &json!({}), None)
+            .await
+            .unwrap();
+        let _driver = DriverGuard::register(&driven.id);
+        let first = sweep_orphaned_runs(&ctx, &HashSet::new()).await;
+        assert!(first.contains(&orphan.id) && !first.contains(&driven.id));
+        assert!(!repo.is_canceled(&orphan.id).await);
+        assert_eq!(
+            repo.get_run(&orphan.id).await.unwrap().status,
+            RunStatus::Pending
+        );
+        // S3-305: the run's provisioned dir (no worktrees left in it) is
+        // reaped by the sweep, as a canceled run's would be.
+        let run_dir = ctx.data_dir.join("workflow-runs").join(&orphan.id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("run-brief.md"), "x").unwrap();
+        sweep_orphaned_runs(&ctx, &first).await;
+        assert!(!run_dir.exists(), "orphan's run dir is reaped");
+        let swept = repo.get_run(&orphan.id).await.unwrap();
+        assert_eq!(swept.status, RunStatus::Error);
+        assert!(swept
+            .error
+            .unwrap_or_default()
+            .contains("lost its engine driver"));
+        assert_eq!(
+            repo.get_run(&driven.id).await.unwrap().status,
+            RunStatus::Pending
+        );
+        // The workflow is admissible again.
+        assert!(
+            repo.admit_run_if_idle(&wf.id, &"orphan-ws".into(), &json!({}), None)
+                .await
+                .unwrap()
+                .is_none(),
+            "the driven run still holds the slot"
+        );
+    }
+
     #[test]
     fn settle_interrupted_nodes_leaves_nothing_running() {
         let nodes = settle_interrupted_nodes(vec![
@@ -8913,25 +9061,6 @@ mod tests {
         ] {
             assert!(is_restart_resumable_kind(k), "{k} should be restart-safe");
         }
-    }
-
-    #[test]
-    fn catalog_kinds_are_known() {
-        assert!(is_known_kind("agent_prompt"));
-        assert!(is_known_kind("game_engine"));
-        assert!(is_known_kind("prepare_context"));
-        assert!(!is_known_kind("nope"));
-    }
-
-    #[test]
-    fn prepare_context_output_schema_declares_jira() {
-        let schema = output_schema_for("prepare_context").expect("schema present");
-        assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
-        let fields = schema
-            .get("fields")
-            .and_then(|v| v.as_object())
-            .expect("fields present");
-        assert_eq!(fields.get("jira").and_then(|v| v.as_str()), Some("object"));
     }
 
     #[test]
@@ -9246,8 +9375,8 @@ mod tests {
         assert_eq!(t.chat, "C123");
         assert_eq!(t.thread.as_deref(), Some("169.1"));
         assert_eq!(
-            t.ws, "trigger-ws",
-            "reports via the integration's workspace"
+            t.ws, "wf-ws",
+            "S3-02: a foreign origin_workspace_id never borrows another workspace's bot"
         );
         // Explicit override wins.
         let t = resolve_chat_target(
@@ -9703,47 +9832,6 @@ mod tests {
         assert!(stop_step_sessions_wanted("prepare_context", &json!({})));
     }
 
-    #[test]
-    fn retry_backoff_by_error_class() {
-        let policy = otto_core::workflows::RetryPolicy {
-            max_attempts: 2,
-            backoff_ms: 2000,
-            factor: 2.0,
-        };
-        // 529 / overload / fd exhaustion: ≥ 20s and a 4-attempt floor.
-        for (err, label) in [
-            (
-                "agent error: API Error 529 Overloaded",
-                "provider overloaded: 529",
-            ),
-            ("upstream overloaded, try later", "provider overloaded"),
-            ("Rate limit reached for model", "rate limit"),
-            ("os error 24: Too many open files", "fd exhaustion"),
-            ("dup of fd 12 failed", "fd exhaustion"),
-            ("failed to spawn claude", "spawn failure"),
-        ] {
-            let (sleep, max_eff, reason) =
-                retry_backoff(err, &policy, 1, policy.backoff_ms, 3_000).expect("retryable");
-            assert!(sleep >= 20_000, "{err}: {sleep}");
-            assert_eq!(max_eff, 4, "{err}");
-            assert_eq!(reason, label);
-        }
-        // Everything else keeps the node's own policy verbatim.
-        let (sleep, max_eff, reason) =
-            retry_backoff("empty prompt", &policy, 1, policy.backoff_ms, 3_000).expect("retryable");
-        assert_eq!(sleep, 2000);
-        assert_eq!(max_eff, 2);
-        assert_eq!(reason, "empty prompt");
-        // Budget spent → no retry (the classified floor still applies first).
-        assert!(retry_backoff("empty prompt", &policy, 3, 2000, 0).is_none());
-        assert!(retry_backoff("529 overloaded", &policy, 4, 2000, 0).is_some());
-        assert!(retry_backoff("529 overloaded", &policy, 5, 2000, 0).is_none());
-        // The reason is bounded so one huge provider error can't flood the log.
-        let long = "x".repeat(500);
-        let (_, _, reason) = retry_backoff(&long, &policy, 1, 1, 0).expect("retryable");
-        assert!(reason.chars().count() <= 121, "{}", reason.chars().count());
-    }
-
     /// SD-01: 1 000 streamed lines (one per ms) on a 500-node run used to be
     /// 1 000 whole-run writes. Coalesced, they are ≤ one write per 20 lines /
     /// 250 ms, a lone line after a quiet spell is still written at once, and
@@ -10023,23 +10111,6 @@ mod tests {
             resolve_review_mode_source(&node_input, &json!({})),
             Some((otto_core::domain::ReviewMode::Orchestrator, "run override"))
         );
-    }
-
-    #[test]
-    fn review_run_catalog_declares_mode_param() {
-        let spec = node_catalog()
-            .into_iter()
-            .find(|s| s.kind == "review_run")
-            .expect("review_run in the catalog");
-        let schema = spec.params_schema.expect("params_schema");
-        let modes = schema["properties"]["mode"]["enum"].clone();
-        assert_eq!(modes, json!(["fan_out", "orchestrator"]));
-        // Every other kind stays schema-free (the inspector falls back to its
-        // hand-written forms).
-        assert!(node_catalog()
-            .iter()
-            .filter(|s| s.kind != "review_run")
-            .all(|s| s.params_schema.is_none()));
     }
 }
 

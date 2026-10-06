@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use otto_core::Result;
-use otto_state::memory::{ListFilter, SearchFilter};
+use otto_state::memory::{ListFilter, SaveOutcome, SearchFilter};
 use otto_state::DbPool;
 use otto_state::MemoriesRepo;
 
@@ -27,9 +27,19 @@ pub struct MemoryService {
     /// When set, saved memories are also written through to an Obsidian-compatible
     /// markdown vault (git-shareable; the file-based path to a shared vault).
     vault: Option<crate::vault::VaultWriter>,
-    /// FTS5 availability (lazily probed once): unknown/yes/no.
+    /// FTS5 availability (probed once): unknown/yes/no.
     fts: AtomicU8,
+    /// Single-flight for the probe: `ensure_fts` reconciles the whole index
+    /// under the write lock, so concurrent first callers wait for one run.
+    fts_probe: tokio::sync::Mutex<()>,
+    /// When the last probe failed TRANSIENTLY (S7-308): searches fall back to
+    /// LIKE until [`FTS_RETRY_AFTER`] has passed, then probe again — a busy
+    /// boot no longer pins the fallback for the daemon's lifetime.
+    fts_failed_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
+
+/// Back-off between FTS probes after a transient failure.
+const FTS_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl MemoryService {
     /// Internal: assemble a service from its parts (all constructors funnel here
@@ -40,6 +50,8 @@ impl MemoryService {
             remote,
             vault: None,
             fts: AtomicU8::new(FTS_UNKNOWN),
+            fts_probe: tokio::sync::Mutex::new(()),
+            fts_failed_at: std::sync::Mutex::new(None),
         }
     }
 
@@ -70,7 +82,11 @@ impl MemoryService {
     /// Re-index a (possibly externally edited / git-synced) vault directory into
     /// the store. Returns the number of notes ingested.
     pub async fn reindex_vault(&self, ws: &str, by: &str, dir: &std::path::Path) -> Result<usize> {
-        let notes = crate::vault::read_dir_notes(dir)?;
+        // A directory walk + a read per note: off the async workers (S9-305).
+        let owned = dir.to_path_buf();
+        let notes = tokio::task::spawn_blocking(move || crate::vault::read_dir_notes(&owned))
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("vault reindex task: {e}")))??;
         let n = notes.len();
         self.save(ws, by, notes).await?;
         Ok(n)
@@ -87,6 +103,16 @@ impl MemoryService {
         self.repo.pool()
     }
 
+    /// Run the FTS probe + reconcile now (boot background task) so the first
+    /// memory call after boot doesn't pay the O(n) reconcile under the write
+    /// lock (S7-10). A remote-backed service has no local index to warm.
+    pub async fn warm_fts(&self) -> bool {
+        if self.remote.is_some() {
+            return false;
+        }
+        self.fts_ready().await
+    }
+
     /// Probe FTS5 once and cache the result; subsequent calls are a cheap atomic
     /// read. Returns whether FTS5-backed keyword search is available.
     async fn fts_ready(&self) -> bool {
@@ -94,21 +120,35 @@ impl MemoryService {
             FTS_YES => true,
             FTS_NO => false,
             _ => {
-                let ok = self.repo.ensure_fts().await.unwrap_or(false);
-                self.fts
-                    .store(if ok { FTS_YES } else { FTS_NO }, Ordering::Relaxed);
-                ok
+                let _probe = self.fts_probe.lock().await;
+                match self.fts.load(Ordering::Relaxed) {
+                    FTS_YES => return true,
+                    FTS_NO => return false,
+                    _ => {}
+                }
+                let failed_recently = self
+                    .fts_failed_at
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some_and(|at| at.elapsed() < FTS_RETRY_AFTER);
+                if failed_recently {
+                    return false;
+                }
+                match self.repo.ensure_fts().await {
+                    Ok(ok) => {
+                        self.fts
+                            .store(if ok { FTS_YES } else { FTS_NO }, Ordering::Relaxed);
+                        ok
+                    }
+                    Err(e) => {
+                        // Transient: stay UNKNOWN (LIKE for now), retry later.
+                        tracing::warn!(error = %e, "memory FTS probe failed; retrying later");
+                        *self.fts_failed_at.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Some(std::time::Instant::now());
+                        false
+                    }
+                }
             }
-        }
-    }
-
-    /// Keep the FTS index in sync for a saved/updated memory.
-    async fn fts_index_one(&self, m: &Memory) {
-        if self.fts_ready().await {
-            let _ = self
-                .repo
-                .fts_index(&m.id, &m.workspace_id, &m.title, &m.body)
-                .await;
         }
     }
 
@@ -118,23 +158,40 @@ impl MemoryService {
         if let Some(r) = &self.remote {
             return r.save(ws, items).await;
         }
+        Ok(self
+            .save_detailed(ws, by, items)
+            .await?
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect())
+    }
+
+    /// [`Self::save`], reporting per item whether it was created, revived
+    /// from an inactive duplicate, or already live. Each item is ONE write
+    /// transaction covering the dedup lookup, the row and its FTS entry
+    /// ([`MemoriesRepo::save_one`]). Local store only (a remote host reports
+    /// no outcomes).
+    pub async fn save_detailed(
+        &self,
+        ws: &str,
+        by: &str,
+        items: Vec<NewMemory>,
+    ) -> Result<Vec<(Memory, SaveOutcome)>> {
+        if self.remote.is_some() {
+            return Err(otto_core::Error::Invalid(
+                "detailed save must run on the memory host".into(),
+            ));
+        }
+        let fts = self.fts_ready().await;
         let mut out = Vec::with_capacity(items.len());
         for nm in items {
-            let hash = MemoriesRepo::content_hash(&nm.body);
-            if let Some(ex) = self
-                .repo
-                .find_by_hash(ws, &nm.collection, nm.scope, nm.story_id.as_deref(), &hash)
-                .await?
-            {
-                out.push(ex);
-                continue;
+            let (m, outcome) = self.repo.save_one(ws, by, nm, fts).await?;
+            if outcome.is_new() {
+                if let Some(v) = &self.vault {
+                    let _ = v.write(ws, &m, &[]);
+                }
             }
-            let m = self.repo.create(ws, by, nm).await?;
-            self.fts_index_one(&m).await;
-            if let Some(v) = &self.vault {
-                let _ = v.write(ws, &m, &[]);
-            }
-            out.push(m);
+            out.push((m, outcome));
         }
         Ok(out)
     }
@@ -157,18 +214,19 @@ impl MemoryService {
         if let Some(r) = &self.remote {
             return r.update(ws, id, &p).await;
         }
-        let m = self.repo.update(ws, id, p).await?;
-        self.fts_index_one(&m).await;
-        Ok(m)
+        let fts = self.fts_ready().await;
+        self.repo.update_indexed(ws, id, p, fts).await
     }
 
     pub async fn forget(&self, ws: &str, id: &str) -> Result<()> {
         if let Some(r) = &self.remote {
             return r.forget(ws, id).await;
         }
-        self.repo.forget(ws, id).await?;
-        let _ = self.repo.fts_remove(id).await;
-        Ok(())
+        // The FTS index mirrors every memory row (search filters `active`,
+        // and `include_inactive` recall still needs the text indexed), so a
+        // forget leaves it — removing it here would just be re-added by the
+        // startup reconcile.
+        self.repo.forget(ws, id).await
     }
 
     pub async fn links(&self, ws: &str, id: &str) -> Result<Vec<MemoryLink>> {

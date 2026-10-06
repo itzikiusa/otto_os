@@ -27,6 +27,7 @@
   import { STUDIOS, studioInfo } from './model';
   import { library } from './library.svelte';
   import { openStoryInProduct } from './nav';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     scope: Scope;
@@ -132,9 +133,14 @@
       seenScoped = now;
       if (!sLoaded || !evs.length) return;
       const ids = new Set(hits.map((h) => h.artifact.id));
+      // A project lives in one workspace: a create / delete / link change in
+      // ANOTHER workspace (every design event is broadcast) can't change this
+      // slice, so it must not re-read it. Cards it shows still patch.
+      const home = scope.kind === 'project' ? project?.workspace_id : undefined;
       let full = false;
       for (const ev of evs) {
         if (ev.type === 'design_learning_update') continue;
+        if (home && ev.workspace_id !== home && !ids.has(ev.artifact_id)) continue;
         if (ev.type === 'design_artifact_updated' && ev.change !== 'created' && ev.change !== 'deleted') {
           if (ids.has(ev.artifact_id)) patchIds.add(ev.artifact_id);
           // An update to a card this slice doesn't show can't add it here
@@ -289,10 +295,7 @@
   {#if !sLoaded && !sError}
     <Skeleton rows={3} height={180} />
   {:else if sError && !sLoaded}
-    <div class="err" role="alert">
-      <Icon name="warning" size={14} /> Couldn’t load these designs. <span class="dim">{sError}</span>
-      <button class="btn small" onclick={() => { void library.load(); void loadScoped(); }}>Retry</button>
-    </div>
+    <LoadState variant="compact" what="these designs" error={sError} empty onretry={() => { void library.load(); void loadScoped(); }} />
   {:else if notFound}
     <EmptyState variant="page" icon="designHall" title="This project isn’t available" body="It was archived or deleted, or it belongs to a workspace you can’t view."
       actionLabel="Back to Design Hall" onaction={() => router.go('design')} />
@@ -364,20 +367,6 @@
     color: var(--info);
     margin-block-start: 1px;
     flex: none;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: var(--fs-s);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-  }
-  .dim {
-    color: var(--text-dim);
-    font-weight: 400;
   }
   .studio-filter {
     display: flex;

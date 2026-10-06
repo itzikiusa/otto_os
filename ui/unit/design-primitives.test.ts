@@ -31,6 +31,14 @@ test('Skeleton is a labelled status region unless a parent owns the announcement
   assert.match(src, /sr-only/);
 });
 
+test('Skeleton adds its loading text AFTER the status region mounts (S19-305)', () => {
+  // A live region inserted with its text is not announced; the text must sit
+  // behind a state flag that flips after mount.
+  const src = read('src/lib/components/Skeleton.svelte');
+  assert.match(src, /\{#if announce && speak\}<span class="sr-only">/);
+  assert.match(src, /setTimeout\(\(\) => \(speak = true\)/);
+});
+
 test('every overlay backdrop uses the scrim tokens, defined for each scheme', () => {
   for (const f of ['src/lib/components/Modal.svelte', 'src/shell/Drawer.svelte']) {
     assert.match(read(f), /background: var\(--scrim\)/, f);

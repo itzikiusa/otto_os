@@ -4,6 +4,7 @@
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ActiveShareLinks from './ActiveShareLinks.svelte';
   // Settings → Sharing: configure a Gmail App Password sender for email-OTP shares.
   // The app password is write-only (never echoed back from the server); the form
   // always shows an empty password field so the user can update it without seeing the
@@ -15,6 +16,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
+  import { auth } from '../../lib/stores/auth.svelte';
 
   // ── state ─────────────────────────────────────────────────────────────────────
   let status = $state<EmailSenderResp | null>(null);
@@ -50,7 +52,9 @@
   // ── load current sender on mount ──────────────────────────────────────────────
   onMount(() => {
     void load();
-    void loadBaseUrl();
+    // The public link domain lives in the daemon settings (`GET|PUT /settings`,
+    // root-only): other members never see a card that can only fail.
+    if (auth.isRoot) void loadBaseUrl();
   });
 
   async function load(): Promise<void> {
@@ -136,8 +140,9 @@
     verifying = true;
     smtpError = null;
     try {
-      // PUT with no password triggers a re-check using the Keychain-stored value.
-      status = await api.put<EmailSenderResp>('/email-sender', { gmail_address: fGmail.trim() });
+      // A dedicated verify route re-checks with the Keychain-stored password
+      // (a PUT without `app_password` is rejected — the password is required).
+      status = await api.post<EmailSenderResp>('/email-sender/verify', {});
       if (status.verified) {
         toasts.success('SMTP verified', 'Gmail connection is working.');
       } else {
@@ -172,6 +177,9 @@
   <PageBody width="readable">
   <SectionIntro>Configure a Gmail sender so Otto can email a one-time code to each guest before they attach to a shared session. A leaked link alone is useless without the guest’s mailbox.</SectionIntro>
 
+  <!-- ── Every live share link, across sessions ── -->
+  <ActiveShareLinks />
+
   <!-- ── Gmail sender: status + setup form in one card ── -->
   <div class="section-title">Gmail sender</div>
   <LoadState what="the email sender" {loading} error={loadError} empty={!status} onretry={() => void load()} rows={2}>
@@ -205,7 +213,7 @@
 
     <div class="field">
       <label for="es-gmail">Gmail address</label>
-      <input
+      <input dir="ltr"
         id="es-gmail"
         class="input"
         type="email"
@@ -264,7 +272,8 @@
   </div>
   </LoadState>
 
-  <!-- ── Public link domain ── -->
+  <!-- ── Public link domain (root-only daemon setting) ── -->
+  {#if auth.isRoot}
   <div class="section-title">Public link domain</div>
   <div class="card s-card">
     {#if baseUrlError}
@@ -274,7 +283,7 @@
     {/if}
     <div class="field">
       <label for="es-base-url">Domain for share links</label>
-      <input
+      <input dir="ltr"
         id="es-base-url"
         class="input"
         type="url"
@@ -298,6 +307,7 @@
       </button>
     </div>
   </div>
+  {/if}
 
   <!-- ── How it works ── -->
   <div class="section-title">How it works</div>

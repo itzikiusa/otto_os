@@ -47,7 +47,7 @@
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { RIGHT_TABS, SESSION_PANEL } from '../lib/rightTabs';
   import { startWindowDrag } from '../lib/windowDrag';
-  import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
+  import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute, closePopoutWindow } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
   import {
     pageKeyOf,
@@ -77,9 +77,9 @@
   // Old bookmarks lead to the workspace's existing context editor.
   $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   import { git } from '../lib/stores/git.svelte';
-  import { auth } from '../lib/stores/auth.svelte';
+  import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
-  import { installKeyMap, routeFind, type KeyAction } from '../lib/keys';
+  import { dismissTopDialog, installKeyMap, modalKeyVerdict, routeFind, type KeyAction } from '../lib/keys';
   import { attachMenuBridge, attachCloseHandler, handleMenu } from '../lib/menu';
   import { gcWindowKeys } from '../lib/win';
   import { openExternal, isExternalUrl } from '../lib/external';
@@ -210,25 +210,17 @@
   });
 
   // ---- impersonation countdown ---
-  // The admin token is saved in localStorage with a timestamp so we can show a
-  // 30-minute countdown from when the impersonation started. If no timestamp is
-  // stored we treat the start as "now" (conservative: 30 min from this load).
-  const IMP_START_KEY = 'otto_imp_start_ms';
+  // Counts down the 30-minute impersonation token from when THIS tab started
+  // it (kept in sessionStorage next to the admin token — see
+  // `impersonationStartedMs`). Unknown start (an older build's session) →
+  // the conservative "30 min from this load".
   const IMP_DURATION_MS = 30 * 60 * 1000;
-
-  $effect(() => {
-    if (auth.isImpersonating && !localStorage.getItem(IMP_START_KEY)) {
-      localStorage.setItem(IMP_START_KEY, String(Date.now()));
-    }
-    if (!auth.isImpersonating) {
-      localStorage.removeItem(IMP_START_KEY);
-    }
-  });
+  const impLoadedAt = Date.now();
 
   const impSecsLeft = $derived.by(() => {
     if (!auth.isImpersonating) return 0;
     void now(); // reactive tick
-    const startMs = parseInt(localStorage.getItem(IMP_START_KEY) ?? '0', 10) || Date.now();
+    const startMs = impersonationStartedMs() ?? impLoadedAt;
     const elapsed = Date.now() - startMs;
     return Math.max(0, Math.ceil((IMP_DURATION_MS - elapsed) / 1000));
   });
@@ -401,12 +393,10 @@
     };
   });
 
-  // Open Git tabs remain fresh while working in other modules. Only the
-  // visible, focused window schedules network work; focus resumes due repos.
+  // Automatic network work belongs to the visible Git page. Leaving it stops
+  // queued/background work; returning resumes due repos with the same backoff.
   $effect(() => {
-    // The side-by-side pane keeps repos fresh only while it shows Git — the
-    // main window already polls every open repo tab.
-    if (isEmbedded && moduleName !== 'git') return;
+    if (moduleName !== 'git') return;
     let stopped = false;
     void untrack(() => git.initializeOpenTabs()).then(() => {
       if (!stopped) git.startAutoFetch();
@@ -426,11 +416,24 @@
   $effect(() => {
     if (ws.currentId) void git.loadRepos(ws.currentId);
   });
+  // …and retry a failed load when the window comes back (S13-305): the
+  // effect above only re-runs on a workspace switch.
+  $effect(() => {
+    const retry = (): void => {
+      if (git.reposError && ws.currentId) void git.loadRepos(ws.currentId);
+    };
+    window.addEventListener('focus', retry);
+    return () => window.removeEventListener('focus', retry);
+  });
 
   // ---- keyboard map ----
   // One dispatcher for the key map, the side-by-side pane (which hands the
   // window its window-level chords) and nothing else.
   function runKeyAction(action: KeyAction | 'shortcuts', index?: number): void {
+    // A dialog is up: ⌘W closes it, window verbs never act behind it.
+    const verdict = modalKeyVerdict(action, ui.modalCount > 0);
+    if (verdict === 'dismiss') return dismissTopDialog();
+    if (verdict === 'drop') return;
     switch (action) {
       case 'shortcuts':
         shortcutsOpen = true;
@@ -478,10 +481,11 @@
         ui.newSessionOpen = true;
         break;
       case 'closeTab':
-        ws.closeActiveTab();
+        // Off the Agents page there is no tab to close: a pop-out closes itself.
+        if (!ws.closeActiveTab()) void closePopoutWindow();
         break;
       case 'reopenTab':
-        ws.reopenClosedTab();
+        void ws.reopenClosedTab();
         break;
       case 'nextTab':
         ws.cycleTab(1);
@@ -536,6 +540,8 @@
   $effect(() => {
     return installKeyMap((action, _e, index) => {
       if (isEmbedded) {
+        // A dialog open in the pane owns its chords (see runKeyAction).
+        if (ui.modalCount > 0) return runKeyAction(action, index);
         // The side pane: pane verbs run here, window verbs in the host.
         const target = embeddedKeyTarget(action, paneKey(router.parts.join('/')));
         if (target === 'host') postToHost({ type: 'key', action, ...(index ? { index } : {}) });
@@ -720,7 +726,7 @@
     const isAgent = active.kind === 'agent';
     const cmds = [
       { id: 'focus.restart', title: 'Restart focused session', group: 'Session', keywords: 'reload reboot relaunch active current', run: () => void ws.requestRestart(active.id) },
-      { id: 'focus.archive', title: 'Archive focused session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
+      { id: 'focus.archive', title: 'Archive focused session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.requestArchive(active.id).catch((e: unknown) => toastError('Couldn’t archive the session', e)) },
       { id: 'focus.rename', title: 'Rename focused session…', group: 'Session', keywords: 'title name active current', run: () => void renameActiveSession() },
       ...(isAgent
         ? [{ id: 'focus.handover', title: 'Hand over focused session…', group: 'Session', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]
@@ -894,6 +900,15 @@
     }),
   );
 
+  // The host's workspace, applied once this pane's list knows it.
+  let guestWorkspace = $state<string | null>(null);
+  $effect(() => {
+    const id = guestWorkspace;
+    if (!id || !ws.listSettled) return;
+    guestWorkspace = null;
+    if (ws.currentId !== id && ws.workspaces.some((w) => w.id === id)) void ws.select(id);
+  });
+
   // Host → pane: which module the main pane shows, and its workspace (the
   // pane follows a workspace switch).
   $effect(() => {
@@ -1000,7 +1015,9 @@
     const stop = startGuest({
       runMenu: (id) => handleMenu(id),
       selectWorkspace: (id) => {
-        if (ws.currentId !== id) void ws.select(id);
+        // The host can name its workspace before this pane's own list landed:
+        // hold it until the list settles instead of selecting an unknown id.
+        guestWorkspace = id;
       },
       runCommand: (id) => void registry.all.find((c) => c.id === id)?.run(),
     });
@@ -1144,7 +1161,7 @@
         title="Open navigator"
         aria-label="Open navigator"
       >
-        <Icon name="sidebar" size={18} />
+        <Icon name="sidebar" size={20} />
       </button>
     {/if}
     <!-- Back/Forward: visible whenever there is history to walk. Placed left of
@@ -1166,7 +1183,7 @@
         aria-label={SESSION_PANEL}
         aria-expanded={ui.rightOpen}
       >
-        <Icon name="panel" size={18} />
+        <Icon name="panel" size={20} />
       </button>
     {/if}
   </header>

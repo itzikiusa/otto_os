@@ -51,10 +51,17 @@ function sameProjects(a: DesignProject[], b: DesignProject[]): boolean {
   return a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** How many designs the lobby loads (newest first). */
+export const LIBRARY_LIMIT = 500;
+
 class DesignLibrary {
   // Replaced wholesale on every load, never mutated → raw (no deep proxy over
   // up to 500 hits), with id-keyed indexes for the per-card lookups.
   hits: DesignSearchHit[] = $state.raw([]);
+  /** The lobby reads at most LIBRARY_LIMIT designs (newest first): project
+   *  counts, mosaics and the Mine/Shipped filters only see those. True when
+   *  the cap was hit, so the lobby can say so (S18-12). */
+  truncated = $state(false);
   projects: DesignProject[] = $state.raw([]);
   #hitById = $derived(new Map(this.hits.map((h) => [h.artifact.id, h])));
   #projectById = $derived(new Map(this.projects.map((p) => [p.id, p])));
@@ -94,7 +101,7 @@ class DesignLibrary {
     this.loading = true;
     try {
       const [hits, projects] = await Promise.all([
-        design.search('', { limit: 500 }),
+        design.search('', { limit: LIBRARY_LIMIT }),
         design.listProjects(),
       ]);
       if (my !== this.seq) return;
@@ -102,6 +109,7 @@ class DesignLibrary {
       // grids and thumbnails see no change at all (SD-16).
       if (!sameHits(this.hits, hits)) this.hits = hits;
       if (!sameProjects(this.projects, projects)) this.projects = projects;
+      this.truncated = hits.length >= LIBRARY_LIMIT;
       this.error = null;
       this.loaded = true;
       void this.resolveStories(my);

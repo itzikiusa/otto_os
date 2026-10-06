@@ -117,7 +117,7 @@
         <div class="now-row">
           <StatusBadge status={runStatus(run.status)} variant="text" />
           <span class="chip">{modeLabel(run)}</span>
-          {#if run.read_only}<span class="chip pa-ichip"><Icon name="lock" size={11} /> Read-only</span>{/if}
+          {#if run.read_only}<span class="chip pa-ichip"><Icon name="lock" size={12} /> Read-only</span>{/if}
           <span class="meta">Started <RelTime iso={run.started_at} /></span>
           {#if data.now.session_status}<span class="meta">Session: {data.now.session_status}</span>{/if}
           {#if run.session_id}
@@ -165,7 +165,7 @@
                 <Icon name="play" size={13} />
                 <span>{modeLabel(e.run)} run</span>
                 <StatusBadge status={runStatus(e.run.status)} variant="text" />
-                {#if e.run.read_only}<span class="chip pa-ichip"><Icon name="lock" size={11} /> Read-only</span>{/if}
+                {#if e.run.read_only}<span class="chip pa-ichip"><Icon name="lock" size={12} /> Read-only</span>{/if}
                 <span class="detail grow" title={e.run.summary || e.run.error || undefined}>{e.run.summary || e.run.error || ''}</span>
                 <span class="meta"><RelTime iso={e.at} /></span>
               </li>

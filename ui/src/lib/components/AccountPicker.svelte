@@ -3,7 +3,7 @@
   import { api } from '../api/client';
   import type { Session, ProviderAccount } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
-  import Terminal from './Terminal.svelte';
+  import LazyTerminal from './LazyTerminal.svelte';
   import { loadErrorText } from '../loadError';
   let { provider, value = '', workspaceId, onchange }: {
     provider: string; value?: string; workspaceId: string; onchange: (id: string) => void;
@@ -89,7 +89,7 @@
   {#if listError}<p class="error" role="alert">{listError} <button class="btn small" type="button" onclick={loadAccounts} disabled={listLoading}>Retry accounts</button></p>{/if}
   {#if adding}
     <div class="actions">
-      <input class="input" aria-label="Account label" placeholder="Personal, Work…" maxlength="80" bind:value={label} />
+      <input dir="auto" class="input" aria-label="Account label" placeholder="Personal, Work…" maxlength="80" bind:value={label} />
       <button class="btn small" type="button" disabled={busy || !label.trim()} onclick={add}>Create profile</button>
     </div>
     <p>Each profile has its own subscription login. Your default CLI account stays available.</p>
@@ -98,7 +98,7 @@
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if loginSession}
     <p>Complete the provider’s sign-in below, then check sign-in.</p>
-    <div class="login-terminal"><Terminal sessionId={loginSession.id} /></div>
+    <div class="login-terminal"><LazyTerminal sessionId={loginSession.id} /></div>
   {/if}
 </div>
 

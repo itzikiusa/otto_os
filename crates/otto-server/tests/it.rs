@@ -26,6 +26,8 @@ mod auth_security;
 mod canvas_refs_api;
 #[path = "email_sender_storage.rs"]
 mod email_sender_storage;
+#[path = "git_spawn_guard.rs"]
+mod git_spawn_guard;
 #[path = "grants_api.rs"]
 mod grants_api;
 #[path = "impersonation.rs"]
@@ -40,12 +42,24 @@ mod mcp_auto_approve;
 mod personal_agent_policy;
 #[path = "policy_coverage.rs"]
 mod policy_coverage;
+#[path = "provider_resolve.rs"]
+mod provider_resolve;
 #[path = "rbac_matrix.rs"]
 mod rbac_matrix;
+#[path = "resume_missing_cwd.rs"]
+mod resume_missing_cwd;
+#[path = "review_agent_retry.rs"]
+mod review_agent_retry;
+#[path = "review_comment_states.rs"]
+mod review_comment_states;
 #[path = "rooms_api.rs"]
 mod rooms_api;
 #[path = "route_inventory.rs"]
 mod route_inventory;
+#[path = "router_mount.rs"]
+mod router_mount;
+#[path = "run_repo_scope.rs"]
+mod run_repo_scope;
 #[path = "runtime_lag.rs"]
 mod runtime_lag;
 #[path = "share_api.rs"]
@@ -54,6 +68,8 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
+#[path = "swarm_scope_api.rs"]
+mod swarm_scope_api;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workbench_api.rs"]

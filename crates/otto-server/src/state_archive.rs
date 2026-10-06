@@ -142,7 +142,9 @@ pub(crate) async fn build_snapshot_parts(
     daemon_version: &str,
     options: SnapshotOptions,
 ) -> ApiResult<StateArchive> {
-    let mut tx = pool.begin().await.map_err(db_error)?;
+    // A read-only snapshot: the export never writes, so it must not hold the
+    // write lock (or a writer connection) for the whole table walk.
+    let mut tx = pool.begin_read().await.map_err(db_error)?;
     let tables = schema::schema(&mut tx).await?;
     let mut excluded=vec![".otto-sync Git snapshot output directories".into(),"Authentication sessions, password hashes, Keychain contents, secret references and active permission bindings/allowlists".into(),"Live processes, sockets, PTY state, external repository working trees and database-engine data".into(),"Derived FTS/Vault indexes, provider catalogs and disposable caches".into(),"External provider transcript directories and workflow/agent worktrees (references retained)".into()];
     let mut reconnect = BTreeSet::new();

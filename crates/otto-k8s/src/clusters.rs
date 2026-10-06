@@ -190,11 +190,39 @@ pub async fn kubectl_for<S: K8sCtx>(ctx: &S, cluster: &K8sCluster) -> Result<Kub
 async fn kubectl_fresh<S: K8sCtx>(ctx: &S, cluster: &K8sCluster) -> Result<Kubectl> {
     let program = kubectl_program(ctx.data_dir());
     let env = aws_env_for(ctx, cluster).await?;
-    if let Some(path) = crate::eks_token::overlay_for(&program, cluster, &env, ctx.data_dir()).await
+    // `Err`: the context's credential plugin is not allow-listed (S11-303) —
+    // no kubectl runs for this cluster at all.
+    if let Some(path) =
+        crate::eks_token::overlay_for(&program, cluster, &env, ctx.data_dir()).await?
     {
         return Ok(Kubectl::new(program, &with_kubeconfig(cluster, &path), env));
     }
     Ok(Kubectl::new(program, cluster, env))
+}
+
+/// S11-303: the kubeconfig exec-plugin allow-list
+/// ([`otto_core::kubeconfig_policy`]) over kubeconfig YAML. With `context`,
+/// only that context's user is checked (every user if it is missing).
+pub fn check_kubeconfig_yaml(yaml: &str, context: Option<&str>) -> Result<()> {
+    let cfg: Value = serde_yaml::from_str(yaml)
+        .map_err(|e| Error::Invalid(format!("kubeconfig is not valid YAML: {e}")))?;
+    otto_core::kubeconfig_policy::check_kubeconfig(&cfg, context).map_err(Error::Invalid)
+}
+
+/// [`check_kubeconfig_yaml`] over a kubeconfig file on disk.
+pub fn check_kubeconfig_file(path: &Path, context: Option<&str>) -> Result<()> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| Error::Invalid(format!("kubeconfig {}: {e}", path.display())))?
+        .len();
+    if len > (4 * IMPORT_MAX_BYTES) as u64 {
+        return Err(Error::Invalid(format!(
+            "kubeconfig {} is too large to check",
+            path.display()
+        )));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| Error::Invalid(format!("kubeconfig {}: {e}", path.display())))?;
+    check_kubeconfig_yaml(&text, context)
 }
 
 /// `cluster` pointed at another kubeconfig file (same context name).
@@ -361,6 +389,9 @@ impl<S: K8sCtx> Clusters<S> {
                 if !abs.is_file() {
                     return Err(Error::Invalid(format!("kubeconfig file not found: {p}")));
                 }
+                // S11-303: refuse a context whose credential plugin is not
+                // allow-listed before the row exists.
+                check_kubeconfig_file(&abs, Some(&context_name))?;
                 Some(abs.to_string_lossy().to_string())
             }
             None => None,
@@ -407,6 +438,9 @@ impl<S: K8sCtx> Clusters<S> {
                 "kubeconfig_yaml exceeds 1 MiB".into(),
             ));
         }
+        // S11-303: every user of a pasted kubeconfig must use an allow-listed
+        // credential plugin (or none) — checked before anything is written.
+        check_kubeconfig_yaml(yaml, None)?;
         let id = new_id();
         let path = self.write_kubeconfig(&id, yaml)?;
         let path_str = path.to_string_lossy().to_string();
@@ -525,7 +559,7 @@ impl<S: K8sCtx> Clusters<S> {
     ) -> Result<K8sCluster> {
         crate::access::check(&self.ctx.pool(), user, id, "configure", None).await?;
         let cur = self.repo.get(id).await?;
-        if !user.is_root {
+        if !otto_core::auth::root_authority(user) {
             let path_changed = req.kubeconfig_path.as_deref().is_some_and(|p| {
                 let p = p.trim();
                 let normalized = if p.is_empty() {
@@ -587,6 +621,22 @@ impl<S: K8sCtx> Clusters<S> {
                 return Err(Error::Invalid("context_name cannot be empty".into()));
             }
         }
+        // S11-303: re-pointing the cluster (path or context) re-checks the
+        // credential plugin it will run.
+        if kubeconfig_path.is_some() || req.context_name.is_some() {
+            let path = match &kubeconfig_path {
+                Some(p) => p.clone(),
+                None => cur.kubeconfig_path.clone(),
+            };
+            let context = req
+                .context_name
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or(&cur.context_name);
+            if let Some(path) = path {
+                check_kubeconfig_file(Path::new(&path), Some(context))?;
+            }
+        }
         let c = self
             .repo
             .update(
@@ -636,6 +686,8 @@ impl<S: K8sCtx> Clusters<S> {
         }
         // The cached EKS token file is a credential — never leave it behind.
         crate::eks_token::forget(id.as_str(), self.ctx.data_dir());
+        // Nor a pooled mutating `kubectl proxy` holding its credentials.
+        crate::pod_http::forget(id.as_str()).await;
         self.broadcast(id, true);
         Ok(())
     }

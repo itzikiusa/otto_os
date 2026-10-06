@@ -338,13 +338,7 @@ pub fn render_value(
 /// First `max` chars of `s` (for error messages), with an ellipsis when cut.
 pub(crate) fn clip(s: &str, max: usize) -> String {
     let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max {
-        flat
-    } else {
-        let mut out: String = flat.chars().take(max).collect();
-        out.push('…');
-        out
-    }
+    otto_core::text::clip_chars(&flat, max)
 }
 
 /// A valid placeholder name (`[A-Za-z_][A-Za-z0-9_]*`).

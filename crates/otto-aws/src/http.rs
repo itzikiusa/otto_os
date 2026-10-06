@@ -882,7 +882,14 @@ async fn sqs_attributes<S: AwsCtx>(
     ))
 }
 
-/// POST /aws/accounts/{id}/sqs/queues/peek — AwsSqs:View (non-mutating POST)
+/// POST /aws/accounts/{id}/sqs/queues/peek — AwsSqs:Edit. The receive pins
+/// visibility timeout 0 (nothing is hidden), but SQS still bumps each
+/// message's receive count — enough to dead-letter it on a queue with a
+/// redrive policy — so the policy table grades the POST Edit, plus the
+/// account's own `sqs_receive` operation, which is not `sqs_send` (S6-12).
+/// For an Enforced account the feature guard lowers the tier to View and the
+/// per-resource grant decides, exactly as for `sqs_send` — no extra global
+/// check here, or a `sqs_receive` grant alone could never peek (S6-303).
 async fn sqs_peek<S: AwsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -890,7 +897,7 @@ async fn sqs_peek<S: AwsCtx>(
     Query(rq): Query<sqs::RegionQuery>,
     Json(req): Json<sqs::PeekReq>,
 ) -> ApiResult<Json<sqs::PeekResp>> {
-    crate::access::check(&ctx.pool(), &user, &id, "sqs_receive", None).await?;
+    crate::access::check(&ctx.pool(), &user, &id, sqs::PEEK_OPERATION, None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(sqs::peek(&svc, &a, &req, rq.region.as_deref()).await?))

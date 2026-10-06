@@ -48,6 +48,17 @@
 
   // The detail object for the currently selected story.
   const detail = $derived(product.detail);
+
+  // ProductPage keys this tab by story ({#key product.selectedId}), so every
+  // story gets a fresh instance. A request started by an instance can still
+  // settle after it was torn down (or after A → B → A reopened A in a NEW
+  // instance), so each loader/writer captures its story and re-checks this
+  // after every await before assigning state or sending a Jira write.
+  let destroyed = false;
+  $effect(() => () => { destroyed = true; });
+  function onStory(s: { id: string }): boolean {
+    return !destroyed && product.selectedId === s.id;
+  }
   const story = $derived(detail?.story ?? null);
   const source = $derived(detail?.source ?? null);
 
@@ -131,7 +142,7 @@
   async function approveDraftLeave(): Promise<boolean> {
     if (!draftDirty) return true;
     const allowed = await confirmer.ask('You have unsaved changes to this draft. Leaving now discards them.', {
-      title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing',
+      title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing',
     });
     if (allowed) { draftTitle = story?.title ?? ''; draftBody = source?.body_md ?? ''; }
     return allowed;
@@ -155,6 +166,9 @@
   // IDs currently being fetched — prevents duplicate in-flight requests across
   // overlapping resolver runs (mirrors AttachmentsPanel.loadAttUrl guard).
   const bodyAttFetching = new Set<string>();
+  /** Bumped per resolve pass and on story change — a pass that settles after a
+   *  newer one (or after a switch) drops its result and frees its blobs. */
+  let resolveSeq = 0;
 
   // HTML of renderedBody with markdown image tokens rewritten to <img> tags with blob URLs.
   let resolvedBody = $state('');
@@ -251,6 +265,17 @@
     // Reset editable-field state.
     editmeta = null;
     editmetaLoading = false;
+    // Loading flags too: a stale `issueLoading` blocked B's own /full load and
+    // let A's response win (S18-02). Inline editors close so A's text can
+    // never be saved "to B" (S18-01).
+    issueLoading = false;
+    transitionsLoading = false;
+    assignablesLoading = false;
+    editingTitle = false;
+    titleDraft = '';
+    editingDesc = false;
+    descDraft = '';
+    ++resolveSeq;
     editingField = null;
     fieldDraft = null;
     fieldSaving = false;
@@ -380,14 +405,20 @@
     const html = renderedBody;
     if (!html || html === lastResolvedInput) return;
     lastResolvedInput = html;
-    void resolveAttachmentTokens(html);
+    void resolveAttachmentTokens(html, ++resolveSeq);
   });
+
+  function decodeEntities(s: string): string {
+    return s.replace(/&(amp|lt|gt|quot|#39);/g, (_, e: string) =>
+      ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e] ?? _,
+    );
+  }
 
   function escapeHtmlAttr(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  async function resolveAttachmentTokens(html: string): Promise<void> {
+  async function resolveAttachmentTokens(html: string, seq: number): Promise<void> {
     // Match literal markdown image syntax `![alt](attachment:<id>)` in the HTML
     // (renderMarkdown outputs these as-is since it doesn't handle image syntax).
     const tokenRe = /!\[([^\]]*)\]\(attachment:([A-Za-z0-9]+)\)/g;
@@ -412,6 +443,10 @@
       uncached.map(async (id) => {
         try {
           const url = await authedBlobUrl(`/product/attachments/${id}`);
+          if (destroyed || seq !== resolveSeq) {
+            URL.revokeObjectURL(url); // stale pass — never cached, so free it now
+            return;
+          }
           bodyAttObjectUrls.push(url);
           collected[id] = url;
         } catch (e) {
@@ -421,6 +456,9 @@
         }
       }),
     );
+    // A newer pass (or a story switch) owns resolvedBody now: never let A's
+    // body replace B's description.
+    if (destroyed || seq !== resolveSeq) return;
     if (Object.keys(collected).length > 0) {
       bodyAttUrls = { ...bodyAttUrls, ...collected };
     }
@@ -429,7 +467,11 @@
     for (const { full, alt, id } of matches) {
       const blobUrl = bodyAttUrls[id];
       if (blobUrl) {
-        out = out.replace(full, `<img class="body-attachment" alt="${escapeHtmlAttr(alt)}" src="${blobUrl}">`);
+        // `alt` comes from already-rendered HTML (entities escaped once):
+        // decode, then escape for the attribute — escaping again showed
+        // "&amp;amp;". A replacer function keeps `$&`/`$1` in alt literal.
+        const img = `<img class="body-attachment" alt="${escapeHtmlAttr(decodeEntities(alt))}" src="${blobUrl}">`;
+        out = out.replace(full, () => img);
       }
     }
     resolvedBody = out;
@@ -437,16 +479,19 @@
 
   async function loadIssueFull(): Promise<void> {
     if (!story) return;
+    const s = story;
     issueLoading = true;
     issueError = null;
     try {
-      issueFull = await api.get<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/full`,
+      const full = await api.get<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/full`,
       );
+      if (!onStory(s)) return;
+      issueFull = full;
     } catch (e) {
-      issueError = loadErrorText(e);
+      if (onStory(s)) issueError = loadErrorText(e);
     } finally {
-      issueLoading = false;
+      if (onStory(s)) issueLoading = false;
     }
   }
 
@@ -454,43 +499,54 @@
   // and the on-open effect can both call it safely.
   async function loadDevStatus(): Promise<void> {
     if (devLoaded || !story) return;
+    const s = story;
     devLoading = true;
     devError = null;
     try {
       const idParam = issueFull?.id ? `?issueId=${encodeURIComponent(issueFull.id)}` : '';
-      devStatus = await api.get<DevStatus>(
-        `/issue/${story.account_id}/${story.source_key}/devstatus${idParam}`,
+      const dev = await api.get<DevStatus>(
+        `/issue/${s.account_id}/${s.source_key}/devstatus${idParam}`,
       );
+      if (!onStory(s)) return;
+      devStatus = dev;
     } catch (e) {
-      devError = loadErrorText(e);
+      if (onStory(s)) devError = loadErrorText(e);
     } finally {
       // Mark loaded even on error: the on-open $effect gates on `devLoaded`, so
       // leaving it false after a failed fetch would re-trigger this every time
       // the request settles → an infinite retry loop. (Same guard rationale as
       // ensureEditmeta's `editmeta = []` on error.) The explicit refresh path
       // resets `devLoaded = false` to force a fresh fetch.
-      devLoaded = true;
-      devLoading = false;
+      if (onStory(s)) {
+        devLoaded = true;
+        devLoading = false;
+      }
     }
   }
 
   async function loadTransitions(): Promise<void> {
     if (transitionsLoaded || !story) return;
+    const s = story;
     transitionsLoading = true;
     try {
-      transitions = await api.get<JiraTransition[]>(
-        `/issue/${story.account_id}/${story.source_key}/transitions`,
+      const rows = await api.get<JiraTransition[]>(
+        `/issue/${s.account_id}/${s.source_key}/transitions`,
       );
+      // Transition ids are per issue: A's ids must never be offered (and
+      // POSTed) against B after a switch during this await.
+      if (!onStory(s)) return;
+      transitions = rows;
       transitionsLoaded = true;
     } catch (e) {
-      toastError('Couldn’t load transitions', e);
+      if (onStory(s)) toastError('Couldn’t load transitions', e);
     } finally {
-      transitionsLoading = false;
+      if (onStory(s)) transitionsLoading = false;
     }
   }
 
   // ── Live Jira writes ────────────────────────────────────────────────────
-  // Status, assignee and comments change the real issue that the whole team
+  // Status, assignee, comments, the title and every custom field (story
+  // points, sprint, labels…) change the real issue that the whole team
   // sees (and may fire Jira notifications / automations), so each one goes
   // through `confirmOutward` naming the issue key and the new value. The
   // pickers are global `ctxMenu` menus (viewport-clamped, height-capped, Esc
@@ -538,7 +594,8 @@
 
   async function applyTransition(t: JiraTransition): Promise<void> {
     if (!story) return;
-    const key = story.source_key;
+    const s = story;
+    const key = s.source_key;
     const ok = await confirmOutward({
       verb: `Move to ${t.to_status}`,
       title: `Move ${key} to ${t.to_status}?`,
@@ -546,10 +603,10 @@
       what: `Status: ${issueFull?.status ?? 'current'} → ${t.to_status}${t.name !== t.to_status ? ` (transition “${t.name}”)` : ''}`,
       who: `Everyone with access to ${key} sees the change; watchers are notified and Jira workflow rules may run.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     transitionWorking = true;
     try {
-      await api.post(`/issue/${story.account_id}/${story.source_key}/transitions`, {
+      await api.post(`/issue/${s.account_id}/${s.source_key}/transitions`, {
         transition_id: t.id,
       });
       // Available transitions depend on the status — refetch on next open, or
@@ -567,23 +624,27 @@
 
   async function loadAssignables(): Promise<void> {
     if (assignablesLoaded || !story) return;
+    const s = story;
     assignablesLoading = true;
     try {
-      assignables = await api.get<JiraUser[]>(
-        `/issue/${story.account_id}/${story.source_key}/assignable`,
+      const rows = await api.get<JiraUser[]>(
+        `/issue/${s.account_id}/${s.source_key}/assignable`,
       );
+      if (!onStory(s)) return;
+      assignables = rows;
       assignablesLoaded = true;
     } catch (e) {
-      toastError('Couldn’t load assignable users', e);
+      if (onStory(s)) toastError('Couldn’t load assignable users', e);
     } finally {
-      assignablesLoading = false;
+      if (onStory(s)) assignablesLoading = false;
     }
   }
 
   /** Assign `u`, or unassign when null — confirmed first (see Live Jira writes). */
   async function assignUser(u: JiraUser | null): Promise<void> {
     if (!story) return;
-    const key = story.source_key;
+    const s = story;
+    const key = s.source_key;
     const cur = issueFull?.assignee?.display_name ?? 'Unassigned';
     const ok = await confirmOutward({
       verb: u ? `Assign to ${u.display_name}` : 'Unassign',
@@ -592,10 +653,10 @@
       what: `Assignee: ${cur} → ${u ? u.display_name : 'Unassigned'}`,
       who: `Jira notifies the old and new assignee and ${key}'s watchers.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     assigneeWorking = true;
     try {
-      await api.put(`/issue/${story.account_id}/${story.source_key}/assignee`, {
+      await api.put(`/issue/${s.account_id}/${s.source_key}/assignee`, {
         account_id: u ? u.account_id : '',
       });
       toasts.info('Assignee updated');
@@ -613,16 +674,20 @@
    *  so everything stays read-only and we don't retry-loop. */
   async function ensureEditmeta(): Promise<void> {
     if (editmeta !== null || editmetaLoading || !story) return;
+    const s = story;
     editmetaLoading = true;
     try {
-      editmeta = await api.get<EditableField[]>(
-        `/issue/${story.account_id}/${story.source_key}/editmeta`,
+      const meta = await api.get<EditableField[]>(
+        `/issue/${s.account_id}/${s.source_key}/editmeta`,
       );
+      if (!onStory(s)) return;
+      editmeta = meta;
     } catch (e) {
+      if (!onStory(s)) return;
       toastError('Couldn’t load editable fields', e);
       editmeta = []; // loaded-but-empty: every field stays read-only
     } finally {
-      editmetaLoading = false;
+      if (onStory(s)) editmetaLoading = false;
     }
   }
 
@@ -754,16 +819,48 @@
     }
   }
 
+  /** Human-readable form of the working draft, for the outward confirm. */
+  function draftLabel(ef: EditableField, draft: unknown): string {
+    const opt = (id: string) => ef.allowed_values.find((o) => o.id === id)?.label ?? id;
+    const user = (id: string) => assignables.find((u) => u.account_id === id)?.display_name ?? id;
+    if (ef.schema_type === 'array' && ef.items !== 'string') {
+      const ids = Array.isArray(draft) ? (draft as string[]) : [];
+      return ids.map(ef.items === 'user' ? user : opt).join(', ');
+    }
+    const raw = String(draft ?? '').trim();
+    if (!raw) return '';
+    if (ef.schema_type === 'user') return user(raw);
+    if (['option', 'priority', 'version', 'component'].includes(ef.schema_type)) return opt(raw);
+    return raw;
+  }
+
   /** PUT a single field then swap in the refreshed issue returned by the server. */
   async function saveField(ef: EditableField): Promise<void> {
     if (!story) return;
+    const s = story;
+    const draft = fieldDraft;
+    // A custom field is a live Jira write like status / title (S18-302): it
+    // notifies watchers and can fire Jira automations, so name the issue and
+    // show old → new before sending.
+    const before = rawFieldValue(ef.key).trim() || '(empty)';
+    const after = draftLabel(ef, draft) || '(empty)';
+    const ok = await confirmOutward({
+      verb: 'Update field',
+      title: `Update ${ef.name} on ${s.source_key}?`,
+      where: jiraWhere(),
+      what: `${ef.name}: “${before}” → “${after}”`,
+      who: `Everyone with access to ${s.source_key} sees the change; watchers are notified and Jira automations may run.`,
+    });
+    if (!ok || !onStory(s) || editingField !== ef.key) return;
     fieldSaving = true;
     try {
-      const value = buildFieldValue(ef, fieldDraft);
-      issueFull = await api.put<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/fields`,
+      const value = buildFieldValue(ef, draft);
+      const full = await api.put<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/fields`,
         { fields: { [ef.key]: value } },
       );
+      if (!onStory(s)) return;
+      issueFull = full;
       editingField = null;
       fieldDraft = null;
       toasts.info('Field updated');
@@ -787,23 +884,36 @@
   /** Save the story summary via the generic fields endpoint (native string). */
   async function saveTitle(): Promise<void> {
     if (!story) return;
+    const s = story;
     const next = titleDraft.trim();
     if (!next) return; // the empty field says so inline (titleEmpty)
-    if (next === story.title) {
+    if (next === s.title) {
       cancelEditTitle();
       return;
     }
+    // The summary is a live Jira write like every other in this file: name the
+    // issue and show old → new before sending (watchers are notified).
+    const ok = await confirmOutward({
+      verb: 'Rename issue',
+      title: `Rename ${s.source_key}?`,
+      where: jiraWhere(),
+      what: `Title: “${s.title}” → “${next}”`,
+      who: `Everyone with access to ${s.source_key} sees the new title; watchers are notified.`,
+    });
+    if (!ok || !onStory(s)) return;
     titleSaving = true;
     try {
-      issueFull = await api.put<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/fields`,
+      const full = await api.put<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/fields`,
         { fields: { summary: next } },
       );
       // Reflect the new title in the header + story list without a full refresh.
-      product.patchLocalTitle(next);
+      product.patchLocalTitle(s.id, next);
+      toasts.info('Title updated', s.source_key);
+      if (!onStory(s)) return;
+      issueFull = full;
       editingTitle = false;
       titleDraft = '';
-      toasts.info('Title updated');
     } catch (e) {
       toastError('Couldn’t update title', e);
     } finally {
@@ -823,28 +933,32 @@
   /** Save the description via the dedicated (ADF-aware) description endpoint. */
   async function saveDesc(): Promise<void> {
     if (!story) return;
+    const s = story;
+    const draft = descDraft;
     // The whole description is replaced upstream (not merged) — the one inline
     // Jira write that can silently lose someone else's text, so it asks first.
     const ok = await confirmOutward({
       verb: `Replace description`,
-      title: `Replace the description of ${story.source_key}?`,
+      title: `Replace the description of ${s.source_key}?`,
       where: jiraWhere(),
-      what: descDraft.trim() || '(empty description)',
-      who: `Everyone with access to ${story.source_key} sees the new text; the previous description is only in Jira’s history.`,
+      what: draft.trim() || '(empty description)',
+      who: `Everyone with access to ${s.source_key} sees the new text; the previous description is only in Jira’s history.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     descSaving = true;
     try {
-      issueFull = await api.put<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/description`,
-        { body_md: descDraft },
+      const full = await api.put<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/description`,
+        { body_md: draft },
       );
       // The body column reads from the cached source version — patch it locally
       // with exactly what we just sent so the change shows without a refresh.
-      product.patchLocalBody(descDraft);
+      product.patchLocalBody(s.id, draft);
+      toasts.info('Description updated', s.source_key);
+      if (!onStory(s)) return;
+      issueFull = full;
       editingDesc = false;
       descDraft = '';
-      toasts.info('Description updated');
     } catch (e) {
       toastError('Couldn’t update description', e);
     } finally {
@@ -854,17 +968,22 @@
 
   async function loadAttachmentUrl(attId: string): Promise<void> {
     if (!story || attachmentUrls[attId] || attachmentLoading[attId]) return;
+    const s = story;
     attachmentLoading = { ...attachmentLoading, [attId]: true };
     try {
       const url = await authedBlobUrl(
-        `/issue/${story.account_id}/${story.source_key}/attachment/${attId}`,
+        `/issue/${s.account_id}/${s.source_key}/attachment/${attId}`,
       );
+      if (!onStory(s)) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       createdObjectUrls.push(url);
       attachmentUrls = { ...attachmentUrls, [attId]: url };
     } catch (e) {
       console.warn('[OverviewTab] attachment load failed', attId, e);
     } finally {
-      attachmentLoading = { ...attachmentLoading, [attId]: false };
+      if (onStory(s)) attachmentLoading = { ...attachmentLoading, [attId]: false };
     }
   }
 
@@ -1072,19 +1191,21 @@
 
   async function addComment(): Promise<void> {
     if (!story || !newCommentBody.trim()) return;
-    const key = story.source_key;
+    const s = story;
+    const key = s.source_key;
+    const body = newCommentBody.trim();
     const ok = await confirmOutward({
       verb: 'Post comment',
       title: `Post comment to ${key}?`,
       where: jiraWhere(),
-      what: newCommentBody.trim(),
+      what: body,
       who: `Everyone with access to ${key} in Jira; watchers are notified.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     postingComment = true;
     try {
-      await api.post(`/issue/${story.account_id}/${story.source_key}/comment`, {
-        body: newCommentBody.trim(),
+      await api.post(`/issue/${s.account_id}/${s.source_key}/comment`, {
+        body,
       });
       newCommentBody = '';
       toasts.success('Comment posted');
@@ -1154,7 +1275,7 @@
       aria-label="Edit field"
       onclick={() => beginEdit(editableFor(key)!, current)}
     >
-      <Icon name="edit" size={11} />
+      <Icon name="edit" size={12} />
     </button>
   {/if}
 {/snippet}
@@ -1163,16 +1284,16 @@
 {#snippet fieldEditor(ef: EditableField)}
   <div class="field-editor">
     {#if ef.schema_type === 'number'}
-      <input class="field-input" type="number" step="any" bind:value={fieldDraft} />
+      <input aria-label={ef.name} class="field-input" type="number" step="any" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'date'}
-      <input class="field-input" type="date" bind:value={fieldDraft} />
+      <input aria-label={ef.name} class="field-input" type="date" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'datetime'}
-      <input class="field-input" type="datetime-local" bind:value={fieldDraft} />
+      <input aria-label={ef.name} class="field-input" type="datetime-local" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'user'}
       {#if assignablesLoading && assignables.length === 0}
         <Skeleton rows={1} height={27} label="people" />
       {:else}
-        <select class="field-input" bind:value={fieldDraft}>
+        <select aria-label={ef.name} class="field-input" bind:value={fieldDraft}>
           <option value="">Unassigned</option>
           {#each assignables as u (u.account_id)}
             <option value={u.account_id}>{u.display_name}</option>
@@ -1180,7 +1301,7 @@
         </select>
       {/if}
     {:else if (ef.schema_type === 'option' || ef.schema_type === 'priority' || ef.schema_type === 'version' || ef.schema_type === 'component') && ef.allowed_values.length > 0}
-      <select class="field-input" bind:value={fieldDraft}>
+      <select aria-label={ef.name} class="field-input" bind:value={fieldDraft}>
         {#if !ef.required}
           <option value="">— None —</option>
         {/if}
@@ -1203,10 +1324,10 @@
       </div>
     {:else if ef.schema_type === 'array'}
       <!-- labels / free-text array (no allowed values) → comma-separated text -->
-      <input class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
+      <input dir="auto" aria-label={ef.name} class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
     {:else}
       <!-- string / unknown → raw text -->
-      <input class="field-input" type="text" bind:value={fieldDraft} />
+      <input dir="auto" aria-label={ef.name} class="field-input" type="text" bind:value={fieldDraft} />
       {#if ef.schema_type !== 'string'}
         <span class="field-raw-note">raw ({ef.schema_type})</span>
       {/if}
@@ -1239,7 +1360,7 @@
           title="Lifecycle stage — advance to Approved before sending to a swarm"
         >
           <StatusBadge status={storyStage(story.stage)} title="" />
-          <Icon name="chevronDown" size={10} />
+          <Icon name="chevronDown" size={12} />
         </button>
         {#if story.issue_type}
           <Badge label={story.issue_type} />
@@ -1247,7 +1368,7 @@
         {#if story.url}
           <a class="source-link mono" href={story.url} target="_blank" rel="noopener noreferrer" title="Open in source">
             {story.source_key}
-            <Icon name="external" size={11} />
+            <Icon name="external" size={12} />
           </a>
         {:else}
           <span class="source-key mono">{story.source_key}</span>
@@ -1255,7 +1376,7 @@
       </div>
       {#if editingTitle}
         <div class="title-edit">
-          <input
+          <input dir="auto"
             class="title-input"
             bind:value={titleDraft}
             spellcheck="false"
@@ -1291,11 +1412,11 @@
 
       <!-- counts row -->
       <div class="counts-row">
-        <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{plural(detail.counts.versions, 'version')}</span>
-        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{plural(detail.counts.analyses, 'analysis', 'analyses')}</span>
-        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{plural(detail.counts.open_questions, 'open question')}</span>
-        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{plural(detail.counts.notes, 'note')}</span>
-        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{plural(detail.counts.testcases, 'test')}</span>
+        <span class="count-chip" title="Versions"><Icon name="archive" size={12} />{plural(detail.counts.versions, 'version')}</span>
+        <span class="count-chip" title="Analyses"><Icon name="gauge" size={12} />{plural(detail.counts.analyses, 'analysis', 'analyses')}</span>
+        <span class="count-chip" title="Open questions"><Icon name="comment" size={12} />{plural(detail.counts.open_questions, 'open question')}</span>
+        <span class="count-chip" title="Notes"><Icon name="note" size={12} />{plural(detail.counts.notes, 'note')}</span>
+        <span class="count-chip" title="Test cases"><Icon name="check" size={12} />{plural(detail.counts.testcases, 'test')}</span>
       </div>
 
       <!-- tags row -->
@@ -1308,14 +1429,14 @@
               onclick={() => removeTag(tag)}
               aria-label="Remove tag {tag}"
               title="Remove tag"
-            ><Icon name="x" size={10} /></button>
+            ><Icon name="x" size={12} /></button>
           </span>
         {/each}
         <form
           class="tag-add-form"
           onsubmit={(e) => { e.preventDefault(); void addTag(); }}
         >
-          <input
+          <input dir="auto"
             class="tag-input"
             bind:value={tagInput}
             placeholder="Add tag…"
@@ -1415,7 +1536,7 @@
 
             <div class="field">
               <label class="label" for="draft-title">Title</label>
-              <input
+              <input dir="auto"
                 id="draft-title"
                 class="input wide-input"
                 bind:value={draftTitle}
@@ -1426,7 +1547,7 @@
 
             <div class="field">
               <label class="label" for="draft-body">Body (Markdown)</label>
-              <textarea
+              <textarea dir="auto"
                 id="draft-body"
                 class="textarea"
                 bind:value={draftBody}
@@ -1486,7 +1607,7 @@
                         onclick={() => toggleTranscript(t.id)}
                         aria-expanded={expandedTranscripts[t.id] ?? false}
                       >
-                        <span class="coll-arrow" aria-hidden="true"><Icon name={expandedTranscripts[t.id] ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+                        <span class="coll-arrow" aria-hidden="true"><Icon name={expandedTranscripts[t.id] ? 'chevronDown' : 'chevronRight'} size={12} /></span>
                         <span class="transcript-title">{t.title || 'Untitled transcript'}</span>
                         <span class="transcript-date" data-find-skip>{relDate(t.created_at)}</span>
                       </button>
@@ -1495,7 +1616,7 @@
                         onclick={() => doDeleteTranscript(t)}
                         title="Remove transcript"
                         aria-label="Remove transcript"
-                      ><Icon name="x" size={11} /></button>
+                      ><Icon name="x" size={12} /></button>
                       <button class="btn small" data-find-skip onclick={() => void downloadTranscript(t)}>Download</button>
                     </div>
                     {#if expandedTranscripts[t.id]}
@@ -1521,13 +1642,13 @@
 
             <!-- Add transcript form -->
             <div class="add-transcript-form">
-              <input
+              <input dir="auto"
                 class="input wide-input"
                 bind:value={newTranscriptTitle}
                 placeholder="e.g. Kickoff call, 12 Oct" aria-label="Transcript title (optional)"
                 spellcheck="false"
               />
-              <textarea
+              <textarea dir="auto" aria-label="Transcript"
                 class="textarea"
                 bind:value={newTranscriptBody}
                 rows={5}
@@ -1573,14 +1694,14 @@
               <span class="desc-label">Description</span>
               {#if !editingDesc && !viewingVersion}
                 <button class="desc-edit-btn" onclick={beginEditDesc}>
-                  <Icon name="edit" size={11} /> Edit
+                  <Icon name="edit" size={12} /> Edit
                 </button>
               {/if}
             </div>
 
             {#if editingDesc}
               <div class="desc-editor">
-                <textarea
+                <textarea dir="auto"
                   class="desc-textarea"
                   bind:value={descDraft}
                   rows={16}
@@ -1618,7 +1739,7 @@
                   onclick={() => toggleSection('comments')}
                   aria-expanded={!collapsed.comments}
                 >
-                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.comments ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.comments ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                   <span class="jira-section-label">Comments</span>
                   <span class="section-count">({issueFull.comments.length})</span>
                 </button>
@@ -1640,7 +1761,7 @@
                   </div>
                   <!-- Add comment form -->
                   <div class="add-comment-form">
-                    <textarea
+                    <textarea dir="auto"
                       class="textarea comment-textarea"
                       bind:value={newCommentBody}
                       rows={3}
@@ -1670,7 +1791,7 @@
                     onclick={() => toggleSection('history')}
                     aria-expanded={!collapsed.history}
                   >
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.history ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.history ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     <span class="jira-section-label">History</span>
                     <span class="section-count">({issueFull.history.length} entries)</span>
                   </button>
@@ -1706,7 +1827,7 @@
                     onclick={() => toggleSection('attachments')}
                     aria-expanded={!collapsed.attachments}
                   >
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.attachments ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.attachments ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     <span class="jira-section-label">Attachments</span>
                     <span class="section-count">({issueFull.attachments.length})</span>
                   </button>
@@ -1813,7 +1934,7 @@
                       aria-haspopup="menu"
                       data-testid="ov-transition-btn"
                     >
-                      {#if transitionWorking}Working…{:else if transitionsLoading}Loading transitions…{:else}Transition <Icon name="chevronDown" size={10} />{/if}
+                      {#if transitionWorking}Working…{:else if transitionsLoading}Loading transitions…{:else}Transition <Icon name="chevronDown" size={12} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1844,7 +1965,7 @@
                       aria-haspopup="menu"
                       data-testid="ov-assignee-btn"
                     >
-                      {#if assigneeWorking}Working…{:else if assignablesLoading}Loading people…{:else}Change <Icon name="chevronDown" size={10} />{/if}
+                      {#if assigneeWorking}Working…{:else if assignablesLoading}Loading people…{:else}Change <Icon name="chevronDown" size={12} />{/if}
                     </button>
                   </div>
                 </div>
@@ -1857,7 +1978,7 @@
                   onclick={() => toggleSection('details')}
                   aria-expanded={!collapsed.details}
                 >
-                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.details ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.details ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                   <span class="jira-section-label">Details</span>
                 </button>
                 {#if !collapsed.details}
@@ -1979,7 +2100,7 @@
                                 title="Set {ef.name}"
                                 aria-label="Set {ef.name}"
                                 onclick={() => beginEdit(ef, '')}
-                              ><Icon name="plus" size={11} /></button>
+                              ><Icon name="plus" size={12} /></button>
                             </div>
                           {/if}
                         </span>
@@ -1997,7 +2118,7 @@
                     onclick={() => toggleSection('links')}
                     aria-expanded={!collapsed.links}
                   >
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.links ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.links ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     <span class="jira-section-label">Linked issues</span>
                     <span class="section-count">({issueFull.links.length})</span>
                   </button>
@@ -2024,7 +2145,7 @@
                   onclick={() => toggleSection('development')}
                   aria-expanded={!collapsed.development}
                 >
-                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.development ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                  <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.development ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                   <span class="jira-section-label">Development</span>
                   {#if devStatus}
                     <span class="section-count">
@@ -2705,7 +2826,7 @@
     color: var(--text);
   }
   .change-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 
@@ -3184,7 +3305,7 @@
     border-color: var(--accent);
   }
   .att-load-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .att-dl-link {

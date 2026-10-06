@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectNoHorizontalOverflow, tourChapter, tourVideoPath } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 test.setTimeout(120_000);
@@ -82,7 +82,10 @@ test('folder picker keeps a deliberate workspace name through error retry and ke
 });
 
 async function realMedia(page: Page) {
-  const bytes = readFileSync(process.env.OTTO_E2E_TOUR_VIDEO!);
+  // Playback needs a real MP4 (CI generates a synthetic one); like the r1/r2
+  // help specs, skip — not crash in readFileSync — when none is provided.
+  test.skip(!tourVideoPath, 'Set OTTO_E2E_TOUR_VIDEO to test actual playback');
+  const bytes = readFileSync(tourVideoPath!);
   await page.route('**/walkthroughs/resolve**', (r) => r.fulfill({ json: { url: `${new URL(page.url()).origin}/__r4tour.mp4` } }));
   await page.route('**/otto-tour-poster.jpg', (r) => r.abort());
   await page.route('**/__r4tour.mp4', (r) => {
@@ -101,10 +104,11 @@ test('tour pause, end and keyboard chapter replay preserve caption preference', 
   await page.goto('/#/walkthroughs', { waitUntil: 'domcontentloaded' });
   const video = page.getByTestId('tour-film-video');
   await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.readyState)).toBeGreaterThanOrEqual(1);
-  const chapter = page.getByRole('button', { name: '2:45 Everywhere', exact: true });
+  const everywhere = tourChapter('Everywhere');
+  const chapter = page.getByRole('button', { name: everywhere.label, exact: true });
   await chapter.focus();
   await page.keyboard.press('Enter');
-  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => !el.paused && el.currentTime >= 165.2)).toBe(true);
+  await expect.poll(() => video.evaluate((el: HTMLVideoElement, t) => !el.paused && el.currentTime >= t, everywhere.start + 0.2)).toBe(true);
   await video.evaluate((el: HTMLVideoElement) => el.pause());
   const pausedAt = await video.evaluate((el: HTMLVideoElement) => el.currentTime);
   await page.getByRole('button', { name: 'CC on', exact: true }).click();
@@ -113,7 +117,7 @@ test('tour pause, end and keyboard chapter replay preserve caption preference', 
   await video.evaluate((el: HTMLVideoElement) => { el.currentTime = el.duration - 0.3; return el.play(); });
   await expect.poll(() => video.evaluate((el: HTMLVideoElement) => el.ended)).toBe(true);
   expect(await video.evaluate((el: HTMLVideoElement) => el.paused)).toBe(true);
-  const first = page.getByRole('button', { name: '0:00 Meet Otto', exact: true });
+  const first = page.getByRole('button', { name: tourChapter('Meet Otto').label, exact: true });
   await first.focus();
   await page.keyboard.press('Enter');
   await expect.poll(() => video.evaluate((el: HTMLVideoElement) => !el.ended && !el.paused && el.currentTime < 7.5)).toBe(true);

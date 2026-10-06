@@ -15,13 +15,13 @@ use otto_core::api::{
     Problem, UpdateConfluencePageReq, UpdateIssueAccountReq,
 };
 use otto_core::auth::{authorize_owner, AuthUser};
-use otto_core::domain::{IssueAccount, IssueDetail, IssueProject, IssueSummary, MyWorkIssue};
+use otto_core::domain::{IssueAccount, IssueDetail, IssueSummary, MyWorkIssue};
 use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::ConfluenceClient;
-use crate::confluence::{markdown_to_storage, ConfluencePageSummary, ConfluenceSpace, PageComment};
+use crate::confluence::{markdown_to_storage, ConfluencePageSummary, PageComment};
 use crate::jira::{
     CommentRef, DevStatus, EditableField, IssueFull, JiraClient, JiraTransition, JiraUser,
 };
@@ -192,7 +192,7 @@ async fn create_account<S: IssuesCtx>(
         return Err(Error::Invalid("base_url must not be empty".into()).into());
     }
     let token_ref = format!("issueacct-{}", new_id());
-    s.secrets().put(&token_ref, &req.token)?;
+    otto_core::secrets::put_async(s.secrets(), &token_ref, &req.token).await?;
     let created = s
         .issues()
         .create_account(NewIssueAccount {
@@ -209,7 +209,7 @@ async fn create_account<S: IssuesCtx>(
         Ok(a) => Ok(Json(a)),
         Err(e) => {
             // Don't leave an orphan secret behind.
-            let _ = s.secrets().delete(&token_ref);
+            let _ = otto_core::secrets::delete_async(s.secrets(), &token_ref).await;
             Err(e.into())
         }
     }
@@ -227,19 +227,27 @@ async fn update_account<S: IssuesCtx>(
     let label = req.label.as_deref().unwrap_or(&account.label);
     let email = req.email.as_deref().unwrap_or(&account.email);
     let base_url = req.base_url.as_deref().unwrap_or(&account.base_url);
+    // Repointing the account at another HOST must come with a fresh token:
+    // the stored one would otherwise be sent (as `email:token` Basic auth) to
+    // whatever host the caller names — a PAT or a prompt-injected agent could
+    // exfiltrate the credential with one PATCH.
+    require_token_for_host_change(&account.base_url, base_url, req.token.as_deref())?;
 
     // Token rotation: non-empty → store new ref, delete old; empty/absent → keep.
     let token_ref = if let Some(tok) = req.token.as_deref().filter(|t| !t.is_empty()) {
         let new_ref = format!("issueacct-{}", new_id());
-        s.secrets().put(&new_ref, tok)?;
-        let _ = s.secrets().delete(&account.token_ref);
+        otto_core::secrets::put_async(s.secrets(), &new_ref, tok).await?;
+        let _ = otto_core::secrets::delete_async(s.secrets(), &account.token_ref).await;
         new_ref
     } else {
         account.token_ref.clone()
     };
 
-    // token_expires_at: present → set; absent (None) → keep current.
-    let token_expires_at = req.token_expires_at.or(account.token_expires_at);
+    // token_expires_at: absent → keep current; `null` → clear; value → set.
+    let token_expires_at = match req.token_expires_at {
+        Some(v) => v,
+        None => account.token_expires_at,
+    };
 
     let updated = s
         .issues()
@@ -248,22 +256,75 @@ async fn update_account<S: IssuesCtx>(
     Ok(Json(updated))
 }
 
+/// The scheme + host + port a Jira / Confluence base URL sends credentials to
+/// (host lower-cased). `None` when it does not parse.
+fn credential_origin(base_url: &str) -> Option<(String, String, Option<u16>)> {
+    let u = reqwest::Url::parse(base_url.trim()).ok()?;
+    Some((
+        u.scheme().to_string(),
+        u.host_str()?.to_ascii_lowercase(),
+        u.port_or_known_default(),
+    ))
+}
+
+/// Refuse a base-URL change that moves the stored token to a different
+/// origin unless the update carries a new, non-empty token. A path-only
+/// change on the same host keeps the token. Pure — unit-tested.
+fn require_token_for_host_change(
+    current: &str,
+    next: &str,
+    token: Option<&str>,
+) -> Result<(), Error> {
+    let fresh = token.is_some_and(|t| !t.trim().is_empty());
+    let moved = match (credential_origin(current), credential_origin(next)) {
+        (Some(a), Some(b)) => a != b,
+        // Unparseable either side: only an identical string is "the same".
+        _ => current.trim() != next.trim(),
+    };
+    if moved && !fresh {
+        return Err(Error::Invalid(
+            "changing the account's host requires a new token — the stored token is only \
+             ever sent to the host it was saved for"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn delete_account<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let account = load_authorized_account(&s, &id, &user).await?;
-    let _ = s.secrets().delete(&account.token_ref);
+    let _ = otto_core::secrets::delete_async(s.secrets(), &account.token_ref).await;
     s.issues().delete_account(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `?meta=1` asks for `{items, truncated}` instead of the bare array, so a
+/// picker can say "not every result is shown" when a listing stopped at its
+/// page cap (S5-22). Without it the response is unchanged.
+fn wants_meta(params: &HashMap<String, String>) -> bool {
+    params
+        .get("meta")
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true"))
+}
+
+/// The listing body for [`wants_meta`]: the bare array, or `{items, truncated}`.
+fn listing<T: serde::Serialize>(items: Vec<T>, truncated: bool, meta: bool) -> serde_json::Value {
+    if meta {
+        serde_json::json!({ "items": items, "truncated": truncated })
+    } else {
+        serde_json::json!(items)
+    }
 }
 
 async fn list_projects<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
-) -> ApiResult<Json<Vec<IssueProject>>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let account_id: Id = params
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
@@ -273,8 +334,8 @@ async fn list_projects<S: IssuesCtx>(
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
-    let projects = client.list_projects().await?;
-    Ok(Json(projects))
+    let (projects, truncated) = client.list_projects_paged().await?;
+    Ok(Json(listing(projects, truncated, wants_meta(&params))))
 }
 
 async fn search_issues<S: IssuesCtx>(
@@ -345,7 +406,7 @@ async fn list_spaces_cf<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
-) -> ApiResult<Json<Vec<ConfluenceSpace>>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let account_id: Id = params
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
@@ -355,8 +416,8 @@ async fn list_spaces_cf<S: IssuesCtx>(
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
-    let spaces = client.list_spaces().await?;
-    Ok(Json(spaces))
+    let (spaces, truncated) = client.list_spaces_paged().await?;
+    Ok(Json(listing(spaces, truncated, wants_meta(&params))))
 }
 
 async fn search_pages_cf<S: IssuesCtx>(
@@ -899,5 +960,38 @@ mod tests {
     fn root_can_access_any_account() {
         let account = account_owned_by("alice");
         assert!(authorize_account(&account, &user("root", true)).is_ok());
+    }
+
+    /// S5-22: `?meta=1` wraps a listing with its truncation flag; without it
+    /// the bare array is unchanged.
+    #[test]
+    fn a_listing_carries_truncation_only_when_asked() {
+        let mut params = HashMap::new();
+        assert!(!wants_meta(&params));
+        assert_eq!(listing(vec![1, 2], true, false), serde_json::json!([1, 2]));
+        params.insert("meta".to_string(), "1".to_string());
+        assert!(wants_meta(&params));
+        assert_eq!(
+            listing(vec![1], true, true),
+            serde_json::json!({"items": [1], "truncated": true})
+        );
+    }
+
+    /// S17-06: a host change without a fresh token is refused; the same
+    /// host (any path / case), or a new token, is fine.
+    #[test]
+    fn a_host_change_needs_a_fresh_token() {
+        let cur = "https://acme.atlassian.net";
+        assert!(require_token_for_host_change(cur, "https://evil.example", None).is_err());
+        assert!(require_token_for_host_change(cur, "https://evil.example", Some("  ")).is_err());
+        assert!(require_token_for_host_change(cur, "http://acme.atlassian.net", None).is_err());
+        assert!(
+            require_token_for_host_change(cur, "https://acme.atlassian.net:8443", None).is_err()
+        );
+        assert!(require_token_for_host_change(cur, "https://evil.example", Some("new")).is_ok());
+        assert!(
+            require_token_for_host_change(cur, "https://ACME.atlassian.net/wiki/", None).is_ok()
+        );
+        assert!(require_token_for_host_change(cur, cur, None).is_ok());
     }
 }

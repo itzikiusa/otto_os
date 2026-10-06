@@ -4,7 +4,7 @@
 //! Routes exposed:
 //!   GET  /api/v1/lsp/capabilities              → LspCapabilities (authed)
 //!   POST /api/v1/workspaces/{id}/lsp/install   → Session (Editor role)
-//!   GET  /ws/lsp?lang=&root=&token=            → WebSocket bridge (token auth)
+//!   GET  /ws/lsp?lang=&root=                   → WebSocket bridge (`otto-bearer` subprotocol auth)
 //!
 //! The bridge does NOT spawn a server per socket: sockets attach to the shared
 //! [`pool::LspPool`] (one process per `(lang, root)`, ref-counted, reaped
@@ -207,7 +207,6 @@ struct LspWsState {
 struct LspWsQuery {
     lang: Option<String>,
     root: Option<String>,
-    token: Option<String>,
 }
 
 fn ws_problem(status: StatusCode, code: &str, message: &str) -> Response {
@@ -218,14 +217,19 @@ fn ws_problem(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// `GET /ws/lsp?lang=<lang>&root=<path>&token=<token>`
+/// `GET /ws/lsp?lang=<lang>&root=<path>` (bearer in `Sec-WebSocket-Protocol`)
 async fn lsp_ws(
     ws: WebSocketUpgrade,
     Query(q): Query<LspWsQuery>,
     State(st): State<LspWsState>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    // 1. Token auth before upgrade (mirrors term_ws).
-    let token = match q.token {
+    // 1. Token auth before upgrade (mirrors term_ws). The bearer travels only
+    //    in the `otto-bearer` subprotocol — never the URL, which lands in
+    //    trace spans and tunnel/proxy access logs (S11-11); the legacy
+    //    `?token=` fallback is gone (S11-312).
+    let ws = ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL]);
+    let token = match crate::ws_events::token_from_subprotocol(&headers) {
         Some(t) => t,
         None => {
             return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing token");
@@ -238,8 +242,16 @@ async fn lsp_ws(
         }
     };
     // Same credential rules as the Files routes (`/fs/read`, `/fs/browse`):
-    // share-link (scoped) and MCP-restricted tokens never reach host files.
-    if auth.scope.is_some() || auth.mcp_only {
+    // share-link (scoped), MCP-restricted and agent-session tokens never reach
+    // host files (an unconfined language server reads the whole root).
+    if crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::Lsp,
+        &auth,
+        Some(&st.ctx.pool),
+    )
+    .await
+    .is_err()
+    {
         return ws_problem(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -464,7 +476,7 @@ pub fn api_router() -> Router<ServerCtx> {
         .route("/workspaces/{id}/lsp/install", post(install_servers))
 }
 
-/// Root-level WS router (self-authenticates via `?token=`).
+/// Root-level WS router (self-authenticates via the `otto-bearer` subprotocol).
 pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>, ctx: ServerCtx) -> Router {
     Router::new()
         .route("/ws/lsp", get(lsp_ws))

@@ -219,7 +219,21 @@ fn exit_while_detached_is_reported_on_adoption() {
     // Detach BEFORE the input that makes the child exit: its EXITED report can
     // then race the hang-up without the detached handle releasing the holder.
     h.detach();
-    h.write(b"z\n").expect("write");
+    // A held handle can be mid-reconnect for a moment (its send path reports
+    // "connection lost" until the reader re-attaches) — that is the designed
+    // behaviour, so retry the input briefly instead of failing on the first try.
+    // An exit counts as delivered: the child exits only after reading it.
+    let mut wrote = Err(otto_core::error::Error::Internal("not attempted".into()));
+    for _ in 0..100 {
+        wrote = h.write(b"z\n");
+        if wrote.is_ok() || h.has_exited() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !h.has_exited() {
+        wrote.expect("write");
+    }
     drop(h);
     std::thread::sleep(Duration::from_millis(800));
     assert!(
@@ -235,6 +249,121 @@ fn exit_while_detached_is_reported_on_adoption() {
         "its final screen is still there"
     );
     drop(adopted);
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
+}
+
+/// A holder whose child exited while its (detached) handle let go: it lingers
+/// for the next daemon. Returns its socket and pid.
+fn lingering_exited_holder(cfg: &HolderConfig) -> (PathBuf, u32) {
+    let h = PtyHandle::spawn_held(
+        cfg,
+        &sh("echo READY; sleep 0.3; exit 3"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    let holder_pid = h.holder().unwrap().holder_pid;
+    h.detach();
+    wait_until("exit", Duration::from_secs(10), || h.has_exited());
+    drop(h);
+    (only_socket(cfg), holder_pid)
+}
+
+/// A RELEASE that could not go out because the connection was mid-reconnect
+/// fell back to a detached thread — which gave up at once when the child's
+/// exit was already known (a dead-on-arrival adoption), so the dropped handle
+/// left the exited holder lingering for its whole exit linger.
+#[test]
+fn release_while_reconnecting_reaches_an_exited_holder() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let (socket, holder_pid) = lingering_exited_holder(&cfg);
+    let adopted = PtyHandle::adopt(&socket).expect("adopt the lingering holder");
+    adopted.simulate_holder_reconnecting();
+    assert!(adopted.has_exited(), "dead on arrival");
+    drop(adopted);
+    // Well inside the 30 s exit linger: only a delivered RELEASE ends it.
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
+}
+
+/// A client that sends KILL + RELEASE and hangs up at once (a daemon dropping
+/// its handle) while the holder is busy writing to it: the holder's write hits
+/// EPIPE first and used to abort the connection's reader with the control
+/// frames still unread — the child ran on and the holder lingered for the
+/// orphan TTL. The ignored filler frames ahead of the KILL keep the reader
+/// busy so the failed write wins that race.
+#[test]
+fn control_frames_sent_right_before_a_hang_up_are_honoured() {
+    use std::io::{Read, Write};
+    fn encode(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![kind];
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+    const HELLO: u8 = 0x01;
+    const HELLO_ACK: u8 = 0x02;
+    const RELEASE: u8 = 0x7E;
+    const KILL: u8 = 0x7F;
+    /// An unassigned kind: holders ignore unknown frames.
+    const FILLER: u8 = 0x6A;
+
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("while :; do echo spam; done"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    // READY scrolls out of the history at once: wait for the stream itself.
+    wait_until("output", Duration::from_secs(10), || {
+        screen_text(&h).contains("spam")
+    });
+    let child = h.pid().unwrap();
+    let holder_pid = h.holder().unwrap().holder_pid;
+    h.detach();
+    drop(h);
+
+    let mut s = std::os::unix::net::UnixStream::connect(only_socket(&cfg)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(&encode(HELLO, br#"{"proto_major":1,"proto_minor":2}"#))
+        .expect("hello");
+    let mut hdr = [0u8; 5];
+    s.read_exact(&mut hdr).expect("hello ack header");
+    assert_eq!(hdr[0], HELLO_ACK);
+    let mut ack = vec![0u8; u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize];
+    s.read_exact(&mut ack).expect("hello ack");
+    let mut burst = Vec::new();
+    for _ in 0..20_000 {
+        burst.extend_from_slice(&encode(FILLER, &[]));
+    }
+    burst.extend_from_slice(&encode(KILL, &[]));
+    burst.extend_from_slice(&encode(RELEASE, &[]));
+    // Keep reading what the holder streams so the burst is not stuck behind a
+    // full socket buffer, then hang up the moment it is all written.
+    let mut rd = s.try_clone().expect("clone");
+    let sink = std::thread::spawn(move || {
+        let mut buf = [0u8; 1 << 16];
+        while matches!(rd.read(&mut buf), Ok(n) if n > 0) {}
+    });
+    s.write_all(&burst).expect("burst");
+    let _ = s.shutdown(std::net::Shutdown::Both);
+    let _ = sink.join();
+    drop(s);
+
+    wait_until(
+        "child killed",
+        otto_pty::KILL_GRACE * 2 + Duration::from_secs(5),
+        || !pid_alive(child),
+    );
     wait_until("holder gone", Duration::from_secs(10), || {
         !pid_alive(holder_pid)
     });
@@ -263,6 +392,82 @@ fn kill_through_the_holder_escalates_past_an_ignored_hup() {
         || h.has_exited(),
     );
     assert!(!pid_alive(child));
+}
+
+/// A KILL issued while the connection is being re-established used to be
+/// dropped (`ConnectionReset`): the child ran on, orphaned, while the session
+/// looked dead. It now ends the holder over a fresh connection, and the exit
+/// is reported only after that.
+#[test]
+fn kill_while_reconnecting_terminates_over_a_fresh_connection() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("echo READY; exec sleep 60"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&h).contains("READY")
+    });
+    let child = h.pid().unwrap();
+    let holder_pid = h.holder().unwrap().holder_pid;
+    h.simulate_holder_reconnecting();
+    h.kill().expect("kill falls back to terminate");
+    wait_until(
+        "exit reported once the holder is gone",
+        Duration::from_secs(15),
+        || h.has_exited(),
+    );
+    assert!(!pid_alive(child), "the child is dead when the exit fires");
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
+}
+
+/// Review S1-08: the fallback used to report the exit as soon as the
+/// KILL/RELEASE bytes were written — before the holder's HUP → TERM → KILL
+/// escalation finished. With a child that ignores HUP the session looked
+/// dead (and resumable) for seconds while the CLI still ran. The exit must
+/// fire only once the child is provably gone, and `kill()` must not block
+/// the caller for the escalation.
+#[test]
+fn held_kill_fallback_reports_the_exit_only_after_the_child_is_dead() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("trap '' HUP; echo READY; while :; do sleep 0.2; done"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&h).contains("READY")
+    });
+    let child = h.pid().unwrap();
+    h.simulate_holder_reconnecting();
+    let started = Instant::now();
+    h.kill().expect("kill falls back to terminate");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "kill() must not wait for the escalation: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !h.has_exited(),
+        "a HUP-ignoring child is still running: no exit yet"
+    );
+    let deadline = Instant::now() + otto_pty::KILL_GRACE * 2 + Duration::from_secs(10);
+    while !h.has_exited() {
+        assert!(Instant::now() < deadline, "exit never reported");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!pid_alive(child), "exit fired while the child still ran");
 }
 
 #[test]
@@ -441,4 +646,64 @@ fn history_cap_reaches_the_holder_emulator_and_regrows() {
         "history regrew past {UNVIEWED_SCROLLBACK_LINES} rows in the holder"
     );
     drop(third);
+}
+
+/// Review S1-19: adoption clamped the holder's grid to the RESTORE bounds
+/// (200 rows) although live resizes allow up to 300, so a tall session came
+/// back mirrored at 200 rows with its bottom (the TUI composer) missing.
+#[test]
+fn adoption_keeps_a_grid_taller_than_the_restore_bounds() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let first = PtyHandle::spawn_held(
+        &cfg,
+        &sh("echo READY; exec cat"),
+        100,
+        30,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&first).contains("READY")
+    });
+    first
+        .resize(100, otto_pty::RESIZE_MAX_ROWS)
+        .expect("tall resize");
+    let holder_pid = first.holder().unwrap().holder_pid;
+    // Let the holder apply the RESIZE frame before handing over.
+    std::thread::sleep(Duration::from_millis(500));
+    first.detach();
+    drop(first);
+    let second = PtyHandle::adopt(&only_socket(&cfg)).expect("adopt");
+    assert_eq!(second.size(), (100, otto_pty::RESIZE_MAX_ROWS));
+    drop(second);
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
+}
+
+/// Review S1-20: a resize whose holder write fails must leave the mirror at
+/// its old size — otherwise every later identical resize is a "same size"
+/// no-op and the PTY and the mirror stay out of sync.
+#[test]
+fn failed_held_resize_keeps_the_mirror_at_the_old_size() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("echo READY; exec cat"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&h).contains("READY")
+    });
+    h.simulate_holder_reconnecting();
+    h.resize(90, 30)
+        .expect_err("no connection to send the resize on");
+    assert_eq!(h.size(), (80, 24), "mirror reverted");
+    h.kill().expect("kill");
+    wait_until("ended", Duration::from_secs(15), || h.has_exited());
 }

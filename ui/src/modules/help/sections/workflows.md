@@ -50,7 +50,7 @@ A workflow is a graph of steps you build once and run many times. Each step is a
   - **Budget Gate** — stops the run when a provider spend cap is blocked.
   - **Human Approval** — pauses until someone chooses **Approve** or **Reject**.
   - **Condition** — evaluates an expression.
-  - **Loop (Until)** — repeats inner steps until an expression holds, 1–10 iterations. Loops can't be nested.
+  - **Repeat (Until)** — repeats inner steps until an expression holds, 1–10 iterations. Loops can't be nested.
 - **Integrations:** Channel Notify — posts to a configured Slack or Telegram integration.
 - **Product:** Product Analyze, Product Rewrite, Product Plan, Product Publish (Confluence RFC or Jira issue, dry run by default), and Canvas Diagram (Mermaid or Excalidraw).
 - **Game:** Game Engine and Verifier — scaffolds that produce a template spec, not a certified build.

@@ -15,9 +15,12 @@
 //!   invalidation (stale access after revoke) outweighs any latency benefit.
 //!   Every authenticated request for these kinds always hits the DB.
 //! - Every revocation path evicts the affected entry **before** returning:
-//!   `revoke`, `revoke_api_token`, and `revoke_all_for_user` all call
-//!   `cache.evict(hash)` / `cache.evict_user(uid)` synchronously, so there is
-//!   no window where a revoked token is served from cache.
+//!   `revoke`, `revoke_api_token`, `revoke_all_for_user` (and the MCP /
+//!   managed-token sweeps) evict from EVERY live [`AuthCache`] in the process
+//!   (`cache::evict_everywhere` / `evict_user_everywhere`), whether or not the
+//!   repo doing the revoke has a cache attached — routes revoke through
+//!   cache-less `AuthRepo::new(pool)` repos (S8-302), so there is no window
+//!   where a revoked token is served from the authenticator's cache.
 //! - Grant changes invalidate the user's cached context via
 //!   [`GrantsInvalidator::invalidate_user`], implemented by `AuthCache`.
 //! - The cache is disabled entirely (all paths hit the DB) when
@@ -61,12 +64,39 @@ pub const SHARE_TOKEN_TTL_MIN_SECS: i64 = 60;
 /// emailed code can at most grant a 12h window per verification; requests above
 /// this are clamped down.
 pub const SHARE_OTP_WINDOW_MAX_SECS: i64 = 12 * 60 * 60;
+
+/// Absolute lifetime of an email-OTP share (S8-06): `POST /share/extend` grants
+/// fresh ≤12h windows, but never past `created_at + this`. A lapsed share stays
+/// listed (as `dormant`) until then so the owner can see and revoke it.
+pub const SHARE_OTP_ABSOLUTE_MAX_SECS: i64 = 7 * 24 * 60 * 60;
 /// Lifetime of a single emailed OTP (10 minutes). Short by design — the code is
 /// a second factor delivered out-of-band, single-use, and rate-limited.
 pub const SHARE_OTP_TTL_SECS: i64 = 600;
+/// Wrong codes one emailed OTP tolerates before it is burned (S8-301). The
+/// per-IP share throttle can be rotated around (tunnels, IPv6), so this is the
+/// hard, IP-independent bound: after this many misses the guest must request a
+/// fresh code via `POST /share/extend`, which is itself capped per share.
+pub const SHARE_OTP_MAX_FAILURES: i64 = 5;
 /// Minimum age of `last_seen_at` before we touch the row again (throttles
 /// writes; for session tokens this also slides the expiry).
 const TOUCH_THROTTLE_SECS: i64 = 3600;
+
+/// Process-wide revocation generation (S8-03): bumped by every token
+/// revocation so long-lived sockets (`/ws/events`) notice within a beat and
+/// re-authenticate, instead of waiting for their periodic re-check. A plain
+/// atomic (no runtime dependency): readers poll it on a short tick — one
+/// relaxed load — and only hit the authenticator when it moved.
+static REVOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The current revocation generation (see [`REVOCATIONS`]).
+pub fn revocation_generation() -> u64 {
+    REVOCATIONS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Announce that some credential was revoked.
+pub fn signal_revocation() {
+    REVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
 
 /// SHA-256 hex of a raw token string.
 pub fn token_hash(token: &str) -> String {
@@ -108,6 +138,21 @@ fn legacy_session_label(label: &str) -> Option<&str> {
     .then_some(id)
 }
 
+/// Why `POST /share/verify` did (not) accept a code
+/// ([`AuthRepo::verify_share_otp_outcome`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareOtpOutcome {
+    /// The code matched; the share is verified and the code consumed.
+    Verified,
+    /// Wrong / expired / already-used code, or not an OTP share.
+    Rejected,
+    /// This wrong code was the last one allowed: the code is burned and the
+    /// guest must request a fresh one (S8-301).
+    Burned,
+    /// The argon2 verify bound is saturated; nothing was counted — retry.
+    Busy,
+}
+
 /// Repository for `auth_sessions`.
 ///
 /// Holds an optional short-TTL [`AuthCache`] to avoid redundant SQLite reads on
@@ -139,6 +184,23 @@ impl AuthRepo {
             pool,
             cache: Some(cache),
         }
+    }
+
+    /// Drop one token hash from every live auth cache (S8-302): revokes run
+    /// on cache-less repos (`AuthRepo::new`) all over the routes, so evicting
+    /// only `self.cache` left the shared authenticator serving the revoked
+    /// token for up to `AUTH_CACHE_TTL`.
+    fn evict_hash(&self, hash: &str) {
+        crate::cache::evict_everywhere(hash);
+    }
+
+    /// Drop every cached token of `user_id` from every live auth cache (and
+    /// this repo's grant rows when a cache is attached).
+    fn evict_user(&self, user_id: &str) {
+        if let Some(cache) = &self.cache {
+            cache.evict_user(user_id);
+        }
+        crate::cache::evict_user_everywhere(user_id);
     }
 
     /// Issue a new token for `user_id` and return the RAW token (the only
@@ -188,8 +250,8 @@ impl AuthRepo {
 
         // Cache fast-path: only populated for login/api tokens (never for share
         // or impersonation). A hit means: the token was valid at insert-time,
-        // TTL has not elapsed, and evict() has not been called for this hash
-        // (which revoke paths do synchronously before returning). Safe to serve.
+        // TTL has not elapsed, and no revoke has evicted this hash (every revoke
+        // path evicts process-wide before returning — S8-302). Safe to serve.
         if let Some(cache) = &self.cache {
             if let Some(ctx) = cache.get(&hash) {
                 return Ok(ctx);
@@ -233,8 +295,11 @@ impl AuthRepo {
         // Session-managed credentials retain the owner's permissions, but only
         // while their originating session exists. Never cache this liveness
         // check: deleting a session must close access even after a restart.
-        let managed_session: Option<String> = if kind == "api" {
-            row.get("session_scope")
+        // `agent_mcp` (the session's MCP credential) is held to the same rule
+        // and is likewise never cached (S8-14).
+        let managed_session: Option<String> = if kind == "api" || kind == "agent_mcp" {
+            row.get::<Option<String>, _>("session_scope")
+                .filter(|value| !value.is_empty())
         } else {
             None
         };
@@ -463,9 +528,8 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke token: {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict(&hash);
-        }
+        self.evict_hash(&hash);
+        signal_revocation();
         Ok(())
     }
 
@@ -485,9 +549,8 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke all for user: {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict_user(user_id);
-        }
+        self.evict_user(user_id);
+        signal_revocation();
         Ok(res.rows_affected())
     }
 
@@ -514,10 +577,8 @@ impl AuthRepo {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("purge expired tokens: {e}")))?;
-            if let Some(cache) = &self.cache {
-                for h in &hashes {
-                    cache.evict(h);
-                }
+            for h in &hashes {
+                self.evict_hash(h);
             }
             total += hashes.len() as u64;
             if (hashes.len() as i64) < BATCH {
@@ -543,6 +604,21 @@ impl AuthRepo {
         user_id: &Id,
         session_id: &Id,
     ) -> Result<(String, ApiTokenInfo)> {
+        self.issue_session_api_token_labeled(user_id, session_id, &format!("otto-mcp:{session_id}"))
+            .await
+    }
+
+    /// [`Self::issue_session_api_token`] under a caller-chosen label — the
+    /// governed self-call cache (S8-305) mints its session-bound credentials
+    /// with its own label so its crash-leftover sweep can find them. The
+    /// session binding (`session_scope`) is what makes the credential an
+    /// agent's; the label is only a name.
+    pub async fn issue_session_api_token_labeled(
+        &self,
+        user_id: &Id,
+        session_id: &Id,
+        label: &str,
+    ) -> Result<(String, ApiTokenInfo)> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND created_by = ?)",
         )
@@ -554,12 +630,8 @@ impl AuthRepo {
         if !exists {
             return Err(Error::Unauthorized);
         }
-        self.issue_api_token_inner(
-            user_id,
-            Some(&format!("otto-mcp:{session_id}")),
-            Some(session_id),
-        )
-        .await
+        self.issue_api_token_inner(user_id, Some(label), Some(session_id))
+            .await
     }
 
     async fn issue_api_token_inner(
@@ -620,11 +692,10 @@ impl AuthRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("revoke session tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            for hash in &hashes {
-                cache.evict(hash);
-            }
+        for hash in &hashes {
+            self.evict_hash(hash);
         }
+        signal_revocation();
         Ok(hashes.len() as u64)
     }
 
@@ -658,10 +729,8 @@ impl AuthRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("expire managed session tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            for hash in &hashes {
-                cache.evict(hash);
-            }
+        for hash in &hashes {
+            self.evict_hash(hash);
         }
         Ok(hashes.len() as u64)
     }
@@ -721,10 +790,8 @@ impl AuthRepo {
         tx.commit()
             .await
             .map_err(|e| Error::Internal(format!("expire legacy session tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            for (_, hash) in &stale {
-                cache.evict(hash);
-            }
+        for (_, hash) in &stale {
+            self.evict_hash(hash);
         }
         Ok(stale.len() as u64)
     }
@@ -888,8 +955,8 @@ impl AuthRepo {
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("revoke vault reviewer token: {e}")))?;
-        if let (Some(cache), Some(hash)) = (&self.cache, cached_hash) {
-            cache.evict(&hash);
+        if let Some(hash) = cached_hash {
+            self.evict_hash(&hash);
         }
         Ok(result.rows_affected() > 0)
     }
@@ -949,9 +1016,10 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke mcp token: {e}")))?;
-        if let (Some(cache), Some(uid)) = (&self.cache, owner) {
-            cache.evict_user(&uid);
+        if let Some(uid) = owner {
+            self.evict_user(&uid);
         }
+        signal_revocation();
         Ok(res.rows_affected() > 0)
     }
 
@@ -988,9 +1056,7 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("rotate mcp token (delete old): {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict_user(&user_id);
-        }
+        self.evict_user(&user_id);
         Ok(Some((token, info)))
     }
 
@@ -1009,9 +1075,7 @@ impl AuthRepo {
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("revoke mcp tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict_user(user_id);
-        }
+        self.evict_user(user_id);
         Ok(res.rows_affected())
     }
 
@@ -1140,22 +1204,19 @@ impl AuthRepo {
     /// so the cache entry can be evicted by hash. The read is scoped by `user_id`
     /// and `kind='api'` so it cannot accidentally reveal another user's hash.
     pub async fn revoke_api_token(&self, user_id: &Id, id: &Id) -> Result<bool> {
-        // Pre-fetch the hash for cache eviction. This is a single indexed lookup
-        // and only runs when the cache is present; it is a no-op read otherwise.
-        let cached_hash: Option<String> = if self.cache.is_some() {
-            let row = sqlx::query(
-                "SELECT token_hash FROM auth_sessions
-                 WHERE id = ? AND user_id = ? AND kind = 'api'",
-            )
-            .bind(id)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| Error::Internal(format!("revoke api token lookup: {e}")))?;
-            row.map(|r| r.get::<String, _>("token_hash"))
-        } else {
-            None
-        };
+        // Pre-fetch the hash for cache eviction: a single indexed lookup. It
+        // runs even without an attached cache — the shared authenticator's
+        // cache is evicted process-wide (S8-302).
+        let cached_hash: Option<String> = sqlx::query(
+            "SELECT token_hash FROM auth_sessions
+             WHERE id = ? AND user_id = ? AND kind = 'api'",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke api token lookup: {e}")))?
+        .map(|r| r.get::<String, _>("token_hash"));
 
         let res =
             sqlx::query("DELETE FROM auth_sessions WHERE id = ? AND user_id = ? AND kind = 'api'")
@@ -1166,9 +1227,10 @@ impl AuthRepo {
                 .map_err(|e| Error::Internal(format!("revoke api token: {e}")))?;
 
         if res.rows_affected() > 0 {
-            if let (Some(cache), Some(h)) = (&self.cache, cached_hash) {
-                cache.evict(&h);
+            if let Some(h) = cached_hash {
+                self.evict_hash(&h);
             }
+            signal_revocation();
         }
         Ok(res.rows_affected() > 0)
     }
@@ -1243,6 +1305,7 @@ impl AuthRepo {
                 label,
                 created_at: now,
                 expires_at,
+                dormant: false,
             },
         ))
     }
@@ -1333,6 +1396,7 @@ impl AuthRepo {
                 label,
                 created_at: now,
                 expires_at,
+                dormant: false,
             },
         ))
     }
@@ -1352,6 +1416,22 @@ impl AuthRepo {
     /// the comparison is constant-shape (both sides SHA-256 hex). The caller is
     /// responsible for IP rate-limiting (the share throttle) around this call.
     pub async fn verify_share_otp(&self, token: &str, otp: &str) -> Result<bool> {
+        Ok(self.verify_share_otp_outcome(token, otp).await? == ShareOtpOutcome::Verified)
+    }
+
+    /// [`Self::verify_share_otp`] with the reason a code was not accepted.
+    ///
+    /// Every WRONG code against a live OTP counts on the share itself
+    /// (`otp_failures`); the [`SHARE_OTP_MAX_FAILURES`]th burns the code
+    /// (`otp_hash = NULL`) so no IP rotation can keep guessing it (S8-301).
+    /// The argon2 check runs off the async workers behind the shared verify
+    /// bound ([`crate::passwords::verify_password_bounded`]); a saturated bound
+    /// answers [`ShareOtpOutcome::Busy`] without counting a failure.
+    pub async fn verify_share_otp_outcome(
+        &self,
+        token: &str,
+        otp: &str,
+    ) -> Result<ShareOtpOutcome> {
         let hash = token_hash(token);
         let row = sqlx::query(
             "SELECT otp_hash, otp_expires_at, revoked, recipient_email
@@ -1363,29 +1443,56 @@ impl AuthRepo {
         .await
         .map_err(|e| Error::Internal(format!("verify share otp lookup: {e}")))?;
 
-        let Some(row) = row else { return Ok(false) };
+        let Some(row) = row else {
+            return Ok(ShareOtpOutcome::Rejected);
+        };
         // A revoked share never verifies; an OTP-less share (plain or already
-        // redeemed) has nothing to match.
+        // redeemed / burned) has nothing to match.
         if row.get::<i64, _>("revoked") != 0 {
-            return Ok(false);
+            return Ok(ShareOtpOutcome::Rejected);
         }
         let recipient: Option<String> = row.get("recipient_email");
         if recipient.is_none() {
-            return Ok(false); // not an OTP-gated share
+            return Ok(ShareOtpOutcome::Rejected); // not an OTP-gated share
         }
         let stored_hash: Option<String> = row.get("otp_hash");
         let Some(stored_hash) = stored_hash else {
-            return Ok(false); // already redeemed (single-use) — no code to match
+            // Already redeemed (single-use) or burned — no code to match.
+            return Ok(ShareOtpOutcome::Rejected);
         };
         let otp_expires_at: Option<i64> = row.get("otp_expires_at");
         let now = Utc::now().timestamp();
         if otp_expires_at.map(|e| e <= now).unwrap_or(true) {
-            return Ok(false); // expired code
+            return Ok(ShareOtpOutcome::Rejected); // expired code
         }
         // argon2id, not a plain digest: a 6-digit code behind a fast hash is a
         // one-million-guess offline job for anyone who reads the row.
-        if !crate::passwords::verify_password(otp, &stored_hash).unwrap_or(false) {
-            return Ok(false); // wrong code
+        let matched = match crate::passwords::verify_password_bounded(otp, &stored_hash).await {
+            Ok(r) => r.unwrap_or(false),
+            Err(crate::passwords::VerifySaturated) => return Ok(ShareOtpOutcome::Busy),
+        };
+        if !matched {
+            // Count the miss on the share; the last allowed one burns the code.
+            // Guarded on `otp_hash` so a miss can't touch a newer code that an
+            // extend minted meanwhile. SQLite evaluates SET against the OLD row.
+            let burned: Option<i64> = sqlx::query_scalar(
+                "UPDATE auth_sessions
+                 SET otp_failures = otp_failures + 1,
+                     otp_hash = CASE WHEN otp_failures + 1 >= ? THEN NULL ELSE otp_hash END
+                 WHERE token_hash = ? AND kind = 'share' AND otp_hash = ?
+                 RETURNING otp_hash IS NULL",
+            )
+            .bind(SHARE_OTP_MAX_FAILURES)
+            .bind(&hash)
+            .bind(&stored_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("verify share otp miss: {e}")))?;
+            return Ok(if burned == Some(1) {
+                ShareOtpOutcome::Burned
+            } else {
+                ShareOtpOutcome::Rejected
+            });
         }
 
         // Match: mark verified and CLEAR the code (single-use). Guard the UPDATE
@@ -1393,7 +1500,7 @@ impl AuthRepo {
         // can't both succeed on the same code.
         let res = sqlx::query(
             "UPDATE auth_sessions
-             SET verified_at = ?, otp_hash = NULL
+             SET verified_at = ?, otp_hash = NULL, otp_failures = 0
              WHERE token_hash = ? AND kind = 'share' AND otp_hash = ?",
         )
         .bind(now)
@@ -1403,7 +1510,59 @@ impl AuthRepo {
         .await
         .map_err(|e| Error::Internal(format!("verify share otp update: {e}")))?;
 
-        Ok(res.rows_affected() > 0)
+        Ok(if res.rows_affected() > 0 {
+            ShareOtpOutcome::Verified
+        } else {
+            ShareOtpOutcome::Rejected
+        })
+    }
+
+    /// The share id of `token` when `POST /share/extend` may act on it: a live
+    /// (not revoked, inside its 7-day lifetime) email-OTP share that is NOT
+    /// currently verified-and-open (S8-307 — extending re-pends the guest, so a
+    /// link holder must not be able to kick a verified guest out). `Ok(None)`
+    /// for anything that is not an OTP share at all. The route takes the
+    /// per-share extend budget only after this resolves (S8-306).
+    pub async fn extendable_share_id(&self, token: &str) -> Result<Option<Id>> {
+        let row = sqlx::query(
+            "SELECT id, recipient_email, revoked, created_at, verified_at, max_expires_at
+             FROM auth_sessions
+             WHERE token_hash = ? AND kind = 'share'",
+        )
+        .bind(token_hash(token))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("extendable share lookup: {e}")))?;
+        let Some(row) = row else { return Ok(None) };
+        if row.get::<i64, _>("revoked") != 0
+            || row.get::<Option<String>, _>("recipient_email").is_none()
+        {
+            return Ok(None);
+        }
+        Self::check_extendable(&row)?;
+        Ok(Some(Id::from(row.get::<String, _>("id"))))
+    }
+
+    /// The lifetime / verified-window refusals shared by
+    /// [`Self::extendable_share_id`] and [`Self::extend_share_otp`].
+    fn check_extendable(row: &sqlx::sqlite::SqliteRow) -> Result<()> {
+        let now = Utc::now();
+        let created_at = parse_ts(&row.get::<String, _>("created_at"))?;
+        if now >= created_at + Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS) {
+            return Err(Error::Forbidden(
+                "this share link reached its 7-day lifetime; ask the owner for a new link".into(),
+            ));
+        }
+        let verified_at: Option<i64> = row.get("verified_at");
+        let max_expires_at: Option<i64> = row.get("max_expires_at");
+        if verified_at.is_some() && max_expires_at.is_some_and(|m| m > now.timestamp()) {
+            return Err(Error::Conflict(
+                "this share is verified and still open; it can be extended once its window \
+                 lapses"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Extend an email-OTP share with a **fresh** code, re-emailed to the LOCKED
@@ -1434,7 +1593,8 @@ impl AuthRepo {
     pub async fn extend_share_otp(&self, token: &str) -> Result<Option<(String, String, Id)>> {
         let hash = token_hash(token);
         let row = sqlx::query(
-            "SELECT user_id, recipient_email, revoked, created_at, expires_at
+            "SELECT user_id, recipient_email, revoked, created_at, expires_at,
+                    verified_at, max_expires_at
              FROM auth_sessions
              WHERE token_hash = ? AND kind = 'share'",
         )
@@ -1464,17 +1624,22 @@ impl AuthRepo {
         let window_secs =
             original_window.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
 
-        let otp = generate_otp();
         let now = Utc::now();
-        // Fresh ≤12h window; the bearer-token TTL tracks it so the token can never
-        // outlive the window it grants.
-        let expires_at = now + Duration::seconds(window_secs);
+        // Absolute lifetime (S8-06): past it the link is dead for good — the
+        // holder can no longer revive it, however often they ask. A verified
+        // guest inside its window is never re-pended by a link holder (S8-307).
+        Self::check_extendable(&row)?;
+        let hard_end = created_at + Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS);
+        let otp = generate_otp();
+        // Fresh ≤12h window (never past the absolute lifetime); the bearer-token
+        // TTL tracks it so the token can never outlive the window it grants.
+        let expires_at = (now + Duration::seconds(window_secs)).min(hard_end);
         let max_expires_at = expires_at.timestamp();
         let otp_expires_at = (now + Duration::seconds(SHARE_OTP_TTL_SECS)).timestamp();
 
         let res = sqlx::query(
             "UPDATE auth_sessions
-             SET otp_hash = ?, otp_expires_at = ?, verified_at = NULL,
+             SET otp_hash = ?, otp_expires_at = ?, verified_at = NULL, otp_failures = 0,
                  max_expires_at = ?, expires_at = ?
              WHERE token_hash = ? AND kind = 'share' AND revoked = 0
                    AND recipient_email IS NOT NULL",
@@ -1498,15 +1663,19 @@ impl AuthRepo {
     /// List the **live** (non-revoked, non-expired) share tokens for one session,
     /// newest first. Metadata only — never the secret.
     pub async fn list_shares_for_session(&self, session_id: &Id) -> Result<Vec<ShareInfo>> {
-        let now = Utc::now().to_rfc3339();
+        let now_ts = Utc::now();
+        let now = now_ts.to_rfc3339();
+        let dormant_cutoff = (now_ts - Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS)).to_rfc3339();
         let rows = sqlx::query(
             "SELECT id, session_scope, scope_role, token_prefix, label, created_at, expires_at
              FROM auth_sessions
-             WHERE kind = 'share' AND revoked = 0 AND session_scope = ? AND expires_at > ?
+             WHERE kind = 'share' AND revoked = 0 AND session_scope = ?
+                   AND (expires_at > ? OR (recipient_email IS NOT NULL AND created_at > ?))
              ORDER BY created_at DESC",
         )
         .bind(session_id)
         .bind(now)
+        .bind(dormant_cutoff)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("list shares for session: {e}")))?;
@@ -1516,6 +1685,7 @@ impl AuthRepo {
                 let scope_role: String = row.get("scope_role");
                 let role = WorkspaceRole::parse(&scope_role)
                     .ok_or_else(|| Error::Internal(format!("bad scope_role '{scope_role}'")))?;
+                let expires_at = parse_ts(&row.get::<String, _>("expires_at"))?;
                 Ok(ShareInfo {
                     id: row.get("id"),
                     session_id: Id::from(row.get::<String, _>("session_scope")),
@@ -1523,7 +1693,50 @@ impl AuthRepo {
                     token_prefix: row.get("token_prefix"),
                     label: row.get("label"),
                     created_at: parse_ts(&row.get::<String, _>("created_at"))?,
-                    expires_at: parse_ts(&row.get::<String, _>("expires_at"))?,
+                    expires_at,
+                    dormant: expires_at <= now_ts,
+                })
+            })
+            .collect()
+    }
+
+    /// List the caller's **live** share tokens across every session (newest
+    /// first) — the Settings → Sharing "Active links" table. Owner-scoped:
+    /// another user's links never appear. Metadata only — never the secret.
+    pub async fn list_shares_for_user(&self, owner_user_id: &Id) -> Result<Vec<ShareInfo>> {
+        let now_ts = Utc::now();
+        let now = now_ts.to_rfc3339();
+        let dormant_cutoff = (now_ts - Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS)).to_rfc3339();
+        let rows = sqlx::query(
+            "SELECT id, session_scope, scope_role, token_prefix, label, created_at, expires_at
+             FROM auth_sessions
+             WHERE kind = 'share' AND revoked = 0 AND user_id = ?
+                   AND (expires_at > ? OR (recipient_email IS NOT NULL AND created_at > ?))
+             ORDER BY created_at DESC
+             LIMIT 500",
+        )
+        .bind(owner_user_id)
+        .bind(now)
+        .bind(dormant_cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("list shares for user: {e}")))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let scope_role: String = row.get("scope_role");
+                let role = WorkspaceRole::parse(&scope_role)
+                    .ok_or_else(|| Error::Internal(format!("bad scope_role '{scope_role}'")))?;
+                let expires_at = parse_ts(&row.get::<String, _>("expires_at"))?;
+                Ok(ShareInfo {
+                    id: row.get("id"),
+                    session_id: Id::from(row.get::<String, _>("session_scope")),
+                    role,
+                    token_prefix: row.get("token_prefix"),
+                    label: row.get("label"),
+                    created_at: parse_ts(&row.get::<String, _>("created_at"))?,
+                    expires_at,
+                    dormant: expires_at <= now_ts,
                 })
             })
             .collect()
@@ -2213,7 +2426,7 @@ mod tests {
         let pool = mem_pool().await;
         let repo = AuthRepo::new(pool.clone());
         let uid = seed_user(&pool, "vault-reviewer").await;
-        let session_id = Id::from("review-session-1");
+        let session_id = seed_managed_session(&pool, &uid).await;
         let workspace_id = Id::from("workspace-1");
 
         let (token, token_id) = repo
@@ -2244,6 +2457,18 @@ mod tests {
         assert!(scope
             .deny_reason("vault_read", false, Some("workspace-2"))
             .is_some());
+
+        // S8-14: like a session `api` token, it lives only while its session
+        // row does — and is never served from the auth cache.
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.authenticate(&token).await,
+            Err(Error::Unauthorized)
+        ));
 
         assert!(repo
             .revoke_vault_reviewer_token(&uid, &token_id)
@@ -2799,6 +3024,71 @@ mod tests {
         }
     }
 
+    /// S8-06: a lapsed OTP share stays listed as `dormant` (the link holder
+    /// can still revive it), and `extend` is refused past the 7-day absolute
+    /// lifetime — after which it also drops out of the lists.
+    #[tokio::test]
+    async fn lapsed_otp_share_is_listed_dormant_and_extend_is_capped() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+        let sid = Id::from("S1");
+        let (raw, _otp, _) = repo
+            .issue_share_otp_token(
+                &owner,
+                &sid,
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "g@example.com",
+            )
+            .await
+            .unwrap();
+        let set_times = |created: chrono::DateTime<Utc>, expires: chrono::DateTime<Utc>| {
+            let pool = pool.clone();
+            let raw = raw.clone();
+            async move {
+                sqlx::query(
+                    "UPDATE auth_sessions SET created_at = ?, expires_at = ? WHERE token_hash = ?",
+                )
+                .bind(created.to_rfc3339())
+                .bind(expires.to_rfc3339())
+                .bind(token_hash(&raw))
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        let now = Utc::now();
+
+        // Lapsed 1 day into its life: listed, flagged dormant, still extendable
+        // — and the fresh window never runs past the absolute lifetime.
+        set_times(now - Duration::days(1), now - Duration::hours(1)).await;
+        let listed = repo.list_shares_for_user(&owner).await.unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "a revivable lapsed share must stay visible"
+        );
+        assert!(listed[0].dormant);
+        assert!(repo.list_shares_for_session(&sid).await.unwrap()[0].dormant);
+        assert!(repo.extend_share_otp(&raw).await.unwrap().is_some());
+        let live = repo.list_shares_for_user(&owner).await.unwrap();
+        assert!(!live[0].dormant, "an extended share is live again");
+
+        // Past the absolute lifetime: extend is refused and the row is gone.
+        set_times(
+            now - Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS + 60),
+            now - Duration::hours(1),
+        )
+        .await;
+        assert!(matches!(
+            repo.extend_share_otp(&raw).await,
+            Err(Error::Forbidden(_))
+        ));
+        assert!(repo.list_shares_for_user(&owner).await.unwrap().is_empty());
+    }
+
     /// Minting an OTP share: returns a raw OTP, stores only its hash, and the
     /// share authenticates as **OTP-pending** (reaches nothing until verified).
     #[tokio::test]
@@ -2880,6 +3170,68 @@ mod tests {
             !repo.verify_share_otp(&raw, &otp).await.unwrap(),
             "the OTP must be single-use"
         );
+    }
+
+    /// S8-301: wrong codes count against the SHARE (not just the caller's
+    /// IP): the `SHARE_OTP_MAX_FAILURES`th burns the code, so even the right
+    /// code fails afterwards; a fresh extend (only once the share is not
+    /// verified-and-open) resets the counter.
+    #[tokio::test]
+    async fn wrong_otps_burn_the_code_after_the_cap() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+        let (raw, otp, _info) = repo
+            .issue_share_otp_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "guest@example.com",
+            )
+            .await
+            .unwrap();
+        let wrong = if otp == "000000" { "111111" } else { "000000" };
+        for i in 1..=SHARE_OTP_MAX_FAILURES {
+            let out = repo.verify_share_otp_outcome(&raw, wrong).await.unwrap();
+            let want = if i == SHARE_OTP_MAX_FAILURES {
+                ShareOtpOutcome::Burned
+            } else {
+                ShareOtpOutcome::Rejected
+            };
+            assert_eq!(out, want, "miss #{i}");
+        }
+        assert!(
+            !repo.verify_share_otp(&raw, &otp).await.unwrap(),
+            "a burned code must not verify, even when correct"
+        );
+        // Pending (never verified) → extendable; the new code works.
+        assert!(repo.extendable_share_id(&raw).await.unwrap().is_some());
+        let (fresh, _, _) = repo.extend_share_otp(&raw).await.unwrap().unwrap();
+        let wrong = if fresh == "000000" {
+            "111111"
+        } else {
+            "000000"
+        };
+        for _ in 1..SHARE_OTP_MAX_FAILURES {
+            assert!(!repo.verify_share_otp(&raw, wrong).await.unwrap());
+        }
+        assert!(
+            repo.verify_share_otp(&raw, &fresh).await.unwrap(),
+            "extend resets the per-share miss counter"
+        );
+        // Verified and open: no longer extendable by a link holder (S8-307).
+        assert!(matches!(
+            repo.extendable_share_id(&raw).await,
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(
+            repo.extend_share_otp(&raw).await,
+            Err(Error::Conflict(_))
+        ));
+        // A plain token is not an OTP share at all.
+        assert!(repo.extendable_share_id("junk").await.unwrap().is_none());
     }
 
     /// An expired OTP cannot be redeemed (otp_expires_at in the past).
@@ -3092,6 +3444,40 @@ mod tests {
         assert!(
             matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
             "revoked login token must be rejected even with cache present"
+        );
+    }
+
+    /// S8-302: routes revoke through a CACHE-LESS `AuthRepo::new(pool)` while
+    /// the authenticator holds the shared cache. Logout, PAT revoke and
+    /// revoke-all must still be refused on the very next cached lookup.
+    #[tokio::test]
+    async fn uncached_revokes_evict_the_shared_authenticator_cache() {
+        let pool = mem_pool().await;
+        let (authn, _cache) = cached_repo(pool.clone());
+        let routes = AuthRepo::new(pool.clone());
+        let uid = seed_user(&pool, "s8_302_user").await;
+
+        let login = routes.issue(&uid).await.unwrap();
+        let (pat, pat_info) = routes.issue_api_token(&uid, Some("ci")).await.unwrap();
+        let other = routes.issue(&uid).await.unwrap();
+        for t in [&login, &pat, &other] {
+            assert!(authn.authenticate(t).await.is_ok(), "primes the cache");
+        }
+
+        routes.revoke(&login).await.unwrap();
+        assert!(
+            matches!(authn.authenticate(&login).await, Err(Error::Unauthorized)),
+            "logout via an uncached repo must evict the shared cache"
+        );
+        assert!(routes.revoke_api_token(&uid, &pat_info.id).await.unwrap());
+        assert!(
+            matches!(authn.authenticate(&pat).await, Err(Error::Unauthorized)),
+            "PAT revoke via an uncached repo must evict the shared cache"
+        );
+        routes.revoke_all_for_user(&uid).await.unwrap();
+        assert!(
+            matches!(authn.authenticate(&other).await, Err(Error::Unauthorized)),
+            "revoke-all via an uncached repo must evict the shared cache"
         );
     }
 

@@ -101,13 +101,16 @@
     if (!id) return;
     loading = true;
     try {
-      tools = await mcpCpApi.cpDiscover(id);
-      toasts.success('Discovered tools', `${tools.length} found`);
+      const found = await mcpCpApi.cpDiscover(id);
+      // Switched servers meanwhile: never list server A's tools under B.
+      if (selectedServerId !== id) return;
+      tools = found;
+      toasts.success('Discovered tools', `${found.length} found`);
       ondiscovered?.();
     } catch (e) {
-      toastError('Couldn’t discover tools', e);
+      if (selectedServerId === id) toastError('Couldn’t discover tools', e);
     } finally {
-      loading = false;
+      if (selectedServerId === id) loading = false;
     }
   }
 
@@ -224,7 +227,7 @@
           </div>
           <span class="cell">
             <McpPill kind="risk" value={t.risk_label} small />
-            {#if t.risk_overridden}<span class="pinned" title="Human-pinned override (survives re-discovery)"><Icon name="key" size={10} /></span>{/if}
+            {#if t.risk_overridden}<span class="pinned" title="Human-pinned override (survives re-discovery)"><Icon name="key" size={12} /></span>{/if}
           </span>
           <span class="cell"><McpPill kind="injection" value={t.injection_risk} small /></span>
           <span class="cell">
@@ -307,7 +310,7 @@
         </div>
         <label class="field">
           <span>Arguments (JSON)</span>
-          <textarea bind:value={argsText} rows="4" class="mono" spellcheck="false"></textarea>
+          <textarea dir="ltr" bind:value={argsText} rows="4" class="mono" spellcheck="false"></textarea>
         </label>
         {#if argError}<p class="warn">{argError}</p>{/if}
 

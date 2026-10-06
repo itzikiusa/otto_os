@@ -157,7 +157,7 @@
       <span class="grow"></span>
       <div class="refresh-pick">
         <Icon name="refresh" size={12} />
-        <select
+        <select aria-label="Auto-refresh interval"
           class="input"
           value={String(dashboard.refresh_secs ?? '')}
           onchange={(e) => {
@@ -215,7 +215,7 @@
   <Modal title={editing ? 'Edit widget' : 'Add widget'} width={520} onclose={() => (adding = false)}>
     <div class="field">
       <label for="w-title">Title</label>
-      <input id="w-title" class="input" bind:value={wTitle} placeholder="Daily signups" />
+      <input dir="auto" id="w-title" class="input" bind:value={wTitle} placeholder="Daily signups" />
     </div>
     {#if editing}
       <p class="conn-note" title={editing.connection_id}>
@@ -224,13 +224,13 @@
     {/if}
     <div class="field">
       <label for="w-stmt">Statement</label>
-      <textarea id="w-stmt" class="input mono" rows="4" bind:value={wStatement} spellcheck="false"></textarea>
+      <textarea dir="ltr" id="w-stmt" class="input mono" rows="4" bind:value={wStatement} spellcheck="false"></textarea>
     </div>
     <div class="field">
-      <label for="w-viz">Visualization</label>
-      <div class="viz-row" id="w-viz">
+      <span class="field-label" id="w-viz-label">Visualization</span>
+      <div class="viz-row" role="group" aria-labelledby="w-viz-label">
         {#each VIZ as v (v)}
-          <button class="viz-chip" class:selected={wViz === v} onclick={() => (wViz = v)}>{v}</button>
+          <button type="button" class="viz-chip" class:selected={wViz === v} aria-pressed={wViz === v} onclick={() => (wViz = v)}>{v}</button>
         {/each}
       </div>
     </div>

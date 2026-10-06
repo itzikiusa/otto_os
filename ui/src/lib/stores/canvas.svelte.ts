@@ -1,19 +1,19 @@
-// Canvas Studio store — scene list + the live editable Scene, autosave, coarse
-// snapshot undo/redo, and agent assist. Reads `ws.currentId` only.
+// Canvas Studio store — scene list, the open scene's file-backed doc
+// (Excalidraw / Mermaid / D2 source), queued per-scene saves, and agent
+// assist. Reads `ws.currentId` only.
 //
-// Source-of-truth model: the store owns `scene`. A `rev` counter is the
-// "reload the editor" signal — it bumps ONLY on external changes (open / undo /
-// redo / assist insert / rename / template). The editor owns its live flow
-// arrays for smooth dragging and pushes edits back via `commitFromEditor`,
-// which updates `scene` + schedules a save + records an undo snapshot WITHOUT
-// bumping `rev` (so the editor is not yanked mid-drag).
+// The editors (ExcalidrawCanvas / MermaidCanvas / D2Canvas) stage every edit
+// through `persistDoc`, which queues one PUT per scene so a delayed older write
+// never overwrites a newer one. `scene` is only the parsed title/metadata view;
+// `rev` bumps when a scene is (re)opened. (The earlier node-graph editor and
+// its undo/redo save path were removed — nothing mounted them.)
 
 import { api, getToken } from '../api/client';
 import { NO_WORKSPACE } from '../labels';
 import { ws } from './workspace.svelte';
 import { defaultAgentProvider } from '../providers';
 import { loadErrorText } from '../loadError';
-import { assistToNodes, emptyScene, parseScene } from '../../modules/canvas/scene';
+import { emptyScene, parseScene } from '../../modules/canvas/scene';
 import type {
   AssistMode,
   AssistResult,
@@ -32,8 +32,6 @@ export interface CanvasTurn {
   ts: number;
 }
 
-const AUTOSAVE_MS = 900;
-const HISTORY_CAP = 50;
 
 class CanvasStore {
   scenes = $state<CanvasSceneSummary[]>([]);
@@ -62,7 +60,7 @@ class CanvasStore {
   /** A scene id to auto-open once the Canvas module mounts (deep-link from e.g.
    *  the Discovery-Chat "Open in Canvas" action). CanvasPage consumes + clears it. */
   pendingOpenId = $state<string | null>(null);
-  /** Bumps when the editor must reload from `scene` (open/undo/redo/assist). */
+  /** Bumps when a scene is (re)opened — the editors reload from it. */
   rev = $state(0);
 
   saving = $state(false);
@@ -145,20 +143,10 @@ class CanvasStore {
     return sent;
   }
 
-  #history: string[] = [];
-  #future: string[] = [];
-  #saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   async retryDoc(id: string): Promise<void> {
     const doc = this.#drafts.get(id);
     if (doc) await this.persistDoc(id, doc);
-  }
-
-  get canUndo(): boolean {
-    return this.#history.length > 0;
-  }
-  get canRedo(): boolean {
-    return this.#future.length > 0;
   }
 
   // -- list --------------------------------------------------------------
@@ -217,8 +205,6 @@ class CanvasStore {
       this.provider = (row as { provider?: string }).provider ?? defaultAgentProvider();
       this.convo = [];
       this.sessionId = row.session_id;
-      this.#history = [];
-      this.#future = [];
       this.dirty = this.#drafts.has(id);
       this.savedAt = Date.parse(row.updated_at) || null;
       this.rev += 1;
@@ -232,11 +218,8 @@ class CanvasStore {
 
   closeScene(): void {
     ++this.#openSequence;
-    if (this.#saveTimer) clearTimeout(this.#saveTimer);
     this.currentId = null;
     this.scene = null;
-    this.#history = [];
-    this.#future = [];
     this.dirty = false;
   }
 
@@ -321,22 +304,45 @@ class CanvasStore {
 
   /** Restore a version. Pending saves land first (so they can't overwrite the
    *  restore afterwards); unsaved local edits are dropped — the server keeps
-   *  the replaced doc as a `restore` version, so this is undoable. */
+   *  the replaced doc as a `restore` version, so this is undoable. The restore
+   *  is itself a link in the per-scene write chain (S18-306): a save issued
+   *  while it is in flight (keystrokes typed after clicking Restore) queues
+   *  BEHIND it instead of racing it, and — since that save will land last —
+   *  the editor keeps showing it rather than the restored doc. */
   async restoreVersion(id: string, versionId: string): Promise<void> {
-    await this.#writes.get(id)?.catch(() => {});
-    const row = await api.post<CanvasScene>(`/canvas/scenes/${id}/versions/${versionId}/restore?files=ref`, {});
+    const context = this.#saveContext;
+    const previous = this.#writes.get(id);
+    const dropped = this.#drafts.get(id); // the unsaved edits the restore replaces
+    const posted = (async () => {
+      await previous?.catch(() => {});
+      return api.post<CanvasScene>(`/canvas/scenes/${id}/versions/${versionId}/restore?files=ref`, {});
+    })();
+    const write = posted.then(() => {});
+    write.catch(() => {}); // the failure surfaces via `posted`; the chain link must not go unhandled
+    this.#writes.set(id, write);
+    let restored: CanvasScene;
+    try {
+      restored = await posted;
+    } finally {
+      if (this.#writes.get(id) === write) this.#writes.delete(id);
+    }
+    if (context !== this.#saveContext) return;
+    // A newer draft was staged during the restore: its save is queued behind
+    // the restore and wins on disk, so it must win on screen too.
+    const draft = this.#drafts.get(id);
+    if (draft !== undefined && draft !== dropped) return;
     this.#drafts.delete(id);
     delete this.docSaveErrors[id];
     if (this.currentId !== id) return;
     let doc: CanvasDoc | null = null;
     try {
-      doc = JSON.parse(row.doc_json) as CanvasDoc;
+      doc = JSON.parse(restored.doc_json) as CanvasDoc;
     } catch {
       doc = null;
     }
     this.dirty = false;
     if (doc) this.ingestDoc(doc);
-    this.savedAt = Date.parse(row.updated_at) || Date.now();
+    this.savedAt = Date.parse(restored.updated_at) || Date.now();
   }
 
   /** Append a turn to the inline conversation (of `sceneId` when given — a
@@ -360,123 +366,11 @@ class CanvasStore {
     await this.loadScenes().catch(() => {});
   }
 
-  /** Persist a freshly-serialized Mermaid SOURCE (from a MANUAL edit on the
-   *  board) as the scene's doc — same file the agent edits. `positions` carries
-   *  the hand-arranged node coordinates (Mermaid has none) so layout survives a
-   *  reload. */
-  async saveSource(
-    source: string,
-    positions?: Record<string, { x: number; y: number }>,
-  ): Promise<void> {
-    const id = this.currentId;
-    if (!id) return;
-    this.source = source;
-    const doc = {
-      type: 'otto-canvas',
-      version: 1,
-      format: this.format,
-      source,
-      ...(positions ? { positions } : {}),
-    };
-    this.rawDoc = doc;
-    try {
-      await api.put(`/canvas/scenes/${id}?summary=true`, { doc }); // list row back, not the doc (SD-22)
-      this.savedAt = Date.now();
-      this.dirty = false;
-    } catch {
-      this.dirty = true; // a later edit reschedules
-    }
-  }
-
-  /** Editor → store: the canonical scene changed via direct manipulation. */
-  commitFromEditor(next: Scene): void {
-    if (!this.scene) return;
-    this.#pushHistory(this.scene);
-    this.scene = next;
-    this.dirty = true;
-    this.#scheduleSave();
-  }
-
-  /** External mutation (assist/template/rename): update + bump rev to reload. */
-  setScene(next: Scene, recordHistory = true): void {
-    if (recordHistory && this.scene) this.#pushHistory(this.scene);
-    this.scene = next;
-    this.dirty = true;
-    this.rev += 1;
-    this.#scheduleSave();
-  }
-
-  rename(title: string): void {
-    if (!this.scene) return;
-    this.setScene({ ...this.scene, title }, true);
-  }
-
-  /** Insert assist output near a viewport point. Returns inserted node count. */
-  insertAssist(res: AssistResult, ox: number, oy: number): number {
-    if (!this.scene) return 0;
-    const { nodes, edges } = assistToNodes(res, ox, oy);
-    if (!nodes.length) return 0;
-    this.setScene(
-      {
-        ...this.scene,
-        nodes: [...this.scene.nodes, ...nodes],
-        edges: [...this.scene.edges, ...edges],
-      },
-      true,
-    );
-    return nodes.length;
-  }
-
-  #pushHistory(prev: Scene): void {
-    this.#history.push(JSON.stringify(prev));
-    if (this.#history.length > HISTORY_CAP) this.#history.shift();
-    this.#future = [];
-  }
-
-  undo(): void {
-    if (!this.scene || !this.#history.length) return;
-    const snap = this.#history.pop()!;
-    this.#future.push(JSON.stringify(this.scene));
-    this.scene = JSON.parse(snap) as Scene;
-    this.dirty = true;
-    this.rev += 1;
-    this.#scheduleSave();
-  }
-
-  redo(): void {
-    if (!this.scene || !this.#future.length) return;
-    const snap = this.#future.pop()!;
-    this.#history.push(JSON.stringify(this.scene));
-    this.scene = JSON.parse(snap) as Scene;
-    this.dirty = true;
-    this.rev += 1;
-    this.#scheduleSave();
-  }
-
-  #scheduleSave(): void {
-    if (this.#saveTimer) clearTimeout(this.#saveTimer);
-    this.#saveTimer = setTimeout(() => void this.saveNow(), AUTOSAVE_MS);
-  }
-
+  /** Flush the open scene's staged draft now (phone back-nav). The
+   *  file-backed editors stage every edit through `persistDoc`, so `dirty`
+   *  always means "a draft is queued" — there is no other save path. */
   async saveNow(): Promise<void> {
-    if (this.currentId && this.#drafts.has(this.currentId)) {
-      await this.retryDoc(this.currentId);
-      return;
-    }
-    if (!this.currentId || !this.scene || this.saving) return;
-    this.saving = true;
-    try {
-      await api.put(`/canvas/scenes/${this.currentId}?summary=true`, {
-        title: this.scene.title,
-        doc: this.scene,
-      });
-      this.dirty = false;
-      this.savedAt = Date.now();
-    } catch {
-      // keep dirty; a later edit reschedules. (Surface via toast at call site.)
-    } finally {
-      this.saving = false;
-    }
+    if (this.currentId && this.#drafts.has(this.currentId)) await this.retryDoc(this.currentId);
   }
 
   // -- agent assist ------------------------------------------------------
@@ -486,6 +380,15 @@ class CanvasStore {
       return api.post<AssistResult>(`/canvas/scenes/${this.currentId}/assist`, body);
     }
     return api.post<AssistResult>(`/canvas/assist/preview`, body);
+  }
+
+  /** Mark the open scene's running Ask AI turn as stopped (S4-20) so it
+   *  commits nothing when it settles — the board stays as it was before the
+   *  turn. Pair with an Esc interrupt of the agent's PTY. */
+  async stopAssist(): Promise<boolean> {
+    if (!this.currentId) return false;
+    const r = await api.post<{ stopping: boolean }>(`/canvas/scenes/${this.currentId}/assist/stop`, {});
+    return r.stopping;
   }
 }
 

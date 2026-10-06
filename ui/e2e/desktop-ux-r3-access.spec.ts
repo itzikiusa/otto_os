@@ -13,6 +13,8 @@ async function guest(page:Page) {
   });
 }
 async function navigate(page:Page,id:string) {await page.evaluate(id=>{location.hash=`#/s/${id}/token-${id}`;},id);}
+// The workspace step checks its folder on the daemon before moving on.
+const browse=(page:Page)=>page.route('**/api/v1/fs/browse*',r=>r.fulfill({json:{path:new URL(r.request().url()).searchParams.get('path'),parent:'/tmp',is_git_repo:false,entries:[]}}));
 function deferredRoute() {let release!:(r:Route)=>void; const promise=new Promise<Route>(resolve=>release=resolve);return {promise,hold:(r:Route)=>{release(r);}};}
 
 test('guest navigation ignores old metadata and role replies',async({page})=>{
@@ -91,7 +93,10 @@ test('first account keeps failed workspace setup recoverable without recreating 
   await page.route('**/api/v1/onboarding/root',r=>{roots++;return r.fulfill({json:{token:'fixture-root',user}});});
   await page.route('**/api/v1/auth/capabilities',r=>r.fulfill({json:{capabilities:{}}}));
   await page.route('**/api/v1/workspaces',r=>r.request().method()==='POST'?(++workspaces===1?r.fulfill({status:503,json:{code:'upstream',message:'Workspace unavailable; retry setup'}}):r.fulfill({json:{id:'fixture-ws',name:'Fixture',root_path:'/tmp/fixture'}})):r.fulfill({json:[]}));
-  await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await browse(page);
+  await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Create account',exact:true}).click();
+  // The account exists from the password step on; the workspace step says so.
+  await expect(page.getByRole('status').filter({hasText:'Root account created.'})).toBeVisible();expect(roots).toBe(1);
   await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByRole('button',{name:'Finish setup'}).click();await expect(page.getByText('Workspace unavailable; retry setup')).toBeVisible();
   await page.screenshot({path:info.outputPath('first-account-error.png')});
@@ -120,9 +125,10 @@ for(const v of [{theme:'native',scheme:'light',width:375,height:667},{theme:'nat
 
 test('first account long tool versions stay readable on short phone',async({page},info)=>{
   await guest(page);await page.setViewportSize({width:375,height:400});await page.addInitScript(()=>localStorage.setItem('otto_direction','rtl'));
+  await page.route('**/api/v1/onboarding/root',r=>r.fulfill({json:{token:'fixture-root',user}}));
   await page.route('**/api/v1/meta',r=>r.fulfill({json:{...meta,needs_onboarding:true,tools:['claude','codex','clickhouse'].map(name=>({name,found:true,version:`${name}-long-synthetic-build-20260925-with-complete-version-information`}))}}));
   await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();
-  await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Skip',exact:true}).click();await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Create account',exact:true}).click();await page.getByRole('button',{name:'Skip',exact:true}).click();await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.screenshot({path:info.outputPath('first-account-tools.png')});
   expect(await page.locator('.ob-wrap').evaluate(el=>el.scrollWidth-el.clientWidth)).toBeLessThanOrEqual(1);
   for(const row of await page.locator('.tool-row').all()) {

@@ -70,8 +70,8 @@
       s('whiteboard', 'Whiteboard diagram (Mermaid)', 'mermaid'),
       s('whiteboard', 'Whiteboard diagram (D2)', 'd2'),
       s('whiteboard', 'Whiteboard board (Excalidraw)', 'excalidraw'),
+      s('site', 'Site'),
       s('brand', 'Brand kit'),
-      { label: 'Site (planned for Phase 1)', icon: 'layout', disabled: true },
       { label: 'Exhibition (planned for v3)', icon: 'gallery', disabled: true },
       { separator: true },
       { label: 'Import file…', icon: 'download', disabled: !canEdit, action: pickFile },
@@ -81,7 +81,13 @@
 
   // ── Import ────────────────────────────────────────────────────────────────
   let fileInput = $state<HTMLInputElement | null>(null);
+  /** One import at a time: the base64 read + upload can take a while. */
+  let importing = $state(false);
   function pickFile(): void {
+    if (importing) {
+      toasts.info('Already importing', 'Wait for the current file to finish.');
+      return;
+    }
     fileInput?.click();
   }
   async function onFile(e: Event): Promise<void> {
@@ -95,12 +101,18 @@
       return;
     }
     const projectId = route.view === 'project' ? route.id : null;
+    importing = true;
+    const pending = toasts.info('Importing…', file.name);
     try {
       const id = await importDesignFile(file, { workspaceId: wsId, projectId });
+      toasts.dismiss(pending);
       toasts.success('Imported', file.name);
       created(id);
     } catch (err) {
+      toasts.dismiss(pending);
       toastError('Couldn’t import the file', err);
+    } finally {
+      importing = false;
     }
   }
 

@@ -45,7 +45,7 @@
 {#if open}
   <Modal title="New note{dir ? ` in ${dir}/` : ''}" width={440} onclose={() => (open = false)}>
     <div class="nn-body">
-      <input
+      <input dir="auto"
         bind:this={input}
         bind:value={name}
         class="nn-name"

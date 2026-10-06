@@ -30,6 +30,9 @@ export interface SettingsAccess {
 
 const ADMIN: SettingsGate = { feature: 'settings', level: 'admin' };
 const USERS_ADMIN: SettingsGate = { feature: 'users', level: 'admin' };
+// Providers, Daemon, Trust & safety and Logs read/write root-only handlers
+// (`GET|PUT /settings`, `/audit-log`, `/security-posture`, `/logs/daemon` all
+// `require_root`), so a non-root settings admin only ever saw "Couldn’t load".
 
 /**
  * Every section, in nav order. `id` is the route (`#/settings/<id>`) and must
@@ -48,13 +51,13 @@ export const SETTINGS_SECTIONS = [
   // ── Integrations ──
   { id: 'git-accounts', label: 'Git accounts', group: 'integrations', keywords: 'github gitlab bitbucket token pr push https credentials' },
   { id: 'jira', label: 'Jira accounts', group: 'integrations', keywords: 'atlassian confluence issues tickets token' },
-  { id: 'channels', label: 'Channels', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
+  { id: 'channels', label: 'Slack, Telegram & webhooks', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
   { id: 'mcp-servers', label: 'MCP servers', group: 'integrations', keywords: 'model context protocol tools workspace' },
   { id: 'language-servers', label: 'Language servers', group: 'integrations', keywords: 'lsp completion gopls rust-analyzer typescript install path' },
   { id: 'sharing', label: 'Sharing', group: 'integrations', keywords: 'email sender share guest one-time code otp gmail smtp email remote' },
   // ── Agents ──
   { id: 'assistant', label: 'Assistant', group: 'agents', keywords: 'otto assistant routing claude codex subscription limit' },
-  { id: 'providers', label: 'Providers', group: 'agents', keywords: 'agent cli claude codex agy gemini custom model update', gate: ADMIN },
+  { id: 'providers', label: 'Providers', group: 'agents', keywords: 'agent cli claude codex agy gemini custom model update', gate: 'root' },
   { id: 'context-soul', label: 'Workspace context', group: 'agents', keywords: 'soul goals instructions memory references project' },
   { id: 'self-improvement', label: 'Self-improvement', group: 'agents', keywords: 'improve review memory skills edits approval' },
   { id: 'insights', label: 'Insights', group: 'agents', keywords: 'reports daily weekly monthly schedule html' },
@@ -62,11 +65,15 @@ export const SETTINGS_SECTIONS = [
   { id: 'skill-eval', label: 'Skills evaluator', group: 'agents', keywords: 'skill eval validate improve iterations lab', gate: ADMIN },
   { id: 'context-library', label: 'Context library', group: 'agents', keywords: 'skills souls snippets library materialize', gate: ADMIN },
   // ── System ──
-  { id: 'daemon', label: 'Daemon', group: 'system', keywords: 'ottod server port listener network sandbox isolation sessions restart persist suspend idle timeout', gate: ADMIN },
-  { id: 'plugins', label: 'Plugins', group: 'system', keywords: 'custom plugin sidecar install git', gate: ADMIN },
-  { id: 'trust-safety', label: 'Trust & safety', group: 'system', keywords: 'security posture audit log trust', gate: ADMIN },
-  { id: 'logs', label: 'Logs', group: 'system', keywords: 'daemon log files debug errors', gate: ADMIN },
-  { id: 'backup', label: 'Backup & restore', group: 'system', keywords: 'export import archive restore transfer connections git backup storage design hall auto-tidy autosave prune', gate: ADMIN },
+  { id: 'daemon', label: 'Daemon', group: 'system', keywords: 'ottod server port listener network sandbox isolation sessions restart persist suspend idle timeout', gate: 'root' },
+  // Every /plugin-admin* handler is require_root (plugins.rs) — S17-303.
+  { id: 'plugins', label: 'Plugins', group: 'system', keywords: 'custom plugin sidecar install git', gate: 'root' },
+  { id: 'trust-safety', label: 'Trust & safety', group: 'system', keywords: 'security posture audit log trust', gate: 'root' },
+  { id: 'logs', label: 'Logs', group: 'system', keywords: 'daemon log files debug errors', gate: 'root' },
+  // Every Backup action is root-only server-side: /settings/export|import,
+  // /state/backup|restore|archive* (routes/backup.rs), /state/git/*
+  // (backup_git.rs), /state/connections/export* (connection_export.rs) — S17-303.
+  { id: 'backup', label: 'Backup & restore', group: 'system', keywords: 'export import archive restore transfer connections git backup storage design hall auto-tidy autosave prune', gate: 'root' },
   // ── People ──
   { id: 'users', label: 'Users', group: 'people', keywords: 'accounts members roles workspace permissions', gate: USERS_ADMIN },
   { id: 'access-groups', label: 'Groups & access', group: 'people', keywords: 'groups roles access rules rbac permissions', gate: 'root' },

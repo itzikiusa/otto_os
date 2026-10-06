@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import Badge from '../../lib/components/Badge.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { NO_WORKSPACE } from '../../lib/labels';
@@ -34,7 +35,8 @@
   import ExportDialog from './ExportDialog.svelte';
   import { stmtPreview } from './sql-util';
   import { databaseAccessChild } from '../../lib/access-options';
-  import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
+  import { database, engineGlyph, type DbMainTab, type DbSideTab } from '../../lib/stores/database.svelte';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -46,6 +48,7 @@
   import { popoutItems } from '../../lib/popoutMenu';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
+  import { lsGet, lsSet } from '../../lib/storage';
   import type {
     BrokerCluster,
     Connection,
@@ -117,12 +120,12 @@
     { id: 'kafka', label: 'Kafka' },
     { id: 'custom', label: 'Custom' },
   ];
-  let filterKind = $state(
-    typeof localStorage === 'undefined' ? 'all' : localStorage.getItem(FILTER_KEY) || 'all',
-  );
+  // Guarded storage: this runs at mount, so a throwing accessor (blocked
+  // storage) must not take the whole Database page down.
+  let filterKind = $state(lsGet(FILTER_KEY) || 'all');
   function setFilter(id: string): void {
     filterKind = id;
-    if (typeof localStorage !== 'undefined') localStorage.setItem(FILTER_KEY, id);
+    lsSet(FILTER_KEY, id);
   }
   // Only offer kinds that exist (plus the active one, so a remembered filter
   // can always be cleared). One kind or none → no chip row at all: a filter
@@ -223,6 +226,14 @@
   let accessFor = $state<Connection | null>(null);
   const connectionAccess = (c: Connection, operation: string, capability: 'view'|'edit'|'admin'='edit') => resourceAccess.can('connection',c.id,operation,'connections',capability);
   $effect(() => { for (const c of [...database.connections,...database.otherConnections]) void resourceAccess.load('connection',c.id); });
+  // The "Open a connection" pane offers the most recently opened ones as a
+  // one-click reopen instead of only pointing at the list.
+  const recentConns = $derived(
+    database.connections
+      .filter((c) => c.last_opened_at)
+      .sort((a, b) => Date.parse(b.last_opened_at!) - Date.parse(a.last_opened_at!))
+      .slice(0, 5),
+  );
   function connMenu(e: MouseEvent, c: Connection): void {
     const isDb = database.connections.some((x) => x.id === c.id);
     ctxMenu.show(e, [
@@ -766,6 +777,15 @@
     return parts.join(' · ');
   }
 
+  // Sidebar views. On a phone the connection list is its own accordion, so
+  // the strip there starts at Schema ("connections" shows as Schema).
+  const SIDE_TABS: TabItem<DbSideTab>[] = [
+    { id: 'connections', label: 'Connections' },
+    { id: 'schema', label: 'Schema' },
+    { id: 'saved', label: 'Saved' },
+    { id: 'history', label: 'History' },
+  ];
+  const MOBILE_SIDE_TABS = SIDE_TABS.slice(1);
   const mainTabs: { id: DbMainTab; label: string; icon: IconName; show: () => boolean }[] = [
     { id: 'query', label: 'Query', icon: 'terminal', show: () => true },
     { id: 'builder', label: 'Builder', icon: 'layers', show: () => database.supportsBuilder },
@@ -781,16 +801,11 @@
   // query-editor's own resizable-pane idiom (pointer drag + localStorage px).
   let assistW = $state(loadAssistW());
   function loadAssistW(): number {
-    if (typeof localStorage === 'undefined') return 460;
-    const v = Number(localStorage.getItem('db.assistW'));
+    const v = Number(lsGet('db.assistW'));
     return Number.isFinite(v) && v > 280 ? v : 460;
   }
   function persistAssistW(): void {
-    try {
-      localStorage.setItem('db.assistW', String(Math.round(assistW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
+    lsSet('db.assistW', String(Math.round(assistW)));
   }
   const assistMaxW = (): number => Math.max(320, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 360);
   const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
@@ -811,9 +826,13 @@
       persistAssistW();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    // A cancelled gesture (system gesture, focus loss) ends the drag too —
+    // else pointermove stays attached and the pane follows the cursor.
+    window.addEventListener('pointercancel', onUp);
   }
 
   // ── Connection sidebar width (resizable, persisted) ───────────────────────────
@@ -1017,10 +1036,8 @@
             </div>
           {/if}
         </div>
-        <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onTabKey}>
-          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema' || database.sideTab === 'connections'} tabindex={database.sideTab === 'schema' || database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
-          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
-          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
+        <div class="side-switch" class:acc-collapsed={!schemaOpen}>
+          <Tabs label="Sidebar view" tabs={MOBILE_SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)} />
         </div>
         <div class="side-body" class:acc-collapsed={!schemaOpen}>
           {@render schemaSideBody()}
@@ -1030,18 +1047,13 @@
       <!-- TABLET / DESKTOP: one tab strip. "Connections" is the picker tab, so
            the list takes the full sidebar height instead of a capped section. -->
       <div class="side-switch">
-        <!-- The tabs get their own tablist: the strip also carries plain
-             buttons (Refresh), which a tablist may not own. -->
-        <div class="ss-tabs" role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onTabKey}>
-          <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} tabindex={database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('connections')}>Connections</button>
-          <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} tabindex={database.sideTab === 'schema' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
-          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
-          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
-        </div>
-        <span class="grow"></span>
-        {#if database.sideTab === 'schema' && database.selectedConnId}
-          <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
-        {/if}
+        <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab} onchange={(id) => database.setSideTab(id)}>
+          {#snippet trailing()}
+            {#if database.sideTab === 'schema' && database.selectedConnId}
+              <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
+            {/if}
+          {/snippet}
+        </Tabs>
       </div>
       <div class="side-body">
         {#if database.sideTab === 'connections'}
@@ -1104,18 +1116,29 @@
           body={`${hubSummary} Choose one ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
           actionLabel={database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
           onaction={showConnections}
-        />
+        >
+          {#if recentConns.length > 0}
+            <div class="recent-conns" data-testid="db-recent-conns">
+              <p class="empty-note">Recently opened</p>
+              {#each recentConns as c (c.id)}
+                <button class="btn ghost small" onclick={() => void database.openConnection(c.id)} title="Open {c.name}">
+                  <Icon name={engineGlyph(c.kind)} size={12} /> {c.name}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </EmptyState>
       {/if}
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
       <!-- Each tab is the main <button role="tab">; the status glyph, the ⋯ menu
            (the right-click menu, reachable without a mouse) and the close button
            are its siblings inside a presentational wrapper. -->
-      <div class="conn-tabs" role="tablist" aria-label="Open connections" tabindex="-1" onkeydown={onTabKey} bind:this={connTabsEl}>
+      <div class="conn-tabs" role="tablist" aria-label="Open connections" tabindex="-1" onkeydown={onTabKey} bind:this={connTabsEl}><!-- ui-guards: allow — closable document tabs (status glyph, ⋯ menu, close per tab): <Tabs> has no slot for per-tab controls -->
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
           {@const on = database.activePane === null && database.selectedConnId === c.id}
-          <div class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
+          <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
@@ -1147,7 +1170,7 @@
         {/each}
         {#each brokers.openClusters as cl (cl.id)}
           {@const on = database.activePane?.kind === 'kafka' && database.activePane.id === cl.id}
-          <div class="conn-tab" class:active={on} class:prod={isProdConn(cl)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}>
+          <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(cl)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}>
             <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `kafka:${cl.id}`)} onclick={() => openCluster(cl)} title={cl.name}>
               <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
               <span class="conn-tab-name ellipsis">{cl.name}</span>
@@ -1378,7 +1401,7 @@
 
 {#snippet connRow(c: Connection, depth: number)}
   {@const isDb = database.connections.some((x) => x.id === c.id)}
-  <div
+  <div use:rowMenu
     role="group"
     aria-label={c.name}
     class="conn-row"
@@ -1416,7 +1439,7 @@
 {/snippet}
 
 {#snippet clusterRow(cl: BrokerCluster, depth: number)}
-  <div
+  <div use:rowMenu
     role="group"
     aria-label={cl.name}
     class="conn-row"
@@ -1451,7 +1474,7 @@
 {#snippet connSearchBox()}
   <div class="tree-search">
     <Icon name="search" size={12} />
-    <input
+    <input dir="ltr"
       class="tree-search-input"
       type="text"
       bind:value={connFilter}
@@ -1460,7 +1483,7 @@
       aria-label="Filter connections"
     />
     {#if connFilter}
-      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={10} /></button>
+      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
     {/if}
     {#if !viewport.isPhone}
       <!-- New section / connection live here on tablet/desktop (the phone keeps
@@ -1566,7 +1589,7 @@
   {#if database.sideTab === 'saved'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         class="list-search-input"
         placeholder="Filter saved queries…"
         bind:value={savedSearch}
@@ -1587,7 +1610,7 @@
       {#each filteredSaved as q (q.id)}
         <div class="saved-row">
           {#if renamingId === q.id}
-            <input
+            <input dir="auto"
               class="rename-input"
               bind:value={renameDraft}
               use:focusOnMount
@@ -1622,7 +1645,7 @@
   {:else if database.sideTab === 'history'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         class="list-search-input"
         placeholder="Filter history…"
         bind:value={historySearch}
@@ -1734,6 +1757,15 @@
 {/if}
 
 <style>
+  .recent-conns {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    margin-block-start: 12px;
+  }
+  .recent-conns .empty-note { flex-basis: 100%; margin: 0; text-align: center; }
   .db-root {
     height: 100%;
     display: flex;
@@ -2078,39 +2110,8 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .ss-tabs { display: contents; }
   .side-switch {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 8px 8px 6px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .side-switch::-webkit-scrollbar {
-    display: none;
-  }
-  .side-switch .ss {
     flex-shrink: 0;
-  }
-  .ss {
-    height: 24px;
-    padding: 0 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .ss:hover {
-    background: var(--hover);
-  }
-  .ss.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
   }
   .side-body {
     flex: 1;
@@ -2773,10 +2774,6 @@
     }
     .conn-name {
       font-size: var(--fs-l);
-    }
-    .ss {
-      height: 30px;
-      font-size: var(--fs-m);
     }
     /* The status row (engine chip + Test) can wrap rather than overflow. */
     .conn-status {

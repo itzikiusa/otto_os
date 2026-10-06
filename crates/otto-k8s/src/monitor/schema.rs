@@ -34,14 +34,13 @@
 //! key, so a 1 h window reads ~1 h of granules instead of the whole day
 //! partition the raw key forces.
 //!
-//! Existing installs migrate in [`ensure`]: the rollup tables are created,
-//! back-filled from whatever raw rows exist (one `(cluster, day)` partition
-//! per statement, one thread with bounded aggregation spilling), and only
-//! THEN are the materialized views created — while every collector loop
-//! waits on the same lock — so a row is
-//! never counted twice and a crash mid-backfill simply redoes it (the
-//! rollups are truncated first; nothing but the backfill writes them until
-//! the views exist). Raw partitions older than the raw keep are then dropped.
+//! Existing installs migrate in [`ensure`]: each missing tier is streamed
+//! in bounded blocks into a staging table, atomically exchanged with its
+//! target, then checkpointed by creating its materialized view. A failed
+//! attempt leaves the previous target intact and retries only unfinished
+//! tiers. Initialization is serialized so collectors start after every view
+//! exists. Old raw partitions are then trimmed best-effort; TTL remains the
+//! fallback if shutdown interrupts that final cleanup.
 //!
 //! Tables are partitioned per cluster so per-cluster purges are cheap; TTLs
 //! follow the largest configured retention (`alter_ttl_sql`), and clusters
@@ -547,59 +546,18 @@ pub fn backfill_partitions_sql() -> &'static str {
     "SELECT cluster_id, toString(sample_date) AS d FROM k8s_samples GROUP BY cluster_id, sample_date ORDER BY d, cluster_id"
 }
 
-/// Truncate every rollup target (backfill restart point).
-pub fn truncate_rollups_sql() -> String {
-    let mut v: Vec<String> = ROLLUPS
-        .iter()
-        .map(|r| format!("TRUNCATE TABLE IF EXISTS {}", r.table))
-        .collect();
-    v.push(format!("TRUNCATE TABLE IF EXISTS {LATEST_TABLE}"));
-    v.push(format!("TRUNCATE TABLE IF EXISTS {PODS_TABLE}"));
-    v.join(";\n")
-}
-
-/// `INSERT … SELECT` statements that back-fill one raw partition into the
-/// tiers that still keep that day. `age_days` = today − `date`. A raw day
-/// can hold millions of distinct label maps: limiting threads alone does
-/// not bound the aggregation hash table. Spill well below the query budget,
-/// leaving room for the merge phase and the embedded server's other work.
+/// Bounded-block singleton aggregates for a raw partition. The destination
+/// engines combine these values without a day-wide aggregation hash table.
 pub fn backfill_sql(
     cluster_id: &str,
     date: &str,
     age_days: i64,
     retention_days: u32,
 ) -> Vec<String> {
-    let filter = format!(
-        "\nWHERE cluster_id = {} AND sample_date = {}",
-        sql_str(cluster_id),
-        sql_str(date)
-    );
-    const LIMITS: &str = "\nSETTINGS max_threads = 1, max_memory_usage = 402653184, \
-        max_bytes_before_external_group_by = 67108864, max_bytes_before_external_sort = 67108864, \
-        max_block_size = 8192, max_insert_block_size = 8192, \
-        min_insert_block_size_rows = 0, min_insert_block_size_bytes = 0";
-    let mut out = Vec::new();
-    for r in ROLLUPS {
-        if age_days <= i64::from(keep_days(r.keep_days, retention_days)) {
-            out.push(format!(
-                "INSERT INTO {}\n{}{LIMITS}",
-                r.table,
-                rollup_select(&r, &filter)
-            ));
-        }
-    }
-    if age_days <= i64::from(LATEST_KEEP_DAYS) {
-        out.push(format!(
-            "INSERT INTO {LATEST_TABLE}\n{}{LIMITS}",
-            latest_select(&filter)
-        ));
-    }
-    out.push(format!(
-        "INSERT INTO {PODS_TABLE}\n{}{LIMITS}",
-        pods_select(&filter)
-    ));
-    out
+    backfill::statements(cluster_id, date, age_days, retention_days)
 }
+
+mod backfill;
 
 /// Raw partitions past the raw keep (dropped once, right after migrating —
 /// the old TTL would otherwise keep them up to two weeks).
@@ -643,37 +601,9 @@ pub async fn ensure(sink: &dyn MonitorSink, retention_days: u32) -> Result<()> {
             }
         }
     }
-    let present = sink
-        .query_rows(&views_present_sql())
-        .await?
-        .first()
-        .and_then(|r| r.get("n"))
-        .and_then(|n| {
-            n.as_u64()
-                .or_else(|| n.as_str().and_then(|s| s.parse().ok()))
-        })
-        .unwrap_or(0);
-    if present as usize >= views().len() {
+    if !backfill::migrate(sink, retention_days).await? {
         return Ok(());
     }
-    tracing::info!("k8s monitor: migrating to rollup tables (one-time backfill)");
-    sink.exec(&truncate_rollups_sql()).await?;
-    let today = chrono::Utc::now().date_naive();
-    let parts = sink.query_rows(backfill_partitions_sql()).await?;
-    for p in &parts {
-        let cid = p.get("cluster_id").and_then(|v| v.as_str()).unwrap_or("");
-        let d = p.get("d").and_then(|v| v.as_str()).unwrap_or("");
-        let Ok(date) = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d") else {
-            continue;
-        };
-        let age = (today - date).num_days();
-        for q in backfill_sql(cid, d, age, retention_days) {
-            sink.exec(&q).await?;
-        }
-        // Let merges and the dashboards breathe between partitions.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    sink.exec(&views_sql()).await?;
     // Old raw days are now in the rollups: drop them instead of waiting for
     // the old (longer) TTL.
     if let Ok(rows) = sink
@@ -688,10 +618,7 @@ pub async fn ensure(sink: &dyn MonitorSink, retention_days: u32) -> Result<()> {
             }
         }
     }
-    tracing::info!(
-        partitions = parts.len(),
-        "k8s monitor: rollup migration complete"
-    );
+    tracing::info!("k8s monitor: rollup migration complete");
     Ok(())
 }
 
@@ -869,7 +796,7 @@ mod tests {
         assert!(fresh[0].contains("cluster_id = 'c\\'1' AND sample_date = '2026-10-01'"));
         assert!(fresh
             .iter()
-            .all(|q| q.contains("SETTINGS max_threads = 1, max_memory_usage = 402653184")));
+            .all(|q| q.contains("max_threads = 1") && q.contains("max_memory_usage = 402653184")));
         let old = backfill_sql("c1", "2026-09-20", 12, 14);
         let tables: Vec<&str> = old
             .iter()
@@ -879,8 +806,8 @@ mod tests {
             tables,
             vec!["k8s_samples_5m", "k8s_samples_1h", "k8s_pods_1h"]
         );
-        assert!(truncate_rollups_sql().contains("TRUNCATE TABLE IF EXISTS k8s_latest"));
-        assert!(!truncate_rollups_sql().contains("k8s_samples;"));
+        assert!(fresh.iter().all(|q| !q.contains("GROUP BY")));
+        assert!(fresh.iter().all(|q| q.contains("max_insert_threads = 1")));
         assert!(expired_raw_partitions_sql(14).contains("today() - 2"));
         assert_eq!(
             drop_raw_partition_sql("a'b"),

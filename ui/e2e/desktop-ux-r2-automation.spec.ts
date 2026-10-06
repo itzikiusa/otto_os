@@ -31,9 +31,10 @@ test('agent detail: arrow keys and End move focus with selection', async ({ page
   const overview = page.getByRole('tab', { name: 'Overview', exact: true });
   await overview.focus();
   await page.keyboard.press('ArrowRight');
-  const schedules = page.getByRole('tab', { name: 'Schedules', exact: true });
-  await expect(schedules).toHaveAttribute('aria-selected', 'true');
-  await expect(schedules).toBeFocused();
+  // Overview's neighbour is Activity (Overview · Activity · Autonomy · Schedules …).
+  const activity = page.getByRole('tab', { name: 'Activity', exact: true });
+  await expect(activity).toHaveAttribute('aria-selected', 'true');
+  await expect(activity).toBeFocused();
   await page.keyboard.press('End');
   await expect(page.getByRole('tab', { name: 'Context', exact: true })).toBeFocused();
 });
@@ -168,8 +169,8 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await expect(page.getByRole('tab', { name: 'Graph', exact: true })).toHaveAttribute('aria-selected', 'true');
       await shot('mission-control');
       await page.goto('/#/personal-agents/rooms');
-      await expect(page.getByRole('log', { name: 'Room messages' }).getByText('Decision 8:', { exact: false })).toBeVisible();
-      await page.getByLabel('Message to the room').fill('Draft kept while reading the discussion');
+      await expect(page.getByRole('log', { name: 'Channel messages' }).getByText('Decision 8:', { exact: false })).toBeVisible();
+      await page.getByLabel('Message to the channel').fill('Draft kept while reading the discussion');
       await shot('rooms');
       await page.goto('/#/personal-agents');
       await expect(page.locator('.pa-card').first()).toBeVisible();
@@ -232,7 +233,7 @@ test('agent detail: RTL arrow keys follow visual tab direction', async ({ page }
   await page.evaluate(() => document.documentElement.dir = 'rtl');
   await page.getByRole('tab', { name: 'Overview', exact: true }).focus();
   await page.keyboard.press('ArrowLeft');
-  await expect(page.getByRole('tab', { name: 'Schedules', exact: true })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Activity', exact: true })).toBeFocused();
 });
 
 test('rooms: phone conversation keeps its header and composer in view', async ({ page }) => {
@@ -243,13 +244,13 @@ test('rooms: phone conversation keeps its header and composer in view', async ({
   await ctx.dispose();
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto('/#/personal-agents/rooms');
-  await page.getByRole('button', { name: 'Back to rooms' }).click();
+  await page.getByRole('button', { name: 'Back to channels' }).click();
   await page.getByRole('button', { name: 'Long discussion 0 agents' }).click();
-  await page.getByLabel('Message to the room').fill('Follow-up draft');
+  await page.getByLabel('Message to the channel').fill('Follow-up draft');
   await expectFullyInViewport(page, page.locator('.detail-title'));
-  await expectFullyInViewport(page, page.getByLabel('Message to the room'));
+  await expectFullyInViewport(page, page.getByLabel('Message to the channel'));
   await expectFullyInViewport(page, page.getByRole('button', { name: 'Send', exact: true }));
-  await expect.poll(() => page.getByRole('log', { name: 'Room messages' }).evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+  await expect.poll(() => page.getByRole('log', { name: 'Channel messages' }).evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
 });
 
 test('goal research flow: draft, edit, launch and inspect within a phone viewport', async ({ page }) => {
@@ -268,7 +269,8 @@ test('goal research flow: draft, edit, launch and inspect within a phone viewpor
     if (r.request().method() === 'POST') { launched = r.request().postDataJSON(); await r.fulfill({ json: loop }); }
     else await r.fulfill({ json: launched ? [loop] : [] });
   });
-  await page.route('**/api/v1/goal-loops/review-loop', r => r.fulfill({ json: { loop, iterations: [] } }));
+  // The detail is read as `/goal-loops/{id}?summary=true`.
+  await page.route(/\/api\/v1\/goal-loops\/review-loop(\?|$)/, r => r.fulfill({ json: { loop, iterations: [] } }));
   await page.goto('/#/loops');
   await page.getByRole('button', { name: 'New goal loop', exact: true }).click();
   await page.locator('#gl-seed').fill('Compare release options');

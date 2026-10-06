@@ -381,9 +381,12 @@ async fn namespaces<S: K8sCtx>(
             });
         }
     }
-    let mut ns = Vec::new();
-    for candidate in listed {
-        for op in [
+    let names: Vec<String> = listed.iter().map(|n| n.name.clone()).collect();
+    let visible = crate::access::namespaces_allowing_any(
+        &ctx.pool(),
+        &user,
+        &id,
+        &[
             "workloads_view",
             "resources_view",
             "secrets_view",
@@ -394,13 +397,15 @@ async fn namespaces<S: K8sCtx>(
             "scale",
             "restart",
             "delete",
-        ] {
-            if crate::access::allowed(&ctx.pool(), &user, &id, op, Some(&candidate.name)).await? {
-                ns.push(candidate);
-                break;
-            }
-        }
-    }
+        ],
+        &names,
+    )
+    .await?;
+    let ns: Vec<_> = listed
+        .into_iter()
+        .zip(visible)
+        .filter_map(|(row, ok)| ok.then_some(row))
+        .collect();
     Ok(Json(json!({ "namespaces": ns })))
 }
 
@@ -537,6 +542,8 @@ async fn resource_detail<S: K8sCtx>(
     if q.name.trim().is_empty() {
         return Err(Error::Invalid("name is required".into()).into());
     }
+    // A flag-shaped name (`--context=…`) would re-target kubectl past the grant.
+    resources::validate_name("object", q.name.trim())?;
     if kind.namespaced() && q.ns.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err(Error::Invalid("ns is required for namespaced kinds".into()).into());
     }
@@ -552,6 +559,8 @@ async fn pod_containers<S: K8sCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, ns, name)): Path<(Id, String, String)>,
 ) -> ApiResult<Json<Value>> {
+    resources::validate_name("namespace", &ns)?;
+    resources::validate_name("pod", &name)?;
     let mut allowed = false;
     for operation in ["logs", "exec", "workloads_view"] {
         allowed |= crate::access::allowed(&ctx.pool(), &user, &id, operation, Some(&ns)).await?;
@@ -571,6 +580,7 @@ async fn pod_logs<S: K8sCtx>(
     Path((id, ns, name)): Path<(Id, String, String)>,
     Query(q): Query<LogsQuery>,
 ) -> ApiResult<Response> {
+    logs::validate_target(&ns, &LogTarget::Pod(&name), &q)?;
     crate::access::check(&ctx.pool(), &user, &id, "logs", Some(&ns)).await?;
     let c = Clusters::new(&ctx).get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;

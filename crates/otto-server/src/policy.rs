@@ -56,7 +56,8 @@ use PolicyDecision::{Deny, Exempt, Require};
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
 /// including the `/api/v1` nest prefix the daemon mounts the API under — e.g.
 /// `/api/v1/connections/{id}/db/query`. Root-mounted WebSocket / proxy routers
-/// (`/ws/...`, `/browser/proxy`) self-authenticate via `?token=` and never reach
+/// (`/ws/...`, `/browser/proxy`) self-authenticate via `?token=` / a single-use
+/// `?ticket=` and never reach
 /// the central guard, so they are not represented here.
 pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Strip the `/api/v1` nest prefix so the rules read against the
@@ -144,9 +145,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/plugin-host/") || p == "/plugins" {
         return Exempt;
     }
-    // Plugin management (install / enable / disable / remove) — admin only.
+    // Plugin management (install / enable / disable / remove): every handler
+    // is `require_root` (plugins.rs), so the policy tier matches the other
+    // root-only daemon settings — Settings:Admin, as the UI section gate is
+    // (S17-303; it said Users:Admin, a third gate for the same routes).
     if p == "/plugin-admin" || p.starts_with("/plugin-admin/") {
-        return Require(Users, Admin);
+        return Require(Settings, Admin);
     }
     // Auth / personal-access-token self-management + identity. Any authed user
     // manages their own session and tokens; never feature-gated.
@@ -188,7 +192,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // 7.1). Self-owned — any authed user configures/reads their OWN sender, like
     // `/auth/tokens`; no feature grant needed. The app password lives in the
     // Keychain, never the DB.
-    if p == "/email-sender" {
+    if p == "/email-sender" || p == "/email-sender/verify" {
         return Exempt;
     }
     // Email-OTP share redemption (mobile plan Task 7.3). PUBLIC by design: the
@@ -215,10 +219,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/whoami" {
         return Exempt;
     }
-    // Host filesystem access: authenticated; OS permissions enforced by I/O.
-    // Share/MCP endpoint scopes are still checked before this exemption.
-    if matches!(p, "/fs/browse" | "/fs/read") {
-        return Exempt;
+    // Host filesystem access (browse + read anywhere the daemon's OS account
+    // can). There is no separate "Files" feature: reading the host disk is the
+    // same power as running an agent/shell session (which can `cat` anything),
+    // so it requires Agents/Edit — a Viewer can no longer read the host disk.
+    // Root bypasses; non-root callers additionally hit the secret deny list in
+    // `routes/fs.rs` (Otto data dir, ~/.ssh & co., key files).
+    if matches!(p, "/fs/browse" | "/fs/read" | "/fs/stat") {
+        return Require(Agents, Edit);
     }
     // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
     // and not feature-gated HERE because it spans many features — every lookup
@@ -333,7 +341,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/settings/skill-eval" {
         return Require(SkillEval, if put { Admin } else { View });
     }
-    if p.ends_with("/skill-evaluations/{id}/promote") || p.ends_with("/promote") {
+    // Exact template only (S8-13): a bare `ends_with("/promote")` would have
+    // silently put any future `…/promote` route (vault, design, memory) under
+    // SkillEval:Admin.
+    if p == "/skill-evaluations/{id}/promote" {
         return Require(SkillEval, Admin);
     }
     if p.starts_with("/workspaces/{id}/skill-evaluations")
@@ -931,8 +942,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/insights/config" {
         return Require(Insights, if put { Admin } else { View });
     }
-    if p == "/insights/run" {
+    if p == "/insights/run" || p == "/insights/runs/{id}/cancel" {
         return Require(Insights, Edit);
+    }
+    if p == "/insights/runs/active" {
+        return Require(Insights, View);
     }
     if p == "/insights/reports" || p == "/insights/report" || p == "/insights/report-status" {
         return Require(Insights, View);
@@ -978,7 +992,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     // Secret-store status + the confirmed "Secure secrets…" migration — root
     // daemon maintenance (handlers require root).
-    if matches!(p, "/admin/secrets/status" | "/admin/secrets/secure") {
+    if matches!(
+        p,
+        "/admin/secrets/status" | "/admin/secrets/secure" | "/admin/secrets/reset-store"
+    ) {
         return Require(Settings, Admin);
     }
     if matches!(
@@ -1120,6 +1137,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/scheduled-tasks/presets" {
         return Require(ScheduledTasks, View);
     }
+    // Schedule preview (pure computation, saves nothing) — gated like the
+    // workflow trigger preview: writes need Edit (the form's author).
+    if p == "/scheduled-tasks/preview" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
     if p == "/scheduled-tasks/{id}" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }
@@ -1237,6 +1259,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/browser/tabs/{id}" || p == "/browser/annotations/{id}" {
         return Require(Browser, Edit);
     }
+    // Take-over proxy ticket: lets the root-level `/browser/proxy` fetch a
+    // caller-supplied URL once, so it's gated like `/page` (Edit).
+    if p == "/browser/proxy-ticket" {
+        return Require(Browser, Edit);
+    }
     if p == "/workspaces/{wid}/browser/page" || p == "/workspaces/{wid}/browser/query" {
         return Require(Browser, Edit);
     }
@@ -1298,7 +1325,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //   S3     — read-only by design: every S3 route (incl. download) is View,
     //            EXCEPT `download-to` (+ its cancel): it writes a file onto the
     //            daemon HOST, so it is Edit (same as SFTP download, r3-10-01).
-    //   SQS    — list/attributes/peek are View; send/delete/purge/redrive Edit.
+    //   SQS    — list/attributes are View; send/delete/purge/redrive Edit.
+    //            Peek is graded View here, but its handler requires
+    //            aws_sqs:Edit (a receive bumps the receive count, S6-12).
     //   EC2    — describe is View; start/stop/reboot Edit.
     //   Athena — catalog/history/results/cancel View; executing a query Edit.
     //   EKS    — describe is View; kubeconfig import Edit.
@@ -1332,8 +1361,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             );
         }
         if rest.starts_with("sqs/") {
-            let read = get || rest.ends_with("/peek");
-            return Require(AwsSqs, if read { View } else { Edit });
+            // Every non-GET is Edit — `peek` included: a receive bumps each
+            // message's receive count (enough to dead-letter it). For an
+            // Enforced account the guard lowers this to View and the
+            // account's own `sqs_receive` operation decides (S6-303), so the
+            // handler adds no global-tier check of its own.
+            return Require(AwsSqs, if get { View } else { Edit });
         }
         if rest.starts_with("ec2/") {
             return Require(AwsEc2, if get { View } else { Edit });
@@ -1421,10 +1454,377 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     Deny
 }
 
+// ---------------------------------------------------------------------------
+// Credential class (S11-01/02/03, S8-01, S1-02, S3-01).
+// ---------------------------------------------------------------------------
+
+/// What KIND of credential a route needs — orthogonal to the feature axis
+/// above. An agent session's own token (and a session's internal MCP
+/// credential) authorizes AS ITS OWNER, often root, so `require_root` and the
+/// feature grant alone cannot tell "the person" from "the person's agent".
+/// The feature guard reads this tag and refuses every non-human credential
+/// ([`crate::ui_bridge::is_human`] is false: agent-session, MCP-only and
+/// share-link tokens) on [`RouteClass::Admin`] and [`RouteClass::Secret`]
+/// routes. [`RouteClass::Outward`] is a tag only for now (the user's
+/// `otto-pr` skill drives PRs with its session token); making the guard
+/// refuse it too is a one-line change in `feature_guard::credential_class_gate`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RouteClass {
+    /// Administers identity, policy or the daemon itself (users, grants,
+    /// impersonation, settings, plugins, restores, MCP governance config,
+    /// binaries installed and run by the daemon) or decides a human approval
+    /// gate. A credential that can do this can make itself unconfined.
+    Admin,
+    /// Returns credential material in plaintext or mints a credential (saved
+    /// passwords, connection passwords, tokens, share links, full state).
+    Secret,
+    /// Reaches outside the machine on the user's behalf (PR merge/approve,
+    /// push, Jira/Confluence/Slack/Telegram writes, broker produce, SQS
+    /// send/delete, k8s/EC2 actions). Tag only — not enforced yet.
+    Outward,
+}
+
+/// The credential class of `(method, matched_path)`, or `None` for an
+/// ordinary route. `matched_path` is the same `/api/v1`-prefixed template
+/// [`policy_for`] takes. Reads stay untagged unless they return secrets.
+pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
+    use RouteClass::{Admin as A, Outward as O, Secret as S};
+    let p = matched_path.strip_prefix("/api/v1").unwrap_or(matched_path);
+    let read = method == Method::GET || method == Method::HEAD || method == Method::OPTIONS;
+    let write = !read;
+
+    // --- Secret: plaintext credentials / credential minting (any method). ---
+    if matches!(
+        p,
+        "/browser/credentials/{id}/reveal"
+            | "/state/connections/export"
+            | "/state/archive"
+            | "/admin/secrets/status"
+            | "/admin/secrets/secure"
+            | "/admin/secrets/reset-store"
+    ) {
+        return Some(S);
+    }
+    // Minting: a PAT (a laundered human credential), MCP tokens, share links
+    // (a share token passes `agent_attach_rule` on /ws/term — S1-02).
+    if write
+        && (p == "/auth/tokens"
+            || p == "/mcp/tokens"
+            || p.starts_with("/mcp/tokens/")
+            || p == "/sessions/{id}/share")
+    {
+        return Some(S);
+    }
+
+    // --- Admin: identity, policy and daemon administration (writes). ---
+    if write {
+        let admin = p == "/users"
+            || p.starts_with("/users/")
+            || p.starts_with("/access/groups")
+            || p.starts_with("/access/roles")
+            || p == "/access/{kind}/{id}"
+            || p == "/workspaces/{id}/members"
+            || (p.starts_with("/admin/") && p != "/admin/impersonate/stop")
+            || p == "/plugin-admin"
+            || p.starts_with("/plugin-admin/")
+            || matches!(
+                p,
+                "/settings"
+                    | "/settings/import"
+                    | "/settings/skill-eval"
+                    | "/settings/pr-review"
+                    | "/settings/pr-review/presets"
+                    | "/room-settings"
+                    | "/room-recap-settings"
+                    // Kills every live session of every user (root-only in
+                    // the handler, which an agent token of root passes).
+                    | "/app/kill-sessions"
+                    | "/state/restore"
+                    | "/state/archive/restore"
+                    | "/insights/config"
+                    | "/telemetry/config"
+                    | "/usage/config"
+                    | "/usage/budgets"
+                    // Binaries the daemon downloads and runs.
+                    | "/usage/install"
+                    | "/aws/install"
+                    | "/k8s/install"
+                    | "/browser/live/install"
+                    | "/browser/live/settings"
+                    // MCP governance + the servers it spawns (`command`/`args`).
+                    | "/mcp/otto-server"
+                    | "/mcp/auto-approve"
+                    | "/mcp/auto-approve/{id}"
+                    | "/mcp/policies"
+                    | "/mcp/policies/{id}"
+                    | "/mcp/policies/import"
+                    | "/mcp-servers/{id}"
+                    | "/workspaces/{id}/mcp-servers"
+                    // Human approval gates: the agent the gate supervises
+                    // must never pass it itself (S3-01).
+                    | "/mcp/approvals/{id}/decide"
+                    | "/workflow-runs/{id}/approve"
+                    | "/runs/{id}/approve"
+                    | "/database-changes/{id}/approve"
+                    | "/workspaces/{wid}/workgraph/approvals/{aid}/decide"
+            )
+            || p.starts_with("/state/git/")
+            // MCP control-plane registry (S11-301): a server row names the
+            // command the daemon spawns unsandboxed; a tool row / allowlist
+            // switches the approval gate on governed outbound tools.
+            || matches!(
+                p,
+                "/workspaces/{wid}/mcp/servers"
+                    | "/mcp/servers/{id}"
+                    | "/mcp/tools/{tool_id}"
+                    | "/workspaces/{wid}/mcp/allowlist"
+                    | "/mcp/otto-server/enabled"
+            )
+            // Kubeconfigs name an `exec` plugin the daemon runs (S11-303).
+            || matches!(
+                p,
+                "/k8s/clusters"
+                    | "/k8s/clusters/{id}"
+                    | "/k8s/clusters/import"
+                    | "/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig"
+            )
+            // Channel bridges: tokens, allowed users and open_to_all decide
+            // who can drive new agent sessions remotely (S11-306). The
+            // `/test` send stays Outward (matched below).
+            || matches!(
+                p,
+                "/workspaces/{id}/integrations"
+                    | "/workspaces/{id}/integrations/{channel}"
+                    | "/workspaces/{id}/integrations/seed-from-loom"
+            )
+            // Self-improvement autonomy flips edits to auto-apply into shared
+            // skills (S8-304); the email sender carries share links + OTPs;
+            // notification settings silence the owner; revoking the owner's
+            // own tokens / shares is a credential administration act.
+            || matches!(
+                p,
+                "/workspaces/{id}/self-improvement"
+                    | "/email-sender"
+                    | "/email-sender/verify"
+                    | "/notifications/settings"
+                    | "/auth/tokens/{id}"
+                    | "/auth/shares/revoke-all"
+                    | "/skill-reviews/{id}/apply"
+            )
+            // Human approval gates, structurally (S11-308, S8-304): every
+            // write that approves / decides / rejects / rolls back is a
+            // person's call — except a PR approve, an Outward act on the
+            // remote that the `otto-pr` skill performs with its own token.
+            || (is_gate_decision(p) && !p.starts_with("/repos/{id}/prs/"))
+            // The shared skill/soul library is loaded into every session.
+            || (p.starts_with("/library/") && !p.starts_with("/library/bundled"))
+            || p == "/skill-evaluations/{id}/promote";
+        if admin {
+            return Some(A);
+        }
+    }
+
+    // --- Outward (tag only; writes). ---
+    if write {
+        let outward = p == "/repos/{id}/push"
+            || p == "/repos/{id}/tag/push"
+            || p == "/repos/{id}/api-collections/push"
+            || p == "/repos/{id}/prs"
+            || (p.starts_with("/repos/{id}/prs/{number}")
+                && !p.ends_with("/readiness")
+                && !p.ends_with("/diff")
+                && !p.ends_with("/commits")
+                && !p.ends_with("/checks"))
+            || (p.starts_with("/issue/")
+                && !matches!(
+                    p,
+                    "/issue/search" | "/issue/confluence/search" | "/issue/my-work"
+                )
+                && !p.starts_with("/issue/accounts"))
+            || p == "/findings/{id}/jira"
+            || p.starts_with("/product/stories/{sid}/publish")
+            || p == "/product/testcase-runs/{rid}/publish"
+            || p == "/product/versions/{vid}/publish"
+            || p == "/workspaces/{id}/integrations/{channel}/test"
+            || p == "/brokers/clusters/{id}/topics/{topic}/produce"
+            || p == "/brokers/clusters/{id}/replay"
+            || p == "/brokers/clusters/{id}/groups/{group}/reset"
+            || matches!(
+                p,
+                "/aws/accounts/{id}/sqs/queues/send"
+                    | "/aws/accounts/{id}/sqs/queues/delete-message"
+                    | "/aws/accounts/{id}/sqs/queues/purge"
+                    | "/aws/accounts/{id}/sqs/queues/redrive"
+                    | "/aws/accounts/{id}/ec2/instances/{instance_id}/reboot"
+                    | "/aws/accounts/{id}/ec2/instances/{instance_id}/start"
+                    | "/aws/accounts/{id}/ec2/instances/{instance_id}/stop"
+            )
+            || matches!(
+                p,
+                "/k8s/clusters/{id}/actions"
+                    | "/k8s/clusters/{id}/exec"
+                    | "/k8s/clusters/{id}/pod-http"
+                    | "/k8s/clusters/{id}/resource"
+            );
+        if outward {
+            return Some(O);
+        }
+    }
+    None
+}
+
+/// The last path segment decides a human approval gate.
+fn is_gate_decision(p: &str) -> bool {
+    matches!(
+        p.rsplit('/').next().unwrap_or(""),
+        "approve" | "decide" | "reject" | "rollback"
+    )
+}
+
+/// The reviewed allow-list of WRITES on which an agent credential keeps its
+/// owner's root authority (S11 "flip the default"). Everywhere else the
+/// feature guard withholds root from a non-human credential's write, so a
+/// handler's `require_root` / `require_setup_authority` /
+/// `otto_core::auth::root_authority` refuses it — a new root-gated route is
+/// closed to agents until someone reviews it and adds it HERE.
+///
+/// Today the list is exactly the [`RouteClass::Outward`] routes: the user has
+/// not decided whether an agent's own token may merge / push / post (the
+/// `otto-pr` skill drives PRs with its session token), so those keep working.
+/// No Admin / Secret route may ever appear here (a test pins that).
+pub fn agent_root_write_allowed(method: &Method, matched_path: &str) -> bool {
+    matches!(route_class(method, matched_path), Some(RouteClass::Outward))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::Method;
+
+    #[test]
+    fn credential_classes_cover_the_findings_and_leave_ordinary_routes_alone() {
+        let c = |m: Method, p: &str| route_class(&m, p);
+        use RouteClass::{Admin as A, Outward as O, Secret as S};
+        // S11-01 / S8-01: settings, plugins, users, grants, impersonation, restore.
+        assert_eq!(c(Method::PUT, "/api/v1/settings"), Some(A));
+        assert_eq!(c(Method::POST, "/api/v1/plugin-admin/install"), Some(A));
+        assert_eq!(
+            c(Method::POST, "/api/v1/plugin-admin/{slug}/enable"),
+            Some(A)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/users"), Some(A));
+        assert_eq!(c(Method::PATCH, "/api/v1/users/{id}"), Some(A));
+        assert_eq!(c(Method::PUT, "/api/v1/users/{id}/grants"), Some(A));
+        assert_eq!(
+            c(Method::POST, "/api/v1/admin/impersonate/{user_id}"),
+            Some(A)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/state/archive/restore"), Some(A));
+        assert_eq!(c(Method::PUT, "/api/v1/workspaces/{id}/members"), Some(A));
+        // S3-01: human approval gates.
+        assert_eq!(
+            c(Method::POST, "/api/v1/workflow-runs/{id}/approve"),
+            Some(A)
+        );
+        // S11-03 / S1-02: plaintext secrets and credential minting.
+        assert_eq!(c(Method::POST, "/api/v1/state/connections/export"), Some(S));
+        assert_eq!(
+            c(Method::POST, "/api/v1/browser/credentials/{id}/reveal"),
+            Some(S)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/sessions/{id}/share"), Some(S));
+        assert_eq!(c(Method::POST, "/api/v1/auth/tokens"), Some(S));
+        // Outward: tagged, never Admin/Secret.
+        assert_eq!(
+            c(Method::POST, "/api/v1/repos/{id}/prs/{number}/merge"),
+            Some(O)
+        );
+        assert_eq!(c(Method::POST, "/api/v1/repos/{id}/push"), Some(O));
+        // Reads and ordinary work stay untagged.
+        assert_eq!(c(Method::GET, "/api/v1/settings"), None);
+        assert_eq!(c(Method::GET, "/api/v1/users"), None);
+        assert_eq!(c(Method::GET, "/api/v1/repos/{id}/prs/{number}/diff"), None);
+        assert_eq!(c(Method::POST, "/api/v1/sessions/{id}/input"), None);
+        assert_eq!(c(Method::POST, "/api/v1/admin/impersonate/stop"), None);
+        assert_eq!(c(Method::GET, "/api/v1/auth/tokens"), None);
+        // S11-301 / 303 / 306 / 308, S8-304: root-gated writes the agent
+        // could reach before, now person-only.
+        for (m, p) in [
+            (Method::POST, "/api/v1/workspaces/{wid}/mcp/servers"),
+            (Method::PATCH, "/api/v1/mcp/servers/{id}"),
+            (Method::DELETE, "/api/v1/mcp/servers/{id}"),
+            (Method::PATCH, "/api/v1/mcp/tools/{tool_id}"),
+            (Method::PUT, "/api/v1/workspaces/{wid}/mcp/allowlist"),
+            (Method::PUT, "/api/v1/mcp/otto-server/enabled"),
+            (Method::POST, "/api/v1/k8s/clusters"),
+            (Method::POST, "/api/v1/k8s/clusters/import"),
+            (
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig",
+            ),
+            (
+                Method::PUT,
+                "/api/v1/workspaces/{id}/integrations/{channel}",
+            ),
+            (
+                Method::POST,
+                "/api/v1/workspaces/{id}/integrations/seed-from-loom",
+            ),
+            (Method::POST, "/api/v1/improvement/edits/{eid}/approve"),
+            (Method::POST, "/api/v1/improvement/edits/{eid}/rollback"),
+            (Method::POST, "/api/v1/findings/{id}/approve"),
+            (Method::POST, "/api/v1/pr-review-comments/{cid}/approve"),
+            (Method::POST, "/api/v1/product/testcase-runs/{rid}/approve"),
+            (Method::POST, "/api/v1/design/artifacts/{id}/approve"),
+            (Method::POST, "/api/v1/database-changes/{id}/reject"),
+            (Method::POST, "/api/v1/skill-reviews/{id}/apply"),
+            (Method::PUT, "/api/v1/workspaces/{id}/self-improvement"),
+            (Method::PUT, "/api/v1/email-sender"),
+            (Method::POST, "/api/v1/email-sender/verify"),
+            (Method::PUT, "/api/v1/notifications/settings"),
+            (Method::DELETE, "/api/v1/auth/tokens/{id}"),
+            (Method::POST, "/api/v1/auth/shares/revoke-all"),
+        ] {
+            assert_eq!(c(m.clone(), p), Some(A), "{m} {p}");
+        }
+        // The PR approve stays Outward (the `otto-pr` skill), and the
+        // integration `/test` send stays Outward too.
+        assert_eq!(
+            c(Method::POST, "/api/v1/repos/{id}/prs/{number}/approve"),
+            Some(O)
+        );
+        assert_eq!(
+            c(
+                Method::POST,
+                "/api/v1/workspaces/{id}/integrations/{channel}/test"
+            ),
+            Some(O)
+        );
+        // Reading the bridges / k8s clusters stays untagged.
+        assert_eq!(c(Method::GET, "/api/v1/workspaces/{id}/integrations"), None);
+        assert_eq!(c(Method::GET, "/api/v1/k8s/clusters"), None);
+    }
+
+    #[test]
+    fn agent_root_write_allow_list_is_outward_only_and_never_admin_or_secret() {
+        assert!(agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/repos/{id}/prs/{number}/merge"
+        ));
+        assert!(agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/repos/{id}/prs"
+        ));
+        assert!(!agent_root_write_allowed(&Method::PUT, "/api/v1/settings"));
+        assert!(!agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/workspaces/{wid}/mcp/servers"
+        ));
+        assert!(!agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/sessions/{id}/input"
+        ));
+    }
 
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {
@@ -1543,7 +1943,7 @@ mod tests {
                 "/api/v1/design/artifacts/{id}/links/{link_id}",
             ),
             (Method::POST, "/api/v1/design/signals"),
-            // design_assist.rs — agent turns, variants, learned rules.
+            // otto-design-assist — agent turns, variants, learned rules.
             (Method::POST, "/api/v1/design/artifacts/{id}/assist"),
             (Method::POST, "/api/v1/design/artifacts/{id}/variants"),
             (
@@ -2084,6 +2484,13 @@ mod tests {
     // ---- Self-owned / cross-cutting exemptions -------------------------------
 
     #[test]
+    fn host_filesystem_requires_agents_edit_not_any_signed_in_user() {
+        assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Require(Agents, Edit));
+        assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Require(Agents, Edit));
+        assert_eq!(pol(Method::GET, "/api/v1/fs/stat"), Require(Agents, Edit));
+    }
+
+    #[test]
     fn self_owned_routes_exempt() {
         assert_eq!(pol(Method::GET, "/api/v1/auth/me"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/auth/logout"), Exempt);
@@ -2094,8 +2501,6 @@ mod tests {
         assert_eq!(pol(Method::GET, "/api/v1/auth/capabilities"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/notifications"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/notifications/{id}/read"), Exempt);
-        assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Exempt);
-        assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Exempt);
         // Agent discovery: every lookup is a self-call re-authorized by the
         // listed kind's own route, so the discovery route itself is exempt.
         assert_eq!(pol(Method::GET, "/api/v1/refs/directory"), Exempt);
@@ -2117,6 +2522,7 @@ mod tests {
         // Per-user email sender (Gmail App Password → Keychain): self-owned.
         assert_eq!(pol(Method::GET, "/api/v1/email-sender"), Exempt);
         assert_eq!(pol(Method::PUT, "/api/v1/email-sender"), Exempt);
+        assert_eq!(pol(Method::POST, "/api/v1/email-sender/verify"), Exempt);
     }
 
     #[test]
@@ -2334,6 +2740,23 @@ mod tests {
             pol(Method::GET, "/api/v1/library/bundled"),
             Require(Skills, View)
         );
+    }
+
+    /// S8-13: only the exact skill-eval template is SkillEval:Admin — another
+    /// family's `…/promote` must not inherit it by suffix.
+    #[test]
+    fn promote_suffix_does_not_leak_into_other_families() {
+        for path in [
+            "/api/v1/vault/{id}/promote",
+            "/api/v1/design/artifacts/{id}/promote",
+            "/api/v1/memory/{id}/promote",
+        ] {
+            assert_ne!(
+                pol(Method::POST, path),
+                Require(SkillEval, Admin),
+                "{path} must not be governed by SkillEval by suffix"
+            );
+        }
     }
 
     #[test]
@@ -2848,6 +3271,14 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{wid}/browser/ask"),
+            Require(Browser, Edit)
+        );
+    }
+
+    #[test]
+    fn browser_proxy_ticket_mint_is_edit() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/proxy-ticket"),
             Require(Browser, Edit)
         );
     }

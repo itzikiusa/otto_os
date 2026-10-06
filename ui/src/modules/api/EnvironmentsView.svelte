@@ -199,11 +199,11 @@
     {/if}
   </header>
 
-  {#if apiClient.environments.length === 0 && (apiClient.envLoadError || apiClient.loading)}
+  {#if apiClient.environments.length === 0 && (apiClient.envLoadError || apiClient.listsPending)}
     <!-- A failed/in-flight load is not "No environments yet". -->
     <LoadState
       what="environments"
-      loading={apiClient.loading}
+      loading={apiClient.listsPending}
       error={apiClient.envLoadError}
       empty
       onretry={() => void apiClient.loadAll()}
@@ -258,7 +258,7 @@
             </div>
             {#each rows as row, i (i)}
               <div class="vt-row var-row">
-                <input class="input mono var-key" placeholder="base_url" value={row.key} disabled={!canEdit}
+                <input dir="ltr" class="input mono var-key" placeholder="base_url" value={row.key} disabled={!canEdit}
                   aria-label="Variable name" oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
                 <input
                   class="input mono var-val"

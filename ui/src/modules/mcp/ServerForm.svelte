@@ -156,7 +156,7 @@
 
     <label class="field">
       <span>Name</span>
-      <input bind:value={name} placeholder="github" aria-invalid={nameError != null} oninput={() => (nameError = null)} />
+      <input dir="auto" bind:value={name} placeholder="github" aria-invalid={nameError != null} oninput={() => (nameError = null)} />
       {#if nameError}<span class="field-error" role="alert">{nameError}</span>{/if}
     </label>
 
@@ -175,40 +175,45 @@
       </p>
       <label class="field">
         <span>Command</span>
-        <input bind:value={command} placeholder="npx" class="mono" aria-invalid={commandError != null} oninput={() => (commandError = null)} />
+        <input dir="ltr" bind:value={command} placeholder="npx" class="mono" aria-invalid={commandError != null} oninput={() => (commandError = null)} />
         {#if commandError}<span class="field-error" role="alert">{commandError}</span>{/if}
       </label>
       <label class="field">
         <span>Arguments <em>(one per line)</em></span>
-        <textarea bind:value={argsText} rows="3" class="mono" placeholder={'-y\n@modelcontextprotocol/server-github'}></textarea>
+        <textarea dir="ltr" bind:value={argsText} rows="3" class="mono" placeholder={'-y\n@modelcontextprotocol/server-github'}></textarea>
       </label>
       <label class="field">
         <span>Env <em>(KEY=value, one per line)</em></span>
-        <textarea bind:value={envText} rows="2" class="mono" placeholder="LOG_LEVEL=info"></textarea>
+        <textarea dir="ltr" bind:value={envText} rows="2" class="mono" placeholder="LOG_LEVEL=info"></textarea>
+        <span class="env-note">
+          The server does not inherit Otto’s environment — only PATH, HOME, the locale, temp dir, proxy
+          (HTTPS_PROXY, NO_PROXY…), CA bundle (NODE_EXTRA_CA_CERTS, SSL_CERT_FILE…), DOCKER_HOST and XDG_*
+          variables. Set anything else it needs here.
+        </span>
       </label>
       <label class="field">
         <span>Secret env <em>(KEY=value — stored in Keychain, never shown again)</em></span>
-        <textarea bind:value={secretEnvText} rows="2" class="mono" placeholder="GITHUB_TOKEN=ghp_…"></textarea>
+        <textarea dir="ltr" bind:value={secretEnvText} rows="2" class="mono" placeholder="GITHUB_TOKEN=ghp_…"></textarea>
       </label>
     {:else}
       <label class="field">
         <span>URL</span>
-        <input bind:value={url} placeholder="https://mcp.example.com/rpc" class="mono" aria-invalid={urlError != null} oninput={() => (urlError = null)} />
+        <input dir="ltr" bind:value={url} placeholder="https://mcp.example.com/rpc" class="mono" aria-invalid={urlError != null} oninput={() => (urlError = null)} />
         {#if urlError}<span class="field-error" role="alert">{urlError}</span>{/if}
       </label>
       <label class="field">
         <span>Headers <em>(Name=value, one per line)</em></span>
-        <textarea bind:value={headersText} rows="2" class="mono" placeholder="X-Client=otto"></textarea>
+        <textarea dir="ltr" bind:value={headersText} rows="2" class="mono" placeholder="X-Client=otto"></textarea>
       </label>
       <label class="field">
         <span>Secret headers <em>(stored in Keychain, never shown again)</em></span>
-        <textarea bind:value={secretHeadersText} rows="2" class="mono" placeholder="Authorization=Bearer …"></textarea>
+        <textarea dir="ltr" bind:value={secretHeadersText} rows="2" class="mono" placeholder="Authorization=Bearer …"></textarea>
       </label>
     {/if}
 
     <label class="field">
       <span>Description</span>
-      <input bind:value={description} placeholder="What this server provides (optional)" />
+      <input dir="auto" bind:value={description} placeholder="What this server provides (optional)" />
     </label>
 
     <button
@@ -272,6 +277,10 @@
   .field em {
     font-style: normal;
     opacity: 0.7;
+  }
+  .field > .env-note {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .row2 {
     display: grid;

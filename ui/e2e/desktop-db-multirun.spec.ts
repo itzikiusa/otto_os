@@ -128,7 +128,7 @@ async function fixture(page: Page) {
 async function openStg(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const picker = page.locator('.side-switch .ss', { hasText: 'Connections' }).first();
+  const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
   if (await picker.isVisible()) await picker.click();
   await page.locator('.conn-list .conn-name', { hasText: STG }).first().click();
   await expect(page.locator('.query-editor')).toBeVisible();

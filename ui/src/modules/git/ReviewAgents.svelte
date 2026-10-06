@@ -10,7 +10,7 @@
   import { api } from '../../lib/api/client';
   import type { Review } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, type BadgeTone } from '../../lib/status';
   import { sentenceCase, severityLabel } from '../../lib/labels';
@@ -127,12 +127,15 @@
             {stopping[i] ? 'Stopping…' : 'Stop'}
           </button>
         {/if}
-        {#if i < lastRetryable}
+        {#if i < lastRetryable && (agent.status === 'done' || agent.status === 'error' || agent.status === 'skipped')}
+          <!-- A single agent is retryable only once the whole review has settled:
+               the run's end-of-review cleanup would delete a retried agent's
+               files mid-read (the server answers 409 too). -->
           <button
             class="btn small ghost"
-            disabled={retrying[i]}
+            disabled={retrying[i] || review.status === 'running'}
             onclick={() => retryAgent(i)}
-            title="Re-run this agent"
+            title={review.status === 'running' ? 'Retry once the review has finished' : 'Re-run this agent'}
           >
             {retrying[i] ? 'Retrying…' : 'Retry'}
           </button>
@@ -187,7 +190,7 @@
                WS reconnect storm, leaving a running agent's terminal stuck on
                "reconnecting". The {#each} is keyed by agent.name, so the
                component instance is stable across refetches. -->
-          <Terminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
+          <LazyTerminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
         </div>
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}

@@ -381,9 +381,12 @@ impl Visitor for SafeExpressions {
 /// read-only gate in addition to their keyword checks: a first keyword cannot
 /// reveal a write nested inside a read-looking statement.
 ///
-/// Unlike [`operations`] this does NOT restrict functions or catalogs — that
+/// Unlike [`operations`] this does NOT allow-list functions or catalogs — that
 /// is the enforced-mode boundary; the legacy paths rely on native privileges
-/// and, for MCP, a native read-only transaction behind this check. A parse
+/// and, for MCP, a native read-only transaction behind this check. It DOES
+/// refuse the built-ins a read-only transaction cannot stop
+/// ([`function_has_side_effect`]: killing backends, advisory locks, `dblink`,
+/// `nextval`, …), so such a `SELECT` is never treated as a read. A parse
 /// failure is unproven and returns `false` (the callers treat it as a write).
 /// Engines other than MySQL / PostgreSQL are not parsed and return `true`.
 pub(crate) fn read_is_provable(engine: Engine, sql: &str) -> bool {
@@ -395,7 +398,206 @@ pub(crate) fn read_is_provable(engine: Engine, sql: &str) -> bool {
     let Ok(statements) = parsed else {
         return false;
     };
-    !statements.is_empty() && statements.iter().all(statement_is_pure_read)
+    !statements.is_empty()
+        && statements.iter().all(statement_is_pure_read)
+        && statements.visit(&mut SideEffectFunctions).is_continue()
+}
+
+/// True for a built-in whose CALL has a side effect even inside a read-only
+/// transaction: it signals or kills other backends, reloads / rotates server
+/// state, takes session-level locks, writes over a separate session
+/// (`dblink*`), touches large objects or server files, publishes
+/// notifications, or advances a sequence. A `SELECT` that calls one is not a
+/// proven read — `BEGIN READ ONLY` (the MCP second barrier) does not stop any
+/// of them. Matched on the unqualified, unquoted, lower-cased name so
+/// `pg_catalog."pg_terminate_backend"` cannot slip past.
+pub(crate) fn function_has_side_effect(name: &str) -> bool {
+    let name = name
+        .rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .replace(['"', '`'], "")
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        // PostgreSQL
+        "pg_terminate_backend"
+            | "pg_cancel_backend"
+            | "pg_reload_conf"
+            | "pg_rotate_logfile"
+            | "pg_switch_wal"
+            | "pg_switch_xlog"
+            | "pg_promote"
+            | "pg_create_restore_point"
+            | "pg_wal_replay_pause"
+            | "pg_wal_replay_resume"
+            | "pg_notify"
+            | "pg_logical_emit_message"
+            | "pg_sleep"
+            | "pg_sleep_for"
+            | "pg_sleep_until"
+            | "set_config"
+            | "nextval"
+            | "setval"
+            | "txid_current"
+            | "pg_current_xact_id"
+            | "pg_stat_statements_reset"
+            | "pg_start_backup"
+            | "pg_stop_backup"
+            | "pg_log_backend_memory_contexts"
+            // Execute a query given as TEXT: the visitor never sees the inner
+            // statement, so `query_to_xml('SELECT pg_terminate_backend(…)', …)`
+            // would hide any other entry here behind a pure-looking SELECT.
+            | "ts_stat"
+            | "ts_rewrite"
+            // MySQL
+            | "get_lock"
+            | "release_lock"
+            | "release_all_locks"
+            | "sleep"
+            | "benchmark"
+            | "master_pos_wait"
+            | "source_pos_wait"
+            | "load_file"
+    ) || name.starts_with("dblink")
+        || name.starts_with("lo_")
+        || name.starts_with("pg_read_")
+        || name.starts_with("pg_ls_")
+        || name.starts_with("pg_stat_reset")
+        || name.starts_with("pg_file_")
+        || name.starts_with("pg_create_")
+        || name.starts_with("pg_drop_")
+        || name.starts_with("pg_replication_")
+        || name.starts_with("pg_backup_")
+        || name.starts_with("pg_background")
+        || name.starts_with("query_to_xml")
+        || name.starts_with("cursor_to_xml")
+        || name.contains("advisory")
+}
+
+/// True when a string literal is itself SQL — it parses as one or more
+/// statements in either dialect we classify. A function handed such text may
+/// execute it (`query_to_xml`, `ts_stat`, `dblink`, an extension we do not
+/// know by name), and the visitor cannot see inside a literal, so a call
+/// carrying one is not a proven read. Defence in depth behind the name list:
+/// a concatenated or `format()`-built query still needs the name list.
+fn literal_is_sql(text: &str) -> bool {
+    let t = text.trim_start().trim_start_matches('(').trim_start();
+    let head: String = t
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if !matches!(
+        head.as_str(),
+        "select"
+            | "with"
+            | "insert"
+            | "update"
+            | "delete"
+            | "merge"
+            | "values"
+            | "table"
+            | "call"
+            | "do"
+            | "copy"
+            | "create"
+            | "drop"
+            | "alter"
+            | "truncate"
+            | "grant"
+            | "revoke"
+            | "set"
+            | "explain"
+            | "lock"
+            | "vacuum"
+            | "analyze"
+            | "refresh"
+            | "notify"
+    ) {
+        return false;
+    }
+    Parser::parse_sql(&PostgreSqlDialect {}, text).is_ok_and(|s| !s.is_empty())
+        || Parser::parse_sql(&MySqlDialect {}, text).is_ok_and(|s| !s.is_empty())
+}
+
+/// Finds a SQL-text string literal anywhere inside one function call's
+/// arguments (see [`literal_is_sql`]).
+struct SqlTextLiteral;
+impl Visitor for SqlTextLiteral {
+    type Break = ();
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        use sqlparser::ast::Value;
+        let Expr::Value(v) = expr else {
+            return ControlFlow::Continue(());
+        };
+        let text = match &v.value {
+            Value::SingleQuotedString(s)
+            | Value::DoubleQuotedString(s)
+            | Value::EscapedStringLiteral(s)
+            | Value::NationalStringLiteral(s)
+            | Value::TripleSingleQuotedString(s)
+            | Value::TripleDoubleQuotedString(s) => s.as_str(),
+            Value::DollarQuotedString(d) => d.value.as_str(),
+            _ => return ControlFlow::Continue(()),
+        };
+        if literal_is_sql(text) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+}
+
+/// Refuses any call (scalar or table function) of a
+/// [`function_has_side_effect`] built-in, anywhere in the statement.
+struct SideEffectFunctions;
+impl Visitor for SideEffectFunctions {
+    type Break = ();
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        match expr {
+            Expr::Function(f) if function_has_side_effect(&f.name.to_string()) => {
+                ControlFlow::Break(())
+            }
+            // A function handed SQL as text may execute it out of the
+            // visitor's sight; refuse rather than guess which ones do.
+            Expr::Function(f) if f.args.visit(&mut SqlTextLiteral).is_break() => {
+                ControlFlow::Break(())
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    }
+    fn pre_visit_table_factor(
+        &mut self,
+        table: &sqlparser::ast::TableFactor,
+    ) -> ControlFlow<Self::Break> {
+        use sqlparser::ast::TableFactor;
+        let name = match table {
+            TableFactor::Table {
+                name,
+                args: Some(_),
+                ..
+            } => Some(name.to_string()),
+            TableFactor::Function { name, .. } => Some(name.to_string()),
+            _ => None,
+        };
+        if name.is_some_and(|n| function_has_side_effect(&n)) {
+            return ControlFlow::Break(());
+        }
+        // `SELECT * FROM ts_stat('SELECT …')`-style table functions: the
+        // arguments of a table-valued call are SQL text just the same.
+        let sql_text_arg = match table {
+            TableFactor::Table {
+                args: Some(args), ..
+            } => args.visit(&mut SqlTextLiteral).is_break(),
+            TableFactor::Function { args, .. } => args.visit(&mut SqlTextLiteral).is_break(),
+            _ => false,
+        };
+        if sql_text_arg {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 fn statement_is_pure_read(statement: &Statement) -> bool {
@@ -520,7 +722,7 @@ pub(crate) fn operations(engine: Engine, sql: &str) -> Result<Vec<&'static str>>
             _ => {
                 return Err(Error::Forbidden(
                     "this SQL form is unsupported for governed direct execution".into(),
-                ))
+                ));
             }
         };
         if !ops.contains(&op) {
@@ -654,5 +856,95 @@ mod select_into_regressions {
         ] {
             assert!(operations(Engine::Postgres, sql).is_err(), "{sql}");
         }
+    }
+
+    #[test]
+    fn side_effect_functions_are_not_provable_reads() {
+        for sql in [
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = current_user",
+            "SELECT pg_cancel_backend(42)",
+            "SELECT pg_reload_conf()",
+            "SELECT pg_rotate_logfile()",
+            "SELECT pg_switch_wal()",
+            "SELECT pg_promote()",
+            "SELECT pg_create_restore_point('x')",
+            "SELECT dblink_exec('dbname=x', 'DELETE FROM t')",
+            "SELECT * FROM dblink('dbname=x', 'SELECT 1') AS t(a int)",
+            "SELECT lo_unlink(1)",
+            "SELECT lo_import('/etc/passwd')",
+            "SELECT pg_advisory_lock(1)",
+            "SELECT pg_try_advisory_lock(1)",
+            "SELECT pg_advisory_xact_lock_shared(1)",
+            "SELECT set_config('search_path', 'x', false)",
+            "SELECT pg_notify('ch', 'payload')",
+            "SELECT pg_read_file('/etc/passwd')",
+            "SELECT pg_read_binary_file('/etc/passwd')",
+            "SELECT * FROM pg_ls_dir('.')",
+            "SELECT pg_stat_reset()",
+            "SELECT pg_logical_emit_message(true, 'p', 'x')",
+            "SELECT nextval('orders_id_seq')",
+            "SELECT setval('orders_id_seq', 1)",
+            "SELECT pg_catalog.pg_terminate_backend(1)",
+            "SELECT \"pg_terminate_backend\"(1)",
+            "WITH k AS (SELECT pg_terminate_backend(1)) SELECT * FROM k",
+            "SELECT 1 WHERE EXISTS (SELECT pg_cancel_backend(2))",
+            "EXPLAIN SELECT pg_sleep(1)",
+            // S6-301: built-ins that EXECUTE a query given as text hide any
+            // call above behind a pure-looking outer SELECT.
+            "SELECT query_to_xml('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = current_user', true, false, '')",
+            "SELECT query_to_xmlschema('SELECT 1', true, false, '')",
+            "SELECT query_to_xml_and_xmlschema('SELECT 1', true, false, '')",
+            "SELECT pg_catalog.query_to_xml('SELECT nextval(''s'')', true, false, '')",
+            "SELECT cursor_to_xml('c', 10, true, false, '')",
+            "SELECT * FROM ts_stat('SELECT pg_advisory_lock(1)::text::tsvector')",
+            "SELECT ts_rewrite('a & b'::tsquery, 'SELECT t, s FROM aliases')",
+            "SELECT pg_stat_statements_reset()",
+            "SELECT pg_backup_start('x')",
+            "SELECT pg_backup_stop()",
+            "SELECT pg_start_backup('x')",
+            "SELECT pg_stop_backup()",
+            "SELECT pg_log_backend_memory_contexts(1)",
+            // Any function handed SQL text is refused — even one we don't
+            // know by name (an extension's executor).
+            "SELECT my_ext.run_sql('SELECT pg_terminate_backend(1)')",
+            "SELECT my_ext.run_sql($$DELETE FROM t$$)",
+            "SELECT * FROM my_ext.exec_rows('select 1') AS t(a int)",
+            "SELECT length(query_to_xml('SELECT 1', true, false, '')::text)",
+        ] {
+            assert!(!read_is_provable(Engine::Postgres, sql), "{sql}");
+        }
+        for sql in [
+            "SELECT GET_LOCK('x', 10)",
+            "SELECT RELEASE_LOCK('x')",
+            "SELECT RELEASE_ALL_LOCKS()",
+            "SELECT SLEEP(100)",
+            "SELECT BENCHMARK(100000000, MD5('a'))",
+            "SELECT LOAD_FILE('/etc/passwd')",
+        ] {
+            assert!(!read_is_provable(Engine::Mysql, sql), "{sql}");
+        }
+        // Ordinary function calls stay provable reads.
+        assert!(read_is_provable(
+            Engine::Postgres,
+            "SELECT count(*), lower(name), now() FROM shop.orders"
+        ));
+        assert!(read_is_provable(
+            Engine::Mysql,
+            "SELECT CONCAT(a, b), COALESCE(c, 0) FROM t"
+        ));
+        // A string argument that merely starts with an SQL word but is not a
+        // statement stays a read; a non-function literal is never inspected.
+        assert!(read_is_provable(
+            Engine::Postgres,
+            "SELECT lower('Select, then confirm'), replace(name, 'update', 'x') FROM t"
+        ));
+        assert!(read_is_provable(
+            Engine::Postgres,
+            "SELECT * FROM logs WHERE msg = 'SELECT 1'"
+        ));
+        assert!(read_is_provable(
+            Engine::Postgres,
+            "SELECT table_to_xml('shop.orders', true, false, '')"
+        ));
     }
 }

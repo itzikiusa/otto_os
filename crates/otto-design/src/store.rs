@@ -896,27 +896,36 @@ impl Store {
 
     /// HARD delete (workspace-admin only, explicit `?hard=true`): the row, its
     /// versions, its outgoing links and its search row. Incoming links are kept
-    /// and flagged `broken` (consumers show a badge). Blobs are NOT touched —
-    /// only the opt-in prune GC ever removes a blob.
-    pub async fn delete_artifact(&self, id: &str) -> Result<()> {
+    /// and flagged `broken` (consumers show a badge). Returns the DISTINCT
+    /// blobs the deleted rows referenced (version contents + thumbnail) — GC
+    /// CANDIDATES the caller re-checks with [`Self::blob_in_use`] under the
+    /// blob GC fence after this commit (S7-03: they used to stay on disk
+    /// forever, deleted design bytes included).
+    pub async fn delete_artifact(&self, id: &str) -> Result<Vec<String>> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(dberr("design.artifact.delete.begin"))?;
-        let res = sqlx::query("DELETE FROM design_artifacts WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("design.artifact.delete"))?;
-        if res.rows_affected() == 0 {
+        let deleted: Option<Option<String>> =
+            sqlx::query_scalar("DELETE FROM design_artifacts WHERE id = ? RETURNING thumb_blob")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(dberr("design.artifact.delete"))?;
+        let Some(thumb) = deleted else {
             return Err(Error::NotFound(format!("design artifact {id}")));
-        }
-        sqlx::query("DELETE FROM design_versions WHERE artifact_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("design.artifact.delete.versions"))?;
+        };
+        let version_blobs: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM design_versions WHERE artifact_id = ? RETURNING blob_sha256",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(dberr("design.artifact.delete.versions"))?;
+        let mut blobs: Vec<String> = version_blobs.into_iter().chain(thumb).collect();
+        blobs.sort();
+        blobs.dedup();
         sqlx::query("DELETE FROM design_links WHERE src_artifact_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -933,7 +942,7 @@ impl Store {
             .await
             .map_err(dberr("design.artifact.delete.commit"))?;
         self.fts_remove(id).await;
-        Ok(())
+        Ok(blobs)
     }
 
     // -- versions -------------------------------------------------------------
@@ -1394,6 +1403,19 @@ impl Store {
         otto_state::SettingsRepo::new(self.pool.clone())
             .put(crate::retention::AUTO_TIDY_SETTING, &Value::Bool(on))
             .await
+    }
+
+    /// Every blob a version or thumbnail references (the orphan sweep's
+    /// keep-set; read under the exclusive GC fence).
+    pub async fn referenced_blobs(&self) -> Result<std::collections::HashSet<String>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT blob_sha256 FROM design_versions
+             UNION SELECT thumb_blob FROM design_artifacts WHERE thumb_blob IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("design.blob.referenced"))?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Is `sha` still referenced by any version or thumbnail?
@@ -1989,24 +2011,75 @@ impl Store {
         };
         let res: std::result::Result<(), sqlx::Error> = put.await;
         if res.is_err() && self.has_fts().await {
-            // No map on this DB (it failed to build): the old scan path.
-            let _ = sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
-                .bind(artifact_id)
-                .execute(&self.pool)
-                .await;
-            let _ = sqlx::query(
-                "INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+            // No map on this DB (it failed to build), or the mapped write
+            // failed: the old scan path — but in ONE transaction that also
+            // points the map (when this DB has one) at the new row. Writing
+            // the row outside the map left it unmapped: the next index found
+            // a stale rid, inserted again, and search returned the artifact
+            // twice (or a ghost after delete).
+            let fallback = self.fts_put_scan(artifact_id, title, tags, body, story, project);
+            if let Err(e) = fallback.await {
+                tracing::warn!("design: FTS index of {artifact_id} failed: {e}");
+            }
+        }
+    }
+
+    /// The map-less (scan) write path of [`Self::fts_index`], in one
+    /// transaction that also keeps the map, when present, pointing at the
+    /// artifact's single row.
+    async fn fts_put_scan(
+        &self,
+        artifact_id: &str,
+        title: &str,
+        tags: &str,
+        body: &str,
+        story: &str,
+        project: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
+            .bind(artifact_id)
+            .execute(&mut *tx)
+            .await?;
+        let ins = sqlx::query(
+            "INSERT INTO design_search_fts (artifact_id, title, tags, body, story, project) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(artifact_id)
+        .bind(title)
+        .bind(tags)
+        .bind(body)
+        .bind(story)
+        .bind(project)
+        .execute(&mut *tx)
+        .await?;
+        if fts_map_exists(&mut tx).await? {
+            sqlx::query(
+                "INSERT OR REPLACE INTO design_search_fts_ids (artifact_id, rid) VALUES (?, ?)",
             )
             .bind(artifact_id)
-            .bind(title)
-            .bind(tags)
-            .bind(body)
-            .bind(story)
-            .bind(project)
-            .execute(&self.pool)
-            .await;
+            .bind(ins.last_insert_rowid())
+            .execute(&mut *tx)
+            .await?;
         }
+        tx.commit().await
+    }
+
+    /// The scan removal path of [`Self::fts_remove`]: every row of the
+    /// artifact and its map row (when present), in one transaction.
+    async fn fts_del_scan(&self, artifact_id: &str) -> std::result::Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
+            .bind(artifact_id)
+            .execute(&mut *tx)
+            .await?;
+        if fts_map_exists(&mut tx).await? {
+            sqlx::query("DELETE FROM design_search_fts_ids WHERE artifact_id = ?")
+                .bind(artifact_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await
     }
 
     /// The body text last indexed for an artifact (`None`: not indexed, or no
@@ -2059,10 +2132,13 @@ impl Store {
         };
         let res: std::result::Result<(), sqlx::Error> = del.await;
         if res.is_err() {
-            let _ = sqlx::query("DELETE FROM design_search_fts WHERE artifact_id = ?")
-                .bind(artifact_id)
-                .execute(&self.pool)
-                .await;
+            // The scan path, with the map row (when this DB has one) removed
+            // in the same transaction — a surviving map row would point the
+            // next index of this id at a rowid FTS may hand to another row.
+            let fallback = self.fts_del_scan(artifact_id);
+            if let Err(e) = fallback.await {
+                tracing::warn!("design: FTS removal of {artifact_id} failed: {e}");
+            }
         }
     }
 
@@ -2179,6 +2255,17 @@ impl Store {
             .map(|r| Ok((row_artifact(r)?, String::new(), 0.0)))
             .collect()
     }
+}
+
+/// Whether this DB has the FTS `artifact_id → rowid` map (it is built at
+/// runtime and may be missing when its creation failed).
+async fn fts_map_exists(conn: &mut sqlx::SqliteConnection) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+         WHERE name = 'design_search_fts_ids' AND type = 'table')",
+    )
+    .fetch_one(&mut *conn)
+    .await
 }
 
 #[cfg(test)]
@@ -2465,6 +2552,41 @@ mod tests {
         s.fts_index("A", "", "", "newest", "", "").await;
         assert_eq!(s.fts_body("A").await.as_deref(), Some("newest"));
         assert_eq!(fts_rows(&s).await.len(), 2);
+    }
+
+    /// r10: the scan fallback (taken when the mapped write fails) wrote its
+    /// row outside the map, so the next index found a stale rid and inserted
+    /// a second row (duplicate hits; a ghost after delete). It now keeps the
+    /// map pointing at the artifact's single row, in the same transaction.
+    #[tokio::test]
+    async fn scan_fallback_keeps_the_rowid_map_consistent() {
+        let s = store().await;
+        assert!(s.ensure_fts().await);
+        s.fts_index("A", "", "", "first", "", "").await;
+        s.fts_put_scan("A", "", "", "fallback", "", "")
+            .await
+            .unwrap();
+        s.fts_index("A", "", "", "again", "", "").await;
+        assert_eq!(
+            fts_rows(&s).await,
+            vec![("A".into(), "again".into())],
+            "one row per artifact after a fallback write"
+        );
+        let mapped: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM design_search_fts_ids m \
+             JOIN design_search_fts f ON f.rowid = m.rid WHERE m.artifact_id = 'A'",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(mapped, 1, "the map points at the live row");
+        s.fts_del_scan("A").await.unwrap();
+        assert!(fts_rows(&s).await.is_empty());
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM design_search_fts_ids")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "no map row survives the fallback removal");
     }
 
     /// A map row that outlived its index row (e.g. the FTS table was rebuilt)

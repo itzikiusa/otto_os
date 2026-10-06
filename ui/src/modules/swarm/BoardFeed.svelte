@@ -157,7 +157,7 @@
     <select class="input small" bind:value={draftKind} aria-label="Kind of post" title="Kind of post">
       {#each KINDS as k (k)}<option value={k}>{sentenceCase(k)}</option>{/each}
     </select>
-    <input
+    <input dir="auto"
       bind:this={composerEl}
       class="input grow"
       aria-label="Message"

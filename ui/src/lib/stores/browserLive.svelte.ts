@@ -134,7 +134,13 @@ class BrowserLiveStore {
     this.starting = true;
     try {
       const job = await liveApi.installEngine(build);
-      if (this.status) this.status = { ...this.status, install: job };
+      // The 202 is the job as it STARTED; progress events for it can land
+      // before this response does. Never let the start snapshot (0 bytes)
+      // overwrite progress already applied from the event stream.
+      const cur = this.status?.install;
+      const ahead =
+        !!cur && cur.build === job.build && RUNNING.includes(cur.state) && cur.received_bytes > job.received_bytes;
+      if (this.status && !ahead) this.status = { ...this.status, install: job };
       if (job.state === 'installed') await this.load();
       else this.schedulePoll();
     } finally {

@@ -176,13 +176,14 @@
     </p>
 
     <!-- Target: new vs existing -->
-    <div class="seg">
-      <button class="seg-btn" class:active={mode === 'new'} onclick={() => (mode = 'new')}>
+    <div class="seg" role="group" aria-label="Hand over to">
+      <button class="seg-btn" class:active={mode === 'new'} aria-pressed={mode === 'new'} onclick={() => (mode = 'new')}>
         New agent
       </button>
       <button
         class="seg-btn"
         class:active={mode === 'existing'}
+        aria-pressed={mode === 'existing'}
         disabled={otherAgents.length === 0}
         title={otherAgents.length === 0 ? 'No other agents in this workspace' : ''}
         onclick={() => (mode = 'existing')}
@@ -236,7 +237,7 @@
 
     <div class="field">
       <label for="ho-focus">What should the agent focus on? <span class="dim">(optional)</span></label>
-      <textarea
+      <textarea dir="auto"
         id="ho-focus"
         class="input"
         bind:value={focus}
@@ -281,7 +282,7 @@
     {#if briefNote}<p class="note">{briefNote}</p>{/if}
     <div class="field">
       <label for="ho-brief">Handover brief</label>
-      <textarea
+      <textarea dir="auto"
         id="ho-brief"
         class="input mono brief"
         bind:value={brief}
@@ -362,7 +363,7 @@
     box-shadow: var(--glass-shadow);
   }
   .seg-btn:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

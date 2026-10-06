@@ -23,6 +23,9 @@ test.beforeEach(async ({ page }) => {
 
 test('Product phone empty state exposes the import action immediately', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
+  // Product stories are global and the e2e daemon is shared: other specs'
+  // stories would replace the empty state this test is about.
+  await page.route('**/api/v1/workspaces/*/product/stories', (r) => r.fulfill({ json: [] }));
   await openPage(page, 'product');
   const action = page.getByRole('button', { name: 'Import story', exact: true });
   await expectFullyInViewport(page, action, 'Import story onboarding');
@@ -56,7 +59,7 @@ test('Browser URL field preserves left-to-right editing in RTL', async ({ page }
   await page.setViewportSize({ width: 1024, height: 768 });
   await page.addInitScript(() => localStorage.setItem('otto_direction', 'rtl'));
   await openPage(page, 'browser');
-  const address = page.getByPlaceholder('Enter URL');
+  const address = page.getByPlaceholder('e.g. https://example.com');
   await address.fill('https://example.invalid/docs?query=hello#intro');
   await expect(address).toHaveCSS('direction', 'ltr');
   await page.screenshot({ path: '/tmp/otto-ux-content-browser-rtl.png' });

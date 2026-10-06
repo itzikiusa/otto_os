@@ -48,7 +48,7 @@
     {#each names as name (name)}
       <div class="vp-row">
         <span class="vp-name mono" title={name}>{name}</span>
-        <input
+        <input dir="auto"
           class="input vp-input"
           bind:value={drafts[name].value}
           placeholder={drafts[name].type === 'number' ? '123' : 'value'}

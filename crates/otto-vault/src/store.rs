@@ -304,6 +304,7 @@ impl Store {
                 unresolved,
                 tags,
                 attachments,
+                tracked_recovery: Vec::new(),
             },
             counts,
         ))

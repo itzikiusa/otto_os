@@ -422,19 +422,34 @@ static GATEWAYS: LazyLock<Pool> = LazyLock::new(Default::default);
 
 /// The cluster's pooled mutating-capable `kubectl proxy` (started on demand,
 /// restarted when the credentials changed). `None` ⇒ use port-forward.
+///
+/// The pool lock is NOT held while a proxy starts (up to 10 s): a slow start
+/// for one cluster no longer serializes pod-HTTP calls on every other
+/// cluster. Two concurrent first calls for the same cluster may both start
+/// one; the loser's is dropped (and its child killed) on insert.
 async fn gateway(cluster_id: &str, k: &Kubectl) -> Option<Arc<KubeProxy>> {
-    let mut pool = GATEWAYS.lock().await;
-    pool.retain(|_, (_, used)| used.elapsed() < GATEWAY_IDLE);
-    if let Some((gw, used)) = pool.get_mut(cluster_id) {
-        if gw.usable_for(k) {
-            *used = Instant::now();
-            return Some(gw.clone());
+    ensure_reaper();
+    {
+        let mut pool = GATEWAYS.lock().await;
+        pool.retain(|_, (_, used)| used.elapsed() < GATEWAY_IDLE);
+        if let Some((gw, used)) = pool.get_mut(cluster_id) {
+            if gw.usable_for(k) {
+                *used = Instant::now();
+                return Some(gw.clone());
+            }
         }
+        pool.remove(cluster_id);
     }
-    pool.remove(cluster_id);
     match KubeProxy::start_with(k, true).await {
         Ok(gw) => {
             let gw = Arc::new(gw);
+            let mut pool = GATEWAYS.lock().await;
+            if let Some((other, used)) = pool.get_mut(cluster_id) {
+                if other.usable_for(k) {
+                    *used = Instant::now();
+                    return Some(other.clone());
+                }
+            }
             pool.insert(cluster_id.to_string(), (gw.clone(), Instant::now()));
             Some(gw)
         }
@@ -445,9 +460,34 @@ async fn gateway(cluster_id: &str, k: &Kubectl) -> Option<Arc<KubeProxy>> {
     }
 }
 
+/// Reap idle gateways in the background: a mutating-capable proxy (with the
+/// cluster's credentials loaded) must not outlive [`GATEWAY_IDLE`] just
+/// because no further pod-HTTP call came along to run the inline sweep.
+fn ensure_reaper() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    STARTED.get_or_init(|| {
+        tokio::spawn(async {
+            loop {
+                tokio::time::sleep(GATEWAY_IDLE / 4).await;
+                GATEWAYS
+                    .lock()
+                    .await
+                    .retain(|_, (_, used)| used.elapsed() < GATEWAY_IDLE);
+            }
+        });
+    });
+}
+
 /// Drop the pooled gateway of a cluster (it misbehaved).
 async fn drop_gateway(cluster_id: &str) {
     GATEWAYS.lock().await.remove(cluster_id);
+}
+
+/// Forget a cluster's pooled gateway — called when the cluster is deleted so
+/// its mutating `kubectl proxy` stops at once instead of idling on with the
+/// deleted cluster's credentials.
+pub async fn forget(cluster_id: &str) {
+    drop_gateway(cluster_id).await;
 }
 
 /// Did the API server refuse the pod proxy itself (RBAC / not proxyable),
@@ -526,6 +566,14 @@ async fn one_pod(k: &Kubectl, gw: Option<&KubeProxy>, v: &Validated, pod: String
             Err(e) if e.to_string().contains("timeout") => {
                 return failed(pod, started, "proxy", e.to_string())
             }
+            // Only a failure that provably happened BEFORE the request left
+            // (socket / handshake / request build) — or an idempotent read —
+            // may be resent via port-forward. A POST/DELETE that failed after
+            // delivery ("connection closed before message completed", a body
+            // cut mid-stream) would run the mutation twice (S6-07).
+            Err(e) if v.mutating() && !proxy_failed_before_send(&e.to_string()) => {
+                return failed(pod, started, "proxy", e.to_string())
+            }
             Err(e) => tracing::debug!("k8s pod-http: proxy transport failed ({e}); port-forward"),
         }
     }
@@ -546,6 +594,20 @@ async fn one_pod(k: &Kubectl, gw: Option<&KubeProxy>, v: &Validated, pod: String
         }
         Err(e) => failed(pod, started, "port_forward", e.to_string()),
     }
+}
+
+/// True when a `KubeProxy::request` error happened before any byte of the
+/// request reached the proxy: connecting to its socket, the HTTP handshake,
+/// or building the request. Everything else (send / read failures) may have
+/// been delivered.
+fn proxy_failed_before_send(error: &str) -> bool {
+    [
+        "kubectl proxy socket:",
+        "kubectl proxy handshake:",
+        "proxy request:",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
 }
 
 fn failed(pod: String, started: Instant, via: &'static str, error: String) -> PodHttpResult {
@@ -635,6 +697,34 @@ mod tests {
 
     fn req(v: Value) -> PodHttpReq {
         serde_json::from_value(v).unwrap()
+    }
+
+    /// S6-07: only failures that provably happened before the request left
+    /// may be resent via port-forward; a send/read failure may have been
+    /// delivered already.
+    #[test]
+    fn only_pre_send_proxy_failures_fall_back() {
+        for pre in [
+            "upstream: kubectl proxy socket: No such file or directory",
+            "kubectl proxy handshake: connection reset",
+            "invalid: proxy request: invalid header",
+        ] {
+            assert!(proxy_failed_before_send(pre), "{pre}");
+        }
+        for post in [
+            "upstream: kubectl proxy: connection closed before message completed",
+            "upstream: read body: unexpected EOF",
+            "upstream: timeout",
+        ] {
+            assert!(!proxy_failed_before_send(post), "{post}");
+        }
+    }
+
+    /// S6-15: deleting a cluster drops its pooled gateway.
+    #[tokio::test]
+    async fn forget_is_a_no_op_for_an_unknown_cluster() {
+        forget("no-such-cluster").await;
+        assert!(!GATEWAYS.lock().await.contains_key("no-such-cluster"));
     }
 
     #[test]

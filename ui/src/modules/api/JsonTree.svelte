@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Collapsible JSON tree for the response viewer. Objects/arrays fold; the
   // root and, within a row budget, its child containers start open
   // (`autoOpenPaths` — a wide root array no longer mounts every row). A search query highlights matching keys and
@@ -61,14 +62,14 @@
   {@const open = container && isOpen(path, depth)}
   <div class="row" class:hit={found.hits.has(path)} style:padding-inline-start="{depth * 16}px">
     {#if container}
-      <button class="tog" onclick={() => toggle(path, depth)} oncontextmenu={(e) => menu(e, path, v)} aria-expanded={open} title={path}>
+      <button use:rowMenu class="tog" onclick={() => toggle(path, depth)} oncontextmenu={(e) => menu(e, path, v)} aria-expanded={open} title={path}>
         <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
         {#if key !== null}<span class="k">{typeof key === 'number' ? key : `"${key}"`}</span><span class="p">:</span>{/if}
         <span class="p">{Array.isArray(v) ? '[' : '{'}</span>
         {#if !open}<span class="pv">{preview(v)}</span><span class="p">{Array.isArray(v) ? ']' : '}'}</span>{/if}
       </button>
     {:else}
-      <button class="leaf" oncontextmenu={(e) => menu(e, path, v)} onkeydown={(e) => { if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) menu(e, path, v); }} title={path}>
+      <button use:rowMenu class="leaf" oncontextmenu={(e) => menu(e, path, v)} onkeydown={(e) => { if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) menu(e, path, v); }} title={path}>
         {#if key !== null}<span class="k">{typeof key === 'number' ? key : `"${key}"`}</span><span class="p">:</span>{/if}
         <span class="v {kind(v)}">{typeof v === 'string' ? JSON.stringify(v) : String(v)}</span>
       </button>

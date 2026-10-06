@@ -46,6 +46,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-connections` | SSH / MySQL / Redis / MongoDB / ClickHouse sessions |
 | `otto-ssh` | Shared SSH-tunnel helper (`-L`/SOCKS5 `-D`, SFTP, Kafka-aware proxy) |
 | `otto-dbviewer` | Database Explorer engine |
+| `otto-apiclient` | HTTP API-client engines split out of `otto-server`: dynamic gRPC describe/reflect/invoke (tonic + protox + prost-reflect) and server-side `pm` request scripts (boa_engine); thin axum handlers stay in `otto-server` |
 | `otto-brokers` | Message Brokers (Kafka viewer) |
 | `otto-browser` | In-app browser — reader/live tabs, DOM annotations, Lightpanda-sidecar-or-plain-fetch fetch engine |
 | `otto-orchestrator` | Claude-PTY agent runner + ⌘K plan parsing (summaries, PR/commit drafts) |
@@ -53,19 +54,26 @@ Otto.app (Tauri / otto-desktop)
 | `otto-issues` | Jira / Confluence integration |
 | `otto-channels` | Slack / Telegram bridges |
 | `otto-improve` | Self-improvement engine |
+| `otto-insights` | Insights — opt-in catch-up scheduler + reports/config/run API that runs the `insights` skill in a headless agent session (behind `InsightsCtx`) |
 | `otto-context` | Context assembly |
+| `otto-assistant` | Personal Assistant (threads, tasks, memory, routing, limits) + Personal Agents engine & scheduler, behind an `AssistantCtx` trait (routes, read-only agent policy and activity feed stay in `otto-server`) |
 | `otto-memory` | Workspace-scoped agent knowledge store (keyword/FTS5 recall; no embeddings) |
 | `otto-vault` | Vault docs home — file-backed Obsidian-parity markdown vaults + OKF (derived SQLite index: notes, links, tags, FTS, graph) |
-| `otto-canvas` | Canvas scene CRUD (file-backed visual scenes; agent-assist endpoints live in `otto-server`) |
+| `otto-canvas` | Canvas scene CRUD (file-backed visual scenes) + the agent-assist engine (`assist.rs`; the host runs the agent turn via `CanvasAssistCtx`) |
 | `otto-design` | Design Hall artifact graph — projects, artifacts, content-addressed versions, typed `otto://design` links, FTS search, design signals, idempotent legacy import |
-| `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through |
+| `otto-design-assist` | Design Hall agent-assist engine — assist turns, variants, learned team rules (the host runs the agent turn via `DesignAssistCtx`; keeps `otto-design` free of session/agent deps) |
+| `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through; `outward/` holds the outward `otto.*` tool catalog, policy lists, `route_for` self-call map and the MCP HTTP JSON-RPC framing (server glue: `otto-server`'s `mcp_outward` / `mcp_http`) |
+| `otto-workflows` | Workflow engine pieces with no server dependency — node catalog, graph validation, retry policy, loop checkpoints, run context files, `prepare_context` helpers, chat + event triggers — behind the `WorkflowCtx` trait (the executor itself is still `otto-server/src/workflow_engine.rs`) |
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
 | `otto-skills` | Bundled, versioned skill library |
-| `otto-product` | Jira/Confluence product workflows |
-| `otto-swarm` | Agent Swarm (role agents, org tree, coordinator) |
-| `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, swarm runtime, workflow engine & plugin supervisor |
-| `ottod` | The daemon binary |
+| `otto-product` | Product Story Analysis — Jira/Confluence story workflows, the analysis/rewrite/test/plan runners, story watcher, discovery chat, refinement, attachments/annotations, design formats, Product↔Swarm (host hooks via `ProductCtx` / `ProductRunHost` / `ProductStudioHost`) |
+| `otto-swarm` | Agent Swarm — role agents, org tree, CRUD router, and the orchestration runtime (Coordinator, turn runner, scheduler, verifier, channel triggers) behind the `SwarmHost` trait otto-server implements |
+| `otto-agent-run` | Agent-run primitives for PTY-driven CLI agents: result-file watcher + recovery (`agent_run`), transcript turn oracle, off-runtime blocking IO |
+| `otto-review` | Multi-agent code-review engine — reviewer sessions, managed summarizer + deterministic fallback, and the pure core (diff render/caps, configs/budgets, lens expansion, prompts, draft parsing); routes + ctx-bound orchestration stay in `otto-server` |
+| `otto-automation` | Scheduled Tasks (cadence, 60 s supervisor, run engine, report delivery) + Goal Loops controller, behind the `AutomationCtx` trait (otto-server's impl: `src/automation_ctx.rs`) |
+| `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
+| `ottod` | The daemon binary: process setup, single-instance lock, listeners, shutdown; drives `otto_server::boot` |
 
 > The Tauri desktop shell lives in `apps/desktop/src-tauri` and is a **separate,
 > standalone Cargo workspace** (note the `[workspace]` in its `Cargo.toml`). It is
@@ -185,6 +193,12 @@ macOS-only.
   `docs/contracts/*.md` and `ui/src/lib/api/types.ts` in lockstep.
 - **Migrations are append-only.** Add a new numbered file under
   `crates/otto-state/migrations/`; never edit or renumber an existing migration.
+  Every migration **must stay compatible with the previous build**: a deploy
+  rollback boots the old binary on the new schema (`set_ignore_missing`), so
+  never drop or rename a table/column, never add a NOT NULL column without a
+  DEFAULT to an existing table, and only ever widen a CHECK. A table rebuild
+  (`t_new` → copy → drop → rename) is fine if it keeps every column.
+  `crates/otto-state/tests/migration_compat.rs` enforces this.
 - **Secrets never live in the repo.** Tokens/passwords go through the macOS
   Keychain (`otto-keychain`); the DB stores only opaque key references. Never
   commit `.env`, `*.pem`, `*.key`, `*.p12`, or local DBs (see `.gitignore`).

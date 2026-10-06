@@ -149,7 +149,7 @@
       <option value="false">false</option>
     </select>
   {:else if kind !== 'null'}
-    <input
+    <input dir="ltr"
       class="ve-input mono"
       class:bad={err !== null}
       bind:value={raw}

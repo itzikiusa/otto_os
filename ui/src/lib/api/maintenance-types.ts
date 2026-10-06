@@ -73,3 +73,9 @@ export interface SecretsMigrationReport {
   total: number;
   duration_ms: number;
 }
+
+/** Response of `POST /admin/secrets/reset-store` (root; body `{confirm: true}`). */
+export interface SecretsResetStoreResp {
+  /** Where the unreadable `secrets.enc` was moved (kept, never deleted); null when there was none. */
+  set_aside: string | null;
+}

@@ -497,11 +497,7 @@
             {#if !active}
               <EmptyState icon="file" title="No file open" body="Pick a file from the list, or press ⌘P to open one." />
             {:else if active.loadError && !doc}
-              <div class="wb-inline-err" role="alert">
-                <Icon name="warning" size={13} />
-                <span>Couldn’t load this file: {active.loadError}</span>
-                <button class="btn small" onclick={() => void workbench.retryLoad(active.id)}>Retry</button>
-              </div>
+              <LoadState what="this file" error={active.loadError} empty onretry={() => void workbench.retryLoad(active.id)} />
             {:else if !doc}
               <div class="wb-skel" aria-busy="true" aria-label="Loading file">
                 <span></span><span></span><span></span>

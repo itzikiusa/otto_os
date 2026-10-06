@@ -284,8 +284,10 @@ async fn full_surface_against_redpanda() {
     assert_eq!(st, StatusCode::OK);
     assert!(groups.is_array());
 
-    // 10. Metrics — total >= 3; Prometheus scrape of Redpanda should populate
-    //     per-broker resource metrics.
+    // 10. Metrics — total >= 3. The profile's metrics URL is the local
+    //     Redpanda (loopback), which the SSRF guard (audit S1) refuses for a
+    //     direct, untunnelled scrape: the endpoint still answers, without the
+    //     Prometheus half. A real cluster's endpoint is public or tunnelled.
     let (st, metrics) = call(
         &app,
         "GET",
@@ -300,12 +302,40 @@ async fn full_surface_against_redpanda() {
     );
     assert_eq!(
         metrics["prometheus_available"],
-        json!(true),
-        "metrics: {metrics}"
+        json!(false),
+        "a loopback metrics URL must be blocked by the SSRF guard: {metrics}"
     );
-    assert!(!metrics["brokers"].as_array().unwrap().is_empty());
+    assert!(metrics["brokers"].as_array().unwrap().is_empty());
+    match otto_brokers::metrics::scrape(&metrics_url(), false, None).await {
+        Err(otto_core::Error::Forbidden(m)) => {
+            assert!(m.contains("metrics endpoint blocked"), "{m}")
+        }
+        other => panic!("loopback scrape must be Forbidden, got {other:?}"),
+    }
+    //     The parse/aggregate half against Redpanda's REAL exposition: fetch
+    //     it here (the test is the trusted caller) and fold it in exactly as
+    //     the service does after a permitted scrape.
+    let exposition = reqwest::get(metrics_url())
+        .await
+        .expect("Redpanda metrics endpoint reachable")
+        .error_for_status()
+        .expect("Redpanda metrics endpoint answers 200")
+        .text()
+        .await
+        .unwrap();
+    let folded = otto_brokers::metrics::ClusterMetricState::default().build(3, Some(&exposition));
+    assert!(folded.prometheus_available);
+    assert!(
+        !folded.brokers.is_empty(),
+        "Redpanda's exposition must yield per-broker metrics"
+    );
 
-    // 11. Schema registry subjects (none registered yet → empty array, 200).
+    // 11. Schema registry subjects. The fixture registry is on loopback, so
+    //     (like the metrics URL above) a direct, untunnelled profile must be
+    //     refused by the SSRF guard — that is the production contract, not a
+    //     test artefact. The listing/parsing half is unit-tested against a
+    //     mock registry (`schema_registry::tests`); here the test, as the
+    //     trusted caller, checks the real registry answers the same request.
     let (st, subjects) = call(
         &app,
         "GET",
@@ -313,8 +343,26 @@ async fn full_surface_against_redpanda() {
         None,
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "subjects: {subjects}");
-    assert!(subjects.is_array());
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a loopback schema registry must be blocked by the SSRF guard: {subjects}"
+    );
+    assert!(
+        subjects["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("schema registry blocked")),
+        "subjects: {subjects}"
+    );
+    let direct: Value = reqwest::get(format!("{}/subjects", sr_url()))
+        .await
+        .expect("Redpanda schema registry reachable")
+        .error_for_status()
+        .expect("Redpanda schema registry answers 200")
+        .json()
+        .await
+        .unwrap();
+    assert!(direct.is_array(), "registry /subjects: {direct}");
 
     // 12. Delete the topic, then the cluster.
     let (st, _) = call(

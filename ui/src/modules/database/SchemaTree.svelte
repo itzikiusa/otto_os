@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Lazy recursive schema tree (databases → tables/views → columns; keyspaces →
   // keys; collections → fields). Mirrors CollectionsTree: chevron expand, indent
   // by depth, an icon per node kind, dimmed `detail`. Clicking a leaf object
@@ -520,7 +521,7 @@
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         class="tree-search-input"
         type="text"
         value={database.objectSearchQuery}
@@ -537,7 +538,7 @@
       />
       {#if database.objectSearchQuery || hits !== null}
         <button class="tree-search-clear" onclick={clearSearch} aria-label="Clear filter" title="Clear filter">
-          <Icon name="x" size={10} />
+          <Icon name="x" size={12} />
         </button>
       {/if}
     </div>
@@ -610,7 +611,7 @@
         </span>
       </div>
       {#each hits as hit (hit.path)}
-        <button
+        <button use:rowMenu
           class="hit"
           class:selected={database.selectedObjectPath === hit.path}
           aria-current={database.selectedObjectPath === hit.path ? 'true' : undefined}
@@ -640,7 +641,7 @@
           {@render nodeRow(row.node, row.depth)}
         {:else if row.t === 'failed'}
           <div class="node-failed" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
-            <Icon name="x" size={10} />
+            <Icon name="x" size={12} />
             <span>failed to load</span>
             <button class="node-failed-retry" onclick={() => expandNode(row.node)}>retry</button>
           </div>
@@ -666,7 +667,7 @@
 {#snippet nodeRow(node: SchemaNode, depth: number)}
   {@const open = database.isExpanded(node.id)}
   {@const selected = database.selectedObjectPath === node.id}
-  <div
+  <div use:rowMenu
     class="node"
     class:selected
     class:active-db={(node.kind === 'database' && node.label === database.activeDb) ||

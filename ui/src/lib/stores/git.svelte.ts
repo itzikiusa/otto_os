@@ -3,6 +3,7 @@
 // the Git module manages its own deeper state on top).
 
 import { api } from '../api/client';
+import { latestOnly } from '../latest';
 import { loadErrorText } from '../loadError';
 import { mergeTouched, touches, type TouchedPaths } from '../gitLivePaths';
 import type {
@@ -46,7 +47,14 @@ const OPEN_TABS_KEY = 'otto_git_open_tabs';
 /** localStorage key for the auto-fetch toggle/interval (per-device). */
 const AUTO_FETCH_KEY = 'otto_git_auto_fetch';
 const DEFAULT_AUTO_FETCH_SEC = 120;
-const ACTIVE_AUTO_FETCH_SEC = 30;
+/** The selected repo's cadence. 30 s made `POST /repos/{id}/fetch` the app's
+ *  biggest wall-time consumer (~6/min, p95 3 s, telemetry 2026-10-05). */
+const ACTIVE_AUTO_FETCH_SEC = 60;
+/** Background tabs are swept only while recently used (opened, selected or
+ *  manually fetched); an idle tab resumes on its next activation. */
+const RECENT_USE_MS = 15 * 60_000;
+/** A fetch's own status answers a status read this soon after it. */
+const FETCH_STATUS_REUSE_MS = 2000;
 /** A status read younger than this is shared by a new caller (same burst). */
 const STATUS_SHARE_MS = 300;
 const DEFAULT_SUB: GitSubTab = 'graph';
@@ -141,8 +149,21 @@ class GitStore {
   detecting = $state(false);
   /** Set when the focused session's cwd is not inside a git repo. */
   notARepo = $state(false);
+  /** The workspace repo list failed to load (S13-305): the panel offers
+   *  Retry and the app retries on window focus. Null when loaded. */
+  reposError: string | null = $state(null);
   private loadedFor: Id | null = null;
   private detectedCwd: string | null = null;
+  /** The repo the last successful {@link detectFor} made primary — a
+   *  `loadRepos` that lands after it must not replace it with `repos[0]`. */
+  private detectedRepoId: Id | null = null;
+  // Stale-response guards (S13-03): switching workspace / focused session
+  // A→B used to let A's slower status / PR list / repo list land last and
+  // show repo A's branch and PRs under repo B's name.
+  private reposGen = latestOnly();
+  private primaryGen = latestOnly();
+  private prsGen = latestOnly();
+  private detectGen = latestOnly();
 
   // ── Git page top-level repo tabs (GitKraken-style, workspace-independent) ──
   // The set of repos the user has OPEN as tabs, the active one, and each repo's
@@ -188,6 +209,8 @@ class GitStore {
   private autoFetchInFlight = false;
   private autoFetchGen = 0;
   private lastFetchAt: Record<string, number> = {};
+  /** Last time each repo was opened/selected/manually fetched (see RECENT_USE_MS). */
+  private repoUsedAt: Record<string, number> = {};
   private retryFetchAt: Record<string, number> = {};
   private autoFetchFailStreak: Record<string, number> = {};
   private fetches = new Map<string, Promise<RepoStatusResp>>();
@@ -255,6 +278,7 @@ class GitStore {
       this.subTab = { ...this.subTab, [repoId]: sub };
     }
     this.activeRepoId = repoId;
+    this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
     this.requestAutoFetch();
   }
@@ -278,6 +302,7 @@ class GitStore {
   activateRepoTab(repoId: string): void {
     if (!this.openRepoIds.includes(repoId)) return;
     this.activeRepoId = repoId;
+    this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
     this.requestAutoFetch();
   }
@@ -340,57 +365,88 @@ class GitStore {
     if (!force && this.loadedFor === workspaceId) return;
     this.loadedFor = workspaceId;
     this.loading = true;
+    const t = this.reposGen.begin();
     try {
-      this.repos = await api.get<Repo[]>(`/workspaces/${workspaceId}/repos`);
+      const repos = await api.get<Repo[]>(`/workspaces/${workspaceId}/repos`);
+      if (!t.current) return; // a newer workspace's load owns the panel
+      this.reposError = null;
+      // A detect for the focused session's cwd that resolved FIRST already
+      // picked the right primary (S13-305): keep it rather than snapping back
+      // to the workspace's first registered repo. The detect registers its
+      // repo, but this list may predate that — so add it if missing.
+      const kept = this.primary;
+      if (kept && kept.workspace_id === workspaceId && (kept.id === this.detectedRepoId || repos.some((r) => r.id === kept.id))) {
+        this.repos = repos.some((r) => r.id === kept.id) ? repos : [...repos, kept];
+        return;
+      }
+      this.repos = repos;
       this.primary = this.repos[0] ?? null;
       this.primaryStatus = null;
       this.prs = [];
       if (this.primary) {
         await this.selectPrimary(this.primary);
       }
-    } catch {
+    } catch (e) {
+      if (!t.current) return;
       this.repos = [];
       this.primary = null;
       this.primaryStatus = null;
       this.prs = [];
+      // Not sticky: the next loadRepos for this workspace retries — the
+      // panel's Retry, or App's retry on window focus (S13-305).
+      this.loadedFor = null;
+      this.reposError = e instanceof Error ? e.message : String(e);
     } finally {
-      this.loading = false;
+      if (t.current) this.loading = false;
     }
   }
 
-  /** Make `repo` the primary repo and load its status + PRs. */
+  /** Make `repo` the primary repo and load its status + PRs. A later
+   *  selection supersedes this one: its status/PRs are then dropped (the
+   *  per-repo status cache still takes them — they are keyed by repo). */
   async selectPrimary(repo: Repo): Promise<void> {
+    const t = this.primaryGen.begin();
     this.primary = repo;
     if (!this.repos.some((r) => r.id === repo.id)) this.repos = [...this.repos, repo];
     try {
-      const s = await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
-      this.primaryStatus = s;
+      const s = this.freshFetchStatus(repo.id) ?? await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
       this.setStatus(repo.id, s);
+      if (!t.current || this.primary?.id !== repo.id) return;
+      this.primaryStatus = s;
     } catch {
+      if (!t.current || this.primary?.id !== repo.id) return;
       this.primaryStatus = null;
     }
     void this.loadPrs(repo.id);
   }
 
   async loadPrs(repoId: Id): Promise<void> {
+    const t = this.prsGen.begin();
     this.prsLoading = true;
     this.prError = null;
+    // Results for a repo that is no longer primary (or superseded by a newer
+    // load) are dropped — they would list repo A's PRs under repo B.
+    const mine = () => t.current && (this.primary === null || this.primary.id === repoId);
     try {
-      this.prs = (await api.get<PrListResp>(`/repos/${repoId}/prs?state=open`)).items;
+      const items = (await api.get<PrListResp>(`/repos/${repoId}/prs?state=open`)).items;
+      if (!mine()) return;
+      this.prs = items;
     } catch (e) {
+      if (!mine()) return;
       this.prs = [];
       // Surface the upstream reason (e.g. a 401 bad token) instead of a
       // misleading "no pull requests".
       this.prError = e instanceof Error ? e.message : String(e);
     } finally {
-      this.prsLoading = false;
+      if (t.current) this.prsLoading = false;
     }
   }
 
   /**
    * Detect (and register, idempotently) the git repo containing `cwd` and make
    * it primary. Used by the right-panel Git tab so being inside a repo "just
-   * works" without manual registration. No-op if cwd unchanged.
+   * works" without manual registration. No-op if cwd unchanged. A newer
+   * detect (focus moved to another session) supersedes this one.
    */
   async detectFor(workspaceId: Id, cwd: string, force = false): Promise<void> {
     if (!cwd) return;
@@ -398,24 +454,37 @@ class GitStore {
     this.detectedCwd = cwd;
     this.detecting = true;
     this.notARepo = false;
+    const t = this.detectGen.begin();
     try {
       const repo = await api.post<Repo>(`/workspaces/${workspaceId}/repos/detect`, { path: cwd });
+      if (!t.current) return;
+      this.detectedRepoId = repo.id;
       await this.selectPrimary(repo);
     } catch {
+      if (!t.current) return;
       // cwd isn't inside a git repo — fall back to any registered repo.
       this.notARepo = !this.primary;
     } finally {
-      this.detecting = false;
+      if (t.current) this.detecting = false;
     }
   }
 
+  /** Retry a failed workspace load (and the cwd detect that may have fallen
+   *  back with it). */
+  async retryRepos(workspaceId: Id, cwd?: string | null): Promise<void> {
+    await this.loadRepos(workspaceId, true);
+    if (cwd) await this.detectFor(workspaceId, cwd, true);
+  }
+
   async refreshPrimary(): Promise<void> {
-    if (!this.primary) return;
+    const repo = this.primary;
+    if (!repo) return;
     try {
-      const s = await api.get<RepoStatusResp>(`/repos/${this.primary.id}/status`);
+      const s = this.freshFetchStatus(repo.id) ?? await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
+      this.setStatus(repo.id, s);
+      if (this.primary?.id !== repo.id) return; // primary moved on meanwhile
       this.primaryStatus = s;
-      this.setStatus(this.primary.id, s);
-      void this.loadPrs(this.primary.id);
+      void this.loadPrs(repo.id);
     } catch {
       /* keep stale status */
     }
@@ -436,6 +505,14 @@ class GitStore {
     this.statusById = { ...this.statusById, [repoId]: s };
     if (this.primary?.id === repoId) this.primaryStatus = s;
     return true;
+  }
+
+  /** The status a fetch returned moments ago (it ran `git status` right after
+   *  the fetch), so a caller doesn't spawn a second walk for the same state. */
+  private freshFetchStatus(repoId: string): RepoStatusResp | null {
+    const at = this.lastFetchAt[repoId];
+    const s = this.statusById[repoId];
+    return s && at != null && Date.now() - at < FETCH_STATUS_REUSE_MS ? s : null;
   }
 
   /** In-flight status reads per repo. RepoView's mount, `ensureStatus` and a
@@ -560,7 +637,10 @@ class GitStore {
   fetchRepo(repoId: string, reason: 'manual' | 'background' = 'manual'): Promise<RepoStatusResp> {
     // A manual request can promote a queued background fetch. Explicit work
     // remains valid even if its tab closes or automatic fetching is paused.
-    if (reason === 'manual') this.manualFetches.add(repoId);
+    if (reason === 'manual') {
+      this.manualFetches.add(repoId);
+      this.repoUsedAt[repoId] = Date.now();
+    }
     const existing = this.fetches.get(repoId);
     if (existing) return existing;
     const generation = this.autoFetchGen;
@@ -607,7 +687,7 @@ class GitStore {
     while (this.fetchCount < 2 && this.fetchQueue.length) this.fetchQueue.shift()!();
   }
 
-  /** Shell lifetime, independent of which module is currently shown. */
+  /** Owned by the shell while its visible module is Git. */
   startAutoFetch(): void {
     if (this.autoFetchRunning) return;
     this.autoFetchRunning = true;
@@ -657,7 +737,11 @@ class GitStore {
             ? this.activeRepoId : pending.values().next().value!;
           pending.delete(id);
           if (!this.openRepoIds.includes(id)) continue;
-          const interval = id === this.activeRepoId ? ACTIVE_AUTO_FETCH_SEC : Math.max(30, this.autoFetchIntervalSec);
+          const active = id === this.activeRepoId;
+          // First sighting counts as a use, so restored tabs refresh once.
+          const used = (this.repoUsedAt[id] ??= Date.now());
+          if (!active && Date.now() - used > RECENT_USE_MS) continue;
+          const interval = active ? ACTIVE_AUTO_FETCH_SEC : Math.max(60, this.autoFetchIntervalSec);
           if (Date.now() < (this.retryFetchAt[id] ?? 0)) continue;
           if (this.lastFetchAt[id] != null && Date.now() - this.lastFetchAt[id] < interval * 1000) continue;
           try { await this.fetchRepo(id, 'background'); } catch { /* quiet background retry with backoff */ }

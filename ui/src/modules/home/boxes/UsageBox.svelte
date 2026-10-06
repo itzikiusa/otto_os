@@ -14,6 +14,7 @@
   import type { UsageStatus, UsageSummary } from '../../../lib/api/usage.svelte';
   import { home, type HomeBox } from '../home.svelte';
   import { freshness, poll, type Poller } from './poll';
+  import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
     box: HomeBox;
@@ -112,9 +113,7 @@
   {#if loading && !summary}
     <Skeleton rows={3} />
   {:else if error && !summary}
-    <EmptyState icon="warning" title="Couldn’t load Usage" body={error}>
-      <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
-    </EmptyState>
+    <LoadState what="Usage" error={error} empty onretry={() => poller?.now()} />
   {:else if status && !status.available}
     <EmptyState icon="chart" title="Usage engine is off" body="Enable the embedded ClickHouse engine on the Usage page.">
       <button class="btn small" onclick={() => router.go('usage')}>Open Usage</button>

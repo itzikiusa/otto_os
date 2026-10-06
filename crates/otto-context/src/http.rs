@@ -74,8 +74,10 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Library writes are root-only.
 fn require_root(user: &AuthUser) -> Result<(), ApiErr> {
-    if user.0.is_root {
+    if otto_core::auth::root_authority(&user.0) {
         Ok(())
+    } else if user.0.is_root {
+        Err(otto_core::auth::root_refusal().into())
     } else {
         Err(Error::Forbidden("library writes require root".into()).into())
     }
@@ -270,9 +272,13 @@ async fn put_skill_file<C: ContextCtx>(
     if s.library().get_skill(&name).is_none() {
         return Err(Error::NotFound(format!("skill '{name}'")).into());
     }
-    s.library()
-        .write_skill_file(&name, &req.path, &req.content)
-        .map_err(|e| map_io("write skill file", e))?;
+    let lib = s.library();
+    let written = if req.create_only {
+        lib.create_skill_file(&name, &req.path, &req.content)
+    } else {
+        lib.write_skill_file(&name, &req.path, &req.content)
+    };
+    written.map_err(|e| map_io("write skill file", e))?;
     Ok(Json(s.library().list_skill_files(&name)))
 }
 

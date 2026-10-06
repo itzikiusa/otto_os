@@ -14,8 +14,16 @@ pub struct Inbound {
     pub thread: Option<String>,
     /// Channel-native user identifier (numeric id string).
     pub user: String,
+    /// The sender's display name / @handle when the platform sends one — only
+    /// shown to the owner beside a rejected sender (S5-308). Never trusted.
+    pub user_name: Option<String>,
     /// The user's message text.
     pub text: String,
+    /// A human EDIT of an earlier message (Slack `message_changed`), not a new
+    /// one: the bridge never re-fires commands or triggers for it (an edited
+    /// `Action: Workflow` must not start a second run) and marks it for the
+    /// agent as an edit.
+    pub edited: bool,
 }
 
 /// Sending/editing abstraction for a messaging channel.
@@ -35,6 +43,19 @@ pub trait Adapter: Send + Sync {
     /// The default implementation falls back to plain `send` so adapters that
     /// don't support formatted text still work.
     async fn send_formatted(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        self.send(chat, thread, text).await
+    }
+
+    /// Report a bridge-side failure to the sender ("couldn't deliver your
+    /// message", "couldn't start a session"). Chat channels post it like any
+    /// message; a webhook — whose `send` is a no-op (no activity feed) —
+    /// overrides it so the caller is told instead of waiting forever.
+    async fn send_notice(
         &self,
         chat: &str,
         thread: Option<&str>,

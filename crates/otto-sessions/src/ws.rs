@@ -1,6 +1,7 @@
 //! Terminal WebSocket — `GET /ws/term/{session_id}` per docs/contracts/ws.md.
 //!
-//! Auth: `?token=` validated BEFORE the upgrade via a `route_layer` middleware,
+//! Auth: the `otto-bearer` subprotocol token (never `?token=`, S11-312)
+//! validated BEFORE the upgrade via a `route_layer` middleware,
 //! so the 403 path is exercisable in tests even without a real WS connection.
 //! Owners (session creator), workspace Admins, and root may attach. Editors and
 //! Viewers who are not the owner are rejected (#L9).  Input/resize capability
@@ -13,12 +14,11 @@
 //! `session_id` (else 403, no upgrade) — and its write capability is the share's
 //! capped role (`Editor` may input/resize; a `Viewer` share is read-only).
 
-use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -74,11 +74,6 @@ const REVIVE_POLL: Duration = Duration::from_secs(1);
 struct WsState<S> {
     auth: Arc<dyn TokenAuthenticator>,
     ctx: S,
-}
-
-#[derive(Deserialize)]
-struct TokenQuery {
-    token: Option<String>,
 }
 
 fn user_input_default() -> bool {
@@ -374,8 +369,8 @@ fn pty_capture(h: &Arc<PtyHandle>, lines: usize) -> impl FnOnce() -> Capture + S
     }
 }
 
-/// A `scrollback` reply built off the async worker. The live stream is left
-/// untouched (the client may skip an optional compact and keep streaming).
+/// A `scrollback` reply built off the async worker, for a viewer with no live
+/// subscription to swap (normally [`resync_frame`] answers `scrollback`).
 async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize, binary: bool) -> Snap {
     let h = Arc::clone(h);
     let epoch = h.spawn_seq();
@@ -763,6 +758,17 @@ pub fn ws_router<S: SessionsCtx>(authenticator: Arc<dyn TokenAuthenticator>, ctx
         .with_state(state)
 }
 
+/// HTTP status for a failed session lookup on attach (review S1-26): only a
+/// row that is really gone is 404 ("session gone" — the client stops
+/// reconnecting). A transient DB error (busy, pool timeout) is 503, so the
+/// client retries instead of declaring a live session dead.
+fn lookup_failure_status(e: &Error) -> StatusCode {
+    match e {
+        Error::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 fn problem(status: StatusCode, e: &Error) -> Response {
     let body = Problem {
         code: e.code().to_string(),
@@ -771,90 +777,86 @@ fn problem(status: StatusCode, e: &Error) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Route-layer middleware: authenticate the token (from `Sec-WebSocket-Protocol`
-/// or `?token=`), look up the session, and enforce the owner-or-admin gate (#L9).
+/// Route-layer middleware: authenticate the token (from `Sec-WebSocket-Protocol`),
+/// look up the session, and enforce the owner-or-admin gate (#L9).
 ///
-/// Token extraction order (Task 1.10):
-///  1. `Sec-WebSocket-Protocol: otto-bearer, <token>` — preferred; keeps the
-///     token out of the URL (which is logged everywhere). On a successful
-///     subprotocol auth, the upgrade response echoes `otto-bearer` back.
-///  2. `?token=<bearer token>` query param — backward-compatible fallback.
+/// The token travels ONLY as `Sec-WebSocket-Protocol: otto-bearer, <token>`
+/// (Task 1.10), which keeps it out of the URL (logged everywhere); the upgrade
+/// response echoes `otto-bearer` back. The legacy `?token=` query fallback is
+/// gone (S11-312) — a request carrying only that is a 401.
 ///
-/// On success, inserts [`AuthUser`], [`CanInput`], and [`UsedSubprotocol`]
-/// extensions so `term_ws` can read them. On failure, returns a 401/403/404
+/// On success, inserts [`AuthUser`] and [`CanInput`] extensions so `term_ws`
+/// can read them. On failure, returns a 401/403/404
 /// JSON problem BEFORE the WebSocket upgrade extractor runs — this is the
 /// property the isolation tests rely on.
 ///
-/// Rate limiting (Task 1.8): the real socket-peer IP (from
-/// `ConnectInfo<SocketAddr>`, wired up by `into_make_service_with_connect_info`
-/// in `ottod`) is checked against the share-redemption throttle BEFORE auth.
-/// A failed auth records a failure; a successful auth clears the IP's tally.
+/// Rate limiting (Task 1.8, S8-02): the token is authenticated FIRST and a
+/// valid one always passes. A failed auth records a failure against the
+/// tunnel-aware client IP and, once that IP is locked, is answered 429 instead
+/// of 401. Store errors (`Internal`) are 503 and never counted.
 async fn ws_auth_gate<S: SessionsCtx>(
     State(st): State<WsState<S>>,
     Path(session_id): Path<Id>,
-    Query(q): Query<TokenQuery>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    // 0. Extract the real peer IP from the ConnectInfo extension (Task 1.8).
-    //    `into_make_service_with_connect_info::<SocketAddr>` (in ottod) injects
-    //    this; it's absent only in unit-test harnesses that don't wire it up.
-    let peer_ip = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip());
+    // 0. The client IP: the host guard's tunnel-aware [`share_throttle::ClientIp`]
+    //    when present, else the raw `ConnectInfo` peer (absent only in unit-test
+    //    harnesses that wire neither).
+    let peer_ip = share_throttle::client_ip(req.extensions());
 
-    // 1. Token source resolution (Task 1.10): subprotocol first, then query.
-    let subprotocol_token = token_from_subprotocol(req.headers());
-    let used_subprotocol = subprotocol_token.is_some();
-    let token = match subprotocol_token.or(q.token) {
+    // 1. Token source (Task 1.10 / S11-312): the subprotocol only.
+    let token = match token_from_subprotocol(req.headers()) {
         Some(t) => t,
         None => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
 
-    // 2. IP rate-limit check BEFORE auth (Task 1.8).
-    if let Some(ip) = peer_ip {
-        if let Err(locked) = share_throttle::global().check(ip) {
-            let secs = locked.retry_after.as_secs().max(1);
-            let body = otto_core::api::Problem {
-                code: "too_many_requests".to_string(),
-                message: "too many failed share-token attempts; try again later".to_string(),
-            };
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [("retry-after", secs.to_string())],
-                Json(body),
-            )
-                .into_response();
-        }
-    }
-
-    // 3. Token auth.
+    // 2. Token auth FIRST (S8-02 / S1-05). A token that verifies is never
+    //    refused by the lockout: on the desktop (and behind a tunnel without
+    //    `CF-Connecting-IP`) every client shares 127.0.0.1, so a lock checked
+    //    before auth let any web page — or a stale-token reconnect loop — keep
+    //    every terminal from attaching. Tokens are 256-bit; the lockout only
+    //    ever needs to slow down guesses, so it gates failures alone.
     let auth = match st.auth.authenticate(&token).await {
-        Ok(auth) => {
-            // Successful auth: clear the IP's failure tally.
-            if let Some(ip) = peer_ip {
-                share_throttle::global().clear(ip);
-            }
-            auth
-        }
+        Ok(auth) => auth,
+        // A store hiccup is not a guess: never counted, never a lockout.
+        Err(e @ Error::Internal(_)) => return problem(StatusCode::SERVICE_UNAVAILABLE, &e),
         Err(_) => {
-            // Failed auth: record failure against the peer IP.
             if let Some(ip) = peer_ip {
+                if let Err(locked) = share_throttle::global().check(ip) {
+                    let secs = locked.retry_after.as_secs().max(1);
+                    let body = otto_core::api::Problem {
+                        code: "too_many_requests".to_string(),
+                        message: "too many failed share-token attempts; try again later"
+                            .to_string(),
+                    };
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", secs.to_string())],
+                        Json(body),
+                    )
+                        .into_response();
+                }
                 share_throttle::global().record_failure(ip);
             }
             return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized);
         }
     };
-    // Authorize attach against the effective user (== real for a normal token);
-    // the owner-or-admin gate below runs on the effective identity.
-    let user = auth.effective_user;
-
     // 2. Session lookup.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
-        Err(e) => return problem(StatusCode::NOT_FOUND, &e),
+        Err(e) => return problem(lookup_failure_status(&e), &e),
     };
+
+    // 2b. Agent-credential confinement. This root-mounted route never passes
+    // the `/api/v1` feature guard, so the agent-token rules are applied here.
+    let agent_input = match agent_attach_rule(&auth, &session) {
+        Ok(allowed) => allowed,
+        Err(e) => return problem(StatusCode::FORBIDDEN, &e),
+    };
+    // Authorize attach against the effective user (== real for a normal token);
+    // the owner-or-admin gate below runs on the effective identity.
+    let user = auth.effective_user;
 
     // 3. Authorize the attach + decide write capability. Two disjoint paths:
     //
@@ -913,7 +915,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
                 .await
                 .is_ok()
         }
-    };
+    } && agent_input;
 
     if let Err(e) = st.ctx.check_resource(&user, &session).await {
         return problem(StatusCode::FORBIDDEN, &e);
@@ -928,12 +930,43 @@ async fn ws_auth_gate<S: SessionsCtx>(
     });
     req.extensions_mut().insert(AuthUser(user));
     req.extensions_mut().insert(CanInput(can_input));
-    // Tell term_ws whether the client used the subprotocol path so it can echo
-    // `otto-bearer` back in the upgrade response (Task 1.10).
-    req.extensions_mut()
-        .insert(UsedSubprotocol(used_subprotocol));
 
     next.run(req).await
+}
+
+/// Agent-credential confinement for the terminal socket. The `/api/v1` feature
+/// guard confines agent tokens (MCP-only, read-only sessions), but `/ws/term`
+/// is root-mounted and a WS upgrade is a GET, so those rules are restated here:
+///
+/// - an MCP-restricted token (external `.mcp.json` or a session's internal MCP
+///   credential) never attaches to a terminal;
+/// - an Otto-minted agent-session token (`managed_session_id`) may attach only
+///   to its OWN session — never type into another terminal of its owner;
+/// - a read-only session (`meta.read_only = true`) gets a view-only socket.
+///
+/// `Ok(input_allowed)` caps the caller's write capability; `Err` is a 403.
+fn agent_attach_rule(
+    auth: &otto_core::auth::AuthContext,
+    session: &otto_core::domain::Session,
+) -> otto_core::Result<bool> {
+    if auth.mcp_only {
+        return Err(Error::Forbidden(
+            "mcp-restricted token cannot attach to a terminal".into(),
+        ));
+    }
+    let Some(own) = auth.managed_session_id.as_ref() else {
+        return Ok(true);
+    };
+    if *own != session.id {
+        return Err(Error::Forbidden(
+            "an agent session token may only attach to its own session".into(),
+        ));
+    }
+    Ok(session
+        .meta
+        .get("read_only")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true))
 }
 
 /// Newtype extension carrying the write-capability flag set by [`ws_auth_gate`].
@@ -957,6 +990,7 @@ impl LiveTerminalAuth {
         if auth.effective_user.id != self.user.id || auth.mcp_only {
             return Err(Error::Unauthorized);
         }
+        let agent_input = agent_attach_rule(&auth, session)?;
         let can_input = if let Some(scope) = auth.scope {
             if scope.session_id != session.id || scope.otp_pending {
                 return Err(Error::Unauthorized);
@@ -974,18 +1008,11 @@ impl LiveTerminalAuth {
                 )
                 .await
                 .is_ok()
-        };
+        } && agent_input;
         ctx.check_resource(&auth.effective_user, session).await?;
         Ok(can_input)
     }
 }
-
-/// Newtype extension: true iff the client presented the token via the
-/// `Sec-WebSocket-Protocol: otto-bearer, <token>` header. When set, `term_ws`
-/// echoes the `otto-bearer` subprotocol in the upgrade response so the browser
-/// handshake completes; a bare `?token=` client gets a plain upgrade.
-#[derive(Clone, Copy)]
-struct UsedSubprotocol(bool);
 
 async fn term_ws<S: SessionsCtx>(
     ws: WebSocketUpgrade,
@@ -993,35 +1020,19 @@ async fn term_ws<S: SessionsCtx>(
     State(st): State<WsState<S>>,
     axum::Extension(live_auth): axum::Extension<LiveTerminalAuth>,
     axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
-    axum::Extension(UsedSubprotocol(used_subprotocol)): axum::Extension<UsedSubprotocol>,
     Query(attach): Query<AttachQuery>,
 ) -> Response {
     let view_only = attach.view_only();
     // Auth and owner-gate already enforced by ws_auth_gate middleware.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
-        Err(e) => return problem(StatusCode::NOT_FOUND, &e),
+        Err(e) => return problem(lookup_failure_status(&e), &e),
     };
     let initial_status = session.status;
-    // Echo `otto-bearer` only when the client used the subprotocol path (Task
-    // 1.10): the browser rejects an unsolicited subprotocol in the upgrade
-    // response, so we must not echo it for legacy `?token=` clients.
-    if used_subprotocol {
-        ws.protocols([BEARER_SUBPROTOCOL])
-            .on_upgrade(move |socket| async move {
-                serve_terminal(
-                    socket,
-                    st.ctx,
-                    session_id,
-                    initial_status,
-                    can_input,
-                    view_only,
-                    live_auth,
-                )
-                .await;
-            })
-    } else {
-        ws.on_upgrade(move |socket| async move {
+    // Echo `otto-bearer` (the only way a token arrives — Task 1.10 /
+    // S11-312) so the browser completes the handshake.
+    ws.protocols([BEARER_SUBPROTOCOL])
+        .on_upgrade(move |socket| async move {
             serve_terminal(
                 socket,
                 st.ctx,
@@ -1033,7 +1044,6 @@ async fn term_ws<S: SessionsCtx>(
             )
             .await;
         })
-    }
 }
 
 /// Receive the next live output chunk, pending forever without a handle.
@@ -1234,9 +1244,15 @@ async fn reauth_loop_shared<S: SessionsCtx>(
             _ = tick.tick() => {}
         }
         let started = std::time::Instant::now();
-        let Ok(current) = ctx.manager().get(&session_id).await else {
-            unregister_reauth(&shared, &can_tx, false);
-            return;
+        let current = match ctx.manager().get(&session_id).await {
+            Ok(current) => current,
+            // A transient store error (SQLITE_BUSY, pool timeout) is not a
+            // revocation: keep the last verdict and look again next tick.
+            Err(Error::Internal(_)) => continue,
+            Err(_) => {
+                unregister_reauth(&shared, &can_tx, false);
+                return;
+            }
         };
         let get_ms = started.elapsed().as_millis() as u64;
         let verdict = live_auth.check(&ctx, &current).await;
@@ -1259,14 +1275,17 @@ async fn reauth_loop_shared<S: SessionsCtx>(
                     changed
                 });
             }
+            // Transient (DB busy / pool timeout): keep the last verdict, retry
+            // next tick. Only a definite auth/authz failure evicts.
+            Err(Error::Internal(_)) => continue,
             Err(_) => {
+                // Access revoked mid-connection: evict THIS viewer only (S1-01).
+                // The session itself is never killed from here — a share or
+                // impersonation token resolves to the OWNER, so "the revoked
+                // user created it" used to take the owner's live agent down when
+                // a guest's share lapsed, an impersonation expired, or the owner
+                // logged out on another device.
                 unregister_reauth(&shared, &can_tx, false);
-                // Access revoked mid-connection. Killing the session stays the
-                // owner-only path (unchanged): a guest losing a share must not
-                // take the owner's terminal down with it.
-                if current.created_by == live_auth.user.id {
-                    let _ = ctx.manager().kill_session(&session_id).await;
-                }
                 return;
             }
         }
@@ -1326,9 +1345,21 @@ struct InputJob {
 struct InputQueue {
     tx: tokio::sync::mpsc::UnboundedSender<InputJob>,
     budget: Arc<tokio::sync::Semaphore>,
+    /// Shared with the writer task: once cleared, queued input is DISCARDED
+    /// instead of written (review S1-25). Up to the whole byte budget could
+    /// sit queued when re-auth narrowed `can_input` or evicted the viewer,
+    /// and the writer used to deliver all of it afterwards.
+    allowed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl InputQueue {
+    /// This connection lost input authority (re-auth narrowed it, or the
+    /// viewer is being evicted): drop everything still queued.
+    fn revoke(&self) {
+        self.allowed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Budget a frame of `len` bytes holds. A frame larger than the whole
     /// budget holds all of it (it waits for an empty queue, then goes alone).
     fn cost(len: usize) -> u32 {
@@ -1465,6 +1496,8 @@ where
     let budget = Arc::new(tokio::sync::Semaphore::new(INPUT_BUDGET_BYTES));
     let (res_tx, res_rx) = tokio::sync::mpsc::channel(64);
     let task_budget = budget.clone();
+    let allowed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let task_allowed = allowed.clone();
     tokio::spawn(async move {
         let mut carry: Option<InputJob> = None;
         loop {
@@ -1496,6 +1529,12 @@ where
                     Err(_) => break,
                 }
             }
+            if !task_allowed.load(std::sync::atomic::Ordering::SeqCst) {
+                // Revoked: discard, never write (the socket is going away or
+                // can no longer type — no notice to report).
+                task_budget.add_permits(cost as usize);
+                continue;
+            }
             let res = write(bytes, user).await;
             task_budget.add_permits(cost as usize);
             if res.is_err() && user {
@@ -1505,7 +1544,14 @@ where
             let _ = res_tx.try_send(res);
         }
     });
-    (InputQueue { tx, budget }, res_rx)
+    (
+        InputQueue {
+            tx,
+            budget,
+            allowed,
+        },
+        res_rx,
+    )
 }
 
 /// [`spawn_input_queue`] wired to the session manager for one connection.
@@ -1676,8 +1722,14 @@ async fn serve_terminal<S: SessionsCtx>(
             // gone) → tell the client and drop the socket.
             update = next_can_input(&mut can_rx) => {
                 match update {
-                    Some(allowed) => can_input &= allowed,
+                    Some(allowed) => {
+                        can_input &= allowed;
+                        if !can_input {
+                            input_q.revoke();
+                        }
+                    }
                     None => {
+                        input_q.revoke();
                         let _ = socket.send(Message::Close(None)).await;
                         return;
                     }
@@ -1828,6 +1880,7 @@ async fn serve_terminal<S: SessionsCtx>(
             // also resolves here (signal was sent) → evict; only `Closed`
             // (handled in next_evict) is a non-event that stops this branch.
             _ = next_evict(&mut evict_rx) => {
+                input_q.revoke();
                 let frame = r#"{"type":"terminated"}"#;
                 let _ = socket.send(Message::Text(frame.into())).await;
                 return;
@@ -2032,9 +2085,17 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh screen under stale (possibly narrow-painted)
                         // history. Omitted (0) when no live handle exists.
                         // Built off the async worker (r3-06-02).
-                        let frame = match handle.as_ref() {
-                            Some(h) => snapshot_frame(h, want, binary_snapshots).await,
-                            None => Snap::build(Vec::new(), 0, false),
+                        //
+                        // Like `resync`, the snapshot and a NEW subscription
+                        // are taken under one emulator lock and swapped in for
+                        // `out_rx`: every chunk already queued on the old
+                        // receiver is in the snapshot, so streaming it after
+                        // the snapshot double-applied output (duplicated lines
+                        // on every attach/reattach).
+                        let frame = match (out_rx.as_mut(), handle.as_ref()) {
+                            (Some(rx), Some(h)) => resync_frame(rx, pty_capture(h, want), binary_snapshots).await,
+                            (None, Some(h)) => snapshot_frame(h, want, binary_snapshots).await,
+                            (_, None) => Snap::build(Vec::new(), 0, false),
                         };
                         // Sent inline, i.e. before any subsequent live bytes.
                         if frame.send(&mut socket).await.is_err() {
@@ -2186,22 +2247,17 @@ mod tests {
     }
 
     /// Build a router that layers the REAL [`ws_auth_gate`] over a probe handler
-    /// echoing the gate-set [`CanInput`] and [`UsedSubprotocol`] flags into
-    /// response headers. This lets the test read the exact capability decision
-    /// and subprotocol detection pre-upgrade (without a real WS upgrade).
+    /// echoing the gate-set [`CanInput`] flag into a response header. This lets
+    /// the test read the exact capability decision pre-upgrade (without a real
+    /// WS upgrade).
     fn probe_app(state: WsState<Ctx>) -> Router {
         async fn probe(
             axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
-            axum::Extension(UsedSubprotocol(used_subprotocol)): axum::Extension<UsedSubprotocol>,
         ) -> Response {
             let mut resp = StatusCode::OK.into_response();
             resp.headers_mut().insert(
                 "x-can-input",
                 axum::http::HeaderValue::from_static(if can_input { "1" } else { "0" }),
-            );
-            resp.headers_mut().insert(
-                "x-used-subprotocol",
-                axum::http::HeaderValue::from_static(if used_subprotocol { "1" } else { "0" }),
             );
             resp
         }
@@ -2238,8 +2294,13 @@ mod tests {
             .0
     }
 
-    /// Drive the gate via the legacy `?token=` query param.
+    /// Drive the gate the way every client authenticates: the subprotocol.
     async fn gate(app: &Router, sid: &Id, token: &str) -> Response {
+        gate_subprotocol(app, sid, token).await
+    }
+
+    /// Drive the gate via the retired `?token=` query param (S11-312).
+    async fn gate_query(app: &Router, sid: &Id, token: &str) -> Response {
         let req = Request::builder()
             .method("GET")
             .uri(format!("/ws/term/{sid}?token={token}"))
@@ -2361,10 +2422,105 @@ mod tests {
         );
     }
 
+    // ---- Agent-credential confinement on /ws/term ---------------------------
+
+    async fn seed_editor(pool: &SqlitePool, user: &str) {
+        sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1', ?, 'editor')")
+            .bind(user)
+            .execute(pool)
+            .await
+            .expect("set member");
+    }
+
+    /// An agent session's own API token may NOT attach to another terminal of
+    /// its owner (it would type into it): the WS upgrade is a GET, so the
+    /// `/api/v1` read-only guard never saw it — the gate must refuse it.
+    #[tokio::test]
+    async fn agent_session_token_refused_on_other_session() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_editor(&pool, "alice").await;
+        let repo = SessionsRepo::new(pool.clone());
+        let agent = insert_session(&repo, "ws1", "alice").await;
+        let other = insert_session(&repo, "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+
+        let (token, _) = AuthRepo::new(pool.clone())
+            .issue_session_api_token(&"alice".into(), &agent)
+            .await
+            .expect("issue session token");
+        assert_eq!(
+            gate(&app, &other, &token).await.status(),
+            StatusCode::FORBIDDEN,
+            "a managed-session token must be 403 on a sibling session"
+        );
+        let own = gate(&app, &agent, &token).await;
+        assert_eq!(own.status(), StatusCode::OK, "own session still attaches");
+        assert_eq!(own.headers().get("x-can-input").unwrap(), "1");
+    }
+
+    /// A read-only agent session attaching to its own terminal is view-only.
+    #[tokio::test]
+    async fn read_only_agent_session_cannot_input() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_editor(&pool, "alice").await;
+        let repo = SessionsRepo::new(pool.clone());
+        let agent = repo
+            .create(otto_state::NewSession {
+                workspace_id: "ws1".into(),
+                kind: SessionKind::Agent,
+                provider: "shell".into(),
+                title: "t".into(),
+                cwd: "/tmp".into(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: "alice".into(),
+                meta: serde_json::json!({ "read_only": true }),
+            })
+            .await
+            .expect("insert session")
+            .id;
+        let app = probe_app(build(&pool).await);
+        let (token, _) = AuthRepo::new(pool.clone())
+            .issue_session_api_token(&"alice".into(), &agent)
+            .await
+            .expect("issue session token");
+        let resp = gate(&app, &agent, &token).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-can-input").unwrap(),
+            "0",
+            "a read-only session must never get input on the terminal socket"
+        );
+    }
+
+    /// An MCP-restricted token never attaches to a terminal (its only routes
+    /// are the governed MCP endpoints).
+    #[tokio::test]
+    async fn mcp_token_refused_on_terminal() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_editor(&pool, "alice").await;
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+        let token = AuthRepo::new(pool.clone())
+            .issue_mcp_token(&"alice".into(), None)
+            .await
+            .expect("issue mcp token");
+        assert_eq!(
+            gate(&app, &s1, &token).await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
     // ---- Task 1.10: otto-bearer subprotocol on /ws/term -------------------
 
     /// A share token presented via `Sec-WebSocket-Protocol: otto-bearer, <token>`
-    /// is accepted: the gate sets 200 and marks `UsedSubprotocol = true`.
+    /// is accepted: the gate sets 200.
     #[tokio::test]
     async fn subprotocol_token_accepted() {
         let pool = mem_pool().await;
@@ -2379,11 +2535,6 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "subprotocol token must pass the gate"
-        );
-        assert_eq!(
-            resp.headers().get("x-used-subprotocol").unwrap(),
-            "1",
-            "gate must detect the subprotocol path"
         );
     }
 
@@ -2404,9 +2555,10 @@ mod tests {
         );
     }
 
-    /// Legacy `?token=` is still accepted and `UsedSubprotocol` is false.
+    /// S11-312: the legacy `?token=` query fallback is gone — a VALID token
+    /// presented only in the URL is a 401, the same as no token at all.
     #[tokio::test]
-    async fn query_param_token_marks_no_subprotocol() {
+    async fn bearer_token_param_is_no_longer_accepted() {
         let pool = mem_pool().await;
         seed_user(&pool, "alice").await;
         seed_workspace(&pool, "ws1").await;
@@ -2414,17 +2566,12 @@ mod tests {
         let app = probe_app(build(&pool).await);
 
         let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
-        let resp = gate(&app, &s1, &token).await;
         assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "?token= must still work (backward compat)"
+            gate_query(&app, &s1, &token).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "?token= must no longer authenticate"
         );
-        assert_eq!(
-            resp.headers().get("x-used-subprotocol").unwrap(),
-            "0",
-            "legacy ?token= path must NOT set UsedSubprotocol"
-        );
+        assert_eq!(gate(&app, &s1, &token).await.status(), StatusCode::OK);
     }
 
     // ---- Task 1.8: share redemption rate limiter --------------------------
@@ -2436,6 +2583,7 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_blocks_locked_ip() {
         use crate::share_throttle::{ShareThrottle, FAILURE_THRESHOLD};
+        use axum::extract::ConnectInfo;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         let pool = mem_pool().await;
@@ -2457,7 +2605,11 @@ mod tests {
         let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
         let req = Request::builder()
             .method("GET")
-            .uri(format!("/ws/term/{s1}?token={token}"))
+            .uri(format!("/ws/term/{s1}"))
+            .header(
+                axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+                format!("otto-bearer, {token}"),
+            )
             // Inject a clean ConnectInfo — the loopback already has N failures
             // in the isolated `throttle` above, but the GLOBAL store is clean.
             .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
@@ -2469,6 +2621,56 @@ mod tests {
             StatusCode::OK,
             "a valid token from a clean IP must still pass through the global throttle"
         );
+    }
+
+    /// S8-02 / S1-05: once an IP is locked by junk tokens, a token that
+    /// VERIFIES still attaches (the lock only refuses further failures), and
+    /// the tunnel-aware [`share_throttle::ClientIp`] keys tunnelled clients
+    /// apart so one visitor's junk never locks another.
+    #[tokio::test]
+    async fn locked_ip_still_admits_a_valid_token() {
+        use crate::share_throttle::{ClientIp, FAILURE_THRESHOLD};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+        // Unique per-test addresses: the gate uses the process-global throttle.
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 18, 77, 1));
+        let other = IpAddr::V4(Ipv4Addr::new(198, 18, 77, 2));
+        let req = |token: &str, ip: IpAddr| {
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ws/term/{s1}"))
+                .header(
+                    axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+                    format!("otto-bearer, {token}"),
+                )
+                .extension(ClientIp { ip, local: false })
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        for _ in 0..FAILURE_THRESHOLD {
+            let resp = app.clone().oneshot(req("junk", attacker)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        // Locked: further junk is 429 …
+        let resp = app.clone().oneshot(req("junk", attacker)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // … but a valid token from the SAME address still attaches.
+        let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
+        let resp = app.clone().oneshot(req(&token, attacker)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a token that verifies must never be refused by the lockout"
+        );
+        // A different (tunnel-resolved) client is unaffected by the lock.
+        let resp = app.clone().oneshot(req("junk", other)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ---- Task 7.3: email-OTP gate before attach ---------------------------
@@ -2555,6 +2757,10 @@ mod tests {
         seed_user(&pool, "alice").await;
         seed_workspace(&pool, "ws1").await;
         let sid = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let before = SessionsRepo::new(pool.clone())
+            .get(&sid)
+            .await
+            .expect("session row");
         let st = build(&pool).await;
         let token = mint_share(&pool, "alice", &sid, WorkspaceRole::Editor).await;
         let user = st
@@ -2602,6 +2808,20 @@ mod tests {
             verdict, None,
             "a revoked share closes the capability watch (= evict this socket)"
         );
+
+        // S1-01: evicting the guest must NOT kill the owner's session. A share
+        // token resolves to the owner, so the old "revoked user created it ⇒
+        // kill" rule took the owner's live agent down with the guest.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = SessionsRepo::new(pool.clone())
+            .get(&sid)
+            .await
+            .expect("session row survives the eviction");
+        assert_eq!(
+            after.status, before.status,
+            "re-auth eviction must leave the session status untouched"
+        );
+        assert!(st.ctx.manager().get(&sid).await.is_ok());
     }
 
     /// Perf 01 F8: sockets presenting the same token to the same session
@@ -2951,6 +3171,45 @@ mod tests {
         ));
         tx.send(Bytes::from_static(b"after")).unwrap();
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"after"));
+    }
+
+    /// The attach `scrollback` reply against a REAL PTY: output that was
+    /// queued on the viewer's attach-time subscription is already in the
+    /// snapshot, so after the reply (built like `resync`) it must not arrive
+    /// on the live stream again — it used to be painted twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scrollback_reply_never_double_applies_queued_output() {
+        let spec = otto_pty::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 0.3; printf QUEUED-MARK; sleep 5".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let h = Arc::new(PtyHandle::spawn(&spec).expect("spawn"));
+        // The attach-time subscription (`out_rx`).
+        let mut rx = h.subscribe();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !String::from_utf8_lossy(&h.snapshot_with_history(10)).contains("QUEUED-MARK") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "marker never printed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let frame = resync_frame(&mut rx, pty_capture(&h, 100), false).await;
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
+        let data = B64.decode(v["data"].as_str().unwrap()).unwrap();
+        assert!(String::from_utf8_lossy(&data).contains("QUEUED-MARK"));
+        // Nothing already in the snapshot is streamed after it.
+        let mut streamed = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            streamed.extend_from_slice(&chunk);
+        }
+        assert!(
+            !String::from_utf8_lossy(&streamed).contains("QUEUED-MARK"),
+            "queued output was delivered in both the snapshot and the live stream"
+        );
+        let _ = h.kill();
     }
 
     // ── Credit-based flow control ─────────────────────────────────────────
@@ -3396,6 +3655,34 @@ mod input_queue_tests {
         panic!("writer never delivered {total} bytes");
     }
 
+    /// Review S1-25: input already queued when the viewer loses input
+    /// authority (re-auth narrowing, eviction) is discarded, not written.
+    #[tokio::test]
+    async fn revoked_queue_discards_input_already_queued() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (q, _res, writes, _) = gated(gate.clone(), false);
+        push(&q, b"first".to_vec(), true, None).await;
+        // The first write is stuck in the child; more queues up behind it.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        push(&q, b"queued-after".to_vec(), true, None).await;
+        q.revoke();
+        gate.add_permits(10);
+        settle(&writes, 5).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let delivered: Vec<u8> = writes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w.0.clone())
+            .collect();
+        assert_eq!(
+            delivered, b"first",
+            "nothing queued after the revoke is written"
+        );
+        // The budget is returned: the queue does not wedge.
+        assert_eq!(q.budget.available_permits(), INPUT_BUDGET_BYTES);
+    }
+
     #[tokio::test]
     async fn thousands_of_keystrokes_behind_a_stuck_write_are_all_delivered_in_order() {
         let gate = Arc::new(Semaphore::new(0));
@@ -3667,6 +3954,25 @@ mod snapshot_encoding_tests {
         assert!(
             ratio > 1.33,
             "base64-in-JSON is {ratio:.3}× the binary form (binary {binary} B, json {json} B)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lookup_status_tests {
+    use super::*;
+
+    /// Review S1-26: a transient DB error on the attach's session lookup is
+    /// not "session gone".
+    #[test]
+    fn only_a_missing_session_is_404() {
+        assert_eq!(
+            lookup_failure_status(&Error::NotFound("session".into())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            lookup_failure_status(&Error::Internal("database is locked".into())),
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 }

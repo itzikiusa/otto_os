@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedVaultDir } from './seed';
-import { openPage, expectNoHorizontalOverflow, expectFullyInViewport } from './helpers';
+import { openPage, expectNoHorizontalOverflow, expectFullyInViewport, snipAnnotatedPng } from './helpers';
 test.use({ viewport:{width:1280,height:900}, serviceWorkers:'block' });
 let workspaceId='', vaultId=0;
 test.beforeAll(async()=>{const {ctx,base}=await apiCtx();workspaceId=await seedWorkspace(ctx,base);vaultId=(await seedVaultDir(ctx,base,workspaceId)).vaultId;await ctx.dispose();});
@@ -31,7 +31,7 @@ test('Canvas preserves a failed pending draft across scene switches',async({page
 test('Reader new page clears old pending mark and nested links leave one tab stop',async({page})=>{
  const {ctx,base}=await apiCtx();const w=await seedWorkspace(ctx,base);await ctx.dispose();await page.addInitScript(id=>localStorage.setItem('otto_workspace',id),w);
  await page.context().route('**/browser/page?url=**',route=>{const second=route.request().url().includes('second');return route.fulfill({json:{url:`https://example.invalid/${second?'second':'first'}`,title:second?'Second reader':'First reader',markdown:'Paragraph with [nested link](https://example.invalid/nested).\n\n> Nested **quote** with [link](https://example.invalid/quote).',engine:'fixture',degraded:false}});});
- await openPage(page,'browser');const url=page.getByPlaceholder('Enter URL');await url.fill('https://example.invalid/first');await url.press('Enter');await expect(page.locator('.reader h1')).toHaveText('First reader');
+ await openPage(page,'browser');const url=page.getByPlaceholder('e.g. https://example.com');await url.fill('https://example.invalid/first');await url.press('Enter');await expect(page.locator('.reader h1')).toHaveText('First reader');
  await page.getByRole('button',{name:'Mark passage',exact:true}).click();
  await expect(page.locator('.reader article a').first()).toHaveAttribute('tabindex','-1');
  await page.locator('.reader article p').first().click();await page.getByRole('textbox',{name:'Note for this mark'}).fill('Old source draft');
@@ -59,7 +59,10 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
   await page.screenshot({path:`/tmp/otto-ux-r3-content-snip-${theme}-${scheme}-entry.png`});
   await page.locator('.snip-textentry').fill('Readable annotation');await page.keyboard.press('Control+Enter');await expect(page.locator('.snip-editor')).toHaveAttribute('data-count','1');
   // The input may move inward, but the exported annotation must also be legible.
-  const ink = await drawing.evaluate((canvas: HTMLCanvasElement) => {
+  // `data-count` flips on commit; the canvas repaints on the next animation
+  // frame, so poll the pixels instead of reading them once (a cold first run
+  // read the pre-commit frame: no ink at all).
+  const measureInk = () => drawing.evaluate((canvas: HTMLCanvasElement) => {
     const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
     let left = canvas.width, right = 0, top = canvas.height, bottom = 0;
     for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 150 && pixels[i + 1] < 130 && pixels[i + 2] < 130 && pixels[i + 3] > 100) {
@@ -68,8 +71,8 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
     }
     return { width: right - left, height: bottom - top };
   });
-  expect(ink.width, 'Committed edge text must remain readable in the image').toBeGreaterThan(100);
-  expect(ink.height).toBeGreaterThan(10);
+  await expect.poll(async () => (await measureInk()).width, { message: 'Committed edge text must remain readable in the image' }).toBeGreaterThan(100);
+  expect((await measureInk()).height).toBeGreaterThan(10);
   await expect(page.locator('.snip-copied')).toHaveText('Copied');await page.screenshot({path:`/tmp/otto-ux-r3-content-snip-${theme}-${scheme}.png`});
  });
 }
@@ -123,7 +126,7 @@ test('Snip transient image failure offers Retry instead of claiming deletion',as
 });
 test('Snip pending copy remains attached to its original image when switching snips',async({page})=>{
  const png=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=300;c.height=200;return c.toDataURL().split(',')[1];});const {ctx,base}=await apiCtx();const ids:string[]=[];for(let i=0;i<2;i++){const r=await ctx.post(`${base}/api/v1/snips`,{data:{data_b64:png,filename:`switch-${i}.png`}});expect(r.ok()).toBeTruthy();ids.push((await r.json()).id);}await ctx.dispose();
- const copies:string[]=[];let copiedPng='';await page.context().route('**/snips/*/annotated',route=>{copiedPng=route.request().postDataJSON().data_b64;copies.push(route.request().url().split('/').at(-2)!);return route.fulfill({json:{copied:true}});});
+ const copies:string[]=[];let copiedPng='';await page.context().route('**/snips/*/annotated',route=>{copiedPng=snipAnnotatedPng(route.request());copies.push(route.request().url().split('/').at(-2)!);return route.fulfill({json:{copied:true}});});
  await page.goto(`/#/snip/${ids[0]}`);const c=page.locator('.snip-canvas');await expect(c).toBeVisible();const b=(await c.boundingBox())!;await page.mouse.move(b.x+25,b.y+25);await page.mouse.down();await page.mouse.move(b.x+110,b.y+110,{steps:3});await page.mouse.up();await page.evaluate(id=>{location.hash=`/snip/${id}`;},ids[1]);await expect(page.locator('.snip-editor')).toHaveAttribute('data-count','0');await expect.poll(()=>copies).toEqual([ids[0]]);
  const pixels=await page.evaluate(data=>new Promise<{width:number;height:number;painted:boolean}>(resolve=>{const image=new Image();image.onload=()=>{const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;const context=canvas.getContext('2d')!;context.drawImage(image,0,0);const rgba=context.getImageData(0,0,canvas.width,canvas.height).data;resolve({width:canvas.width,height:canvas.height,painted:rgba.some((value,index)=>index%4===3&&value>0)});};image.src=`data:image/png;base64,${data}`;}),copiedPng);
  expect(pixels).toEqual({width:300,height:200,painted:true});

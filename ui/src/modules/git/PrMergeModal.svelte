@@ -13,6 +13,7 @@
   import { openExternal } from '../../lib/external';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import { pinnedHead } from './pr-cache';
 
   interface Props {
     repoId: string;
@@ -20,8 +21,11 @@
     pr: PrDetail;
     onclose: () => void;
     onmerged: () => void;
+    /** The PR moved under the modal (a pinned merge 409'd): the parent should
+     *  re-read its own (now stale) copy of the PR. */
+    onstale?: () => void;
   }
-  let { repoId, number, pr, onclose, onmerged }: Props = $props();
+  let { repoId, number, pr, onclose, onmerged, onstale }: Props = $props();
 
   let disposed = false;
   onDestroy(() => { disposed = true; });
@@ -43,6 +47,27 @@
   let readinessError = $state(false);
   // Bumped by Retry to re-run the probes.
   let probeTick = $state(0);
+
+  // The head the merge is PINNED to, read by the modal itself alongside the
+  // probes (S15-305). `pr` is the parent's copy — possibly a cache hit from
+  // minutes ago — so pinning `pr.head_sha` 409'd forever after a push while
+  // the CI row showed the live head's checks.
+  let liveHead = $state<string | null>(null);
+  let headLoading = $state(true);
+  $effect(() => {
+    const id = repoId;
+    const n = number;
+    void probeTick;
+    headLoading = true;
+    void api
+      .get<PrDetail>(`/repos/${id}/prs/${n}`)
+      .then((r) => (liveHead = r.head_sha ?? null))
+      // Unreadable: fall back to the parent's head — the daemon still refuses
+      // a merge whose head moved, so this can only fail closed.
+      .catch(() => (liveHead = null))
+      .finally(() => (headLoading = false));
+  });
+  const pinSha = $derived(pinnedHead(liveHead, pr.head_sha ?? null));
 
   $effect(() => {
     const id = repoId;
@@ -88,7 +113,7 @@
       checksError || readinessError ? 'Unable to verify CI / readiness' : null,
     ].filter((r): r is string => r !== null),
   );
-  const loading = $derived(checksLoading || readinessLoading);
+  const loading = $derived(checksLoading || readinessLoading || headLoading);
   const canMerge = $derived(!merging && !loading && (reasons.length === 0 || mergeAnyway));
 
   const FRESHNESS: Record<string, string> = {
@@ -123,18 +148,33 @@
     merging = true;
     error = null;
     try {
+      // Pin the merge to the head these checks/readiness rows describe: a push
+      // while the modal is open must 409, not merge unreviewed commits.
       await api.post(`/repos/${repoId}/prs/${number}/merge`, {
         strategy,
         delete_source_branch: deleteSource,
+        ...(pinSha ? { expected_head_sha: pinSha } : {}),
       });
       toasts.success('PR merged', `#${mergedNumber}`);
       if (!disposed) onmerged();
     } catch (e) {
       // Keep the provider's own words — "Required status check failing" and
       // friends are the actionable text.
-      const detail = e instanceof ApiError || e instanceof Error ? e.message : String(e);
+      const moved = e instanceof ApiError && e.status === 409 && /head|changed|sha/i.test(e.message);
+      const detail = moved
+        ? 'The pull request changed since these checks ran (new commits were pushed). The checks below were re-read for the new head — review them, then merge again.'
+        : e instanceof ApiError || e instanceof Error
+          ? e.message
+          : String(e);
       if (disposed) toasts.error(`Couldn’t merge PR #${mergedNumber}`, detail);
       else error = detail;
+      // Recover instead of dead-ending: re-read the head + probes here, and let
+      // the parent refresh its stale copy. Merge stays a fresh, explicit click.
+      if (moved && !disposed) {
+        mergeAnyway = false;
+        probeTick++;
+        onstale?.();
+      }
     } finally {
       merging = false;
     }
@@ -149,6 +189,7 @@
     </div>
     <div class="flow mono dim">
       {pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}
+      {#if pinSha}<span title="The merge is pinned to this head commit">· at {pinSha.slice(0, 7)}</span>{/if}
     </div>
 
     <!-- readiness rows -->

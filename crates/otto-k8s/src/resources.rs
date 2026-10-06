@@ -1426,10 +1426,13 @@ pub fn api_collection_path(kind: Kind, ns: Option<&str>) -> Option<String> {
     }
 }
 
-/// `[a-z0-9.-]`, 1–253 chars, no `..` — safe to put in an API path.
-fn is_dns_name(x: &str) -> bool {
+/// `[a-z0-9.-]`, 1–253 chars, no `..`, starting with an alphanumeric — safe
+/// to put in an API path AND as a kubectl positional (a leading `-` would be
+/// parsed as a flag: `--context=…` / `-A` / `--server=…` re-target the call).
+pub(crate) fn is_dns_name(x: &str) -> bool {
     !x.is_empty()
         && x.len() <= 253
+        && x.as_bytes()[0].is_ascii_alphanumeric()
         && x.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
         && !x.contains("..")
@@ -1702,22 +1705,51 @@ pub async fn namespaces(k: &Kubectl) -> Result<Vec<NamespaceRow>> {
         .collect())
 }
 
-/// Fetch one object's JSON.
-pub async fn get_one(k: &Kubectl, kind: Kind, ns: Option<&str>, name: &str) -> Result<Value> {
+/// Reject an object / container name that is not a DNS-1123 name. Every
+/// user-supplied name reaches kubectl as a positional; one shaped like a flag
+/// (`--context=other`, `-A`, `--server=https://evil`) would bypass the
+/// cluster/namespace grant or ship the kubeconfig credentials elsewhere.
+pub fn validate_name(what: &str, name: &str) -> Result<()> {
+    if is_dns_name(name) {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!("invalid Kubernetes {what} name")))
+    }
+}
+
+/// `-n <ns>` as one `--namespace=<ns>` token (validated), for namespaced kinds.
+fn ns_flag(kind: Kind, ns: Option<&str>) -> Result<Vec<String>> {
+    if !kind.namespaced() {
+        return Ok(vec![]);
+    }
+    match ns.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => {
+            validate_name("namespace", n)?;
+            Ok(vec![format!("--namespace={n}")])
+        }
+        None => Ok(vec![]),
+    }
+}
+
+/// `get <kind> -o json [--namespace=ns] -- <name>` — flags first, then `--`
+/// so the name can never be read as a flag (belt to `validate_name`'s braces).
+fn get_one_args(kind: Kind, ns: Option<&str>, name: &str) -> Result<Vec<String>> {
+    validate_name("object", name)?;
     let mut args: Vec<String> = vec![
         "get".into(),
         kind.kubectl_resource().into(),
-        name.into(),
         "-o".into(),
         "json".into(),
     ];
-    if kind.namespaced() {
-        if let Some(n) = ns.map(str::trim).filter(|n| !n.is_empty()) {
-            args.push("-n".into());
-            args.push(n.to_string());
-        }
-    }
-    k.json(args).await
+    args.extend(ns_flag(kind, ns)?);
+    args.push("--".into());
+    args.push(name.into());
+    Ok(args)
+}
+
+/// Fetch one object's JSON.
+pub async fn get_one(k: &Kubectl, kind: Kind, ns: Option<&str>, name: &str) -> Result<Value> {
+    k.json(get_one_args(kind, ns, name)?).await
 }
 
 /// `GET /k8s/clusters/{id}/pods/{ns}/{name}/containers`.
@@ -1726,24 +1758,21 @@ pub async fn containers(k: &Kubectl, ns: &str, name: &str) -> Result<Vec<Contain
     Ok(pod_containers(&pod))
 }
 
+/// `describe <kind> [--namespace=ns] -- <name>` (name validated by `get_one`).
+fn describe_args(kind: Kind, ns_args: &[String], name: &str) -> Vec<String> {
+    let mut a: Vec<String> = vec!["describe".into(), kind.kubectl_resource().into()];
+    a.extend(ns_args.iter().cloned());
+    a.push("--".into());
+    a.push(name.into());
+    a
+}
+
 /// `GET /k8s/clusters/{id}/resource` — sanitized manifest + describe + events.
 pub async fn detail(k: &Kubectl, kind: Kind, ns: Option<&str>, name: &str) -> Result<Value> {
     let manifest = get_one(k, kind, ns, name).await?;
     let uid = s(&manifest, "/metadata/uid").map(str::to_string);
-    let ns_args: Vec<String> = if kind.namespaced() {
-        ns.map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(|n| vec!["-n".to_string(), n.to_string()])
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
-    let mut describe_args: Vec<String> = vec![
-        "describe".into(),
-        kind.kubectl_resource().into(),
-        name.into(),
-    ];
-    describe_args.extend(ns_args.iter().cloned());
+    let ns_args = ns_flag(kind, ns)?;
+    let describe_args = describe_args(kind, &ns_args, name);
     let mut events_args: Vec<String> =
         vec!["get".into(), "events".into(), "-o".into(), "json".into()];
     events_args.extend(ns_args.iter().cloned());
@@ -1805,6 +1834,44 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn flag_shaped_object_names_never_reach_kubectl() {
+        for bad in [
+            "--context=x",
+            "-A",
+            "--server=https://evil.example",
+            "a b",
+            "",
+        ] {
+            assert!(
+                get_one_args(Kind::Pods, Some("shop"), bad).is_err(),
+                "{bad:?}"
+            );
+            assert!(get_one_args(Kind::Pods, Some(bad), "web-1").is_err() || bad.is_empty());
+        }
+        assert_eq!(
+            get_one_args(Kind::Pods, Some("shop"), "web-1").unwrap(),
+            vec![
+                "get",
+                "pods",
+                "-o",
+                "json",
+                "--namespace=shop",
+                "--",
+                "web-1"
+            ]
+        );
+        // Cluster-scoped kinds ignore ns.
+        assert_eq!(
+            get_one_args(Kind::Nodes, Some("shop"), "node-1.eu").unwrap(),
+            vec!["get", "nodes", "-o", "json", "--", "node-1.eu"]
+        );
+        assert_eq!(
+            describe_args(Kind::Pods, &["--namespace=shop".into()], "web-1"),
+            vec!["describe", "pods", "--namespace=shop", "--", "web-1"]
+        );
     }
 
     fn fixture(name: &str) -> Value {

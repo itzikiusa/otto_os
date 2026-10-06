@@ -289,7 +289,7 @@
           </label>
           <label class="wb-cmp">
             <span>Revision</span>
-            <input type="text" inputmode="numeric" size="6" bind:value={compareInput} aria-label="Compare revision"
+            <input dir="auto" type="text" inputmode="numeric" size="6" bind:value={compareInput} aria-label="Compare revision"
               onkeydown={(event) => { if (event.key === 'Enter') compareRevision(); }} />
           </label>
           <button class="btn small" onclick={compareRevision}>Compare</button>

@@ -26,7 +26,7 @@ import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
-import { SCRATCH_WORKSPACE_ID } from './sessionScope';
+import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
@@ -79,6 +79,12 @@ export function visibleOnThisDevice(s: Session): boolean {
 /** Sentinel tab/pane id for the docked DB Explorer (not a real session). Lets
  *  the DB Explorer live as a pane in the Agents split, beside an agent. */
 export const DB_PANE_ID = '__db_explorer__';
+
+/** What a close gesture resolved to. 'delete-deferred' = the remembered
+ *  "Always delete": archive now, delete after the Undo toast expires. */
+type CloseAction = 'close' | 'archive' | 'delete' | 'delete-deferred';
+/** Undo window for a remembered "Always delete" close. */
+const DELETE_UNDO_MS = 8000;
 
 export type SplitAxis = Axis;
 
@@ -484,7 +490,13 @@ class WorkspaceStore {
       this.resetArchived();
     }
     const selection = this.selectionGeneration;
-    const current = () => generation === this.loadGeneration && token === getToken() && selection === this.selectionGeneration;
+    // `fresh`: this is still the newest load for this identity — its LIST is
+    // valid. `current`: nobody selected a workspace meanwhile either (the side
+    // pane's guest follows the host's workspace before its own list lands) —
+    // only then may it pick the default selection. A selection made meanwhile
+    // must not leave the list empty and `listSettled` false forever.
+    const fresh = () => generation === this.loadGeneration && token === getToken();
+    const current = () => fresh() && selection === this.selectionGeneration;
     // The hidden scratch workspace — best-effort: a daemon without it leaves
     // `scratch` null and the sheet falls back to `~`. Fetched WITH the list
     // (perf F3: one round-trip instead of two before the session list).
@@ -508,11 +520,17 @@ class WorkspaceStore {
       this.listSettled = true;
       throw e;
     }
-    if (!current()) return;
+    if (!fresh()) return;
     this.workspaces = workspaces;
     const scratch = await scratchReq;
-    if (!current()) return;
+    if (!fresh()) return;
     this.scratch = scratch;
+    if (!current()) {
+      // Someone already chose the workspace — keep their choice.
+      dropBoot();
+      this.listSettled = true;
+      return;
+    }
     const target = workspaces.find((w) => w.id === saved) ?? workspaces[0] ?? null;
     if (target?.id !== saved) dropBoot();
     // select()/selectNone() set currentId before their first await, so the
@@ -1279,16 +1297,17 @@ class WorkspaceStore {
    *  delete — both close the tab themselves) or, for a non-session id, just
    *  close the tab. A failed end falls back to closing the tab so a bulk
    *  close never leaves a dead tab behind, and reports the error. */
-  private async endSession(id: Id, action: 'close' | 'archive' | 'delete'): Promise<void> {
+  private async endSession(id: Id, action: CloseAction): Promise<void> {
     if (action === 'close' || !this.isEndable(id)) {
       this.closeTab(id);
       return;
     }
     try {
-      if (action === 'delete') await this.killSession(id);
+      if (action === 'delete-deferred') await this.deleteWithUndo(id);
+      else if (action === 'delete') await this.killSession(id);
       else await this.archiveSession(id);
     } catch (e) {
-      toastError(action === 'delete' ? 'Couldn’t delete the session' : 'Couldn’t archive the session', e);
+      toastError(action === 'archive' ? 'Couldn’t archive the session' : 'Couldn’t delete the session', e);
       this.closeTab(id);
     }
   }
@@ -1302,32 +1321,65 @@ class WorkspaceStore {
     return !!s && !s.archived;
   }
 
+  /** Whether ending `id` now would stop an AGENT mid-turn — the one case a
+   *  remembered "Always archive/delete" still asks about. `working` only means
+   *  "printed in the last few seconds", so a plain shell (whose prompt redraw
+   *  or `ls` output reads as working) is not mid-turn: its close/delete
+   *  honours the remembered choice like an idle session's.
+   *
+   *  `statusMap` only knows the rows this store loaded (current workspace,
+   *  All-workspaces foreground agents, fetched-by-id). A caller that drew the
+   *  row from its OWN list — Classrooms' back row, other workspaces — passes
+   *  what it showed as `hint.working`; either source saying "working" counts
+   *  (S14-301: asking needlessly is cheap, a silent mid-turn kill is not). */
+  isAgentMidTurn(id: Id, hint?: { working?: boolean }): boolean {
+    if (this.statusMap[id] !== 'working' && !hint?.working) return false;
+    const s = this.sessions.find((x) => x.id === id) ?? this.otherWsSessions.find((x) => x.id === id);
+    return !s || (s.kind === 'agent' && s.provider !== 'shell');
+  }
+
   /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
    *  returns 'archive' | 'delete' (or 'close' when nothing needs ending), or
    *  null for cancel. Applies (and records) the remembered preference: a
-   *  single-tab close under "Always archive" or "Always delete" is silent —
-   *  the user opted out of the question in Settings → Appearance, and asking
-   *  anyway made the setting a lie. One guard remains: a close that ends
-   *  **more than one** session (Close others / to the right / all) always
-   *  confirms once, naming the count, whatever the preference. */
-  private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | 'delete' | null> {
+   *  single-tab close under "Always archive" or "Always delete" asks nothing
+   *  — the user opted out of the question in Settings → Appearance, and
+   *  asking anyway made the setting a lie. But "Always delete" is never
+   *  silently irreversible: it resolves to 'delete-deferred' (archive now,
+   *  delete after an Undo toast — see {@link deleteWithUndo}), so a stray
+   *  ⌘W / ⌫ / middle-click can be taken back. Two more guards: a close that ends
+   *  **more than one** session (Close others / to the right / all), or one
+   *  that stops a **working** agent mid-turn, always confirms once, whatever
+   *  the preference. */
+  private async resolveCloseAction(ids: Id[]): Promise<CloseAction | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
     const n = ending.length;
     const many = n > 1;
+    const busy = ending.filter((id) => this.isAgentMidTurn(id)).length;
     const pref = ui.closeTabPref;
-    if ((pref === 'archive' || pref === 'delete') && !many) return pref;
+    if (pref === 'archive' && !many && busy === 0) return 'archive';
+    if (pref === 'delete' && !many && busy === 0) return 'delete-deferred';
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
+    const busyNote =
+      busy === 0
+        ? ''
+        : many
+          ? `\n\n${plural(busy, 'session')} ${busy === 1 ? 'is' : 'are'} working right now and will stop mid-turn.`
+          : `\n\n“${name}” is working right now and will stop mid-turn.`;
     if (pref === 'archive' || pref === 'delete') {
       const del = pref === 'delete';
-      const what = del
-        ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can’t be undone.`
-        : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`;
+      const what = !many
+        ? del
+          ? `Closing this tab deletes “${name}”: it stops and its history is removed for good. This can’t be undone.`
+          : `Closing this tab archives “${name}”: it stops and keeps its history (resumable from the Archived list).`
+        : del
+          ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can’t be undone.`
+          : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`;
       const ok = await confirmer.ask(
-        `${what}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
+        `${what}${busyNote}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
         {
-          title: `${del ? 'Delete' : 'Archive'} ${n} sessions?`,
-          confirmLabel: `${del ? 'Delete' : 'Archive'} ${n} sessions`,
+          title: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions?` : `${del ? 'Delete' : 'Archive'} working session?`,
+          confirmLabel: many ? `${del ? 'Delete' : 'Archive'} ${n} sessions` : `${del ? 'Delete' : 'Archive'} session`,
           danger: del,
         },
       );
@@ -1336,7 +1388,7 @@ class WorkspaceStore {
     const message = many
       ? `Closing these tabs ends ${n} sessions. Archive stops them and keeps their history (resumable from the Archived list); Delete stops them and removes their history for good.`
       : `Closing this tab ends “${name}”. Archive stops it and keeps its history (resumable from the Archived list); Delete stops it and removes its history for good.`;
-    const picked = await confirmer.choose(message, {
+    const picked = await confirmer.choose(message + busyNote, {
       title: many ? `Close ${n} sessions?` : 'Close session?',
       options: [
         { label: many ? `Archive ${n} sessions` : 'Archive session', value: 'archive', kind: 'primary' },
@@ -1359,9 +1411,11 @@ class WorkspaceStore {
     return `${base} — asks to archive or delete the session`;
   }
 
-  /** Reopen the most recently closed tab (⌘⇧T). Skips ids whose session no
-   *  longer exists. */
-  reopenClosedTab(): void {
+  /** Reopen the most recently closed tab (⌘⇧T). Closing a session's tab
+   *  archives it, so an id missing from the live list is unarchived and
+   *  reopened; one that is gone for good (deleted — {@link killSession} also
+   *  drops it from the list) is skipped. */
+  async reopenClosedTab(): Promise<void> {
     while (this.recentlyClosed.length > 0) {
       const id = this.recentlyClosed[this.recentlyClosed.length - 1];
       this.recentlyClosed = this.recentlyClosed.slice(0, -1);
@@ -1369,7 +1423,27 @@ class WorkspaceStore {
         this.navigateToSession(id);
         return;
       }
+      const row = await this.ensureSession(id);
+      if (!row) continue; // deleted (or no longer visible) — try the next one
+      try {
+        if (row.archived) await this.unarchiveSession(id);
+        if (row.workspace_id !== this.currentId && !this.belongsHere(row.workspace_id)) {
+          await this.openInWorkspace(row.workspace_id, id);
+        } else {
+          this.navigateToSession(id);
+        }
+        return;
+      } catch (e) {
+        toastError('Couldn’t reopen the session', e);
+        return;
+      }
     }
+  }
+
+  /** Undo an archive: bring the session back to the live list and open it. */
+  async unarchiveAndOpen(id: Id): Promise<void> {
+    await this.unarchiveSession(id);
+    this.navigateToSession(id);
   }
 
   /** Move tab `id` to `targetIndex` in `openTabs` and persist the order. */
@@ -1383,8 +1457,18 @@ class WorkspaceStore {
     this.persistTabs();
   }
 
-  closeActiveTab(): void {
-    if (this.activeSessionId) void this.requestCloseTab(this.activeSessionId);
+  /** ⌘W / File ▸ Close Tab / the palette's "Close tab" / the mobile bar.
+   *  Only while the Agents page is on screen: `activeSessionId` is the
+   *  focused pane's session whatever module is showing, so ⌘W on Git / Vault
+   *  / Settings used to end a session the user wasn't looking at. Elsewhere
+   *  it is a no-op (open dialogs already consume ⌘W via `modalKeyVerdict`;
+   *  the side pane closes itself via `embeddedKeyTarget`). Returns whether a
+   *  close was requested. */
+  closeActiveTab(): boolean {
+    if (!sessionVerbsApply(router.module)) return false;
+    if (!this.activeSessionId) return false;
+    void this.requestCloseTab(this.activeSessionId);
+    return true;
   }
 
   cycleTab(dir: 1 | -1): void {
@@ -1499,10 +1583,12 @@ class WorkspaceStore {
    *  setting feel broken). Bulk deletes keep their own one-time confirm.
    *  Failures surface as a toast. */
   async requestDeleteSession(id: Id): Promise<void> {
-    if (ui.closeTabPref !== 'delete') {
+    // "Always delete" skips this — but never for an agent working mid-turn.
+    const working = this.isAgentMidTurn(id);
+    if (ui.closeTabPref !== 'delete' || working) {
       const name = this.sessions.find((s) => s.id === id)?.title?.trim();
       const ok = await confirmer.ask(
-        `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.`,
+        `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.${working ? ' It is working right now and will stop mid-turn.' : ''}`,
         { title: 'Delete session', confirmLabel: 'Delete' },
       );
       if (!ok) return;
@@ -1517,6 +1603,8 @@ class WorkspaceStore {
   async killSession(id: Id): Promise<void> {
     await api.del(`/sessions/${id}`);
     this.closeTab(id);
+    // Gone for good: ⌘⇧T / "Reopen closed tab" must not offer it.
+    this.recentlyClosed = this.recentlyClosed.filter((t) => t !== id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== id);
     this.dropArchived(id);
@@ -1543,6 +1631,9 @@ class WorkspaceStore {
   /** HTTP responses and events share the same idempotent membership update. */
   private applyArchiveState(s: Session): void {
     this.pendingStatus.delete(s.id);
+    // Back from the archive by any route: a pending "Always delete" must not
+    // fire on the restored session (S13-301).
+    if (!s.archived) this.cancelPendingDelete(s.id);
     this.statusMap[s.id] = s.status;
     this.clearNeedsYou(s.id);
     if (s.archived) {
@@ -1592,7 +1683,105 @@ class WorkspaceStore {
   async archiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
     this.applyArchiveState(s);
-    toasts.info('Session archived', s.title);
+    toasts.push('info', 'Session archived', s.title, 8000, {
+      action: { label: 'Undo', run: () => this.unarchiveAndOpen(id) },
+    });
+  }
+
+  /** Pending "Always delete" closes: ids whose Undo toast is still up. The
+   *  toast's own expiry commits the delete (see {@link deleteWithUndo}); an
+   *  id leaving this set cancels it. */
+  private pendingDeletes = new Set<Id>();
+
+  /** Forget a pending "Always delete" — the session came back (Undo, ⌘⇧T,
+   *  Archived ▸ Restore, another window's unarchive). Idempotent. */
+  cancelPendingDelete(id: Id): void {
+    this.pendingDeletes.delete(id);
+  }
+
+  /**
+   * A remembered "Always delete" close (S13-01): no dialog, but not silently
+   * irreversible either. The session is ARCHIVED now (it stops, its tab
+   * closes, its history is kept) and permanently deleted only once the Undo
+   * toast has gone away (S13-301):
+   * - the delete hangs off the toast's `onClose`, not a parallel timer, so a
+   *   toast held open by hover/focus holds the delete too;
+   * - ANY way of bringing the session back cancels it — the toast's Undo,
+   *   ⌘⇧T, Archived ▸ Restore, or another window's unarchive all pass through
+   *   {@link applyArchiveState}, which calls {@link cancelPendingDelete};
+   * - before the DELETE the row is re-read and must still be archived, so a
+   *   restore this window never heard about still wins.
+   * If the window goes away inside the grace period, the session simply stays
+   * archived — the failure mode is "kept", never "lost".
+   */
+  async deleteWithUndo(id: Id, graceMs = DELETE_UNDO_MS): Promise<void> {
+    const s = await api.post<Session>(`/sessions/${id}/archive`);
+    this.applyArchiveState(s);
+    this.pendingDeletes.add(id);
+    toasts.push('info', 'Session deleted', s.title, graceMs, {
+      action: {
+        label: 'Undo',
+        run: async () => {
+          if (!this.pendingDeletes.has(id)) throw new Error('The session was already deleted.');
+          this.cancelPendingDelete(id);
+          await this.unarchiveAndOpen(id);
+        },
+      },
+      onClose: (reason) => {
+        if (reason !== 'action') void this.commitPendingDelete(id);
+      },
+    });
+  }
+
+  /** The deferred half of {@link deleteWithUndo}: delete only if the close is
+   *  still pending AND the server still has the row archived. */
+  private async commitPendingDelete(id: Id): Promise<void> {
+    if (!this.pendingDeletes.has(id)) return;
+    let row: Session;
+    try {
+      row = await api.get<Session>(`/sessions/${id}`);
+    } catch {
+      // Gone already, or unreadable: never DELETE blind — it stays archived.
+      this.pendingDeletes.delete(id);
+      return;
+    }
+    // Restored meanwhile (a cancel may also have landed during the read).
+    if (!row.archived || !this.pendingDeletes.has(id)) {
+      this.pendingDeletes.delete(id);
+      return;
+    }
+    this.pendingDeletes.delete(id);
+    await this.killSession(id).catch((e) => toastError('Couldn’t delete the session', e));
+  }
+
+  /** User-facing archive (session menu, History, Classrooms' detention).
+   *  Archiving kills the PTY, so — like closing the tab or restarting — a
+   *  WORKING agent asks first (its in-flight turn is lost; Undo unarchives
+   *  the session but cannot bring the turn back). Idle/exited archive at once,
+   *  and so does a plain shell ({@link isAgentMidTurn}: its output is not a turn).
+   *  `hint` carries what a caller with its own row list showed (S14-301): its
+   *  working state, title, and — for an engine-owned session — the engine's
+   *  label, which the confirm names (archiving pulls the session out from
+   *  under that run). Resolves false when the user cancelled; a failed
+   *  archive rejects. */
+  async requestArchive(id: Id, hint?: { working?: boolean; title?: string; engine?: string | null }): Promise<boolean> {
+    if (this.isAgentMidTurn(id, hint)) {
+      const name =
+        this.sessions.find((x) => x.id === id)?.title?.trim() ||
+        this.otherWsSessions.find((x) => x.id === id)?.title?.trim() ||
+        hint?.title?.trim() ||
+        'this session';
+      const engine = hint?.engine
+        ? ` It is a running ${hint.engine} session, not one you started: the ${hint.engine} run that owns it loses it and may fail.`
+        : '';
+      const ok = await confirmer.ask(
+        `“${name}” is working right now and will stop mid-turn. Archiving stops the agent; you can restore the session from the Archived list, but its current turn is lost.${engine}`,
+        { title: 'Archive working session?', confirmLabel: 'Archive session', danger: true },
+      );
+      if (!ok) return false;
+    }
+    await this.archiveSession(id);
+    return true;
   }
 
   async unarchiveSession(id: Id): Promise<void> {
@@ -1629,19 +1818,25 @@ class WorkspaceStore {
    *  the pane header used to ask; the other paths restarted silently.
    *  Failures surface as a toast. */
   async requestRestart(id: Id): Promise<void> {
-    if (this.statusMap[id] === 'working') {
-      const name = this.sessions.find((x) => x.id === id)?.title?.trim() || 'this session';
-      const ok = await confirmer.ask(
-        `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
-        { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
-      );
-      if (!ok) return;
-    }
+    if (!(await this.confirmRestart(id))) return;
     try {
       await this.restartSession(id);
     } catch (e) {
       toastError('Couldn’t restart', e);
     }
+  }
+
+  /** The restart working-guard on its own, for callers that restart as part
+   *  of a larger action (SessionView's "Save & restart"). True = go ahead. */
+  async confirmRestart(id: Id): Promise<boolean> {
+    // The same working-guard as archive/close: a busy plain shell restarts
+    // without asking, an agent mid-turn asks (S14-301).
+    if (!this.isAgentMidTurn(id)) return true;
+    const name = this.sessions.find((x) => x.id === id)?.title?.trim() || 'this session';
+    return confirmer.ask(
+      `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,
+      { title: 'Restart working session?', confirmLabel: 'Restart session', danger: true },
+    );
   }
 
   async renameSession(id: Id, title: string): Promise<void> {

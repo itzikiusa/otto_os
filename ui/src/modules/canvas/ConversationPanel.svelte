@@ -8,13 +8,14 @@
   import { toastError } from '../../lib/toastError';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { agentProviders } from '../../lib/providers';
   import { confirmer, type ChoiceOption } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { interruptSession } from '../../lib/api/interrupt';
 
   interface Props {
     editor: { generate: (p: string) => Promise<boolean>; isGenerating: () => boolean } | undefined;
@@ -71,6 +72,25 @@
 
   const working = $derived(busy || editor?.isGenerating());
 
+  // Stop: flag the turn as stopped server-side (it then commits nothing and
+  // restores the pre-turn board, S4-20), then interrupt the agent (Esc into
+  // its PTY) so the pending Ask Otto request settles.
+  let stopping = $state(false);
+  async function stop(): Promise<void> {
+    const sid = canvas.sessionId;
+    if (!sid || stopping) return;
+    stopping = true;
+    try {
+      await canvas.stopAssist();
+      await interruptSession(sid);
+      toasts.info('Stopped Ask Otto', 'The board was left as it was before this turn.');
+    } catch (e) {
+      toastError('Couldn’t stop the agent', e);
+    } finally {
+      stopping = false;
+    }
+  }
+
   // Version history (C5): snapshots taken before each Ask Otto commit, before a
   // restore, and at most every 10 min across manual saves. Offer the newest few.
   const ORIGIN_LABEL: Record<string, string> = {
@@ -120,7 +140,7 @@
 
 <aside class="assistant">
   <header class="head">
-    <span class="title"><Icon name="terminal" size={15} /> Assistant</span>
+    <span class="title"><Icon name="terminal" size={14} /> Assistant</span>
     {#if providers.length > 1}
       <select
         class="provider"
@@ -134,7 +154,12 @@
         {/each}
       </select>
     {/if}
-    {#if working}<span class="working" role="status"><LiveWorkingDot label="Working…" /></span>{/if}
+    {#if working}
+      <span class="working" role="status"><LiveWorkingDot label="Working…" /></span>
+      {#if canvas.sessionId}
+        <button class="hist-btn stop" onclick={() => void stop()} disabled={stopping} aria-busy={stopping} aria-label="Stop Ask Otto" title="Stop Ask Otto"><Icon name="stop" size={14} /></button>
+      {/if}
+    {/if}
     <button
       class="hist-btn history"
       onclick={restorePrevious}
@@ -142,17 +167,17 @@
       aria-label="Restore previous version"
       title="Restore previous version…"
     >
-      <Icon name="undo" size={15} />
+      <Icon name="undo" size={14} />
     </button>
     <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
-      <Icon name="x" size={15} />
+      <Icon name="x" size={14} />
     </button>
   </header>
 
   <div class="shell">
     {#if canvas.sessionId}
       {#key canvas.sessionId}
-        <Terminal sessionId={canvas.sessionId} readOnly={false} forceDark preferDom />
+        <LazyTerminal sessionId={canvas.sessionId} readOnly={false} forceDark preferDom />
       {/key}
     {:else}
       <div class="empty">
@@ -164,7 +189,7 @@
   </div>
 
   <div class="composer">
-    <textarea
+    <textarea dir="auto"
       bind:value={draft}
       onkeydown={onKey}
       aria-label="Ask the canvas assistant"
@@ -251,7 +276,7 @@
     background: var(--hover);
   }
   .hist-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .shell {
@@ -322,7 +347,7 @@
     cursor: pointer;
   }
   .send:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 </style>

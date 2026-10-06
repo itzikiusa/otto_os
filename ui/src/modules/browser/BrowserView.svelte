@@ -10,6 +10,7 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { vault } from '../vault/vault.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { isAbortError } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -32,6 +33,7 @@
   // JS context via `browser_eval`, never bundled/imported as a module (see
   // overlay.js's header for why).
   import overlaySrc from './overlay.js?raw';
+  import { buildFillScript, fillAllowedForUrl, fillResult, fillTargetOk, hostOf, matchDomain } from './autofill';
 
   interface Props {
     /** Hosted inside the agent-mode right panel (the "v2" Browser tab): no
@@ -326,40 +328,6 @@
       });
   });
 
-  function hostOf(url: string): string | null {
-    try {
-      return new URL(url).hostname || null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Mirrors `otto_state::browser_credentials::match_domain` (exact host, or
-   *  any subdomain of a stored domain). Client-side only — a mismatch here
-   *  just hides the key icon; the server independently re-derives its own
-   *  match for the agent-facing `/browser/login` route, so this is never a
-   *  security boundary, only a UX one. */
-  function matchDomain(host: string, domain: string): boolean {
-    const h = host.trim().replace(/\.$/, '').toLowerCase();
-    const d = domain.trim().replace(/\.$/, '').toLowerCase();
-    if (!d) return false;
-    return h === d || h.endsWith(`.${d}`);
-  }
-
-  function fillAllowedForUrl(url: string): boolean {
-    let u: URL;
-    try {
-      u = new URL(url);
-    } catch {
-      return false;
-    }
-    if (u.protocol === 'https:') return true;
-    if (u.protocol === 'http:') {
-      return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1';
-    }
-    return false;
-  }
-
   const matchedCredential = $derived.by(() => {
     const tab = activeLive;
     if (!tab) return null;
@@ -418,29 +386,19 @@
       // (the eval string below is never passed to `toasts`/`console`), and
       // it never re-enters this component's own $state.
       const { password } = await browserApi.revealCredential(cred.id);
-      const userJs = JSON.stringify(cred.username);
-      const passJs = JSON.stringify(password);
-      const js =
-        '(function(){' +
-        'var pwd = document.querySelector(\'input[type="password"]\');' +
-        "if (!pwd) return 'no-password-field';" +
-        'var user = document.querySelector(\'input[type="email"]\') || ' +
-        'document.querySelector(\'input[autocomplete="username"]\') || ' +
-        'document.querySelector(\'input[type="text"]\');' +
-        'if (user) {' +
-        'user.focus();' +
-        `user.value = ${userJs};` +
-        "user.dispatchEvent(new Event('input', {bubbles: true}));" +
-        "user.dispatchEvent(new Event('change', {bubbles: true}));" +
-        '}' +
-        'pwd.focus();' +
-        `pwd.value = ${passJs};` +
-        "pwd.dispatchEvent(new Event('input', {bubbles: true}));" +
-        "pwd.dispatchEvent(new Event('change', {bubbles: true}));" +
-        "return 'filled';" +
-        '})()';
+      // Re-check AFTER both awaits (S18-04): the confirmation and the reveal
+      // can take seconds, and the tab may have redirected to another origin
+      // meanwhile. The script below re-checks the page's own origin too.
+      if (activeLive?.id !== tab.id || !fillTargetOk(activeLive.url, cred.domain)) {
+        toasts.warn('Not filled', `This tab left ${cred.domain} — nothing was filled.`);
+        return;
+      }
+      const js = buildFillScript(cred.domain, cred.username, password);
       const result = await nativeBrowser.eval(tab.id, js);
-      if (result === "'no-password-field'" || result === 'no-password-field') {
+      const outcome = fillResult(result);
+      if (outcome === 'origin-changed') {
+        toasts.warn('Not filled', `This tab left ${cred.domain} — nothing was filled.`);
+      } else if (outcome === 'no-password-field') {
         toasts.warn('Nothing to fill', 'The page no longer has a password field.');
       } else {
         toasts.success('Autofilled', `${cred.username} · ${cred.domain} — review before submitting`);
@@ -604,7 +562,8 @@
     try {
       await browser.runSummarize(url);
     } catch (e) {
-      toastError('Couldn’t summarize the page', e);
+      if (isAbortError(e)) toasts.info('Summary stopped');
+      else toastError('Couldn’t summarize the page', e);
     }
   }
 
@@ -812,6 +771,7 @@
     <div class="summary" role="status">
       <div class="summary-head"><span>Summary · drafted by Otto</span></div>
       <p class="dim-line">Summarizing this page…</p>
+      <div><button class="btn small" onclick={() => browser.stopSummarize()}><Icon name="stop" size={12} /> Stop</button></div>
     </div>
   {:else if browser.summary}
     <div class="summary">
@@ -973,7 +933,7 @@
     color: var(--text);
   }
   .icon-btn.tool:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .icon-btn.tool.active {

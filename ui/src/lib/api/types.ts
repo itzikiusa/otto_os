@@ -165,6 +165,9 @@ export interface Session {
   live?: boolean;
   /** Transient (list/get only): attached `/ws/term` viewer count. */
   viewers?: number;
+  /** Transient (list/get only): the live PTY runs in a PTY holder and
+   *  session persistence is on — it survives a daemon restart. */
+  held?: boolean;
 }
 
 /** Query for `GET /workspaces/{id}/sessions` (#17) and the cross-workspace
@@ -611,6 +614,17 @@ export interface McpAuditQuery {
   decision?: string;
   limit?: number;
   offset?: number;
+}
+
+/** `GET /mcp/audit?paged=true` — one page of the rows the caller may see.
+ *  Visibility is checked AFTER the ledger read, so `rows` can be short (even
+ *  empty) mid-ledger: page on `has_more` / `next_offset`, never on length. */
+export interface McpAuditPage {
+  rows: McpCallLogRow[];
+  /** Ledger offset of the next page (`offset` + ledger rows read). */
+  next_offset: number;
+  /** The ledger read was a full `limit` — older rows may exist. */
+  has_more: boolean;
 }
 
 /** Per-tool aggregate stats (cost = bytes proxy; latency / error counts). */
@@ -1298,6 +1312,24 @@ export type OttoEvent =
   | { type: 'session_removed'; session_id: Id; workspace_id: Id }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
   | { type: 'notification'; notice: Notice; user_id?: string | null }
+  // Self-improvement engine (otto-improve) — see docs/contracts/ws.md.
+  | { type: 'improvement_run_started'; workspace_id: Id; run_id: Id }
+  | {
+      type: 'improvement_run_finished';
+      workspace_id: Id;
+      run_id: Id;
+      status: 'done' | 'skipped' | 'failed';
+      applied: number;
+      pending: number;
+    }
+  | { type: 'improvement_edit_applied'; workspace_id: Id; run_id: Id; edit_id: Id; target_ref: string }
+  | {
+      type: 'improvement_approval_pending';
+      workspace_id: Id;
+      run_id: Id;
+      edit_id: Id;
+      target_ref: string;
+    }
   | { type: 'trail_appended'; workspace_id: Id; session_id: Id; event: TrailEvent }
   | {
       type: 'api_history_appended';
@@ -1862,6 +1894,9 @@ export type OttoEvent =
        *  Deny" prompt (stores/uiControl.svelte.ts); the tool returns
        *  `pending_grant` and the agent retries once the user allows it. */
       type: 'ui_control_requested';
+      /** The session owner — the only user this event is delivered to. */
+      user_id: Id;
+      workspace_id: Id;
       session_id: Id;
       session_title: string;
       /** The paneKey of the module the command drives (`connections`, `shell`…). */
@@ -2001,7 +2036,8 @@ export type WorkKind =
   | 'review'
   | 'product_story'
   | 'pr'
-  | 'external_trigger';
+  | 'external_trigger'
+  | 'otto_run';
 export type WorkStatus =
   | 'pending'
   | 'running'
@@ -2381,6 +2417,8 @@ export interface UpdateUserReq {
   display_name?: string | null;
   password?: string | null;
   disabled?: boolean | null;
+  /** Required when changing your OWN password (S8-310). */
+  current_password?: string | null;
 }
 
 export interface CreateWorkspaceReq {
@@ -2798,7 +2836,7 @@ export interface UpdateGitAccountReq {
   api_base_url?: string;
   /** Non-empty rotates the Keychain secret; empty/absent keeps existing. */
   token?: string;
-  /** Set the user-entered token expiry (ISO); absent keeps current. */
+  /** User-entered token expiry (ISO): absent keeps current, `null` clears it. */
   token_expires_at?: string | null;
 }
 
@@ -2892,6 +2930,15 @@ export interface FsBrowse {
   entries: FsEntry[];
 }
 
+/** `GET /fs/stat` — one path's existence and kind, without a listing. */
+export interface FsStat {
+  /** Canonical path (symlinks, `..` and `~` resolved). */
+  path: string;
+  is_dir: boolean;
+  /** True when the directory is itself a git repo. */
+  is_git_repo: boolean;
+}
+
 export interface LogFileEntry {
   name: string;
   size: number;
@@ -2918,6 +2965,10 @@ export interface AddRepoReq {
   clone_url?: string | null;
   name?: string | null;
   git_account_id?: Id | null;
+  /** Parent directory to clone INTO (repo lands at `<clone_dir>/<name>`; a
+   *  leading `~` is expanded). Defaults to the workspace root. Only meaningful
+   *  with `clone_url`. */
+  clone_dir?: string | null;
 }
 
 /** `PATCH /repos/{id}` — (re)bind the repo's hosting account. The field is
@@ -3323,11 +3374,17 @@ export interface ConflictFile {
 }
 
 /** `POST /repos/{id}/conflict/resolve` — send `content` (the rebuilt file), or
- *  `side` to take one side wholesale (`content` is ignored then). */
+ *  `side` to take one side wholesale (`content` is ignored then). `content` is
+ *  400 for a binary working file, and when empty for an absent one. */
 export interface ResolveConflictReq {
   path: string;
   content: string;
-  side?: 'ours' | 'theirs';
+  side?: 'ours' | 'theirs' | 'keep' | 'delete';
+}
+
+/** `GET /repos/{id}/head/remotes` — remote-tracking refs containing HEAD. */
+export interface HeadRemotesResp {
+  remotes: string[];
 }
 
 /** `POST /repos/{id}/merge/commit` */
@@ -3413,6 +3470,12 @@ export interface CreatePrReq {
   description: string;
   source_branch: string;
   target_branch: string;
+  /** Proof pack to gate this PR on: Otto refuses to open the PR unless the pack
+   *  is `passed`/`waived` (or `allow_unproven` is set). */
+  proof_pack_id?: string | null;
+  /** Open the PR even over an unproven pack — records an audit `approval`
+   *  artifact on the pack. */
+  allow_unproven?: boolean | null;
   /** Open as a draft (GitHub native flag; GitLab `Draft:` title prefix;
    *  Bitbucket Cloud draft field). Absent = ready for review. */
   draft?: boolean;
@@ -3423,6 +3486,10 @@ export interface CreatePrReq {
 
 export interface DraftPrReq {
   base: string;
+  /** The PR's Source branch. When set the draft describes
+   *  `merge-base(base, head)..head` and `DraftPrResp.source_branch` echoes it;
+   *  absent ⇒ the checked-out branch (+ working tree). */
+  head?: string;
 }
 
 export interface DraftPrResp {
@@ -3477,6 +3544,23 @@ export interface MergePrReq {
   strategy: MergeStrategy;
   /** Ask the provider to delete the PR's source branch as part of the merge. */
   delete_source_branch?: boolean;
+  /** The `PrSummary.head_sha` the user reviewed. A PR whose head moved since
+   *  is refused with 409 "PR changed — re-check" instead of merging. */
+  expected_head_sha?: string | null;
+}
+
+/** `POST /repos/{id}/branch/delete` body. */
+export interface DeleteBranchReq {
+  name: string;
+  /** Also delete the branch on `remote_name` (default `origin`). */
+  remote?: boolean;
+  /** Delete the local branch (default true); `false` = remote-only. */
+  local?: boolean;
+  /** `-D` instead of the safe `-d` — only after the user's explicit confirm. */
+  force?: boolean;
+  /** Which remote a `remote:true` delete targets (default `origin`). A
+   *  remote-ref row like `upstream/x` must send `remote_name: 'upstream'`. */
+  remote_name?: string;
 }
 
 /** One CI check / job / commit-status row behind the PR's aggregate status
@@ -3818,6 +3902,8 @@ export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'er
 export interface ReviewFinding {
   path: string | null;
   line: number | null;
+  /** Last line (inclusive) of a multi-line finding, when the reviewer gave one. */
+  line_end?: number | null;
   severity: string; // 'info' | 'warn' | 'bug'
   body: string;
   /** Stable sha2 fingerprint for cross-run deduplication (added A1). */
@@ -3862,6 +3948,9 @@ export interface ReviewAgentState {
    *  lens are the same lens on different providers. Absent on the summarizer
    *  row and on reviews persisted before the field existed. */
   lens?: string;
+  /** Orchestrator rows only: the lens slugs delegated to sub-agents. A retry
+   *  re-spawns the row as the same orchestrator. */
+  lens_slugs?: string[];
 }
 
 export interface ReviewComment {
@@ -3874,6 +3963,15 @@ export interface ReviewComment {
   state: ReviewCommentState;
   posted: boolean;
   created_at: string;
+}
+
+/** PATCH /pr-review-comments/{cid}: edit a draft's body and/or restore a declined comment. */
+export interface EditReviewCommentReq {
+  body?: string;
+  restore_draft?: boolean;
+  /** Record an approved-but-unposted comment as posted WITHOUT sending it
+   *  (its copy was found on the PR). Alone; 409 unless approved + unposted. */
+  mark_posted?: boolean;
 }
 
 export interface Review {
@@ -4210,6 +4308,13 @@ export interface IssueProject {
   name: string;
 }
 
+/** `GET /issue/projects?meta=1` / `/issue/confluence/spaces?meta=1`: the
+ *  listing plus whether it stopped at its page cap (later rows not shown). */
+export interface ListingPage<T> {
+  items: T[];
+  truncated: boolean;
+}
+
 export interface IssueSummary {
   key: string;
   summary: string;
@@ -4265,6 +4370,9 @@ export interface Integration {
   channel: Channel;
   enabled: boolean;
   allowed_users: string;     // comma-separated
+  /** Explicit opt-in: a BLANK `allowed_users` admits every sender. Off ⇒ a
+   *  blank list admits nobody (fail closed). Webhooks ignore it. */
+  open_to_all: boolean;
   agent_reply: boolean;
   reply_instructions: string;
   channel_id: string;
@@ -4300,6 +4408,17 @@ export interface ListenerStatus {
   last_error_at?: string;
   /** Consecutive failed attempts since the last good connection. */
   failures: number;
+  /** Last senders the allow-list dropped, newest first (omitted when none). */
+  rejected_senders?: RejectedSender[];
+}
+
+/** A sender a channel's allow-list turned away (`ListenerStatus.rejected_senders`). */
+export interface RejectedSender {
+  /** Channel-native user id — what goes into `allowed_users`. */
+  user: string;
+  /** @handle / display name when the platform sent one (display only). */
+  name?: string;
+  at: string;
 }
 
 export interface UpsertIntegrationReq {
@@ -4307,6 +4426,8 @@ export interface UpsertIntegrationReq {
   bot_token?: string | null;   // omit/null to keep existing
   app_token?: string | null;   // slack only
   allowed_users: string;
+  /** Omit to keep the stored value. */
+  open_to_all?: boolean;
   agent_reply: boolean;
   reply_instructions: string;
   channel_id: string;
@@ -4449,6 +4570,8 @@ export interface SkillFileContentResp {
 export interface WriteSkillFileReq {
   path: string;
   content: string;
+  /** "New file": 409 instead of overwriting an existing `path`. */
+  create_only?: boolean;
 }
 
 export interface CreateLibrarySkillReq {
@@ -4637,6 +4760,8 @@ export interface InstallBundledResp {
   backed_up: boolean;
   /** Path of the backup taken before overwriting, when backed_up is true. */
   backup_path: string | null;
+  /** Provider skill paths (`~/.claude/skills/<name>`, …) left untouched because a user-owned skill of that name lives there. Omitted when empty. */
+  user_owned?: string[];
 }
 
 /** Result of installing every bundled skill (optionally a single category). */
@@ -4647,6 +4772,8 @@ export interface InstallAllBundledResp {
   skipped: string[];
   /** Skills that failed to install; the rest of the batch still ran. */
   failed: { name: string; error: string }[];
+  /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */
+  user_owned: string[];
 }
 
 export interface GlobalSoulReq {
@@ -5943,6 +6070,9 @@ export interface DbColumnDef {
   key?: string | null;
   extra?: string | null;
   comment?: string | null;
+  /** Per-column collation when the engine reports one (MySQL string columns);
+   *  the Table Designer re-states it on CHANGE COLUMN. */
+  collation?: string | null;
 }
 
 export interface DbIndexDef {
@@ -6529,6 +6659,17 @@ export interface RunInsightsResp {
   run_id?: string | null;
   /** Human-readable explanation when started === false (e.g. skill not installed). */
   reason?: string | null;
+  /** True when a run for this period was already generating and this request
+   *  attached to it (`run_id` is that run) instead of starting a second one. */
+  attached?: boolean;
+}
+
+/** `GET /insights/runs/active` row — an insights run still generating. */
+export interface ActiveInsightsRun {
+  run_id: string;
+  report_key: string;
+  report_revision: string | null;
+  started_at: string;
 }
 
 export interface InsightReportStatus {
@@ -6555,6 +6696,16 @@ export interface ShareInfo {
   created_at: string;
   /** FIXED expiry (created_at + ttl); never slid for share tokens. */
   expires_at: string;
+  /** Lapsed email-OTP share the link holder can still revive via
+   *  `POST /share/extend` (until its 7-day absolute lifetime) — listed so the
+   *  owner can revoke it. */
+  dormant?: boolean;
+}
+
+/** `GET /auth/shares` row — one of the caller's live links, any session. */
+export interface MyShare extends ShareInfo {
+  /** The shared session's title; null when the session no longer exists. */
+  session_title: string | null;
 }
 
 /** `POST /api/v1/sessions/{id}/share` request body. */
@@ -6612,7 +6763,18 @@ export interface CreateShareResp {
   url: string;
   /** Metadata for the newly-minted share. */
   info: ShareInfo;
+  /** Whether another device can open `url`. False when the origin is loopback
+   *  or empty (no Public link domain and no network listener) — show the
+   *  "only works on this Mac" warning instead of the phone QR hint. */
+  reachable_remotely: boolean;
+  /** Who can open `url` (S20-303): `remote` (routable/public), `lan` (the
+   *  LAN listener's private address — same Wi-Fi only, self-signed
+   *  certificate) or `local` (this Mac only). Absent on older daemons. */
+  reach?: ShareReach;
 }
+
+/** See {@link CreateShareResp.reach}. */
+export type ShareReach = 'remote' | 'lan' | 'local';
 
 // ---------------------------------------------------------------------------
 // Email sender (Gmail App Password → Keychain; mobile plan Task 7.1).
@@ -6628,7 +6790,8 @@ export interface SetEmailSenderReq {
   app_password: string;
 }
 
-/** Response for `PUT` and `GET /api/v1/email-sender`. Never carries the app
+/** Response for `PUT` / `GET /api/v1/email-sender` and
+ *  `POST /api/v1/email-sender/verify` (re-check with the Keychain password). Never carries the app
  *  password. `gmail_address` is absent on GET when no sender is configured. */
 export interface EmailSenderResp {
   /** The configured Gmail address, or absent when no sender is set up. */
@@ -6842,6 +7005,9 @@ export interface VaultStatus {
   unresolved: number;
   tags: number;
   attachments: number;
+  /** Recovery dirs (`.otto-history`, `.trash`) git already tracks — committed
+   *  before Otto ignored them; untrack with `git rm --cached -r <dir>`. Omitted when none. */
+  tracked_recovery?: string[];
 }
 
 export interface VaultDirEntry {
@@ -7577,8 +7743,9 @@ export interface ScheduledTaskRun {
   id: Id;
   task_id: Id;
   workspace_id: Id;
-  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`). */
-  status: 'running' | 'ok' | 'error' | 'canceled';
+  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`).
+   *  `skipped`: a workflow task whose workflow was still busy with an earlier run. */
+  status: 'running' | 'ok' | 'error' | 'canceled' | 'skipped';
   trigger: 'schedule' | 'manual';
   started_at: string;
   finished_at?: string | null;
@@ -7598,6 +7765,12 @@ export interface ScheduledTaskRun {
   skipped_delivery: boolean;
   workflow_run_id?: string | null;
   created_at: string;
+}
+
+/** `POST /scheduled-tasks/preview` response (#137a): the next fires of an
+ *  unsaved schedule, RFC 3339 UTC — empty when it has none (a spent `once`). */
+export interface ScheduledTaskPreview {
+  next_fire_times: string[];
 }
 
 /** A built-in template the create form can pre-fill from. */
@@ -7785,6 +7958,13 @@ export interface SnipCopyResp {
 // ── Browser (reader/annotate tabs + on-demand page fetch) ───────────────────
 
 /** A workspace-scoped browser tab. Mirrors `otto_state::browser::BrowserTab`. */
+/** `POST /browser/proxy-ticket` — single-use ticket for the root-level
+ *  `GET /browser/proxy?url=&ticket=` take-over frame (bound to `url`). */
+export interface BrowserProxyTicket {
+  ticket: string;
+  expires_in_secs: number;
+}
+
 export interface BrowserTab {
   id: Id;
   workspace_id: Id;
@@ -8769,6 +8949,7 @@ export interface SqsMessage {
 export interface SqsPeekReq {
   url: string;
   max?: number;
+  /** Ignored: the daemon always peeks with visibility timeout 0. */
   visibility_timeout?: number;
 }
 
@@ -8859,6 +9040,9 @@ export interface AthenaQueryReq {
   database?: string;
   workgroup?: string;
   output_location?: string;
+  /** Required on a prod account for any statement that is not a plain read
+   *  (DDL/DML) — set only after the person confirms; else 400 `confirm_required`. */
+  confirm?: boolean;
 }
 
 export type AthenaQueryState = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
@@ -9518,7 +9702,12 @@ export interface HistoryEntry {
   turns: number | null;
   status: HistoryStatus;
   transcript_path: string;
+  /** The CLI left resumable state (a provider session id), whatever the
+   *  status — an ended conversation resumes too. Archived rows stay true;
+   *  resume refuses them (409) until unarchived. */
   resumable: boolean;
+  /** Archived Otto row (false for `on_disk`; absent from older daemons). */
+  archived?: boolean;
 }
 
 export interface HistoryQuery {
@@ -9625,6 +9814,10 @@ export interface K8sMonitorStatus {
   pods_scraped: number;
   pods_failed: number;
   cycle_ms: number;
+  /** Set on `monitor/workloads` for a namespace-scoped caller: the row is
+   *  cluster-wide, so counts/`cycle_ms` are zeroed, `last_error` is blank and
+   *  `metrics_server` keeps only its status word (timestamps survive). */
+  restricted?: boolean;
 }
 
 export interface K8sMonitorPreset {
@@ -9674,6 +9867,9 @@ export type K8sMonitorHealth = 'healthy' | 'degraded' | 'incident' | 'off' | 'un
 
 export interface K8sMonitorOverviewRow {
   cluster: { id: Id; name: string; environment: Environment; color?: string | null };
+  /** The caller can discover this cluster but lacks cluster-wide `metrics`:
+   *  figures are zeroed (namespace-scoped users never see other namespaces). */
+  restricted?: boolean;
   enabled: boolean;
   interval_secs: number;
   status: K8sMonitorStatus | null;
@@ -10546,7 +10742,7 @@ export interface DesignPruneReq {
 }
 
 // ---- Design assist (the unified agent turn, variants, learned rules) ------
-// Mirrors crates/otto-server/src/design_assist.rs + otto-design cite/learn.
+// Mirrors crates/otto-design-assist/src/lib.rs + otto-design cite/learn.
 
 /** `POST /design/artifacts/{id}/assist` modes (`variant` is `/variants` only). */
 export type DesignAssistMode = 'generate' | 'refine' | 'critique' | 'a11y';
@@ -11617,6 +11813,9 @@ export interface WorkbenchUpdateReq {
   /** Opaque per-window id echoed in the WS event so a window can ignore its
    *  own writes. */
   client_id?: string;
+  /** Precondition for a `content` write: the `content_hash` the buffer was
+   *  based on. Mismatch → 409 (another window saved). Omit to overwrite. */
+  if_hash?: string;
 }
 
 export interface WorkbenchRevision {
@@ -11681,6 +11880,8 @@ export interface WorkbenchDocChangedEvent {
   doc_id: Id;
   action: 'created' | 'updated' | 'trashed' | 'restored' | 'deleted';
   rev: number;
+  /** Content hash after the change (a coalesced autosave keeps `rev`). */
+  content_hash: string;
   updated_at: string;
   client_id?: string | null;
 }
@@ -11723,8 +11924,16 @@ export interface TelemetryStatus {
   collector_ready: boolean;
   collector_version: string;
   queued: number;
+  /** Per-minute resource maxima + spike/profile logs awaiting the next flush. */
+  buffered_samples: number;
   dropped: number;
   exported: number;
+  /** Records the collector's ClickHouse exporters gave up on (cumulative). */
+  collector_send_failed: number;
+  /** Exporter queue depth at the end of the last flush. */
+  collector_queue_size: number;
+  /** Last successful flush (unix seconds). */
+  last_flush_at: number | null;
   last_error: string | null;
   last_analysis_at: number | null;
   next_analysis_at: number | null;
@@ -11744,6 +11953,8 @@ export interface TelemetryOverview {
 }
 export interface TelemetrySuggestion extends Omit<TelemetryOperation, 'errors'> {
   id: string; kind: string; threshold_ms: number; window_hours: number;
+  /** Exclusive time over the window (the ranking key); null when unmeasured. */
+  self_ms: number | null;
   observed_at: number; action: string; dismissed: boolean;
   peak_cpu_percent: number | null; peak_rss_mb: number | null;
 }

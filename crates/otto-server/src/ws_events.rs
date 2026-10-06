@@ -3,8 +3,8 @@
 //! Auth: the bearer token is read from the `Sec-WebSocket-Protocol` header
 //! (the browser sends `["otto-bearer", "<token>"]`; we validate the token and
 //! echo back the `otto-bearer` subprotocol). This keeps the token out of the
-//! request URL, which is logged everywhere. A legacy `?token=` query parameter
-//! is still accepted as a fallback. Validation happens BEFORE the upgrade (401
+//! request URL, which is logged everywhere. The legacy `?token=` query
+//! parameter is NOT accepted (S11-312). Validation happens BEFORE the upgrade (401
 //! otherwise). Session-scoped events are delivered only to the session's
 //! **owner**, a workspace **Admin** of the session's workspace, or root — and
 //! only after the workspace-Viewer membership gate passes (so a non-member
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
@@ -35,21 +35,15 @@ use crate::state::ServerCtx;
 /// on a successful upgrade so the handshake completes.
 pub(crate) const BEARER_SUBPROTOCOL: &str = "otto-bearer";
 
-#[derive(Debug, Deserialize)]
-pub struct TokenQuery {
-    token: Option<String>,
-}
-
 pub async fn events_ws(
     ws: WebSocketUpgrade,
-    Query(query): Query<TokenQuery>,
     headers: HeaderMap,
     State(ctx): State<ServerCtx>,
 ) -> Response {
-    // Prefer the bearer subprotocol; fall back to the legacy `?token=` query.
-    let subprotocol_token = token_from_subprotocol(&headers);
-    let used_subprotocol = subprotocol_token.is_some();
-    let Some(token) = subprotocol_token.or(query.token) else {
+    // The bearer travels ONLY in the `otto-bearer` subprotocol. The legacy
+    // `?token=` query fallback is gone (S11-312): a URL lands in proxy/tunnel
+    // access logs, and every Otto client uses the subprotocol.
+    let Some(token) = token_from_subprotocol(&headers) else {
         return ApiError(Error::Unauthorized).into_response();
     };
     match ctx.authenticator.authenticate(&token).await {
@@ -64,6 +58,17 @@ pub async fn events_ws(
                 ))
                 .into_response();
             }
+            // Agent-credential rules for root routes (MCP-restricted tokens
+            // never subscribe; an agent session's token only receives).
+            if let Err(e) = crate::feature_guard::root_route_gate(
+                crate::feature_guard::RootRoute::Events,
+                &auth,
+                Some(&ctx.pool),
+            )
+            .await
+            {
+                return ApiError(e).into_response();
+            }
             // Only a person's own credential may act as an Otto window for
             // agent UI control (`hello`); an agent session's token — which
             // can open this socket too — only ever receives events.
@@ -74,14 +79,9 @@ pub async fn events_ws(
             let ws = ws
                 .max_message_size(crate::ui_bridge::MAX_CLIENT_FRAME)
                 .max_frame_size(crate::ui_bridge::MAX_CLIENT_FRAME);
-            // Echo `otto-bearer` only when the client used the subprotocol path,
-            // otherwise the browser would reject an unsolicited subprotocol.
-            if used_subprotocol {
-                ws.protocols([BEARER_SUBPROTOCOL])
-                    .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable))
-            } else {
-                ws.on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable))
-            }
+            // Echo `otto-bearer` so the browser completes the handshake.
+            ws.protocols([BEARER_SUBPROTOCOL])
+                .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable, token))
         }
         Err(_) => ApiError(Error::Unauthorized).into_response(),
     }
@@ -113,7 +113,37 @@ fn scope_denied(auth: &AuthContext) -> bool {
     auth.is_scoped()
 }
 
-async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable: bool) {
+/// How often an open `/ws/events` socket re-validates its credential (S8-03).
+/// A revocation (`otto_rbac::tokens::signal_revocation`) re-checks within a
+/// [`REVOCATION_POLL`] beat;
+/// this cadence catches the rest — user disable, an impersonation token's TTL.
+const EVENTS_REAUTH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often an events socket looks at the revocation generation.
+const REVOCATION_POLL: Duration = Duration::from_secs(1);
+
+/// WebSocket close code sent when the socket's credential stopped verifying
+/// (docs/contracts/ws.md): the client must not silently reconnect with it.
+pub(crate) const CLOSE_AUTH_REVOKED: u16 = 4401;
+
+/// Whether the token that opened this socket still verifies AS THE SAME user.
+/// A transient store error keeps the socket (retry next tick): only a definite
+/// verdict — revoked, expired, disabled, or now another identity — closes it.
+async fn still_authorized(ctx: &ServerCtx, token: &str, user: &User) -> bool {
+    match ctx.authenticator.authenticate(token).await {
+        Ok(auth) => auth.effective_user.id == user.id && !scope_denied(&auth),
+        Err(Error::Internal(_)) => true,
+        Err(_) => false,
+    }
+}
+
+async fn handle_events(
+    socket: WebSocket,
+    ctx: ServerCtx,
+    user: User,
+    ui_capable: bool,
+    token: String,
+) {
     // Shared serialize-once fan-out (ws_fanout.rs): a recv is an Arc clone and
     // the JSON text is built at most once per event across every socket.
     let mut events = crate::ws_fanout::subscribe(&ctx.events);
@@ -135,28 +165,53 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
                        // rest — they are dropped before the authorization check and serializing.
     let mut topics: Option<std::collections::HashSet<String>> = None;
 
-    // Role-check results cached per workspace for this connection's lifetime.
-    let mut role_cache: HashMap<Id, bool> = HashMap::new();
-    // Session owner (`created_by`) cached per session_id for this connection's
-    // lifetime. `created_by` is immutable, so one lookup per session_id is
-    // enough — this keeps the high-frequency `TrailAppended` path off the DB.
-    let mut owner_cache: HashMap<Id, Option<Id>> = HashMap::new();
-    // Workspace-Admin results cached per workspace for this connection's
-    // lifetime, like `role_cache` — a non-owner, non-root recipient used to
-    // pay an Admin role query per `session_status` / `trail_appended` (F8).
-    let mut admin_cache: HashMap<Id, bool> = HashMap::new();
+    // Per-connection authorization caches (role / session owner / admin);
+    // see `AuthCaches` for their freshness + bounds.
+    let mut caches = AuthCaches::new(std::time::Instant::now());
     // Hands the worker back while a burst of big frames drains.
     let mut pacer = crate::ws_fanout::Pacer::new();
+    // Credential re-validation (S8-03): the token was checked once at upgrade;
+    // logout, "revoke all", a revoked API token or an expired impersonation
+    // must not leave this socket streaming (or a `ui_command` target) forever.
+    // A short beat polls the revocation generation (one atomic load); the
+    // authenticator is asked only when it moved or the full interval passed.
+    let mut beat = tokio::time::interval(REVOCATION_POLL);
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    beat.tick().await; // the upgrade just authenticated
+    let mut seen_generation = otto_rbac::tokens::revocation_generation();
+    let mut last_check = std::time::Instant::now();
 
     loop {
         tokio::select! {
+            _ = beat.tick() => {
+                let generation = otto_rbac::tokens::revocation_generation();
+                if generation == seen_generation && last_check.elapsed() < EVENTS_REAUTH_INTERVAL {
+                    continue;
+                }
+                seen_generation = generation;
+                last_check = std::time::Instant::now();
+                if !still_authorized(&ctx, &token, &user).await {
+                    let _ = sink
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: CLOSE_AUTH_REVOKED,
+                            reason: "credential revoked".into(),
+                        })))
+                        .await;
+                    break;
+                }
+            }
             event = events.recv() => match event {
                 Ok(crate::ws_fanout::FanItem::Event(frame)) => {
                     let event = &frame.event;
                     if topics.as_ref().is_some_and(|t| !t.contains(event.type_name())) {
                         continue;
                     }
-                    if !allowed(&ctx, &user, event, &mut role_cache, &mut owner_cache, &mut admin_cache).await {
+                    caches.expire(std::time::Instant::now());
+                    let ok = allowed(&ctx, &user, event, &mut caches.role, &mut caches.owner, &mut caches.admin).await;
+                    // After the check: the owner must still receive its own
+                    // `session_removed` before the entry goes.
+                    caches.forget(event);
+                    if !ok {
                         continue;
                     }
                     let Some(text) = frame.text() else { continue };
@@ -501,6 +556,58 @@ fn scope_of(event: &Event) -> Scope<'_> {
 /// Notice → everyone; workspace events → members (viewer+); session-family
 /// events → the session's owner, a workspace Admin, or root (after the same
 /// viewer-membership gate).
+/// How long a cached workspace role / Admin answer is trusted. There is no
+/// membership-change event, so a demoted (or removed) member kept receiving a
+/// workspace's events for the socket's whole lifetime; now within this window.
+const AUTH_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Session owners cached per socket before the map is reset (a long-lived
+/// socket otherwise remembered every session it ever saw an event for).
+const OWNER_CACHE_CAP: usize = 4096;
+
+/// The per-connection authorization caches `allowed` reads.
+struct AuthCaches {
+    /// Workspace viewer-membership results.
+    role: HashMap<Id, bool>,
+    /// Session owner (`created_by`, immutable) per session_id — keeps the
+    /// high-frequency `TrailAppended` path off the DB.
+    owner: HashMap<Id, Option<Id>>,
+    /// Workspace-Admin results — a non-owner, non-root recipient used to pay
+    /// an Admin role query per `session_status` / `trail_appended` (F8).
+    admin: HashMap<Id, bool>,
+    refreshed: std::time::Instant,
+}
+
+impl AuthCaches {
+    fn new(now: std::time::Instant) -> Self {
+        Self {
+            role: HashMap::new(),
+            owner: HashMap::new(),
+            admin: HashMap::new(),
+            refreshed: now,
+        }
+    }
+
+    /// Drop role/Admin answers older than [`AUTH_CACHE_TTL`] so a membership
+    /// change takes effect on open sockets, and bound the owner map.
+    fn expire(&mut self, now: std::time::Instant) {
+        if now.saturating_duration_since(self.refreshed) >= AUTH_CACHE_TTL {
+            self.role.clear();
+            self.admin.clear();
+            self.refreshed = now;
+        }
+        if self.owner.len() >= OWNER_CACHE_CAP {
+            self.owner.clear();
+        }
+    }
+
+    /// Forget a removed session's owner (it can emit nothing further).
+    fn forget(&mut self, event: &Event) {
+        if let Event::SessionRemoved { session_id, .. } = event {
+            self.owner.remove(session_id);
+        }
+    }
+}
+
 async fn allowed(
     ctx: &ServerCtx,
     user: &User,
@@ -1089,6 +1196,7 @@ mod tests {
                 doc_id: "d1".into(),
                 action: "updated".into(),
                 rev: 1,
+                content_hash: "h".into(),
                 updated_at: "t".into(),
                 client_id: None,
             },
@@ -1153,5 +1261,32 @@ mod tests {
                 "{ev:?}"
             );
         }
+    }
+
+    /// Perf P3 / security: role + Admin answers expire after the TTL (a
+    /// demoted member stops receiving events), a removed session's owner is
+    /// evicted, and the owner map stays bounded.
+    #[test]
+    fn auth_caches_expire_roles_and_evict_removed_sessions() {
+        let t0 = std::time::Instant::now();
+        let mut c = AuthCaches::new(t0);
+        c.role.insert("w".into(), true);
+        c.admin.insert("w".into(), true);
+        c.owner.insert("s1".into(), Some("u".into()));
+        c.owner.insert("s2".into(), Some("u".into()));
+        c.expire(t0 + Duration::from_secs(5));
+        assert!(c.role.contains_key("w") && c.admin.contains_key("w"));
+        c.expire(t0 + AUTH_CACHE_TTL);
+        assert!(c.role.is_empty() && c.admin.is_empty());
+        c.forget(&Event::SessionRemoved {
+            session_id: "s1".into(),
+            workspace_id: "w".into(),
+        });
+        assert!(!c.owner.contains_key("s1") && c.owner.contains_key("s2"));
+        for i in 0..OWNER_CACHE_CAP {
+            c.owner.insert(format!("x{i}"), None);
+        }
+        c.expire(t0 + AUTH_CACHE_TTL);
+        assert!(c.owner.is_empty(), "owner cache is bounded");
     }
 }

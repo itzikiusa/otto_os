@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function typeStatement(page: Page, sql: string): Promise<void> {
   await ensureEditorOpen(page);
   const content = page.locator('.qe-edit .cm-content');
-  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const selectAll = await editorSelectAll(page);
 
   // CodeMirror occasionally drops the leading character if keys arrive before
   // the click-to-focus has settled. Retry the whole type until the editor's text
@@ -117,7 +118,7 @@ async function typeStatement(page: Page, sql: string): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     await content.click();
     await expect(content).toBeFocused({ timeout: 5_000 });
-    await page.keyboard.press(`${mod}+A`);
+    await page.keyboard.press(selectAll);
     await page.keyboard.press('Delete');
     await content.pressSequentially(sql, { delay: 8 });
     // Dismiss any server-driven autocomplete popup so Run/⌘↵ can't accept a
@@ -334,7 +335,7 @@ test.describe('DB Explorer · MySQL sweep', () => {
         await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
       }
     } else {
-      await page.locator('.side-switch .ss', { hasText: 'Connections' }).click();
+      await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
     }
     await expect(page.locator('.conn-list')).toBeVisible();
     await expect(page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' }).first()).toBeVisible();
@@ -347,7 +348,7 @@ test.describe('DB Explorer · MySQL sweep', () => {
         await page.locator('.acc-toggle', { hasText: 'Schema' }).click();
       }
     } else {
-      await page.locator('.side-switch .ss', { hasText: 'Schema' }).click();
+      await page.locator('.side-switch [role="tab"]', { hasText: 'Schema' }).click();
     }
     // The schema switch (Schema/Saved/History) and the tree are present.
     await expect(page.locator('.side-switch')).toBeVisible({ timeout: 15_000 });

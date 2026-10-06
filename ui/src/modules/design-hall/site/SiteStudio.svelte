@@ -44,9 +44,11 @@
     readonly?: boolean;
     /** Compare panes: the page only, fit to the pane, no panels. */
     compact?: boolean;
+    /** The owning editor's unsaved-edits flag (publish sheet warning). */
+    dirty?: boolean;
     onchange?: (source: string) => void;
   }
-  let { artifact, source, readonly = false, compact = false, onchange }: Props = $props();
+  let { artifact, source, dirty = undefined, readonly = false, compact = false, onchange }: Props = $props();
 
   // The page stylesheet is injected once into the document (every rule is
   // scoped under .os-*, so it can't touch the app).
@@ -451,7 +453,7 @@
   }
   async function deleteSection(sid: string): Promise<void> {
     if (!doc) return;
-    const ok = await confirmer.ask('Delete this section? Undo (⌘Z) or any earlier version brings it back.', { title: 'Delete section', confirmLabel: 'Delete section' });
+    const ok = await confirmer.ask('Delete this section? Undo (⌘Z) or any earlier version brings it back.', { title: 'Delete section', danger: true, confirmLabel: 'Delete section' });
     if (!ok || !doc) return;
     commit(ops.removeSection(doc, sid));
     select(null, null);
@@ -504,7 +506,7 @@
     const p = doc.pages.find((x) => x.id === id);
     const ok = await confirmer.ask(`Delete the page “${p?.title}” and its ${p?.sections.length ?? 0} sections? Undo (⌘Z) or any earlier version brings it back.`, {
       title: 'Delete page',
-      confirmLabel: 'Delete page',
+      danger: true, confirmLabel: 'Delete page',
     });
     if (!ok || !doc) return;
     commit(ops.removePage(doc, id));
@@ -718,6 +720,7 @@
       {artifact}
       {doc}
       source={ops.serializeSite(doc)}
+      unsaved={dirty}
       {findings}
       {embedCount}
       onclose={() => (publishMode = null)}

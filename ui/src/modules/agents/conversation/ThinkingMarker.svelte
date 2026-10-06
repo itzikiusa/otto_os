@@ -27,7 +27,7 @@
     <span class="think-mark" aria-hidden="true"><Icon name="sparkle" size={12} /></span>
     <span class="think-label">{label}</span>
     {#if tokens}<span class="think-tok">{fmtTokens(tokens)} thinking tokens</span>{/if}
-    <span class="think-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+    <span class="think-caret" aria-hidden="true"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
   </button>
   {#if open}
     <p class="think-note">

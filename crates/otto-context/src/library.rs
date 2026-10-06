@@ -366,6 +366,35 @@ impl Library {
         Ok(())
     }
 
+    /// Create one NEW file inside a library skill: like [`Self::write_skill_file`]
+    /// but fails with `AlreadyExists` (→ 409) instead of overwriting, so "New
+    /// file" on an existing path can't truncate it. The existence check and the
+    /// create are one `create_new` open, never a check-then-write race.
+    pub fn create_skill_file(&self, name: &str, rel: &str, content: &str) -> io::Result<()> {
+        use std::io::Write as _;
+        let root = self
+            .skill_dir(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+        let target = confined(&root, rel)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
+        if content.len() > MAX_SKILL_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file too large",
+            ));
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)?;
+        f.write_all(content.as_bytes())?;
+        self.evict(name);
+        Ok(())
+    }
+
     /// Delete one file inside a library skill. `SKILL.md` cannot be deleted (use
     /// `delete_skill` to remove the whole skill). Missing file is a no-op.
     pub fn delete_skill_file(&self, name: &str, rel: &str) -> io::Result<()> {
@@ -804,6 +833,28 @@ mod tests {
         assert!(lib
             .read_skill_file("editable", "references/notes.md")
             .is_none());
+
+        // S17-10: create-only never truncates an existing file (SKILL.md included).
+        let before = lib.read_skill_file("editable", "SKILL.md").unwrap().0;
+        let err = lib
+            .create_skill_file("editable", "SKILL.md", "")
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            lib.read_skill_file("editable", "SKILL.md").unwrap().0,
+            before
+        );
+        lib.create_skill_file("editable", "references/new.md", "")
+            .unwrap();
+        assert_eq!(
+            lib.read_skill_file("editable", "references/new.md")
+                .unwrap()
+                .0,
+            ""
+        );
+        assert!(lib
+            .create_skill_file("editable", "../evil.md", "x")
+            .is_err());
 
         // Unsafe paths rejected.
         assert!(lib.write_skill_file("editable", "../evil.md", "x").is_err());

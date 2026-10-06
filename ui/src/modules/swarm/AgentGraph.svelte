@@ -361,7 +361,7 @@
                     aria-label={`${a.name}: ${plural(sess.length, 'session')} — choose one to open`}
                     title={`${a.name}: ${plural(sess.length, 'session')} — choose one to open`}
                     onclick={(e) => sessionMenu(e, a)}
-                  ><Icon name="terminal" size={12} /> {sess.length} <Icon name="chevronDown" size={10} /></button>
+                  ><Icon name="terminal" size={12} /> {sess.length} <Icon name="chevronDown" size={12} /></button>
                 {/if}
               </div>
             {/if}
@@ -392,7 +392,7 @@
       <div class="side-head"><Icon name="zap" size={12} /> Live tasks</div>
       <div class="search">
         <Icon name="search" size={12} />
-        <input class="search-input" aria-label="Filter live tasks" placeholder="Filter live tasks…" bind:value={taskQuery} />
+        <input dir="ltr" class="search-input" aria-label="Filter live tasks" placeholder="Filter live tasks…" bind:value={taskQuery} />
       </div>
       <div class="task-list" role="list" aria-label="Live tasks">
         {#each shownTasks as t (t.id)}

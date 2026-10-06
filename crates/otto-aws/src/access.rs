@@ -1,7 +1,6 @@
 //! Account authorization. Bucket names are exact child identities; other AWS
 //! operations require account-wide authority because their CLIs can fan out.
 use axum::body::Body;
-use futures_util::StreamExt;
 use otto_core::access::{AccessActor, AccessPolicy, ResourceKind, ResourceRef};
 use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Id, Result};
@@ -108,8 +107,9 @@ pub async fn initialize(pool: &DbPool, user: &User, id: &Id) -> Result<()> {
             "ec2_start" | "ec2_stop" | "ec2_reboot" | "ec2_terminate" => {
                 (Feature::AwsEc2, Capability::Edit)
             }
-            "sqs_view" | "sqs_receive" => (Feature::AwsSqs, Capability::View),
-            "sqs_send" | "sqs_delete" | "sqs_purge" | "sqs_redrive" => {
+            "sqs_view" => (Feature::AwsSqs, Capability::View),
+            // A receive bumps the receive count (can dead-letter): Edit.
+            "sqs_receive" | "sqs_send" | "sqs_delete" | "sqs_purge" | "sqs_redrive" => {
                 (Feature::AwsSqs, Capability::Edit)
             }
             "athena_view" => (Feature::AwsAthena, Capability::View),
@@ -150,38 +150,35 @@ pub fn guard_body(
     bucket: Option<String>,
     operation: &'static str,
 ) -> Body {
-    let stream = futures_util::stream::unfold(
-        (body.into_data_stream(), pool, user, id, bucket),
-        move |(mut stream, pool, user, id, bucket)| async move {
-            loop {
-                let current = match otto_state::UsersRepo::new(pool.clone()).get(&user.id).await {
-                    Ok(user) => user,
-                    Err(_) => return None,
-                };
-                if !matches!(GrantsRepo::new(pool.clone()).capability_of(&current, Feature::AwsS3).await, Ok(cap) if cap >= Capability::View)
-                {
-                    return None;
-                }
-                if !matches!(
-                    allowed(&pool, &current, &id, operation, bucket.as_deref()).await,
-                    Ok(true)
-                ) {
-                    return None;
-                }
-                tokio::select! {
-                    data = stream.next() => return data.map(|data| (data, (stream, pool, user, id, bucket))),
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
-                }
+    // Rechecked at most once per second and on idle ticks
+    // ([`otto_connections::stream_guard`], shared with the other crate).
+    otto_connections::stream_guard::guard_body(body, move || {
+        let (pool, user, id, bucket) = (pool.clone(), user.clone(), id.clone(), bucket.clone());
+        async move {
+            let Ok(current) = otto_state::UsersRepo::new(pool.clone()).get(&user.id).await else {
+                return false;
+            };
+            if !matches!(GrantsRepo::new(pool.clone()).capability_of(&current, Feature::AwsS3).await, Ok(cap) if cap >= Capability::View)
+            {
+                return false;
             }
-        },
-    );
-    Body::from_stream(stream)
+            matches!(
+                allowed(&pool, &current, &id, operation, bucket.as_deref()).await,
+                Ok(true)
+            )
+        }
+    })
 }
 
 /// Native credential attachment is host authority, not delegated resource configuration.
+/// Root authority as exercised by this request: withheld from an agent
+/// credential's writes (S11-303 — a kubeconfig/profile names the command the
+/// daemon runs), see [`otto_core::auth::root_authority`].
 pub fn require_setup_authority(user: &User) -> Result<()> {
-    if user.is_root && !user.disabled {
+    if otto_core::auth::root_authority(user) && !user.disabled {
         Ok(())
+    } else if user.is_root && !user.disabled {
+        Err(otto_core::auth::root_refusal())
     } else {
         Err(Error::Forbidden(
             "only root can attach or change native cloud credentials".into(),

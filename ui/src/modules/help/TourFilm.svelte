@@ -184,7 +184,7 @@
   {:else}
     {#if status === 'failed'}
       <div class="film-frame fallback" role="status" data-testid="tour-film-unavailable">
-        <span class="fallback-icon" aria-hidden="true"><Icon name="play" size={18} /></span>
+        <span class="fallback-icon" aria-hidden="true"><Icon name="play" size={16} /></span>
         <p class="fallback-title">The tour film can’t load right now</p>
         <p class="fallback-sub">It streams from the internet. Check your connection, then try again. The guides work offline.</p>
         <div class="fallback-actions">

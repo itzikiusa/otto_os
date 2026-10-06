@@ -1,11 +1,11 @@
 <script lang="ts">
   import { NO_WORKSPACE } from '../../lib/labels';
   // Drawer "Terminal" tab: opens a `kubectl exec -it` terminal session for the pod
-  // (`POST …/exec`, Edit) and renders it inline with `<Terminal preferDom>`
+  // (`POST …/exec`, Edit) and renders it inline with `<LazyTerminal preferDom>`
   // (agent-TUI renderer; shells in a pod redraw prompts constantly). The
   // session is killed when the view unmounts — it lives only in this drawer.
   import { untrack } from 'svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
@@ -24,8 +24,12 @@
     containers: K8sContainer[];
     /** Open the shell immediately (the `s` shortcut). */
     autoOpen?: boolean;
+    /** Called once `autoOpen` was acted on, so the owner can consume the flag —
+     *  a later remount (switching back to the Terminal tab) must not open a
+     *  second shell unasked. */
+    onautoopened?: () => void;
   }
-  let { clusterId, ns, pod, containers, autoOpen = false }: Props = $props();
+  let { clusterId, ns, pod, containers, autoOpen = false, onautoopened }: Props = $props();
 
   $effect(() => { void resourceAccess.load('k8s_cluster', clusterId, `namespace:${ns}`); });
   const canExec = $derived(resourceAccess.can('k8s_cluster', clusterId, 'exec', 'kubernetes', 'edit', `namespace:${ns}`));
@@ -33,6 +37,10 @@
   let sessionId = $state<string | null>(null);
   let status = $state<SessionStatus | null>(null);
   let opening = $state(false);
+  /** False once the view unmounted: an exec POST that resolves after that
+   *  must delete its session — nothing is left to show (or close) it, and a
+   *  leaked `kubectl exec -it` PTY would run on the daemon until it exits. */
+  let alive = true;
   let error = $state('');
 
   const running = $derived(containers.filter((c) => !c.init));
@@ -56,7 +64,7 @@
         title: 'Open a production shell?',
         danger: true,
       });
-      if (!ok) return;
+      if (!ok || !alive) return;
     }
     opening = true;
     error = '';
@@ -67,9 +75,13 @@
         pod,
         container: container || null,
       });
+      if (!alive) {
+        void api.del(`/sessions/${s.id}`).catch(() => {});
+        return;
+      }
       sessionId = s.id;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (alive) error = e instanceof Error ? e.message : String(e);
     } finally {
       opening = false;
     }
@@ -87,10 +99,18 @@
     }
   }
 
-  // Auto-open once when asked; kill the session on unmount.
+  // Auto-open once when asked (read untracked: a later `autoOpen` flip must
+  // not re-run this and close a live shell); kill the session on unmount.
   $effect(() => {
-    if (autoOpen) untrack(() => void open());
+    alive = true;
+    if (untrack(() => autoOpen)) {
+      untrack(() => {
+        onautoopened?.();
+        void open();
+      });
+    }
     return () => {
+      alive = false;
       untrack(() => void close());
     };
   });
@@ -109,7 +129,7 @@
     </div>
     <div class="term">
       {#key sessionId}
-        <Terminal {sessionId} preferDom autoFocus restartable onrestart={() => { void close().then(open); }} onstatus={(s) => (status = s)} />
+        <LazyTerminal {sessionId} preferDom autoFocus restartable onrestart={() => { void close().then(open); }} onstatus={(s) => (status = s)} />
       {/key}
     </div>
   {:else}

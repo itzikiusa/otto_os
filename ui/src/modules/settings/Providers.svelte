@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { serialLatest } from '../../lib/latest';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -284,15 +285,23 @@
   }
 
   // Exclude / re-include a provider. Optimistic; reverts on failure.
+  // Each PUT carries the WHOLE list, so the writes are SERIALIZED and each one
+  // sends the latest `disabled` at send time (S17-308): ordering only the
+  // responses still let two concurrent PUTs be applied out of order, leaving
+  // the server on the older list. A toggle superseded while queued sends
+  // nothing — the newer one carries its change.
+  const saveDisabled = serialLatest(() =>
+    api.put<Record<string, unknown>>('/settings', { disabled_providers: [...disabled] }),
+  );
   async function toggleProvider(nameOfProvider: string, enable: boolean): Promise<void> {
     const next = new Set(disabled);
     if (enable) next.delete(nameOfProvider);
     else next.add(nameOfProvider);
     disabled = next;
     try {
-      allSettings = await api.put<Record<string, unknown>>('/settings', {
-        disabled_providers: [...next],
-      });
+      const r = await saveDisabled();
+      if (!r.ok) return; // a newer toggle's write carries this change
+      allSettings = r.value;
       disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
       await auth.refreshMeta();
       toasts.success(
@@ -302,7 +311,8 @@
           : 'Hidden from every picker; existing sessions keep working',
       );
     } catch (e) {
-      // revert
+      // Undo THIS toggle only: a newer toggle queued behind it still sends
+      // the (now reverted for this provider) latest list.
       const revert = new Set(disabled);
       if (enable) revert.add(nameOfProvider);
       else revert.delete(nameOfProvider);
@@ -352,7 +362,7 @@
       skipPermissions &&
       !(await confirmer.ask(
         'New agent sessions will run tools, edit files and execute commands without asking you first.',
-        { title: 'Skip permission prompts?', confirmLabel: 'Skip prompts', danger: false },
+        { title: 'Skip permission prompts?', confirmLabel: 'Skip prompts', danger: true },
       ))
     ) {
       skipPermissions = false;
@@ -413,7 +423,7 @@
     if (
       !(await confirmer.ask(
         `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You’d have to re-enter its command to add it back.`,
-        { title: 'Remove provider?', confirmLabel: 'Remove' },
+        { title: 'Remove provider?', danger: true, confirmLabel: 'Remove' },
       ))
     )
       return;
@@ -684,27 +694,27 @@
     >
       <div class="field">
         <label for="pv-name">Name</label>
-        <input id="pv-name" class="input mono-in" bind:value={name} placeholder="opencode" spellcheck="false" autocomplete="off" />
+        <input dir="ltr" id="pv-name" class="input mono-in" bind:value={name} placeholder="opencode" spellcheck="false" autocomplete="off" />
       </div>
       <div class="field">
         <label for="pv-cmd">Command</label>
-        <input id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="opencode" spellcheck="false" autocomplete="off" />
+        <input dir="ltr" id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="opencode" spellcheck="false" autocomplete="off" />
       </div>
       <div class="field">
         <label for="pv-args">Arguments (optional)</label>
-        <input id="pv-args" class="input mono-in" bind:value={args} placeholder={'--session {sid}'} spellcheck="false" />
+        <input dir="ltr" id="pv-args" class="input mono-in" bind:value={args} placeholder={'--session {sid}'} spellcheck="false" />
       </div>
       <div class="field">
         <label for="pv-resume">Resume arguments (optional)</label>
-        <input id="pv-resume" class="input mono-in" bind:value={resumeArgs} placeholder={'--resume {sid}'} spellcheck="false" />
+        <input dir="ltr" id="pv-resume" class="input mono-in" bind:value={resumeArgs} placeholder={'--resume {sid}'} spellcheck="false" />
       </div>
       <div class="field">
         <label for="pv-update">Update command (optional)</label>
-        <input id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
+        <input dir="ltr" id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
       </div>
       <div class="field">
         <label for="pv-model">Model flag template (optional)</label>
-        <input id="pv-model" class="input mono-in" bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
+        <input dir="ltr" id="pv-model" class="input mono-in" bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
       </div>
     </form>
     <p class="hint">

@@ -244,7 +244,7 @@
 
       {#if sourceSel === 'custom'}
         <div class="row">
-          <input
+          <input dir="ltr"
             class="input grow"
             aria-label="Skill path or archive"
             placeholder="/path/to/skill-folder · SKILL.md · skill.zip"
@@ -261,7 +261,7 @@
 
     <div class="field">
       <label class="field-label" for="se-task">Task to implement</label>
-      <textarea
+      <textarea dir="auto"
         id="se-task"
         class="input"
         rows="3"
@@ -299,12 +299,12 @@
     {#each validations as v, i (i)}
       <div class="val">
         <div class="row">
-          <input class="input grow" placeholder="logging" aria-label="Validation {i + 1} name" bind:value={v.name} />
+          <input dir="auto" class="input grow" placeholder="logging" aria-label="Validation {i + 1} name" bind:value={v.name} />
           <button class="icon-btn" onclick={() => removeValidation(i)} type="button" title="Remove validation" aria-label="Remove validation {v.name.trim() || i + 1}">
             <Icon name="trash" size={14} />
           </button>
         </div>
-        <textarea
+        <textarea dir="auto"
           class="input"
           rows="2"
           aria-label="Validation {i + 1} criteria"
@@ -339,11 +339,11 @@
         <div class="grid2">
           <div class="field">
             <label class="field-label" for="se-test">Test command <span class="hint-inline">scored and added to the proof pack</span></label>
-            <input id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
+            <input dir="ltr" id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
           </div>
           <div class="field">
             <label class="field-label" for="se-lint">Lint command <span class="hint-inline">optional</span></label>
-            <input id="se-lint" class="input" bind:value={lintCmd} placeholder={lintDefault ? `Default: ${lintDefault}` : 'e.g. cargo clippy  /  npm run check'} data-testid="eval-lint-cmd" />
+            <input dir="ltr" id="se-lint" class="input" bind:value={lintCmd} placeholder={lintDefault ? `Default: ${lintDefault}` : 'e.g. cargo clippy  /  npm run check'} data-testid="eval-lint-cmd" />
           </div>
           <div class="field">
             <label class="field-label" for="se-passes">Validation passes</label>
@@ -358,7 +358,7 @@
         </div>
         <div class="field">
           <label class="field-label" for="se-base">Base git ref</label>
-          <input id="se-base" class="input" placeholder="HEAD" bind:value={baseRef} />
+          <input dir="auto" id="se-base" class="input" placeholder="HEAD" bind:value={baseRef} />
           <p class="hint">
             Each iteration’s worktree is created from this ref of the workspace’s git repo. If the
             workspace root isn’t a git repo, Otto uses a scratch repo at <span class="mono">~/Otto/SkillsEvaluator</span>

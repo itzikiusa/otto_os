@@ -2,6 +2,7 @@
   import { plural } from '../../lib/plural';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
+  import { latestOnly } from '../../lib/latest';
   import { toastError } from '../../lib/toastError';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
@@ -158,22 +159,41 @@
     savedKey = formKey(fresh, allowlistText);
   }
 
+  // Generation guard: a slow load for workspace A landing after a switch to B
+  // used to be ADOPTED (the `cfgWs !== id` branch below), showing A's config
+  // under B — and Save then wrote it to B.
+  const loads = latestOnly();
   async function load(id: string): Promise<void> {
+    const t = loads.begin();
+    const live = () => t.current && wsId === id;
+    if (cfgWs !== id) {
+      // Another workspace's form/runs/edits never stay up while this one loads.
+      cfg = null;
+      cfgWs = null;
+      runs = [];
+      pending = [];
+    }
     loading = true;
     try {
       const fresh = await improveApi.getConfig(id);
+      if (!live()) return;
       if (!cfg || cfgWs !== id || !dirty) adopt(id, fresh);
       // Status fields always refresh (they aren't in the form).
       else cfg = { ...cfg, last_run_at: fresh.last_run_at, next_run_at: fresh.next_run_at };
-      runs = await improveApi.listRuns(id);
-      pending = await improveApi.listEdits(id, 'pending');
+      const r = await improveApi.listRuns(id);
+      if (!live()) return;
+      runs = r;
+      const p = await improveApi.listEdits(id, 'pending');
+      if (!live()) return;
+      pending = p;
       loadError = '';
     } catch (e) {
+      if (!live()) return;
       // Inline (first load) or a slim stale bar (background refresh) — never
       // a toast every 30 s while the daemon is unreachable.
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 
@@ -253,6 +273,12 @@
 
   const EVOLVE_POLL_MS = 2_000;
   const EVOLVE_POLL_MAX = 60; // give up after 2 min
+  // The Evolve poll is a plain loop: stop it when the section unmounts (it
+  // used to keep polling — and toasting — after leaving Settings).
+  let disposed = false;
+  $effect(() => () => {
+    disposed = true;
+  });
 
   async function evolveNow(): Promise<void> {
     if (!activeSession) {
@@ -266,10 +292,22 @@
       // Poll until the run settles.
       let ticks = 0;
       let settled = false;
+      let failures = 0;
       while (!settled && ticks < EVOLVE_POLL_MAX) {
         await new Promise((r) => setTimeout(r, EVOLVE_POLL_MS));
+        if (disposed) return;
         ticks++;
-        const { run, edits } = await improveApi.getRun(run_id);
+        // One transient error no longer aborts the whole wait; three in a row do.
+        let got: Awaited<ReturnType<typeof improveApi.getRun>>;
+        try {
+          got = await improveApi.getRun(run_id);
+          failures = 0;
+        } catch (e) {
+          if (++failures >= 3) throw e;
+          continue;
+        }
+        if (disposed) return;
+        const { run, edits } = got;
         if (run.status === 'done' || run.status === 'failed' || run.status === 'skipped') {
           settled = true;
           if (run.status === 'done') {
@@ -471,7 +509,7 @@
       </div>
       <div class="field">
         <label for="si-allow">Skill allow-list</label>
-        <input
+        <input dir="auto"
           id="si-allow"
           class="input"
           bind:value={allowlistText}

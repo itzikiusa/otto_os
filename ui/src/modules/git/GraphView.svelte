@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import { splitter } from '../../lib/paneResizer';
   import { dialogFocus } from '../../lib/dialogFocus';
   import { toastError } from '../../lib/toastError';
   import { sentenceCase } from '../../lib/labels';
-  import { branchTracking } from './refTracking';
+  import { branchTracking, splitRemoteRef } from './refTracking';
   import { planSection } from './ref-budget';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
@@ -42,6 +43,8 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { runPull } from './pullFlow';
   import { gitBridge } from './gitBridge.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { routeGraphRef } from './deepLink';
 
   /** Strip trailing slashes so worktree paths match registered repo paths. */
   function normPath(p: string): string {
@@ -1339,8 +1342,9 @@
     const items: MenuItem[] = [];
 
     if (b.remote) {
-      // Remote ref row: checkout as a local tracking branch; delete on origin.
-      const localName = b.name.replace(/^[^/]+\//, '');
+      // Remote ref row: checkout as a local tracking branch; delete on ITS remote
+      // (`upstream/x` must never delete `origin/x`).
+      const { remote: remoteName, branch: localName } = splitRemoteRef(b.name);
       items.push({ label: 'Checkout', icon: 'branch', action: () => checkoutRemote(b) });
       // Rebasing onto a remote ref is the common "catch up with origin" move.
       if (currentBranch && b.name !== currentBranch) {
@@ -1376,7 +1380,7 @@
         label: `Delete ${b.name}…`,
         icon: 'trash',
         danger: true,
-        action: () => void deleteRemoteBranch(localName),
+        action: () => void deleteRemoteBranch(localName, remoteName),
       });
       if (localTwin) {
         items.push({
@@ -1386,10 +1390,12 @@
           action: () => void deleteLocalBranch(localName, false),
         });
         items.push({
-          label: 'Delete local + remote…',
+          label: `Delete ${localName} + ${b.name}…`,
           icon: 'trash',
           danger: true,
-          action: () => void deleteLocalBranch(localName, true),
+          // The remote half targets THIS row's remote (S15-303) — never origin
+          // by default when the row says `upstream/x`.
+          action: () => void deleteLocalBranch(localName, true, remoteName),
         });
       }
       items.push({ separator: true });
@@ -1449,8 +1455,13 @@
       items.push({ separator: true });
       items.push({ label: 'GitFlow', disabled: true });
       items.push(...gitFlowItems(b.name));
-      // A matching remote branch (origin/<name>) → offer remote deletes too.
-      const hasRemote = remoteNames.has(`origin/${b.name}`);
+      // A matching remote branch → offer remote deletes too. The remote is the
+      // branch's TRACKING remote when it tracks the same name (a fork's
+      // `upstream/x`), else origin — "local + remote" must delete the twin the
+      // user sees, not whatever origin holds under that name (S15-303).
+      const up = b.upstream ? splitRemoteRef(b.upstream) : null;
+      const trackRemote = up && up.branch === b.name ? up.remote : 'origin';
+      const hasRemote = remoteNames.has(`${trackRemote}/${b.name}`);
       // Never offer Delete on the checked-out branch (git refuses).
       if (!isCurrent) {
         items.push({ separator: true });
@@ -1462,16 +1473,16 @@
         });
         if (hasRemote) {
           items.push({
-            label: `Delete origin/${b.name}…`,
+            label: `Delete ${trackRemote}/${b.name}…`,
             icon: 'trash',
             danger: true,
-            action: () => void deleteRemoteBranch(b.name),
+            action: () => void deleteRemoteBranch(b.name, trackRemote),
           });
           items.push({
-            label: 'Delete local + remote…',
+            label: `Delete ${b.name} + ${trackRemote}/${b.name}…`,
             icon: 'trash',
             danger: true,
-            action: () => void deleteLocalBranch(b.name, true),
+            action: () => void deleteLocalBranch(b.name, true, trackRemote),
           });
         }
       }
@@ -1526,10 +1537,13 @@
     await mutate('/branch/rename', { from, to }, 'Branch renamed', `${from} → ${to}`);
   }
 
-  async function deleteLocalBranch(name: string, alsoRemote: boolean): Promise<void> {
+  /** `remote` names WHICH remote the `alsoRemote` half deletes on; it is sent
+   *  as `remote_name` on both the safe and the forced request (the daemon
+   *  otherwise defaults to origin). */
+  async function deleteLocalBranch(name: string, alsoRemote: boolean, remote = 'origin'): Promise<void> {
     const ok = await confirmer.ask(
       alsoRemote
-        ? `Delete branch “${name}” locally AND on origin? This cannot be undone.`
+        ? `Delete branch “${name}” locally AND “${remote}/${name}” on the remote “${remote}”? This cannot be undone.`
         : `Delete local branch “${name}”?`,
       { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
     );
@@ -1542,6 +1556,7 @@
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch/delete`, {
         name,
         remote: alsoRemote,
+        ...(alsoRemote ? { remote_name: remote } : {}),
       });
       await refreshAfter(s);
       toasts.success(okTitle, name);
@@ -1558,23 +1573,30 @@
         { title: 'Branch not fully merged', confirmLabel: 'Force delete', danger: true },
       );
       if (!force) return;
-      await mutate('/branch/delete', { name, remote: alsoRemote, force: true }, okTitle, name);
+      await mutate(
+        '/branch/delete',
+        { name, remote: alsoRemote, ...(alsoRemote ? { remote_name: remote } : {}), force: true },
+        okTitle,
+        name,
+      );
     }
   }
 
-  async function deleteRemoteBranch(name: string): Promise<void> {
-    const ok = await confirmer.ask(`Delete branch “${name}” on origin? This cannot be undone.`, {
+  async function deleteRemoteBranch(name: string, remote = 'origin'): Promise<void> {
+    const full = `${remote}/${name}`;
+    const ok = await confirmer.ask(`Delete branch “${full}” on the remote “${remote}”? This cannot be undone.`, {
       title: 'Delete remote branch',
       confirmLabel: 'Delete',
       danger: true,
     });
     if (!ok) return;
-    // Remote-only: leave any local branch of the same name intact.
+    // Remote-only: leave any local branch of the same name intact. `remote_name`
+    // pins WHICH remote — the daemon pushes `--delete` to that remote, not origin.
     await mutate(
       '/branch/delete',
-      { name, remote: true, local: false, force: true },
+      { name, remote: true, remote_name: remote, local: false, force: true },
       'Remote branch deleted',
-      `origin/${name}`,
+      full,
     );
   }
 
@@ -2740,6 +2762,30 @@
     if (sha) void revealSha(sha, t.name);
   }
 
+  // A deep link `#/git/<repo>/graph/<branch>` (Run with Otto's "View branch
+  // diff", S20-301) jumps to that branch's tip — once per link — as soon as
+  // the refs and the first history page are in.
+  const routeRef = $derived(routeGraphRef(router.parts, repoId));
+  let routeRefSeen = '';
+  $effect(() => {
+    const name = routeRef;
+    const r: RefsResp | null = refs;
+    if (!name) {
+      routeRefSeen = ''; // leaving the link re-arms it for the next visit
+      return;
+    }
+    if (!r || commitsLoading || name === routeRefSeen) return;
+    routeRefSeen = name;
+    untrack(() => {
+      const b =
+        r.local.find((x) => x.name === name) ??
+        r.remote.find((x) => x.name === name) ??
+        r.remote.find((x) => x.name.endsWith(`/${name}`));
+      if (b) selectBranchRow(b);
+      else toasts.info('Branch not found', `${name} isn’t in this repository any more (it may have been deleted).`);
+    });
+  });
+
   // Set of remote-branch names (e.g. "origin/main") from the refs response, used
   // to classify a decoration token that isn't obviously a tag/HEAD.
   // Snapshot the refs response into plain arrays + lookup sets. Reading `refs`
@@ -3129,11 +3175,11 @@
           ? `Worktree · ${chip.label} — open worktree (do not switch branch)`
           : chip.label}
   >
-    {#if chip.current}<Icon name="check" size={8} />{/if}
-    {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
-    {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
-    {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-    {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+    {#if chip.current}<Icon name="check" size={12} />{/if}
+    {#if chip.worktree && !chip.current}<Icon name="worktree" size={12} />{/if}
+    {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={12} />{/if}
+    {#if chip.kind === 'tag'}<Icon name="tag" size={12} />{/if}
+    {#if chip.kind === 'stash'}<Icon name="stash" size={12} />{/if}
     <span class="chip-label">{label}</span>
     {#if tracking.ahead > 0 || tracking.behind > 0}
       <span class="chip-ab" title="{tracking.ahead} ahead · {tracking.behind} behind upstream">
@@ -3196,7 +3242,7 @@
             ? `Merged into ${baseBranch} — safe to delete`
             : 'Merged — safe to delete'}
         >
-          <Icon name="check" size={10} />
+          <Icon name="check" size={12} />
         </span>
       {/snippet}
 
@@ -3207,7 +3253,7 @@
         {@const tracking = branchTracking(b, status)}
         {@const wtElsewhere = worktreeByBranch.get(b.name)}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           class="ref-row"
           class:nested
           class:current={b.is_current}
@@ -3231,11 +3277,11 @@
               : `${b.name} — click to highlight, double-click to checkout`}
         >
           {#if b.is_current}
-            <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
+            <span class="cur-pip" title="Checked out"><Icon name="check" size={12} /></span>
           {:else if wtElsewhere}
-            <span class="cur-pip wt-pip" title="Worktree — click to open"><Icon name="worktree" size={9} /></span>
+            <span class="cur-pip wt-pip" title="Worktree — click to open"><Icon name="worktree" size={12} /></span>
           {:else}
-            <Icon name="dot" size={10} />
+            <Icon name="dot" size={12} />
           {/if}
           {@render refName(leaf.label)}
           {#if showMerged(b)}{@render mergedMark()}{/if}
@@ -3253,7 +3299,7 @@
               <!-- Default same-named tracking (e.g. origin/<branch>): redundant,
                    so collapse to a small "tracked" glyph and leave the row's
                    width for the branch NAME instead of a duplicate string. -->
-              <span class="ref-track" title={`tracks ${b.upstream}`}><Icon name="globe" size={10} /></span>
+              <span class="ref-track" title={`tracks ${b.upstream}`}><Icon name="globe" size={12} /></span>
             {:else}
               <!-- Non-default upstream (tracks a differently-named branch) → show it. -->
               <span class="ref-upstream mono dim" title={`upstream: ${b.upstream}`}>{b.upstream}</span>
@@ -3275,7 +3321,7 @@
       {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           class="ref-row remote"
           class:nested
           class:dragging={dragSource?.name === b.name && dragSource.remote}
@@ -3288,7 +3334,7 @@
           oncontextmenu={(e) => branchMenu(e, b)}
           title="{b.name} — click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
         >
-          <Icon name="dot" size={10} />
+          <Icon name="dot" size={12} />
           {@render refName(leaf.label)}
           {#if showMerged(b)}{@render mergedMark()}{/if}
           {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
@@ -3309,7 +3355,7 @@
         {@const key = folderKey(section, folder.name)}
         {@const collapsed = collapsedFolders.has(key)}
         <button class="ref-folder" class:collapsed onclick={() => toggleFolder(key)} title={folder.name}>
-          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={11} />
+          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
           <Icon name="folder" size={12} />
           <span class="folder-name">{folder.name}</span>
           <span class="ref-count">{folder.leaves.length}</span>
@@ -3328,7 +3374,7 @@
       <!-- LOCAL -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (localOpen = !localOpen)} aria-expanded={localOpen}>
-          <Icon name={localOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={localOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="branch" size={12} />
           <span>LOCAL</span>
           <span class="ref-count">{refs.local.length}</span>
@@ -3358,7 +3404,7 @@
       <!-- REMOTE -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (remoteOpen = !remoteOpen)} aria-expanded={remoteOpen}>
-          <Icon name={remoteOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={remoteOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="globe" size={12} />
           <span>REMOTE</span>
           <span class="ref-count">{refs.remote.length}</span>
@@ -3388,7 +3434,7 @@
       <!-- TAGS -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (tagsOpen = !tagsOpen)} aria-expanded={tagsOpen}>
-          <Icon name={tagsOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={tagsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="tag" size={12} />
           <span>TAGS</span>
           <span class="ref-count">{refs.tags.length}</span>
@@ -3396,14 +3442,14 @@
         {#if tagsOpen}
           {#each refs.tags.slice(0, leafLimit('tags:')) as t (t.name)}
             <div class="ref-action-row">
-            <button
+            <button use:rowMenu
               class="ref-row tag"
               class:ref-row-busy={revealBusy === t.name}
               title="{t.name} — click to show it on the graph, right-click for actions"
               onclick={() => selectTagRow(t)}
               oncontextmenu={(e) => tagMenu(e, t)}
             >
-              <Icon name="tag" size={10} />
+              <Icon name="tag" size={12} />
               <span class="mono ref-name">{t.name}</span>
             </button>
             <!-- Actions stay reachable without a right-click (trackpad/touch),
@@ -3427,7 +3473,7 @@
       <!-- STASHES — read-only `git stash list`; right-click for Apply / Drop. -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (stashesOpen = !stashesOpen)} aria-expanded={stashesOpen}>
-          <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="stash" size={12} />
           <span>STASHES</span>
           <span class="ref-count">{stashes.length}</span>
@@ -3435,13 +3481,13 @@
         {#if stashesOpen}
           {#each stashes as s (s.ref)}
             <div class="ref-action-row">
-            <button
+            <button use:rowMenu
               class="ref-row stash-row"
               title={`${s.ref} · ${s.message}`}
               onclick={() => selectStash(s)}
               oncontextmenu={(e) => stashMenu(e, s)}
             >
-              <Icon name="stash" size={10} />
+              <Icon name="stash" size={12} />
               <span class="ref-name stash-msg">{stashShortMsg(s)}</span>
               {#if s.branch}<span class="stash-branch mono dim">{s.branch}</span>{/if}
             </button>
@@ -3458,7 +3504,7 @@
            trees (swarm, Run-with-Otto, goal loops) too. -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (worktreesOpen = !worktreesOpen)} aria-expanded={worktreesOpen}>
-          <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="worktree" size={12} />
           <span>WORKTREES</span>
           <span class="ref-count">{worktrees.length}</span>
@@ -3467,7 +3513,7 @@
           {#each worktrees as w (w.path)}
             {@const isHere = currentRepoPath !== '' && normPath(w.path) === currentRepoPath}
             <div class="ref-action-row">
-            <button
+            <button use:rowMenu
               type="button"
               class="ref-row stash-row is-worktree"
               class:current={isHere}
@@ -3485,11 +3531,11 @@
                 wtMenu(e, w);
               }}
             >
-              <Icon name="worktree" size={10} />
+              <Icon name="worktree" size={12} />
               <span class="ref-name stash-msg" class:dim={w.prunable}>{wtName(w)}</span>
               {#if !w.dirty_known}<span class="wt-dirty" title="Changes unknown — status check unavailable">?</span>
               {:else if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
-              {#if w.locked}<Icon name="lock" size={9} />{/if}
+              {#if w.locked}<Icon name="lock" size={12} />{/if}
               {#if w.prunable}
                 <span class="wt-flag mono dim">stale</span>
               {:else if isHere}
@@ -3514,7 +3560,7 @@
           {/each}
           {#if worktrees.some((w) => w.prunable)}
             <button class="ref-row stash-row wt-prune" onclick={() => void wtPrune()}>
-              <Icon name="trash" size={10} />
+              <Icon name="trash" size={12} />
               <span class="ref-name">Prune stale entries</span>
             </button>
           {/if}
@@ -3525,21 +3571,21 @@
       {#if submodules.length > 0}
         <div class="ref-section">
           <button class="ref-header" onclick={() => (submodulesOpen = !submodulesOpen)} aria-expanded={submodulesOpen}>
-            <Icon name={submodulesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+            <Icon name={submodulesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
             <Icon name="shapes" size={12} />
             <span>SUBMODULES</span>
             <span class="ref-count">{submodules.length}</span>
           </button>
           {#if submodulesOpen}
             {#each submodules as sub (sub.path)}
-              <button
+              <button use:rowMenu
                 class="ref-row stash-row"
                 title={`${sub.path} @ ${sub.sha.slice(0, 10)}${sub.url ? ` · ${sub.url}` : ''}${sub.state !== 'ok' ? ` · ${sub.state}` : ''}`}
                 oncontextmenu={(e) => subMenu(e, sub)}
                 aria-label="Actions for submodule {sub.path}"
                 onclick={(e) => subMenu(e, sub)}
               >
-                <Icon name="shapes" size={10} />
+                <Icon name="shapes" size={12} />
                 <span class="ref-name stash-msg">{sub.path}</span>
                 {#if sub.state !== 'ok'}
                   <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sentenceCase(sub.state)}</span>
@@ -3727,7 +3773,7 @@
               {#if shouldCollapseRow(chips)}
                 <!-- Keep collapsed refs on a separate keyboard-accessible control. -->
                 {@const primary = primaryChip(chips)}
-                <button class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
+                <button use:rowMenu class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
                 <button
                   class="ref-expander"
                   tabindex="0"
@@ -3737,13 +3783,13 @@
                   aria-expanded={refMenu?.commit.sha === row.commit.sha}
                   title="{chips.length} refs on this commit — click to list"
                   onclick={(e) => openRefMenu(e, row.commit, chips)}
-                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</button>
+                ><Icon name="chevronDown" size={12} />+{chips.length - 1}</button>
               {:else}
                 {#each chips as chip (chip.kind + chip.label)}
                   {@const label = chip.kind === 'stash'
                     ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
                     : chip.label}
-                  <button class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
+                  <button use:rowMenu class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
                 {/each}
               {/if}
               <!-- HEAD marker ("you are here") — rightmost so it stays visible as
@@ -3753,7 +3799,7 @@
               {/if}
             </div>
 
-            <button class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
+            <button use:rowMenu class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
             <!-- SVG gutter -->
             <svg
               class="gutter"
@@ -3957,11 +4003,11 @@
                       ? `Checked out · ${chip.label}`
                       : chip.label}
                 >
-                  {#if chip.current}<Icon name="check" size={8} />{/if}
-                  {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
-                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
-                  {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-                  {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+                  {#if chip.current}<Icon name="check" size={12} />{/if}
+                  {#if chip.worktree && !chip.current}<Icon name="worktree" size={12} />{/if}
+                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={12} />{/if}
+                  {#if chip.kind === 'tag'}<Icon name="tag" size={12} />{/if}
+                  {#if chip.kind === 'stash'}<Icon name="stash" size={12} />{/if}
                   <span class="chip-label">{chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}</span>
                 </span>
               {/each}
@@ -4007,7 +4053,7 @@
       <div class="ref-pop-group">Branches</div>
       {#each refMenu.branches as chip (chip.kind + chip.label)}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           type="button"
           class="ref-pop-row kind-{chip.kind}"
           class:is-current={chip.current}
@@ -4022,13 +4068,13 @@
           oncontextmenu={(e) => refRowMenu(e, chip)}
         >
           {#if chip.current}
-            <Icon name="check" size={10} />
+            <Icon name="check" size={12} />
           {:else if chip.worktree}
-            <Icon name="worktree" size={10} />
+            <Icon name="worktree" size={12} />
           {:else if chip.kind === 'remote' || chip.onRemote}
-            <Icon name="globe" size={10} />
+            <Icon name="globe" size={12} />
           {:else}
-            <Icon name="branch" size={10} />
+            <Icon name="branch" size={12} />
           {/if}
           <span class="ref-pop-label">{chip.label}</span>
           {#if chip.current}
@@ -4045,7 +4091,7 @@
       <div class="ref-pop-group">Tags</div>
       {#each refMenu.tags as chip (chip.kind + chip.label)}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           type="button"
           class="ref-pop-row kind-tag"
           title={`Double-click to checkout tag (detached) · ${chip.label}`}
@@ -4053,7 +4099,7 @@
           ondblclick={() => refRowCheckout(chip)}
           oncontextmenu={(e) => refRowMenu(e, chip)}
         >
-          <Icon name="tag" size={10} />
+          <Icon name="tag" size={12} />
           <span class="ref-pop-label">{chip.label}</span>
         </button>
         <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>

@@ -68,7 +68,7 @@ Two storage layers cooperate:
 | **UI** | `ui/src/modules/usage/` (`UsagePage.svelte`, `AttributionDrilldown.svelte`, `CostForecastChip.svelte`) | The dashboard, attribution drilldown, and forecast chip. |
 
 The engine is started once at daemon boot
-(`UsageEngine::start(usage_config, data_dir)` in `crates/ottod/src/main.rs`) and
+(`UsageEngine::start(usage_config, data_dir)` in `crates/otto-server/src/boot/build.rs`) and
 the tailer right after it (`UsageTailer::new(usage, pool, data_dir, home).start()`).
 
 ---
@@ -242,7 +242,8 @@ Otto ships no embedded C++; it drives the *same* `clickhouse` binary you'd insta
 via `curl https://clickhouse.com/ | sh`, as one persistent **`clickhouse server`**
 child bound to a random loopback HTTP port over the data dir
 (`crates/otto-usage/src/clickhouse.rs`). Writes are batched (usage events every
-15 s while any are buffered, system metrics every 5 min).
+90 s while any are buffered, or sooner when a dashboard reads; system metrics every
+5 min).
 
 **Idle-stop.** The server costs ~56 threads / ~100+ MB RSS even with nothing to
 do, so after **15 min** with no query, insert or DDL (and none in flight) it is
@@ -343,10 +344,27 @@ The alter is skipped when the table's TTL (read from `system.tables.engine_full`
 already matches, and carries `materialize_ttl_after_modify = 0`, so neither boot nor a
 self-heal queues a part-rewriting mutation; background TTL merges apply the window.
 
-**Write path.** The writer flushes buffered events every **15 s** (or at 200 events,
-and on shutdown), with server-side `async_insert=1&wait_for_async_insert=1`, and both
-tables use `old_parts_lifetime = 60`. The live dashboard therefore lags by up to ~15 s;
-in exchange ClickHouse no longer creates (and re-merges) a part every 2 s.
+**Write path.** Each event is stamped with the time it was recorded (not the
+time it is inserted), so a deferred row still lands in the right day, budget window
+and swarm turn. The writer flushes buffered events every **90 s** (or at 2,000 events,
+before any usage read — the read waits up to 2 s for that flush, so it sees every
+row recorded before it — and on shutdown, which waits for that final flush), with server-side `async_insert=1&wait_for_async_insert=1`, and both
+tables use `old_parts_lifetime = 60`. Each flush is one part that is later merged into
+the month's partition, so the coarse cadence keeps merge I/O low (at 15 s a month's
+partition was rewritten ~1,300 times in three days). Usage flushes are **background**
+writes: they never wake an idle-stopped server or reset its idle clock. While it is
+parked, events stay in memory until the next foreground request wakes it, or until
+the oldest has waited 30 min (or 20,000 are buffered), when the writer wakes it once
+without resetting the idle clock. A held buffer (parked, or a failed insert) is
+retried on the timer, a read or the wake — not once per new event — and the parked
+check runs before the batch is serialized.
+
+**Background reads.** The budget sampler, budget gates (swarm turns, workflow steps,
+goal loops) and a swarm turn's cost read spend WITHOUT resetting the idle clock, so
+an always-on agent no longer keeps the server up through the budget path. While the
+server is parked, budget checks reuse the last spend they saw (nothing new can be
+written while it is parked); a swarm turn's cost may restart it briefly for an exact
+total, still without resetting the idle clock.
 
 ---
 

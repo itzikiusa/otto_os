@@ -24,7 +24,7 @@ test('section ids are unique and labels are sentence case', () => {
   assert.equal(new Set(ids).size, ids.length);
   // Sentence case: no word after the first starts upper-case unless it is a
   // proper noun / acronym on the allow-list.
-  const proper = new Set(['MCP', 'Jira', 'Git']);
+  const proper = new Set(['MCP', 'Jira', 'Git', 'Telegram']);
   for (const s of SETTINGS_SECTIONS) {
     const [, ...rest] = s.label.split(/\s+/);
     for (const w of rest) {
@@ -72,16 +72,61 @@ test('every section page titles itself from the registry', () => {
   for (const s of SETTINGS_SECTIONS) {
     // The component mapped to this id in Settings.svelte's VIEWS table…
     const key = s.id.includes('-') ? `'${s.id}'` : s.id;
-    const m = settings.match(new RegExp(`\\n\\s*${key}: (\\w+),`));
+    // Sections load lazily (`id: lazyComponent(() => import('./X.svelte'))`);
+    // the default one wraps a static import (`{ default: Appearance }`).
+    const m = settings.match(new RegExp(`\\n\\s*${key}: lazyComponent\\((.*)\\),\\n`));
     assert.ok(m, `no view mapped for ${s.id}`);
-    const imp = settings.match(new RegExp(`import ${m[1]} from '(.+?)';`));
-    assert.ok(imp, `no import for ${m[1]}`);
-    const src = readFileSync(new URL(imp[1], new URL('settings/', base)), 'utf8');
+    let path = m[1].match(/import\('(.+?)'\)/)?.[1];
+    const local = m[1].match(/default: (\w+)/)?.[1];
+    if (!path && local) path = settings.match(new RegExp(`import ${local} from '(.+?)';`))?.[1];
+    assert.ok(path, `no import for ${s.id}`);
+    const src = readFileSync(new URL(path, new URL('settings/', base)), 'utf8');
     // …renders a PageHeader whose title is the registry label.
     assert.ok(
       src.includes(`title={sectionLabel('${s.id}')}`),
-      `${m[1]} does not title its PageHeader with sectionLabel('${s.id}')`,
+      `${path} does not title its PageHeader with sectionLabel('${s.id}')`,
     );
   }
   assert.equal(sectionLabel('tokens'), 'Personal access tokens');
+});
+
+// S17-14: these sections only call root-only handlers (`GET|PUT /settings`,
+// `/audit-log`, `/security-posture`, `/logs/daemon` → `require_root`). A
+// non-root settings admin must not get nav entries that can only 403.
+test('sections backed by root-only handlers are gated on root, not settings:admin', () => {
+  const settingsAdmin: SettingsAccess = { can: (f, level) => f === 'settings' && level === 'admin', isRoot: false };
+  const ids = availableSections(settingsAdmin).map((s) => s.id);
+  for (const id of ['providers', 'daemon', 'trust-safety', 'logs']) {
+    assert.equal(findSection(id)!.gate, 'root', `${id} must be root-gated`);
+    assert.ok(!ids.includes(id as never), `${id} shown to a non-root settings admin`);
+  }
+  // Sections whose handlers accept settings admins stay open to them.
+  assert.ok(ids.includes('skills'));
+});
+
+// S17-303: a section's UI gate must match its handlers' real gate. These
+// sections' handlers are all `require_root`; gating them `settings:admin`
+// showed a non-root settings admin a page where every action 403'd.
+const ROOT_ONLY_HANDLERS: Record<string, string[]> = {
+  plugins: ['crates/otto-server/src/plugins.rs'],
+  backup: [
+    'crates/otto-server/src/routes/backup.rs',
+    'crates/otto-server/src/routes/backup_git.rs',
+    'crates/otto-server/src/routes/connection_export.rs',
+  ],
+};
+
+test('root-only handlers ↔ root-gated sections (S17-303)', () => {
+  const settingsAdmin: SettingsAccess = { can: (f, level) => f === 'settings' && level === 'admin', isRoot: false };
+  const visible = availableSections(settingsAdmin).map((s) => s.id);
+  for (const [id, files] of Object.entries(ROOT_ONLY_HANDLERS)) {
+    const section = findSection(id);
+    assert.ok(section, id);
+    assert.equal((section as { gate?: unknown }).gate, 'root', `${id} must be gated 'root'`);
+    assert.ok(!visible.includes(id as never), `a non-root settings admin must not see ${id}`);
+    for (const f of files) {
+      const src = readFileSync(new URL(`../../${f}`, import.meta.url), 'utf8');
+      assert.match(src, /require_root\(/, `${f} is root-gated`);
+    }
+  }
 });

@@ -39,11 +39,11 @@ even though the on-disk HTML uses the same report style (see §7).
 | Scheduler enable/disable (Settings → Insights) | `ui/src/modules/settings/InsightsSettings.svelte` |
 | UI API client | `ui/src/lib/api/insights.ts` |
 | TypeScript DTOs | `ui/src/lib/api/types.ts` (`InsightsConfig`, `InsightReport`, `InsightKind`, `RunInsightsReq`, `RunInsightsResp`) |
-| Backend (scheduler + generator + HTTP API) | `crates/otto-server/src/insights.rs` |
-| Scheduler start-up wiring | `crates/ottod/src/main.rs` (`InsightsScheduler::new(ctx).start()`) |
+| Backend (scheduler + generator + HTTP API) | `crates/otto-insights/src/lib.rs` (host glue: `InsightsCtx` impl in `crates/otto-server/src/modules.rs`) |
+| Scheduler start-up wiring | `crates/otto-server/src/boot/tasks.rs` (`start_insights_scheduler`) |
 | Route mount | `crates/otto-server/src/modules.rs` (`crate::insights::routes()`) |
 | RBAC policy | `crates/otto-server/src/policy.rs` (the `Insights` feature) |
-| WS event source | `crates/otto-server/src/insights.rs` → `Event::InsightReady` |
+| WS event source | `crates/otto-insights/src/lib.rs` → `Event::InsightReady` |
 | Channel notifier | `crates/otto-channels/src/improve_notify.rs` (`channels.notify_insight_ready`) |
 | Contract (authoritative) | `docs/contracts/api.md` (§ Insights) · `docs/contracts/ws.md` (`insight_ready`) |
 | On-disk artifacts | `<data_dir>/insights/` (see §5) |
@@ -339,7 +339,7 @@ interface RunInsightsResp { started: boolean; run_id?: string | null; reason?: s
 
 ### WebSocket — `insight_ready`
 
-Emitted by `crates/otto-server/src/insights.rs` after a **scheduled** run
+Emitted by `crates/otto-insights/src/lib.rs` after a **scheduled** run
 completes (conditioned on the period's report actually landing,
 `period_done() == true`). Scope is **Everyone** — all connected clients receive
 it.

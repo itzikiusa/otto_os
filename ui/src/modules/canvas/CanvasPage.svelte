@@ -193,7 +193,7 @@
     <!-- One primary per page: with no scenes yet the hero's mode cards own "new". -->
     {#if ws.currentId && !noScenes}
       <button class="btn small primary" onclick={newSceneMenu} aria-haspopup="menu" data-testid="canvas-new-scene">
-        <Icon name="plus" size={13} /> New scene <Icon name="chevronDown" size={11} />
+        <Icon name="plus" size={13} /> New scene <Icon name="chevronDown" size={12} />
       </button>
     {/if}
   {/snippet}
@@ -300,17 +300,17 @@
           </p>
           <div class="modes">
             <button class="mode" onclick={() => createBlank('excalidraw')}>
-              <Icon name="shapes" size={20} />
+              <Icon name="shapes" size={24} />
               <span class="m-title">Excalidraw board</span>
               <span class="m-sub">Fully editable shapes — draw &amp; arrange by hand too</span>
             </button>
             <button class="mode" onclick={() => createBlank('mermaid')}>
-              <Icon name="branch" size={20} />
+              <Icon name="branch" size={24} />
               <span class="m-title">Mermaid diagram</span>
               <span class="m-sub">Auto-rendered flowchart / sequence / class — rich &amp; clean</span>
             </button>
             <button class="mode" onclick={() => createBlank('d2')}>
-              <Icon name="layers" size={20} />
+              <Icon name="layers" size={24} />
               <span class="m-title">D2 diagram</span>
               <span class="m-sub">Modern declarative diagrams — architecture, sequence &amp; SQL tables</span>
             </button>
@@ -409,7 +409,7 @@
   .ai-bar {
     position: absolute;
     bottom: 18px;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     transform: translateX(-50%);
     z-index: var(--z-sticky);
     display: flex;

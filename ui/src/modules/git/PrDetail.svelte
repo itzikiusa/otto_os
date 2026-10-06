@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // PR detail: meta, editable markdown description, diff with inline comment
@@ -349,7 +350,7 @@
   // it runs after the keyboard starts animating up.
   function scrollIntoViewOnFocus(e: FocusEvent): void {
     const el = e.currentTarget as HTMLElement;
-    setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
+    setTimeout(() => el.scrollIntoView({ block: 'center', behavior: scrollBehavior() }), 250);
   }
 
   async function addGeneralComment(): Promise<void> {
@@ -496,7 +497,7 @@
 
     <div class="prd-title-block">
       {#if editMode}
-        <input class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} />
+        <input dir="auto" class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} />
       {/if}
       <div class="prd-meta">
         <span class="dim">{pr.author}</span>
@@ -516,7 +517,7 @@
     <div hidden={activeTab !== 'summary'}>
       <section class="prd-desc card">
         {#if editMode}
-          <textarea class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
+          <textarea dir="auto" class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
           <div class="row prd-compose-foot">
             <span class="hint dim">Updates PR #{number} on {repoLabel} ({providerName}) · visible to the author and reviewers</span>
             <button class="btn small" disabled={busy === 'edit'} onclick={() => (editMode = false)}>Cancel</button>
@@ -607,7 +608,7 @@
         {#if showRequestChanges}
           <section class="prd-request-changes card">
             <div class="section-title" style="margin-bottom: 8px">Request changes</div>
-            <textarea
+            <textarea dir="auto"
               class="input"
               rows="3"
               bind:value={requestChangesBody}
@@ -644,7 +645,7 @@
         {/each}
 
         <div class="new-comment card">
-          <textarea class="input" rows="3" bind:value={newComment} disabled={busy === 'comment'} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
+          <textarea dir="auto" class="input" rows="3" bind:value={newComment} disabled={busy === 'comment'} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
           <div class="row prd-compose-foot">
             <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
             <button
@@ -680,6 +681,7 @@
             onReplyComment={(parentId, body) => postComment(body, undefined, undefined, parentId)}
             onResolveComment={resolveThread}
             loadFile={loadPrFile}
+            stateKey={`${repoId}#${number}`}
           />
         {/if}
       </section>
@@ -735,6 +737,10 @@
       invalidatePr(repoId, number);
       mergeOpen = false;
       void load(repoId, number);
+    }}
+    onstale={() => {
+      invalidatePr(repoId, number);
+      void load(repoId, number, true);
     }}
   />
 {/if}

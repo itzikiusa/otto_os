@@ -209,7 +209,9 @@ pub async fn inbound(
         chat: conversation.clone(),
         thread: req.thread.filter(|t| !t.trim().is_empty()),
         user: user.unwrap_or_else(|| "webhook".to_string()),
+        user_name: None,
         text,
+        edited: false,
     };
     let adapter: Arc<dyn Adapter> = Arc::new(WebhookAdapter::new(callback));
     tokio::spawn(async move {

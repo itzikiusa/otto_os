@@ -512,15 +512,15 @@ async fn attach_outputs(
         let Ok(bytes) = tokio::fs::read(&path).await else {
             continue;
         };
-        if bytes.is_empty() || !crate::product_media::sniff_ok(mime, &bytes) {
+        if bytes.is_empty() || !otto_product::media::sniff_ok(mime, &bytes) {
             tracing::warn!("blender render: {file} did not sniff as {mime}; skipped");
             continue;
         }
         let id = otto_core::new_id();
-        let ext = crate::product_media::ext_for_mime(mime);
+        let ext = otto_product::media::ext_for_mime(mime);
         let rel = format!(
             "{}/{}/{id}{ext}",
-            crate::product_media::ATTACH_ROOT,
+            otto_product::media::ATTACH_ROOT,
             src.story_id
         );
         let full = otto_core::paths::confine_join(&ctx.data_dir, &rel)

@@ -1,0 +1,3518 @@
+//! Analysis fan-out runner for Product Story Analysis.
+//!
+//! `run_analysis` is spawned as a background tokio task by the analyze handler.
+//! It drives one agent per (lens × provider) concurrently, each running as a
+//! REAL, openable [`otto_sessions::SessionManager`] session (exactly like a PR
+//! reviewer agent — see `otto-server`'s `review_session`), then a single summarizer
+//! agent consolidates / dedupes / resolves conflicts across all lens outputs.
+//!
+//! Provider-honoring: every provider (claude / codex / agy / …) is spawned as a
+//! real session via the SessionManager mechanism, so all three CLIs are honored
+//! per-lens (the old `Orchestrator::run_agent` was claude-only).
+//!
+//! Concurrency approach mirrors `otto_review::session`: each agent is independent;
+//! one failure never aborts the others (errors are isolated per-agent). Sessions
+//! are NOT killed when done — they stay live/openable so the PO can inspect
+//! each lens's terminal afterward.
+
+use std::collections::HashSet;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use otto_core::workref::WorkRef;
+use otto_core::Id;
+use otto_state::{LearningPatch, NewAnalysisAgent, NewEvent, NewLearning, NewQuestion, StoryPatch};
+use tracing::warn;
+
+use crate::host::ProductRunHost;
+
+// ---------------------------------------------------------------------------
+// Per-session cwd attribution (codex usage tracking)
+// ---------------------------------------------------------------------------
+
+/// Resolve the cwd a product agent session should run in, making it unique when
+/// it would otherwise be the shared system temp-dir fallback.
+///
+/// WHY: the usage tailer attributes codex sessions by their cwd (1:1 `by_cwd`).
+/// Product sessions (analysis fan-out, rewrite, test-gen, plan-gen) fall back to
+/// `std::env::temp_dir()` when a story has no real cwd. Multiple codex sessions
+/// then share `/tmp` (or `$TMPDIR`) and collide → all attributed to "external"
+/// instead of the workspace. Giving each session its own temp subdir restores a
+/// 1:1 cwd→session mapping. (Claude attributes by its own session id, so it's
+/// unaffected — but a unique dir is harmless for it.)
+///
+/// A REAL story cwd (the user's repo) passes through UNCHANGED — the architecture
+/// lens needs the real repo. Only the shared-temp fallback is rewritten, to a
+/// freshly-created unique child of the temp dir.
+pub fn session_cwd(requested: &str) -> String {
+    let temp = std::env::temp_dir();
+
+    // Compare against the shared temp-dir fallback. Canonicalize both so e.g.
+    // /var vs /private/var (macOS) or a trailing slash don't defeat the match;
+    // fall back to a raw path compare if canonicalization fails.
+    let requested_path = std::path::Path::new(requested);
+    let is_shared_temp = match (requested_path.canonicalize(), temp.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => requested_path == temp.as_path(),
+    };
+
+    if !is_shared_temp {
+        // Real story cwd — leave it untouched.
+        return requested.to_string();
+    }
+
+    // Shared-temp fallback → unique per-session subdir so codex usage attributes
+    // 1:1 by cwd instead of colliding on the shared temp dir. The children live
+    // under ONE stable root (S4-14) that [`spawn_scratch_sweep`] clears of
+    // day-old leftovers no session still uses, so scratch dirs no longer
+    // accumulate in `$TMPDIR` forever.
+    let root = temp.join(SCRATCH_ROOT);
+    let unique = root.join(uuid::Uuid::new_v4().to_string());
+    if let Err(e) = std::fs::create_dir_all(&unique) {
+        tracing::debug!("product_run: create session cwd {}: {e}", unique.display());
+    }
+    unique.to_string_lossy().to_string()
+}
+
+/// Pre-trust a session cwd from [`session_cwd`]: a scratch child trusts the
+/// stable [`SCRATCH_ROOT`] once for claude instead of adding one dead
+/// `~/.claude.json` project entry per run (S4-14); a real story cwd is
+/// trusted as-is.
+pub fn trust_session_cwd(provider: &str, cwd: &str) {
+    otto_sessions::trust::ensure_trusted_scratch(
+        provider,
+        &std::env::temp_dir().join(SCRATCH_ROOT),
+        cwd,
+    );
+}
+
+/// Stable parent of every product scratch cwd (under the temp dir).
+pub const SCRATCH_ROOT: &str = "otto-product-scratch";
+/// Scratch dirs older than this — and used by no unarchived session — are
+/// removed by [`spawn_scratch_sweep`].
+pub const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// At most one sweep per this interval (each one reads the sessions table).
+const SCRATCH_SWEEP_EVERY_SECS: u64 = 3600;
+
+/// Sweep the product scratch root in the background (called when a product
+/// run starts; throttled to one sweep an hour, one at a time). A product
+/// analysis / test / plan session is a visible, RESUMABLE session that can
+/// stay open for days, and a dir's mtime does not move while an agent only
+/// reads in it — so age alone swept live sessions' cwds and broke their
+/// resume (S4-304). Every cwd an unarchived session still points at is kept.
+pub fn spawn_scratch_sweep(pool: otto_state::DbPool) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    static SWEEPING: AtomicBool = AtomicBool::new(false);
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST.load(Ordering::Acquire);
+    if (last != 0 && now.saturating_sub(last) < SCRATCH_SWEEP_EVERY_SECS)
+        || SWEEPING.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    LAST.store(now, Ordering::Release);
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        SWEEPING.store(false, Ordering::Release);
+        return;
+    };
+    handle.spawn(async move {
+        let root = std::env::temp_dir().join(SCRATCH_ROOT);
+        let keep = otto_state::SessionsRepo::new(pool)
+            .unarchived_cwds_under(&root.to_string_lossy())
+            .await;
+        match keep {
+            Ok(keep) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    sweep_stale_scratch(&root, SCRATCH_MAX_AGE, &keep)
+                })
+                .await;
+            }
+            // Without the in-use set nothing is provably safe to remove.
+            Err(e) => warn!("product scratch sweep skipped: {e}"),
+        }
+        SWEEPING.store(false, Ordering::Release);
+    });
+}
+
+/// Remove children of `root` last modified more than `max_age` ago, except
+/// the paths in `keep` (best-effort; a missing root is fine). Blocking: call
+/// it from the blocking pool (see [`spawn_scratch_sweep`]) or a test.
+#[allow(clippy::disallowed_methods)] // sync helper: only run via spawn_scratch_sweep's spawn_blocking (or a test)
+pub fn sweep_stale_scratch(
+    root: &std::path::Path,
+    max_age: std::time::Duration,
+    keep: &std::collections::HashSet<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        if keep.contains(e.path().to_string_lossy().as_ref()) {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age);
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// One analysis agent specification (provided by the 3.3 handler).
+pub struct AgentSpec {
+    pub provider: String,
+    pub model: Option<String>,
+    pub skill: String,
+    pub name: String,
+}
+
+/// The JSON schema each analysis agent must respond with.
+#[derive(serde::Deserialize, Default)]
+pub struct Findings {
+    pub summary: String,
+    pub related_repos: Vec<String>,
+    pub functionalities: Vec<String>,
+    pub integration_points: Vec<String>,
+    pub risks: Vec<String>,
+    pub open_questions: Vec<FoundQuestion>,
+    pub suggested_learnings: Vec<FoundLearning>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct FoundQuestion {
+    pub text: String,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default)]
+    pub category: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct FoundLearning {
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+}
+
+// ---------------------------------------------------------------------------
+// Session-based, provider-honoring lens runner (mirrors review_session)
+// ---------------------------------------------------------------------------
+
+/// Outcome of one lens (or the summarizer) running as a real session. This is the
+/// caller-facing shape; the host's run mechanics return their own outcome type,
+/// which [`ProductRunHost::run_agent_with_recovery`] flattens into this (keeping
+/// `reason` as a stable `&str` for the existing notification/error-note code).
+/// [`LensRunResult::reason`] when a newer run (a Retry after Stop) took the
+/// agent row over mid-flight: the caller must skip every status write (S4-16).
+pub const SUPERSEDED: &str = "superseded";
+
+pub struct LensRunResult {
+    /// Raw text the agent wrote to its out file (or the claude transcript turn).
+    pub raw: Option<String>,
+    /// The live SessionManager session id (so the agent stays openable).
+    pub session_id: Option<Id>,
+    /// True if the agent never produced output (timeout / exit / start failure).
+    pub errored: bool,
+    /// Short reason when `errored` ("stuck", "timeout", "exited", "session-gone",
+    /// "create-failed", "stopped") — surfaced in notifications and the agent error
+    /// field. `None` on success.
+    pub reason: Option<&'static str>,
+}
+
+/// How a product agent session presents itself: its terminal title and the
+/// `meta.source` tag. The `source` matters for UI visibility — analysis sessions
+/// use `"product-analysis"`, which the workspace store FILTERS OUT of the Agents
+/// list/grid (they're opened on demand inline). Plan sessions instead use
+/// `"product-plan"`, which is NOT filtered, so they tile side-by-side in the
+/// Agents view by default — exactly what the Plan flow wants (watch them live).
+#[derive(Clone)]
+pub struct SessionAppearance {
+    pub title: String,
+    pub source: &'static str,
+}
+
+impl SessionAppearance {
+    /// The analysis default (hidden from the Agents grid; opened inline).
+    pub fn analysis(provider: &str) -> Self {
+        Self {
+            title: format!("Analysis: {provider}"),
+            source: "product-analysis",
+        }
+    }
+}
+
+/// Append the "write your JSON to this file" instruction to a built prompt.
+pub fn augment_with_out_path(base_prompt: &str, out_path: &str) -> String {
+    format!(
+        "{base_prompt}\n\n---\nWhen done, write your result as JSON to this file (overwrite it), \
+         and write ONLY the JSON (no prose): {out_path}"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The verbatim OUTPUT CONTRACT appended to every analysis prompt.
+// ---------------------------------------------------------------------------
+
+const OUTPUT_CONTRACT: &str = r#"Investigate as needed, then respond with EXACTLY ONE ```json code block (no prose before or after) matching:
+{"summary": "...", "related_repos": ["..."], "functionalities": ["..."],
+ "integration_points": ["..."], "risks": ["..."],
+ "open_questions": [{"text":"...","rationale":"...","category":"scope|data|ux|edge-case|dependency|other"}],
+ "suggested_learnings": [{"kind":"pattern|avoid","title":"...","body":"..."}]}"#;
+
+/// The verbatim consolidation contract for the summarizer agent. It MUST merge,
+/// dedupe, and resolve conflicts across all lens outputs into ONE result.
+const SUMMARIZER_CONTRACT: &str = r#"You are the SUMMARIZER. Several analysis lenses (possibly run on different AI providers) each produced findings about the SAME product story. Consolidate them into ONE result:
+- Write a single cohesive summary.
+- Merge related_repos, functionalities, integration_points, and risks across all lenses; remove duplicates.
+- Merge AND DEDUPE the open questions (collapse near-identical questions into one; keep the clearest wording).
+- RESOLVE conflicts: where lenses or providers disagree, decide the best answer and record what you reconciled in "conflict_notes".
+- Merge suggested_learnings; drop duplicates.
+
+Respond with EXACTLY ONE ```json code block (no prose before or after) matching:
+{"summary": "...",
+ "questions": [{"text":"...","rationale":"...","category":"scope|data|ux|edge-case|dependency|other"}],
+ "related_repos": ["..."], "functionalities": ["..."], "integration_points": ["..."], "risks": ["..."],
+ "suggested_learnings": [{"kind":"pattern|avoid","title":"...","body":"..."}],
+ "conflict_notes": "..."}"#;
+
+// ---------------------------------------------------------------------------
+// Pure helpers (unit-testable without an agent)
+// ---------------------------------------------------------------------------
+
+/// Extract the first JSON value from an agent reply (```json fence first,
+/// else the first balanced `{…}` that parses). The shared implementation:
+/// see [`otto_core::text::extract_json`].
+pub use otto_core::text::extract_json as extract_json_block;
+
+/// Build the full analysis prompt for one agent.
+///
+/// The story context (body + learnings + Jira details) now lives in a separate
+/// CONTEXT file that agents read. This keeps the prompt compact while allowing
+/// the context to be arbitrarily large.
+///
+/// The prompt body is: skill instructions + file-read directive + OUTPUT CONTRACT.
+/// An optional `prior_summary` is still inlined (it's a short text, not a large blob).
+pub fn build_analysis_prompt(
+    skill_body: &str,
+    context_path: &str,
+    prior_summary: Option<&str>,
+) -> String {
+    let mut prompt = String::new();
+
+    // 1. Skill body (instructions for this agent role)
+    prompt.push_str(skill_body);
+    prompt.push_str("\n\n---\n\n");
+
+    // 2. Context file directive — agents must read the file before answering.
+    prompt.push_str(
+        "The full story context is in this file — it may be LARGE, read it fully \
+         (in chunks if needed) before answering:\n",
+    );
+    prompt.push_str(context_path);
+    prompt.push_str("\n\n");
+
+    // 3. Prior analysis summary (if re-running)
+    if let Some(summary) = prior_summary {
+        if !summary.is_empty() {
+            prompt.push_str("## Prior Analysis Summary\n\n");
+            prompt.push_str(summary);
+            prompt.push_str("\n\n");
+        }
+    }
+
+    // 4. OUTPUT CONTRACT (verbatim, required by the brief)
+    prompt.push_str("---\n\n");
+    prompt.push_str(OUTPUT_CONTRACT);
+    prompt.push('\n');
+
+    prompt
+}
+
+/// The consolidated result the summarizer agent must produce.
+#[derive(serde::Deserialize, Default)]
+pub struct SummaryFindings {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub questions: Vec<FoundQuestion>,
+    #[serde(default)]
+    pub related_repos: Vec<String>,
+    #[serde(default)]
+    pub functionalities: Vec<String>,
+    #[serde(default)]
+    pub integration_points: Vec<String>,
+    #[serde(default)]
+    pub risks: Vec<String>,
+    #[serde(default)]
+    pub suggested_learnings: Vec<FoundLearning>,
+    #[serde(default)]
+    pub conflict_notes: String,
+}
+
+/// Build the summarizer prompt, feeding every successful lens's findings JSON
+/// (each labelled `Lens <name> (<provider>):`) and instructing the agent to
+/// consolidate, merge, dedupe, and resolve conflicts into ONE result.
+///
+/// `lenses` is `(name, provider, findings_json)` per successful lens agent.
+pub fn build_summarizer_prompt(
+    skill_body: &str,
+    story_title: &str,
+    lenses: &[(String, String, String)],
+) -> String {
+    let mut prompt = String::new();
+
+    if !skill_body.is_empty() {
+        prompt.push_str(skill_body);
+        prompt.push_str("\n\n---\n\n");
+    }
+
+    prompt.push_str("## Story: ");
+    prompt.push_str(story_title);
+    prompt.push_str("\n\n");
+
+    prompt.push_str("## Lens Findings to Consolidate\n\n");
+    for (name, provider, json) in lenses {
+        prompt.push_str("### Lens ");
+        prompt.push_str(name);
+        prompt.push_str(" (");
+        prompt.push_str(provider);
+        prompt.push_str("):\n\n");
+        prompt.push_str(json);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.push_str("---\n\n");
+    prompt.push_str(SUMMARIZER_CONTRACT);
+    prompt.push('\n');
+
+    prompt
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration entry point
+// ---------------------------------------------------------------------------
+
+const LENS_TIMEOUT: Duration = Duration::from_secs(600);
+const SUMMARIZER_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Total attempts for an agent (initial + retries) before it's marked errored.
+pub const MAX_AGENT_ATTEMPTS: u32 = 3;
+/// How many times an orphaned agent may be auto-resumed across daemon restarts
+/// before the reaper gives up and marks it errored.
+const MAX_RESUME_ATTEMPTS: i64 = 2;
+
+// ---------------------------------------------------------------------------
+// Per-agent cancellation registry (mirrors skill_eval::CancelRegistry)
+// ---------------------------------------------------------------------------
+
+/// Maps analysis-agent id → a cancel flag, so a manual Stop (or shutdown) can
+/// signal an in-flight `run_agent_with_recovery` to abort without it being
+/// mistaken for a failure (which would auto-retry).
+pub use otto_core::cancel::{new_cancel_registry, CancelRegistry};
+
+/// Trip the cancel flag for `agent_id` if it is registered (in-flight).
+pub fn signal_cancel(reg: &CancelRegistry, agent_id: &str) {
+    if let Some(flag) = reg.lock().unwrap().get(agent_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Cancel-registry key prefix of a story run WITHOUT an agent row (rewrite,
+/// test generation, plan generation): `story:<sid>:<unique>` (S4-23).
+const STORY_RUN_CANCEL_PREFIX: &str = "story:";
+
+/// A fresh cancel key for one agent-row-less run of `story_id`, so deleting
+/// the story can stop it ([`signal_story_cancels`]) instead of the recovery
+/// loop respawning a killed session.
+pub fn story_run_cancel_key(story_id: &str) -> String {
+    format!(
+        "{STORY_RUN_CANCEL_PREFIX}{story_id}:{}",
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Trip every in-flight rewrite / test / plan run of `story_id` (S4-23).
+pub fn signal_story_cancels(reg: &CancelRegistry, story_id: &str) {
+    let prefix = format!("{STORY_RUN_CANCEL_PREFIX}{story_id}:");
+    for (key, flag) in reg.lock().unwrap().iter() {
+        if key.starts_with(&prefix) {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// One lens agent's outcome after running as a real session.
+struct LensOutcome {
+    name: String,
+    provider: String,
+    /// The findings JSON we persisted for the agent row (canonicalised).
+    findings_json: Option<String>,
+    findings: Option<Findings>,
+    errored: bool,
+}
+
+/// Run the full analysis fan-out for a story.  Spawned as a background tokio
+/// task by the analyze handler.  Returns `()` — all errors are logged and
+/// isolated; no panic propagates.
+///
+/// Every entry in `specs` is one (lens × provider) and runs as its own real,
+/// openable session (claude / codex / agy all honored). A final summarizer
+/// session consolidates, dedupes, and resolves conflicts across all lenses.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_analysis<C: ProductRunHost>(
+    ctx: C,
+    ws: otto_core::domain::Workspace,
+    user_id: otto_core::Id,
+    story_id: otto_core::Id,
+    analysis_id: otto_core::Id,
+    specs: Vec<AgentSpec>,
+    summarizer_provider: String,
+    cwd: String,
+    focus: Option<String>,
+) {
+    // 1. Load story title (for summarizer prompt) + build the shared context file.
+    let story = match ctx.product_repo().get_story(&story_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("product_run: get_story {story_id}: {e}");
+            let _ = ctx
+                .product_repo()
+                .set_analysis_status(&analysis_id, "error", Some("failed to load story"), true)
+                .await;
+            return;
+        }
+    };
+
+    let story_title = story.title.clone();
+
+    // Build the enriched context document and write it to a temp file shared
+    // by all lens agents. On error, fall back to bare story body.
+    let context_path = std::env::temp_dir().join(format!("otto-product-{analysis_id}-context.md"));
+    {
+        let context_md = match ctx
+            .product()
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
+            Ok(md) => md,
+            Err(e) => {
+                warn!("product_run: build_agent_context: {e}; falling back to story body");
+                // Fallback: bare story body.
+                let body = match ctx.product_repo().latest_source_version(&story_id).await {
+                    Ok(Some(v)) => v.body_md,
+                    _ => String::new(),
+                };
+                format!("# {story_title}\n\n## Story\n\n{body}\n")
+            }
+        };
+        if let Err(e) = std::fs::write(&context_path, &context_md) {
+            warn!("product_run: write context file: {e}");
+        }
+    }
+    let context_path_str = context_path.to_string_lossy().to_string();
+
+    // 2. Pre-trust every distinct provider on cwd (mirror review) so no session
+    //    stalls on the interactive "trust this folder?" prompt and times out.
+    {
+        let mut trusted = HashSet::<String>::new();
+        for provider in specs
+            .iter()
+            .map(|s| s.provider.clone())
+            .chain(std::iter::once(summarizer_provider.clone()))
+        {
+            if trusted.insert(provider.clone()) {
+                otto_sessions::trust::ensure_trusted(&provider, &cwd);
+            }
+        }
+    }
+
+    // 3. Per-(lens × provider) concurrent fan-out as real sessions ------------
+    // For each spec: create the agent row (status=running), build the lens
+    // prompt (skill body + context-file ref + write-to-file), run a real
+    // session, record session_id, persist findings. Failures are isolated.
+    let mut set = tokio::task::JoinSet::new();
+    for (i, spec) in specs.into_iter().enumerate() {
+        let ctx = ctx.clone();
+        let ws = ws.clone();
+        let user_id = user_id.clone();
+        let analysis_id = analysis_id.clone();
+        let _story_title = story_title.clone();
+        let story_id = story_id.clone();
+        let context_path_str = context_path_str.clone();
+        // Per-spec session cwd: when the story has no real cwd we fell back to the
+        // shared temp dir; give EACH lens session its own unique temp subdir so the
+        // codex usage tailer attributes them 1:1 by cwd instead of colliding. A real
+        // story cwd passes through unchanged (the architecture lens needs the repo).
+        let cwd = session_cwd(&cwd);
+
+        set.spawn(async move {
+            // Create the agent row (status = "running"). The display name
+            // disambiguates the lens across providers, like review.
+            let agent = match ctx
+                .product_repo()
+                .add_analysis_agent(NewAnalysisAgent {
+                    analysis_id: analysis_id.clone(),
+                    name: format!("{} \u{00b7} {}", spec.name, spec.provider),
+                    skill: spec.skill.clone(),
+                    provider: spec.provider.clone(),
+                    model: spec.model.clone().unwrap_or_default(),
+                    status: "running".into(),
+                    session_id: None,
+                })
+                .await
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("product_run: add_analysis_agent '{}': {e}", spec.name);
+                    return LensOutcome {
+                        name: spec.name.clone(),
+                        provider: spec.provider.clone(),
+                        findings_json: None,
+                        findings: None,
+                        errored: true,
+                    };
+                }
+            };
+            let agent_id = agent.id.clone();
+
+            // Resolve skill body: library first, then bundled, then empty.
+            let skill_body = ctx
+                .context_library()
+                .get_skill(&spec.skill)
+                .map(|s| s.body)
+                .or_else(|| crate::skill_body(&spec.skill).map(|s| s.to_string()))
+                .unwrap_or_default();
+
+            // Build the lens prompt (context lives in the context file) +
+            // append the write-to-file instruction.
+            let out_path = std::env::temp_dir()
+                .join(format!("otto-product-{analysis_id}-{i}.json"));
+            let base_prompt = build_analysis_prompt(&skill_body, &context_path_str, None);
+            let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
+
+            // Run as a real, openable session honoring this spec's provider.
+            // Each lens carries its own model (persisted on the agent row above);
+            // pass it through so SessionManager injects `--model <name>` for
+            // providers that support it (empty is filtered inside recovery).
+            // Work-graph: attribute this session to the source story.
+            let lens_work = serde_json::to_value(WorkRef {
+                story_id: Some(story_id.clone()),
+                origin: Some("product".into()),
+                ..Default::default()
+            })
+            .ok();
+            let result = ctx.run_agent_with_recovery(
+                &ws,
+                &user_id,
+                &spec.provider,
+                spec.model.as_deref(),
+                lens_work,
+                &cwd,
+                &prompt,
+                &out_path,
+                LENS_TIMEOUT,
+                Some(&agent_id),
+                &SessionAppearance::analysis(&spec.provider),
+                None,
+            )
+            .await;
+
+            // Record the session id so the UI can Open the live terminal.
+            if let Some(ref sid) = result.session_id {
+                if let Err(e) = ctx.product_repo().set_agent_session(&agent_id, sid).await {
+                    warn!("product_run: set_agent_session {agent_id}: {e}");
+                }
+            }
+
+            // Parse + persist the outcome.
+            let parsed = result
+                .raw
+                .as_deref()
+                .and_then(extract_json_block)
+                .and_then(|v| serde_json::from_value::<Findings>(v).ok());
+
+            match (result.errored, parsed) {
+                (false, Some(findings)) => {
+                    let findings_json = serde_json::to_string(&serde_json::json!({
+                        "summary": findings.summary,
+                        "related_repos": findings.related_repos,
+                        "functionalities": findings.functionalities,
+                        "integration_points": findings.integration_points,
+                        "risks": findings.risks,
+                        "open_questions": findings.open_questions.iter().map(|q| serde_json::json!({"text": q.text, "rationale": q.rationale, "category": q.category})).collect::<Vec<_>>(),
+                        "suggested_learnings": findings.suggested_learnings.iter().map(|l| serde_json::json!({"kind": l.kind, "title": l.title, "body": l.body})).collect::<Vec<_>>(),
+                    }))
+                    .unwrap_or_default();
+                    if let Err(e) = ctx
+                        .product_repo()
+                        .set_agent_status(&agent_id, "done", Some(&findings_json), None, true)
+                        .await
+                    {
+                        warn!("product_run: set_agent_status done {agent_id}: {e}");
+                    }
+                    LensOutcome {
+                        name: spec.name.clone(),
+                        provider: spec.provider.clone(),
+                        findings_json: Some(findings_json),
+                        findings: Some(findings),
+                        errored: false,
+                    }
+                }
+                _ if result.reason == Some(SUPERSEDED) => LensOutcome {
+                    name: spec.name.clone(),
+                    provider: spec.provider.clone(),
+                    findings_json: None,
+                    findings: None,
+                    errored: true,
+                },
+                _ => {
+                    let stopped = result.reason == Some("stopped");
+                    let err = if result.errored {
+                        match result.reason {
+                            Some("stopped") => "stopped by user".to_string(),
+                            Some(r) => format!("agent failed after {MAX_AGENT_ATTEMPTS} attempts ({r})"),
+                            None => "session produced no output (timeout/exit/start failure)".to_string(),
+                        }
+                    } else {
+                        format!(
+                            "could not parse Findings JSON from agent output (len={})",
+                            result.raw.as_deref().map(|s| s.len()).unwrap_or(0)
+                        )
+                    };
+                    warn!("product_run: lens '{}' ({}) failed: {err}", spec.name, spec.provider);
+                    let _ = ctx
+                        .product_repo()
+                        .set_agent_status(&agent_id, "error", None, Some(&err), true)
+                        .await;
+                    // Surface genuine failures (not user-initiated stops) so an
+                    // unattended pipeline notices instead of silently degrading.
+                    if !stopped {
+                        let _ = ctx.events().send(otto_core::event::Event::Notice {
+                            level: "warn".into(),
+                            title: format!("Analysis agent failed: {} · {}", spec.name, spec.provider),
+                            body: err.clone(),
+                        });
+                    }
+                    LensOutcome {
+                        name: spec.name.clone(),
+                        provider: spec.provider.clone(),
+                        findings_json: None,
+                        findings: None,
+                        errored: true,
+                    }
+                }
+            }
+        });
+    }
+
+    let mut outcomes: Vec<LensOutcome> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(o) = joined {
+            outcomes.push(o);
+        }
+    }
+
+    let any_errored = outcomes.iter().any(|o| o.errored);
+    let lens_count = outcomes.len();
+
+    // Successful lenses (name, provider, findings_json) feed the summarizer.
+    let successful: Vec<(String, String, String)> = outcomes
+        .iter()
+        .filter_map(|o| {
+            o.findings_json
+                .as_ref()
+                .map(|j| (o.name.clone(), o.provider.clone(), j.clone()))
+        })
+        .collect();
+
+    // 4. Summarizer session: ONE agent consolidates / dedupes / resolves -------
+    let summarizer_skill_body = ctx
+        .context_library()
+        .get_skill("po-story-overview")
+        .map(|s| s.body)
+        .or_else(|| crate::skill_body("po-story-overview").map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let summarizer_agent = ctx
+        .product_repo()
+        .add_analysis_agent(NewAnalysisAgent {
+            analysis_id: analysis_id.clone(),
+            name: format!("{SUMMARIZER_NAME_PREFIX}{summarizer_provider}"),
+            skill: "po-story-overview".into(),
+            provider: summarizer_provider.clone(),
+            model: String::new(),
+            status: "running".into(),
+            session_id: None,
+        })
+        .await
+        .ok();
+
+    let summary: Option<SummaryFindings> = if successful.is_empty() {
+        // No lens produced findings → nothing to consolidate. Don't leave the
+        // summarizer row stuck in "running" (it would show as a perpetual
+        // spinner with no openable session).
+        if let Some(ref agent) = summarizer_agent {
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent.id,
+                    "error",
+                    None,
+                    Some("no successful lens outputs to consolidate"),
+                    true,
+                )
+                .await;
+        }
+        None
+    } else {
+        let out_path =
+            std::env::temp_dir().join(format!("otto-product-{analysis_id}-summary.json"));
+        let base = build_summarizer_prompt(&summarizer_skill_body, &story_title, &successful);
+        let prompt = augment_with_out_path(&base, &out_path.to_string_lossy());
+
+        // Own unique session cwd for the summarizer (same temp-fallback fix as the
+        // lenses); a real story cwd passes through unchanged.
+        let summarizer_cwd = session_cwd(&cwd);
+        let summarizer_work = serde_json::to_value(WorkRef {
+            story_id: Some(story_id.clone()),
+            origin: Some("product".into()),
+            ..Default::default()
+        })
+        .ok();
+        let result = ctx
+            .run_agent_with_recovery(
+                &ws,
+                &user_id,
+                &summarizer_provider,
+                None, // no model override for the summarizer; uses provider default
+                summarizer_work,
+                &summarizer_cwd,
+                &prompt,
+                &out_path,
+                SUMMARIZER_TIMEOUT,
+                summarizer_agent.as_ref().map(|a| &a.id),
+                &SessionAppearance::analysis(&summarizer_provider),
+                None,
+            )
+            .await;
+
+        if let Some(ref agent) = summarizer_agent {
+            if let Some(ref sid) = result.session_id {
+                let _ = ctx.product_repo().set_agent_session(&agent.id, sid).await;
+            }
+        }
+
+        let parsed = result
+            .raw
+            .as_deref()
+            .and_then(extract_json_block)
+            .and_then(|v| serde_json::from_value::<SummaryFindings>(v).ok());
+
+        // Persist the summarizer agent row.
+        if let Some(ref agent) = summarizer_agent {
+            match (&parsed, result.errored) {
+                (Some(_), _) => {
+                    let _ = ctx
+                        .product_repo()
+                        .set_agent_status(&agent.id, "done", result.raw.as_deref(), None, true)
+                        .await;
+                }
+                (None, _) => {
+                    let _ = ctx
+                        .product_repo()
+                        .set_agent_status(
+                            &agent.id,
+                            "error",
+                            None,
+                            Some("summarizer produced no parseable JSON"),
+                            true,
+                        )
+                        .await;
+                }
+            }
+        }
+
+        parsed
+    };
+
+    // 5. Persist questions + learnings ----------------------------------------
+    // The summarizer's deduped questions REPLACE the old per-lens Rust dedup.
+    // Fall back to the Rust-side merge only if the summarizer failed.
+    let existing_questions = ctx
+        .product_repo()
+        .list_questions(&story_id)
+        .await
+        .unwrap_or_default();
+    let mut seen_texts: HashSet<String> = existing_questions
+        .iter()
+        .map(|q| q.text.trim().to_lowercase())
+        .collect();
+    let mut question_count = 0usize;
+
+    let mut create_question = |q_text: &str, rationale: &str, category: &str| {
+        let norm = q_text.trim().to_lowercase();
+        if norm.is_empty() || seen_texts.contains(&norm) {
+            return None;
+        }
+        seen_texts.insert(norm);
+        Some(NewQuestion {
+            story_id: story_id.clone(),
+            analysis_id: Some(analysis_id.clone()),
+            text: q_text.to_string(),
+            rationale: rationale.to_string(),
+            category: category.to_string(),
+            created_by: story.created_by.clone(),
+        })
+    };
+
+    // Gather the questions to create (summarizer-first; else fallback).
+    let mut to_create: Vec<NewQuestion> = Vec::new();
+    if let Some(ref s) = summary {
+        for q in &s.questions {
+            if let Some(nq) = create_question(&q.text, &q.rationale, &q.category) {
+                to_create.push(nq);
+            }
+        }
+    } else {
+        for o in &outcomes {
+            if let Some(ref f) = o.findings {
+                for q in &f.open_questions {
+                    if let Some(nq) = create_question(&q.text, &q.rationale, &q.category) {
+                        to_create.push(nq);
+                    }
+                }
+            }
+        }
+    }
+    #[allow(clippy::drop_non_drop)]
+    drop(create_question);
+    for nq in to_create {
+        if let Err(e) = ctx.product_repo().create_question(nq).await {
+            warn!("product_run: create_question: {e}");
+        } else {
+            question_count += 1;
+        }
+    }
+
+    // Suggested learnings → inactive product_learnings (summarizer-first).
+    let suggested: Vec<(&str, &str, &str)> = if let Some(ref s) = summary {
+        s.suggested_learnings
+            .iter()
+            .map(|l| (l.kind.as_str(), l.title.as_str(), l.body.as_str()))
+            .collect()
+    } else {
+        outcomes
+            .iter()
+            .filter_map(|o| o.findings.as_ref())
+            .flat_map(|f| f.suggested_learnings.iter())
+            .map(|l| (l.kind.as_str(), l.title.as_str(), l.body.as_str()))
+            .collect()
+    };
+    for (kind, title, body) in suggested {
+        if title.trim().is_empty() {
+            continue;
+        }
+        let created = ctx
+            .product_repo()
+            .create_learning(NewLearning {
+                workspace_id: story.workspace_id.clone(),
+                kind: kind.to_string(),
+                title: title.to_string(),
+                body: body.to_string(),
+                tags: String::new(),
+                refs_json: "[]".into(),
+                source_story_id: Some(story_id.clone()),
+                created_by: story.created_by.clone(),
+            })
+            .await;
+        match created {
+            Ok(learning) => {
+                // create_learning hardcodes active=1; flip to inactive so
+                // suggested learnings require human review before use.
+                if let Err(e) = ctx
+                    .product_repo()
+                    .update_learning(
+                        &learning.id,
+                        LearningPatch {
+                            kind: None,
+                            title: None,
+                            body: None,
+                            tags: None,
+                            refs_json: None,
+                            active: Some(false),
+                        },
+                    )
+                    .await
+                {
+                    warn!("product_run: deactivate learning {}: {e}", learning.id);
+                }
+            }
+            Err(e) => warn!("product_run: create_learning '{title}': {e}"),
+        }
+    }
+
+    // 6. Finalise analysis row -------------------------------------------------
+    let final_summary = match &summary {
+        Some(s) if !s.summary.trim().is_empty() => s.summary.clone(),
+        _ => {
+            // Fallback: concat successful lens summaries.
+            let joined = outcomes
+                .iter()
+                .filter_map(|o| o.findings.as_ref())
+                .map(|f| f.summary.clone())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            if joined.is_empty() {
+                "(no agent summaries available)".to_string()
+            } else {
+                joined
+            }
+        }
+    };
+    let final_status = if any_errored { "partial" } else { "done" };
+    if let Err(e) = ctx
+        .product_repo()
+        .set_analysis_status(&analysis_id, final_status, Some(&final_summary), true)
+        .await
+    {
+        warn!("product_run: set_analysis_status: {e}");
+    }
+    // Notify subscribed UI tabs so they can refresh without waiting for the next poll.
+    let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
+        workspace_id: ws.id.clone(),
+        story_id: story_id.clone(),
+        section: "analysis".into(),
+        status: final_status.into(),
+    });
+
+    // 7. Update story stage to "analyzed" -------------------------------------
+    if let Err(e) = ctx
+        .product_repo()
+        .update_story(
+            &story_id,
+            StoryPatch {
+                stage: Some("analyzed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        warn!("product_run: update_story stage: {e}");
+    }
+
+    // 8. Append event ---------------------------------------------------------
+    let summary_event =
+        format!("analysis completed: {lens_count} lens agent(s), {question_count} new question(s)");
+    if let Err(e) = ctx
+        .product_repo()
+        .add_event(NewEvent {
+            story_id: story_id.clone(),
+            section: "analysis".into(),
+            kind: "analyzed".into(),
+            summary: summary_event,
+            actor_id: None,
+            meta_json: None,
+        })
+        .await
+    {
+        warn!("product_run: add_event: {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-agent retry — re-run a single failed / stuck analysis lens agent.
+// ---------------------------------------------------------------------------
+
+/// Re-run a single analysis lens agent by id.  Mirrors one iteration of the
+/// `run_analysis` per-agent loop but operates on an EXISTING agent row rather
+/// than creating a new one.  The summarizer is NOT re-run; only the one lens.
+///
+/// All errors are isolated — nothing panics.  The caller (the HTTP handler)
+/// spawns this as a background task and returns 202 immediately.
+pub async fn retry_analysis_agent<C: ProductRunHost>(
+    ctx: C,
+    ws: otto_core::domain::Workspace,
+    user_id: Id,
+    analysis_id: Id,
+    agent_id: Id,
+) {
+    // 1. Load the agent row.
+    let agent = match ctx.product_repo().get_analysis_agent(&agent_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("product_run(retry): get_analysis_agent {agent_id}: {e}");
+            return;
+        }
+    };
+
+    // 2. Verify the agent belongs to the requested analysis.
+    if agent.analysis_id != analysis_id {
+        warn!("product_run(retry): agent {agent_id} does not belong to analysis {analysis_id}");
+        return;
+    }
+
+    // 3. Load the analysis → story (for context_path + cwd).
+    let analysis = match ctx.product_repo().get_analysis(&analysis_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("product_run(retry): get_analysis {analysis_id}: {e}");
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: analysis not found"),
+                    true,
+                )
+                .await;
+            return;
+        }
+    };
+
+    let story = match ctx.product_repo().get_story(&analysis.story_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("product_run(retry): get_story {}: {e}", analysis.story_id);
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: story not found"),
+                    true,
+                )
+                .await;
+            return;
+        }
+    };
+
+    // 4. Mark the agent row "running" and clear prior error.
+    let clear_err: Option<&str> = None;
+    if let Err(e) = ctx
+        .product_repo()
+        .set_agent_status(&agent_id, "running", None, clear_err, false)
+        .await
+    {
+        warn!("product_run(retry): set_agent_status running {agent_id}: {e}");
+    }
+    // Clear the error field explicitly by re-setting to None via a raw update.
+    // (set_agent_status merges existing error; we want a clean slate.)
+    // We do this by passing empty-string error and relying on the merge — the
+    // empty string is better than the old error text for the UI.
+    // (No separate "clear_error" API; the empty string approach is idiomatic here.)
+
+    // 5. Pre-trust provider. As in the fan-out, a missing story cwd falls back to
+    // the shared temp dir; rewrite that to a unique per-session subdir so codex
+    // usage attributes this retry 1:1 by cwd. A real story cwd passes unchanged.
+    let cwd = session_cwd(
+        &story
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string()),
+    );
+    trust_session_cwd(&agent.provider, &cwd);
+
+    // 6. Rebuild context file (shared with this analysis's context path, or
+    // fresh). Unlike the fan-out (which embeds daemon-minted ids), the retry ids
+    // arrive as route params — confine the temp-dir joins so a hostile id can't
+    // steer the scratch files (rust/path-injection).
+    let context_path = match otto_core::paths::confine_join(
+        &std::env::temp_dir(),
+        &format!("otto-product-{analysis_id}-context.md"),
+    ) {
+        Some(p) => p,
+        None => {
+            warn!("product_run(retry): unsafe analysis id {analysis_id}");
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: unsafe analysis id"),
+                    true,
+                )
+                .await;
+            return;
+        }
+    };
+    if !context_path.exists() {
+        // Context file was cleaned up; rebuild it.
+        let context_md = match ctx
+            .product()
+            .build_agent_context(&analysis.story_id, None)
+            .await
+        {
+            Ok(md) => md,
+            Err(e) => {
+                warn!("product_run(retry): build_agent_context: {e}; falling back to story body");
+                let body = match ctx
+                    .product_repo()
+                    .latest_source_version(&analysis.story_id)
+                    .await
+                {
+                    Ok(Some(v)) => v.body_md,
+                    _ => String::new(),
+                };
+                format!("# {}\n\n## Story\n\n{body}\n", story.title)
+            }
+        };
+        if let Err(e) = std::fs::write(&context_path, &context_md) {
+            warn!("product_run(retry): write context file: {e}");
+        }
+    }
+    let context_path_str = context_path.to_string_lossy().to_string();
+
+    // 7. Resolve skill body.
+    let skill_body = ctx
+        .context_library()
+        .get_skill(&agent.skill)
+        .map(|s| s.body)
+        .or_else(|| crate::skill_body(&agent.skill).map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    // 8. Build prompt + unique out_path (use agent_id for uniqueness). Same
+    // route-param confinement as the context file above.
+    let out_path = match otto_core::paths::confine_join(
+        &std::env::temp_dir(),
+        &format!("otto-product-{analysis_id}-retry-{agent_id}.json"),
+    ) {
+        Some(p) => p,
+        None => {
+            warn!("product_run(retry): unsafe agent id {agent_id}");
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent_id,
+                    "error",
+                    None,
+                    Some("retry: unsafe agent id"),
+                    true,
+                )
+                .await;
+            return;
+        }
+    };
+    let base_prompt = build_analysis_prompt(&skill_body, &context_path_str, None);
+    let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
+
+    // 9. Run the session.  Attribute cost to the source story.
+    let retry_work = serde_json::to_value(WorkRef {
+        story_id: Some(analysis.story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
+    let result = ctx
+        .run_agent_with_recovery(
+            &ws,
+            &user_id,
+            &agent.provider,
+            None, // retry path: no model override; agent row already has its provider
+            retry_work,
+            &cwd,
+            &prompt,
+            &out_path,
+            LENS_TIMEOUT,
+            Some(&agent_id),
+            &SessionAppearance::analysis(&agent.provider),
+            None,
+        )
+        .await;
+
+    // 10. Record the new session id.
+    if let Some(ref sid) = result.session_id {
+        if let Err(e) = ctx.product_repo().set_agent_session(&agent_id, sid).await {
+            warn!("product_run(retry): set_agent_session {agent_id}: {e}");
+        }
+    }
+
+    // 11. Parse + persist outcome — mirrors the run_analysis per-agent logic.
+    let parsed = result
+        .raw
+        .as_deref()
+        .and_then(extract_json_block)
+        .and_then(|v| serde_json::from_value::<Findings>(v).ok());
+
+    match (result.errored, parsed) {
+        (false, Some(findings)) => {
+            let findings_json = serde_json::to_string(&serde_json::json!({
+                "summary": findings.summary,
+                "related_repos": findings.related_repos,
+                "functionalities": findings.functionalities,
+                "integration_points": findings.integration_points,
+                "risks": findings.risks,
+                "open_questions": findings.open_questions.iter().map(|q| serde_json::json!({"text": q.text, "rationale": q.rationale, "category": q.category})).collect::<Vec<_>>(),
+                "suggested_learnings": findings.suggested_learnings.iter().map(|l| serde_json::json!({"kind": l.kind, "title": l.title, "body": l.body})).collect::<Vec<_>>(),
+            }))
+            .unwrap_or_default();
+            if let Err(e) = ctx
+                .product_repo()
+                .set_agent_status(&agent_id, "done", Some(&findings_json), None, true)
+                .await
+            {
+                warn!("product_run(retry): set_agent_status done {agent_id}: {e}");
+            }
+        }
+        _ if result.reason == Some(SUPERSEDED) => {}
+        _ => {
+            let err = if result.errored {
+                "retry: session produced no output (timeout/exit/start failure)".to_string()
+            } else {
+                format!(
+                    "retry: could not parse Findings JSON from agent output (len={})",
+                    result.raw.as_deref().map(|s| s.len()).unwrap_or(0)
+                )
+            };
+            warn!("product_run(retry): agent {agent_id} failed: {err}");
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(&agent_id, "error", None, Some(&err), true)
+                .await;
+            if result.reason != Some("stopped") {
+                let _ = ctx.events().send(otto_core::event::Event::Notice {
+                    level: "warn".into(),
+                    title: format!("Analysis agent failed: {}", agent.name),
+                    body: err.clone(),
+                });
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orphan reaper — auto-resume analysis agents stranded by a daemon restart
+// ---------------------------------------------------------------------------
+
+/// Summary stamped on an analysis the boot reaper finalizes (S4-10).
+pub const INTERRUPTED_SUMMARY: &str =
+    "Interrupted by a daemon restart before the summary — re-run the analysis to consolidate.";
+
+/// Display-name prefix of the summarizer agent row (see `run_analysis`).
+pub const SUMMARIZER_NAME_PREFIX: &str = "Summarizer \u{00b7} ";
+
+/// True for the analysis's summarizer row (not a lens).
+pub fn is_summarizer_agent(name: &str) -> bool {
+    name.starts_with(SUMMARIZER_NAME_PREFIX)
+}
+
+/// Run ONCE at daemon startup. After a restart, any analysis agent still in
+/// `running`/`waiting` has no surviving task driving it, so it is orphaned.
+/// For each: if it hasn't exhausted its resume budget, re-run it via
+/// [`retry_analysis_agent`] (which rebuilds context + prompt from the DB and runs
+/// with full recovery); otherwise mark it errored and notify. Running this only at
+/// startup avoids racing legitimately-in-flight agents (there are none yet).
+pub async fn reap_orphaned_agents_on_startup<C: ProductRunHost>(ctx: C) {
+    // The analysis rows themselves (S4-10): `run_analysis` — the only writer of
+    // their final status — died with the previous daemon, so a `running` row
+    // would spin the Analysis tab forever. Finalize each as `partial` (a
+    // terminal status the UI understands); resumed lens agents still land
+    // their findings on their own rows, and a re-run re-summarizes.
+    match ctx.product_repo().list_running_analyses().await {
+        Ok(running) => {
+            for a in running {
+                let _ = ctx
+                    .product_repo()
+                    .set_analysis_status(&a.id, "partial", Some(INTERRUPTED_SUMMARY), true)
+                    .await;
+            }
+        }
+        Err(e) => warn!("orphan reaper: list_running_analyses failed: {e}"),
+    }
+    let agents = match ctx.product_repo().list_unfinished_agents().await {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("orphan reaper: list_unfinished_agents failed: {e}");
+            return;
+        }
+    };
+    if agents.is_empty() {
+        return;
+    }
+    warn!(
+        "orphan reaper: {} unfinished analysis agent(s) after restart",
+        agents.len()
+    );
+
+    for agent in agents {
+        // The summarizer is not a lens: re-running it through the lens retry
+        // would store lens findings on the summarizer row (S4-10).
+        if is_summarizer_agent(&agent.name) {
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent.id,
+                    "error",
+                    None,
+                    Some("interrupted by daemon restart — re-run the analysis to re-summarize"),
+                    true,
+                )
+                .await;
+            continue;
+        }
+        let analysis = match ctx.product_repo().get_analysis(&agent.analysis_id).await {
+            Ok(a) => a,
+            Err(_) => {
+                let _ = ctx
+                    .product_repo()
+                    .set_agent_status(
+                        &agent.id,
+                        "error",
+                        None,
+                        Some("interrupted (restart); analysis gone"),
+                        true,
+                    )
+                    .await;
+                continue;
+            }
+        };
+        let story = match ctx.product_repo().get_story(&analysis.story_id).await {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = ctx
+                    .product_repo()
+                    .set_agent_status(
+                        &agent.id,
+                        "error",
+                        None,
+                        Some("interrupted (restart); story gone"),
+                        true,
+                    )
+                    .await;
+                continue;
+            }
+        };
+
+        if agent.resume_count >= MAX_RESUME_ATTEMPTS {
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent.id,
+                    "error",
+                    None,
+                    Some("interrupted by daemon restart — gave up after auto-resumes"),
+                    true,
+                )
+                .await;
+            let _ = ctx.events().send(otto_core::event::Event::Notice {
+                level: "warn".into(),
+                title: format!("Analysis agent abandoned: {}", agent.name),
+                body: "Restarted too many times to auto-resume.".into(),
+            });
+            continue;
+        }
+
+        let ws = match ctx.workspaces().get(&story.workspace_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(
+                    "orphan reaper: workspace {} load failed: {e}",
+                    story.workspace_id
+                );
+                continue;
+            }
+        };
+
+        let _ = ctx.product_repo().bump_resume_count(&agent.id).await;
+        let _ = ctx.events().send(otto_core::event::Event::Notice {
+            level: "info".into(),
+            title: format!("Resuming analysis agent: {}", agent.name),
+            body: "Re-running after a daemon restart.".into(),
+        });
+        tokio::spawn(retry_analysis_agent(
+            ctx.clone(),
+            ws,
+            story.created_by.clone(),
+            analysis.id.clone(),
+            agent.id.clone(),
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rewrite output contract appended to the writer prompt.
+// ---------------------------------------------------------------------------
+
+const REWRITE_OUTPUT_CONTRACT: &str = r#"Respond with EXACTLY ONE ```json code block (no prose) matching:
+{"title":"...","body_markdown":"...","change_notes":"..."}"#;
+
+// ---------------------------------------------------------------------------
+// build_rewrite_prompt — pure, unit-testable
+// ---------------------------------------------------------------------------
+
+/// Build the full rewrite prompt for the writer agent.
+///
+/// The story context (body, learnings, Jira details, answered questions) now
+/// lives in a separate CONTEXT file. This keeps the prompt compact while allowing
+/// arbitrarily large context.
+///
+/// Prompt body: writer skill body + file-read directive + OUTPUT CONTRACT.
+pub fn build_rewrite_prompt(writer_skill_body: &str, context_path: &str) -> String {
+    let mut prompt = String::new();
+
+    // 1. Writer skill body
+    prompt.push_str(writer_skill_body);
+    prompt.push_str("\n\n---\n\n");
+
+    // 2. Context file directive
+    prompt.push_str(
+        "The full story context (body, answered questions, analysis summary, learnings) is in \
+         this file — it may be LARGE, read it fully (in chunks if needed) before writing:\n",
+    );
+    prompt.push_str(context_path);
+    prompt.push_str("\n\n");
+
+    // 3. OUTPUT CONTRACT (verbatim)
+    prompt.push_str("---\n\n");
+    prompt.push_str(REWRITE_OUTPUT_CONTRACT);
+    prompt.push('\n');
+
+    prompt
+}
+
+// ---------------------------------------------------------------------------
+// run_rewrite — spawned as a background task by the rewrite handler
+// ---------------------------------------------------------------------------
+
+/// Parsed response from the writer agent.
+#[derive(serde::Deserialize)]
+struct RewriteFindings {
+    title: String,
+    body_markdown: String,
+    change_notes: String,
+}
+
+/// Run the rewrite for a story.  Spawned as a background tokio task.
+/// Returns `()` — all errors are logged; no panic propagates.
+///
+/// Provider-honoring: runs via `run_lens_session` (not `orchestrator.run_agent`),
+/// so claude / codex / agy are all honored.  Context is written to a temp file.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_rewrite<C: ProductRunHost>(
+    ctx: C,
+    ws: otto_core::domain::Workspace,
+    user_id: otto_core::Id,
+    story_id: otto_core::Id,
+    provider: String,
+    model: Option<String>,
+    cwd: String,
+    focus: Option<String>,
+) {
+    // Per-invocation session cwd: when there's no real story cwd we fell back to
+    // the shared temp dir; give this rewrite session its own unique temp subdir so
+    // the codex usage tailer attributes it 1:1 by cwd (re-running rewrite for the
+    // same story never collides). A real story cwd passes through unchanged.
+    let cwd = session_cwd(&cwd);
+
+    // 1. Load story
+    let story = match ctx.product_repo().get_story(&story_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("product_run(rewrite): get_story {story_id}: {e}");
+            return;
+        }
+    };
+
+    // 2. Pick writer skill: jira → jira-story-writer, else → rfc-writer
+    let writer_skill_name = if story.source_kind == "jira" {
+        "jira-story-writer"
+    } else {
+        "rfc-writer"
+    };
+
+    let skill_body = ctx
+        .context_library()
+        .get_skill(writer_skill_name)
+        .map(|s| s.body)
+        .or_else(|| crate::skill_body(writer_skill_name).map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    // 3. Build context file (enriched with Jira details, answered Q&A, learnings).
+    //    The rewrite context also includes answered questions and analysis summary
+    //    (build_agent_context provides story body + Jira + learnings; we enrich
+    //    further here with the answered questions and analysis summary).
+    let rewrite_id = otto_core::new_id();
+    let context_path =
+        std::env::temp_dir().join(format!("otto-product-rewrite-{rewrite_id}-context.md"));
+
+    {
+        let mut context_md = match ctx
+            .product()
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
+            Ok(md) => md,
+            Err(e) => {
+                warn!("product_run(rewrite): build_agent_context: {e}");
+                let body = match ctx.product_repo().latest_source_version(&story_id).await {
+                    Ok(Some(v)) => v.body_md,
+                    _ => String::new(),
+                };
+                format!("# {}\n\n## Story\n\n{body}\n", story.title)
+            }
+        };
+
+        // Append answered questions (important for the writer).
+        let answered: Vec<otto_state::ProductQuestion> = ctx
+            .product_repo()
+            .list_questions(&story_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|q| q.status == "answered")
+            .collect();
+        if !answered.is_empty() {
+            context_md.push_str("\n## Answered Questions\n\n");
+            for q in &answered {
+                context_md.push_str(&format!("**Q:** {}\n", q.text));
+                if let Some(ref ans) = q.answer {
+                    if !ans.trim().is_empty() {
+                        context_md.push_str(&format!("**A:** {}\n", ans));
+                    }
+                }
+                context_md.push('\n');
+            }
+        }
+
+        // Append latest analysis summary.
+        let analysis_summary = {
+            let analyses = ctx
+                .product_repo()
+                .list_analyses(&story_id)
+                .await
+                .unwrap_or_default();
+            analyses
+                .into_iter()
+                .max_by_key(|a| a.created_at)
+                .map(|a| a.summary)
+                .unwrap_or_default()
+        };
+        if !analysis_summary.trim().is_empty() {
+            context_md.push_str("\n## Analysis Summary\n\n");
+            context_md.push_str(&analysis_summary);
+            context_md.push('\n');
+        }
+
+        if let Err(e) = std::fs::write(&context_path, &context_md) {
+            warn!("product_run(rewrite): write context file: {e}");
+        }
+    }
+
+    // 4. Build prompt (references the context file) + out_path for JSON output.
+    let out_path = std::env::temp_dir().join(format!("otto-product-rewrite-{rewrite_id}.json"));
+    let base_prompt = build_rewrite_prompt(&skill_body, &context_path.to_string_lossy());
+    let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
+
+    // 5. Pre-trust provider.
+    trust_session_cwd(&provider, &cwd);
+
+    // 6. Run as a provider-honoring session.  The requested model (if any) is
+    //    injected by run_agent_with_recovery → run_lens_session → SessionManager
+    //    for providers that support `--model` (claude/codex). For agy/shell the
+    //    model value is stored in meta for attribution only.
+    //    Stamp the session with a WorkRef so cost is attributed to this story.
+    let rewrite_work = serde_json::to_value(WorkRef {
+        story_id: Some(story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
+    let result = ctx
+        .run_agent_with_recovery(
+            &ws,
+            &user_id,
+            &provider,
+            model.as_deref(),
+            rewrite_work,
+            &cwd,
+            &prompt,
+            &out_path,
+            Duration::from_secs(300),
+            None,
+            &SessionAppearance::analysis(&provider),
+            None,
+        )
+        .await;
+
+    // 7. Parse + persist the outcome.
+    let output_opt = result
+        .raw
+        .as_deref()
+        .and_then(extract_json_block)
+        .and_then(|v| serde_json::from_value::<RewriteFindings>(v).ok());
+
+    match output_opt {
+        Some(findings) => {
+            // 8. Persist suggested version
+            if let Err(e) = ctx
+                .product_repo()
+                .add_version(otto_state::NewVersion {
+                    story_id: story_id.clone(),
+                    kind: "suggested".into(),
+                    title: findings.title,
+                    body_md: findings.body_markdown,
+                    raw_json: None,
+                    change_notes: Some(findings.change_notes.clone()),
+                    created_by: story.created_by.clone(),
+                })
+                .await
+            {
+                warn!("product_run(rewrite): add_version: {e}");
+            }
+
+            // 9. Update story stage to "refined"
+            if let Err(e) = ctx
+                .product_repo()
+                .update_story(
+                    &story_id,
+                    otto_state::StoryPatch {
+                        stage: Some("refined".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                warn!("product_run(rewrite): update_story stage: {e}");
+            }
+
+            // 10. Add event
+            if let Err(e) = ctx
+                .product_repo()
+                .add_event(otto_state::NewEvent {
+                    story_id: story_id.clone(),
+                    section: "rewrite".into(),
+                    kind: "rewrite_suggested".into(),
+                    summary: format!(
+                        "Rewrite suggested using skill '{writer_skill_name}'; change_notes: {}",
+                        findings.change_notes
+                    ),
+                    actor_id: None,
+                    meta_json: None,
+                })
+                .await
+            {
+                warn!("product_run(rewrite): add_event: {e}");
+            }
+            // Notify UI so the Rewrite tab can refresh without waiting for a poll.
+            let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "rewrite".into(),
+                status: "done".into(),
+            });
+        }
+        None => {
+            let reason = if result.errored {
+                "rewrite agent session failed (timeout/exit/start failure)".to_string()
+            } else {
+                format!(
+                    "rewrite agent returned unparseable output (len={})",
+                    result.raw.as_deref().map(|s| s.len()).unwrap_or(0)
+                )
+            };
+            warn!("product_run(rewrite): {reason}");
+            let _ = ctx
+                .product_repo()
+                .add_event(otto_state::NewEvent {
+                    story_id: story_id.clone(),
+                    section: "rewrite".into(),
+                    kind: "rewrite_error".into(),
+                    summary: reason,
+                    actor_id: None,
+                    meta_json: None,
+                })
+                .await;
+            let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "rewrite".into(),
+                status: "error".into(),
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests output contract appended to the test-cases prompt.
+// ---------------------------------------------------------------------------
+
+const TESTS_OUTPUT_CONTRACT: &str = r#"Respond with EXACTLY ONE ```json code block (no prose) matching:
+{"testcases":[{"title":"...","category":"happy|validation|error|edge","priority":"high|medium|low","preconditions":["..."],"steps":["..."],"expected":"..."}]}"#;
+
+// ---------------------------------------------------------------------------
+// Local deserialization structs for the test-generation response.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct GenTestcases {
+    testcases: Vec<GenTestcase>,
+}
+
+#[derive(serde::Deserialize)]
+struct GenTestcase {
+    title: String,
+    category: String,
+    #[serde(default = "default_priority")]
+    priority: String,
+    #[serde(default)]
+    preconditions: Vec<String>,
+    #[serde(default)]
+    steps: Vec<String>,
+    #[serde(default)]
+    expected: String,
+}
+
+fn default_priority() -> String {
+    "medium".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// build_tests_prompt — pure, unit-testable
+// ---------------------------------------------------------------------------
+
+/// Build the full test-case generation prompt.
+///
+/// The story context (body, answered questions, analysis summary, learnings)
+/// now lives in a separate CONTEXT file read by the agent.
+///
+/// Prompt body: tests skill body + file-read directive + OUTPUT CONTRACT.
+pub fn build_tests_prompt(tests_skill_body: &str, context_path: &str) -> String {
+    let mut prompt = String::new();
+
+    // 1. Tests skill body
+    prompt.push_str(tests_skill_body);
+    prompt.push_str("\n\n---\n\n");
+
+    // 2. Context file directive
+    prompt.push_str(
+        "The full story context (body, answered questions, analysis summary, learnings) is in \
+         this file — it may be LARGE, read it fully (in chunks if needed) before generating tests:\n",
+    );
+    prompt.push_str(context_path);
+    prompt.push_str("\n\n");
+
+    // 3. OUTPUT CONTRACT (verbatim)
+    prompt.push_str("---\n\n");
+    prompt.push_str(TESTS_OUTPUT_CONTRACT);
+    prompt.push('\n');
+
+    prompt
+}
+
+// ---------------------------------------------------------------------------
+// run_generate_tests — spawned as a background task by the generate handler
+// ---------------------------------------------------------------------------
+
+/// Run the test-case generation for a story.  Spawned as a background tokio
+/// task by the generate handler.  Returns `()` — all errors are logged; no
+/// panic propagates.
+///
+/// Provider-honoring: runs via `run_lens_session` (not `orchestrator.run_agent`).
+/// Context is written to a temp file.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_generate_tests<C: ProductRunHost>(
+    ctx: C,
+    ws: otto_core::domain::Workspace,
+    user_id: otto_core::Id,
+    story_id: otto_core::Id,
+    provider: String,
+    model: Option<String>,
+    cwd: String,
+    focus: Option<String>,
+) {
+    // Per-invocation session cwd: when there's no real story cwd we fell back to
+    // the shared temp dir; give this test-gen session its own unique temp subdir so
+    // the codex usage tailer attributes it 1:1 by cwd. A real story cwd passes
+    // through unchanged.
+    let cwd = session_cwd(&cwd);
+
+    // 1. Load story
+    let story = match ctx.product_repo().get_story(&story_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("product_run(generate_tests): get_story {story_id}: {e}");
+            return;
+        }
+    };
+
+    // 2. Resolve skill body: story-test-cases
+    let skill_name = "story-test-cases";
+    let skill_body = ctx
+        .context_library()
+        .get_skill(skill_name)
+        .map(|s| s.body)
+        .or_else(|| crate::skill_body(skill_name).map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    // 3. Build context file (enriched with Jira details, answered Q&A, learnings).
+    let gen_id = otto_core::new_id();
+    let context_path = std::env::temp_dir().join(format!("otto-product-tests-{gen_id}-context.md"));
+
+    {
+        let mut context_md = match ctx
+            .product()
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
+            Ok(md) => md,
+            Err(e) => {
+                warn!("product_run(generate_tests): build_agent_context: {e}");
+                let body = match ctx.product_repo().latest_source_version(&story_id).await {
+                    Ok(Some(v)) => v.body_md,
+                    _ => String::new(),
+                };
+                format!("# {}\n\n## Story\n\n{body}\n", story.title)
+            }
+        };
+
+        // Append answered questions.
+        let answered: Vec<otto_state::ProductQuestion> = ctx
+            .product_repo()
+            .list_questions(&story_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|q| q.status == "answered")
+            .collect();
+        if !answered.is_empty() {
+            context_md.push_str("\n## Answered Questions\n\n");
+            for q in &answered {
+                context_md.push_str(&format!("**Q:** {}\n", q.text));
+                if let Some(ref ans) = q.answer {
+                    if !ans.trim().is_empty() {
+                        context_md.push_str(&format!("**A:** {}\n", ans));
+                    }
+                }
+                context_md.push('\n');
+            }
+        }
+
+        // Append latest analysis summary.
+        let analysis_summary = {
+            let analyses = ctx
+                .product_repo()
+                .list_analyses(&story_id)
+                .await
+                .unwrap_or_default();
+            analyses
+                .into_iter()
+                .max_by_key(|a| a.created_at)
+                .map(|a| a.summary)
+                .unwrap_or_default()
+        };
+        if !analysis_summary.trim().is_empty() {
+            context_md.push_str("\n## Analysis Summary\n\n");
+            context_md.push_str(&analysis_summary);
+            context_md.push('\n');
+        }
+
+        if let Err(e) = std::fs::write(&context_path, &context_md) {
+            warn!("product_run(generate_tests): write context file: {e}");
+        }
+    }
+
+    // 4. Build prompt (references the context file) + out_path for JSON output.
+    let out_path = std::env::temp_dir().join(format!("otto-product-tests-{gen_id}.json"));
+    let base_prompt = build_tests_prompt(&skill_body, &context_path.to_string_lossy());
+    let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
+
+    // 5. Pre-trust provider.
+    trust_session_cwd(&provider, &cwd);
+
+    // 6. Run as a provider-honoring session.  The requested model (if any) is
+    //    threaded through SessionManager's spawn path for claude/codex.
+    //    Stamp the session with a WorkRef so cost is attributed to this story.
+    let tests_work = serde_json::to_value(WorkRef {
+        story_id: Some(story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
+    let result = ctx
+        .run_agent_with_recovery(
+            &ws,
+            &user_id,
+            &provider,
+            model.as_deref(),
+            tests_work,
+            &cwd,
+            &prompt,
+            &out_path,
+            Duration::from_secs(300),
+            None,
+            &SessionAppearance::analysis(&provider),
+            None,
+        )
+        .await;
+
+    // 7. Parse + persist the outcome.
+    let parsed_opt = result
+        .raw
+        .as_deref()
+        .and_then(extract_json_block)
+        .and_then(|v| serde_json::from_value::<GenTestcases>(v).ok());
+
+    match parsed_opt {
+        Some(parsed) => {
+            // 8. Create testcase run
+            let run = match ctx
+                .product_repo()
+                .create_testcase_run(&story_id, &story.created_by)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("product_run(generate_tests): create_testcase_run: {e}");
+                    let _ = ctx
+                        .product_repo()
+                        .add_event(otto_state::NewEvent {
+                            story_id: story_id.clone(),
+                            section: "tests".into(),
+                            kind: "tests_error".into(),
+                            summary: format!("test generation failed (db): {e}"),
+                            actor_id: None,
+                            meta_json: None,
+                        })
+                        .await;
+                    return;
+                }
+            };
+
+            // 9. Insert each test case
+            let tc_count = parsed.testcases.len();
+            for (i, tc) in parsed.testcases.into_iter().enumerate() {
+                let steps_json = serde_json::to_string(&serde_json::json!({
+                    "preconditions": tc.preconditions,
+                    "steps": tc.steps,
+                    "expected": tc.expected,
+                }))
+                .unwrap_or_else(|_| "{}".into());
+
+                if let Err(e) = ctx
+                    .product_repo()
+                    .add_testcase(otto_state::NewTestcase {
+                        run_id: run.id.clone(),
+                        story_id: story_id.clone(),
+                        title: tc.title,
+                        category: tc.category,
+                        priority: tc.priority,
+                        steps_json,
+                        order_idx: i as i64,
+                    })
+                    .await
+                {
+                    warn!("product_run(generate_tests): add_testcase[{i}]: {e}");
+                }
+            }
+
+            // 10. Update story stage
+            if let Err(e) = ctx
+                .product_repo()
+                .update_story(
+                    &story_id,
+                    otto_state::StoryPatch {
+                        stage: Some("tests_drafted".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                warn!("product_run(generate_tests): update_story stage: {e}");
+            }
+
+            // 11. Add event
+            if let Err(e) = ctx
+                .product_repo()
+                .add_event(otto_state::NewEvent {
+                    story_id: story_id.clone(),
+                    section: "tests".into(),
+                    kind: "tests_drafted".into(),
+                    summary: format!("test cases generated: {tc_count} case(s) drafted"),
+                    actor_id: None,
+                    meta_json: None,
+                })
+                .await
+            {
+                warn!("product_run(generate_tests): add_event: {e}");
+            }
+            let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "testcases".into(),
+                status: "done".into(),
+            });
+        }
+        None => {
+            let reason = if result.errored {
+                "test generation session failed (timeout/exit/start failure)".to_string()
+            } else {
+                format!(
+                    "test generation agent returned unparseable output (len={})",
+                    result.raw.as_deref().map(|s| s.len()).unwrap_or(0)
+                )
+            };
+            warn!("product_run(generate_tests): {reason}");
+            let _ = ctx
+                .product_repo()
+                .add_event(otto_state::NewEvent {
+                    story_id: story_id.clone(),
+                    section: "tests".into(),
+                    kind: "tests_error".into(),
+                    summary: reason,
+                    actor_id: None,
+                    meta_json: None,
+                })
+                .await;
+            let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "testcases".into(),
+                status: "error".into(),
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan output contract appended to the task-breakdown prompt.
+// ---------------------------------------------------------------------------
+
+const PLAN_OUTPUT_CONTRACT: &str = r#"Respond with EXACTLY ONE ```json code block (no prose) matching:
+{"plan_markdown":"..."}
+where plan_markdown is the full implementation plan as Markdown using level-3 headings of the form `### Task N: <title>`, each followed by `**Goal:** ...`, a checklist of steps as `- [ ]` items, and `**Verify:** ...`. Emit every checkbox as `- [ ]` (todo)."#;
+
+/// Prepended to a planning prompt when the run is NON-interactive (the default).
+/// Instructs the agent to work fully autonomously and NOT ask the user anything —
+/// the operator is away and will only review the finished plan.
+const PLAN_AUTONOMY_DIRECTIVE: &str = r#"AUTONOMY: You are running UNATTENDED. The user is NOT available and will only review the finished plan at the end. Do NOT ask the user any questions, and do NOT wait for input. Where something is ambiguous, make reasonable assumptions, STATE those assumptions explicitly in the plan, and continue. Produce the complete plan autonomously and write the final JSON to the output path.
+
+---
+
+"#;
+
+/// The verbatim consolidation contract for the PLAN summarizer agent. It merges
+/// the candidate plans (possibly from different providers) into ONE plan obeying
+/// the same `plan_markdown` output shape.
+const PLAN_SUMMARIZER_CONTRACT: &str = r#"You are the SUMMARIZER. Several planning agents (possibly on different AI providers) each produced an implementation plan for the SAME story. Consolidate them into ONE best plan:
+- Merge the tasks across all candidate plans; remove duplicates and collapse near-identical tasks.
+- Keep the clearest wording and the most complete, correct steps; reconcile any disagreements, choosing the best approach.
+- Preserve good coverage (setup, implementation, tests, verification) without redundant busywork.
+- Keep the SAME Markdown structure: level-3 headings `### Task N: <title>`, each with `**Goal:** ...`, a `- [ ]` checklist of steps, and `**Verify:** ...`. Emit every checkbox as `- [ ]` (todo).
+
+Respond with EXACTLY ONE ```json code block (no prose) matching:
+{"plan_markdown":"..."}"#;
+
+/// Build the plan-summarizer prompt: feed every candidate plan (labelled by
+/// provider) and instruct consolidation into one plan, same output contract.
+/// `candidates` is `(provider, plan_markdown)` per successful planner.
+fn build_plan_summarizer_prompt(
+    skill_body: &str,
+    story_title: &str,
+    context_path: &str,
+    candidates: &[(String, String)],
+) -> String {
+    let mut prompt = String::new();
+
+    if !skill_body.is_empty() {
+        prompt.push_str(skill_body);
+        prompt.push_str("\n\n---\n\n");
+    }
+
+    prompt.push_str("## Story: ");
+    prompt.push_str(story_title);
+    prompt.push_str("\n\n");
+
+    prompt.push_str(
+        "The full story context (body, answered questions, analysis summary, approved test \
+         cases, learnings) is in this file — read it fully before consolidating:\n",
+    );
+    prompt.push_str(context_path);
+    prompt.push_str("\n\n");
+
+    prompt.push_str("## Candidate Plans to Consolidate\n\n");
+    for (provider, plan) in candidates {
+        prompt.push_str("### Plan (");
+        prompt.push_str(provider);
+        prompt.push_str("):\n\n");
+        prompt.push_str(plan);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.push_str("---\n\n");
+    prompt.push_str(PLAN_SUMMARIZER_CONTRACT);
+    prompt.push('\n');
+
+    prompt
+}
+
+// ---------------------------------------------------------------------------
+// build_plan_prompt — pure, unit-testable
+// ---------------------------------------------------------------------------
+
+/// Build the full implementation-plan prompt for the task-breakdown agent.
+///
+/// The story context (body, answered questions, analysis summary, approved test
+/// cases, learnings) lives in a separate CONTEXT file the agent reads. The prompt
+/// body is: task-breakdown skill body + file-read directive + OUTPUT CONTRACT.
+pub fn build_plan_prompt(skill_body: &str, context_path: &str) -> String {
+    let mut prompt = String::new();
+
+    // 1. Task-breakdown skill body
+    prompt.push_str(skill_body);
+    prompt.push_str("\n\n---\n\n");
+
+    // 2. Context file directive
+    prompt.push_str(
+        "The full story context (body, answered questions, analysis summary, approved test \
+         cases, learnings) is in this file — it may be LARGE, read it fully (in chunks if \
+         needed) before planning:\n",
+    );
+    prompt.push_str(context_path);
+    prompt.push_str("\n\n");
+
+    // 3. OUTPUT CONTRACT (verbatim)
+    prompt.push_str("---\n\n");
+    prompt.push_str(PLAN_OUTPUT_CONTRACT);
+    prompt.push('\n');
+
+    prompt
+}
+
+// ---------------------------------------------------------------------------
+// run_generate_plan — spawned as a background task by the plan handler
+// ---------------------------------------------------------------------------
+
+/// Parsed response from the task-breakdown agent.
+#[derive(serde::Deserialize)]
+struct PlanFindings {
+    plan_markdown: String,
+}
+
+/// Run the implementation-plan generation for a story. Spawned as a background
+/// tokio task by the generate-plan handler. Returns `()` — all errors are
+/// logged; no panic propagates.
+///
+/// MULTI-AGENT, mirroring `run_analysis`: one planning agent runs per provider in
+/// `providers` (each as its own real, openable, VISIBLE session so the user can
+/// watch them), and — when >1 planner produced a plan — a summarizer consolidates
+/// the candidate plans into ONE. A `plan_run` event surfaces the live session ids
+/// so the UI can tile them side-by-side. When `interactive` is false (the default)
+/// every planning prompt is prefixed with an autonomy directive so agents work
+/// unattended and never block on questions.
+///
+/// The shared context file is enriched with answered questions, the latest
+/// analysis summary, AND the latest run's approved test cases — same as before.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_generate_plan<C: ProductRunHost>(
+    ctx: C,
+    ws: otto_core::domain::Workspace,
+    user_id: otto_core::Id,
+    story_id: otto_core::Id,
+    providers: Vec<String>,
+    summarizer_provider: String,
+    interactive: bool,
+    // Optional model override, threaded into each planning (and summarizer)
+    // session so SessionManager injects `--model <name>` for providers that
+    // support it (claude/codex); empty is filtered inside run_agent_with_recovery.
+    model: Option<String>,
+    cwd: String,
+    focus: Option<String>,
+) {
+    // Normalize the provider list: drop blanks; if somehow empty, the handler
+    // should have guaranteed at least one — but guard anyway.
+    let providers: Vec<String> = providers
+        .into_iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    if providers.is_empty() {
+        warn!("product_run(plan): no providers resolved; nothing to do");
+        return;
+    }
+
+    // 1. Load story
+    let story = match ctx.product_repo().get_story(&story_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("product_run(plan): get_story {story_id}: {e}");
+            return;
+        }
+    };
+
+    // 2. Resolve skill body: story-task-breakdown
+    let skill_name = "story-task-breakdown";
+    let skill_body = ctx
+        .context_library()
+        .get_skill(skill_name)
+        .map(|s| s.body)
+        .or_else(|| crate::skill_body(skill_name).map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    // 3. Build context file (Jira details + answered Q&A + analysis summary +
+    //    approved test cases + learnings).
+    let plan_id = otto_core::new_id();
+    let context_path = std::env::temp_dir().join(format!("otto-product-plan-{plan_id}-context.md"));
+
+    {
+        let mut context_md = match ctx
+            .product()
+            .build_agent_context(&story_id, focus.as_deref())
+            .await
+        {
+            Ok(md) => md,
+            Err(e) => {
+                warn!("product_run(plan): build_agent_context: {e}");
+                let body = match ctx.product_repo().latest_source_version(&story_id).await {
+                    Ok(Some(v)) => v.body_md,
+                    _ => String::new(),
+                };
+                format!("# {}\n\n## Story\n\n{body}\n", story.title)
+            }
+        };
+
+        // Append answered questions.
+        let answered: Vec<otto_state::ProductQuestion> = ctx
+            .product_repo()
+            .list_questions(&story_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|q| q.status == "answered")
+            .collect();
+        if !answered.is_empty() {
+            context_md.push_str("\n## Answered Questions\n\n");
+            for q in &answered {
+                context_md.push_str(&format!("**Q:** {}\n", q.text));
+                if let Some(ref ans) = q.answer {
+                    if !ans.trim().is_empty() {
+                        context_md.push_str(&format!("**A:** {}\n", ans));
+                    }
+                }
+                context_md.push('\n');
+            }
+        }
+
+        // Append latest analysis summary.
+        let analysis_summary = {
+            let analyses = ctx
+                .product_repo()
+                .list_analyses(&story_id)
+                .await
+                .unwrap_or_default();
+            analyses
+                .into_iter()
+                .max_by_key(|a| a.created_at)
+                .map(|a| a.summary)
+                .unwrap_or_default()
+        };
+        if !analysis_summary.trim().is_empty() {
+            context_md.push_str("\n## Analysis Summary\n\n");
+            context_md.push_str(&analysis_summary);
+            context_md.push('\n');
+        }
+
+        // Append approved test cases from the latest run (mirrors inject bundle
+        // section 4: list_testcase_runs → first → list_testcases → approved).
+        let approved: Vec<otto_state::ProductTestcase> = {
+            let runs = ctx
+                .product_repo()
+                .list_testcase_runs(&story_id)
+                .await
+                .unwrap_or_default();
+            match runs.first() {
+                Some(run) => ctx
+                    .product_repo()
+                    .list_testcases(&run.id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| c.status == "approved")
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+        if !approved.is_empty() {
+            context_md.push_str("\n## Approved Test Cases\n\n");
+            for c in &approved {
+                context_md.push_str(&format!(
+                    "### {} ({}, {})\n",
+                    c.title, c.category, c.priority
+                ));
+                if let Ok(steps) = serde_json::from_str::<serde_json::Value>(&c.steps_json) {
+                    if let Some(pre) = steps.get("preconditions").and_then(|v| v.as_array()) {
+                        if !pre.is_empty() {
+                            context_md.push_str("**Preconditions:**\n");
+                            for p in pre {
+                                if let Some(s) = p.as_str() {
+                                    context_md.push_str(&format!("- {s}\n"));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(st) = steps.get("steps").and_then(|v| v.as_array()) {
+                        if !st.is_empty() {
+                            context_md.push_str("**Steps:**\n");
+                            for (i, s) in st.iter().enumerate() {
+                                if let Some(s) = s.as_str() {
+                                    context_md.push_str(&format!("{}. {s}\n", i + 1));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(exp) = steps.get("expected").and_then(|v| v.as_str()) {
+                        if !exp.trim().is_empty() {
+                            context_md.push_str(&format!("**Expected:** {exp}\n"));
+                        }
+                    }
+                }
+                context_md.push('\n');
+            }
+        }
+
+        if let Err(e) = std::fs::write(&context_path, &context_md) {
+            warn!("product_run(plan): write context file: {e}");
+        }
+    }
+
+    let context_path_str = context_path.to_string_lossy().to_string();
+
+    // 4. Pre-trust every distinct provider on the base cwd (mirror analysis) so no
+    //    session stalls on the interactive "trust this folder?" prompt.
+    {
+        let mut trusted = HashSet::<String>::new();
+        for provider in providers
+            .iter()
+            .cloned()
+            .chain(std::iter::once(summarizer_provider.clone()))
+        {
+            if trusted.insert(provider.clone()) {
+                otto_sessions::trust::ensure_trusted(&provider, &cwd);
+            }
+        }
+    }
+
+    // 5. Shared live session-id collector. Each planner reports its session id the
+    //    moment it exists (via the run_lens_session on_session hook); we re-emit a
+    //    `plan_run` event each time so the Plan tab can tile the sessions live.
+    let session_ids: Arc<Mutex<Vec<Id>>> = Arc::new(Mutex::new(Vec::new()));
+    let emit_plan_run = {
+        let ctx = ctx.clone();
+        let ws_id = ws.id.clone();
+        let story_id = story_id.clone();
+        let session_ids = Arc::clone(&session_ids);
+        move || {
+            let ids = session_ids.lock().unwrap().clone();
+            let _ = ctx.events().send(otto_core::event::Event::PlanRun {
+                workspace_id: ws_id.clone(),
+                story_id: story_id.clone(),
+                session_ids: ids,
+                interactive,
+            });
+        }
+    };
+
+    // Stamp every planning (and the summarizer) session with a WorkRef so cost is
+    // attributed to this story (merged in from main's single-provider path).
+    let plan_work = serde_json::to_value(WorkRef {
+        story_id: Some(story_id.clone()),
+        origin: Some("product".into()),
+        ..Default::default()
+    })
+    .ok();
+
+    // 6. Per-provider concurrent fan-out as real, VISIBLE planning sessions.
+    //    Each writes its plan JSON to a distinct out_path. Non-interactive (the
+    //    default) prepends the autonomy directive so agents never block on input.
+    let mut set = tokio::task::JoinSet::new();
+    for (i, provider) in providers.iter().cloned().enumerate() {
+        let ctx = ctx.clone();
+        let ws = ws.clone();
+        let user_id = user_id.clone();
+        let context_path_str = context_path_str.clone();
+        let skill_body = skill_body.clone();
+        let session_ids = Arc::clone(&session_ids);
+        let emit_plan_run = emit_plan_run.clone();
+        let plan_id = plan_id.clone();
+        let plan_work = plan_work.clone();
+        let model = model.clone();
+        // Unique per-session cwd (codex usage attribution), like the analysis fan-out.
+        let planner_cwd = session_cwd(&cwd);
+
+        set.spawn(async move {
+            let out_path =
+                std::env::temp_dir().join(format!("otto-product-plan-{plan_id}-{i}.json"));
+            let base_prompt = build_plan_prompt(&skill_body, &context_path_str);
+            let mut prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
+            if !interactive {
+                prompt = format!("{PLAN_AUTONOMY_DIRECTIVE}{prompt}");
+            }
+
+            // Surface the session id for live tiling as soon as it's created.
+            let on_session = {
+                let session_ids = Arc::clone(&session_ids);
+                let emit_plan_run = emit_plan_run.clone();
+                move |sid: &Id| {
+                    {
+                        let mut guard = session_ids.lock().unwrap();
+                        if !guard.contains(sid) {
+                            guard.push(sid.clone());
+                        }
+                    }
+                    emit_plan_run();
+                }
+            };
+
+            let result = ctx
+                .run_agent_with_recovery(
+                    &ws,
+                    &user_id,
+                    &provider,
+                    model.as_deref(),
+                    plan_work,
+                    &planner_cwd,
+                    &prompt,
+                    &out_path,
+                    Duration::from_secs(300),
+                    None,
+                    &SessionAppearance {
+                        title: format!("Plan: {provider}"),
+                        source: "product-plan",
+                    },
+                    Some(&on_session),
+                )
+                .await;
+
+            let plan_markdown = result
+                .raw
+                .as_deref()
+                .and_then(extract_json_block)
+                .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok())
+                .map(|f| f.plan_markdown)
+                .filter(|m| !m.trim().is_empty());
+            (provider, plan_markdown)
+        });
+    }
+
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((provider, Some(plan))) = joined {
+            candidates.push((provider, plan));
+        }
+    }
+
+    // 7. Consolidate: if >1 candidate plan, run a VISIBLE summarizer session to
+    //    merge them into one. With 0 or 1 candidate, no summarizer is needed.
+    let final_plan: Option<String> = match candidates.len() {
+        0 => None,
+        1 => Some(candidates.remove(0).1),
+        _ => {
+            let out_path =
+                std::env::temp_dir().join(format!("otto-product-plan-{plan_id}-summary.json"));
+            let base = build_plan_summarizer_prompt(
+                &skill_body,
+                &story.title,
+                &context_path_str,
+                &candidates,
+            );
+            let mut prompt = augment_with_out_path(&base, &out_path.to_string_lossy());
+            if !interactive {
+                prompt = format!("{PLAN_AUTONOMY_DIRECTIVE}{prompt}");
+            }
+            let summarizer_cwd = session_cwd(&cwd);
+
+            let on_session = {
+                let session_ids = Arc::clone(&session_ids);
+                let emit_plan_run = emit_plan_run.clone();
+                move |sid: &Id| {
+                    {
+                        let mut guard = session_ids.lock().unwrap();
+                        if !guard.contains(sid) {
+                            guard.push(sid.clone());
+                        }
+                    }
+                    emit_plan_run();
+                }
+            };
+
+            let result = ctx
+                .run_agent_with_recovery(
+                    &ws,
+                    &user_id,
+                    &summarizer_provider,
+                    model.as_deref(),
+                    plan_work.clone(),
+                    &summarizer_cwd,
+                    &prompt,
+                    &out_path,
+                    Duration::from_secs(300),
+                    None,
+                    &SessionAppearance {
+                        title: format!("Plan summarizer: {summarizer_provider}"),
+                        source: "product-plan",
+                    },
+                    Some(&on_session),
+                )
+                .await;
+
+            let summarized = result
+                .raw
+                .as_deref()
+                .and_then(extract_json_block)
+                .and_then(|v| serde_json::from_value::<PlanFindings>(v).ok())
+                .map(|f| f.plan_markdown)
+                .filter(|m| !m.trim().is_empty());
+
+            // Fall back to the first candidate plan if the summarizer produced
+            // nothing usable — better a single plan than no plan at all.
+            summarized.or_else(|| candidates.into_iter().next().map(|(_, p)| p))
+        }
+    };
+
+    // 8. Persist the final (consolidated, or single) plan as a new kind="plan"
+    //    version — exactly as before.
+    match final_plan {
+        Some(plan_markdown) => {
+            if let Err(e) = ctx
+                .product_repo()
+                .add_version(otto_state::NewVersion {
+                    story_id: story_id.clone(),
+                    kind: "plan".into(),
+                    title: "Implementation Plan".into(),
+                    body_md: plan_markdown,
+                    raw_json: None,
+                    change_notes: None,
+                    created_by: story.created_by.clone(),
+                })
+                .await
+            {
+                warn!("product_run(plan): add_version: {e}");
+            }
+
+            // Update story stage to "planned".
+            if let Err(e) = ctx
+                .product_repo()
+                .update_story(
+                    &story_id,
+                    otto_state::StoryPatch {
+                        stage: Some("planned".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                warn!("product_run(plan): update_story stage: {e}");
+            }
+
+            // Add event.
+            if let Err(e) = ctx
+                .product_repo()
+                .add_event(otto_state::NewEvent {
+                    story_id: story_id.clone(),
+                    section: "plan".into(),
+                    kind: "plan_generated".into(),
+                    summary: "Implementation plan generated".into(),
+                    actor_id: None,
+                    meta_json: None,
+                })
+                .await
+            {
+                warn!("product_run(plan): add_event: {e}");
+            }
+            let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "plan".into(),
+                status: "done".into(),
+            });
+        }
+        None => {
+            let reason = "plan generation produced no usable plan (all planning agents \
+                          failed or returned unparseable/empty output)"
+                .to_string();
+            warn!("product_run(plan): {reason}");
+            let _ = ctx
+                .product_repo()
+                .add_event(otto_state::NewEvent {
+                    story_id: story_id.clone(),
+                    section: "plan".into(),
+                    kind: "plan_error".into(),
+                    summary: reason,
+                    actor_id: None,
+                    meta_json: None,
+                })
+                .await;
+            let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
+                workspace_id: ws.id.clone(),
+                story_id: story_id.clone(),
+                section: "plan".into(),
+                status: "error".into(),
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Narrative builders for skill self-improvement (Task 4.4)
+// ---------------------------------------------------------------------------
+
+/// Build a self-improvement narrative from test-case review outcomes.
+///
+/// Describes the story, then each case with its title, category, and status.
+/// Cases with `status == "changes_requested"` or a non-empty `review_note`
+/// are highlighted so the improvement engine can learn what the PO changed or
+/// rejected. Framed as a signal for improving the `story-test-cases` skill.
+pub fn build_improve_narrative_from_tests(
+    story: &otto_state::ProductStory,
+    cases: &[otto_state::ProductTestcase],
+) -> String {
+    let mut s = String::new();
+    s.push_str("# Test-Case Skill Improvement Signal\n\n");
+    s.push_str(
+        "The Product Owner has reviewed the generated test cases for the following story. \
+         Reflect on the story-test-cases skill and how it can be improved based on the PO's \
+         feedback (what was changed, rejected, or approved).\n\n",
+    );
+    s.push_str("## Story\n\n");
+    s.push_str("**Title:** ");
+    s.push_str(&story.title);
+    s.push('\n');
+    s.push_str("**Source:** ");
+    s.push_str(&story.source_kind);
+    s.push_str(" / ");
+    s.push_str(&story.source_key);
+    s.push('\n');
+    s.push_str("**Stage:** ");
+    s.push_str(&story.stage);
+    s.push_str("\n\n");
+
+    if cases.is_empty() {
+        s.push_str("## Test Cases\n\n(none)\n");
+        return s;
+    }
+
+    s.push_str("## Test Cases\n\n");
+    for case in cases {
+        let needs_emphasis = case.status == "changes_requested"
+            || case
+                .review_note
+                .as_ref()
+                .is_some_and(|n| !n.trim().is_empty());
+
+        if needs_emphasis {
+            s.push_str("### [FEEDBACK] ");
+        } else {
+            s.push_str("### ");
+        }
+        s.push_str(&case.title);
+        s.push('\n');
+        s.push_str("- **Category:** ");
+        s.push_str(&case.category);
+        s.push('\n');
+        s.push_str("- **Priority:** ");
+        s.push_str(&case.priority);
+        s.push('\n');
+        s.push_str("- **Status:** ");
+        s.push_str(&case.status);
+        s.push('\n');
+
+        if let Some(ref note) = case.review_note {
+            if !note.trim().is_empty() {
+                s.push_str("- **PO Review Note:** ");
+                s.push_str(note.trim());
+                s.push('\n');
+            }
+        }
+
+        if case.status == "changes_requested" {
+            s.push_str(
+                "  *(PO requested changes — consider what generated this case and what \
+                 should be improved in the skill to avoid this outcome.)*\n",
+            );
+        }
+        s.push('\n');
+    }
+
+    let approved = cases.iter().filter(|c| c.status == "approved").count();
+    let changed = cases
+        .iter()
+        .filter(|c| c.status == "changes_requested")
+        .count();
+    let total = cases.len();
+    s.push_str(&format!(
+        "## Summary\n\n{total} case(s) total: {approved} approved, {changed} with changes requested.\n"
+    ));
+
+    s
+}
+
+/// Build a self-improvement narrative from clarifying questions and notes.
+///
+/// Includes posted/answered questions and internal notes as signals for
+/// improving clarifying-questions / po-story-overview skills.
+pub fn build_improve_narrative_from_clarifications(
+    story: &otto_state::ProductStory,
+    questions: &[otto_state::ProductQuestion],
+    notes: &[otto_state::ProductNote],
+) -> String {
+    let mut s = String::new();
+    s.push_str("# Clarifying-Questions Skill Improvement Signal\n\n");
+    s.push_str(
+        "The following answered questions and internal notes were captured for this story. \
+         Use them to improve the clarifying-questions and po-story-overview skills — \
+         what kinds of questions were useful, what gaps they uncovered, and what notes \
+         the team found important enough to record.\n\n",
+    );
+    s.push_str("## Story\n\n");
+    s.push_str("**Title:** ");
+    s.push_str(&story.title);
+    s.push('\n');
+    s.push_str("**Source:** ");
+    s.push_str(&story.source_kind);
+    s.push_str(" / ");
+    s.push_str(&story.source_key);
+    s.push_str("\n\n");
+
+    let answered: Vec<&otto_state::ProductQuestion> = questions
+        .iter()
+        .filter(|q| q.status == "answered")
+        .collect();
+
+    if answered.is_empty() {
+        s.push_str("## Answered Questions\n\n(none)\n\n");
+    } else {
+        s.push_str("## Answered Questions\n\n");
+        for q in &answered {
+            s.push_str("**Q:** ");
+            s.push_str(&q.text);
+            s.push('\n');
+            if let Some(ref ans) = q.answer {
+                if !ans.trim().is_empty() {
+                    s.push_str("**A:** ");
+                    s.push_str(ans.trim());
+                    s.push('\n');
+                }
+            }
+            if !q.category.is_empty() && q.category != "general" {
+                s.push_str("**Category:** ");
+                s.push_str(&q.category);
+                s.push('\n');
+            }
+            s.push('\n');
+        }
+    }
+
+    if notes.is_empty() {
+        s.push_str("## Internal Notes\n\n(none)\n");
+    } else {
+        s.push_str("## Internal Notes\n\n");
+        for note in notes {
+            if let Some(ref section) = note.section {
+                s.push_str("**[");
+                s.push_str(section);
+                s.push_str("]** ");
+            }
+            s.push_str(&note.body);
+            s.push_str("\n\n");
+        }
+    }
+
+    s
+}
+
+// ---------------------------------------------------------------------------
+// Tests (pure helpers only; run_analysis is compile-checked)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // session_cwd — per-session cwd attribution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_cwd_passes_real_path_through_unchanged() {
+        // A real directory (use the manifest dir of this crate, which surely
+        // exists and is NOT the temp dir) must pass through verbatim — the
+        // architecture lens needs the actual repo cwd.
+        let real = env!("CARGO_MANIFEST_DIR");
+        let out = session_cwd(real);
+        assert_eq!(out, real, "a real story cwd must pass through unchanged");
+    }
+
+    #[test]
+    fn session_cwd_rewrites_shared_temp_fallback_to_existing_child() {
+        // The fallback string used by the handlers.
+        let fallback = std::env::temp_dir().to_string_lossy().to_string();
+        let out = session_cwd(&fallback);
+
+        // It must NOT be the shared temp dir itself.
+        assert_ne!(out, fallback, "shared temp fallback must be rewritten");
+
+        let out_path = std::path::Path::new(&out);
+        // It must be a child of the temp dir...
+        assert!(
+            out_path.starts_with(std::env::temp_dir()),
+            "rewritten cwd must live under the temp dir; got {out}"
+        );
+        // ...and it must actually exist on disk (created by the helper).
+        assert!(
+            out_path.exists(),
+            "rewritten cwd must exist on disk; got {out}"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(out_path);
+    }
+
+    /// S4-14: product scratch dirs share one stable root, and stale ones are swept.
+    #[test]
+    fn session_cwd_uses_a_stable_swept_root() {
+        let fallback = std::env::temp_dir().to_string_lossy().to_string();
+        let out = session_cwd(&fallback);
+        let root = std::env::temp_dir().join(SCRATCH_ROOT);
+        assert!(std::path::Path::new(&out).starts_with(&root), "{out}");
+        let _ = std::fs::remove_dir_all(&out);
+        // The sweep removes children older than max-age (private root, so
+        // parallel tests' fresh dirs are never touched).
+        let mine = tempfile::tempdir().unwrap();
+        let child = mine.path().join("old");
+        std::fs::create_dir_all(&child).unwrap();
+        let live = mine.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let keep: std::collections::HashSet<String> =
+            [live.to_string_lossy().into_owned()].into_iter().collect();
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_secs(3600), &keep);
+        assert!(child.exists(), "fresh scratch kept");
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_millis(1), &keep);
+        assert!(!child.exists(), "stale scratch swept");
+        // S4-304: an old dir an unarchived session still uses survives.
+        assert!(live.exists(), "a live session's scratch cwd is never swept");
+    }
+
+    #[test]
+    fn session_cwd_two_calls_yield_distinct_dirs() {
+        let fallback = std::env::temp_dir().to_string_lossy().to_string();
+        let a = session_cwd(&fallback);
+        let b = session_cwd(&fallback);
+        assert_ne!(a, b, "two fallback rewrites must yield distinct dirs");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_json_block
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_json_block_finds_json_in_fence() {
+        let input = "Here is the result:\n```json\n{\"a\":1}\n```\n";
+        let v = extract_json_block(input).expect("should find json");
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn extract_json_block_finds_bare_object() {
+        let input = r#"Some prose. {"key": "value", "n": 42}"#;
+        let v = extract_json_block(input).expect("should find bare object");
+        assert_eq!(v["key"], "value");
+        assert_eq!(v["n"], 42);
+    }
+
+    #[test]
+    fn extract_json_block_returns_none_for_prose() {
+        let input = "This is just some text without any JSON at all.";
+        assert!(extract_json_block(input).is_none());
+    }
+
+    #[test]
+    fn extract_json_block_fence_wins_over_prose_brace() {
+        // There is a `{` in prose text BEFORE the fenced block; the fence should win.
+        let input = "intro text { not json } then\n```json\n{\"a\":1}\n```";
+        let v = extract_json_block(input).expect("should find fenced json");
+        // The fenced {"a":1} wins, not the prose brace.
+        assert_eq!(v["a"], 1);
+        // Make sure the prose brace wasn't interpreted as the result.
+        assert!(v.get("not").is_none());
+    }
+
+    #[test]
+    fn extract_json_block_empty_string_returns_none() {
+        assert!(extract_json_block("").is_none());
+    }
+
+    #[test]
+    fn extract_json_block_nested_json_balanced() {
+        let input = r#"{"outer":{"inner":"yes"},"list":[1,2,3]}"#;
+        let v = extract_json_block(input).expect("should parse nested json");
+        assert_eq!(v["outer"]["inner"], "yes");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_analysis_prompt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_analysis_prompt_includes_skill_body() {
+        let skill = "## Skill: Analyse stories\nBe thorough.";
+        let prompt = build_analysis_prompt(skill, "/tmp/ctx.md", None);
+        assert!(
+            prompt.contains(skill),
+            "prompt must include the entire skill body; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_analysis_prompt_includes_context_path_reference() {
+        let ctx_path = "/tmp/otto-product-TEST-context.md";
+        let prompt = build_analysis_prompt("skill body", ctx_path, None);
+        assert!(
+            prompt.contains(ctx_path),
+            "prompt must include the context file path; got:\n{prompt}"
+        );
+        // The prompt should tell the agent to read the file.
+        assert!(
+            prompt.to_lowercase().contains("read"),
+            "prompt should instruct agent to read the context file; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_analysis_prompt_includes_output_contract_marker() {
+        let prompt = build_analysis_prompt("skill body", "/tmp/ctx.md", None);
+        // The key distinguishing text from the OUTPUT CONTRACT
+        assert!(
+            prompt.contains("EXACTLY ONE"),
+            "prompt must include OUTPUT CONTRACT text 'EXACTLY ONE'; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("suggested_learnings"),
+            "prompt must include OUTPUT CONTRACT field 'suggested_learnings'"
+        );
+        assert!(
+            prompt.contains("open_questions"),
+            "prompt must include OUTPUT CONTRACT field 'open_questions'"
+        );
+    }
+
+    #[test]
+    fn build_analysis_prompt_includes_prior_summary_when_given() {
+        let prompt =
+            build_analysis_prompt("skill", "/tmp/ctx.md", Some("Previously we found X and Y."));
+        assert!(
+            prompt.contains("Previously we found X and Y."),
+            "prompt must include prior summary"
+        );
+    }
+
+    #[test]
+    fn build_analysis_prompt_omits_prior_summary_section_when_none() {
+        let prompt = build_analysis_prompt("skill", "/tmp/ctx.md", None);
+        assert!(
+            !prompt.contains("Prior Analysis Summary"),
+            "no prior summary section when None"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // augment_with_out_path — the write-to-file instruction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn augment_with_out_path_appends_write_instruction_and_path() {
+        let base = build_analysis_prompt("skill body", "/tmp/otto-product-X-context.md", None);
+        let out = augment_with_out_path(&base, "/tmp/otto-product-X-0.json");
+        // The context path is preserved.
+        assert!(out.contains("/tmp/otto-product-X-context.md"));
+        // The write-to-file path is present.
+        assert!(
+            out.contains("/tmp/otto-product-X-0.json"),
+            "augmented prompt must include the out_path; got:\n{out}"
+        );
+        // It instructs writing JSON to the file.
+        assert!(out.to_lowercase().contains("write"));
+        assert!(out.contains("JSON"));
+    }
+
+    // -----------------------------------------------------------------------
+    // build_summarizer_prompt — consolidate/dedupe instruction + schema marker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_summarizer_prompt_includes_consolidate_dedupe_and_questions_schema() {
+        let lenses = vec![
+            (
+                "PO Overview".to_string(),
+                "claude".to_string(),
+                r#"{"summary":"a","open_questions":[{"text":"q1"}]}"#.to_string(),
+            ),
+            (
+                "Architecture".to_string(),
+                "codex".to_string(),
+                r#"{"summary":"b","risks":["r1"]}"#.to_string(),
+            ),
+        ];
+        let prompt = build_summarizer_prompt("synth skill", "Login Story", &lenses);
+
+        // Consolidate / dedupe / resolve-conflict instructions are present.
+        assert!(
+            prompt.to_lowercase().contains("consolidate"),
+            "summarizer prompt must instruct consolidation; got:\n{prompt}"
+        );
+        assert!(
+            prompt.to_uppercase().contains("DEDUPE"),
+            "summarizer prompt must instruct dedupe; got:\n{prompt}"
+        );
+        assert!(
+            prompt.to_lowercase().contains("conflict"),
+            "summarizer prompt must instruct conflict resolution; got:\n{prompt}"
+        );
+        // The output schema marker: a `questions` array (the summarizer schema).
+        assert!(
+            prompt.contains("\"questions\""),
+            "summarizer prompt must include the questions schema marker; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("conflict_notes"),
+            "summarizer prompt must include conflict_notes schema field; got:\n{prompt}"
+        );
+        // Each lens is labelled with name + provider, and its JSON is fed in.
+        assert!(prompt.contains("Lens PO Overview (claude)"));
+        assert!(prompt.contains("Lens Architecture (codex)"));
+        assert!(prompt.contains(r#"{"summary":"a","open_questions":[{"text":"q1"}]}"#));
+        // The story title is included.
+        assert!(prompt.contains("Login Story"));
+    }
+
+    #[test]
+    fn summary_findings_parses_summarizer_schema() {
+        let raw = r#"```json
+{"summary":"consolidated","questions":[{"text":"q","rationale":"r","category":"scope"}],
+ "related_repos":["a"],"functionalities":["f"],"integration_points":["i"],"risks":["x"],
+ "suggested_learnings":[{"kind":"pattern","title":"t","body":"b"}],"conflict_notes":"resolved X"}
+```"#;
+        let v = extract_json_block(raw).expect("should find json");
+        let parsed: SummaryFindings =
+            serde_json::from_value(v).expect("should parse SummaryFindings");
+        assert_eq!(parsed.summary, "consolidated");
+        assert_eq!(parsed.questions.len(), 1);
+        assert_eq!(parsed.questions[0].text, "q");
+        assert_eq!(parsed.suggested_learnings.len(), 1);
+        assert_eq!(parsed.conflict_notes, "resolved X");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_rewrite_prompt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_rewrite_prompt_includes_writer_skill_body() {
+        let skill = "## Jira Story Writer\nWrite excellent stories.";
+        let prompt = build_rewrite_prompt(skill, "/tmp/ctx-rewrite.md");
+        assert!(
+            prompt.contains(skill),
+            "prompt must include the entire writer skill body; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_rewrite_prompt_includes_context_path_reference() {
+        let ctx_path = "/tmp/otto-product-rewrite-TEST-context.md";
+        let prompt = build_rewrite_prompt("skill", ctx_path);
+        assert!(
+            prompt.contains(ctx_path),
+            "prompt must reference the context file path; got:\n{prompt}"
+        );
+        assert!(
+            prompt.to_lowercase().contains("read"),
+            "prompt should instruct agent to read the context file; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_rewrite_prompt_includes_body_markdown_contract_marker() {
+        let prompt = build_rewrite_prompt("skill", "/tmp/ctx.md");
+        assert!(
+            prompt.contains("body_markdown"),
+            "prompt must include 'body_markdown' from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("EXACTLY ONE"),
+            "prompt must include 'EXACTLY ONE' from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("change_notes"),
+            "prompt must include 'change_notes' from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_tests_prompt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_tests_prompt_includes_skill_body_verbatim() {
+        let skill = "## Story Test Cases\nDraft readable test cases. Happy path plus validations and error coverage.";
+        let prompt = build_tests_prompt(skill, "/tmp/ctx-tests.md");
+        assert!(
+            prompt.contains(skill),
+            "prompt must include the entire tests skill body verbatim; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_tests_prompt_skill_body_mentions_happy_and_coverage_guidance() {
+        // The bundled skill body mentions "happy" and "validation" / "error" coverage.
+        // We embed it verbatim, so the prompt must contain those words.
+        let skill = "Cover happy path plus meaningful validations and realistic errors. Not over-defensive.";
+        let prompt = build_tests_prompt(skill, "/tmp/ctx.md");
+        assert!(
+            prompt.contains("happy"),
+            "prompt must include 'happy' (from skill body); got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("validation") || prompt.contains("error"),
+            "prompt must reference 'validation' or 'error' coverage (from skill body); got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_tests_prompt_includes_context_path_reference() {
+        let ctx_path = "/tmp/otto-product-tests-TEST-context.md";
+        let prompt = build_tests_prompt("skill", ctx_path);
+        assert!(
+            prompt.contains(ctx_path),
+            "prompt must reference the context file path; got:\n{prompt}"
+        );
+        assert!(
+            prompt.to_lowercase().contains("read"),
+            "prompt should instruct agent to read the context file; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_plan_prompt_includes_context_path_reference() {
+        let ctx_path = "/tmp/otto-product-plan-TEST-context.md";
+        let prompt = build_plan_prompt("skill", ctx_path);
+        assert!(
+            prompt.contains(ctx_path),
+            "prompt must reference the context file path; got:\n{prompt}"
+        );
+        assert!(
+            prompt.to_lowercase().contains("read"),
+            "prompt should instruct agent to read the context file; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_plan_prompt_includes_plan_contract_marker() {
+        let prompt = build_plan_prompt("skill body", "/tmp/ctx.md");
+        assert!(
+            prompt.contains("plan_markdown"),
+            "prompt must include 'plan_markdown' from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("EXACTLY ONE"),
+            "prompt must include 'EXACTLY ONE' from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("- [ ]"),
+            "prompt must instruct emitting '- [ ]' checkboxes; got:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn build_plan_summarizer_prompt_includes_candidates_and_consolidate_contract() {
+        let candidates = vec![
+            (
+                "claude".to_string(),
+                "### Task 1: A\n- [ ] do a".to_string(),
+            ),
+            ("codex".to_string(), "### Task 1: B\n- [ ] do b".to_string()),
+        ];
+        let prompt =
+            build_plan_summarizer_prompt("synth skill", "Login Story", "/tmp/ctx.md", &candidates);
+        // Consolidation instruction + the plan output contract marker.
+        assert!(
+            prompt.to_lowercase().contains("consolidate"),
+            "must instruct consolidation:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("plan_markdown"),
+            "must keep the plan_markdown contract:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("EXACTLY ONE"),
+            "must include the EXACTLY ONE contract text:\n{prompt}"
+        );
+        // Each candidate is labelled by provider and fed in verbatim.
+        assert!(
+            prompt.contains("Plan (claude)"),
+            "must label the claude candidate:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Plan (codex)"),
+            "must label the codex candidate:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("- [ ] do a"),
+            "must include the first candidate body:\n{prompt}"
+        );
+        // Story title + context path are referenced.
+        assert!(prompt.contains("Login Story"));
+        assert!(prompt.contains("/tmp/ctx.md"));
+    }
+
+    #[test]
+    fn autonomy_directive_instructs_no_questions_and_assumptions() {
+        // The non-interactive directive must tell the agent to work unattended,
+        // not ask questions, and state assumptions.
+        assert!(PLAN_AUTONOMY_DIRECTIVE
+            .to_uppercase()
+            .contains("UNATTENDED"));
+        assert!(PLAN_AUTONOMY_DIRECTIVE
+            .to_lowercase()
+            .contains("do not ask"));
+        assert!(PLAN_AUTONOMY_DIRECTIVE
+            .to_lowercase()
+            .contains("assumption"));
+    }
+
+    #[test]
+    fn build_tests_prompt_includes_testcases_contract_marker() {
+        let prompt = build_tests_prompt("skill body", "/tmp/ctx.md");
+        assert!(
+            prompt.contains("testcases"),
+            "prompt must include 'testcases' from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("EXACTLY ONE"),
+            "prompt must include 'EXACTLY ONE' from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("happy|validation|error|edge"),
+            "prompt must include category enumeration from the OUTPUT CONTRACT; got:\n{prompt}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_improve_narrative_from_tests
+    // -----------------------------------------------------------------------
+
+    fn make_testcase(
+        title: &str,
+        category: &str,
+        status: &str,
+        review_note: Option<&str>,
+    ) -> otto_state::ProductTestcase {
+        use chrono::Utc;
+        otto_state::ProductTestcase {
+            id: otto_core::new_id(),
+            run_id: otto_core::new_id(),
+            story_id: otto_core::new_id(),
+            title: title.to_string(),
+            category: category.to_string(),
+            priority: "medium".to_string(),
+            steps_json: "{}".to_string(),
+            status: status.to_string(),
+            review_note: review_note.map(|s| s.to_string()),
+            order_idx: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_story(title: &str) -> otto_state::ProductStory {
+        use chrono::Utc;
+        let uid = otto_core::new_id();
+        otto_state::ProductStory {
+            id: otto_core::new_id(),
+            workspace_id: otto_core::new_id(),
+            source_kind: "jira".to_string(),
+            account_id: uid.clone(),
+            source_key: "PROJ-42".to_string(),
+            title: title.to_string(),
+            url: "https://jira.example.com/PROJ-42".to_string(),
+            issue_type: None,
+            stage: "tests_drafted".to_string(),
+            cwd: None,
+            watch_enabled: false,
+            watch_cadence_min: 60,
+            watch_cursor: None,
+            confluence_tests_page_id: None,
+            confluence_tests_url: None,
+            tags: String::new(),
+            parent_id: None,
+            tree_kind: "story".to_string(),
+            folder: String::new(),
+            created_by: uid,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn narrative_from_tests_contains_story_title() {
+        let story = make_story("Add Payment Gateway");
+        let cases = vec![
+            make_testcase("Happy path checkout", "happy", "approved", None),
+            make_testcase(
+                "Invalid card number",
+                "validation",
+                "changes_requested",
+                Some("Too generic, add specific error codes"),
+            ),
+        ];
+        let narrative = super::build_improve_narrative_from_tests(&story, &cases);
+        assert!(
+            narrative.contains("Add Payment Gateway"),
+            "narrative must contain story title; got:\n{narrative}"
+        );
+    }
+
+    #[test]
+    fn narrative_from_tests_highlights_changes_requested_case() {
+        let story = make_story("Checkout Feature");
+        let cases = vec![make_testcase(
+            "Invalid card number",
+            "validation",
+            "changes_requested",
+            Some("Too generic, add specific error codes"),
+        )];
+        let narrative = super::build_improve_narrative_from_tests(&story, &cases);
+        assert!(
+            narrative.contains("Invalid card number"),
+            "narrative must contain the changed case's title; got:\n{narrative}"
+        );
+        assert!(
+            narrative.contains("changes_requested"),
+            "narrative must mention changes_requested status; got:\n{narrative}"
+        );
+        assert!(
+            narrative.contains("Too generic, add specific error codes"),
+            "narrative must include the review_note text; got:\n{narrative}"
+        );
+    }
+
+    #[test]
+    fn narrative_from_tests_flags_nonempty_review_note() {
+        let story = make_story("My Story");
+        let cases = vec![make_testcase(
+            "Edge case timeout",
+            "edge",
+            "approved",
+            Some("Consider shorter timeout"),
+        )];
+        let narrative = super::build_improve_narrative_from_tests(&story, &cases);
+        assert!(
+            narrative.contains("Consider shorter timeout"),
+            "narrative must include non-empty review_note even for approved cases; got:\n{narrative}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_improve_narrative_from_clarifications
+    // -----------------------------------------------------------------------
+
+    fn make_question_full(
+        text: &str,
+        status: &str,
+        answer: Option<&str>,
+    ) -> otto_state::ProductQuestion {
+        use chrono::Utc;
+        let dummy = otto_core::new_id();
+        otto_state::ProductQuestion {
+            id: otto_core::new_id(),
+            story_id: dummy.clone(),
+            analysis_id: None,
+            text: text.to_string(),
+            rationale: String::new(),
+            category: "scope".to_string(),
+            status: status.to_string(),
+            answer: answer.map(|a| a.to_string()),
+            posted_ref: None,
+            created_by: dummy,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_note(body: &str, section: Option<&str>) -> otto_state::ProductNote {
+        use chrono::Utc;
+        otto_state::ProductNote {
+            id: otto_core::new_id(),
+            story_id: otto_core::new_id(),
+            section: section.map(|s| s.to_string()),
+            body: body.to_string(),
+            author_id: otto_core::new_id(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn narrative_from_clarifications_contains_answered_question() {
+        let story = make_story("User Authentication Story");
+        let questions = vec![
+            make_question_full(
+                "What OAuth providers are supported?",
+                "answered",
+                Some("Google and GitHub only."),
+            ),
+            make_question_full("Unanswered question", "open", None),
+        ];
+        let notes = vec![];
+        let narrative =
+            super::build_improve_narrative_from_clarifications(&story, &questions, &notes);
+        assert!(
+            narrative.contains("What OAuth providers are supported?"),
+            "narrative must contain answered question text; got:\n{narrative}"
+        );
+        assert!(
+            narrative.contains("Google and GitHub only."),
+            "narrative must contain the answer text; got:\n{narrative}"
+        );
+        // Unanswered questions should not appear as answered
+        assert!(
+            !narrative.contains("Unanswered question"),
+            "narrative must only show answered questions; got:\n{narrative}"
+        );
+    }
+
+    #[test]
+    fn narrative_from_clarifications_contains_note_body() {
+        let story = make_story("Payment Story");
+        let questions = vec![];
+        let notes = vec![make_note(
+            "Remember to handle 3DS authentication flow",
+            Some("security"),
+        )];
+        let narrative =
+            super::build_improve_narrative_from_clarifications(&story, &questions, &notes);
+        assert!(
+            narrative.contains("Remember to handle 3DS authentication flow"),
+            "narrative must contain the note body; got:\n{narrative}"
+        );
+    }
+}

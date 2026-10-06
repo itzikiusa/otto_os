@@ -159,7 +159,7 @@
   <div class="tools">
     <label class="search">
       <Icon name="search" size={12} />
-      <input placeholder="Filter by URL, method or status…" bind:value={search} aria-label="Search request history" />
+      <input dir="auto" placeholder="Filter by URL, method or status…" bind:value={search} aria-label="Search request history" />
       {#if search}
         <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
       {/if}

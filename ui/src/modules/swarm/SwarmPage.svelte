@@ -12,6 +12,8 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -524,6 +526,7 @@
       {/if}
     {/snippet}
     {#snippet actions()}
+      <AutomateGuideButton current="swarm" />
       {#if detail}
         <!-- Settings · Recruit · lifecycle · ⋯. The destructive verbs (Abort all,
              Delete swarm) live in ⋯, one step away from the lifecycle action —
@@ -573,7 +576,7 @@
           <span class="rail-current ellipsis">· {detail.name}</span>
         {/if}
       </button>
-      <button class="icon-btn" onclick={() => (showNew = true)} aria-label="New swarm" title="New swarm"><Icon name="plus" size={15} /></button>
+      <button class="icon-btn" onclick={() => (showNew = true)} aria-label="New swarm" title="New swarm"><Icon name="plus" size={14} /></button>
     </div>
     <div class="rail-list">
       <LoadState
@@ -659,6 +662,7 @@
               </button>
             {/if}
           </div>
+          <AutomateGuide current="swarm" />
         </EmptyState>
       {/if}
     {:else}
@@ -791,9 +795,9 @@
 {/if}
 {#if projModal}
   <Modal title={projEditId ? 'Edit project' : 'New project'} width={480} onclose={() => (projModal = false)}>
-    <div class="field"><label for="p-name">Name</label><input id="p-name" class="input" bind:value={projName} /></div>
-    <div class="field"><label for="p-repo">Repository path (optional, for code projects)</label><PathField bind:value={projRepo}><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
-    <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
+    <div class="field"><label for="p-name">Name</label><input dir="auto" id="p-name" class="input" bind:value={projName} /></div>
+    <div class="field"><label for="p-repo">Repository path (optional, for code projects)</label><PathField bind:value={projRepo}><input dir="ltr" id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
+    <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea dir="auto" id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
       {#if projEditId}

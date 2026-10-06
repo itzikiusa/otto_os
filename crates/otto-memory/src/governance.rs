@@ -143,10 +143,21 @@ impl MemoryService {
         self.repo().undo_forget(ws, undo_token).await
     }
 
+    /// [`Self::undo_forget`] that only restores memory `id` (the
+    /// `/memory/{mid}/forget/undo` route): a token naming another row is 404.
+    pub async fn undo_forget_id(&self, ws: &str, id: &str, undo_token: &str) -> Result<Memory> {
+        self.repo()
+            .undo_forget_scoped(ws, Some(id), undo_token)
+            .await
+    }
+
     /// Merge N source memories into one. The resulting memory inherits the
     /// collection, scope, and story_id of the first source. Source memories are
     /// marked `contradicted`. Returns the new merged memory.
-    pub async fn merge(&self, ws: &str, by: &str, req: MergeReq) -> Result<Memory> {
+    pub async fn merge(&self, ws: &str, by: &str, mut req: MergeReq) -> Result<Memory> {
+        // A repeated id is one source, not two.
+        let mut seen = std::collections::HashSet::new();
+        req.ids.retain(|id| seen.insert(id.clone()));
         if req.ids.len() < 2 {
             return Err(Error::Invalid(
                 "merge requires at least 2 source memories".into(),
@@ -182,7 +193,10 @@ impl MemoryService {
         let mut created = self.save(ws, by, vec![new_mem]).await?;
         let merged = created.remove(0);
 
-        // Record provenance on the new row + mark sources contradicted.
+        // Record provenance on the merged row + mark sources contradicted.
+        // Save deduplicates: when the merged text equals a source (after
+        // normalisation) `merged` IS that source, and `record_merge` keeps it
+        // active instead of superseding it by itself (S7-02).
         self.repo()
             .record_merge(ws, &merged.id, &req.ids, &prov_str)
             .await?;
@@ -206,6 +220,29 @@ impl MemoryService {
             )));
         }
         let parent = self.repo().get(ws, mid).await?;
+
+        // Save deduplicates by content hash within the parent's
+        // collection/scope/story — exactly where children land. A part equal
+        // to the parent would resolve to the parent itself (which would then
+        // supersede itself), and two equal parts to one child: refuse both
+        // before anything is written (S7-02).
+        let parent_hash = otto_state::MemoriesRepo::content_hash(&parent.body);
+        let mut hashes = std::collections::HashSet::new();
+        for (i, part) in req.parts.iter().enumerate() {
+            let h = otto_state::MemoriesRepo::content_hash(&part.body);
+            if h == parent_hash {
+                return Err(Error::Invalid(format!(
+                    "split part {} equals the parent memory",
+                    i + 1
+                )));
+            }
+            if !hashes.insert(h) {
+                return Err(Error::Invalid(format!(
+                    "split part {} duplicates an earlier part",
+                    i + 1
+                )));
+            }
+        }
 
         let provenance = serde_json::json!({
             "op": "split",
@@ -267,10 +304,17 @@ impl MemoryService {
             });
         }
 
-        // Save with state=suggested via a small shim: save() creates rows with
-        // the default state ('accepted'); we flip them right after.
-        let mems = self.save(ws, by, parsed).await?;
-        let ids: Vec<String> = mems.iter().map(|m| m.id.clone()).collect();
+        // Save, then park ONLY the rows this import brought in as
+        // `suggested`: a section identical to a memory that is already live
+        // keeps its state and provenance (re-importing the same AGENTS.md
+        // used to demote every accepted memory back to suggested). A revived
+        // forgotten/merged duplicate counts as brought in.
+        let saved = self.save_detailed(ws, by, parsed).await?;
+        let ids: Vec<String> = saved
+            .iter()
+            .filter(|(_, outcome)| outcome.is_new())
+            .map(|(m, _)| m.id.clone())
+            .collect();
 
         // Mark each as suggested + record the import kind in provenance_json.
         let prov = serde_json::json!({
@@ -296,7 +340,7 @@ impl MemoryService {
             .await?;
 
         Ok(ImportResp {
-            imported: n,
+            imported: ids.len(),
             import_id: gi.id,
         })
     }

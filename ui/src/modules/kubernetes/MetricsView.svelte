@@ -37,9 +37,9 @@
     historyLoading = true;
     try {
       const [ws, sys, rps] = await Promise.all([
-        k8sApi.monitorSeries(clusterId, { metric: 'mem_working_set_bytes', pod, window: '1h' }),
-        k8sApi.monitorSeries(clusterId, { metric: 'mem_sys_bytes', pod, window: '1h' }),
-        k8sApi.monitorSeries(clusterId, { metric: 'http_requests_total', pod, window: '1h' }),
+        k8sApi.monitorSeries(clusterId, { metric: 'mem_working_set_bytes', pod, ns: ns || undefined, window: '1h' }),
+        k8sApi.monitorSeries(clusterId, { metric: 'mem_sys_bytes', pod, ns: ns || undefined, window: '1h' }),
+        k8sApi.monitorSeries(clusterId, { metric: 'http_requests_total', pod, ns: ns || undefined, window: '1h' }),
       ]);
       if (seq !== historySeq) return;
       history = { mem: ws.points.length ? ws : sys.points.length ? sys : null, rps: rps.points.length ? rps : null };

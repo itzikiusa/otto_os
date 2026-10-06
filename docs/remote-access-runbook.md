@@ -62,6 +62,27 @@ cloudflared tunnel run otto          # (run as a launchd service for always-on)
 ### Alternatives (documented, not default)
 - **Tailscale Funnel** — also no open ports, edge TLS; `*.ts.net` is already trusted
   by Otto's CORS allowlist. Simpler, but owner-device-centric and less per-path control.
+  Funnel does **not** set (or strip) `CF-Connecting-IP`, so Otto never trusts that
+  header on a `*.ts.net` host by default: every Funnel visitor shares one
+  `127.0.0.1` throttle key (one visitor's bad guesses can briefly lock out other
+  guests' OTP entry — a share token that verifies is still never refused).
+
+### Per-client throttling behind a tunnel (`trusted_client_ip_header`)
+
+Behind any tunnel every client reaches the daemon as `127.0.0.1`. Which forwarded
+header identifies the real client is an explicit setting (`PUT /settings`
+`{"trusted_client_ip_header": …}`), never inferred from which allow-list admitted
+the host:
+
+| value | effect |
+|---|---|
+| unset (default) | `CF-Connecting-IP`, only for the Public link domain (`share_base_url`) host, never a `*.ts.net` one — the Cloudflare setup above works with no change |
+| `"CF-Connecting-IP"` (or another header your tunnel **sets and overwrites**) | trusted for every allowed tunnel host — needed when the tunnel host is admitted via `OTTO_ALLOWED_HOSTS` rather than as the Public link domain |
+| `""` / `"none"` | never trust a forwarded header (all tunnel visitors share one key) |
+
+Only name a header your tunnel always overwrites: a header the client can set
+lets it pick a fresh throttle key per request. The OTP itself stays bounded
+either way — 5 wrong codes burn it and a new one needs `share/extend` (3/hour).
 - **Caddy reverse proxy** — full control + Let's Encrypt, but needs an open inbound
   port + DNS + router forwarding (largest attack surface).
 
@@ -84,7 +105,11 @@ Apple Developer ID.
 
 - Daemon bound to `127.0.0.1`; `network_listener` OFF; exposure only via the tunnel.
 - Share tokens: scoped to one session, **never root**, short fixed TTL, single-use OTP
-  (when enabled), IP rate-limited, revocable, token carried in the URL **fragment**
+  (when enabled; 5 wrong codes burn it whatever the client IP), IP rate-limited
+  (keyed on the tunnel's `CF-Connecting-IP` — see `trusted_client_ip_header` above
+  — with IPv6 bucketed by /64, so one visitor's bad guesses never lock out another;
+  a token that verifies is never refused), 7-day absolute lifetime + 3 extends/hour
+  (never while a guest is verified and inside its window), revocable, token carried in the URL **fragment**
   (not sent to servers/Referer) and over the `otto-bearer` WS subprotocol (not the URL).
 - Per-user RBAC + data isolation apply (`docs/MULTI-USER-RBAC.md`).
 

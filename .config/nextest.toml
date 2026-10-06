@@ -28,14 +28,46 @@ processes = { max-threads = 2 }
 timing = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = '(package(otto-usage) & binary(e2e)) | (package(otto-server) & binary(it) & test(/^k8s_monitor_clickhouse::/))'
+# One disjunct per suite (no `(a|b)` regex alternation): the filter guard
+# checks each disjunct for >=1 match, and an alternation would keep matching
+# after one of its suites moved.
+filter = '''
+(package(otto-usage) & binary(e2e))
+| (package(otto-server) & binary(it) & test(/^k8s_monitor_clickhouse::/))
+| (package(otto-server) & binary(it) & test(/^k8s_backfill_budget::/))
+'''
 test-group = 'clickhouse'
-
-[[profile.default.overrides]]
-filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox)'
-test-group = 'processes'
 
 [[profile.default.overrides]]
 filter = 'package(otto-server) & binary(it) & test(/^runtime_lag::/)'
 test-group = 'timing'
 threads-required = 'num-test-threads'
+
+# Unit tests with short UNSCALED wall-clock asserts ("returned in < 50 ms",
+# "did not wait for the Keychain", "woken by the poke"): they prove something
+# did not block, so they are only meaningful without CPU contention. Run them
+# alone in the timing group instead of padding every budget for a loaded runner.
+#
+# Every filter here is written as a top-level `|` of disjuncts that each name
+# real tests: scripts/check-nextest-filters.py (CI, Rust job) fails when any
+# disjunct matches 0 tests, so a crate split / module move cannot silently
+# orphan an entry again (the 2026-10 split left three of these pointing at
+# otto-server paths that no longer existed). This override sits BEFORE the
+# `processes` one: nextest applies the first matching override per setting,
+# and otto-automation / otto-swarm are in `processes` too.
+[[profile.default.overrides]]
+filter = '''
+(package(otto-automation) & test(/^goal_loop::goal_loop_tests::until_flag_wakes_on_ring_and_backstops_a_silent_store$/))
+| (package(otto-automation) & test(/^goal_loop_commands::tests::cancellation_kills_verification_descendants$/))
+| (package(otto-swarm) & test(/^runtime::wake::tests::a_poke_wakes_the_coordinator_after_the_min_gap$/))
+| (package(otto-state) & test(/maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed$/))
+| (package(otto-keychain) & test(/control::tests::locked_keychain_times_out_instead_of_blocking$/))
+'''
+test-group = 'timing'
+threads-required = 'num-test-threads'
+
+# Crates whose tests spawn real shells / PTYs / git children (goal-loop
+# verification commands, swarm worktrees, agent-run session drives).
+[[profile.default.overrides]]
+filter = 'package(otto-pty) | package(otto-sessions) | package(otto-sandbox) | package(otto-automation) | package(otto-swarm) | package(otto-agent-run)'
+test-group = 'processes'

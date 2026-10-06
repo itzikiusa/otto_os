@@ -238,6 +238,17 @@ struct Destination {
     agent_reply: bool,
 }
 
+/// The longest the bridge holds a session's turn lock waiting for the turn's
+/// Final (see [`Mirror::wait_turn_done`]) — the stall timeout, after which
+/// the watchdog would end the turn anyway.
+pub const TURN_HOLD_CAP: Duration = TURN_STALL_TIMEOUT;
+
+/// Wait for a turn watch to read "idle" (false), at most `cap`; a dropped
+/// sender (the tailer stopped) ends the wait too. Pure plumbing — tested.
+async fn wait_until_idle(mut rx: tokio::sync::watch::Receiver<bool>, cap: Duration) {
+    let _ = tokio::time::timeout(cap, rx.wait_for(|live| !*live)).await;
+}
+
 /// Snapshot the current destination (never held across an `.await`; a
 /// poisoned lock still yields the last value written).
 fn current_dest(dest: &StdMutex<Destination>) -> Destination {
@@ -338,6 +349,25 @@ impl Mirror {
         if let Some(e) = self.sessions.lock().await.get(session_id) {
             e.new_turn.store(true, Ordering::Relaxed);
             e.typing_active.send_replace(true);
+        }
+    }
+
+    /// Wait until `session_id`'s current turn has ended — its Final reply
+    /// posted, or the watchdog declared it stalled — at most `cap`. Returns at
+    /// once when the session is not tracked (or its tailer stops). The bridge
+    /// holds the session's turn lock across this, so turn N+1's `attach` /
+    /// `begin_turn` never resets the mirror while turn N runs (N's feed stuck
+    /// on "Analyzing…", N's reply ending N+1's typing — and, for a webhook,
+    /// N's answer going to N+1's callback URL).
+    pub async fn wait_turn_done(&self, session_id: &Id, cap: Duration) {
+        let rx = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|e| e.typing_active.subscribe());
+        if let Some(rx) = rx {
+            wait_until_idle(rx, cap).await;
         }
     }
 
@@ -701,10 +731,26 @@ enum FeedSend {
 /// Channel errors that will never succeed on retry for this feed — the thread
 /// target refuses replies (Slack rejects threading onto join/system messages),
 /// or the destination itself is gone. Matched on the adapter's error string,
-/// which embeds the Slack API error code verbatim.
+/// which embeds the Slack API error code / the Telegram `description` verbatim.
 fn classify_send_error(e: &anyhow::Error) -> FeedSend {
     let s = e.to_string();
+    // Telegram refuses an edit whose text is unchanged — the feed already
+    // shows exactly this, so it is a success, not a failure to count.
+    if s.contains("message is not modified") {
+        return FeedSend::Ok;
+    }
     const PERMANENT: &[&str] = &[
+        // Telegram Bot API descriptions.
+        "chat not found",
+        "bot was blocked by the user",
+        "bot was kicked",
+        "user is deactivated",
+        "message to be replied not found",
+        "message to edit not found",
+        "not enough rights to send",
+        "have no rights to send",
+        "Unauthorized",
+        // Slack Web API error codes.
         "cannot_reply_to_message",
         "thread_not_found",
         "message_not_found",
@@ -831,14 +877,7 @@ fn render_feed(header: &str, lines: &[String]) -> String {
 
 /// Truncate `s` to at most `max_chars` Unicode scalar values.  Does NOT append
 /// `…` — the caller adds a continuation note instead.
-fn truncate_to_char_boundary(s: &str, max_chars: usize) -> &str {
-    for (char_count, (byte_idx, _)) in s.char_indices().enumerate() {
-        if char_count == max_chars {
-            return &s[..byte_idx];
-        }
-    }
-    s
-}
+use otto_core::text::prefix_chars as truncate_to_char_boundary;
 
 /// Extract the agent's explicit reply blocks marked with ⟦otto-send⟧ … ⟦/otto-send⟧.
 /// Empty blocks are skipped; unterminated markers are ignored.
@@ -1168,6 +1207,37 @@ mod tests {
     /// perf §15 N2: between turns the status loop wakes only for the slow
     /// liveness probe (an idle wake never refreshes the feed header); during
     /// a turn it ticks every STATUS_TICK. Real clock, scaled cadence.
+    /// S5-06: the turn hold ends on the Final (idle), on a stopped tailer,
+    /// or at the cap — never earlier while the turn is live.
+    #[tokio::test]
+    async fn a_turn_hold_waits_for_the_final() {
+        let tx = tokio::sync::watch::Sender::new(true);
+        let rx = tx.subscribe();
+        let wait = tokio::spawn(wait_until_idle(rx, Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!wait.is_finished(), "still live: the next turn must wait");
+        tx.send_replace(false); // the Final
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("released on the Final")
+            .unwrap();
+        // A stopped tailer (sender gone) releases it as well…
+        let tx = tokio::sync::watch::Sender::new(true);
+        let rx = tx.subscribe();
+        drop(tx);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_until_idle(rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("released when the tailer stops");
+        // …and the cap bounds a turn that never ends.
+        let tx = tokio::sync::watch::Sender::new(true);
+        let started = Instant::now();
+        wait_until_idle(tx.subscribe(), Duration::from_millis(150)).await;
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
     #[tokio::test]
     async fn status_wakes_park_between_turns() {
         let tick = Duration::from_millis(20);
@@ -1427,6 +1497,28 @@ mod tests {
         // Anything else (network blips, timeouts) retries on the next tick.
         let e = anyhow::anyhow!("error sending request: connection reset by peer");
         assert_eq!(classify_send_error(&e), FeedSend::Transient);
+    }
+
+    #[test]
+    fn classify_send_error_matches_telegram_descriptions() {
+        for desc in [
+            "Bad Request: chat not found",
+            "Forbidden: bot was blocked by the user",
+            "Forbidden: bot was kicked from the group chat",
+            "Bad Request: message to be replied not found",
+            "Unauthorized",
+        ] {
+            let e = anyhow::anyhow!("Telegram sendMessage failed: {desc}");
+            assert_eq!(classify_send_error(&e), FeedSend::Permanent, "{desc}");
+        }
+        let e =
+            anyhow::anyhow!("Telegram editMessageText failed: Too Many Requests: retry after 5");
+        assert_eq!(classify_send_error(&e), FeedSend::RateLimited);
+        // An unchanged edit is a no-op success, not a failure to count.
+        let e = anyhow::anyhow!(
+            "Telegram editMessageText failed: Bad Request: message is not modified: specified new message content and reply markup are exactly the same"
+        );
+        assert_eq!(classify_send_error(&e), FeedSend::Ok);
     }
 
     #[test]

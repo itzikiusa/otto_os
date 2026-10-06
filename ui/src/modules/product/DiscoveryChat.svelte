@@ -235,7 +235,7 @@
         </select>
       </label>
     {/if}
-    <textarea
+    <textarea dir="auto" aria-label="Message"
       bind:this={composerEl}
       class="msg-input"
       placeholder="Describe the idea or problem… (Enter to send, Shift+Enter for newline)"
@@ -453,7 +453,7 @@
     border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .msg-input:disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .send-btn {
@@ -474,7 +474,7 @@
     opacity: 0.88;
   }
   .send-btn:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // GitKraken-style WIP panel: shown in the graph's RIGHT detail pane when the
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
   // stage toggles, discard), a per-file working diff, and the commit composer.
   // Replaces the old separate "Changes" tab — staging now lives on the graph.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
@@ -14,8 +15,10 @@
     DiscardReq,
     DraftCommitMessageResp,
     FileChange,
+    HeadRemotesResp,
     RepoStatusResp,
   } from '../../lib/api/types';
+  import { amendPublishedAt } from './refTracking';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
@@ -26,9 +29,17 @@
   import Badge from '../../lib/components/Badge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { ListWindow } from './list-window.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import {
+    draftInFlight,
+    readComposer,
+    startDraft,
+    takePendingDraft,
+    watchComposer,
+    writeComposer,
+  } from './commitComposer';
 
   interface Props {
     repoId: string;
@@ -119,6 +130,40 @@
       (s) => (s.meta as { source?: string } | null)?.source === 'commit-draft' && !s.archived && s.created_at >= draftStartedAt!,
     );
     return c.length > 0 ? c[c.length - 1].id : null;
+  });
+
+  // The composer outlives the panel (commitComposer.ts): restore this repo's
+  // summary / description, adopt a draft that finished while we were away,
+  // and resume the spinner on one still running. Declared before the
+  // `wipRequest` effect so a "Commit with message…" prefill still wins.
+  let composerRepo = '';
+  /** False once unmounted: a draft landing after that must not reach the
+   *  confirmer (its ask() supersedes — cancels — whatever dialog is open) or
+   *  toast; the commitComposer parking slot delivers it to the next panel. */
+  let alive = true;
+  onDestroy(() => (alive = false));
+  $effect(() => {
+    const repo = repoId;
+    const unwatch = untrack(() => {
+      composerRepo = repo;
+      const saved = readComposer(repo);
+      subject = saved.subject;
+      body = saved.body;
+      draftedAt = saved.draftedAt;
+      const stop = watchComposer(repo);
+      const parked = takePendingDraft(repo);
+      if (parked) void applyDraft(parked);
+      const running = draftInFlight(repo);
+      if (running && !drafting) void followDraft(running, repo);
+      return stop;
+    });
+    return unwatch;
+  });
+  $effect(() => {
+    const text = { subject, body, draftedAt };
+    untrack(() => {
+      if (composerRepo) writeComposer(composerRepo, text);
+    });
   });
 
   // The draft endpoint reads the staged diff (falling back to the full working
@@ -543,12 +588,44 @@
       })
       .catch(() => {});
   });
-  /** HEAD is already on the upstream: amending rewrites a pushed commit, and
-   *  the next push needs a force (with lease). Said BEFORE the user commits. */
-  const amendRewritesPushed = $derived(amend && status.upstream != null && status.ahead === 0);
+  // Which remote refs already hold HEAD — asked only while Amend is ticked
+  // (a `--contains` walk is too costly per status poll), and again when HEAD
+  // may have moved (branch / ahead count change). null = unknown.
+  let headRemotes = $state.raw<string[] | null>(null);
+  $effect(() => {
+    if (!amend) return;
+    const id = repoId;
+    void status.branch;
+    void status.ahead;
+    headRemotes = null;
+    let live = true;
+    void api
+      .get<HeadRemotesResp>(`/repos/${id}/head/remotes`)
+      .then((r) => {
+        if (live && id === repoId) headRemotes = r.remotes;
+      })
+      .catch(() => {});
+    return () => { live = false; };
+  });
+  /** HEAD is already published: amending rewrites a pushed commit, and the
+   *  next push needs a force (with lease). Said BEFORE the user commits. */
+  const amendPublished = $derived(amend ? amendPublishedAt(status.upstream, status.ahead, headRemotes) : null);
 
   const canCommit = $derived(
     !committing && !drafting && (subject.trim() !== '' || amend) && (staged.length > 0 || amend),
+  );
+  /** Why Commit is grey — a disabled button with no reason reads as broken
+   *  (a draft works from UNSTAGED changes, so a good message can exist). */
+  const commitHint = $derived(
+    committing || drafting || canCommit
+      ? ''
+      : staged.length === 0 && !amend
+        ? unstaged.length > 0
+          ? 'Stage files to commit'
+          : 'Nothing to commit'
+        : subject.trim() === '' && !amend
+          ? 'Write a summary to commit'
+          : '',
   );
   /** ⌘/Ctrl+Enter in the summary or description commits — the standard
    *  composer shortcut; plain Enter keeps its meaning (newline / nothing). */
@@ -560,6 +637,15 @@
 
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
+    const repo = repoId;
+    const p = startDraft(repo, () =>
+      api.post<DraftCommitMessageResp>(`/repos/${repo}/draft-commit-message`, {}),
+    );
+    await followDraft(p, repo);
+  }
+
+  /** Watch a draft request (started here, or before a remount) to the end. */
+  async function followDraft(p: Promise<DraftCommitMessageResp>, repo: string): Promise<void> {
     drafting = true;
     draftSessionId = null;
     draftElapsed = 0;
@@ -567,45 +653,51 @@
     draftStartedAt = new Date(Date.now() - 2000).toISOString();
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
-      const d = await api.post<DraftCommitMessageResp>(
-        `/repos/${repoId}/draft-commit-message`,
-        {},
-      );
-      const text = d.message.trim();
-      // Never overwrite what the person already typed without asking.
-      if (subject.trim() || body.trim()) {
-        const ok = await confirmer.ask(
-          'The agent’s message will replace the summary and description you have typed.',
-          { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
-        );
-        if (!ok) {
-          draftSessionId = d.session_id ?? null;
-          draftedAt = null;
-          return;
-        }
-      }
-      draftedAt = Date.now();
-      const nl = text.indexOf('\n');
-      if (nl === -1) {
-        subject = text;
-        body = '';
-      } else {
-        subject = text.slice(0, nl).trim();
-        body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
-      }
-      draftSessionId = d.session_id ?? null;
-      toasts.info(
-        'Draft ready',
-        d.from_staged
-          ? 'From staged changes — review the summary & description.'
-          : 'From working changes (nothing staged) — review & edit.',
-      );
+      const d = await p;
+      // Unmounted, or switched repos meanwhile: the reply was parked.
+      if (!alive || repo !== repoId) return;
+      await applyDraft(d);
     } catch (e) {
-      toastError('Couldn’t draft the message', e);
+      if (alive && repo === repoId) toastError('Couldn’t draft the message', e);
     } finally {
       clearInterval(tick);
       drafting = false;
     }
+  }
+
+  /** Put an agent draft into the fields — asking first over typed text. */
+  async function applyDraft(d: DraftCommitMessageResp): Promise<void> {
+    if (!alive) return;
+    const text = d.message.trim();
+    // Never overwrite what the person already typed without asking.
+    if (subject.trim() || body.trim()) {
+      const ok = await confirmer.ask(
+        'The agent’s message will replace the summary and description you have typed.',
+        { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
+      );
+      if (!alive) return;
+      if (!ok) {
+        draftSessionId = d.session_id ?? null;
+        draftedAt = null;
+        return;
+      }
+    }
+    draftedAt = Date.now();
+    const nl = text.indexOf('\n');
+    if (nl === -1) {
+      subject = text;
+      body = '';
+    } else {
+      subject = text.slice(0, nl).trim();
+      body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
+    }
+    draftSessionId = d.session_id ?? null;
+    toasts.info(
+      'Draft ready',
+      d.from_staged
+        ? 'From staged changes — review the summary & description.'
+        : 'From working changes (nothing staged) — review & edit.',
+    );
   }
 
   async function commit(): Promise<void> {
@@ -617,6 +709,7 @@
       toasts.success('Committed', r.sha.slice(0, 8));
       subject = '';
       body = '';
+      draftedAt = null;
       amend = false;
       onstatus(r.status);
       selectedPath = null;
@@ -631,7 +724,7 @@
 
 {#snippet fileRow(file: TFile, depth: number, section: 'unstaged' | 'staged')}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
+  <div use:rowMenu
     class="wp-file"
     class:selected={selectedPath === file.change.path}
     style="padding-inline-start:{8 + depth * 14}px"
@@ -679,7 +772,7 @@
          same affordance file rows have. The name/chevron only folds — a name
          click must never mutate the index. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
+    <div use:rowMenu
       class="wp-folder"
       style="padding-inline-start:{8 + depth * 14}px"
       oncontextmenu={(e) => folderMenu(e, node, section)}
@@ -880,9 +973,9 @@
         <span class="grow"></span>
         {#if partial.has(selectedPath)}
           <!-- Both sides exist: pick which one the hunk actions operate on. -->
-          <div class="segmented wp-target">
-            <button class:active={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
-            <button class:active={stagedView} onclick={() => (stagedView = true)}>Staged</button>
+          <div class="segmented wp-target" role="group" aria-label="Diff side">
+            <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
+            <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
           </div>
         {/if}
         <button class="icon-btn wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>
@@ -919,7 +1012,7 @@
   <!-- Commit composer -->
   <div class="wp-composer">
     <div class="msg-box">
-      <input
+      <input dir="auto"
         class="input subject-input"
         bind:value={subject}
         placeholder={amend
@@ -942,7 +1035,7 @@
         {#if drafting}
           <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
         {:else}
-          <Icon name="zap" size={11} /> Draft
+          <Icon name="zap" size={12} /> Draft
         {/if}
       </button>
       {#if liveDraftId}
@@ -951,7 +1044,7 @@
           onclick={() => (showDraftTerm = !showDraftTerm)}
           title={showDraftTerm ? 'Hide the drafting agent' : 'Watch the drafting agent live'}
         >
-          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={11} />
+          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={12} />
           {showDraftTerm ? 'Hide agent' : 'Watch agent'}
         </button>
       {/if}
@@ -961,10 +1054,10 @@
     {/if}
     {#if liveDraftId && showDraftTerm}
       <div class="draft-term">
-        <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
+        <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
       </div>
     {/if}
-    <textarea
+    <textarea dir="auto"
       class="input body-input"
       rows="2"
       bind:value={body}
@@ -973,10 +1066,10 @@
       spellcheck="false"
       onkeydown={commitKey}
     ></textarea>
-    {#if amendRewritesPushed}
+    {#if amendPublished}
       <div class="amend-warn" role="note">
         <Icon name="warning" size={12} />
-        <span>This commit is already on {status.upstream}. Amending rewrites it — the next push will need a force push with lease.</span>
+        <span>This commit is already on {amendPublished}. Amending rewrites it — the next push will need a force push with lease.</span>
       </div>
     {/if}
     <div class="row">
@@ -1000,11 +1093,13 @@
         </span>
       {/if}
       <span class="grow"></span>
+      {#if commitHint}<span id="wp-commit-hint" class="wp-commit-hint dim">{commitHint}</span>{/if}
       <button
         class="btn primary"
         disabled={!canCommit}
         onclick={commit}
-        title="Commit (⌘↵)"
+        title={commitHint || 'Commit (⌘↵)'}
+        aria-describedby={commitHint ? 'wp-commit-hint' : undefined}
       >
         {committing ? 'Committing…' : `${amend ? 'Amend' : 'Commit'}${staged.length > 0 ? ` (${staged.length})` : ''}`}
       </button>
@@ -1013,6 +1108,13 @@
 </div>
 
 <style>
+  .wp-commit-hint {
+    font-size: var(--fs-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
   .draft-term {
     height: 220px;
     margin: 6px 0;

@@ -117,6 +117,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         )
         .route("/repos/{id}/log", get(repo_log::<S>))
         .route("/repos/{id}/stashes", get(repo_stashes::<S>))
+        .route("/repos/{id}/head/remotes", get(repo_head_remotes::<S>))
         .route("/repos/{id}/worktrees", get(repo_worktrees::<S>))
         .route(
             "/repos/{id}/worktrees/remove",
@@ -285,7 +286,21 @@ pub(crate) async fn repo_ctx<S: GitCtx>(
 ) -> Result<(Repo, LocalGit)> {
     let repo = s.store().get_repo(repo_id).await?;
     s.roles().check(&user.0, &repo.workspace_id, min).await?;
+    // A git route call on a PERSON's credential is their deliberate act: their
+    // hooks run, an in-work-tree `core.hooksPath` (husky) included. An agent
+    // session's own token is not (S11-304): it could have just written those
+    // hook files from inside its sandbox, and ottod runs git unconfined — so
+    // its commit/merge/checkout skips in-work-tree hooks like any
+    // daemon-internal call.
     let git = LocalGit::new(&repo.path);
+    // The credential class is the one the server's feature guard publishes for
+    // every request (`otto_core::auth::RequestCredential`); with no request
+    // scope (daemon-internal callers, a spawned task) it is not a person.
+    let git = if otto_core::auth::request_is_person() {
+        git.person_initiated()
+    } else {
+        git
+    };
     Ok((repo, git))
 }
 
@@ -507,6 +522,48 @@ pub(crate) fn remote_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+/// When each repo's last SUCCESSFUL fetch finished — the single-flight
+/// marker [`fetch_coalesced`] compares a caller's arrival against.
+fn fetch_done() -> &'static StdMutex<HashMap<String, std::time::Instant>> {
+    static DONE: OnceLock<StdMutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+    DONE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Single-flight `git fetch` per repo. Callers serialise on the repo's
+/// remote lock; one that arrived while another fetch of the same repo was
+/// running reuses that fetch's refs instead of re-running it, so N windows
+/// (or the auto-fetch sweep racing a manual click) cost ONE network round,
+/// not N back-to-back ones (telemetry: `POST /repos/{id}/fetch` ~6/min at
+/// p95 3 s). Only a success is shared — after a failure the next waiter runs
+/// its own fetch (it may carry a different, valid token). Returns the held
+/// lock guard and whether this caller actually ran the fetch.
+pub(crate) async fn fetch_coalesced<'a, F, Fut>(
+    id: &Id,
+    lock: &'a tokio::sync::Mutex<()>,
+    fetch: F,
+) -> Result<(tokio::sync::MutexGuard<'a, ()>, bool)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let arrived = std::time::Instant::now();
+    let guard = lock.lock().await;
+    let shared = fetch_done()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(id.as_str())
+        .is_some_and(|done| *done > arrived);
+    if shared {
+        return Ok((guard, false));
+    }
+    fetch().await?;
+    fetch_done()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(id.to_string(), std::time::Instant::now());
+    Ok((guard, true))
+}
+
 /// Forget a deleted repo's locks (both maps otherwise only ever grow). An
 /// in-flight holder keeps its own `Arc`, so dropping the entry is safe.
 fn forget_repo_locks(id: &Id) {
@@ -515,6 +572,10 @@ fn forget_repo_locks(id: &Id) {
         .unwrap_or_else(|p| p.into_inner())
         .remove(id.as_str());
     remote_locks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(id.as_str());
+    fetch_done()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .remove(id.as_str());
@@ -545,6 +606,111 @@ async fn list_accounts<S: GitCtx>(
     Ok(Json(accounts))
 }
 
+/// Opt-out of the https requirement for a self-hosted forge served over plain
+/// http (set `OTTO_GIT_ALLOW_HTTP_API=1` in the daemon's environment).
+const ALLOW_HTTP_API_ENV: &str = "OTTO_GIT_ALLOW_HTTP_API";
+
+/// DNS-free shape check of a git account's `api_base_url` (S2-311): an
+/// http(s) URL with a host, no userinfo / query / fragment, https unless
+/// [`ALLOW_HTTP_API_ENV`] opts out, and never an IP literal / `localhost` that
+/// is loopback, link-local (cloud metadata), unspecified or multicast.
+/// Private ranges stay allowed — self-hosted GitLab lives there.
+pub(crate) fn api_base_url_shape(url: &str, allow_http: bool) -> Result<reqwest::Url> {
+    let bad = |why: &str| Error::Invalid(format!("api_base_url {why}"));
+    let u = reqwest::Url::parse(url.trim()).map_err(|e| bad(&format!("is not a URL: {e}")))?;
+    match u.scheme() {
+        "https" => {}
+        "http" if allow_http => {}
+        "http" => {
+            return Err(bad(&format!(
+                "must use https — the token would travel unencrypted (set {ALLOW_HTTP_API_ENV}=1                  to allow plain http for a self-hosted forge)"
+            )))
+        }
+        other => return Err(bad(&format!("has an unsupported scheme: {other}"))),
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(bad("must not carry credentials"));
+    }
+    if u.query().is_some() || u.fragment().is_some() || url.contains(['?', '#']) {
+        return Err(bad("must not have a query or fragment"));
+    }
+    let host = u
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| bad("has no host"))?;
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return Err(bad("must not point at this machine"));
+    }
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        if internal_only_ip(ip) {
+            return Err(bad(&format!(
+                "must not point at {ip} (loopback / link-local / metadata)"
+            )));
+        }
+    }
+    Ok(u)
+}
+
+/// Addresses a forge API can never legitimately live at: loopback,
+/// link-local (169.254.0.0/16 incl. the cloud-metadata endpoint, fe80::/10),
+/// unspecified, multicast, broadcast — and the IPv4-mapped forms of them.
+fn internal_only_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 0
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return internal_only_ip(std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// [`api_base_url_shape`] plus a resolution check: a hostname that resolves
+/// to an internal-only address is refused the same as the literal (the
+/// test-draft route echoes upstream error text, which would otherwise make it
+/// a readable SSRF). An unresolvable name passes — the forge call fails on
+/// its own, and an offline save must keep working.
+async fn check_api_base_url(url: &str) -> Result<()> {
+    let allow_http = matches!(
+        std::env::var(ALLOW_HTTP_API_ENV).as_deref(),
+        Ok("1") | Ok("true")
+    );
+    let u = api_base_url_shape(url, allow_http)?;
+    let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default()) else {
+        return Ok(());
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), port)).await {
+        for a in addrs {
+            if internal_only_ip(a.ip()) {
+                return Err(Error::Invalid(format!(
+                    "api_base_url host {host} resolves to {} (loopback / link-local / metadata)",
+                    a.ip()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn create_account<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
@@ -552,6 +718,9 @@ async fn create_account<S: GitCtx>(
 ) -> ApiResult<Json<GitAccount>> {
     if req.token.trim().is_empty() {
         return Err(Error::Invalid("token must not be empty".into()).into());
+    }
+    if let Some(url) = req.api_base_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        check_api_base_url(url).await?;
     }
     if req.username.trim().is_empty() {
         return Err(Error::Invalid("username must not be empty".into()).into());
@@ -607,13 +776,22 @@ async fn update_account<S: GitCtx>(
         Some("") => None,
         Some(v) => Some(v.to_string()),
     };
+    // Only a CHANGED url is vetted: an account saved before the check keeps
+    // working when its label or token is edited.
+    if let Some(url) = api_base_url
+        .as_deref()
+        .filter(|u| Some(*u) != account.api_base_url.as_deref())
+    {
+        check_api_base_url(url).await?;
+    }
 
-    // Token rotation: non-empty → store new ref, delete old; empty/absent → keep.
-    let token_ref = if let Some(tok) = req.token.as_deref().filter(|t| !t.is_empty()) {
+    // Token rotation: non-empty → store the new secret under a NEW ref, point
+    // the row at it, and only THEN delete the old one. The other order (S2-313)
+    // left a row pointing at a deleted secret whenever the DB update failed.
+    let rotated = req.token.as_deref().filter(|t| !t.is_empty());
+    let token_ref = if let Some(tok) = rotated {
         let new_ref = format!("gitacct-{}", new_id());
         s.secrets().put(&new_ref, tok)?;
-        // Best-effort cleanup of old secret; don't fail if it's already gone.
-        let _ = s.secrets().delete(&account.token_ref);
         new_ref
     } else {
         account.token_ref.clone()
@@ -633,8 +811,23 @@ async fn update_account<S: GitCtx>(
             api_base_url.as_deref(),
             token_expires_at,
         )
-        .await?;
-    Ok(Json(updated))
+        .await;
+    match updated {
+        Ok(updated) => {
+            if rotated.is_some() {
+                // Best-effort cleanup of the old secret; don't fail if it's gone.
+                let _ = s.secrets().delete(&account.token_ref);
+            }
+            Ok(Json(updated))
+        }
+        Err(e) => {
+            if rotated.is_some() {
+                // The row still names the old secret: drop the orphan new one.
+                let _ = s.secrets().delete(&token_ref);
+            }
+            Err(e.into())
+        }
+    }
 }
 
 async fn delete_account<S: GitCtx>(
@@ -707,6 +900,9 @@ async fn test_account_draft<S: GitCtx>(
         .as_deref()
         .filter(|t| !t.trim().is_empty())
         .ok_or_else(|| Error::Invalid("token is required".into()))?;
+    if let Some(url) = req.api_base_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        check_api_base_url(url).await?;
+    }
     let account = GitAccount {
         id: String::new(),
         user_id: user.0.id.clone(),
@@ -1370,9 +1566,10 @@ async fn repo_fetch<S: GitCtx>(
     let token = optional_token(&s, &user, &repo).await?;
     // Fetch and push both rewrite the tracking refs: one at a time per repo,
     // so neither dies on "cannot lock ref". The worktree lock is not needed.
+    // Concurrent callers share one fetch (see `fetch_coalesced`).
     let lock = remote_lock(&id);
-    let _g = lock.lock().await;
-    git.fetch(token).await?;
+    let (_g, _ran) =
+        fetch_coalesced(&id, &lock, || async { git.fetch(token).await.map(drop) }).await?;
     status_after_release(&git, _g).await
 }
 
@@ -2013,6 +2210,12 @@ struct DeleteBranchReq {
     /// `-d`, which refuses to drop unmerged work.
     #[serde(default)]
     force: Option<bool>,
+    /// Which remote the `remote:true` delete targets. Defaults to `origin`.
+    /// A remote-ref row such as `upstream/feature-x` sends
+    /// `remote_name:"upstream"` so the push deletes THAT branch — previously the
+    /// prefix was stripped and `origin/feature-x` was destroyed instead.
+    #[serde(default)]
+    remote_name: Option<String>,
 }
 
 async fn repo_branch_delete<S: GitCtx>(
@@ -2045,10 +2248,53 @@ async fn repo_branch_delete<S: GitCtx>(
         git.delete_branch(name, req.force.unwrap_or(false)).await?;
     }
     if want_remote {
-        let token = optional_token(&s, &user, &repo).await?;
-        git.delete_remote_branch(name, token).await?;
+        let remote = req
+            .remote_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .unwrap_or("origin");
+        // The bound account's token belongs to origin's host. Offer it to
+        // another remote only when that remote points at the SAME host — a
+        // fork's `upstream` on another forge must never receive it.
+        let token = if remote == "origin" || remote_shares_origin_host(&git, remote).await {
+            optional_token(&s, &user, &repo).await?
+        } else {
+            None
+        };
+        git.delete_remote_branch_on(remote, name, token).await?;
     }
     status_after_release(&git, _g).await
+}
+
+/// True when `remote`'s push URL has the same host as origin's — the only
+/// case where the repo's bound account token may be offered to it.
+async fn remote_shares_origin_host(git: &LocalGit, remote: &str) -> bool {
+    let Ok(remotes) = git.remotes().await else {
+        return false;
+    };
+    let host_of = |name: &str| {
+        remotes
+            .iter()
+            .find(|r| r.name == name)
+            .and_then(|r| url_host(&r.push_url))
+    };
+    matches!((host_of("origin"), host_of(remote)), (Some(a), Some(b)) if a == b)
+}
+
+/// Lower-cased host of a git remote URL — `https://host/…`,
+/// `ssh://git@host:22/…` or scp-like `git@host:owner/repo`. `None` for local
+/// paths and anything unparseable (so they never share a token).
+fn url_host(url: &str) -> Option<String> {
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None if url.contains(':') && !url.starts_with('/') => url,
+        None => return None,
+    };
+    let authority = rest.split(['/']).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    let host = host_port.split(':').next()?.trim();
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 #[derive(Deserialize)]
@@ -2155,6 +2401,19 @@ async fn repo_stashes<S: GitCtx>(
 ) -> ApiResult<Json<Vec<StashInfo>>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     Ok(Json(git.stash_list().await?))
+}
+
+/// `GET /repos/{id}/head/remotes` → `{remotes: string[]}`: remote-tracking
+/// refs that already contain HEAD. Asked only when the user ticks "Amend" —
+/// a `--contains` walk is too costly for every status poll.
+async fn repo_head_remotes<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let remotes = git.head_remote_refs().await?;
+    Ok(Json(serde_json::json!({ "remotes": remotes })))
 }
 
 async fn repo_worktrees<S: GitCtx>(
@@ -2734,8 +2993,16 @@ async fn pr_merge<S: GitCtx>(
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    // Pinned to the head the user checked (S15-10): a push that landed while
+    // the merge dialog was open is a 409 "PR changed — re-check", never a
+    // merge of commits nobody reviewed or CI-checked.
+    let pin = req
+        .expected_head_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     provider
-        .merge(&remote, number, req.strategy, req.delete_source_branch)
+        .merge_pinned(&remote, number, req.strategy, req.delete_source_branch, pin)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2791,6 +3058,30 @@ mod tests {
     use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
 
     use super::*;
+
+    /// S15-01: a non-origin remote only receives origin's account token when
+    /// it lives on the same host; local paths never match anything.
+    #[test]
+    fn url_host_parses_https_ssh_and_scp_forms() {
+        assert_eq!(
+            url_host("https://GitHub.com/o/r.git").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            url_host("https://x@github.com:443/o/r").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            url_host("ssh://git@gitlab.com:22/o/r").as_deref(),
+            Some("gitlab.com")
+        );
+        assert_eq!(
+            url_host("git@bitbucket.org:o/r.git").as_deref(),
+            Some("bitbucket.org")
+        );
+        assert_eq!(url_host("/tmp/origin.git"), None);
+        assert_eq!(url_host("relative/path"), None);
+    }
 
     /// In-memory secret store that returns a fixed token for any ref.
     struct FixedSecret;
@@ -3857,5 +4148,200 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Fetches queued behind a running one reuse its result; a later fetch
+    /// (or one after a failure) runs again.
+    #[tokio::test]
+    async fn concurrent_fetches_of_one_repo_share_a_single_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let id: Id = "repo-fetch-single-flight".into();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let spawn = |delay: u64| {
+            let (id, lock, runs) = (id.clone(), lock.clone(), runs.clone());
+            tokio::spawn(async move {
+                let (_g, ran) = fetch_coalesced(&id, &lock, || async {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                ran
+            })
+        };
+        let first = spawn(80);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let joined: Vec<_> = (0..3).map(|_| spawn(0)).collect();
+        assert!(first.await.unwrap());
+        for j in joined {
+            assert!(!j.await.unwrap(), "a waiter must reuse the running fetch");
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        // Arriving after it finished: a fresh fetch.
+        assert!(spawn(0).await.unwrap());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        // A failure is never shared with the next caller.
+        let err = fetch_coalesced(&id, &lock, || async {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            Err(Error::Internal("offline".into()))
+        });
+        let (r, after) = tokio::join!(err, async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            spawn(0).await.unwrap()
+        });
+        assert!(r.is_err());
+        assert!(after);
+        forget_repo_locks(&id);
+    }
+
+    /// Process-local secret store that remembers what is stored.
+    #[derive(Default)]
+    struct MemSecrets(std::sync::Mutex<HashMap<String, String>>);
+    impl SecretStore for MemSecrets {
+        fn put(&self, k: &str, v: &str) -> Result<()> {
+            self.0.lock().unwrap().insert(k.into(), v.into());
+            Ok(())
+        }
+        fn get(&self, k: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(k).cloned())
+        }
+        fn delete(&self, k: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(k);
+            Ok(())
+        }
+    }
+
+    /// S2-313: a token rotation whose DB update fails keeps the OLD secret
+    /// (the row still names it) and drops the orphaned new one; a successful
+    /// rotation deletes the old secret only after the row points at the new.
+    #[tokio::test]
+    async fn token_rotation_never_strands_the_row_on_a_deleted_secret() {
+        let (pool, mut ctx, user, _ws) = fixture().await;
+        let secrets = Arc::new(MemSecrets::default());
+        ctx.secrets = secrets.clone();
+        let acct = seed_account(&ctx, &user, GitProviderKind::Github, "rot").await;
+        secrets.put(&acct.token_ref, "old-token").unwrap();
+        let req = || UpdateGitAccountReq {
+            label: None,
+            username: None,
+            namespace: None,
+            api_base_url: None,
+            token: Some("new-token".into()),
+            token_expires_at: None,
+        };
+
+        sqlx::query(
+            "CREATE TRIGGER fail_acct_update BEFORE UPDATE ON git_accounts \
+             BEGIN SELECT RAISE(FAIL, 'db down'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let r = update_account(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(acct.id.clone()),
+            Json(req()),
+        )
+        .await;
+        assert!(r.is_err());
+        let held = secrets.0.lock().unwrap().clone();
+        assert_eq!(
+            held.get(&acct.token_ref).map(String::as_str),
+            Some("old-token")
+        );
+        assert_eq!(
+            held.len(),
+            1,
+            "the new secret must not be orphaned: {held:?}"
+        );
+
+        sqlx::query("DROP TRIGGER fail_acct_update")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let Json(updated) = update_account(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(acct.id.clone()),
+            Json(req()),
+        )
+        .await
+        .unwrap();
+        assert_ne!(updated.token_ref, acct.token_ref);
+        let held = secrets.0.lock().unwrap().clone();
+        assert!(!held.contains_key(&acct.token_ref), "old secret removed");
+        assert_eq!(
+            held.get(&updated.token_ref).map(String::as_str),
+            Some("new-token")
+        );
+    }
+
+    /// S2-311: `api_base_url` must be an https forge URL — never loopback,
+    /// link-local / metadata, credentials, a query or a fragment; private
+    /// ranges (self-hosted GitLab) stay allowed, http only with the opt-out.
+    #[test]
+    fn api_base_url_refuses_internal_targets() {
+        for ok in [
+            "https://gitlab.example.com",
+            "https://10.0.0.5/gitlab",
+            "https://192.168.1.20:8443",
+        ] {
+            assert!(api_base_url_shape(ok, false).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://gitlab.example.com",
+            "https://127.0.0.1",
+            "https://localhost:7700",
+            "https://169.254.169.254/latest",
+            "https://[::1]",
+            "https://[::ffff:127.0.0.1]",
+            "https://0.0.0.0",
+            "https://user:pw@gitlab.example.com",
+            "https://gitlab.example.com/?x=1",
+            "https://gitlab.example.com/#frag",
+            "file:///etc/passwd",
+            "ftp://gitlab.example.com",
+        ] {
+            assert!(api_base_url_shape(bad, false).is_err(), "{bad}");
+        }
+        assert!(api_base_url_shape("http://gitlab.corp", true).is_ok());
+        assert!(api_base_url_shape("http://127.0.0.1", true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod person_call_tests {
+    use otto_core::auth::{
+        carry_request_credential, request_is_person, with_request_credential, RequestCredential,
+        OUTSIDE_REQUEST,
+    };
+
+    /// S11-304: only a person's own credential makes a git route call
+    /// `person_initiated` (in-work-tree hooks run); an agent session's
+    /// credential, no request scope at all, and a task spawned off a person's
+    /// request without carrying the credential do not.
+    #[tokio::test]
+    async fn only_a_person_s_credential_runs_in_worktree_hooks() {
+        let person = RequestCredential::default();
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        assert!(with_request_credential(person, async { request_is_person() }).await);
+        assert!(!with_request_credential(agent, async { request_is_person() }).await);
+        assert!(!with_request_credential(OUTSIDE_REQUEST, async { request_is_person() }).await);
+        assert!(!request_is_person());
+        let (spawned, carried) = with_request_credential(person, async {
+            let spawned = tokio::spawn(async { request_is_person() }).await.unwrap();
+            let carried = tokio::spawn(carry_request_credential(async { request_is_person() }))
+                .await
+                .unwrap();
+            (spawned, carried)
+        })
+        .await;
+        assert!(!spawned && carried);
     }
 }

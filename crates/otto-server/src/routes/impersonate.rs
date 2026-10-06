@@ -100,6 +100,9 @@ pub async fn start<C: ImpersonateCtx>(
     State(ctx): State<C>,
     auth: CurrentAuthContext,
 ) -> ApiResult<Json<ImpersonateResp>> {
+    // S8-01: an impersonation token carries no session binding, so minting
+    // one from an agent's credential would launder it into a "human" one.
+    crate::auth::require_human(&auth.0)?;
     let real = auth.real_user().clone();
     let effective = auth.effective_user();
 

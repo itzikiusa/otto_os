@@ -221,10 +221,11 @@
   import { SearchAddon } from '@xterm/addon-search';
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
-  import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
+  import { wsConnect, wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
+  import { reconnectDelay } from './guestReconnect';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
@@ -238,6 +239,7 @@
   import { copyText } from '../clipboard';
   import { snipApi } from '../snip';
   import { toasts } from '../toast.svelte';
+  import { noteTerminalKey, OPTION_META_HINT_KEY } from '../optionMetaHint';
   import { registerSelectAll } from '../selectall';
   import TermKeysBar from './TermKeysBar.svelte';
   import Icon from './Icon.svelte';
@@ -279,7 +281,7 @@
      *  `otto-bearer` Sec-WebSocket-Protocol subprotocol carrying this token
      *  instead of the stored owner login token. Used by the guest share view
      *  (SharePage) so the scoped share token never touches localStorage.
-     *  Default = undefined → falls back to today's wsUrl() behaviour. */
+     *  Default = undefined → the stored owner token (via `wsConnect`). */
     shareToken?: string;
     /** Capability-only room transport; bypasses owner authentication entirely. */
     socketFactory?: () => WebSocket;
@@ -525,11 +527,30 @@
   let exitProbes = 0;
   const MAX_EXIT_PROBES = 30;
 
+  /** Guest (share-link) sockets refused before ever opening, in a row, and
+   *  when the first of them was. A lapsed/revoked share is refused at the
+   *  upgrade forever; retrying it every 5 s with no cap just fed the daemon's
+   *  failure throttle (S1-05), but a daemon restart also refuses for a while.
+   *  {@link reconnectDelay}: fast at first, then every 30 s for 10 minutes
+   *  (S14-303); the share page's access re-check calls {@link reconnect}. */
+  let guestRefusals = 0;
+  let guestFirstRefusalAt: number | null = null;
+
   function scheduleReconnect(afterExit = false): void {
     if (closedByUs || reconnectTimer) return;
     if (exitCode !== null && !afterExit) return;
+    const delay = reconnectDelay({
+      guest: !!shareToken,
+      attempts: reconnectAttempts,
+      refusals: guestRefusals,
+      firstRefusalAt: guestFirstRefusalAt,
+      now: Date.now(),
+    });
+    if (delay === null) {
+      reconnecting = false;
+      return;
+    }
     reconnecting = true;
-    const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
     reconnectAttempts++;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -832,17 +853,15 @@
     resyncPending = false;
     viewAttach = opts.view ?? !resumeOnOpen;
     dormantView = false;
-    // When a shareToken is supplied (guest share view) use the otto-bearer
-    // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
-    // the URL query string (keeps it out of access logs). The stored owner
-    // login token path (wsUrl) is unchanged for all normal sessions.
+    // Every bearer — the guest's share token AND the owner's login token —
+    // travels in the otto-bearer subprotocol (Sec-WebSocket-Protocol), never
+    // the URL query string, so it stays out of tunnel/proxy access logs (S1-13).
     if (socketFactory) {
       sock = socketFactory();
     } else if (shareToken) {
-      const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
-      sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
+      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`), [WS_BEARER_SUBPROTOCOL, shareToken]);
     } else {
-      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`) + (viewAttach ? '&view=1' : ''));
+      sock = wsConnect(`/ws/term/${sessionId}${viewAttach ? '?view=1' : ''}`);
     }
     sock.binaryType = 'arraybuffer';
     wireSocket(sock);
@@ -896,7 +915,11 @@
   /** This component's handlers on `s` — a socket it just opened, or one it
    *  adopted from the parking lot (already open: onopen never fires). */
   function wireSocket(s: WebSocket): void {
+    let opened = s.readyState === WebSocket.OPEN;
     s.onopen = () => {
+      opened = true;
+      guestRefusals = 0;
+      guestFirstRefusalAt = null;
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
@@ -1037,6 +1060,10 @@
       connected = false;
       compactQueue.cancel(compactClient);
       if (closedByUs) return;
+      if (!opened) {
+        if (guestRefusals === 0) guestFirstRefusalAt = Date.now();
+        guestRefusals++;
+      }
       if (exitCode === null) {
         disconnected = true;
         scheduleReconnect();
@@ -1838,7 +1865,12 @@
       letterSpacing: 0,
       scrollback: untrack(() => scrollback),
       theme: untrack(() => terminalTheme(ui.theme, untrack(() => effScheme))),
-      macOptionIsMeta: true,
+      // ⌥ as Meta is a per-device setting (Settings → Appearance → Terminal);
+      // default on. Live changes go through the effect below, no rebuild.
+      macOptionIsMeta: untrack(() => ui.termOptionAsMeta),
+      // Screen-reader mode: xterm keeps an aria-live mirror + accessible row
+      // tree. Effect 1 also forces the DOM renderer while it is on.
+      screenReaderMode: untrack(() => ui.termScreenReader),
       // ⌥-drag forces a LOCAL selection even while the running app has mouse
       // reporting on. Without this there is no way to select at all in a
       // mouse-reporting TUI (claude, codex, vim, htop…) on macOS: xterm's
@@ -1861,10 +1893,40 @@
   // Shift+Enter must insert a newline in the agent's composer, not submit.
   // xterm emits plain `\r` for Enter regardless of Shift, and `\r` is what
   // claude/codex read as "submit". Intercept Shift+Enter and send `\x1b\r`
-  // (ESC+CR) instead — the same sequence Option/Meta+Enter produces (this
-  // terminal sets macOptionIsMeta), which these TUIs treat as a newline.
+  // (ESC+CR) instead — the same sequence Option/Meta+Enter produces (with
+  // macOptionIsMeta on, the default), which these TUIs treat as a newline.
   // Plain Enter is left untouched, so it still submits.
+  // One-time pointer for non-US layouts: ⌥ is Meta by default, so ⌥L (@ on
+  // a German Mac) types nothing. The first such chord says so and offers the
+  // switch (lib/optionMetaHint.ts). Never changes what the key does.
+  const optionMetaHintDeps = {
+    optionAsMeta: () => ui.termOptionAsMeta,
+    shown: () => {
+      try {
+        return localStorage.getItem(OPTION_META_HINT_KEY) === '1';
+      } catch {
+        return true; // no storage → don't nag on every launch
+      }
+    },
+    markShown: () => {
+      try {
+        localStorage.setItem(OPTION_META_HINT_KEY, '1');
+      } catch {
+        /* private mode */
+      }
+    },
+    show: (ch: string) =>
+      toasts.push(
+        'info',
+        'Option is set to act as Meta',
+        `⌥ sends Meta in terminals, so “${ch}” wasn’t typed. Turn it off to type your keyboard layout’s ⌥ characters (Settings → Appearance).`,
+        12000,
+        { action: { label: 'Turn off Option-as-Meta', run: () => ui.setTermOptionAsMeta(false) } },
+      ),
+  };
+
   function termKeyHandler(e: KeyboardEvent): boolean {
+    if (!readOnly) noteTerminalKey(e, optionMetaHintDeps);
     if (
       e.type === 'keydown' &&
       e.key === 'Enter' &&
@@ -1930,6 +1992,20 @@
           // send us down the permissioned path the browser is refusing.)
           copySawEvent = false;
           e.stopPropagation();
+          // Ctrl+Shift+C has NO native copy command behind it (on any OS —
+          // the browser's own chord is ⌘C / Ctrl+C), so leaving it to the
+          // browser means no `copy` event ever fires and the fallback below
+          // runs 80 ms later, outside the gesture, on the permissioned API.
+          // Run the permission-free command ourselves, synchronously, while
+          // the keydown is still a user gesture; `onCopy` fills the clipboard
+          // with the terminal selection and sets `copySawEvent`.
+          if (e.ctrlKey && e.shiftKey && !e.metaKey) {
+            try {
+              document.execCommand('copy');
+            } catch {
+              /* refused — the async fallback below still gets its turn */
+            }
+          }
           // If the browser never fires `copy`, nothing was copied and the
           // async API is the only route left. Say so when that is refused
           // too — a silent failure is indistinguishable from a working copy
@@ -2247,6 +2323,8 @@
     e.term.options.scrollback = scrollback;
     e.term.options.theme = terminalTheme(ui.theme, effScheme);
     if (e.term.options.fontFamily !== ui.termFontStack) e.term.options.fontFamily = ui.termFontStack;
+    e.term.options.macOptionIsMeta = ui.termOptionAsMeta;
+    e.term.options.screenReaderMode = ui.termScreenReader;
     if (e.status) onstatus?.(e.status);
     return true;
   }
@@ -2324,7 +2402,9 @@
     // Tracked reads — the ONLY ones: toggling RTL / phone layout re-runs this
     // effect so the terminal is rebuilt with the correct renderer (WebGL vs DOM).
     const rtl = ui.rtlBidi;
-    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER;
+    // Screen-reader support needs the DOM renderer: a WebGL canvas exposes no
+    // text to assistive tech, so toggling it rebuilds like RTL does.
+    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER || ui.termScreenReader;
     // Everything else is untracked. Loading the WebGL addon (and the xterm
     // callbacks it fires synchronously) reads component state such as
     // `connected`; tracked, the socket opening re-ran this effect, whose
@@ -2686,6 +2766,16 @@
     if (term && term.options.scrollback !== lines) term.options.scrollback = lines;
   });
 
+  // react to the ⌥-as-Meta / screen-reader settings (live options; the
+  // renderer switch for screen-reader mode is Effect 1's rebuild)
+  $effect(() => {
+    const meta = ui.termOptionAsMeta;
+    const sr = ui.termScreenReader;
+    if (!term) return;
+    if (term.options.macOptionIsMeta !== meta) term.options.macOptionIsMeta = meta;
+    if (term.options.screenReaderMode !== sr) term.options.screenReaderMode = sr;
+  });
+
   // react to terminal font-family choice (live, no rebuild needed)
   $effect(() => {
     const family = ui.termFontStack;
@@ -2762,6 +2852,24 @@
     term?.focus();
   }
 
+  /** Reconnect now if this terminal lost its socket (not one that ended):
+   *  the share page calls it when its access re-check succeeds again, so a
+   *  guest whose retries gave up during a long daemon restart comes back on
+   *  its own (S14-303). A no-op while connected or mid-connect. */
+  export function reconnect(): void {
+    if (connected || exitCode !== null || closedByUs) return;
+    if (!disconnected && !reconnecting) return;
+    resetRetries();
+    connect({ view: false });
+  }
+
+  /** A user (or the share page) asked to try again: start a fresh ladder. */
+  function resetRetries(): void {
+    reconnectAttempts = 0;
+    guestRefusals = 0;
+    guestFirstRefusalAt = null;
+  }
+
   /** "Redraw terminal" (pane ⋯ menu, ⌘K): sync the grid and rebuild the
    *  screen from a fresh server snapshot — the rebuild a reconnect or Reset
    *  does, without dropping the socket. One-click recovery for a garbled TUI. */
@@ -2793,7 +2901,7 @@
   <div class="term-wrap" class:otto-force-dark={forceDark}>
     {#if findOpen}
       <div class="find-bar" role="search" aria-label="Find in terminal">
-        <input
+        <input dir="auto"
           bind:this={findInput}
           bind:value={findQuery}
           placeholder="Find in terminal"
@@ -2823,7 +2931,7 @@
           <span class="find-status" title="Searching scrollback…">…</span>
         {:else if serverMatches.length > 0}
           <span class="find-status server" title="{plural(serverMatches.length, 'scrollback match', 'scrollback matches')} (↑↓ to step)">
-            <Icon name="clock" size={10} />{serverMatchIdx >= 0 ? serverMatchIdx + 1 : '–'}/{serverMatches.length}
+            <Icon name="clock" size={12} />{serverMatchIdx >= 0 ? serverMatchIdx + 1 : '–'}/{serverMatches.length}
           </span>
         {/if}
         <button class="icon-btn" onclick={() => findNext(false)} title="Older match" aria-keyshortcuts="Enter" aria-label="Older match">
@@ -2944,12 +3052,12 @@
     {:else if reconnecting}
       <div class="term-overlay dim">
         <span class="ov-status">Reconnecting…</span>
-        <button class="btn" onclick={() => { reconnectAttempts = 0; connect({ view: false }); }}>Reconnect now</button>
+        <button class="btn" onclick={() => { resetRetries(); connect({ view: false }); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">
         <span class="ov-status danger">Disconnected</span>
-        <button class="btn" onclick={() => connect({ view: false })}>Reconnect</button>
+        <button class="btn" onclick={() => { resetRetries(); connect({ view: false }); }}>Reconnect</button>
       </div>
     {:else if !connected}
       <div class="term-overlay dim"><span class="ov-status">Connecting…</span></div>

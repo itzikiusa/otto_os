@@ -15,16 +15,10 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use otto_core::secrets::SecretStore;
-use otto_core::{Error, Id, Result};
-use otto_rbac::{AuthRepo, RbacRoleChecker};
+use otto_core::Id;
+use otto_rbac::AuthRepo;
 use otto_server::ServerCtx;
-use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
-    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo,
-    WorkspacesRepo,
-};
+use otto_state::{DbPool, NewSession, SessionsRepo};
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
@@ -32,34 +26,6 @@ use tokio::sync::broadcast;
 // ---------------------------------------------------------------------------
 // Harness (mirrors ui_control.rs: a real base_url + listener)
 // ---------------------------------------------------------------------------
-
-struct NoopSecrets;
-impl SecretStore for NoopSecrets {
-    fn put(&self, _key: &str, _value: &str) -> Result<()> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-    fn get(&self, _key: &str) -> Result<Option<String>> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-    fn delete(&self, _key: &str) -> Result<()> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-}
-
-struct NoopSpawner;
-impl otto_connections::Spawner for NoopSpawner {
-    fn spawn_connection<'a>(
-        &'a self,
-        _ws_id: &'a Id,
-        _user_id: &'a Id,
-        _conn: &'a otto_core::domain::Connection,
-        _spec: otto_pty::CommandSpec,
-        _first_command: Option<String>,
-        _title: Option<String>,
-    ) -> otto_core::auth::BoxFuture<'a, Result<otto_core::domain::Session>> {
-        Box::pin(async { Err(Error::Internal("noop spawner".into())) })
-    }
-}
 
 async fn file_pool(dir: &std::path::Path) -> DbPool {
     let opts = SqliteConnectOptions::new()
@@ -114,144 +80,9 @@ async fn seed_workspace(pool: &DbPool, ws_id: &str, admin: &str) {
 }
 
 async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> ServerCtx {
-    let (events, _rx) = broadcast::channel(256);
-    let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
-    let roles = Arc::new(RbacRoleChecker::new(pool.clone()));
-    let manager = Arc::new(SessionManager::new(
-        SessionsRepo::new(pool.clone()),
-        events.clone(),
-        ProviderRegistry::new(None),
-    ));
-    let orchestrator = Arc::new(otto_orchestrator::Orchestrator::new("claude"));
-    let improve_engine = Arc::new(otto_improve::ImprovementEngine {
-        improvements: otto_state::ImprovementsRepo::new(pool.clone()),
-        sessions: SessionsRepo::new(pool.clone()),
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(
-            orchestrator.clone(),
-        )),
-        events: events.clone(),
-        library_root: tmp.join("lib"),
-    });
-    let connections = Arc::new(otto_connections::ConnectionsService::new(
-        ConnectionsRepo::new(pool.clone()),
-        ConnectionSectionsRepo::new(pool.clone()),
-        secrets.clone(),
-    ));
-    let db_explorer = Arc::new(otto_dbviewer::DbViewerService::new(
-        ConnectionsRepo::new(pool.clone()),
-        secrets.clone(),
-        DbExplorerRepo::new(pool.clone()),
-    ));
-    let brokers = Arc::new(otto_brokers::BrokersService::new(
-        otto_state::BrokerClustersRepo::new(pool.clone()),
-        secrets.clone(),
-        None,
-    ));
-    let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
-    let swarm_repo = SwarmRepo::new(pool.clone());
-    let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
-    let product_repo = ProductRepo::new(pool.clone());
-    let product = Arc::new(otto_product::ProductService::new(
-        product_repo.clone(),
-        IssuesRepo::new(pool.clone()),
-        secrets.clone(),
-    ));
-    let usage = otto_usage::UsageEngine::start(
-        otto_usage::UsageConfig {
-            enabled: false, // This fixture does not exercise metrics or start ClickHouse.
-            ..Default::default()
-        },
-        tmp.join("usage"),
-    )
-    .await;
-    ServerCtx {
-        pool: pool.clone(),
-        secrets,
-        events: events.clone(),
-        authenticator: Arc::new(otto_rbac::RbacAuthenticator::new(pool.clone())),
-        roles,
-        auth_cache: otto_rbac::AuthCache::new(),
-        version: "test".into(),
-        base_url,
-        data_dir: tmp.to_path_buf(),
-        plugins: Arc::new(otto_server::plugins::PluginManager::new(
-            otto_state::PluginsRepo::new(pool.clone()),
-            tmp.join("plugins"),
-            tmp.to_path_buf(),
-            "http://127.0.0.1:7700/api/v1/plugin-host".into(),
-        )),
-        manager,
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        connections,
-        db_explorer,
-        db_assist: otto_server::db_assist::new_registry(),
-        transcript_cache: Default::default(),
-        rooms: Default::default(),
-        brokers,
-        mcp,
-        spawner: Arc::new(NoopSpawner),
-        git_store: GitStore::new(pool.clone()),
-        issues_store: IssuesRepo::new(pool.clone()),
-        integrations_store: IntegrationsRepo::new(pool.clone()),
-        channel_bridge: None,
-        wf_skip_current: Default::default(),
-        reviews_store: ReviewsRepo::new(pool.clone()),
-        findings_store: otto_state::ReviewFindingsRepo::new(pool.clone()),
-        finding_events_store: otto_state::FindingEventsRepo::new(pool.clone()),
-        repo_rules_store: otto_state::RepoRulesRepo::new(pool.clone()),
-        proof_packs_store: otto_state::ReviewProofPacksRepo::new(pool.clone()),
-        skill_evals_store: SkillEvalsRepo::new(pool.clone()),
-        golden_tasks_store: otto_state::GoldenTasksRepo::new(pool.clone()),
-        eval_matrices_store: otto_state::EvalMatricesRepo::new(pool.clone()),
-        skill_eval_cancels: Default::default(),
-        skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
-        skill_review_cancels: Default::default(),
-        review_agent_cancels: Default::default(),
-        review_cancels: Default::default(),
-        orchestrator,
-        improve_engine,
-        context_library: otto_context::Library::new(tmp.join("ctx")),
-        usage,
-        telemetry: None,
-        product,
-        product_repo,
-        attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),
-        discovery_repo: otto_state::ProductDiscoveryRepo::new(pool.clone()),
-        refinement_repo: otto_state::ProductRefinementRepo::new(pool.clone()),
-        mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
-        discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
-        canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-        product_agent_cancels: otto_server::product_run::new_cancel_registry(),
-        design_jobs: otto_server::design_blender::new_job_registry(),
-        memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
-        vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
-        vault_docs_runs: otto_server::vault_docs_agent::new_run_registry(),
-        vault_docs_refine: otto_server::vault_docs_agent::new_refine_registry(),
-        swarm,
-        swarm_repo,
-        swarm_coords: otto_server::swarm_runtime::new_registry(),
-        swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
-        goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
-        goal_loops: otto_server::goal_loop::new_registry(),
-        workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
-            otto_state::WorkGraphRepo::new(pool.clone()),
-            events.clone(),
-        )),
-        scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-        proof_repo: otto_state::ProofRepo::new(pool.clone()),
-        proof_locks: otto_server::proof::new_locks(),
-        runs: otto_state::RunsRepo::new(pool.clone()),
-        runs_engine: otto_server::run_engine::RunEngine::new(),
-        browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
-        browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
-        browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
-        ui_bridge: Default::default(),
-        browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
-            None,
-            tmp.join("browser"),
-        )),
-    }
+    let mut ctx = ServerCtx::for_tests(pool, tmp).await;
+    ctx.base_url = base_url;
+    ctx
 }
 
 struct Daemon {
@@ -1034,6 +865,28 @@ async fn the_audit_list_does_not_query_per_row() {
         many <= 9,
         "200 rows cost {many} statements vs {one} for 1 — visibility is per row again"
     );
+    // S17-304: the paged envelope decides `has_more` from the LEDGER read
+    // (visibility filtering can shorten a page — even to empty — without it
+    // being the end), and `next_offset` counts ledger rows.
+    let (st, page) = d
+        .send("GET", &d.human, "/mcp/audit?paged=true&limit=150", None)
+        .await;
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(page["rows"].as_array().unwrap().len(), 150);
+    assert_eq!(page["next_offset"], 150);
+    assert_eq!(page["has_more"], true);
+    let (st, page) = d
+        .send(
+            "GET",
+            &d.human,
+            "/mcp/audit?paged=true&limit=150&offset=150",
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(page["rows"].as_array().unwrap().len(), 50);
+    assert_eq!(page["next_offset"], 200);
+    assert_eq!(page["has_more"], false);
 }
 
 /// The Enforced variant of [`the_audit_list_does_not_query_per_row`]
@@ -1224,8 +1077,12 @@ async fn mutating_calls_stay_within_their_statement_budgets() {
 /// read, the usable / still-pending approval lookups, the approval insert +
 /// its re-read, the decision read and the audit insert — fixed per call.
 const PENDING_CALL_BUDGET: u64 = 19;
-/// Measured 14, INCLUDING the self-call's own route.
-const AUTO_APPROVED_CALL_BUDGET: u64 = 16;
+/// Measured 18, INCLUDING the self-call's own route. Since S8-305 the
+/// self-call credential is bound to the calling agent session, so it costs
+/// two statements a person's PAT did not: the lease's liveness re-check of
+/// the cached session-bound token, and the route's managed-token session
+/// check (managed credentials are never served from the auth cache).
+const AUTO_APPROVED_CALL_BUDGET: u64 = 20;
 
 /// R7: the badge count equals the list's length (same visibility) and costs
 /// a fixed handful of statements.
@@ -1315,4 +1172,593 @@ async fn a_ui_tool_reply_carries_the_session_grant() {
         )
         .await;
     assert!(env.get("ui_granted").is_none(), "{env}");
+}
+
+// ---------------------------------------------------------------------------
+// Review S5: the pin echo, the spoofed decision workspace, single-use and
+// session-bound approvals
+// ---------------------------------------------------------------------------
+
+/// An agent session of alice's in `ws` (plus its managed token).
+async fn extra_session(d: &Daemon, ws: &str) -> (Id, String) {
+    let s = SessionsRepo::new(d.pool.clone())
+        .create(NewSession {
+            workspace_id: ws.into(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: format!("Other session in {ws}"),
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "alice".into(),
+            meta: json!({}),
+        })
+        .await
+        .unwrap();
+    let (token, _) = AuthRepo::new(d.pool.clone())
+        .issue_session_api_token(&"alice".to_string(), &s.id)
+        .await
+        .unwrap();
+    (s.id, token)
+}
+
+async fn enable_tools(d: &Daemon, tools: &[&str]) {
+    let (st, body) = d
+        .send(
+            "PATCH",
+            &d.human,
+            "/mcp/otto-server",
+            Some(json!({"enabled": true, "tools": tools})),
+        )
+        .await;
+    assert_eq!(st, 200, "enable tools: {body}");
+}
+
+async fn invoke_as(d: &Daemon, token: &str, tool: &str, args: Value, extra: Value) -> Value {
+    let mut body = json!({"tool": format!("otto.{tool}"), "arguments": args});
+    if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
+        b.extend(e.clone());
+    }
+    let (st, env) = d
+        .send("POST", token, "/mcp/otto-tools/invoke", Some(body))
+        .await;
+    assert_eq!(st, 200, "invoke {tool}: {env}");
+    env
+}
+
+/// S5-01: a token pinned to ws1 that names `workspace_id: ws1` (its own pin)
+/// for an id-only object in ws2 is denied — the object's workspace is probed
+/// and replaces the echo; the unverifiable tools are denied outright.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_token_echoing_its_pin_cannot_reach_another_workspace() {
+    let d = boot().await;
+    enable_tools(
+        &d,
+        &["get_session", "wait_session", "send_message", "get_finding"],
+    )
+    .await;
+    let (other, _) = extra_session(&d, "ws2").await;
+    let (st, minted) = d
+        .send(
+            "POST",
+            &d.human,
+            "/mcp/tokens",
+            Some(
+                json!({"label": "pinned", "scope": {"allow_writes": true, "workspace_id": "ws1"}}),
+            ),
+        )
+        .await;
+    assert_eq!(st, 200, "{minted}");
+    let pinned = minted["token"].as_str().unwrap().to_string();
+    let dry = json!({"dry_run": true});
+    for tool in ["get_session", "wait_session", "send_message"] {
+        let env = invoke_as(
+            &d,
+            &pinned,
+            tool,
+            json!({"session_id": other, "workspace_id": "ws1", "text": "rm -rf"}),
+            dry.clone(),
+        )
+        .await;
+        assert_eq!(env["decision"], "denied", "{tool}: {env}");
+        assert_eq!(env["executed"], false, "{tool}: {env}");
+    }
+    // The pin's own session is still reachable.
+    let env = invoke_as(
+        &d,
+        &pinned,
+        "get_session",
+        json!({"session_id": d.sid, "workspace_id": "ws1"}),
+        dry.clone(),
+    )
+    .await;
+    assert_eq!(env["decision"], "dry_run", "{env}");
+    // An unverifiable tool is denied whatever workspace the caller names.
+    let env = invoke_as(
+        &d,
+        &pinned,
+        "get_finding",
+        json!({"finding_id": "F", "workspace_id": "ws1"}),
+        dry,
+    )
+    .await;
+    assert_eq!(env["decision"], "denied", "{env}");
+}
+
+/// S5-03: a workspace-scoped auto-approve rule keys on the workspace the
+/// call really lands in — a caller-sent `workspace_id` cannot pick it, and a
+/// global-row tool (a K8s cluster) is never covered by a workspace rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spoofed_workspace_never_selects_an_auto_approve_rule() {
+    let d = boot().await;
+    enable_tools(&d, &["send_message", "k8s_action"]).await;
+    let (st, rule) = d
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws2", "target_kind": "tool",
+                     "target": "send_message"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{rule}");
+    // The target session lives in ws1; the caller claims ws2 → still gated.
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "send_message",
+        json!({"session_id": d.sid, "workspace_id": "ws2", "text": "hello"}),
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let pending = d.pending_approvals().await;
+    assert_eq!(
+        pending[0]["workspace_id"], "ws1",
+        "card under the real workspace"
+    );
+
+    // An irreversible K8s rule for the CALLING session's workspace (and the
+    // caller naming it) does not cover a cluster, which is global.
+    // Such a rule is refused at creation (S5-306: it could never apply)…
+    let (st, rule) = d
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                     "target": "k8s_action", "allow_irreversible": true}),
+        )
+        .await;
+    assert_eq!(st, 400, "{rule}");
+    // …and whatever workspace the caller names, the cluster call is never
+    // auto-approved.
+    for args in [
+        json!({"cluster_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V", "action": "delete_pod",
+               "namespace": "prod", "name": "api-0", "workspace_id": "ws1"}),
+        json!({"cluster_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V", "action": "delete_pod",
+               "namespace": "prod", "name": "api-1"}),
+    ] {
+        let env = invoke_as(&d, &d.agent, "k8s_action", args, json!({"wait_seconds": 0})).await;
+        assert_ne!(env["executed"], true, "{env}");
+        assert!(env.get("auto_approved_by").is_none(), "{env}");
+    }
+}
+
+/// S5-301: a session in ws1 naming a ws2 workflow / scheduled task by bare
+/// id (no `workspace_id`) is never covered by a ws1 rule — the object is
+/// looked up and its OWN workspace keys the decision and the approval card.
+/// An improvement-edit approval (whose target's workspace Otto cannot
+/// verify) borrows no workspace at all: its card is filed under none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_id_from_another_workspaces_session_is_never_auto_approved() {
+    let d = boot().await;
+    enable_tools(
+        &d,
+        &[
+            "run_workflow",
+            "run_scheduled_task",
+            "approve_improvement_edit",
+        ],
+    )
+    .await;
+    let (st, wf) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws2/workflows",
+            Some(json!({"name": "Prod deploy"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{wf}");
+    let wf_id = wf["id"].as_str().unwrap().to_string();
+    let (st, task) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws2/scheduled-tasks",
+            Some(json!({"name": "Prod export", "prompt": "export", "enabled": false})),
+        )
+        .await;
+    assert_eq!(st, 200, "{task}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+    // The operator auto-approves these tools in ws1 — where the agent runs.
+    for tool in ["run_workflow", "run_scheduled_task"] {
+        let (st, rule) = d
+            .rule(
+                json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                         "target": tool}),
+            )
+            .await;
+        assert_eq!(st, 201, "{rule}");
+    }
+    // An unverifiable tool takes no workspace rule at all.
+    let (st, rule) = d
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                     "target": "approve_improvement_edit"}),
+        )
+        .await;
+    assert_eq!(st, 400, "{rule}");
+
+    for (tool, args, card_ws) in [
+        ("run_workflow", json!({"workflow_id": wf_id}), json!("ws2")),
+        (
+            "run_scheduled_task",
+            json!({"task_id": task_id}),
+            json!("ws2"),
+        ),
+        (
+            "approve_improvement_edit",
+            json!({"edit_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V"}),
+            Value::Null,
+        ),
+    ] {
+        let env = invoke_as(&d, &d.agent, tool, args, json!({"wait_seconds": 0})).await;
+        assert_eq!(env["decision"], "pending_approval", "{tool}: {env}");
+        assert!(env.get("auto_approved_by").is_none(), "{tool}: {env}");
+        let card = d
+            .pending_approvals()
+            .await
+            .into_iter()
+            .find(|a| a["tool"] == format!("otto.{tool}"))
+            .unwrap_or_else(|| panic!("{tool}: no card"));
+        assert_eq!(card["workspace_id"], card_ws, "{tool}: {card}");
+    }
+    // The same calls inside ws1 ARE covered (the rule is not dead): a ws1
+    // workflow by bare id runs auto-approved.
+    let (st, wf1) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws1/workflows",
+            Some(json!({"name": "Sandbox deploy"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{wf1}");
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "run_workflow",
+        json!({"workflow_id": wf1["id"]}),
+        json!({"dry_run": true}),
+    )
+    .await;
+    assert_eq!(env["decision"], "dry_run", "{env}");
+    assert_eq!(env["preview"]["arguments"]["workspace_id"], "ws1", "{env}");
+    let row = d.last_audit("run_workflow").await;
+    assert!(
+        row["decision_reason"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "covered by the ws1 rule: {row}"
+    );
+}
+
+/// S5-305: a probed read's caller-sent `workspace_id` never becomes the audit
+/// row's workspace — the executor ignores it; the row falls back to the
+/// calling session's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probed_reads_spoofed_workspace_never_reaches_the_audit() {
+    let d = boot().await;
+    enable_tools(&d, &["get_session"]).await;
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "get_session",
+        json!({"session_id": d.sid, "workspace_id": "ws2"}),
+        json!({}),
+    )
+    .await;
+    assert_ne!(env["decision"], "denied", "{env}");
+    let row = d.last_audit("get_session").await;
+    assert_eq!(row["workspace_id"], "ws1", "{row}");
+}
+
+/// S5-04: two identical calls waiting on ONE card both wake on the decision;
+/// the single-use approval runs exactly one of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_approval_runs_one_of_two_waiting_calls() {
+    // `receiver_count` also counts unrelated bus subscribers, so on a loaded
+    // runner the "both parked" check can pass early; retry the scenario until
+    // both calls really shared one card (strict assertions otherwise).
+    for _ in 0..5 {
+        if two_calls_share_one_card().await {
+            return;
+        }
+    }
+    panic!("never got two calls parked on one card in 5 attempts");
+}
+
+async fn two_calls_share_one_card() -> bool {
+    let d = Arc::new(boot().await);
+    let spawn = |d: Arc<Daemon>| {
+        tokio::spawn(async move {
+            let (_, body) = d
+                .send(
+                    "POST",
+                    &d.agent,
+                    "/mcp/otto-tools/invoke",
+                    Some(json!({"tool": "otto.create_pr", "arguments": pr_args(),
+                                "wait_seconds": 10})),
+                )
+                .await;
+            body
+        })
+    };
+    // Each waiting call subscribes to the bus before its first status read:
+    // the receiver count says when BOTH calls are parked on the card (a fixed
+    // sleep raced a loaded runner — the second call arrived after the first
+    // had spent the approval and opened a fresh card).
+    let base = d.events.receiver_count();
+    let a = spawn(d.clone());
+    let id = loop {
+        if let Some(a) = d.pending_approvals().await.first() {
+            break a["id"].as_str().unwrap().to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let b = spawn(d.clone());
+    // Let the second call find the shared card and start waiting.
+    let parked = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while d.events.receiver_count() < base + 2 {
+        assert!(
+            tokio::time::Instant::now() < parked,
+            "both calls should be waiting on the card"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(d.pending_approvals().await.len(), 1, "one shared card");
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let _ = d.events.send(otto_core::event::Event::McpApprovalChanged {
+        approval_id: Some(id.clone()),
+        workspace_id: Some("ws1".into()),
+        status: "approved".into(),
+    });
+    let (ea, eb) = (a.await.unwrap(), b.await.unwrap());
+    let ran = [&ea, &eb]
+        .iter()
+        .filter(|e| e["executed"] == json!(true))
+        .count();
+    assert_eq!(ran, 1, "exactly one execution: {ea} / {eb}");
+    let other = if ea["executed"] == json!(true) {
+        &eb
+    } else {
+        &ea
+    };
+    // The second call reached the card only after the first had spent the
+    // approval: it correctly opened a FRESH card — the scenario under test
+    // (two calls parked on one card) did not happen, so the caller retries.
+    if other["decision"] == "pending_approval" && other["approval_id"] != json!(id) {
+        return false;
+    }
+    assert_eq!(other["decision"], "denied", "{other}");
+    true
+}
+
+/// A call parked on a card that a sibling call already SPENT (approved, then
+/// consumed by the other waiter) settles as "approval already used" as soon as
+/// it re-reads the card — it neither idles to its `wait_seconds` deadline nor
+/// answers `pending_approval` with a dead card id (the flake behind
+/// `one_approval_runs_one_of_two_waiting_calls`: the loser of the consume race
+/// woke on the `consumed` status and kept waiting).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiter_on_a_card_a_sibling_spent_is_denied_promptly() {
+    let d = Arc::new(boot().await);
+    let started = tokio::time::Instant::now();
+    let waiter = {
+        let d = d.clone();
+        tokio::spawn(async move {
+            d.send(
+                "POST",
+                &d.agent,
+                "/mcp/otto-tools/invoke",
+                Some(json!({"tool": "otto.create_pr", "arguments": pr_args(),
+                            "wait_seconds": 20})),
+            )
+            .await
+            .1
+        })
+    };
+    let id = loop {
+        if let Some(a) = d.pending_approvals().await.first() {
+            break a["id"].as_str().unwrap().to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    // The sibling's whole story in one write: approved, then consumed.
+    sqlx::query("UPDATE mcp_approvals SET status = 'consumed', consumed_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&id)
+        .execute(&d.pool)
+        .await
+        .unwrap();
+    let _ = d.events.send(otto_core::event::Event::McpApprovalChanged {
+        approval_id: Some(id.clone()),
+        workspace_id: Some("ws1".into()),
+        status: "consumed".into(),
+    });
+    let env = waiter.await.unwrap();
+    assert_eq!(env["decision"], "denied", "{env}");
+    assert_eq!(env["executed"], json!(false), "{env}");
+    // Woken by the event, or at worst by the 5 s fallback re-read — never the
+    // 20 s deadline.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(12),
+        "settled after {:?}",
+        started.elapsed()
+    );
+}
+
+/// S5-13: an approval a human granted for one session's call is not spent
+/// by a sibling session of the same owner making the identical call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_approval_is_bound_to_the_requesting_session() {
+    let d = boot().await;
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let id = env["approval_id"].as_str().unwrap().to_string();
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let (_, sibling) = extra_session(&d, "ws1").await;
+    let env = invoke_as(
+        &d,
+        &sibling,
+        "create_pr",
+        pr_args(),
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(
+        env["decision"], "pending_approval",
+        "sibling gets its own card: {env}"
+    );
+    assert_ne!(env["approval_id"], json!(id), "{env}");
+    // The requesting session itself still spends it.
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["executed"], true, "{env}");
+}
+
+/// S5-07: the stdio bridge's native irreversible writers run through the
+/// governed path — reachable from a session credential even when the operator
+/// never ticked them in the catalog, and approval-gated there; a person's own
+/// token still needs the catalog switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_irreversible_writer_is_governed_for_its_session() {
+    let d = boot().await;
+    let args = json!({"account_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V",
+                      "url": "https://sqs.example/q", "body": "hello"});
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "aws_sqs_send",
+        args.clone(),
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    assert_eq!(env["executed"], false, "{env}");
+    let env = invoke_as(
+        &d,
+        &d.human,
+        "aws_sqs_send",
+        args,
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "denied", "{env}");
+}
+
+// ---------------------------------------------------------------------------
+// S8-305: governed self-calls carry the caller's credential class.
+// ---------------------------------------------------------------------------
+
+/// The self-call credential rows the governed executor minted.
+async fn self_call_scopes(d: &Daemon) -> Vec<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT session_scope FROM auth_sessions WHERE kind = 'api' AND label = 'mcp-otto-exec'",
+    )
+    .fetch_all(&d.pool)
+    .await
+    .unwrap()
+}
+
+/// An agent's governed call replays with a credential bound to ITS session
+/// (so `is_human` is false at the target route and every agent-credential
+/// rule applies); a person's own governed call replays as a person.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_self_call_is_bound_to_the_calling_session() {
+    let d = boot().await;
+    let env = d
+        .agent_invoke("list_repos", json!({"workspace_id": "ws1"}))
+        .await;
+    assert_eq!(env["executed"], true, "{env}");
+    assert_eq!(self_call_scopes(&d).await, vec![Some(d.sid.clone())]);
+
+    let human = d.human.clone();
+    let env = invoke_as(
+        &d,
+        &human,
+        "list_repos",
+        json!({"workspace_id": "ws1"}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(env["executed"], true, "{env}");
+    let mut scopes = self_call_scopes(&d).await;
+    scopes.sort();
+    assert_eq!(scopes, vec![None, Some(d.sid.clone())]);
+}
+
+/// The person-only improvement-edit tools: an agent's call ALWAYS waits for
+/// a person (an auto-approve rule never covers it), and only the approved
+/// call replays — as the approving person, so the Admin-class route accepts
+/// it (it then 404s on the made-up edit, which is irrelevant here).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_improvement_edit_decision_always_needs_a_person() {
+    let d = boot().await;
+    enable_tools(&d, &["approve_improvement_edit", "list_repos"]).await;
+    let (st, rule) = d
+        .rule(json!({"scope": "global", "target_kind": "tool",
+                     "target": "otto.approve_improvement_edit", "name": "Agents decide edits",
+                     "allow_irreversible": true}))
+        .await;
+    assert!(st == 201 || st == 400, "{rule}");
+    let args = json!({"edit_id": "edit-does-not-exist"});
+    let env = d
+        .agent_invoke("approve_improvement_edit", args.clone())
+        .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    assert_eq!(env["executed"], false, "{env}");
+    let id = env["approval_id"].as_str().unwrap().to_string();
+
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let env = d.agent_invoke("approve_improvement_edit", args).await;
+    assert_eq!(env["executed"], true, "{env}");
+    let err = env["content"]["error"].as_str().unwrap_or_default();
+    assert!(
+        !err.contains("a person signed in to Otto must do this"),
+        "the approved call must replay as the person: {env}"
+    );
+    assert_eq!(
+        d.last_audit("approve_improvement_edit").await["decision"],
+        "approved"
+    );
 }

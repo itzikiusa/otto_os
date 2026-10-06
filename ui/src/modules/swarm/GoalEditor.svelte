@@ -6,7 +6,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { CreateGoalReq, GoalComparator, SwarmGoal } from './types';
+  import type { CreateGoalReq, GoalComparator, SwarmGoal, UpdateGoalReq } from './types';
 
   interface Props {
     /** When set, edit this goal. Otherwise create a new one in `scope`. */
@@ -73,7 +73,16 @@
     busy = true;
     try {
       if (editing && goal) {
-        await swarm.updateGoal(goal.id, req);
+        // A field the user emptied must be sent as `null` (clear), not
+        // omitted — an absent key leaves the stored value unchanged.
+        const patch: UpdateGoalReq = {
+          metric: null,
+          target_value: null,
+          block_value: null,
+          verify_cmd: null,
+          ...req,
+        };
+        await swarm.updateGoal(goal.id, patch);
         toasts.success('Goal updated');
       } else if (scope) {
         await swarm.createGoal(scope, req);
@@ -91,17 +100,17 @@
 <Modal title={editing ? 'Edit goal' : 'Add goal'} width={520} {onclose}>
   <div class="field">
     <label for="g-title">Title</label>
-    <input id="g-title" class="input" bind:value={title} placeholder="e.g. Tests pass" />
+    <input dir="auto" id="g-title" class="input" bind:value={title} placeholder="e.g. Tests pass" />
   </div>
   <div class="field">
     <label for="g-desc">Description <span class="dim">(what the verifier checks)</span></label>
-    <textarea id="g-desc" class="input" rows="2" bind:value={description}></textarea>
+    <textarea dir="auto" id="g-desc" class="input" rows="2" bind:value={description}></textarea>
   </div>
 
   <div class="grid">
     <div class="field">
       <label for="g-metric">Metric <span class="dim">(optional)</span></label>
-      <input id="g-metric" class="input" bind:value={metric} placeholder="e.g. failing_tests" />
+      <input dir="auto" id="g-metric" class="input" bind:value={metric} placeholder="e.g. failing_tests" />
     </div>
     <div class="field">
       <label for="g-cmp">Comparator</label>
@@ -121,7 +130,7 @@
 
   <div class="field">
     <label for="g-cmd">Verify command <span class="dim">(optional — run to measure)</span></label>
-    <input id="g-cmd" class="input mono" bind:value={verifyCmd} placeholder="e.g. cargo test --workspace" />
+    <input dir="ltr" id="g-cmd" class="input mono" bind:value={verifyCmd} placeholder="e.g. cargo test --workspace" />
   </div>
 
   <div class="grid">

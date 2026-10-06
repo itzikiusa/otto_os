@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -10,7 +11,7 @@
   // are confirmed in-app and gated server-side (s3_write / s3_delete / s3_read)
   // + audited. The current bucket + prefix live in the route
   // (`#/aws/<id>/s3/<bucket>?prefix=<encoded>`) so it's deep-linkable.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { awsApi, awsDownloadBlob, awsS3Upload, isLoginRequired, saveBlob } from '../../lib/api/aws';
@@ -300,6 +301,11 @@
     }
   }
 
+  let destroyed = false;
+  onDestroy(() => {
+    destroyed = true;
+  });
+
   async function downloadToDir(o: S3Object, dir: string): Promise<void> {
     pickDirFor = null;
     if (dl) {
@@ -319,6 +325,9 @@
       if (dl) dl = { ...dl, job: job.id };
       while (job.state === 'running') {
         await new Promise((r) => setTimeout(r, 700));
+        // Left the view: stop polling. The job itself keeps running on the
+        // daemon (the file still lands in `dir`) — only the progress UI is gone.
+        if (destroyed) return;
         if (ctrl.signal.aborted) {
           job = await awsApi.s3DownloadCancel(acct, job.id);
           break;
@@ -586,7 +595,7 @@
         <thead><tr><th>Bucket</th><th class="hide-sm">Region</th><th class="hide-sm">Created</th></tr></thead>
         <tbody>
           {#each bucketsShown as b (b.name)}
-            <tr
+            <tr use:rowMenuKeys
               class="trow"
               tabindex="0"
               onclick={() => goTo(b.name, '')}
@@ -694,7 +703,7 @@
           <tbody>
             {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="5" style="height:{win.top}px"></td></tr>{/if}
             {#each rowsWindow as r (r.key)}
-              <tr
+              <tr use:rowMenuKeys
                 class="trow"
                 class:sel={selKey === r.key}
                 tabindex="0"
@@ -732,7 +741,7 @@
 
     {#if dragOver}
       <div class="s3-drop" aria-hidden="true">
-        <Icon name="arrowUp" size={18} />
+        <Icon name="arrowUp" size={16} />
         <span>{uploadBlocked || `Drop to upload to s3://${bucket}/${prefix}`}</span>
       </div>
     {/if}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Virtualized results table: sticky two-line header (name over type),
   // monospace cells, numbers right-aligned in tabular figures, NULL as a dim
   // italic `NULL`, objects/arrays as compact JSON with a click-to-expand cell
@@ -827,7 +828,7 @@
           {@const pos = colStart + k}
           {@const c = result.columns[ci]}
           {@const isPk = flow.editable && flow.editPkCols.includes(c.name)}
-          <th
+          <th use:rowMenu
             title={mini ? (c.type_hint ?? undefined) : `${c.name}${c.type_hint ? ` · ${c.type_hint}` : ''} — click to sort, drag to reorder, right-click for more`}
             class:pk={isPk}
             class:sortable={!mini}
@@ -893,7 +894,7 @@
           {#each headCols as ci (ci)}
             {@const c = result.columns[ci]}
             <td style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;">
-              <input
+              <input dir="ltr"
                 class="col-filter mono"
                 type="text"
                 spellcheck="false"
@@ -1440,7 +1441,7 @@
     padding: 4px 10px;
   }
   .grid :global(.cell-input:disabled) {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .grid :global(td mark) {
     background: var(--accent-line);

@@ -26,7 +26,9 @@ test('channels: an enabled Slack card shows why it is not connected', async ({ p
   // daemon; serve the config + health instead.
   await page.route(`**/api/v1/workspaces/${ws}/integrations`, r => r.request().method() === 'GET'
     ? r.fulfill({ json: [{
-        workspace_id: ws, channel: 'slack', enabled: true, allowed_users: '', agent_reply: false,
+        // Blank allow-list + the explicit opt-in: a blank list alone admits
+        // nobody (the daemon fails closed), so "open" needs `open_to_all`.
+        workspace_id: ws, channel: 'slack', enabled: true, allowed_users: '', open_to_all: true, agent_reply: false,
         reply_instructions: '', channel_id: 'C0123', preferred_cli: '', has_bot_token: true,
         has_app_token: true, updated_at: now,
       }] })
@@ -41,7 +43,7 @@ test('channels: an enabled Slack card shows why it is not connected', async ({ p
   const badge = page.getByTestId('channel-health-slack');
   await expect(badge).toHaveText('Not connected');
   await expect(page.getByText(/Slack rejected the app token \(invalid_auth\)/)).toBeVisible();
-  // Blank allowed users is flagged on the card…
+  // Opened to everyone is flagged on the card…
   await expect(page.getByText('Open to everyone')).toBeVisible();
   // …and explained in the editor.
   await page.getByRole('button', { name: 'Edit Slack integration' }).click();

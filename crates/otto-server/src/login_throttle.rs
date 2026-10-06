@@ -12,13 +12,28 @@
 //!   * [`username_key`] — `"user:<username>"`, a GLOBAL per-username tally.
 //!
 //! The per-username tally is what closes the original bypass. The client IP is
-//! taken from the real socket peer (`ConnectInfo<SocketAddr>`); Tailscale and the
-//! Tauri shell connect directly with no trusted proxy in front, so the handler
-//! must NOT honor `X-Forwarded-For` / `X-Real-IP` (an attacker would just rotate
-//! them to mint a fresh `ip|username` key per request and never trip the
-//! lockout). Even with a genuinely rotating source IP, the global per-username
-//! counter still trips after [`FAILURE_THRESHOLD`] failures against any one
+//! the host guard's tunnel-aware `ClientIp`: the real socket peer, except for a
+//! loopback peer that named the Cloudflare-tunnel host (`share_base_url`, the
+//! recommended remote setup — every tunnelled client arrives as 127.0.0.1),
+//! where `CF-Connecting-IP` identifies the client. `X-Forwarded-For` /
+//! `X-Real-IP` are never honoured (an attacker would just rotate them to mint a
+//! fresh `ip|username` key per request and never trip the lockout). Even with a
+//! genuinely rotating source IP, the global per-username counter still trips
+//! after [`FAILURE_THRESHOLD`] failures against any one account — for every
+//! client except the desktop app itself (loopback peer + loopback Host), which
+//! a remote party must not be able to lock out of its own Mac (S8-07).
 //! account. See `tests/auth_security.rs` for the property test.
+//!
+//! A third, username-independent key, [`client_key`] (`"ip:<ip or /64>"`,
+//! threshold [`CLIENT_FAILURE_THRESHOLD`]), stops one remote client from
+//! spraying many usernames (S8-303). The map is capped at
+//! [`MAX_TRACKED_KEYS`] and FAILS CLOSED when full: the handler refuses a
+//! remote attempt whose keys it could not track
+//! ([`AttemptStore::untracked_while_full`]), and the keys that matter most —
+//! `user:<an existing username>` and the desktop's own key — are recorded with
+//! [`AttemptStore::record_failure_pinned`], which ignores the cap (a bounded
+//! set: real accounts). A flood of junk usernames can no longer stop `root`
+//! from locking.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -31,9 +46,15 @@ pub const FAILURE_THRESHOLD: u32 = 5;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// How long a key stays locked once the threshold is crossed.
 pub const LOCKOUT_DURATION: Duration = Duration::from_secs(15 * 60);
-/// Cap the map so a flood of distinct keys can't grow memory unbounded; oldest
-/// expired entries are pruned first, then we stop tracking new keys.
-const MAX_TRACKED_KEYS: usize = 10_000;
+/// Failures tolerated per remote client across ALL usernames ([`client_key`]).
+/// Higher than the per-account threshold: a person may mistype a few accounts.
+pub const CLIENT_FAILURE_THRESHOLD: u32 = 20;
+/// Cap the map so a flood of distinct keys can't grow memory unbounded. Expired
+/// entries are pruned first; then unpinned new keys are not tracked and the
+/// handler fails closed for them ([`AttemptStore::untracked_while_full`]).
+pub const MAX_TRACKED_KEYS: usize = 10_000;
+/// `Retry-After` for an attempt refused because the map is saturated.
+pub const SATURATED_RETRY: Duration = Duration::from_secs(60);
 
 /// One key's recent failure history.
 #[derive(Default)]
@@ -72,23 +93,50 @@ impl AttemptStore {
     }
 
     /// Record one failed attempt for `key`; lock the key once it crosses the
-    /// threshold inside the window.
+    /// threshold inside the window. A new key is not tracked while the map is
+    /// full of live entries (the handler fails closed for it — see
+    /// [`Self::untracked_while_full`]).
     pub fn record_failure(&self, key: &str) {
+        self.record(key, false);
+    }
+
+    /// [`Self::record_failure`] that ignores the size cap — for the bounded
+    /// set of keys that must ALWAYS lock (`user:<existing username>`, the
+    /// desktop's own key), so a junk-key flood can't switch their lockout off.
+    pub fn record_failure_pinned(&self, key: &str) {
+        self.record(key, true);
+    }
+
+    fn record(&self, key: &str, pinned: bool) {
         let mut store = self.inner.lock().unwrap();
         let now = Instant::now();
-        prune_expired(&mut store, now);
         if store.len() >= MAX_TRACKED_KEYS && !store.contains_key(key) {
-            // Map is full of live entries; skip tracking rather than grow.
-            return;
+            // Only a full map pays the O(n) prune.
+            prune_expired(&mut store, now);
+            if store.len() >= MAX_TRACKED_KEYS && !pinned {
+                return;
+            }
         }
         let entry = store.entry(key.to_string()).or_default();
         entry
             .failures
             .retain(|t| now.duration_since(*t) < FAILURE_WINDOW);
         entry.failures.push(now);
-        if entry.failures.len() as u32 >= FAILURE_THRESHOLD {
+        if entry.failures.len() as u32 >= threshold_for(key) {
             entry.locked_until = Some(now + LOCKOUT_DURATION);
         }
+    }
+
+    /// True when the map is full of live entries and one of `keys` is not
+    /// tracked: that attempt's failures could not be counted, so the handler
+    /// refuses it (fail closed, S8-303).
+    pub fn untracked_while_full(&self, keys: &[&str]) -> bool {
+        let mut store = self.inner.lock().unwrap();
+        if store.len() < MAX_TRACKED_KEYS || keys.iter().all(|k| store.contains_key(*k)) {
+            return false;
+        }
+        prune_expired(&mut store, Instant::now());
+        store.len() >= MAX_TRACKED_KEYS && keys.iter().any(|k| !store.contains_key(*k))
     }
 
     /// Clear a key's failure history (called on a successful login).
@@ -113,10 +161,30 @@ pub fn global() -> &'static AttemptStore {
 /// (lowercased so casing can't be used to dodge the tally). A `None` IP — which
 /// should not happen once connect-info is wired in — collapses to the global
 /// per-username key so an attempt is never left untracked.
+///
+/// The IP part is the share throttle's client key: IPv6 is bucketed by /64.
 pub fn ip_key(peer: Option<IpAddr>, username: &str) -> String {
     match peer {
-        Some(ip) => format!("{ip}|{}", username.trim().to_lowercase()),
+        Some(ip) => format!(
+            "{}|{}",
+            otto_sessions::share_throttle::ip_key(ip),
+            username.trim().to_lowercase()
+        ),
         None => username_key(username),
+    }
+}
+
+/// Per-client key independent of the username (S8-303): one remote client
+/// spraying many usernames still locks after [`CLIENT_FAILURE_THRESHOLD`].
+pub fn client_key(ip: IpAddr) -> String {
+    format!("ip:{}", otto_sessions::share_throttle::ip_key(ip))
+}
+
+fn threshold_for(key: &str) -> u32 {
+    if key.starts_with("ip:") {
+        CLIENT_FAILURE_THRESHOLD
+    } else {
+        FAILURE_THRESHOLD
     }
 }
 
@@ -191,5 +259,38 @@ mod tests {
             store.check_locked(&user_key).is_some(),
             "username key must lock despite IP rotation"
         );
+    }
+
+    #[test]
+    fn a_flooded_map_still_locks_existing_accounts_and_fails_closed() {
+        // S8-303: fill the map with junk-username keys, then guess root.
+        let store = AttemptStore::default();
+        for i in 0..MAX_TRACKED_KEYS {
+            store.record_failure(&username_key(&format!("junk{i}")));
+        }
+        let root = username_key("root");
+        let attacker = ip_key(ip(203, 0, 113, 5), "root");
+        assert!(
+            store.untracked_while_full(&[&attacker, &root]),
+            "a remote attempt the full map can't track must be refused"
+        );
+        for _ in 0..FAILURE_THRESHOLD {
+            store.record_failure_pinned(&root);
+        }
+        assert!(
+            store.check_locked(&root).is_some(),
+            "root must still lock with the map full"
+        );
+    }
+
+    #[test]
+    fn one_client_spraying_usernames_locks_its_client_key() {
+        let store = AttemptStore::default();
+        let client = client_key(ip(198, 51, 100, 3).unwrap());
+        for i in 0..CLIENT_FAILURE_THRESHOLD {
+            store.record_failure(&username_key(&format!("user{i}")));
+            store.record_failure(&client);
+        }
+        assert!(store.check_locked(&client).is_some());
     }
 }

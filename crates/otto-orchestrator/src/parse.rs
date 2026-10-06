@@ -9,23 +9,50 @@ use crate::OrchestratorContext;
 
 /// Maximum number of actions a plan may contain.
 pub const MAX_ACTIONS: usize = 10;
+/// Most sessions one `spawn_sessions` action may open. The plan is
+/// re-validated at execute time (the client can edit it), so this caps what a
+/// hand-crafted `{"count": 10000}` could spawn.
+pub const MAX_SPAWN_COUNT: u8 = 8;
 
 /// Find the first complete JSON array embedded in `text` (brackets matched
 /// outside of string literals) that parses as JSON.
 pub fn find_json_array(text: &str) -> Option<&str> {
+    json_arrays(text).next()
+}
+
+/// Every complete, valid JSON array embedded in `text`, in order. A valid
+/// array is consumed whole — the scan resumes after its closing `]` — so the
+/// arrays nested inside it are not re-parsed as candidates of their own.
+fn json_arrays(text: &str) -> impl Iterator<Item = &str> {
     let bytes = text.as_bytes();
-    for (start, &b) in bytes.iter().enumerate() {
-        if b != b'[' {
-            continue;
-        }
-        if let Some(end) = matching_bracket(bytes, start) {
-            let candidate = &text[start..=end];
-            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                return Some(candidate);
+    let mut start = 0usize;
+    std::iter::from_fn(move || {
+        while start < bytes.len() {
+            let s = start;
+            start += 1;
+            if bytes[s] != b'[' {
+                continue;
+            }
+            if let Some(end) = matching_bracket(bytes, s) {
+                let candidate = &text[s..=end];
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    start = end + 1;
+                    return Some(candidate);
+                }
             }
         }
-    }
-    None
+        None
+    })
+}
+
+/// The bodies of the ```` ```json ```` fenced blocks in `text`, in order.
+fn fenced_json_blocks(text: &str) -> impl Iterator<Item = &str> {
+    text.split("```").skip(1).step_by(2).filter_map(|block| {
+        let (lang, body) = block.split_once('\n')?;
+        lang.trim()
+            .eq_ignore_ascii_case("json")
+            .then_some(body.trim())
+    })
 }
 
 /// Byte index of the `]` matching the `[` at `open`, skipping string
@@ -60,12 +87,29 @@ fn matching_bracket(bytes: &[u8], open: usize) -> Option<usize> {
     None
 }
 
-/// Parse an `ActionPlan` out of assistant text (the first JSON array found).
+/// Parse an `ActionPlan` out of assistant text: a ```` ```json ```` fenced
+/// block when there is one that holds a plan, else the first embedded JSON
+/// array that deserializes as a NON-EMPTY plan. A stray `[1]` or `["a"]` in
+/// the prose before the plan no longer wins just by coming first (S2-314).
+/// When nothing qualifies, the first candidate's schema error is reported.
 pub fn parse_plan(text: &str) -> Result<ActionPlan> {
-    let array = find_json_array(text)
-        .ok_or_else(|| Error::Invalid("no JSON action array found in model output".into()))?;
-    serde_json::from_str::<ActionPlan>(array)
-        .map_err(|e| Error::Invalid(format!("action plan does not match schema: {e}")))
+    let mut first_err: Option<String> = None;
+    let candidates = fenced_json_blocks(text).chain(json_arrays(text));
+    for candidate in candidates {
+        match serde_json::from_str::<ActionPlan>(candidate) {
+            Ok(plan) if !plan.is_empty() => return Ok(plan),
+            Ok(_) => {
+                first_err.get_or_insert_with(|| "the plan has no actions".into());
+            }
+            Err(e) => {
+                first_err.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+    Err(Error::Invalid(match first_err {
+        Some(e) => format!("action plan does not match schema: {e}"),
+        None => "no JSON action array found in model output".into(),
+    }))
 }
 
 /// Validate a parsed plan: 1..=10 actions, providers in the allowed set,
@@ -91,6 +135,11 @@ pub fn validate_plan(
                 }
                 if *count == 0 {
                     return Err(Error::Invalid(format!("action {i}: count must be >= 1")));
+                }
+                if *count > MAX_SPAWN_COUNT {
+                    return Err(Error::Invalid(format!(
+                        "action {i}: count must be <= {MAX_SPAWN_COUNT} (got {count})"
+                    )));
                 }
             }
             Action::Broadcast { text } => {
@@ -207,6 +256,31 @@ mod tests {
         validate_plan(&plan, &ctx(), &allowed()).expect("validate");
     }
 
+    /// S2-314: an unrelated JSON array in the prose (`[1]`, a list of names)
+    /// does not shadow the real plan after it; a fenced json block wins.
+    #[test]
+    fn stray_arrays_before_the_plan_are_skipped() {
+        let text =
+            "Steps [1] and [\"a\", \"b\"] first.\n[{\"action\":\"broadcast\",\"text\":\"hi\"}]";
+        let plan = parse_plan(text).expect("the plan after the stray arrays");
+        assert_eq!(plan.len(), 1);
+
+        let fenced = "[{\"action\":\"broadcast\",\"text\":\"draft\"}]\n```json\n[{\"action\":\"broadcast\",\"text\":\"final\"}]\n```";
+        let plan = parse_plan(fenced).unwrap();
+        assert_eq!(
+            plan[0],
+            otto_core::api::Action::Broadcast {
+                text: "final".into()
+            }
+        );
+
+        // Only non-plans ⇒ the schema error, not "no array".
+        let err = parse_plan("pick [1] or [2]").unwrap_err().to_string();
+        assert!(err.contains("does not match schema"), "{err}");
+        assert!(parse_plan("no arrays here").is_err());
+        assert_eq!(find_json_array("x [1] y [2]"), Some("[1]"));
+    }
+
     #[test]
     fn malformed_json_is_an_error() {
         let text = r#"[{"action":"broadcast","text": "unterminated"#;
@@ -250,5 +324,14 @@ mod tests {
             .map(|_| otto_core::api::Action::Broadcast { text: "x".into() })
             .collect();
         assert!(validate_plan(&too_many, &c, &a).is_err());
+
+        let spawn = |count| {
+            vec![otto_core::api::Action::SpawnSessions {
+                provider: "claude".into(),
+                count,
+            }]
+        };
+        assert!(validate_plan(&spawn(MAX_SPAWN_COUNT), &c, &a).is_ok());
+        assert!(validate_plan(&spawn(MAX_SPAWN_COUNT + 1), &c, &a).is_err());
     }
 }

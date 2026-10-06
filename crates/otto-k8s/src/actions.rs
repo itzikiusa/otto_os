@@ -580,15 +580,13 @@ async fn execute_inner(
             authorize_action(req, pool, user, cluster_id).await?;
         }
         if plan.tolerate_nonzero {
-            let argv = k.argv(step.iter().cloned());
-            let out =
-                crate::cli::run_raw(&k.program, &argv, &k.env, crate::cli::DEFAULT_TIMEOUT, None)
-                    .await?;
+            // Tolerant of a non-zero exit (not complete yet), but NOT of auth
+            // failures: a stale EKS token is re-authed once, and Unauthorized /
+            // Forbidden surface as errors instead of "not complete".
+            let out = k
+                .run_tolerant(step.iter().cloned(), crate::cli::DEFAULT_TIMEOUT)
+                .await?;
             if out.status != 0 {
-                // Forbidden still maps to 403 even in tolerant mode.
-                if out.stderr.to_ascii_lowercase().contains("forbidden") {
-                    return Err(crate::cli::classify_failure(&k.program, &out.stderr));
-                }
                 ok = false;
             }
             let mut text = out.stdout;

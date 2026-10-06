@@ -1,6 +1,7 @@
 <script lang="ts">
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
+  import { latestOnly } from '../../lib/latest';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { tabKeys } from '../../lib/tabKeys';
   import { tick } from 'svelte';
@@ -10,7 +11,7 @@
   import { authedText } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -138,7 +139,7 @@
   async function stopRun(r: PersonalAgentRun): Promise<void> {
     const ok = await confirmer.ask(
       'Stop this run? Its agent session is stopped and nothing is delivered. The agent’s schedules keep running.',
-      { title: 'Stop run', confirmLabel: 'Stop run' },
+      { title: 'Stop run', danger: true, confirmLabel: 'Stop run' },
     );
     if (!ok) return;
     try {
@@ -156,14 +157,27 @@
   // Bumped by Retry: clearing the (already empty) session id is no change, so
   // the effect never re-ran and Retry left "Opening…" up forever.
   let chatAttempt = $state(0);
+  // The get-or-create in flight, if any. Chat → Runs → Chat during the first
+  // (multi-second) create used to fire a SECOND create — two Claude sessions,
+  // one orphaned. The server serialises per agent too; this avoids the request.
+  let chatPending: Promise<void> | null = null;
   $effect(() => {
     void chatAttempt;
     if (tab !== 'chat' || chatSessionId) return;
+    const id = agentId;
+    if (chatPending) return;
     chatError = '';
-    personalAgentsApi
-      .chatSession(agentId)
-      .then((r) => (chatSessionId = r.session_id))
-      .catch((e) => (chatError = loadErrorText(e)));
+    chatPending = personalAgentsApi
+      .chatSession(id)
+      .then((r) => {
+        if (id === agentId) chatSessionId = r.session_id;
+      })
+      .catch((e) => {
+        if (id === agentId) chatError = loadErrorText(e);
+      })
+      .finally(() => {
+        chatPending = null;
+      });
   });
 
   // --- Schedules form -------------------------------------------------------
@@ -233,7 +247,7 @@
 
   async function deleteSchedule(s: PersonalAgentSchedule): Promise<void> {
     const what = cadenceLabel(s.schedule, s.timezone);
-    if (!(await confirmer.ask(`Delete the schedule “${what}”? Past runs stay in Runs.`, { title: 'Delete schedule', confirmLabel: 'Delete' }))) return;
+    if (!(await confirmer.ask(`Delete the schedule “${what}”? Past runs stay in Runs.`, { title: 'Delete schedule', danger: true, confirmLabel: 'Delete' }))) return;
     try {
       await personalAgents.deleteSchedule(agentId, s.id);
     } catch (e) {
@@ -269,7 +283,7 @@
   async function removeAgent(): Promise<void> {
     if (!agent) return;
     const name = agent.name;
-    if (!(await confirmer.ask(`Delete personal agent “${name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', confirmLabel: 'Delete' }))) return;
+    if (!(await confirmer.ask(`Delete personal agent “${name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', danger: true, confirmLabel: 'Delete' }))) return;
     try {
       await personalAgents.remove(agentId);
       toasts.success(`Deleted ${name}`);
@@ -285,17 +299,22 @@
   let reportError = $state('');
   let reportLoading = $state(false);
 
+  const reportSeq = latestOnly();
   async function viewReport(run: PersonalAgentRun): Promise<void> {
     reportRun = run;
     reportLoading = true;
     reportText = '';
     reportError = '';
+    // Only the report last asked for may land (A's slow text used to fill
+    // the modal opened for B).
+    const t = reportSeq.begin();
     try {
-      reportText = await authedText(personalAgentsApi.reportPath(run.id));
+      const text = await authedText(personalAgentsApi.reportPath(run.id));
+      if (t.current) reportText = text;
     } catch (e) {
-      reportError = loadErrorText(e);
+      if (t.current) reportError = loadErrorText(e);
     } finally {
-      reportLoading = false;
+      if (t.current) reportLoading = false;
     }
   }
 
@@ -352,8 +371,8 @@
       </span>
       {#if !agent.enabled}<span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>{/if}
       {#if agent.browser}<span class="chip" title="Runs and chat can use the Otto browser tool">Browser</span>{/if}
-      {#if autonomy?.primary}<span class="chip pa-accent" title="Your primary assistant — routes specialist work to your other agents"><Icon name="star" size={11} /> Your agent</span>{/if}
-      {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={11} /> Proactive</span>{/if}
+      {#if autonomy?.primary}<span class="chip pa-accent" title="Your primary assistant — routes specialist work to your other agents"><Icon name="star" size={12} /> Your agent</span>{/if}
+      {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -511,7 +530,7 @@
         </div>
         <div class="field">
           <label for="{uid}-directive">Directive (the run’s task prompt)</label>
-          <textarea id="{uid}-directive" class="input" bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
+          <textarea dir="auto" id="{uid}-directive" class="input" bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
         </div>
         <div class="field">
           <label for="{uid}-permission">Permissions for its runs</label>
@@ -544,7 +563,7 @@
               <div class="rowtitle">
                 <strong>{cadenceLabel(s.schedule, s.timezone)}</strong>
                 {#if !s.enabled}<span class="chip">Paused</span>{/if}
-                {#if s.permission === 'read_only'}<span class="chip" title="Its runs can read and report, but can’t send, post, write or change anything"><Icon name="lock" size={11} /> Read-only</span>{/if}
+                {#if s.permission === 'read_only'}<span class="chip" title="Its runs can read and report, but can’t send, post, write or change anything"><Icon name="lock" size={12} /> Read-only</span>{/if}
               </div>
               <!-- a paused schedule (or paused agent) never fires: no "next" promise -->
               <span class="meta">{#if s.enabled && agent.enabled}Next <RelTime iso={s.next_run_at} /> · {/if}Last <RelTime iso={s.last_run_at} fallback="never" /></span>
@@ -586,7 +605,7 @@
             <StatusBadge status={runStatus(r.status)} variant="text" />
             <span class="run-when"><RelTime iso={r.started_at} /></span>
             <span class="chip clip-chip" title="What started this run">{scheduleName(r)}</span>
-            {#if r.read_only}<span class="chip" title="This run could read and report, but not change anything"><Icon name="lock" size={11} /> Read-only</span>{/if}
+            {#if r.read_only}<span class="chip" title="This run could read and report, but not change anything"><Icon name="lock" size={12} /> Read-only</span>{/if}
             {#if duration(r)}<span class="meta">{duration(r)}</span>{/if}
             <span class="run-sum" title={r.summary || r.error || undefined}>{r.summary || r.error || 'No summary'}</span>
             {#if (r.attempts ?? 1) > 1}<span class="chip pa-warn">{r.attempts} attempts</span>{/if}
@@ -618,7 +637,7 @@
       <LoadState what="the chat session" error={chatError} empty onretry={() => { chatError = ''; chatSessionId = ''; chatAttempt += 1; }} />
     {:else if chatSessionId}
       <div class="chatwrap">
-        <Terminal sessionId={chatSessionId} autoFocus />
+        <LazyTerminal sessionId={chatSessionId} autoFocus />
       </div>
     {:else}
       <p class="muted" role="status">Opening {agent.name}’s chat session…</p>

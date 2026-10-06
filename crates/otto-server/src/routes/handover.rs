@@ -796,7 +796,12 @@ async fn wait_for_ready(manager: &SessionManager, id: &Id) {
 /// (`ESC[200~ … ESC[201~`) keeps the multi-line brief from submitting on its
 /// first newline; a trailing `\r` then sends it. Returns whether it landed.
 async fn inject_handover_prompt(manager: &SessionManager, id: &Id, prompt: &str) -> bool {
-    let paste = format!("\x1b[200~{prompt}\x1b[201~");
+    // The brief quotes another session's transcript: strip controls so an
+    // embedded `ESC[201~` can't end the paste and type the rest as keys.
+    let paste = format!(
+        "\x1b[200~{}\x1b[201~",
+        otto_orchestrator::claude_pty::sanitize_paste(prompt)
+    );
     if let Err(e) = manager.input(id, paste.as_bytes()).await {
         tracing::warn!(session = %id, "handover: paste failed: {e}");
         return false;
@@ -830,42 +835,10 @@ fn tail_cap(s: &str, cap: usize) -> String {
 /// text. Handles CSI (`ESC[…`), OSC (`ESC]…` ended by BEL or ST) and lone
 /// two-char escapes; passes printable text, tabs, and newlines through.
 fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => match chars.next() {
-                Some('[') => {
-                    // CSI: params/intermediates until a final byte 0x40-0x7E.
-                    for f in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&f) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    // OSC: until BEL, or ST (ESC \).
-                    while let Some(f) = chars.next() {
-                        if f == '\x07' {
-                            break;
-                        }
-                        if f == '\x1b' {
-                            if matches!(chars.peek(), Some('\\')) {
-                                chars.next();
-                            }
-                            break;
-                        }
-                    }
-                }
-                _ => {} // lone/other escape: drop the escape + next char
-            },
-            '\r' | '\x07' => {}
-            '\n' | '\t' => out.push(c),
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
-    }
-    out
+    otto_core::text::strip_ansi(s)
+        .chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
 }
 
 #[cfg(test)]

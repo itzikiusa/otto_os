@@ -127,12 +127,16 @@ test('settings form validates locally, fills a preset, and the daemon rejects en
   // answers 409 (usage engine off) and the toast carries that hint; with one
   // installed the save goes through. Either way the daemon's validation ran.
   await page.getByTestId('k8s-monitor-interval').fill('60');
-  await page.getByTestId('k8s-monitor-enabled').getByRole('switch').check();
   await page.getByTestId('k8s-monitor-save').click();
+  await expect(page.locator('body')).toContainText('Monitoring saved');
+  await page.getByTestId('k8s-monitor-enabled').getByRole('switch').click();
   await expect(page.locator('body')).toContainText(/usage engine|ClickHouse|Monitoring saved/i);
 
   // Disabled saves fine and round-trips.
-  await page.getByTestId('k8s-monitor-enabled').getByRole('switch').uncheck();
+  const monitoringSwitch = page.getByTestId('k8s-monitor-enabled').getByRole('switch');
+  await expect(monitoringSwitch).toBeEnabled();
+  if (await monitoringSwitch.isChecked()) await monitoringSwitch.click();
+  await expect(monitoringSwitch).not.toBeChecked();
   await page.getByTestId('k8s-monitor-save').click();
   await expect(page.locator('body')).toContainText('Monitoring saved');
   const saved = await ctx.get(`${base}/api/v1/k8s/clusters/${clusterId}/monitor`);
@@ -151,4 +155,77 @@ test('exclusions kind menu stays inside the viewport near the bottom of the page
   await expectFullyInViewport(page, menu);
   await page.getByRole('menuitem', { name: /Pod name glob/ }).click();
   await expect(page.locator('.ex .chip')).toHaveText('Pod');
+});
+
+test('monitor switch persists immediately and preserves unsaved probe settings', async ({ page }, info) => {
+  const response = await ctx.get(`${base}/api/v1/k8s/clusters/${clusterId}/monitor`);
+  const payload = await response.json();
+  payload.config.enabled = true;
+  payload.config.interval_secs = 60;
+  payload.config.probes = payload.presets[0].probes;
+  const writes: Array<Record<string, unknown>> = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`**/api/v1/k8s/clusters/${clusterId}/monitor`, async (route) => {
+    if (route.request().method() === 'PUT') {
+      writes.push(route.request().postDataJSON());
+      await blocked;
+      payload.config = writes.at(-1);
+    }
+    await route.fulfill({ status: 200, json: payload });
+  });
+  await boot(page, `kubernetes/monitor/${clusterId}/settings`);
+  const toggle = page.getByTestId('k8s-monitor-enabled').getByRole('switch');
+  await expect(toggle).toBeChecked();
+  await page.getByTestId('k8s-monitor-interval').fill('120');
+  try {
+    await toggle.click();
+    await expect.poll(() => writes.length).toBe(1);
+    expect(writes[0].enabled).toBe(false);
+    expect(writes[0].interval_secs).toBe(60);
+    await expect(toggle).toBeChecked();
+    await expect(toggle).toBeDisabled();
+  } finally { release(); }
+  await expect(toggle).not.toBeChecked();
+  await expect(page.getByTestId('k8s-monitor-interval')).toHaveValue('120');
+  await page.reload();
+  await expect(toggle).not.toBeChecked();
+  await expect(page.getByTestId('k8s-monitor-interval')).toHaveValue('60');
+  await page.route(`**/api/v1/k8s/clusters/${clusterId}/monitor/test`, route => route.fulfill({ json: { namespace: 'shop', pod: 'fixture', transport: 'proxy', metrics_server: 'ok', probes: [] } }));
+  await page.getByTestId('k8s-monitor-interval').fill('180');
+  await page.getByRole('button', { name: 'Test probes', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect.poll(() => writes.length).toBe(2);
+  await expect(dialog).toContainText('fixture');
+  await page.keyboard.press('Escape');
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  expect(writes[2].interval_secs, 'a toggle must preserve settings saved by Test probes').toBe(180);
+
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await expect(page.locator('html')).toHaveAttribute('data-scheme', scheme);
+    const path = info.outputPath(`monitor-switch-${scheme}.png`);
+    await page.screenshot({ path, fullPage: true, animations: 'disabled' });
+    await info.attach(`monitor-switch-${scheme}`, { path, contentType: 'image/png' });
+  }
+});
+
+test('monitor switch keeps confirmed state when persistence fails', async ({ page }) => {
+  const response = await ctx.get(`${base}/api/v1/k8s/clusters/${clusterId}/monitor`);
+  const payload = await response.json();
+  payload.config.enabled = true;
+  await page.route(`**/api/v1/k8s/clusters/${clusterId}/monitor`, async (route) => {
+    if (route.request().method() === 'PUT') {
+      await route.fulfill({ status: 503, json: { code: 'unavailable', message: 'Temporary storage failure' } });
+    } else await route.fulfill({ status: 200, json: payload });
+  });
+  await boot(page, `kubernetes/monitor/${clusterId}/settings`);
+  const toggle = page.getByTestId('k8s-monitor-enabled').getByRole('switch');
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(page.getByTestId('k8s-monitor-settings')).toContainText('Temporary storage failure');
+  await expect(toggle).toBeChecked();
+  await expect(toggle).toBeEnabled();
 });

@@ -41,6 +41,7 @@
     SchemaNode,
   } from '../../lib/api/types';
   import { extractVars, type SplitMode } from './sql-util';
+  import { splitModeFor } from './sql-dialect';
   import {
     buildTargets,
     clusterLine,
@@ -65,7 +66,8 @@
   const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'];
   const kind = $derived(database.selectedConn?.kind ?? null);
   const isClickhouse = $derived(kind === 'clickhouse');
-  const splitMode = $derived<SplitMode>(kind === 'redis' ? 'line' : 'sql');
+  // Engine lexing (Redis per line, Postgres dollar quotes / no `#` comments).
+  const splitMode = $derived<SplitMode>(splitModeFor(kind));
   /** Same-engine connections — one script, one dialect. */
   const candidates = $derived<Connection[]>(
     database.connections.filter((c) => c.kind === kind && DB_KINDS.includes(c.kind)),
@@ -133,7 +135,7 @@
     untrack(() => {
       const tabVars = database.tab.vars ?? {};
       const out: Record<string, ParamDraft> = {};
-      for (const n of extractVars(statement, database.selectedConn?.kind === 'redis' ? 'line' : 'sql')) {
+      for (const n of extractVars(statement, splitMode)) {
         const v = tabVars[n];
         out[n] = { text: v?.value ?? '', type: v?.type ?? 'string', escape: v?.escape ?? true };
       }
@@ -459,7 +461,7 @@
             {@const count = parseValues(drafts[n].text).length}
             <div class="mr-param">
               <span class="mr-pname mono" title={n}>:{n}</span>
-              <textarea
+              <textarea dir="ltr"
                 class="input mr-pvals mono"
                 rows={Math.min(4, Math.max(1, drafts[n].text.split('\n').length))}
                 bind:value={drafts[n].text}
@@ -560,7 +562,7 @@
                       <option value={`custom:${ov.name}`}>ON CLUSTER {ov.name}</option>
                     {/if}
                   </select>
-                  <input
+                  <input dir="ltr"
                     class="input mr-clname mono"
                     placeholder="other cluster…"
                     aria-label="Custom cluster for {t.label}"
@@ -632,7 +634,7 @@
       </ul>
       <label class="mr-typed">
         <span>Type <strong class="mono">{phrase}</strong> to confirm</span>
-        <input
+        <input dir="ltr"
           class="input mono"
           bind:value={typed}
           placeholder={phrase}
@@ -945,7 +947,7 @@
   }
   .mr-link:focus-visible,
   .mr-res-row:focus-visible {
-    outline: 2px solid var(--accent-solid);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .mr-clip {

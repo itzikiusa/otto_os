@@ -35,7 +35,7 @@
     const candidates = [...orphaned];
     if (!candidates.length) return;
     if (!await confirmer.ask(
-      `Revoke ${candidates.length} tokens referring to sessions that no longer exist? Legacy tokens are identified by their labels; review the Deleted session filter first if you named a personal token this way.`,
+      `Revoke ${plural(candidates.length, 'token')} referring to sessions that no longer exist? Legacy tokens are identified by their labels; review the Deleted session filter first if you named a personal token this way.`,
       { title: 'Revoke deleted-session tokens', confirmLabel: 'Revoke tokens', danger: true },
     )) return;
     let failed = 0;
@@ -168,7 +168,7 @@
   <div class="card s-card">
     <label class="mint-label" for="pat-label">Label <span class="dim">(optional)</span></label>
     <div class="mint-row">
-      <input
+      <input dir="auto"
         id="pat-label"
         class="input mint-input"
         type="text"

@@ -1,7 +1,7 @@
 <script lang="ts">
   // Tags panel (left sidebar mode): every tag with its count; click → search.
   import { vault } from './vault.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   let filter = $state('');
   const shown = $derived(
@@ -10,26 +10,30 @@
 </script>
 
 <div class="tags">
-  <input type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
-  {#if vault.tagsError}
-    <div role="alert">Couldn’t refresh tags. {vault.tags.length ? 'Showing the last loaded tags.' : ''} {vault.tagsError}</div>
-    <button class="btn small" onclick={() => void vault.loadTags()} disabled={vault.tagsLoading}>Retry</button>
-  {/if}
-  {#if vault.tags.length === 0 && vault.tagsLoading}
-    <Skeleton rows={4} height={24} label="tags" />
-  {:else if vault.tags.length === 0 && !vault.tagsError}
-    <div class="dim">No tags yet. Add #tags in a note, or tags: in its frontmatter.</div>
-  {:else if vault.tags.length > 0 && shown.length === 0}
-    <div class="dim">No tags match “{filter}”.</div>
-  {/if}
-  <div class="list">
-    {#each shown as t (t.tag)}
-      <button class="tag-row" onclick={() => vault.searchTag(t.tag)}>
-        <span class="tag-name">#{t.tag}</span>
-        <span class="count">{t.count}</span>
-      </button>
-    {/each}
-  </div>
+  <input dir="ltr" type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
+  <LoadState
+    what="tags"
+    loading={vault.tagsLoading}
+    error={vault.tagsError}
+    empty={vault.tags.length === 0}
+    onretry={() => void vault.loadTags()}
+    variant="compact"
+  >
+    {#snippet emptyView()}
+      <div class="dim">No tags yet. Add #tags in a note, or tags: in its frontmatter.</div>
+    {/snippet}
+    {#if shown.length === 0}
+      <div class="dim">No tags match “{filter}”.</div>
+    {/if}
+    <div class="list">
+      {#each shown as t (t.tag)}
+        <button class="tag-row" onclick={() => vault.searchTag(t.tag)}>
+          <span class="tag-name">#{t.tag}</span>
+          <span class="count">{t.count}</span>
+        </button>
+      {/each}
+    </div>
+  </LoadState>
 </div>
 
 <style>

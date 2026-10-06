@@ -125,7 +125,7 @@
     {#if kind === 'text'}
       <label class="gfield">
         <span class="lbl">Describe the model</span>
-        <textarea rows="3" bind:value={prompt} placeholder="A small gift box with a violet ribbon" maxlength="1200" data-testid="gen3d-prompt"></textarea>
+        <textarea dir="auto" rows="3" bind:value={prompt} placeholder="A small gift box with a violet ribbon" maxlength="1200" data-testid="gen3d-prompt"></textarea>
       </label>
     {:else}
       <div class="gfield">
@@ -141,7 +141,7 @@
         </div>
         <label class="gfield">
           <span class="lbl">Notes (optional)</span>
-          <input type="text" bind:value={prompt} placeholder="Keep the proportions; use Brand violet" maxlength="600" />
+          <input dir="auto" type="text" bind:value={prompt} placeholder="Keep the proportions; use Brand violet" maxlength="600" />
         </label>
       </div>
     {/if}
@@ -159,7 +159,7 @@
             </span>
             <span class="prov-note">{p.privacy}</span>
             {#if p.cost}<span class="prov-note">Cost: {p.cost}</span>{/if}
-            {#if why && p.where === 'cloud'}<span class="prov-why"><Icon name="lock" size={11} /> {why}</span>{/if}
+            {#if why && p.where === 'cloud'}<span class="prov-why"><Icon name="lock" size={12} /> {why}</span>{/if}
           </span>
         </label>
       {/each}

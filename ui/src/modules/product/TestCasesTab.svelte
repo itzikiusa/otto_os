@@ -517,17 +517,18 @@
 
   async function publishTests(): Promise<void> {
     if (!activeRun || publishingRun) return;
+    // Pin the run: `activeRun` is derived and may point elsewhere after the awaits.
+    const run = activeRun;
     publishingRun = true;
     try {
-      await product.publishTests(activeRun.id, {
+      // publishTests reloads the runs itself (for confluence_url) — no second fetch.
+      await product.publishTests(run.id, {
         space_key: publishSpaceKey.trim() || null,
         parent_id: publishParentId.trim() || null,
       });
       showPublishForm = false;
-      // Refresh to get confluence_url.
-      await product.loadTestcases();
-      const updatedRun = product.testcaseRuns.find((r) => r.run.id === activeRun.id);
-      const url = updatedRun?.run.confluence_url ?? activeRun.confluence_url;
+      const updatedRun = product.testcaseRuns.find((r) => r.run.id === run.id);
+      const url = updatedRun?.run.confluence_url ?? run.confluence_url;
       if (url) {
         toasts.success('Published to Confluence', url);
       } else {
@@ -696,7 +697,7 @@
           <div class="publish-form">
             <div class="pf-row">
               <label class="field-label" for="pf-space">Space key</label>
-              <input
+              <input dir="auto"
                 id="pf-space"
                 class="text-input"
                 type="text"
@@ -707,7 +708,7 @@
             </div>
             <div class="pf-row">
               <label class="field-label" for="pf-parent">Parent page ID</label>
-              <input
+              <input dir="auto"
                 id="pf-parent"
                 class="text-input"
                 type="text"
@@ -904,7 +905,7 @@
                   {#if action.mode === 'changes'}
                     <div class="inline-form">
                       <div class="if-label">Review note (required)</div>
-                      <textarea
+                      <textarea dir="auto" aria-label="Review note"
                         class="text-area"
                         rows="3"
                         placeholder="Describe what needs to change…"
@@ -936,7 +937,7 @@
                       <div class="edit-grid">
                         <div class="edit-field">
                           <label class="field-label" for="ef-title-{tc.id}">Title</label>
-                          <input
+                          <input dir="auto"
                             id="ef-title-{tc.id}"
                             class="text-input"
                             type="text"
@@ -974,7 +975,7 @@
                         </div>
                         <div class="edit-field">
                           <label class="field-label" for="ef-pre-{tc.id}">Preconditions (one per line)</label>
-                          <textarea
+                          <textarea dir="auto"
                             id="ef-pre-{tc.id}"
                             class="text-area"
                             rows="3"
@@ -985,7 +986,7 @@
                         </div>
                         <div class="edit-field">
                           <label class="field-label" for="ef-steps-{tc.id}">Steps (one per line)</label>
-                          <textarea
+                          <textarea dir="auto"
                             id="ef-steps-{tc.id}"
                             class="text-area"
                             rows="4"
@@ -996,7 +997,7 @@
                         </div>
                         <div class="edit-field">
                           <label class="field-label" for="ef-exp-{tc.id}">Expected result</label>
-                          <textarea
+                          <textarea dir="auto"
                             id="ef-exp-{tc.id}"
                             class="text-area"
                             rows="2"
@@ -1007,7 +1008,7 @@
                         </div>
                         <div class="edit-field">
                           <label class="field-label" for="ef-note-{tc.id}">Review note (optional)</label>
-                          <input
+                          <input dir="auto"
                             id="ef-note-{tc.id}"
                             class="text-input"
                             type="text"

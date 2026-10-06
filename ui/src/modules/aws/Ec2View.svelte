@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import type { BadgeTone } from '../../lib/status';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
@@ -70,15 +71,22 @@
     return list;
   });
 
+  // Region-scoped, latest-wins: a slow region-A reply (or error) that lands
+  // after a switch to B must not overwrite B's error or end B's spinner.
+  let loadSeq = 0;
   async function load(): Promise<void> {
+    const seq = ++loadSeq;
+    const rg = region;
     loading = true;
     try {
-      await aws.loadEc2(account.id, region);
+      await aws.loadEc2(account.id, rg);
+      if (seq !== loadSeq) return;
       error = '';
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
@@ -205,7 +213,7 @@
   {loading}
   bind:auto
   {region}
-  onrefresh={() => void load()}
+  onrefresh={load}
 >
   <RegionPicker {account} service="ec2" bind:region allowAll />
   <label class="sel">
@@ -236,7 +244,7 @@
       </thead>
       <tbody>
         {#each shown as i (`${i.region ?? ''}/${i.instance_id}`)}
-          <tr
+          <tr use:rowMenu
             class="trow"
             class:sel={detail?.inst.instance_id === i.instance_id}
             tabindex="0"

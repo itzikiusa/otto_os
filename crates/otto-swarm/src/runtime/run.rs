@@ -1,0 +1,1161 @@
+//! One swarm agent turn: prepare the agent's cwd + context, spawn or RESUME its
+//! session (resume = the token-efficiency win — no history re-feed), inject only
+//! the new brief, watch for the result via the shared `agent_run` primitives
+//! (out-file / claude transcript; 0 model tokens to read), parse the structured
+//! output, and persist the run. Routing of the result (handoffs / reviews /
+//! subtasks) is the Coordinator's job (`swarm_runtime`).
+
+use otto_core::text::clip_chars;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use chrono::Utc;
+use otto_core::api::CreateSessionReq;
+use otto_core::domain::{SessionKind, SessionStatus};
+use otto_core::event::Event;
+use otto_core::Id;
+use otto_state::{RunPatch, SwarmAgent, SwarmProject, SwarmRun, SwarmTask};
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::runtime::host::SwarmRt;
+use crate::runtime::host::{FailReason, RunOutcome};
+use serde::Serialize;
+
+/// run_id → cancel flag (the shared `otto_core::cancel` registry).
+pub use otto_core::cancel::{new_cancel_registry, CancelRegistry};
+
+pub fn register_cancel(reg: &CancelRegistry, run_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    reg.lock()
+        .unwrap()
+        .insert(run_id.to_string(), Arc::clone(&flag));
+    flag
+}
+
+pub fn signal_cancel(reg: &CancelRegistry, run_id: &str) {
+    if let Some(flag) = reg.lock().unwrap().get(run_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn unregister_cancel(reg: &CancelRegistry, run_id: &str) {
+    reg.lock().unwrap().remove(run_id);
+}
+
+const TURN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const WAITING_IDLE: Duration = Duration::from_secs(45);
+const STUCK_IDLE: Duration = Duration::from_secs(180);
+const MAX_ATTEMPTS: u32 = 2;
+const RETRY_BACKOFF: Duration = Duration::from_secs(3);
+
+// --- Structured turn result ------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TurnArtifact {
+    #[serde(default)]
+    pub r#type: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TurnHandoff {
+    #[serde(default, alias = "to_role", alias = "to")]
+    pub to_role: String,
+    #[serde(default)]
+    pub brief: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TurnReview {
+    #[serde(default, alias = "of_artifact", alias = "of")]
+    pub of: String,
+    #[serde(default)]
+    pub reviewer_role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TurnSubtask {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub assignee_role: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub depends_on_titles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TurnConcern {
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SwarmTurnResult {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub artifacts: Vec<TurnArtifact>,
+    #[serde(default)]
+    pub handoffs: Vec<TurnHandoff>,
+    #[serde(default, alias = "reviews_requested")]
+    pub reviews: Vec<TurnReview>,
+    #[serde(default)]
+    pub subtasks: Vec<TurnSubtask>,
+    #[serde(default)]
+    pub concerns: Vec<TurnConcern>,
+}
+
+fn out_path(run_id: &str) -> PathBuf {
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(dir).join(format!("otto-swarm-{run_id}.json"))
+}
+
+/// Parse the agent's result file content into a `SwarmTurnResult` (tolerant of
+/// fences / surrounding prose). `None` if no JSON object is present.
+pub fn parse_turn_result(text: &str) -> Option<SwarmTurnResult> {
+    let v = crate::recruiter::extract_json(text)?;
+    serde_json::from_value(v).ok()
+}
+
+fn transcript_ok(t: &str) -> bool {
+    crate::recruiter::extract_json(t).is_some()
+}
+
+// --- Prompt ----------------------------------------------------------------
+
+/// Build the per-turn brief. The agent's full identity/skills/board-instructions
+/// are already materialized into its cwd (CLAUDE.md / AGENTS.md), so this stays
+/// focused on the immediate task + the output contract.
+fn build_prompt(
+    agent: &SwarmAgent,
+    task: Option<&SwarmTask>,
+    is_delegation: bool,
+    directive: Option<&str>,
+    board: &[String],
+    out_file: &str,
+) -> String {
+    let mut p = String::new();
+    p.push_str(&format!(
+        "You are {} ({}). Continue your work for the swarm.\n\n",
+        agent.name, agent.title
+    ));
+    if let Some(t) = task {
+        p.push_str(&format!("TASK: {}\n{}\n\n", t.title, t.description));
+    }
+    if let Some(d) = directive {
+        if !d.is_empty() {
+            p.push_str(&format!("STANDING DIRECTIVE: {d}\n\n"));
+        }
+    }
+    if !board.is_empty() {
+        p.push_str("RECENT TEAM BOARD (for context):\n");
+        for m in board {
+            p.push_str(&format!("- {m}\n"));
+        }
+        p.push('\n');
+    }
+    if is_delegation {
+        p.push_str(
+            "You are a LEADER. Do NOT do the hands-on work yourself. Break this down into \
+             concrete subtasks for your reports and return them in `subtasks` (give each an \
+             `assignee_role` matching one of your reports' titles). Keep it lean: the FEWEST \
+             subtasks that deliver the goal, and never re-create work that is already on the \
+             team board. You own the plan — when triaging a proposal or handoff, delegate \
+             only what serves the plan and drop the rest (report status \"done\").\n\n",
+        );
+    } else {
+        p.push_str(
+            "Do the work now. Use `./otto-post` to share progress, ideas, reviews and concerns \
+             with the team as you go. If your role is product/feature design (a PO, analyst, \
+             etc.) and you produce a feature draft/spec, publish it to the Product page for the \
+             user to review with: `./otto-product --title \"Feature title\" \"<markdown body>\"`. \
+             The Product page already has an EPIC for this project; `otto-product` files your \
+             draft under it — pass `--folder` to group your work (e.g. `--folder Design`) and \
+             `--kind story` for a full user story (default `doc`). Publishing the same title \
+             again UPDATES that page instead of creating another. Design artifacts (HTML \
+             screens, Mermaid diagrams, Excalidraw boards, 3D scenes) go through \
+             `./otto-mockup --title \"…\" --format html|mermaid|excalidraw|scene3d \"<content>\"`.\n\n\
+             Stay on THIS task — the plan is owned by your manager. Do not invent new tasks: \
+             `subtasks` and `handoffs` go to your manager for triage, so use them only when \
+             you truly cannot proceed (at most ONE handoff, never a chain). If something is \
+             out of scope or wrong, say so in `concerns` or report status \"blocked\" — do \
+             NOT bounce work back and forth with another agent.\n\n",
+        );
+    }
+    p.push_str(&format!(
+        "When finished, write your result as a SINGLE JSON object to this absolute path \
+         (overwrite it; write ONLY the JSON, no prose, no markdown fence):\n\n{out_file}\n\n\
+         Schema:\n{}\n\nWriting that file is the last thing you do.",
+        RESULT_SCHEMA
+    ));
+    p
+}
+
+const RESULT_SCHEMA: &str = r#"{
+  "status": "done | blocked | needs_review | in_progress",
+  "summary": "one or two sentences on what you did",
+  "artifacts": [{"type": "file|pr|doc|url", "path": "abs path or null", "url": "url or null", "label": "short"}],
+  "handoffs": [{"to_role": "a teammate's title", "brief": "what they should do"}],
+  "reviews_requested": [{"of": "artifact label/path", "reviewer_role": "a teammate's title"}],
+  "subtasks": [{"title": "...", "description": "...", "assignee_role": "title or null", "priority": "low|medium|high", "depends_on_titles": []}],
+  "concerns": [{"severity": "low|medium|high", "text": "if the plan/timeline looks wrong"}]
+}"#;
+
+// --- The turn --------------------------------------------------------------
+
+/// Find a reusable live/resumable session for this agent, or `None`.
+async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str) -> Option<Id> {
+    // Targeted SQL lookup (perf §15 F7) — not the workspace's full history.
+    let sessions = ctx
+        .manager()
+        .list_live_by_meta(ws, Some("agent"), "agent_id", agent_id)
+        .await
+        .ok()?;
+    sessions.into_iter().find_map(|s| {
+        let is_agent = s.kind == SessionKind::Agent && !s.archived;
+        let mine = s.meta.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id);
+        let alive = !matches!(s.status, SessionStatus::Exited);
+        (is_agent && mine && alive).then_some(s.id)
+    })
+}
+
+/// Run one turn for `run`. Updates the run row (running → done/error/stopped),
+/// persists the parsed result, emits events. Returns the parsed result on
+/// success so the Coordinator can route handoffs/subtasks/reviews.
+pub async fn run_turn(ctx: SwarmRt, run: SwarmRun) -> Option<SwarmTurnResult> {
+    let cancel = register_cancel(ctx.swarm_run_cancels(), &run.id);
+    // RAII (S4-25b): the registry entry and the `$TMPDIR` result file go away
+    // however the turn ends — including a panic or a dropped future.
+    let _cleanup = TurnCleanup {
+        reg: ctx.swarm_run_cancels().clone(),
+        run_id: run.id.clone(),
+    };
+    run_turn_inner(&ctx, &run, &cancel).await
+}
+
+/// Drop guard for [`run_turn`]: unregisters the cancel flag and deletes the
+/// turn's result file (it was never cleaned up, so one file leaked per run).
+struct TurnCleanup {
+    reg: CancelRegistry,
+    run_id: String,
+}
+
+impl Drop for TurnCleanup {
+    fn drop(&mut self) {
+        unregister_cancel(&self.reg, &self.run_id);
+        let _ = std::fs::remove_file(out_path(&self.run_id));
+    }
+}
+
+async fn run_turn_inner(
+    ctx: &SwarmRt,
+    run: &SwarmRun,
+    cancel: &Arc<AtomicBool>,
+) -> Option<SwarmTurnResult> {
+    let repo = &ctx.swarm_repo();
+    // Stopped (Stop / pause / board clear) while it sat queued: never start.
+    if let Ok(cur) = repo.get_run(&run.id).await {
+        if !matches!(cur.status.as_str(), "queued" | "running" | "waiting") {
+            return None;
+        }
+    }
+    // A vanished swarm/agent (deleted between enqueue and start) must settle
+    // the run: a bare `?` left it `queued`, holding a parallel slot until the
+    // next daemon restart.
+    let swarm = match repo.get_swarm(&run.swarm_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            mark_run_error(ctx, run, &format!("swarm unavailable: {e}")).await;
+            return None;
+        }
+    };
+    let agent = match repo.get_agent(&run.agent_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            mark_run_error(ctx, run, &format!("agent unavailable: {e}")).await;
+            return None;
+        }
+    };
+    let task: Option<SwarmTask> = match &run.task_id {
+        Some(tid) => repo.get_task(tid).await.ok(),
+        None => None,
+    };
+    let project: Option<SwarmProject> = match task
+        .as_ref()
+        .map(|t| t.project_id.clone())
+        .or_else(|| run.project_id.clone())
+    {
+        Some(pid) => repo.get_project(&pid).await.ok(),
+        None => None,
+    };
+    let ws = swarm.workspace_id.clone();
+
+    // Prepare cwd + per-agent context (skills/soul/identity) + otto-post helper.
+    let cwd_info =
+        match crate::runtime::workspace::ensure_cwd_info(ctx, &swarm, &agent, project.as_ref())
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                mark_run_error(ctx, run, &format!("prepare cwd: {e}")).await;
+                return None;
+            }
+        };
+    let cwd = cwd_info.path.clone();
+    // Requirement 1: announce a freshly-created worktree on the shared board so the
+    // team + user see who is working where (and the leader can coordinate merges).
+    if cwd_info.created {
+        if let (Some(branch), Some(task)) = (&cwd_info.branch, task.as_ref()) {
+            let base = cwd_info.integration_branch.clone().unwrap_or_default();
+            crate::runtime::engine::system_post_meta(
+                ctx,
+                &swarm.id,
+                Some(&task.project_id),
+                Some(&task.id),
+                "worktree",
+                &format!(
+                    "🌿 {} created worktree `{}` (base `{}`) for “{}”.",
+                    agent.name, branch, base, task.title
+                ),
+                serde_json::json!({
+                    "event": "worktree_created",
+                    "agent_id": agent.id, "task_id": task.id,
+                    "branch": branch, "base": base, "path": cwd_info.path,
+                }),
+            )
+            .await;
+        }
+    }
+    let manager_title = match &agent.reports_to {
+        Some(mid) => repo.get_agent(mid).await.ok().map(|m| m.title),
+        None => None,
+    };
+    let reports: Vec<String> = repo
+        .list_agents(&swarm.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.reports_to.as_deref() == Some(agent.id.as_str()))
+        .map(|a| a.title)
+        .collect();
+    let identity = crate::runtime::workspace::render_identity(
+        &swarm,
+        &agent,
+        manager_title.as_deref(),
+        &reports,
+        project.as_ref(),
+        task.as_ref(),
+    );
+    // Skills/soul/identity materialization + helper installs are a burst of
+    // blocking file writes — run them off the runtime worker (perf §15 N9).
+    {
+        let (ctx2, swarm2, project2, agent2, cwd2) = (
+            ctx.clone(),
+            swarm.clone(),
+            project.clone(),
+            agent.clone(),
+            cwd.clone(),
+        );
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::runtime::workspace::provision_agent(
+                &ctx2,
+                &swarm2,
+                project2.as_ref(),
+                &agent2,
+                identity,
+                &cwd2,
+            )
+        })
+        .await;
+    }
+
+    // Board context for the brief (recent messages to/about this agent).
+    let board: Vec<String> = repo
+        .board_for_agent(&swarm.id, &agent.id, 12)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .map(|m| {
+            let who = m.author_agent_id.clone().unwrap_or_else(|| "user".into());
+            format!("[{}] {}: {}", m.kind, who, clip_chars(&m.body, 200))
+        })
+        .collect();
+
+    let is_delegation = run.kind == "planning" || (!reports.is_empty() && run.kind == "task");
+    let directive = run
+        .result
+        .as_ref()
+        .and_then(|v| {
+            v.get("directive")
+                .and_then(|d| d.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            agent.schedule.as_ref().and_then(|s| {
+                s.get("directive")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string)
+            })
+        });
+
+    let out = out_path(&run.id);
+    // Off the runtime worker (perf §15 N9).
+    let _ = tokio::fs::remove_file(&out).await;
+    let prompt = build_prompt(
+        &agent,
+        task.as_ref(),
+        is_delegation,
+        directive.as_deref(),
+        &board,
+        &out.to_string_lossy(),
+    );
+
+    // Mark running. Capture the turn's start time so the token/cost backfill
+    // below can bound usage to THIS turn — the agent's session is reused across
+    // turns, so an unbounded session total would accumulate run1+run2+….
+    let turn_started_at = Utc::now();
+    // `Ok(None)`: stopped while its cwd/brief were being prepared.
+    if let Ok(None) = repo
+        .update_run_if_status(
+            &run.id,
+            &["queued", "running", "waiting"],
+            RunPatch {
+                status: Some("running".into()),
+                started_at: Some(Some(turn_started_at)),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        return None;
+    }
+    emit_run(ctx, &run.id).await;
+
+    // Spawn/resume + inject + watch, with bounded recovery.
+    let provider = agent.provider.clone();
+    let attempt: &mut crate::runtime::host::AttemptFn<'_> = &mut |_attempt| {
+        let ctx = ctx.clone();
+        let ws = ws.clone();
+        // Stamp the work-graph ref so the usage layer can attribute cost to the
+        // originating swarm task. story_id is included when the project was created
+        // from a Product story (Plan → Swarm link; project.story_id is Some).
+        let work_ref = otto_core::workref::WorkRef {
+            swarm_task_id: task.as_ref().map(|t| t.id.clone()),
+            story_id: project.as_ref().and_then(|p| p.story_id.clone()),
+            origin: Some("swarm".into()),
+            ..Default::default()
+        };
+        let mut swarm_meta = json!({
+            "source": "swarm",
+            "swarm_id": swarm.id,
+            "agent_id": agent.id,
+            "project_id": project.as_ref().map(|p| p.id.clone()),
+            "task_id": task.as_ref().map(|t| t.id.clone()),
+            "run_id": run.id,
+            "work": serde_json::to_value(&work_ref).unwrap_or_default(),
+        });
+        // Carry the agent's model into meta so SessionManager can inject
+        // `--model <name>` for providers that support it (claude/codex); for others
+        // it is attribution-only. Mirrors otto-insights / product_run.rs.
+        if let Some(m) = agent
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            swarm_meta["model"] = json!(m);
+        }
+        let provider = provider.clone();
+        let cwd = cwd.clone();
+        let prompt = prompt.clone();
+        let out = out.clone();
+        let run_id = run.id.clone();
+        let agent_id = agent.id.clone();
+        let cancel = Arc::clone(cancel);
+        let title = format!(
+            "{} · {}",
+            agent.name,
+            task.as_ref()
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| agent.title.clone())
+        );
+        Box::pin(async move {
+            run_attempt(
+                &ctx,
+                &ws,
+                &agent_id,
+                &provider,
+                &cwd,
+                &title,
+                &swarm_meta,
+                &prompt,
+                &out,
+                &run_id,
+                &cancel,
+            )
+            .await
+        })
+    };
+    let outcome = ctx
+        .run_with_recovery(MAX_ATTEMPTS, &[RETRY_BACKOFF], Some(cancel), attempt)
+        .await;
+
+    // Best-effort token/cost backfill for this turn, keyed on the run's session.
+    // otto-usage records per-session; the run is tagged with `session_id`/`run_id`
+    // (swarm_meta above). Bound to events at/after `turn_started_at` so a reused
+    // session reports only THIS turn's usage (not the lifetime sum). Stays null
+    // when usage tracking is off or the latest events haven't been flushed yet.
+    let (toks_in, toks_out, cost) =
+        session_usage(ctx, outcome.session_id.as_deref(), turn_started_at).await;
+
+    // Requirement 1: detect when this agent's branch touches files another active
+    // agent's branch also changed, and warn the team on the board so the leader can
+    // coordinate before merge. Best-effort, post-turn.
+    detect_shared_files(ctx, &swarm, &agent, task.as_ref(), &cwd_info).await;
+
+    // Persist terminal state.
+    if let Some(raw) = outcome.raw.as_deref() {
+        let parsed = parse_turn_result(raw);
+        let status = parsed
+            .as_ref()
+            .map(|r| r.status.clone())
+            .unwrap_or_else(|| "done".into());
+        let summary = parsed
+            .as_ref()
+            .map(|r| r.summary.clone())
+            .unwrap_or_default();
+        // Persist the parsed result plus the turn's `cwd`/`brief` so the Run
+        // Inspector can show what was sent and where it ran without a new route.
+        let result = enrich_result(
+            parsed
+                .as_ref()
+                .map(|r| serde_json::to_value(r).unwrap_or_default()),
+            &cwd,
+            &prompt,
+        );
+        // CAS: a turn that finished after the operator stopped it (or a pause
+        // cut it) must not overwrite `stopped` with `done`, nor be routed —
+        // it used to mark the task done / create subtasks anyway.
+        let written = repo
+            .update_run_if_status(
+                &run.id,
+                &["queued", "running", "waiting"],
+                RunPatch {
+                    status: Some("done".into()),
+                    session_id: Some(outcome.session_id.clone()),
+                    summary: Some(Some(if summary.is_empty() {
+                        format!("turn {status}")
+                    } else {
+                        summary
+                    })),
+                    result: Some(Some(result)),
+                    tokens_input: Some(toks_in),
+                    tokens_output: Some(toks_out),
+                    cost_usd: Some(cost),
+                    finished_at: Some(Some(Utc::now())),
+                    ..Default::default()
+                },
+            )
+            .await;
+        emit_run(ctx, &run.id).await;
+        if matches!(written, Ok(None)) {
+            return None;
+        }
+        parsed
+    } else {
+        let reason = outcome.reason.map(|r| r.as_str()).unwrap_or("error");
+        let stopped = matches!(outcome.reason, Some(FailReason::Stopped));
+        // Even on failure, keep the brief/cwd for inspection.
+        let result = enrich_result(None, &cwd, &prompt);
+        let _ = repo
+            .update_run_if_status(
+                &run.id,
+                &["queued", "running", "waiting"],
+                RunPatch {
+                    status: Some(if stopped {
+                        "stopped".into()
+                    } else {
+                        "error".into()
+                    }),
+                    session_id: Some(outcome.session_id.clone()),
+                    error: Some(Some(reason.to_string())),
+                    result: Some(Some(result)),
+                    // The agent may have spent tokens before failing/stopping.
+                    tokens_input: Some(toks_in),
+                    tokens_output: Some(toks_out),
+                    cost_usd: Some(cost),
+                    finished_at: Some(Some(Utc::now())),
+                    ..Default::default()
+                },
+            )
+            .await;
+        emit_run(ctx, &run.id).await;
+        None
+    }
+}
+
+/// Fold the turn's `cwd` + `brief` into the stored run `result` object so the
+/// Run Inspector can surface them. The parsed turn JSON (if any) keeps its own
+/// keys; `cwd`/`brief` are added only when not already present.
+fn enrich_result(parsed: Option<serde_json::Value>, cwd: &str, brief: &str) -> serde_json::Value {
+    let mut obj = match parsed {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.entry("cwd").or_insert_with(|| json!(cwd));
+    obj.entry("brief").or_insert_with(|| json!(brief));
+    serde_json::Value::Object(obj)
+}
+
+/// Pull this turn's token/cost totals from otto-usage for `session_id`, bounded
+/// to events at/after `since` (the turn's start) — swarm sessions are reused
+/// across turns, so an unbounded total would sum every prior run. Returns
+/// `(input, output, cost_usd)`, each `None` when usage tracking is unavailable,
+/// no session was created, or no events were recorded in the window yet — the
+/// `RunPatch` then writes nulls rather than misleading zeros.
+pub(crate) async fn session_usage(
+    ctx: &SwarmRt,
+    session_id: Option<&str>,
+    since: chrono::DateTime<Utc>,
+) -> (Option<i64>, Option<i64>, Option<f64>) {
+    let Some(sid) = session_id else {
+        return (None, None, None);
+    };
+    match ctx.session_usage_totals(sid, since).await {
+        Some((input, output, cost_usd)) => {
+            (Some(input as i64), Some(output as i64), Some(cost_usd))
+        }
+        None => (None, None, None),
+    }
+}
+
+/// One attempt: find-or-create the agent session, inject the brief, watch.
+#[allow(clippy::too_many_arguments)]
+async fn run_attempt(
+    ctx: &SwarmRt,
+    ws: &Id,
+    agent_id: &str,
+    provider: &str,
+    cwd: &str,
+    title: &str,
+    meta: &serde_json::Value,
+    prompt: &str,
+    out: &std::path::Path,
+    run_id: &str,
+    cancel: &Arc<AtomicBool>,
+) -> RunOutcome {
+    let swarm_id = meta
+        .get("swarm_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let operation = crate::runtime::engine::operation_guard(swarm_id).await;
+    // Recheck under the lifecycle boundary, including a stop before this
+    // attempt registered its cancellation handle or between retries.
+    let live = ctx.swarm_repo().get_run(&run_id.to_string()).await;
+    if !matches!(live, Ok(ref run) if matches!(run.status.as_str(), "queued" | "running" | "waiting"))
+    {
+        return RunOutcome::failed(None, FailReason::Stopped);
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return RunOutcome::failed(None, FailReason::Stopped);
+    }
+    // Reuse the agent's live/resumable session (no history re-feed) — but ONLY if
+    // it's in the cwd this turn wants. If the project's repo path was set/changed
+    // after the session was first created (e.g. it started in a scratch dir),
+    // retire the stale session and spawn fresh in the right cwd so the agent
+    // actually works in the configured folder.
+    let reuse = match find_agent_session(ctx, ws, agent_id).await {
+        Some(existing) => {
+            let existing_cwd = ctx.manager().get(&existing).await.ok().map(|s| s.cwd);
+            if existing_cwd.as_deref() == Some(cwd) {
+                let _ = ctx.manager().ensure_live(&existing).await;
+                // Re-tag the reused session with THIS turn's run/task/project ids
+                // (they were only set at creation). Without this, board posts from
+                // later turns carry the first run's id. `update_meta` shallow-merges,
+                // so the current `meta` overwrites the stale ids in place.
+                let _ = ctx.manager().update_meta(&existing, meta.clone()).await;
+                Some(existing)
+            } else {
+                // cwd moved → retire the old session and create a fresh one below.
+                // KILL (status=Exited) rather than ARCHIVE: find_agent_session
+                // skips Exited sessions so it won't be reused, but it stays
+                // OPENABLE (archived sessions are hidden) — the operator can still
+                // open it, and the terminal's ensure_live resumes it on demand.
+                tracing::info!(
+                    "swarm: agent {agent_id} cwd changed ({:?} → {cwd}); recreating session",
+                    existing_cwd
+                );
+                let _ = ctx.manager().kill_session(&existing).await;
+                None
+            }
+        }
+        None => None,
+    };
+    let reused = reuse.is_some();
+    let sid = match reuse {
+        Some(existing) => existing,
+        None => {
+            let req = CreateSessionReq {
+                kind: SessionKind::Agent,
+                provider: Some(provider.to_string()),
+                title: Some(title.to_string()),
+                cwd: Some(cwd.to_string()),
+                connection_id: None,
+                model: None,
+                meta: Some(meta.clone()),
+            };
+            let ws_row = match ctx.workspaces().get(ws).await {
+                Ok(w) => w,
+                Err(_) => return RunOutcome::failed(None, FailReason::CreateFailed),
+            };
+            // A system user id for swarm-created sessions: reuse the swarm's creator.
+            let swarm_id = meta
+                .get("swarm_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let creator = ctx
+                .swarm_repo()
+                .get_swarm(&swarm_id)
+                .await
+                .map(|s| s.created_by)
+                .unwrap_or_else(|_| "system".into());
+            match ctx.manager().create(&ws_row, &creator, req, None).await {
+                Ok(s) => s.id,
+                Err(e) => {
+                    tracing::warn!("swarm: create session ({provider}): {e}");
+                    return RunOutcome::failed(None, FailReason::CreateFailed);
+                }
+            }
+        }
+    };
+
+    // Persist session_id on the run immediately so the UI can Open it live.
+    let _ = ctx
+        .swarm_repo()
+        .update_run(
+            &run_id.to_string(),
+            RunPatch {
+                session_id: Some(Some(sid.clone())),
+                ..Default::default()
+            },
+        )
+        .await;
+    emit_run(ctx, run_id).await;
+    drop(operation);
+
+    // Re-provision into the (possibly reused) cwd is already done by the caller.
+    // Inject the brief once the TUI has drawn + settled. A dead/exited PTY here
+    // means the brief was NEVER sent — fail the attempt so recovery respawns,
+    // instead of silently watching a promptless session until the stuck window
+    // (the operator sees "a session opened but nothing was sent to it").
+    // Transcript length BEFORE injection: claude_prompt_landed only scans what
+    // this turn appends (a reused session has older user records).
+    let transcript_offset = match ctx
+        .manager()
+        .get(&sid)
+        .await
+        .ok()
+        .and_then(|s| s.provider_session_id)
+    {
+        Some(psid) => ctx.transcript_len(cwd, &psid),
+        None => 0,
+    };
+    if crate::runtime::engine::while_run_active(ctx.swarm_repo(), run_id, ctx.wait_for_tui(&sid))
+        .await
+        == Some(true)
+    {
+        if !crate::runtime::engine::send_run_input(
+            ctx,
+            swarm_id,
+            run_id,
+            &sid,
+            &ctx.bracketed_paste(prompt),
+        )
+        .await
+        {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
+        tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+        let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
+        if !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
+        if !ctx.dispatched(&sid, before).await
+            && !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await
+        {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
+    } else {
+        tracing::warn!("swarm: TUI never settled for session {sid} — brief not injected");
+        return RunOutcome::failed(Some(sid), FailReason::Exited);
+    }
+    // For claude, confirm the brief actually LANDED (a "user" record appended to
+    // the transcript): TUI echo alone can be redraw noise around a swallowed
+    // paste. One re-injection round, then fail the attempt so recovery respawns
+    // — a live-but-promptless session used to sit until someone stopped it by hand.
+    if provider == "claude"
+        && !crate::runtime::engine::while_run_active(
+            ctx.swarm_repo(),
+            run_id,
+            ctx.claude_prompt_landed(
+                &sid,
+                cwd,
+                transcript_offset,
+                ctx.pty_timings().prompt_land_wait,
+            ),
+        )
+        .await
+        .unwrap_or(false)
+    {
+        tracing::warn!("swarm: brief didn't land in session {sid} — re-injecting once");
+        if !crate::runtime::engine::send_run_input(
+            ctx,
+            swarm_id,
+            run_id,
+            &sid,
+            &ctx.bracketed_paste(prompt),
+        )
+        .await
+        {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
+        tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+        if !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
+            return RunOutcome::failed(Some(sid), FailReason::Stopped);
+        }
+        if !crate::runtime::engine::while_run_active(
+            ctx.swarm_repo(),
+            run_id,
+            ctx.claude_prompt_landed(
+                &sid,
+                cwd,
+                transcript_offset,
+                ctx.pty_timings().prompt_land_wait,
+            ),
+        )
+        .await
+        .unwrap_or(false)
+        {
+            tracing::warn!("swarm: brief never landed in session {sid} — failing the attempt");
+            return RunOutcome::failed(Some(sid), FailReason::Stuck);
+        }
+    }
+
+    let provider_session_id = ctx
+        .manager()
+        .get(&sid)
+        .await
+        .ok()
+        .and_then(|s| s.provider_session_id);
+
+    // A RESUMED session's transcript still ends with the PREVIOUS turn's
+    // reply: the watch's whole-file transcript fallback could adopt it as this
+    // turn's result the moment the brief landed (the run then completed with
+    // the old result while the agent kept working on the new brief). For a
+    // reused session only a turn completed past `transcript_offset` — i.e.
+    // after this brief — counts; the out-file is per-run either way.
+    // `None`: the reused watch never reads the transcript at all (it used to
+    // read + discard it every second); the tail check below covers it.
+    let watch_ok: Option<fn(&str) -> bool> = if reused { None } else { Some(transcript_ok) };
+    let on_status: &mut crate::runtime::host::StatusFn<'_> = &mut |st| {
+        Box::pin(async move {
+            // Reflect waiting/resumed onto the run row.
+            let _ = st;
+        })
+    };
+    let watch = ctx.watch_for_result(
+        &sid,
+        provider,
+        provider_session_id.as_deref(),
+        cwd,
+        out,
+        TURN_TIMEOUT,
+        WAITING_IDLE,
+        STUCK_IDLE,
+        watch_ok,
+        on_status,
+    );
+    tokio::pin!(watch);
+    let mut tick = tokio::time::interval(CANCEL_POLL);
+    // The reused session's turn, read incrementally from the brief's offset
+    // (only new bytes per tick) and off the runtime.
+    let mut since: Option<Box<dyn crate::runtime::host::TurnTail>> =
+        match provider_session_id.as_deref() {
+            Some(psid) if reused && provider == "claude" => {
+                Some(turn_since(ctx, cwd, psid, transcript_offset))
+            }
+            _ => None,
+        };
+    loop {
+        tokio::select! {
+            res = &mut watch => return res,
+            _ = tick.tick() => {
+                // Stop / pause / board clear: end the watch now. It used to keep
+                // watching (the flag was only read BETWEEN attempts) for up to
+                // the whole turn, while the freed slot pasted a second brief
+                // into this same busy session.
+                if cancel.load(Ordering::Relaxed) {
+                    return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
+                }
+                if let Some(mut t) = since.take() {
+                    let (t, turn) = crate::runtime::host::blocking(move || {
+                        let turn = t.poll_last_turn_text();
+                        (t, turn)
+                    })
+                    .await;
+                    since = Some(t);
+                    if let Some(turn) = turn {
+                        if transcript_ok(&turn) {
+                            return RunOutcome::ok(turn, sid.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How often a running turn checks its cancel flag (and, for a reused
+/// session, the transcript tail).
+const CANCEL_POLL: Duration = Duration::from_secs(2);
+
+/// Reader of the last completed claude turn written AFTER byte `offset` of the
+/// session's transcript — i.e. a turn that answered the brief injected at
+/// `offset`, never the previous turn's reply (`completed_turn_text` of the
+/// tail). Reads only the tail, and each poll only what was appended since.
+fn turn_since(
+    ctx: &SwarmRt,
+    cwd: &str,
+    psid: &str,
+    offset: u64,
+) -> Box<dyn crate::runtime::host::TurnTail> {
+    ctx.claude_turn_tail(
+        otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid),
+        offset,
+    )
+}
+
+async fn mark_run_error(ctx: &SwarmRt, run: &SwarmRun, msg: &str) {
+    let _ = ctx
+        .swarm_repo()
+        .update_run(
+            &run.id,
+            RunPatch {
+                status: Some("error".into()),
+                error: Some(Some(msg.to_string())),
+                finished_at: Some(Some(Utc::now())),
+                ..Default::default()
+            },
+        )
+        .await;
+    emit_run(ctx, &run.id).await;
+}
+
+/// Re-read a run and broadcast `SwarmRunUpdated`. The event is "lite" like
+/// the run list (perf §15 F8): `result` (~8 KB parsed turn JSON) is dropped
+/// except for `kind = 'recruit'` (the Runs list's Hire button reads it);
+/// the inspector fetches `GET /swarm/runs/{rid}` for one run's result.
+pub async fn emit_run(ctx: &SwarmRt, run_id: &str) {
+    if let Ok(mut run) = ctx.swarm_repo().get_run(&run_id.to_string()).await {
+        if run.kind != "recruit" {
+            run.result = None;
+        }
+        let _ = ctx.events().send(Event::SwarmRunUpdated {
+            workspace_id: run.workspace_id.clone(),
+            swarm_id: run.swarm_id.clone(),
+            run: serde_json::to_value(&run).unwrap_or_default(),
+        });
+    }
+}
+
+// --- Shared-functionality detection ---------------------------------------
+//
+// Tracks, per swarm, the files each active agent branch has changed (vs the
+// pinned integration branch). When two branches touch the same file(s), warn the
+// board so the leader can coordinate before the merges collide (requirement 1).
+
+#[derive(Clone)]
+struct BranchFiles {
+    agent_name: String,
+    files: std::collections::HashSet<String>,
+}
+
+#[derive(Default)]
+struct SharedState {
+    /// branch → files it changed.
+    by_branch: HashMap<String, BranchFiles>,
+    /// dedupe key (branchA|branchB|sorted-files-hash) → already announced.
+    announced: std::collections::HashSet<String>,
+}
+
+static SHARED_FILES: std::sync::OnceLock<Mutex<HashMap<String, SharedState>>> =
+    std::sync::OnceLock::new();
+
+fn shared_files() -> &'static Mutex<HashMap<String, SharedState>> {
+    SHARED_FILES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn detect_shared_files(
+    ctx: &SwarmRt,
+    swarm: &otto_state::Swarm,
+    agent: &SwarmAgent,
+    task: Option<&SwarmTask>,
+    cwd_info: &crate::runtime::workspace::CwdInfo,
+) {
+    let (Some(branch), Some(integration_branch)) = (&cwd_info.branch, &cwd_info.integration_branch)
+    else {
+        return;
+    };
+    // Files this agent's branch changed relative to the integration branch.
+    let git = otto_git::LocalGit::new(&cwd_info.path);
+    let files: std::collections::HashSet<String> = match git.changed_files(integration_branch).await
+    {
+        Ok(f) => f.into_iter().collect(),
+        Err(_) => return,
+    };
+    if files.is_empty() {
+        return;
+    }
+    let project_id = task.map(|t| t.project_id.clone());
+
+    // Compute overlaps under the lock, collect what to announce, post after.
+    let mut to_post: Vec<(String, Vec<String>)> = Vec::new();
+    {
+        let mut map = shared_files().lock().unwrap();
+        let st = map.entry(swarm.id.clone()).or_default();
+        for (other_branch, other) in st.by_branch.iter() {
+            if other_branch == branch {
+                continue;
+            }
+            let mut overlap: Vec<String> = files.intersection(&other.files).cloned().collect();
+            if overlap.is_empty() {
+                continue;
+            }
+            overlap.sort();
+            let mut pair = [branch.as_str(), other_branch.as_str()];
+            pair.sort_unstable();
+            let key = format!("{}|{}|{}", pair[0], pair[1], overlap.join(","));
+            if st.announced.insert(key) {
+                to_post.push((
+                    format!(
+                        "⚠️ {} and {} both modified {} shared file(s): {} — coordinate before merge.",
+                        agent.name,
+                        other.agent_name,
+                        overlap.len(),
+                        overlap.iter().take(8).map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")
+                    ),
+                    overlap,
+                ));
+            }
+        }
+        st.by_branch.insert(
+            branch.clone(),
+            BranchFiles {
+                agent_name: agent.name.clone(),
+                files,
+            },
+        );
+    }
+
+    for (body, overlap) in to_post {
+        crate::runtime::engine::system_post_meta(
+            ctx,
+            &swarm.id,
+            project_id.as_deref(),
+            task.map(|t| t.id.as_str()),
+            "shared",
+            &body,
+            json!({ "event": "shared_files", "files": overlap, "branch": branch }),
+        )
+        .await;
+    }
+}
+
+/// Forget a branch's tracked files (called when its worktree is merged/removed).
+pub(crate) fn forget_branch_files(swarm_id: &str, branch: &str) {
+    forget_branch_in(&mut shared_files().lock().unwrap(), swarm_id, branch);
+}
+
+/// Drop `branch` and the overlap announcements naming it; drop the swarm's
+/// whole entry once no branch is tracked, so the process-wide map is bounded
+/// by live swarm branches rather than every swarm/branch ever seen.
+fn forget_branch_in(map: &mut HashMap<String, SharedState>, swarm_id: &str, branch: &str) {
+    let Some(st) = map.get_mut(swarm_id) else {
+        return;
+    };
+    st.by_branch.remove(branch);
+    st.announced.retain(|k| {
+        let mut parts = k.splitn(3, '|');
+        let (a, b) = (parts.next(), parts.next());
+        a != Some(branch) && b != Some(branch)
+    });
+    if st.by_branch.is_empty() {
+        map.remove(swarm_id);
+    }
+}
+
+/// Forget everything tracked for a swarm (its run stopped or it was deleted).
+pub(crate) fn forget_swarm_files(swarm_id: &str) {
+    shared_files().lock().unwrap().remove(swarm_id);
+}
+
+#[cfg(test)]
+mod shared_files_tests {
+    use super::*;
+
+    /// S4-25b: the guard unregisters the run and removes its result file.
+    #[test]
+    fn turn_cleanup_unregisters_and_removes_the_out_file() {
+        let reg: CancelRegistry = Default::default();
+        let rid = format!("cleanup-test-{}", std::process::id());
+        let _flag = register_cancel(&reg, &rid);
+        std::fs::write(out_path(&rid), "{}").unwrap();
+        drop(TurnCleanup {
+            reg: reg.clone(),
+            run_id: rid.clone(),
+        });
+        assert!(reg.lock().unwrap().get(&rid).is_none());
+        assert!(!out_path(&rid).exists());
+    }
+
+    #[test]
+    fn forgetting_the_last_branch_drops_the_swarm_entry() {
+        let mut map: HashMap<String, SharedState> = HashMap::new();
+        let st = map.entry("sw".into()).or_default();
+        for b in ["a", "b"] {
+            st.by_branch.insert(
+                b.into(),
+                BranchFiles {
+                    agent_name: b.into(),
+                    files: ["x.rs".to_string()].into_iter().collect(),
+                },
+            );
+        }
+        st.announced.insert("a|b|x.rs".into());
+        forget_branch_in(&mut map, "sw", "a");
+        assert!(map["sw"].announced.is_empty());
+        assert_eq!(map["sw"].by_branch.len(), 1);
+        forget_branch_in(&mut map, "sw", "b");
+        assert!(!map.contains_key("sw"));
+        forget_branch_in(&mut map, "missing", "a"); // no-op
+    }
+}

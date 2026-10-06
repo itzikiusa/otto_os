@@ -4,6 +4,7 @@
 
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
+import { toastError } from '../toastError';
 import { computeRunStats, EMPTY_AGENT_STATS, type AgentRunStats, type RunStats } from '../../modules/swarm/runStats';
 import type { OttoEvent } from '../api/types';
 import type {
@@ -30,6 +31,7 @@ import type {
   UpdateTriggerReq,
 } from '../../modules/swarm/types';
 import { announceModule } from '../lazyModule';
+import { latestOnly } from '../latest';
 
 type Lifecycle = 'start' | 'pause' | 'abort' | 'resume';
 
@@ -268,7 +270,12 @@ class SwarmStore {
     }
   }
 
+  /** Open A then B: A's detail landing last used to overwrite B's (and the
+   *  page's URL effect then rewrote the hash back to A). */
+  private openSeq = latestOnly();
+
   async openSwarm(sid: string): Promise<void> {
+    const t = this.openSeq.begin();
     this.loading = true;
     if (this.detail?.id !== sid) {
       // Never let the next swarm render tasks/runs cached for the previous one
@@ -286,8 +293,11 @@ class SwarmStore {
     this.detailError = null;
     try {
       try {
-        this.detail = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
+        const d = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
+        if (!t.current) return;
+        this.detail = d;
       } catch (e) {
+        if (!t.current) return;
         this.detailError = loadErrorText(e);
         throw e;
       }
@@ -299,6 +309,7 @@ class SwarmStore {
         this.loadBoard(),
         this.maybeLoadGraph(sid),
       ]);
+      if (!t.current || !this.detail) return;
       // Projects[0] can be an empty shell (e.g. a Discovery project) while all
       // the work lives in a sibling — a blind first-project pin then renders an
       // EMPTY board even though agents are visibly running. Once tasks are
@@ -311,7 +322,7 @@ class SwarmStore {
         if (busiest && busiest.n > 0) this.selectedProjectId = busiest.id;
       }
     } finally {
-      this.loading = false;
+      if (t.current) this.loading = false;
     }
   }
 
@@ -502,14 +513,16 @@ class SwarmStore {
     }
   }
 
-  /** Stop an in-flight plan/recruit for `sid`: kills the live agent session(s)
-   *  server-side and prevents retries. Best-effort. */
-  async stopAgentRun(sid: string): Promise<void> {
+  /** Stop the in-flight `kind` turn (plan or recruit — only that one, so
+   *  "Stop planning" no longer kills a recruit, S17-307) for `sid`: kills the
+   *  live agent session(s) server-side and prevents retries. A failed stop
+   *  toasts — the agent may still be running. */
+  async stopAgentRun(sid: string, kind: 'plan' | 'recruit'): Promise<void> {
     if (!this.wsId) return;
     try {
-      await api.post(`/workspaces/${this.wsId}/swarm/swarms/${sid}/agent-stop`);
-    } catch {
-      /* best-effort */
+      await api.post(`/workspaces/${this.wsId}/swarm/swarms/${sid}/agent-stop?kind=${kind}`);
+    } catch (e) {
+      toastError(kind === 'plan' ? 'Couldn’t stop planning' : 'Couldn’t stop recruiting', e);
     }
   }
 

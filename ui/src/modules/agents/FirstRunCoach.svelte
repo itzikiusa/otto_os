@@ -19,6 +19,8 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { api } from '../../lib/api/client';
+  import { checkFolder } from '../../lib/folderCheck';
   import { agentProviders as registryAgentProviders, providerReadiness } from '../../lib/providers';
 
   interface Props {
@@ -57,7 +59,10 @@
   // --- Step 2: workspace -----------------------------------------------------
   const hasWorkspace = $derived(ws.workspaces.length > 0 && ws.current !== null);
   let wsName = $state('');
-  let wsPath = $state('~/');
+  // Empty (not `~/`): the home folder must not be one click from becoming the
+  // workspace root. Typed paths are checked like onboarding's (folderCheck).
+  let wsPath = $state('');
+  let pathError = $state('');
   let wsBusy = $state(false);
   let pickerOpen = $state(false);
   // Suggest a name from the trailing path segment until the user types one.
@@ -72,7 +77,14 @@
   async function createWorkspace(): Promise<void> {
     if (!canCreateWs) return;
     wsBusy = true;
+    pathError = '';
     try {
+      const check = await checkFolder(wsPath, (url) => api.get(url));
+      if (!check.ok) {
+        pathError = check.message;
+        return;
+      }
+      wsPath = check.path;
       const w = await ws.createWorkspace(wsName, wsPath);
       toasts.success('Workspace created', w.name);
     } catch (e) {
@@ -132,7 +144,7 @@
       toasts.success('Skill installed', s.name);
       await loadSkills();
     } catch (e) {
-      toastError('Couldn’t install the CLI', e);
+      toastError('Couldn’t install the skill', e);
     } finally {
       setSkillBusy(s.name, false);
     }
@@ -205,7 +217,7 @@
     <button class="coach-close" title="Dismiss" aria-label="Dismiss the getting-started guide" onclick={dismiss}><Icon name="x" size={13} /></button>
 
     <div class="coach-head">
-      <div class="coach-mark"><Icon name="zap" size={20} /></div>
+      <div class="coach-mark"><Icon name="zap" size={24} /></div>
       <div>
         <h2>Let’s launch your first agent</h2>
         <p>A few quick checks, then Otto starts a coding agent in your workspace.</p>
@@ -218,13 +230,13 @@
         {#if hasAgentCli}<Icon name="check" size={12} />{:else}<span class="num">1</span>{/if}
       </span>
       <div class="step-body">
-        <div class="step-title">Agent CLI detected</div>
+        <div class="step-title">{hasAgentCli ? 'Agent CLI detected' : 'Install an agent CLI'}</div>
         {#if hasAgentCli}
           <div class="tool-chips">
             {#each agentTools as t (t.name)}
               <Badge tone={t.found && t.checked ? 'ok' : 'neutral'} title={providerReadiness(t.name).message}>
-                <Icon name={!t.checked ? 'clock' : t.found ? 'check' : 'x'} size={10} />
-                {t.name}{!t.checked ? ' · unchecked' : t.found && t.version ? ` ${t.version}` : ''}
+                <Icon name={!t.checked ? 'clock' : t.found ? 'check' : 'x'} size={12} />
+                {t.name}{!t.checked ? ' · not checked yet' : t.found && t.version ? ` ${t.version}` : ''}
               </Badge>
             {/each}
             {#if agentTools.length === 0}
@@ -246,7 +258,7 @@
               </li>
             </ul>
             <button class="btn small" disabled={checkingProviders} onclick={recheckProviders}>
-              <Icon name="refresh" size={11} /> {checkingProviders ? 'Checking…' : 'Re-check'}
+              <Icon name="refresh" size={12} /> {checkingProviders ? 'Checking…' : 'Re-check'}
             </button>
             {#if providerCheckFailed}
               <p role="status">Could not check agent CLIs. Try again.</p>
@@ -271,11 +283,22 @@
         {:else}
           <div class="step-hint">A workspace maps to a project directory. Sessions run inside it.</div>
           <div class="ws-form">
-            <input class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
+            <input dir="auto" class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
             <div class="path-row">
-              <input class="input mono path-input" aria-label="Workspace folder" dir="ltr" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
+              <input
+                class="input mono path-input"
+                aria-label="Workspace folder"
+                dir="ltr"
+                bind:value={wsPath}
+                oninput={() => (pathError = '')}
+                aria-invalid={pathError !== ''}
+                aria-describedby="frc-path-err"
+                spellcheck="false"
+                placeholder="~/code/my-project"
+              />
               <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
             </div>
+            <span id="frc-path-err" class="path-err" role="status">{pathError}</span>
             <button class="btn small primary ws-create" disabled={!canCreateWs} onclick={createWorkspace}>
               {wsBusy ? 'Creating…' : 'Create workspace'}
             </button>
@@ -303,7 +326,7 @@
               <div class="skill-row">
                 <span class="mono skill-name">{s.name}</span>
                 {#if installed}
-                  <Badge tone="ok"><Icon name="check" size={10} /> Installed</Badge>
+                  <Badge tone="ok"><Icon name="check" size={12} /> Installed</Badge>
                 {:else}
                   <button class="btn small" disabled={skillBusy.has(s.name)} onclick={() => installSkill(s)}>
                     {skillBusy.has(s.name) ? 'Installing…' : s.state === 'update_available' ? 'Update' : 'Install'}
@@ -338,9 +361,10 @@
 {#if pickerOpen}
   <FolderPicker
     title="Choose project directory"
-    start={wsPath}
+    start={wsPath || '~'}
     onpick={(p) => {
       wsPath = p;
+      pathError = '';
       pickerOpen = false;
     }}
     onclose={() => (pickerOpen = false)}
@@ -559,5 +583,12 @@
     .coach-head {
       padding-inline-end: 20px;
     }
+  }
+  .path-err {
+    font-size: var(--fs-xs);
+    color: var(--danger);
+  }
+  .path-err:empty {
+    display: none;
   }
 </style>

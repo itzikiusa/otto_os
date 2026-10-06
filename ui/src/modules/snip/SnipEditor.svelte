@@ -34,6 +34,7 @@
     annosHash,
     uploadNeeded,
   } from './annotations';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   // The shell keys this editor by id; cleanup saves belong to that mounted image.
   const snipId = router.parts[1] ?? '';
@@ -677,7 +678,7 @@
   async function deleteSnip(): Promise<void> {
     const ok = await confirmer.ask('Delete this snip and its annotations? This can’t be undone.', {
       title: 'Delete snip',
-      confirmLabel: 'Delete snip',
+      danger: true, confirmLabel: 'Delete snip',
     });
     if (!ok) return;
     try {
@@ -803,11 +804,7 @@
     {#if loading}
       <div class="snip-empty" role="status" aria-label="Loading the snip"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
     {:else if loadError}
-      <div class="snip-empty" role="alert">
-        <p class="snip-missing-title">Could not load the snip</p>
-        <p>{loadError}</p>
-        <button class="btn" onclick={() => void loadImage()}>Retry</button>
-      </div>
+      <LoadState variant="compact" what="the snip" error={loadError} empty onretry={() => void loadImage()} />
     {:else if missing}
       <div class="snip-empty snip-missing" role="alert">
         <Icon name="image" size={26} />
@@ -832,7 +829,7 @@
       <p id="snip-keyboard-help" class="snip-keyboard-help">Choose a tool, then press Enter on the image to add it. Use [ and ] to select annotations, arrow keys to move, and Delete to remove. Enter edits selected text.</p>
       <span class="sr-only" role="status">{selected === null ? `${annos.length} annotations` : `Selected ${annos.find(a => a.id === selected)?.tool ?? 'annotation'} ${annos.findIndex(a => a.id === selected) + 1} of ${annos.length}`}</span>
       {#if textDraft}
-        <textarea
+        <textarea dir="auto"
           class="snip-textentry"
           aria-label="Annotation text"
           style={textOverlayStyle}
@@ -932,7 +929,7 @@
     background: var(--danger-soft);
   }
   .tb:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .swatch {

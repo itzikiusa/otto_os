@@ -142,7 +142,7 @@
   <div class="gsb-row">
     <div class="gsb-box">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         class="gsb-input"
         bind:this={inputEl}
         bind:value={q}
@@ -164,7 +164,7 @@
       </button>
       {#if q}
         <button class="gsb-x" onclick={clear} aria-label="Clear search" title="Clear search">
-          <Icon name="x" size={11} />
+          <Icon name="x" size={12} />
         </button>
       {/if}
     </div>

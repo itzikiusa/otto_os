@@ -14,7 +14,8 @@ scheduled tasks, …) — to other agents (Claude Code, Copilot, …) over a **r
 token**, itself governed by the same pipeline.
 
 This is the definitive end-user + operator guide. It documents what the code in
-`crates/otto-mcp/` (the engine), `crates/otto-server/src/mcp_outward.rs` +
+`crates/otto-mcp/` (the engine, incl. `src/outward/` — the outward tool catalog,
+policy lists, `route_for` and the JSON-RPC transport), `crates/otto-server/src/mcp_outward.rs` +
 `mcp_capabilities.rs` + `routes/mcp_cp.rs` (the outward server, gateway, token
 rotation, session attachment, and capability endpoints),
 `crates/ottod/src/mcp_server.rs` + `mcp_tools.rs` (the two stdio binaries),
@@ -85,7 +86,7 @@ the token kind, and the routes.
 | **Risk labeling** | `crates/otto-mcp/src/risk.rs` | `read`/`write`/`dangerous` + `low`/`medium`/`high` injection from annotations + keywords. |
 | **Policy engine** | `crates/otto-mcp/src/policy.rs` | Most-restrictive-wins matcher (`mcp_policies`). |
 | **Control-plane HTTP** | `crates/otto-mcp/src/http.rs` (`api_router`) | The `/mcp/*` + `/workspaces/{wid}/mcp/*` governance routes. |
-| **Outward server** | `crates/otto-server/src/mcp_outward.rs` | `/mcp/otto-tools/invoke`, `/mcp/otto-server`, the gateway, the categorised `otto.*` tool catalog (`otto_tool_specs` + the pure `route_for` map). |
+| **Outward server** | `crates/otto-mcp/src/outward/` + `crates/otto-server/src/mcp_outward.rs` | The categorised `otto.*` tool catalog (`otto_tool_specs`), policy lists, the pure `route_for` map and the Streamable-HTTP JSON-RPC framing live in `otto_mcp::outward`; the server glue keeps `/mcp/otto-tools/invoke`, `/mcp/otto-server`, the gateway and the governed pipeline. |
 | **CP extensions** | `crates/otto-server/src/routes/mcp_cp.rs` | Per-token rotation and per-workspace session attachment. |
 | **Capability endpoints** | `crates/otto-server/src/mcp_capabilities.rs` | `code-search`, `context-packet`, `proof-pack` (injection-safe). |
 | **stdio binaries** | `crates/ottod/src/{mcp_server,mcp_tools}.rs` | The outward (`ottod mcp-server`) + inward (`ottod mcp-tools`) servers. |
@@ -324,15 +325,16 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Self-Improvement** | ✅ get_config / list_runs / get_run / list_edits | ⚠ run, approve_edit, reject_edit, rollback_edit |
 | **Scheduled Tasks** | ✅ list (every workspace) / get / list_runs | ⚠ create / update / set_enabled / run / delete |
 | **Personal Agents** | ✅ list_agent_rooms / room_read / room_post (never approval-gated — persisted + user-visible) | — |
-| **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_s3_preview / aws_sqs_list_queues / aws_sqs_peek³ / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters / aws_logs_list_groups / aws_logs_filter / aws_logs_insights (billed per GB scanned) / aws_logs_get_insights | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_sqs_send (produces one message) — no S3 write, no EC2 start/stop |
+| **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_s3_preview / aws_sqs_list_queues / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters / aws_logs_list_groups / aws_logs_filter / aws_logs_insights (billed per GB scanned) / aws_logs_get_insights | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_sqs_send (produces one message), aws_sqs_peek³ — no S3 write, no EC2 start/stop |
 | **Kubernetes** | ✅ k8s_list_clusters / k8s_get_resources / k8s_describe / k8s_logs (text tail, never `follow`) / k8s_top | ⚠ k8s_action (restart / scale / delete_pod / rollout_* / Argo Rollouts promote-abort-retry / argocd_sync-refresh-terminate_op-app_restart / cronjob_*; destructive ones need `params.confirm_name == name`) |
 | **Code & Context / Agents / Approvals** | ✅ list_workspaces / list_goal_loops / *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
 
 ¹ Off by default (opt-in): non-mutating tools that stream large/sensitive *content*
 (messages, recalled knowledge, code, rows) are defined but not in `DEFAULT_ENABLED`.
 ² `create_work_item` is the Swarm-task create (mutating).
-³ `aws_sqs_peek` is a POST but a read: `receive-message` with visibility timeout 0
-(nothing consumed), graded `aws_sqs:View` by the policy table. The AWS/K8s tools carry
+³ `aws_sqs_peek` is `receive-message` with visibility timeout 0 (messages stay
+visible) but it increments each message's receive count — repeated peeks can
+dead-letter on a queue with a redrive policy — so it is `aws_sqs:Edit` and approval-gated. The AWS/K8s tools carry
 no `workspace_id` (accounts/clusters are global rows); the self-call reuses the
 per-service feature grants (`aws_s3`/`aws_sqs`/`aws_ec2`/`aws_athena`/`aws_eks`,
 `kubernetes`) — see [aws-console](./aws-console.md) / [kubernetes-console](./kubernetes-console.md).
@@ -410,11 +412,20 @@ sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflo
 `otto_api_list`, `otto_api_get_request`, `otto_api_history`, `aws_list_accounts`,
 `k8s_get_resources`, … so an Otto session can inspect every feature. That server
 stays read-only with named exceptions: the two canvas tools, the three Vault v3
-doc writers (`otto_vault_write`/`_rename`/`_delete` — Editor-gated as the session
-owner; delete only trashes), the API-client writers `otto_api_execute`,
-`otto_api_upsert_request`, `otto_api_run_automation`, and the three cloud-console
-writers `aws_athena_query` / `aws_sqs_send` / `k8s_action` (per-feature
-`Edit`-gated as the session owner).
+doc writers (`otto_vault_write`/`_write_file`/`_rename`/`_delete` — Editor-gated as
+the session owner; delete only trashes), the API-client writers `otto_api_execute`,
+`otto_api_upsert_request`, `otto_api_run_automation`, and the cloud-console
+writers `aws_athena_query` / `aws_sqs_send` / `aws_sqs_peek` (it consumes
+receive counts) / `k8s_action` / `k8s_pod_http` (per-feature `Edit`-gated as the
+session owner). The **IRREVERSIBLE** ones among them — `k8s_action`,
+`k8s_pod_http`, `aws_sqs_send`, `otto_api_execute`, `otto_api_run_automation`
+(`NATIVE_SESSION_WRITERS`) — do not call their daemon routes directly: the
+bridge runs them through `POST /mcp/otto-tools/invoke` as `otto.<tool>`, so they
+get the same approval gate, irreversible guardrail (an auto-approve rule needs
+`allow_irreversible`) and audit as the governed tool; a `confirm_name` the agent
+fills in itself is not an approval. They reach the governed path from a session
+credential even when not ticked in the catalog (the bridge always offered them).
+A call awaiting a human returns the `pending_approval` envelope.
 
 ### 3.4 API client through MCP
 
@@ -672,7 +683,9 @@ and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
 `aws_athena_list_tables`/`_get_query`, `aws_eks_list_clusters`; Kubernetes:
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text/plain
 tail, 256 KiB cap keeping the newest lines, never `follow`), `k8s_top` — plus the
-three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action`.
+Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `aws_sqs_peek`,
+`k8s_action`, `k8s_pod_http` (the irreversible ones approval-gated through the
+governed invoke — see above).
 
 **Cross-workspace, by name.** The native list tools (`otto_list_workflows`,
 `otto_list_connections`, `otto_list_broker_clusters`, `otto_list_swarms`,
@@ -738,9 +751,9 @@ queues every other call, or `ping`, behind it; replies are matched by JSON-RPC
 id. The enable list (+ grant) is cached for 5 s and the gateway tool list for
 30 s (refetched once on an unknown gateway tool); neither cache can widen
 access, because the daemon re-checks the enable list, the grant and the
-gateway authorization on every call. The bridge attaches to the daemon's
-database with `open_existing` — it never runs the repair `UPDATE`s or
-migrations at session start. A governed call that waits on an approval
+gateway authorization on every call. The bridge never opens the daemon's
+database: everything goes through the daemon's HTTP API, so a session start
+runs no repair `UPDATE`s or migrations. A governed call that waits on an approval
 resumes on the `mcp_approval_changed` event (5 s fallback re-read), not on a
 1 s poll.
 
@@ -933,7 +946,13 @@ session (MCP Admin). Calls stay audited (`auto_approved`). If it still asks: a
 workspace rule only covers calls landing in that workspace (for PRs, the repo's
 workspace), a session rule only that session's own calls, and `merge_pr` is
 irreversible — no category rule covers it; it needs its own rule with the second
-toggle.
+toggle. The workspace is always the OBJECT's: a workflow, scheduled task or swarm
+named by bare id is looked up first, so an agent in Sandbox calling
+`run_workflow` on a Prod workflow is never covered by a Sandbox rule (and its card
+is filed under Prod). Tools that act outside any one workspace — the vault library,
+Kubernetes / AWS / Jira / Confluence, improvement edits, work items, the Assistant's
+memory — take no workspace rule at all (creating one is refused); use a global or
+session rule for them.
 
 **An agent says a repo "doesn't exist" / asks you to search again.** Repos are
 registered in exactly one workspace. `otto_list_repos` now lists every workspace you

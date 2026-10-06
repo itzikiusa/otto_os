@@ -144,14 +144,20 @@ trimmed with a `DELETE` at most once a day, not per cycle. Changing a TTL
 never rewrites existing parts.
 
 **Upgrading a raw-only install** (before the per-series rollups) is
-automatic: on the first collector start the rollup tables are created and
-back-filled from the raw rows already there (one `(cluster, day)` partition
-per statement, one ClickHouse thread), the views are created only after
-that — every collector loop waits on the same lock, so nothing is counted
-twice and an interrupted backfill simply reruns — and raw days older than 2
-days are dropped. Backfill queries spill aggregation to disk at 64 MiB,
-use a 384 MiB query budget, and keep read/insert blocks small so a large
-day fits alongside other work within the embedded server's 1 GiB limit.
+automatic: each unfinished per-series tier is built in a separate staging
+table, streaming raw partitions through bounded blocks under a 384 MiB query
+budget and one read/insert thread. The aggregation engines combine singleton
+values within blocks and merges; no whole-day aggregation hash table is needed.
+Once complete, the staged tier atomically replaces its target and its materialized
+view is created as the completion checkpoint. A retry skips completed tiers and
+rebuilds only the unfinished tier, without appending duplicate counts. Staging
+requires temporary disk space; background merges still consume CPU during the
+one-time migration. Collectors begin only after all views exist.
+
+A failure while staging leaves the prior target readable. Lost swap/view replies
+are safe to retry, and leftover staging tables are removed even after all views
+exist. After successful migration, old raw days are trimmed best-effort; normal
+TTL remains the fallback if shutdown interrupts that cleanup.
 If initialization fails, its error appears in monitor status; retries back
 off up to 15 minutes (or the configured interval if longer). No raw history
 is discarded because initialization failed.
@@ -394,3 +400,11 @@ cycle against the current kubeconfig context (intended for minikube) using an
 in-memory sink; without the variable the test is a no-op. Router-level tests
 run through the fake kubectl in `crates/otto-k8s/tests/fake_kubectl.rs`
 (`monitor_*`). UI: `cd ui && OTTO_E2E_BIN=target/debug/ottod npx playwright test desktop-k8s-monitor --project=desktop-browser`.
+
+### Monitoring switch persistence
+
+The Monitoring switch saves on/off immediately, using the last saved probe
+configuration. It waits for the server acknowledgement before changing its
+confirmed state; a failure stays inline and leaves that state unchanged. Other
+form edits remain drafts until Save (or Test probes, which saves before testing).
+The collector reconciles a saved disable within 15 seconds.
