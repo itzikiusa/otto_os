@@ -165,6 +165,9 @@ export interface Session {
   live?: boolean;
   /** Transient (list/get only): attached `/ws/term` viewer count. */
   viewers?: number;
+  /** Transient (list/get only): the live PTY runs in a PTY holder and
+   *  session persistence is on — it survives a daemon restart. */
+  held?: boolean;
 }
 
 /** Query for `GET /workspaces/{id}/sessions` (#17) and the cross-workspace

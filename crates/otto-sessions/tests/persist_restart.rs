@@ -171,6 +171,8 @@ async fn user_sessions_survive_a_daemon_restart_and_engine_ones_do_not() {
     let pid = handle.pid().expect("pid");
     let holder_pid = handle.holder().unwrap().holder_pid;
     drop(handle);
+    // S10-307: what the sessions list reports as `held` (with persistence on).
+    assert!(first.runs_in_holder(&id));
 
     // An engine-owned session stays in-process (its engine dies with the daemon).
     let engine = first
@@ -187,6 +189,7 @@ async fn user_sessions_survive_a_daemon_restart_and_engine_ones_do_not() {
         engine_handle.holder().is_none(),
         "engine sessions are never held"
     );
+    assert!(!first.runs_in_holder(&engine.id));
     let engine_pid = engine_handle.pid().expect("pid");
     drop(engine_handle);
 
@@ -365,6 +368,7 @@ async fn user_sessions_survive_a_daemon_restart_and_engine_ones_do_not() {
         plain_handle.holder().is_none(),
         "persistence off → local pty"
     );
+    assert!(!second.runs_in_holder(&plain.id));
     drop(plain_handle);
     second.kill_session(&plain.id).await.unwrap();
     assert!(holders.sockets().is_empty());
