@@ -20,7 +20,7 @@
 import type * as THREE_NS from 'three';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { assetBase, loadSchoolAssets, type SchoolAssets } from './assets.ts';
-import { furnishCorridor, furnishRoom, type Placement } from './furnish.ts';
+import { KIT_NODES, furnishCorridor, furnishRoom, type KitNode, type Placement } from './furnish.ts';
 import { HEAD_CLIPS, Life, ONCE_CLIPS, SIT_MS, STAND_MS, NOD_MS, SCOLD_MS, type ActorView } from './life.ts';
 import { CORRIDOR_HALF, ROOM_BACK_Z, roomSummary, toWorld, type Kid, type Room, type School } from './model.ts';
 import { SCREEN_H, SCREEN_W, paintScreen, screenKey, type ScreenInfo } from './screens.ts';
@@ -219,7 +219,7 @@ function build(
     if (!root) {
       if (!warned.has(node)) {
         warned.add(node);
-        assets.missing.push(node);
+        if (KIT_NODES.includes(node as KitNode)) assets.missing.push(node);
       }
       return null;
     }

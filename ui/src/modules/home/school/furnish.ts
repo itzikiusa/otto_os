@@ -42,7 +42,10 @@ export type KitNode =
   | 'Corridor_Floor'
   | 'Corridor_Wall'
   | 'Corridor_Door'
-  | 'Ceiling_Light';
+  | 'Ceiling_Light'
+  // Decor (optional — the scene skips any the kit lacks).
+  | 'Backpack'
+  | 'Trashcan';
 
 export const KIT_NODES: readonly KitNode[] = [
   'Workstation', 'Chair', 'TeacherDesk', 'Board', 'Bookshelf', 'Plant', 'Clock', 'Bench',
@@ -132,11 +135,14 @@ export function furnishRoom(room: Room): Placement[] {
 
   // Desks: the workstation sits DESK_OFFSET toward the board from the chair;
   // both turned π so the monitor faces the kid and the kid faces the board.
+  // Every third desk has a backpack dropped beside the chair.
   for (const d of deskGrid(room)) {
     const tag = `${d.row}:${d.col}`;
     put('Workstation', { x: d.seat.x, z: d.seat.z - DESK_OFFSET }, PI, 0, tag);
     put('Chair', d.seat, PI, 0, tag);
+    if ((d.row * 7 + d.col * 3) % 3 === 0) put('Backpack', { x: d.seat.x + 0.45, z: d.seat.z - 0.1 }, PI + ((d.row + d.col) % 2 ? 0.5 : -0.4));
   }
+  put('Trashcan', { x: W / 2 - 0.4, z: D / 2 - 2.6 }, 0);
   return out;
 }
 
