@@ -1,0 +1,4 @@
+{
+  "//": "Advisory e2e (ci.yml e2e-functional, 4 shards) failed-test ceiling, enforced by e2e-advisory-ratchet (scripts/e2e-flaky-check.mjs --ratchet). Only ever LOWER it. 56 = run 37394332591 (PR #87 head 50ccfa59), see the e2e classification.",
+  "max_failed": 56
+}

@@ -11,7 +11,7 @@
   import { formatCount } from '../../lib/metric-format';
   import { TASK_KIND, loadShare, providerName } from './model';
   import { whenLabel } from './format';
-  import NeedsYouLink from '../home/NeedsYouLink.svelte';
+  import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
 
   interface Props {
     onopenthread: (id: string) => void;

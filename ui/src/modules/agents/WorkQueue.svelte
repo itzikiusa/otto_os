@@ -25,7 +25,7 @@
   import { winKey } from '../../lib/win';
   import { matchesSavedView } from './viewFilters';
   import { agentProviders } from '../../lib/providers';
-  import NeedsYouLink from '../home/NeedsYouLink.svelte';
+  import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
 
   // ---------------------------------------------------------------------------
   // Types (module-local; mirroring the Rust DTOs without touching api/types.ts)

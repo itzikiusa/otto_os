@@ -262,3 +262,21 @@ export function tourChapter(title: string): { label: string; start: number } {
 /** Path of a real tour MP4 (OTTO_E2E_TOUR_VIDEO — CI generates a synthetic
  *  one); playback specs skip without it. */
 export const tourVideoPath = process.env.OTTO_E2E_TOUR_VIDEO;
+
+/**
+ * The select-all chord CodeMirror binds for THIS page. CodeMirror's `Mod` is
+ * Meta on Mac or iOS — the same test as @codemirror/view's `browser.mac`
+ * (`/Mac/` platform, or an Apple-vendor engine with a `Mobile/` UA or touch
+ * points) — Control otherwise. Playwright's `ControlOrMeta` follows the HOST OS instead, so on a
+ * Linux runner it sent Control+A to the iPhone (WebKit) project, which
+ * CodeMirror ignores — 19 iPhone DB tests failed on that alone (S12-304).
+ */
+export async function editorSelectAll(page: Page): Promise<string> {
+  const apple = await page.evaluate(() => {
+    const ios =
+      /Apple Computer/.test(navigator.vendor) &&
+      (/Mobile\/\w+/.test(navigator.userAgent) || navigator.maxTouchPoints > 2);
+    return ios || /Mac/.test(navigator.platform);
+  });
+  return apple ? 'Meta+A' : 'Control+A';
+}

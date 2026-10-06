@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
-import { ensureGridView } from './helpers';
+import { ensureGridView, editorSelectAll } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — file→table import dialog (Task 5.1 / Task 9 backend), against the
@@ -155,7 +155,7 @@ async function runStatement(page: Page, sql: string): Promise<void> {
   const content = page.locator('.qe-edit .cm-content');
   await content.click();
   await page.waitForTimeout(60);
-  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press(await editorSelectAll(page));
   await page.waitForTimeout(40);
   await page.keyboard.insertText(sql);
   await page.waitForTimeout(300);

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -129,12 +130,12 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function runRead(page: Page, sql: string): Promise<void> {
   await ensureEditorOpen(page);
   const content = page.locator('.qe-edit .cm-content');
-  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const selectAll = await editorSelectAll(page);
   const want = sql.replace(/\s+/g, ' ').trim();
   for (let attempt = 0; attempt < 3; attempt++) {
     await content.click();
     await expect(content).toBeFocused({ timeout: 5_000 });
-    await page.keyboard.press(`${mod}+A`);
+    await page.keyboard.press(selectAll);
     await page.keyboard.press('Delete');
     await content.pressSequentially(sql, { delay: 8 });
     await page.keyboard.press('Escape');

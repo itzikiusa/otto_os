@@ -15,7 +15,13 @@ let workspaceId = '';
 let firstSha = '';
 let secondSha = '';
 const tabRepos: string[] = [];
-const repoNames = ['promotions-service', 'bo_common_ui', 'cs3-platform', 'koala-backoffice', 'go_dependencies'];
+// Per-WORKER names: every worker runs this beforeAll against the shared
+// 'E2E WS' workspace, so fixed names registered twice and the add-tab menu's
+// `menuitem {name, exact}` hit strict mode (S12-304, ux-r3-git:88). Each
+// worker is its own process, so the pid is a unique, short suffix.
+const repoNames = ['promotions-service', 'bo_common_ui', 'cs3-platform', 'koala-backoffice', 'go_dependencies'].map(
+  (n) => `${n}-${process.pid}`,
+);
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);

@@ -194,9 +194,14 @@ async function isPhoneLayout(page: Page): Promise<boolean> {
 async function selectCluster(page: Page): Promise<void> {
   await page.goto('/#/brokers');
   await expect(page.locator('.brokers-page')).toBeVisible({ timeout: 30_000 });
-  // The cluster list may be collapsed (phone) — open it via the section toggle.
-  const listVisible = await page.locator('.cluster-list').isVisible().catch(() => false);
-  if (!listVisible) await page.locator('.sec-toggle').first().click().catch(() => {});
+  // The cluster list may be collapsed (phone) — open it via the section
+  // toggle, deciding on its aria-expanded STATE. An instant
+  // `isVisible('.cluster-list')` read false before the list rendered and the
+  // click then COLLAPSED the list that was open by default (S12-304).
+  const toggle = page.locator('.sec-toggle').first();
+  await expect(toggle).toHaveAttribute('aria-expanded', /^(true|false)$/, { timeout: 15_000 });
+  if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   const row = page.locator('.cluster .cn', { hasText: clusterName }).first();
   await expect(row).toBeVisible({ timeout: 15_000 });
   await row.click();
