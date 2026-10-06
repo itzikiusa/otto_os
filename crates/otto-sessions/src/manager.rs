@@ -5483,11 +5483,20 @@ impl SessionManager {
     /// Kill every live PTY and mark the sessions exited. Used when the app
     /// closes (no orphaned agent processes left running) and on daemon
     /// shutdown. Returns the number of sessions terminated.
+    ///
+    /// The app closing is NOT the daemon exiting (under launchd it keeps
+    /// running for the next window): spawns are refused only while the kill
+    /// sweep runs, so a resume racing it can't fork a fresh CLI, and the flag
+    /// is cleared again afterwards — left set, every later resume/restart
+    /// answered "the daemon is shutting down" until a daemon restart.
     pub async fn shutdown_all(&self) -> usize {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
-        self.shutdown_ids(ids).await
+        let killed = self.shutdown_ids(ids).await;
+        self.shutting_down
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        killed
     }
 
     /// Kill `ids`' live PTYs and mark them exited (see [`Self::shutdown_all`]).
@@ -7319,9 +7328,18 @@ mod tests {
         for id in &ids {
             assert_eq!(repo.get(id).await.unwrap().status, SessionStatus::Exited);
         }
+        // The app closing is not the daemon exiting: later resumes must work.
+        assert!(
+            !manager
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "an app-close kill sweep must not leave spawns refused"
+        );
         assert_eq!(manager.live_count(), 0);
         drop(guards);
-        // A resume that reaches its spawn after shutdown began must not spawn.
+        // A resume that reaches its spawn after the DAEMON's shutdown began
+        // must not spawn.
+        let _ = manager.shutdown_for_restart().await;
         let spec = CommandSpec {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec /bin/sleep 60".into()],
