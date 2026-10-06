@@ -627,6 +627,17 @@
       const pr = await api.get<PrDetail>(`/repos/${repoId}/prs/${prNumber}`);
       if (alreadyOnPr(c, pr.comments ?? [])) {
         if (!quiet) toasts.info('Already on the PR', 'The earlier attempt did post this comment — not posting it again.');
+        // Record it posted (nothing is sent), or it stays "postable" forever
+        // and every Post-all re-runs this lookup (S15-302).
+        try {
+          const updated = await api.patch<ReviewComment>(`/pr-review-comments/${c.id}`, { mark_posted: true });
+          if (review) {
+            review = patchCommentInReview(review, updated);
+            if (history.length > 0) history = [review, ...history.slice(1)];
+          }
+        } catch {
+          // Best effort: the guard above still blocks a duplicate next time.
+        }
         return true;
       }
       return false;

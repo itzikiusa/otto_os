@@ -331,9 +331,14 @@ test('shell: tapping a sub-route tab navigates without overflow', async ({ page 
 test('shell: many open repo tabs scroll instead of overflowing the page', async ({ page }) => {
   // Open all three seeded repos as tabs, then assert the tablist owns the overflow
   // (its own scroll) while the document itself never scrolls horizontally.
-  for (const id of [repoId, dirtyRepoId, conflictRepoId]) {
+  // Wait for EACH hop's tab to register before the next hop: `.gitpage` is
+  // already visible after the first goto, so waiting on it was a no-op and a
+  // fast second hash hop raced the tab registration (S12-304, git-mobile:331).
+  const ids = [repoId, dirtyRepoId, conflictRepoId];
+  for (const [i, id] of ids.entries()) {
     await page.goto(`/#/git/${id}/graph`);
     await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('.git-tab')).toHaveCount(i + 1, { timeout: 15_000 });
   }
   await expect(page.locator('.git-tab')).toHaveCount(3, { timeout: 15_000 });
   // New-tab affordance still reachable even with several tabs open.

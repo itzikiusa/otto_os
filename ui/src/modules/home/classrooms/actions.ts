@@ -9,12 +9,14 @@
 //  • Detention = ARCHIVE (`ws.requestArchive`, which toasts its own Undo):
 //    resumable, so it asks nothing — EXCEPT for a working agent, whose
 //    in-flight turn archive stops (Undo can't bring that back), where the
-//    store's working-guard confirms like closing a busy tab does.
+//    store's working-guard confirms like closing a busy tab does. The box
+//    passes what it drew (working? engine-owned?) as the guard's hint: the
+//    store's status map never saw back-row / other-workspace rows.
 //
 // Both refuse outright when the caller can't manage the session (viewer role
 // or no Agents:Edit) — the UI hides the actions too; the daemon re-checks.
 
-import type { Student } from './model.ts';
+import { sourceLabel, type Student } from './model.ts';
 
 export interface ConfirmOpts {
   title: string;
@@ -35,10 +37,20 @@ export interface KickDeps {
   failed(title: string, e: unknown): void;
 }
 
+/** What the scene showed for a student, for the store's archive guard. The
+ *  store's own status map doesn't know back-row / other-workspace rows
+ *  (S14-301), so the box hands over its view of the row. */
+export interface ArchiveHint {
+  working: boolean;
+  title: string;
+  /** Engine label for a back-row session (see {@link sourceLabel}), else null. */
+  engine: string | null;
+}
+
 export interface DetentionDeps {
   /** The app's guarded archive path (`ws.requestArchive`: confirms a working
    *  agent, toasts its own Undo). Resolves false when the user cancelled. */
-  archive(id: string): Promise<boolean | void>;
+  archive(id: string, hint: ArchiveHint): Promise<boolean | void>;
   failed(title: string, e: unknown): void;
 }
 
@@ -54,7 +66,7 @@ export function kickOutPrompt(s: Target): { message: string; opts: ConfirmOpts }
   // A back-row student belongs to an engine (workflow step, swarm, review…):
   // deleting it pulls the session out from under that run — say so up front.
   const engine = s.background
-    ? ` It is a running ${s.source ?? 'engine'} session, not one you started: the ${s.source ?? 'engine'} run that owns it loses it and may fail.`
+    ? ` It is a running ${sourceLabel(s.source)} session, not one you started: the ${sourceLabel(s.source)} run that owns it loses it and may fail.`
     : '';
   return {
     message: `Kick “${s.title}” out${where}? The session is deleted together with its entire history. This can’t be undone — there is no Undo.${midTurn}${engine}`,
@@ -87,7 +99,12 @@ export async function kickOut(s: Target, deps: KickDeps): Promise<boolean> {
 export async function sendToDetention(s: Target, deps: DetentionDeps): Promise<boolean> {
   if (!s.canManage) return false;
   try {
-    return (await deps.archive(s.id)) !== false;
+    const hint: ArchiveHint = {
+      working: s.visual === 'working',
+      title: s.title,
+      engine: s.background ? sourceLabel(s.source) : null,
+    };
+    return (await deps.archive(s.id, hint)) !== false;
   } catch (e) {
     deps.failed(`Couldn’t send “${s.title}” to detention`, e);
     return false;

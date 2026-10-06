@@ -28,7 +28,14 @@ processes = { max-threads = 2 }
 timing = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = '(package(otto-usage) & binary(e2e)) | (package(otto-server) & binary(it) & test(/^k8s_(monitor_clickhouse|backfill_budget)::/))'
+# One disjunct per suite (no `(a|b)` regex alternation): the filter guard
+# checks each disjunct for >=1 match, and an alternation would keep matching
+# after one of its suites moved.
+filter = '''
+(package(otto-usage) & binary(e2e))
+| (package(otto-server) & binary(it) & test(/^k8s_monitor_clickhouse::/))
+| (package(otto-server) & binary(it) & test(/^k8s_backfill_budget::/))
+'''
 test-group = 'clickhouse'
 
 [[profile.default.overrides]]

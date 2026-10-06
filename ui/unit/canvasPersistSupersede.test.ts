@@ -49,3 +49,38 @@ test('drafts staged in one tick collapse into a single PUT', async () => {
   await Promise.all([c.persistDoc('scene-a', a), c.persistDoc('scene-a', b)]);
   assert.deepEqual(sent, [b]);
 });
+
+// S18-306: the restore POST is part of the per-scene write chain, so a save
+// issued while it is in flight lands AFTER it (not concurrently), and the
+// newer draft is neither dropped nor overwritten on screen by the restore.
+test('a save issued during a restore queues behind it and keeps its draft', async () => {
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const api = {
+    put: async (_p: string, b: { doc: { source: string } }) => { order.push(`put:${b.doc.source}`); return {}; },
+    post: async (path: string) => {
+      order.push('restore:start');
+      await gate;
+      order.push('restore:end');
+      return { doc_json: JSON.stringify({ source: 'restored' }), updated_at: '2026-10-06T00:00:00Z', path };
+    },
+  };
+  const mod = loadSource(new URL('../src/lib/stores/canvas.svelte.ts', import.meta.url), {
+    '../api/client': { api, getToken: () => 'tok' },
+    './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
+    '../providers': { defaultAgentProvider: () => 'claude' },
+    '../loadError': { loadErrorText: (e: unknown) => String(e) },
+    '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
+  });
+  const c = mod.canvas;
+  const restoring = c.restoreVersion('scene-a', 'v1');
+  await new Promise((r) => setImmediate(r)); // the restore POST is in flight
+  const typed = { source: 'typed-after-restore' };
+  const saving = c.persistDoc('scene-a', typed);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, ['restore:start'], 'the save must not race the restore');
+  release();
+  await Promise.all([restoring, saving]);
+  assert.deepEqual(order, ['restore:start', 'restore:end', 'put:typed-after-restore']);
+});

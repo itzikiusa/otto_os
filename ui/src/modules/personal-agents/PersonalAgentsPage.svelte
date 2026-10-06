@@ -111,7 +111,7 @@
   }
 
   async function remove(a: PersonalAgent): Promise<void> {
-    if (!(await confirmer.ask(`Delete personal agent “${a.name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', confirmLabel: 'Delete' }))) return;
+    if (!(await confirmer.ask(`Delete personal agent “${a.name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', danger: true, confirmLabel: 'Delete' }))) return;
     try {
       await personalAgents.remove(a.id);
       toasts.success(`Deleted ${a.name}`);

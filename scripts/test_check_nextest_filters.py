@@ -60,3 +60,19 @@ class SplitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConventionTest(unittest.TestCase):
+    def test_no_regex_alternation_inside_a_disjunct(self):
+        # `test(/^(a|b)::/)` keeps matching when ONE of a/b moves, so half the
+        # disjunct can be orphaned unseen (S12-308). Write one disjunct each.
+        config = tomllib.loads(mod.CONFIG.read_text())
+        for profile, flt in mod.override_filters(config):
+            for d in mod.split_top_level_or(flt):
+                for rx in mod.regexes(d):
+                    self.assertNotIn("|", rx, f"[{profile}] regex alternation in {d!r}")
+
+    def test_regexes_extracts_every_regex_literal(self):
+        self.assertEqual(
+            mod.regexes("package(a) & test(/^x(y|z)$/) & test(/w/)"), ["^x(y|z)$", "w"]
+        )

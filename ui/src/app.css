@@ -207,7 +207,8 @@ a:hover {
   gap: 4px;
   margin-bottom: 12px;
 }
-.field > label {
+.field > label,
+.field > .field-label /* a group's caption (a <span> naming a role="group") */ {
   font-size: var(--fs-s);
   font-weight: 500;
   color: var(--text-dim);

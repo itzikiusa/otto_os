@@ -8,6 +8,7 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmProd } from '../../lib/confirmProd';
   import { formatBytes } from '../../lib/metric-format';
@@ -45,6 +46,12 @@
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
 
   type Tab = 'messages' | 'partitions' | 'config' | 'produce';
+  const TOPIC_TABS: TabItem<Tab>[] = [
+    { id: 'messages', label: 'Messages' },
+    { id: 'partitions', label: 'Partitions' },
+    { id: 'config', label: 'Config' },
+    { id: 'produce', label: 'Produce' },
+  ];
   let tab = $state<Tab>('messages');
 
   let detail = $state<TopicDetail | null>(null);
@@ -649,12 +656,11 @@
     <button class="btn small danger" onclick={deleteTopic}>Delete topic</button>
   </header>
 
-  <nav class="subtabs">
-    <button class:on={tab === 'messages'} onclick={() => (tab = 'messages')}>Messages</button>
-    <button class:on={tab === 'partitions'} onclick={() => (tab = 'partitions')}>Partitions</button>
-    <button class:on={tab === 'config'} onclick={() => (tab = 'config')}>Config</button>
-    <button class:on={tab === 'produce'} onclick={() => (tab = 'produce')}>Produce</button>
-  </nav>
+  <!-- The topic's main view switch: a real tablist (S19-302), so VoiceOver
+       says which view is open; arrow keys / RTL come from <Tabs>. -->
+  <div class="subtabs">
+    <Tabs label="Topic view" idBase="topic" tabs={TOPIC_TABS} value={tab} onchange={(id) => (tab = id)} />
+  </div>
 
   {#if detailErr}
     <div class="err" role="alert">
@@ -666,6 +672,7 @@
     </div>
   {/if}
 
+  <div class="tpanel" role="tabpanel" id="topic-panel-{tab}" aria-labelledby="topic-tab-{tab}">
   {#if tab === 'messages'}
     <div class="consume-bar">
       <select bind:value={startMode} aria-label="Start position" title="Start position">
@@ -959,6 +966,7 @@
       </button>
     </div>
   {/if}
+  </div>
 </div>
 
 {#if sendToAgentOpen && selected && ws.current}
@@ -1021,30 +1029,14 @@
     flex: none;
   }
   .subtabs {
-    display: flex;
-    gap: 2px;
-    padding: 6px 12px 0;
+    padding: 0 12px;
     border-bottom: 1px solid var(--border);
-    /* Scroll the four subtabs horizontally rather than letting the last one
-       (Produce) jut off the right edge on the narrowest phones (~320px). */
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    -webkit-overflow-scrolling: touch;
   }
-  .subtabs button {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 6px 12px;
-    border-radius: var(--radius-s) var(--radius-s) 0 0;
-    cursor: pointer;
-    font-size: var(--fs-m);
-    white-space: nowrap;
-    flex: none;
-  }
-  .subtabs button.on {
-    color: var(--text);
-    border-bottom: 2px solid var(--accent);
+  .tpanel {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .consume-bar {
     display: flex;

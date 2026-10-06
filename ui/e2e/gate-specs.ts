@@ -11,8 +11,13 @@
 // a spec that turns flaky here moves back out (with an issue), never gets a
 // retry.
 //
-// playwright.config.ts turns these lists into the `desktop-gate` (Chromium,
-// 1280×800 shell) and `iphone-gate` (WebKit, iPhone portrait) projects.
+// With OTTO_E2E_GATE=1, playwright.config.ts narrows the REAL
+// `desktop-browser` (Chromium, 1280×800 shell) and `iphone-portrait` (WebKit)
+// projects to these lists — never separate project names, which the specs'
+// `info.project.name` guards would skip (S12-301). The gate fails on any
+// skipped test and on fewer than GATE_MIN_EXPECTED passes
+// (scripts/e2e-flaky-check.mjs --gate); ui/unit/e2eGateSpecs.test.ts rejects
+// a gate spec whose project guard excludes its gate project.
 
 /** desktop-*.spec.ts files run at desktop width (Chromium). */
 export const DESKTOP_GATE_SPECS = [
@@ -54,6 +59,20 @@ export const DESKTOP_GATE_SPECS = [
 
 /** Mobile specs run at iPhone portrait (WebKit). */
 export const MOBILE_GATE_SPECS = ['theme.spec.ts', 'vault-mobile.spec.ts'] as const;
+
+/** The projects the gate runs a spec on (desktop list / mobile list). */
+export const DESKTOP_GATE_PROJECT = 'desktop-browser';
+export const MOBILE_GATE_PROJECT = 'iphone-portrait';
+
+/**
+ * Floor for the gate's passed-test count: the gate fails when fewer pass, so a
+ * spec that silently stops running (a new skip guard, a rename, a describe
+ * that never registers) is caught. Equals the gate's test count — re-measure
+ * with `OTTO_E2E_GATE=1 npx playwright test --list --project=desktop-browser
+ * --project=iphone-portrait` when promoting a spec; lower it only when a spec
+ * leaves the gate.
+ */
+export const GATE_MIN_EXPECTED = 166;
 
 /** Exact-file matcher for a Playwright project's `testMatch`. */
 export function gateMatcher(files: readonly string[]): RegExp {

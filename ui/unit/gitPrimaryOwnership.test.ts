@@ -84,3 +84,36 @@ test('a failed loadRepos is not sticky: the next call retries', async () => {
   void git.loadRepos('w1');
   assert.equal(calls.filter((c) => c.url === '/workspaces/w1/repos').length, 2);
 });
+
+// S13-305: App's loadRepos and GitPanel's detectFor race on a workspace switch.
+test('a detect that resolves before the repo list keeps the detected primary', async () => {
+  const { git, find } = fixture();
+  const R1 = { id: 'R1', workspace_id: 'w2', name: 'first' };
+  const R2 = { id: 'R2', workspace_id: 'w2', name: 'session-repo' };
+  void git.loadRepos('w2');
+  void git.detectFor('w2', '/src/session-repo');
+  find('/workspaces/w2/repos/detect').resolve(R2);
+  await flush();
+  find('/repos/R2/status').resolve(status('feature'));
+  await flush();
+  // The list predates the detect's registration: it lists R1 only.
+  find('/workspaces/w2/repos').resolve([R1]);
+  await flush();
+  assert.equal(git.primary.id, 'R2', 'still the focused session\'s repo, not repos[0]');
+  assert.equal(JSON.stringify(git.repos.map((r: any) => r.id).sort()), '["R1","R2"]');
+});
+
+test('a failed repo load surfaces an error and retries on demand', async () => {
+  const { git, calls, find } = fixture();
+  void git.loadRepos('w1');
+  find('/workspaces/w1/repos').reject(new Error('daemon restarting'));
+  await flush();
+  assert.match(git.reposError, /daemon restarting/);
+  const before = calls.length;
+  void git.retryRepos('w1');
+  assert.equal(calls.length, before + 1, 'Retry fetches again (loadedFor is not sticky)');
+  calls[calls.length - 1].result.resolve([{ id: 'R1', workspace_id: 'w1', name: 'r' }]);
+  await flush();
+  assert.equal(git.reposError, null);
+  assert.equal(git.primary.id, 'R1');
+});

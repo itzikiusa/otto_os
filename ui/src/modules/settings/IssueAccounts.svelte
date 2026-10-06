@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { originChanged } from './credentialOrigin';
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -33,20 +34,13 @@
   let tokenExpiresAt = $state('');
 
   const isEdit = $derived(editing !== null);
-  /** Repointing an account at another host must not carry the stored token
-   *  there (it would be sent as Basic auth to the new host): a changed host
-   *  needs a fresh token. */
-  function hostOf(u: string): string {
-    try {
-      return new URL(u.trim()).host.toLowerCase();
-    } catch {
-      return u.trim().toLowerCase();
-    }
-  }
+  /** Repointing an account at another origin (scheme, host or port) must not
+   *  carry the stored token there (it would be sent as Basic auth to the new
+   *  origin): a changed origin needs a fresh token — the daemon's own rule. */
   const hostChanged = $derived.by(() => {
     // (cast: TS narrows the `$state(null)` initializer to `null` at this point)
     const e = editing as IssueAccount | null;
-    return !!e && hostOf(baseUrl) !== hostOf(e.base_url);
+    return !!e && originChanged(e.base_url, baseUrl);
   });
   const needsToken = $derived(hostChanged && token === '');
 
@@ -196,7 +190,7 @@
 
   async function remove(a: IssueAccount): Promise<void> {
     if (deleting[a.id]) return;
-    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', confirmLabel: 'Delete account' }))) return;
+    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', danger: true, confirmLabel: 'Delete account' }))) return;
     deleting = { ...deleting, [a.id]: true };
     try {
       await api.del(`/issue/accounts/${a.id}`);

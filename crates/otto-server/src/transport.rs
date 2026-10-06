@@ -32,6 +32,26 @@ pub fn alt_loopback_base() -> Option<String> {
     ALT_LOOPBACK_BASE.get().cloned()
 }
 
+/// Port of the network (0.0.0.0, TLS) listener `ottod` ACTUALLY bound —
+/// `None` while the setting is off, before the restart that applies it, or
+/// after its TLS setup / bind failed (S20-303). Share links read this, never
+/// the saved setting, so a QR never points at an address nothing listens on.
+static NETWORK_LISTENER_PORT: std::sync::Mutex<Option<u16>> = std::sync::Mutex::new(None);
+
+/// Record (or clear) the bound network listener's port.
+pub fn set_network_listener_port(port: Option<u16>) {
+    *NETWORK_LISTENER_PORT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = port;
+}
+
+/// The bound network listener's port, when one is serving.
+pub fn network_listener_port() -> Option<u16> {
+    *NETWORK_LISTENER_PORT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 static BOOT_ID: LazyLock<String> = LazyLock::new(otto_core::new_id);
 
 /// This daemon process's boot id (stable for its lifetime).

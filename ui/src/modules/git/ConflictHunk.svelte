@@ -24,6 +24,9 @@
     /** Side labels — the checked-out branch vs the merge source. */
     oursLabel?: string;
     theirsLabel?: string;
+    /** The whole file's CRLF verdict (`fileIsCrlf`). A hunk with empty or
+     *  single LF-less sides can't tell on its own (S15-308). */
+    fileCrlf?: boolean;
     /** Fired whenever the resolution changes. `lines` is null while undecided. */
     onresolve: (lines: string[] | null) => void;
   }
@@ -36,6 +39,7 @@
     root = '',
     oursLabel = 'OURS',
     theirsLabel = 'THEIRS',
+    fileCrlf,
     onresolve,
   }: Props = $props();
 
@@ -93,7 +97,8 @@
   const oursAll = $derived(ours.length > 0 ? oursPicked === ours.length : emptyTaken.ours);
   const theirsAll = $derived(theirs.length > 0 ? theirsPicked === theirs.length : emptyTaken.theirs);
   // CodeMirror drops `\r`; a CRLF block gets it re-appended on the way out.
-  const crlf = $derived(isCrlfBlock(ours, theirs, base));
+  // The file's verdict wins when given — the block alone is often too small.
+  const crlf = $derived(fileCrlf ?? isCrlfBlock(ours, theirs, base));
 
   // The resolved lines: A's picks in order, then B's picks in order.
   const resolved = $derived.by((): string[] | null => {

@@ -5464,6 +5464,12 @@ struct EditReviewCommentReq {
     /// Move a DECLINED comment back to draft.
     #[serde(default)]
     restore_draft: bool,
+    /// Record an APPROVED-but-unposted comment as posted WITHOUT sending it:
+    /// the client found the copy an earlier failed (5xx) attempt created on
+    /// the PR, so it must stop being offered as postable (S15-302). Claimed
+    /// atomically (posted 0→1), so it can't race a concurrent approve.
+    #[serde(default)]
+    mark_posted: bool,
 }
 
 /// `PATCH /pr-review-comments/{cid}` — a person edits an agent-drafted
@@ -5491,6 +5497,31 @@ async fn edit_review_comment(
         .await
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    if req.mark_posted {
+        if req.body.is_some() || req.restore_draft {
+            return Err(crate::error::ApiError(Error::Invalid(
+                "`mark_posted` stands alone — no `body` / `restore_draft`".into(),
+            )));
+        }
+        let claimed = comment.state == CommentState::Approved
+            && !comment.posted
+            && ctx
+                .reviews_store
+                .claim_comment_post(&cid)
+                .await
+                .map_err(crate::error::ApiError)?;
+        if !claimed {
+            return Err(crate::error::ApiError(Error::Conflict(
+                "only an approved, unposted comment can be marked posted".into(),
+            )));
+        }
+        return ctx
+            .reviews_store
+            .get_comment(&cid)
+            .await
+            .map(Json)
+            .map_err(crate::error::ApiError);
+    }
     let body = req.body.as_deref().map(str::trim);
     if body.is_some_and(str::is_empty) {
         return Err(crate::error::ApiError(Error::Invalid(

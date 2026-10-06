@@ -246,7 +246,7 @@
     border-color: var(--accent-solid);
   }
   .err-chip:focus-visible {
-    outline: 2px solid var(--accent-solid);
+    outline: 2px solid var(--accent-text);
     outline-offset: 1px;
   }
   .err-chip.static {
@@ -293,7 +293,7 @@
     width: fit-content;
   }
   .err-raw summary:focus-visible {
-    outline: 2px solid var(--accent-solid);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   .err-raw-body {

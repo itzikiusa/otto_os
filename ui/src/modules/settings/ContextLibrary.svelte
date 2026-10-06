@@ -144,7 +144,7 @@
     if (!dirty) return true;
     return confirmer.ask(
       `Your changes to ${isNew ? `the new ${meta.singular}` : `“${loadedName}”`} haven’t been saved.`,
-      { title: 'Discard changes?', confirmLabel: 'Discard' },
+      { title: 'Discard changes?', danger: true, confirmLabel: 'Discard' },
     );
   }
 
@@ -266,7 +266,7 @@
         `Delete the ${meta.singular} “${name}” from the library? Workspaces stop receiving it at their next session spawn.`,
         {
           title: `Delete ${meta.singular}`,
-          confirmLabel: 'Delete',
+          danger: true, confirmLabel: 'Delete',
         },
       ))
     )

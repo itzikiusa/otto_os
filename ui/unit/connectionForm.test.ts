@@ -66,3 +66,18 @@ test('Mongo URI: an encodable-character password never stays in the visible stri
   const p = form(); assert.doesNotThrow(() => p.parseDsn('postgres://u%zz:pw%zz@db/a%zz'));
   assert.equal(p.fUser, 'u%zz');
 });
+test('Mongo URI: an unencoded `/` in the password never stays visible (S16-307)', () => {
+  const c = form(); c.parseDsn('mongodb://app:12/ss@h1:27017/db?authSource=admin');
+  assert.equal(c.secret, '12/ss');
+  assert.equal(c.fConnString, 'mongodb://app:{secret}@h1:27017/db?authSource=admin');
+  // An `@` inside the query is an option value, not credentials.
+  const q = form(); q.parseDsn('mongodb://h1:27017/db?appName=a@b');
+  assert.equal(q.secret, '');
+  assert.equal(q.fConnString, 'mongodb://h1:27017/db?appName=a@b');
+  // An unparsable URI with credentials says how to fix it.
+  let msg = '';
+  const r = form({ toasts: { error: (_t: string, m: string) => (msg = m), success: () => {} } });
+  r.parseDsn('mongodb://app:pa/ss@h/db');
+  assert.match(msg, /percent-encode/);
+  assert.equal(r.fConnString, '');
+});

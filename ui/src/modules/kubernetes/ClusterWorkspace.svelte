@@ -533,6 +533,7 @@
               tab={k8s.drawerTab}
               {canEdit}
               {autoExec}
+              onautoexec={() => (autoExec = false)}
               ontab={(t) => (k8s.drawerTab = t)}
               onclose={closeDrawer}
               onopenpod={openPod}

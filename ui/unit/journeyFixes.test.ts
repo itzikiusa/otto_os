@@ -60,3 +60,33 @@ test('History ⌘K resume is registered only when the button would allow it', ()
   assert.match(h, /sel && canEdit && canResume\(sel\) \? \[\{ id: 'history\.resume'/);
   assert.match(h, /if \(e\.archived\) return false;/);
 });
+
+// ── S20-302 · agent channels never say "room"; Settings' Slack/Telegram page
+// no longer shares the "Channels" noun ──────────────────────────────────────
+test('agent-channel UI copy never shows the internal "room" noun (S20-302)', () => {
+  for (const file of ['personal-agents/RoomsView.svelte', 'personal-agents/AgentAutonomy.svelte']) {
+    const code = readFileSync(new URL(`../src/modules/${file}`, import.meta.url), 'utf8')
+      // Drop the <style> block and comments: only rendered/announced text counts.
+      .replace(/<style[\s\S]*?<\/style>/g, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    const visible: string[] = [];
+    // String literals (labels, toasts, dialogs, attributes)…
+    for (const m of code.matchAll(/'([^'\n]*)'|"([^"\n]*)"|`([^`]*)`/g)) visible.push(m[1] ?? m[2] ?? m[3] ?? '');
+    // …and markup text nodes.
+    for (const m of code.matchAll(/>([^<>{}]+)</g)) visible.push(m[1]);
+    const hits = visible
+      // Interpolated code (`${r.room.name}`, `{selected.room.name}`) is not copy…
+      .map((t) => t.replace(/\$?\{[^}]*\}/g, ''))
+      // …nor are single-token literals (class names, selectors, ids, routes).
+      .filter((t) => /\s/.test(t.trim()))
+      .filter((t) => /\broom\b/i.test(t));
+    assert.deepEqual(hits, [], `${file} shows "room" to the user`);
+  }
+  const sections = readFileSync(new URL('../src/modules/settings/sections.ts', import.meta.url), 'utf8');
+  const channels = sections.match(/\{ id: 'channels', label: '([^']+)'[^}]*keywords: '([^']+)'/);
+  assert.ok(channels, 'Settings keeps its Slack/Telegram section');
+  assert.doesNotMatch(channels![1], /channel/i, 'the Slack/Telegram label must not reuse "Channels"');
+  assert.doesNotMatch(channels![2], /\bchannels?\b/i, '⌘K "channels" must find only the agent channels');
+});

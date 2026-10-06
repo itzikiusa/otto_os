@@ -15,9 +15,19 @@ export type EngineLike = DbEngine | ConnectionKind | null | undefined;
 
 /** Quote an identifier: double quotes on Postgres (backticks are a syntax
  *  error there), backticks on MySQL / ClickHouse (and as the engine-less
- *  default, e.g. a chip label). The quote char is doubled inside. */
+ *  default, e.g. a chip label). The quote char is doubled inside; ClickHouse
+ *  also reads `\` as an escape inside a quoted name, so it is doubled there
+ *  first (a name ending in `\` would otherwise swallow the closing backtick)
+ *  — the same rule as the daemon's `import.rs` `SqlFlavor::ident`. */
 export function quoteIdent(engine: EngineLike, name: string): string {
-  return engine === 'postgres' ? '"' + name.replace(/"/g, '""') + '"' : '`' + name.replace(/`/g, '``') + '`';
+  if (engine === 'postgres') return '"' + name.replace(/"/g, '""') + '"';
+  const n = engine === 'clickhouse' ? name.replace(/\\/g, '\\\\') : name;
+  return '`' + n.replace(/`/g, '``') + '`';
+}
+
+/** `schema.table` (or just `table`) quoted for the engine. */
+export function qualifiedName(engine: EngineLike, schema: string | null | undefined, table: string): string {
+  return schema ? `${quoteIdent(engine, schema)}.${quoteIdent(engine, table)}` : quoteIdent(engine, table);
 }
 
 /** MySQL (default modes) and ClickHouse treat `\` as an escape character
@@ -34,15 +44,37 @@ export function escapeSqlText(s: string, backslash: boolean): string {
   return (backslash ? s.replace(/\\/g, '\\\\') : s).replace(/'/g, "''");
 }
 
-/** `'…'` string literal for the engine. */
+/** `'…'` string literal for the engine. NUL can't appear in a Postgres text
+ *  value at all (dropped); the backslash dialects spell it `\0`. */
 export function stringLiteral(engine: EngineLike, s: string): string {
-  return `'${escapeSqlText(s, backslashEscapes(engine))}'`;
+  if (!backslashEscapes(engine)) return `'${escapeSqlText(s.replace(/\0/g, ''), false)}'`;
+  return `'${escapeSqlText(s, true).replace(/\0/g, '\\0')}'`;
 }
 
 /** Boolean literal: `TRUE` / `FALSE` on Postgres (`boolean = integer` is an
  *  error there), `1` / `0` on MySQL / ClickHouse. */
 export function boolLiteral(engine: EngineLike, b: boolean): string {
   return engine === 'postgres' ? (b ? 'TRUE' : 'FALSE') : b ? '1' : '0';
+}
+
+// ── Table references ─────────────────────────────────────────────────────────
+
+/** Resolve a schema-tree node id like `db:shop/table:orders` (Postgres trees use
+ *  `db:` for the schema) to its engine-quoted `schema.table` reference plus the
+ *  raw parts, or null when the node isn't a SQL table / view. */
+export function tableRefFromNodeId(
+  engine: EngineLike,
+  id: string,
+): { ref: string; db: string | null; table: string } | null {
+  const segs = id.split('/').map((s) => {
+    const i = s.indexOf(':');
+    return i < 0 ? ([s, ''] as const) : ([s.slice(0, i), s.slice(i + 1)] as const);
+  });
+  const find = (k: string) => segs.find(([kk]) => kk === k)?.[1];
+  const table = find('table') ?? find('view');
+  if (!table) return null;
+  const db = find('db') ?? find('schema') ?? null;
+  return { ref: qualifiedName(engine, db, table), db, table };
 }
 
 // ── Splitter lexing ──────────────────────────────────────────────────────────

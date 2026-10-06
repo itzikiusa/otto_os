@@ -2930,6 +2930,15 @@ export interface FsBrowse {
   entries: FsEntry[];
 }
 
+/** `GET /fs/stat` — one path's existence and kind, without a listing. */
+export interface FsStat {
+  /** Canonical path (symlinks, `..` and `~` resolved). */
+  path: string;
+  is_dir: boolean;
+  /** True when the directory is itself a git repo. */
+  is_git_repo: boolean;
+}
+
 export interface LogFileEntry {
   name: string;
   size: number;
@@ -3365,11 +3374,17 @@ export interface ConflictFile {
 }
 
 /** `POST /repos/{id}/conflict/resolve` — send `content` (the rebuilt file), or
- *  `side` to take one side wholesale (`content` is ignored then). */
+ *  `side` to take one side wholesale (`content` is ignored then). `content` is
+ *  400 for a binary working file, and when empty for an absent one. */
 export interface ResolveConflictReq {
   path: string;
   content: string;
-  side?: 'ours' | 'theirs';
+  side?: 'ours' | 'theirs' | 'keep' | 'delete';
+}
+
+/** `GET /repos/{id}/head/remotes` — remote-tracking refs containing HEAD. */
+export interface HeadRemotesResp {
+  remotes: string[];
 }
 
 /** `POST /repos/{id}/merge/commit` */
@@ -3954,6 +3969,9 @@ export interface ReviewComment {
 export interface EditReviewCommentReq {
   body?: string;
   restore_draft?: boolean;
+  /** Record an approved-but-unposted comment as posted WITHOUT sending it
+   *  (its copy was found on the PR). Alone; 409 unless approved + unposted. */
+  mark_posted?: boolean;
 }
 
 export interface Review {
@@ -6052,6 +6070,9 @@ export interface DbColumnDef {
   key?: string | null;
   extra?: string | null;
   comment?: string | null;
+  /** Per-column collation when the engine reports one (MySQL string columns);
+   *  the Table Designer re-states it on CHANGE COLUMN. */
+  collation?: string | null;
 }
 
 export interface DbIndexDef {
@@ -6746,7 +6767,14 @@ export interface CreateShareResp {
    *  or empty (no Public link domain and no network listener) — show the
    *  "only works on this Mac" warning instead of the phone QR hint. */
   reachable_remotely: boolean;
+  /** Who can open `url` (S20-303): `remote` (routable/public), `lan` (the
+   *  LAN listener's private address — same Wi-Fi only, self-signed
+   *  certificate) or `local` (this Mac only). Absent on older daemons. */
+  reach?: ShareReach;
 }
+
+/** See {@link CreateShareResp.reach}. */
+export type ShareReach = 'remote' | 'lan' | 'local';
 
 // ---------------------------------------------------------------------------
 // Email sender (Gmail App Password → Keychain; mobile plan Task 7.1).
@@ -7739,13 +7767,13 @@ export interface ScheduledTaskRun {
   created_at: string;
 }
 
-/** A built-in template the create form can pre-fill from. */
 /** `POST /scheduled-tasks/preview` response (#137a): the next fires of an
  *  unsaved schedule, RFC 3339 UTC — empty when it has none (a spent `once`). */
 export interface ScheduledTaskPreview {
   next_fire_times: string[];
 }
 
+/** A built-in template the create form can pre-fill from. */
 export interface ScheduledTaskPreset {
   id: string;
   name: string;

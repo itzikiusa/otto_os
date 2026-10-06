@@ -453,7 +453,7 @@
   }
   async function deleteSection(sid: string): Promise<void> {
     if (!doc) return;
-    const ok = await confirmer.ask('Delete this section? Undo (⌘Z) or any earlier version brings it back.', { title: 'Delete section', confirmLabel: 'Delete section' });
+    const ok = await confirmer.ask('Delete this section? Undo (⌘Z) or any earlier version brings it back.', { title: 'Delete section', danger: true, confirmLabel: 'Delete section' });
     if (!ok || !doc) return;
     commit(ops.removeSection(doc, sid));
     select(null, null);
@@ -506,7 +506,7 @@
     const p = doc.pages.find((x) => x.id === id);
     const ok = await confirmer.ask(`Delete the page “${p?.title}” and its ${p?.sections.length ?? 0} sections? Undo (⌘Z) or any earlier version brings it back.`, {
       title: 'Delete page',
-      confirmLabel: 'Delete page',
+      danger: true, confirmLabel: 'Delete page',
     });
     if (!ok || !doc) return;
     commit(ops.removePage(doc, id));

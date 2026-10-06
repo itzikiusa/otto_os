@@ -738,6 +738,10 @@
       mergeOpen = false;
       void load(repoId, number);
     }}
+    onstale={() => {
+      invalidatePr(repoId, number);
+      void load(repoId, number, true);
+    }}
   />
 {/if}
 

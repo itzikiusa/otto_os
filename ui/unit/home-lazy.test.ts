@@ -73,3 +73,22 @@ test('Classrooms keeps three.js behind a dynamic import', () => {
   assert.match(read('src/modules/home/classrooms/scene.ts'), /import\('three'\)/);
   assert.match(read('scripts/bundle-budget.mjs'), /three: \['home'/);
 });
+
+test('host pages load the Needs-you link lazily (it pulls the whole Today store)', () => {
+  // NeedsYouLink → today.svelte.ts joins assistant, MCP, scheduled-tasks,
+  // design and mission-control sources; a static import put all of that into
+  // each host page's chunk (Mission Control +17 % gzip vs main).
+  for (const host of [
+    'src/modules/mission-control/MissionControlPage.svelte',
+    'src/modules/mcp/ApprovalsTab.svelte',
+    'src/modules/assistant/NeedsYouRail.svelte',
+    'src/modules/agents/WorkQueue.svelte',
+  ]) {
+    const imports = staticImports(read(host));
+    assert.ok(!imports.some((s) => s.endsWith('/home/NeedsYouLink.svelte')), `${host}: use LazyNeedsYouLink`);
+    assert.ok(imports.some((s) => s.endsWith('/home/LazyNeedsYouLink.svelte')), host);
+  }
+  const lazy = read('src/modules/home/LazyNeedsYouLink.svelte');
+  assert.deepEqual(staticImports(lazy), []);
+  assert.match(lazy, /import\('\.\/NeedsYouLink\.svelte'\)/);
+});

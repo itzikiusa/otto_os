@@ -116,12 +116,28 @@ type MockNotice = {
   action: { type: 'open_session'; session_id: string } | null;
 };
 
+/** Pass /ws/events through to the daemon but DROP its `notification` events:
+ *  other specs on the shared daemon raise notices in parallel, and their live
+ *  ingest added rows to a panel these tests mock exactly (unread "3" vs "2",
+ *  S12-304). Everything else on the stream still flows. */
+async function isolateNoticeStream(page: Page): Promise<void> {
+  await page.routeWebSocket(/\/ws\/events/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => server.send(m));
+    server.onMessage((m) => {
+      if (typeof m === 'string' && /"type"\s*:\s*"notification"/.test(m)) return;
+      ws.send(m);
+    });
+  });
+}
+
 /** Serve exactly `notices`; every mutation succeeds. Returns the read hit log. */
 async function mockList(
   page: Page,
   notices: MockNotice[],
 ): Promise<{ readAll: number; readIds: string[] }> {
   const hits = { readAll: 0, readIds: [] as string[] };
+  await isolateNoticeStream(page);
   await page.route(/\/api\/v1\/notifications(\?.*)?$/, async (route) => {
     if (route.request().method() === 'GET') await route.fulfill({ json: notices });
     else await route.fulfill({ status: 204, body: '' });
@@ -258,7 +274,13 @@ test('a failed load shows an error with Retry, not "all caught up"', async ({ pa
   await openPage(page, 'git');
   await navBell(page).click();
   const panel = page.getByRole('dialog', { name: 'Notifications' });
-  await expect(panel.getByText("Couldn’t load notifications")).toBeVisible();
-  await expect(panel.getByRole('button', { name: /Retry/ })).toBeVisible();
+  // Other specs on the shared daemon can push notices over /ws/events while
+  // the GET is failing: then the panel lists those rows with an inline
+  // "Couldn’t refresh" banner instead of the empty-state error. Either way it
+  // must settle (never spin forever) and offer Retry (S12-305).
+  const failure = panel.locator('[role="alert"], [data-testid="load-stale"]').first();
+  await expect(failure).toContainText(/Couldn’t (load|refresh) notifications/);
+  await expect(failure.getByRole('button', { name: /Retry/ })).toBeVisible();
+  await expect(panel.locator('[aria-busy="true"]')).toHaveCount(0);
   await expect(panel.getByText("You’re all caught up")).toHaveCount(0);
 });

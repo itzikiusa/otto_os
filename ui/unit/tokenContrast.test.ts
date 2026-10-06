@@ -200,3 +200,23 @@ for (const combo of COMBOS) {
     assert.deepEqual(fails, [], fails.join('; '));
   });
 }
+
+// S19-301: the focus ring is drawn in --accent-text (>= 4.5:1 on every ground
+// above, so well past WCAG 1.4.11's 3:1). --accent-solid — the darkened FILL
+// colour — is under 3:1 on dark grounds and must not draw a ring
+// (ui-guards `focus-ring-token` catches local rules).
+test('the global :focus-visible ring uses --accent-text', () => {
+  const app = readFileSync(new URL('../src/app.css', import.meta.url), 'utf8');
+  const rule = /(^|\n):focus-visible\s*\{([^}]*)\}/.exec(app);
+  assert.ok(rule, 'app.css has a global :focus-visible rule');
+  assert.match(rule[2], /outline:\s*2px solid var\(--accent-text\)/);
+  for (const combo of COMBOS) {
+    const v = varsFor(combo.theme, combo.scheme);
+    const accent = hex(v, '--accent');
+    const ring = mixSrgb(accent, hex(v, '--text'), mixPct(combo.theme, combo.scheme, '--accent-text', '--accent'));
+    for (const g of GROUNDS) {
+      const r = contrast(ring, hex(v, g));
+      assert.ok(r >= 3, `${combo.name}: focus ring on ${g} is ${r.toFixed(2)}:1 (< 3)`);
+    }
+  }
+});

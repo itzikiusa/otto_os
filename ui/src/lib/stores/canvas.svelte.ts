@@ -304,22 +304,45 @@ class CanvasStore {
 
   /** Restore a version. Pending saves land first (so they can't overwrite the
    *  restore afterwards); unsaved local edits are dropped — the server keeps
-   *  the replaced doc as a `restore` version, so this is undoable. */
+   *  the replaced doc as a `restore` version, so this is undoable. The restore
+   *  is itself a link in the per-scene write chain (S18-306): a save issued
+   *  while it is in flight (keystrokes typed after clicking Restore) queues
+   *  BEHIND it instead of racing it, and — since that save will land last —
+   *  the editor keeps showing it rather than the restored doc. */
   async restoreVersion(id: string, versionId: string): Promise<void> {
-    await this.#writes.get(id)?.catch(() => {});
-    const row = await api.post<CanvasScene>(`/canvas/scenes/${id}/versions/${versionId}/restore?files=ref`, {});
+    const context = this.#saveContext;
+    const previous = this.#writes.get(id);
+    const dropped = this.#drafts.get(id); // the unsaved edits the restore replaces
+    const posted = (async () => {
+      await previous?.catch(() => {});
+      return api.post<CanvasScene>(`/canvas/scenes/${id}/versions/${versionId}/restore?files=ref`, {});
+    })();
+    const write = posted.then(() => {});
+    write.catch(() => {}); // the failure surfaces via `posted`; the chain link must not go unhandled
+    this.#writes.set(id, write);
+    let restored: CanvasScene;
+    try {
+      restored = await posted;
+    } finally {
+      if (this.#writes.get(id) === write) this.#writes.delete(id);
+    }
+    if (context !== this.#saveContext) return;
+    // A newer draft was staged during the restore: its save is queued behind
+    // the restore and wins on disk, so it must win on screen too.
+    const draft = this.#drafts.get(id);
+    if (draft !== undefined && draft !== dropped) return;
     this.#drafts.delete(id);
     delete this.docSaveErrors[id];
     if (this.currentId !== id) return;
     let doc: CanvasDoc | null = null;
     try {
-      doc = JSON.parse(row.doc_json) as CanvasDoc;
+      doc = JSON.parse(restored.doc_json) as CanvasDoc;
     } catch {
       doc = null;
     }
     this.dirty = false;
     if (doc) this.ingestDoc(doc);
-    this.savedAt = Date.parse(row.updated_at) || Date.now();
+    this.savedAt = Date.parse(restored.updated_at) || Date.now();
   }
 
   /** Append a turn to the inline conversation (of `sceneId` when given — a

@@ -23,10 +23,15 @@
 //! `/#/s/{session_id}/{token}` when unavailable). The same `origin` is used to
 //! build the link emailed alongside an OTP code. When neither the configured
 //! domain nor the Host is reachable from another device (the desktop app always
-//! calls 127.0.0.1) and the network listener is on, the LAN listener address
-//! (`https://<lan-ip>:<port>`) is used instead. `reachable_remotely` reports
-//! whether the final origin is non-loopback; an emailed OTP share on a loopback
-//! origin is refused with 409 (the recipient could never open it).
+//! calls 127.0.0.1) and the network listener is actually serving (the port
+//! `ottod` bound — never the saved setting, which applies only after a restart
+//! and may have failed TLS setup), the LAN listener address
+//! (`https://<lan-ip>:<port>`) is used instead. `reach` classifies the final
+//! origin — `remote` / `lan` (private or link-local: same Wi-Fi only, behind a
+//! self-signed certificate) / `local` (loopback) — and `reachable_remotely` is
+//! `reach != local`. An emailed OTP share is refused with 409 unless its origin
+//! is `remote` or a Public link domain is configured: a recipient is almost
+//! never on the owner's network (S20-303).
 //!
 //! ## Eviction on revoke
 //! After revoking a share, `SessionManager::evict(&session_id)` is called so
@@ -41,7 +46,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use otto_channels::GmailSender;
 use otto_core::api::{
-    CreateShareReq, CreateShareResp, ExtendShareReq, ListSharesResp, VerifyShareReq,
+    CreateShareReq, CreateShareResp, ExtendShareReq, ListSharesResp, ShareReach, VerifyShareReq,
     VerifyShareResp,
 };
 use otto_core::domain::WorkspaceRole;
@@ -153,6 +158,10 @@ fn origin_from_headers(headers: &HeaderMap) -> String {
 pub struct ShareOrigin {
     pub origin: String,
     pub reachable_remotely: bool,
+    /// Who can open the origin (S20-303).
+    pub reach: ShareReach,
+    /// The origin is the operator-configured Public link domain.
+    pub configured: bool,
 }
 
 /// Host part of an origin (`scheme://host[:port]` or a bare `host[:port]`),
@@ -179,6 +188,33 @@ pub fn origin_is_remote(origin: &str) -> bool {
     }
 }
 
+/// Classify who can open `origin`: `local` (loopback/empty), `lan` (an RFC
+/// 1918 / link-local / IPv6 ULA address or an mDNS `.local` name — only
+/// devices on this Mac's network) or `remote`.
+pub fn origin_reach(origin: &str) -> ShareReach {
+    if !origin_is_remote(origin) {
+        return ShareReach::Local;
+    }
+    let host = origin_host(origin).trim().to_ascii_lowercase();
+    if host.ends_with(".local") {
+        return ShareReach::Lan;
+    }
+    let private = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_private() || v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let first = v6.segments()[0];
+            // fe80::/10 link-local, fc00::/7 unique-local.
+            (first & 0xffc0) == 0xfe80 || (first & 0xfe00) == 0xfc00
+        }
+        Err(_) => false,
+    };
+    if private {
+        ShareReach::Lan
+    } else {
+        ShareReach::Remote
+    }
+}
+
 /// Pick the share origin: the configured public domain, else a remote request
 /// Host, else the LAN listener's address, else the (loopback/empty) Host.
 pub fn resolve_share_origin(
@@ -189,41 +225,35 @@ pub fn resolve_share_origin(
     let configured = configured
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty());
+    let is_configured = configured.is_some();
     let origin = configured
         .or_else(|| origin_is_remote(&host_origin).then(|| host_origin.clone()))
         .or(lan_origin)
         .unwrap_or(host_origin);
+    let reach = origin_reach(&origin);
     ShareOrigin {
-        reachable_remotely: origin_is_remote(&origin),
+        reachable_remotely: reach != ShareReach::Local,
+        reach,
+        configured: is_configured,
         origin,
     }
 }
 
-/// `https://<lan-ip>:<port>` of the network (TLS, 0.0.0.0) listener when the
-/// `network_listener` setting is enabled and this Mac has a non-loopback
-/// primary address. The port is the setting's, else the request Host's (the
-/// listener defaults to the daemon port), else 7700.
-fn lan_listener_origin(setting: Option<&serde_json::Value>, headers: &HeaderMap) -> Option<String> {
-    let setting = setting?;
-    if !setting
-        .get("enabled")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let host_port = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.rsplit_once(':'))
-        .and_then(|(_, p)| p.parse::<u16>().ok());
-    let port = setting
-        .get("port")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|p| u16::try_from(p).ok())
-        .or(host_port)
-        .unwrap_or(7700);
-    let ip = primary_lan_ip()?;
+/// Whether a share link on `o` may be EMAILED: the recipient is almost never on
+/// the owner's network, so only a routable origin — or one the operator
+/// configured as the Public link domain — qualifies (S20-303).
+pub fn emailable(o: &ShareOrigin) -> bool {
+    o.reach == ShareReach::Remote || (o.configured && o.reach != ShareReach::Local)
+}
+
+/// `https://<lan-ip>:<port>` of the network (TLS, 0.0.0.0) listener when it is
+/// ACTUALLY serving — `bound_port` is what `ottod` bound
+/// ([`crate::transport::network_listener_port`]), not the saved setting, which
+/// only applies after a restart and is ignored when TLS setup or the bind
+/// failed (S20-303) — and this Mac has a non-loopback primary address.
+fn lan_listener_origin(bound_port: Option<u16>, ip: Option<std::net::IpAddr>) -> Option<String> {
+    let port = bound_port?;
+    let ip = ip?;
     Some(match ip {
         std::net::IpAddr::V4(v4) => format!("https://{v4}:{port}"),
         std::net::IpAddr::V6(v6) => format!("https://[{v6}]:{port}"),
@@ -311,27 +341,34 @@ pub async fn mint_share(
         .await?
         .and_then(|v| v.as_str().map(str::to_string));
     let host_origin = origin_from_headers(&headers);
-    let lan_origin = if origin_is_remote(&host_origin) {
-        None // the caller already reached us remotely — no need to probe
-    } else {
-        let listener = settings.get("network_listener").await?;
-        lan_listener_origin(listener.as_ref(), &headers)
+    let lan_origin = match crate::transport::network_listener_port() {
+        // The caller already reached us remotely — no need to probe.
+        Some(_) if origin_is_remote(&host_origin) => None,
+        Some(port) => lan_listener_origin(Some(port), primary_lan_ip()),
+        None => None,
     };
+    let resolved = resolve_share_origin(configured, host_origin, lan_origin);
+
+    // An emailed OTP share is useless when its link points at loopback or a
+    // private LAN address: the recipient would get a dead link and a code they
+    // cannot redeem. Refuse BEFORE minting (nothing to revoke) with a fixable
+    // message.
+    if recipient.is_some() && !emailable(&resolved) {
+        let why = if resolved.reach == ShareReach::Lan {
+            "this link only works on this Mac's Wi-Fi network — set a Public link domain \
+             (Settings → Sharing) before emailing a share"
+        } else {
+            "this link would only work on this Mac — set a Public link domain \
+             (Settings → Sharing) before emailing a share"
+        };
+        return Err(ApiError(Error::Conflict(why.into())));
+    }
     let ShareOrigin {
         origin,
         reachable_remotely,
-    } = resolve_share_origin(configured, host_origin, lan_origin);
-
-    // An emailed OTP share is useless when its link points at loopback: the
-    // recipient would get a dead link and a code they cannot redeem. Refuse
-    // BEFORE minting (nothing to revoke) with a fixable message.
-    if recipient.is_some() && !reachable_remotely {
-        return Err(ApiError(Error::Conflict(
-            "this link would only work on this Mac — set a Public link domain \
-             (Settings → Sharing) or turn on the network listener before emailing a share"
-                .into(),
-        )));
-    }
+        reach,
+        ..
+    } = resolved;
 
     let (token, info) = if let Some(recipient) = recipient {
         // Resolve the owner's verified Gmail sender → build the production mailer.
@@ -381,6 +418,7 @@ pub async fn mint_share(
         url,
         info,
         reachable_remotely,
+        reach,
     }))
 }
 
@@ -1028,12 +1066,82 @@ mod tests {
     }
 
     #[test]
-    fn lan_listener_origin_requires_enabled_setting() {
-        let headers = HeaderMap::new();
-        assert_eq!(lan_listener_origin(None, &headers), None);
+    fn lan_listener_origin_requires_a_bound_listener() {
+        let ip: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+        // Setting on but nothing bound (before the restart / failed TLS): no
+        // LAN origin, so the link stays honest about being local (S20-303).
+        assert_eq!(lan_listener_origin(None, Some(ip)), None);
+        assert_eq!(lan_listener_origin(Some(7700), None), None);
         assert_eq!(
-            lan_listener_origin(Some(&serde_json::json!({ "enabled": false })), &headers),
-            None
+            lan_listener_origin(Some(7701), Some(ip)).as_deref(),
+            Some("https://192.168.1.20:7701")
         );
+        let v6: std::net::IpAddr = "fe80::1".parse().unwrap();
+        assert_eq!(
+            lan_listener_origin(Some(7700), Some(v6)).as_deref(),
+            Some("https://[fe80::1]:7700")
+        );
+    }
+
+    #[test]
+    fn origin_reach_separates_lan_from_remote() {
+        for o in [
+            "http://127.0.0.1:7700",
+            "",
+            "http://localhost:7700",
+            "http://[::1]:7700",
+        ] {
+            assert_eq!(origin_reach(o), ShareReach::Local, "{o}");
+        }
+        for o in [
+            "https://192.168.1.20:7700",
+            "https://10.0.0.2:7700",
+            "https://172.16.4.1:7700",
+            "https://169.254.3.3:7700",
+            "https://[fe80::1]:7700",
+            "https://[fd12:3456::1]:7700",
+            "https://my-mac.local:7700",
+        ] {
+            assert_eq!(origin_reach(o), ShareReach::Lan, "{o}");
+        }
+        for o in [
+            "https://otto.example.com",
+            "https://203.0.113.9:7700",
+            "https://[2001:db8::1]",
+        ] {
+            assert_eq!(origin_reach(o), ShareReach::Remote, "{o}");
+        }
+    }
+
+    #[test]
+    fn emailed_shares_refuse_lan_unless_a_domain_is_configured() {
+        // The LAN listener fallback: phone-on-Wi-Fi only → not emailable.
+        let lan = resolve_share_origin(
+            None,
+            "http://127.0.0.1:7700".into(),
+            Some("https://192.168.1.20:7700".into()),
+        );
+        assert_eq!(lan.reach, ShareReach::Lan);
+        assert!(lan.reachable_remotely);
+        assert!(!emailable(&lan));
+        // Loopback: never.
+        let local = resolve_share_origin(None, "http://127.0.0.1:7700".into(), None);
+        assert!(!emailable(&local));
+        // A public domain: yes.
+        let public = resolve_share_origin(
+            Some("https://otto.example.com".into()),
+            "http://127.0.0.1:7700".into(),
+            None,
+        );
+        assert_eq!(public.reach, ShareReach::Remote);
+        assert!(emailable(&public));
+        // An operator-configured private domain is their explicit choice.
+        let configured_lan = resolve_share_origin(
+            Some("https://192.168.1.20:7700".into()),
+            "http://127.0.0.1:7700".into(),
+            None,
+        );
+        assert_eq!(configured_lan.reach, ShareReach::Lan);
+        assert!(emailable(&configured_lan));
     }
 }

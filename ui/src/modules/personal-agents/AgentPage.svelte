@@ -139,7 +139,7 @@
   async function stopRun(r: PersonalAgentRun): Promise<void> {
     const ok = await confirmer.ask(
       'Stop this run? Its agent session is stopped and nothing is delivered. The agent’s schedules keep running.',
-      { title: 'Stop run', confirmLabel: 'Stop run' },
+      { title: 'Stop run', danger: true, confirmLabel: 'Stop run' },
     );
     if (!ok) return;
     try {
@@ -247,7 +247,7 @@
 
   async function deleteSchedule(s: PersonalAgentSchedule): Promise<void> {
     const what = cadenceLabel(s.schedule, s.timezone);
-    if (!(await confirmer.ask(`Delete the schedule “${what}”? Past runs stay in Runs.`, { title: 'Delete schedule', confirmLabel: 'Delete' }))) return;
+    if (!(await confirmer.ask(`Delete the schedule “${what}”? Past runs stay in Runs.`, { title: 'Delete schedule', danger: true, confirmLabel: 'Delete' }))) return;
     try {
       await personalAgents.deleteSchedule(agentId, s.id);
     } catch (e) {
@@ -283,7 +283,7 @@
   async function removeAgent(): Promise<void> {
     if (!agent) return;
     const name = agent.name;
-    if (!(await confirmer.ask(`Delete personal agent “${name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', confirmLabel: 'Delete' }))) return;
+    if (!(await confirmer.ask(`Delete personal agent “${name}”? Its schedules, memory and run history go with it.`, { title: 'Delete personal agent', danger: true, confirmLabel: 'Delete' }))) return;
     try {
       await personalAgents.remove(agentId);
       toasts.success(`Deleted ${name}`);

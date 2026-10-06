@@ -51,7 +51,7 @@ export const SETTINGS_SECTIONS = [
   // ── Integrations ──
   { id: 'git-accounts', label: 'Git accounts', group: 'integrations', keywords: 'github gitlab bitbucket token pr push https credentials' },
   { id: 'jira', label: 'Jira accounts', group: 'integrations', keywords: 'atlassian confluence issues tickets token' },
-  { id: 'channels', label: 'Channels', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
+  { id: 'channels', label: 'Slack, Telegram & webhooks', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
   { id: 'mcp-servers', label: 'MCP servers', group: 'integrations', keywords: 'model context protocol tools workspace' },
   { id: 'language-servers', label: 'Language servers', group: 'integrations', keywords: 'lsp completion gopls rust-analyzer typescript install path' },
   { id: 'sharing', label: 'Sharing', group: 'integrations', keywords: 'email sender share guest one-time code otp gmail smtp email remote' },
@@ -66,10 +66,14 @@ export const SETTINGS_SECTIONS = [
   { id: 'context-library', label: 'Context library', group: 'agents', keywords: 'skills souls snippets library materialize', gate: ADMIN },
   // ── System ──
   { id: 'daemon', label: 'Daemon', group: 'system', keywords: 'ottod server port listener network sandbox isolation sessions restart persist suspend idle timeout', gate: 'root' },
-  { id: 'plugins', label: 'Plugins', group: 'system', keywords: 'custom plugin sidecar install git', gate: ADMIN },
+  // Every /plugin-admin* handler is require_root (plugins.rs) — S17-303.
+  { id: 'plugins', label: 'Plugins', group: 'system', keywords: 'custom plugin sidecar install git', gate: 'root' },
   { id: 'trust-safety', label: 'Trust & safety', group: 'system', keywords: 'security posture audit log trust', gate: 'root' },
   { id: 'logs', label: 'Logs', group: 'system', keywords: 'daemon log files debug errors', gate: 'root' },
-  { id: 'backup', label: 'Backup & restore', group: 'system', keywords: 'export import archive restore transfer connections git backup storage design hall auto-tidy autosave prune', gate: ADMIN },
+  // Every Backup action is root-only server-side: /settings/export|import,
+  // /state/backup|restore|archive* (routes/backup.rs), /state/git/*
+  // (backup_git.rs), /state/connections/export* (connection_export.rs) — S17-303.
+  { id: 'backup', label: 'Backup & restore', group: 'system', keywords: 'export import archive restore transfer connections git backup storage design hall auto-tidy autosave prune', gate: 'root' },
   // ── People ──
   { id: 'users', label: 'Users', group: 'people', keywords: 'accounts members roles workspace permissions', gate: USERS_ADMIN },
   { id: 'access-groups', label: 'Groups & access', group: 'people', keywords: 'groups roles access rules rbac permissions', gate: 'root' },

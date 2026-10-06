@@ -34,6 +34,9 @@
       onclick={() => (rawMode = !rawMode)}
       title="Toggle the engine’s raw EXPLAIN JSON"
     >
+      <!-- An ACTION button: its name says which view a press shows ("Tree" /
+           "Raw JSON"), so it carries no aria-pressed (that would read as
+           "Tree, pressed" while the raw view is open). -->
       <Icon name="grid" size={12} />{rawMode ? 'Tree' : 'Raw JSON'}
     </button>
     <button class="plan-close" onclick={onclose} aria-label="Close plan" title="Close plan"><Icon name="x" size={13} /></button>

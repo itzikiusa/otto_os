@@ -818,6 +818,7 @@
         <button
           class="needs-you-filter"
           class:active={ws.needsYouFilter}
+          aria-pressed={ws.needsYouFilter}
           onclick={() => (ws.needsYouFilter = !ws.needsYouFilter)}
           title="Show only sessions waiting on you"
         >

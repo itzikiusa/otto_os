@@ -490,7 +490,7 @@
     const id = pollRunId;
     if (!id || stoppingRun) return;
     const ok = await confirmer.ask('Stop generating this insights report? The agent session is ended; nothing already published is removed.', {
-      title: 'Stop insights run', confirmLabel: 'Stop run',
+      title: 'Stop insights run', danger: true, confirmLabel: 'Stop run',
     });
     if (!ok) return;
     stoppingRun = true;

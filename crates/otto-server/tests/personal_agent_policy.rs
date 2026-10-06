@@ -287,7 +287,13 @@ async fn agent_credentials_are_confined_on_files_and_root_routes() {
         assert_eq!(st, 403, "agent token must not read host files: {body}");
         let (st, _) = d.send("GET", token, "/fs/browse?path=/tmp", None).await;
         assert_eq!(st, 403);
+        let (st, _) = d.send("GET", token, "/fs/stat?path=/tmp", None).await;
+        assert_eq!(st, 403, "agent token must not stat host paths");
     }
+    // The person's token stats a folder without listing it (S14-306).
+    let (st, body) = d.send("GET", &d.human, "/fs/stat?path=/tmp", None).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["is_dir"], true);
 
     // The language server reads a whole host directory: agents are refused.
     let root = d._tmp.path().display().to_string();

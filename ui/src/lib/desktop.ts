@@ -38,6 +38,27 @@ export const isPopout: boolean =
 export const isEmbedded: boolean =
   isNativePane || (typeof window !== 'undefined' && window.parent !== window && isEmbedSearch(window.location.search));
 
+/** Close THIS pop-out window (S13-306). ⌘W only closes a session tab while
+ *  the Agents page shows; in a pop-out of Git / Vault / any other module it
+ *  was a silent no-op, so the standard macOS ⌘W closed nothing. Resolves
+ *  whether a close was attempted — never the main window, never a pane. */
+export async function closePopoutWindow(): Promise<boolean> {
+  if (!isPopout || isEmbedded) return false;
+  try {
+    if (isTauri) {
+      const mod = await import('@tauri-apps/api/window');
+      await mod.getCurrentWindow().close();
+    } else {
+      window.close(); // a script-opened `?popout=1` browser window
+    }
+    return true;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[popout] close failed:', err);
+    return false;
+  }
+}
+
 /** Title the shell gave this pop-out (falls back to the document title). */
 export function popoutTitle(): string {
   const t = (window as { __OTTO_POPOUT__?: PopoutInit }).__OTTO_POPOUT__?.title;

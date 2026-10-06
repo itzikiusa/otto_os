@@ -11,7 +11,8 @@ they ran unscaled under full CI contention, the exact flake the `timing`
 group exists to stop. Write overrides as `(A) | (B) | ...` with each
 disjunct naming real tests so this guard can check every one.
 
-Run after the workspace tests are built (CI: right after `cargo nextest run`)
+Also run by scripts/check.sh when `.config/nextest.toml` changed. Run after
+the workspace tests are built (CI: right after `cargo nextest run`)
 so listing only re-runs `--list` on the existing binaries.
 
     scripts/check-nextest-filters.py              # list + check every disjunct
@@ -54,6 +55,24 @@ def split_top_level_or(expr: str) -> list[str]:
         prev = ch
     parts.append("".join(cur))
     return [" ".join(p.split()) for p in parts if p.strip()]
+
+
+def regexes(disjunct: str) -> list[str]:
+    """The `/regex/` literals inside one filterset disjunct."""
+    out: list[str] = []
+    cur: list[str] | None = None
+    prev = ""
+    for ch in disjunct:
+        if ch == "/" and prev != "\\":
+            if cur is None:
+                cur = []
+            else:
+                out.append("".join(cur))
+                cur = None
+        elif cur is not None:
+            cur.append(ch)
+        prev = ch
+    return out
 
 
 def override_filters(config: dict) -> list[tuple[str, str]]:
@@ -102,6 +121,17 @@ def main(argv: list[str]) -> int:
         for profile, d in disjuncts:
             print(f"[{profile}] {d}")
         return 0
+    # Build/list the workspace ONCE up front: when the tests don't compile
+    # (the nextest step already failed on that), every per-disjunct
+    # `cargo nextest list` would retry the failed build — minutes of noise.
+    pre = subprocess.run(
+        ["cargo", "nextest", "list", "--workspace", "--message-format", "json"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+    )
+    if pre.returncode != 0:
+        print("::error::cargo nextest list failed (tests do not build) — fix the build first")
+        return 1
     orphaned = []
     for profile, d in disjuncts:
         n = list_matches(d)

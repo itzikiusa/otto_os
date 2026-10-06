@@ -678,7 +678,7 @@
   async function deleteSnip(): Promise<void> {
     const ok = await confirmer.ask('Delete this snip and its annotations? This can’t be undone.', {
       title: 'Delete snip',
-      confirmLabel: 'Delete snip',
+      danger: true, confirmLabel: 'Delete snip',
     });
     if (!ok) return;
     try {

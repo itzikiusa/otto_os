@@ -178,7 +178,7 @@
     if (
       !(await confirmer.ask(`Remove “${s.name}” from your library and from each agent CLI’s skills folder? You can install it again from this page.`, {
         title: 'Remove skill',
-        confirmLabel: 'Remove',
+        danger: true, confirmLabel: 'Remove',
       }))
     )
       return;

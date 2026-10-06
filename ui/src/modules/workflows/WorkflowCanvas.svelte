@@ -578,7 +578,7 @@
     cursor: inherit;
   }
   .node-main:focus-visible {
-    outline: 2px solid var(--accent-solid);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   .head {
@@ -767,7 +767,7 @@
     background: var(--accent);
   }
   button.port.out:focus-visible {
-    outline: 2px solid var(--accent-solid);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
     background: var(--accent);
   }

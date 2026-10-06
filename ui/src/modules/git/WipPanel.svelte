@@ -15,8 +15,10 @@
     DiscardReq,
     DraftCommitMessageResp,
     FileChange,
+    HeadRemotesResp,
     RepoStatusResp,
   } from '../../lib/api/types';
+  import { amendPublishedAt } from './refTracking';
   import { toasts } from '../../lib/toast.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
@@ -586,9 +588,28 @@
       })
       .catch(() => {});
   });
-  /** HEAD is already on the upstream: amending rewrites a pushed commit, and
-   *  the next push needs a force (with lease). Said BEFORE the user commits. */
-  const amendRewritesPushed = $derived(amend && status.upstream != null && status.ahead === 0);
+  // Which remote refs already hold HEAD — asked only while Amend is ticked
+  // (a `--contains` walk is too costly per status poll), and again when HEAD
+  // may have moved (branch / ahead count change). null = unknown.
+  let headRemotes = $state.raw<string[] | null>(null);
+  $effect(() => {
+    if (!amend) return;
+    const id = repoId;
+    void status.branch;
+    void status.ahead;
+    headRemotes = null;
+    let live = true;
+    void api
+      .get<HeadRemotesResp>(`/repos/${id}/head/remotes`)
+      .then((r) => {
+        if (live && id === repoId) headRemotes = r.remotes;
+      })
+      .catch(() => {});
+    return () => { live = false; };
+  });
+  /** HEAD is already published: amending rewrites a pushed commit, and the
+   *  next push needs a force (with lease). Said BEFORE the user commits. */
+  const amendPublished = $derived(amend ? amendPublishedAt(status.upstream, status.ahead, headRemotes) : null);
 
   const canCommit = $derived(
     !committing && !drafting && (subject.trim() !== '' || amend) && (staged.length > 0 || amend),
@@ -1045,10 +1066,10 @@
       spellcheck="false"
       onkeydown={commitKey}
     ></textarea>
-    {#if amendRewritesPushed}
+    {#if amendPublished}
       <div class="amend-warn" role="note">
         <Icon name="warning" size={12} />
-        <span>This commit is already on {status.upstream}. Amending rewrites it — the next push will need a force push with lease.</span>
+        <span>This commit is already on {amendPublished}. Amending rewrites it — the next push will need a force push with lease.</span>
       </div>
     {/if}
     <div class="row">

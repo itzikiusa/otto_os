@@ -106,14 +106,14 @@
   async function chooseGroup(group?: AccessGroup) {
     if (group?.id === selected?.id && group) return;
     const dirty = selected ? groupDirty : !!(name.trim() || description.trim());
-    if (dirty && !(await confirmer.ask('Switching groups discards your unsaved changes.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
+    if (dirty && !(await confirmer.ask('Switching groups discards your unsaved changes.', { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
     if (group) await selectGroup(group);
     else newGroup();
   }
   async function chooseRole(role?: AccessRole) {
     if (role?.id === roleId) return;
     const dirty = savedRole ? roleDirty : !!(roleName.trim() || roleDescription.trim() || operations.length);
-    if (dirty && !(await confirmer.ask('Switching presets discards your unsaved changes.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
+    if (dirty && !(await confirmer.ask('Switching presets discards your unsaved changes.', { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
     editRole(role);
   }
   async function selectGroup(group: AccessGroup) {
@@ -185,7 +185,7 @@
       !add &&
       !(await confirmer.ask(
         `Remove ${users.find((u) => u.id === userId)?.display_name ?? 'this member'} from ${g.name}? Both Allow and Deny rules from this group stop applying to them.`,
-        { title: 'Remove group member', confirmLabel: 'Remove member' },
+        { title: 'Remove group member', danger: true, confirmLabel: 'Remove member' },
       ))
     )
       return;
