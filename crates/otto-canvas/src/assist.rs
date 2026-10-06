@@ -144,7 +144,7 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
     // One assist turn per scene at a time (S4-20): two tabs' turns would paste
     // into the same resumed PTY (or mint two sessions while `session_id` is
     // still unset) and race to commit. Released on drop, incl. a dropped request.
-    let _busy = SceneBusy::claim(&scene.id).ok_or_else(|| {
+    let busy = SceneBusy::claim(&scene.id).ok_or_else(|| {
         ApiError(Error::Conflict(
             "an Ask AI turn is already running on this canvas".into(),
         ))
@@ -202,6 +202,22 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
     let (raw, sid) = turn?;
     if scene.session_id.is_none() {
         let _ = ctx.canvas_repo().set_session(&scene.id, &sid).await;
+    }
+    if busy.stopped() {
+        // Stopped (S4-20): commit nothing. Put the backing file back to the
+        // pre-turn view (a resumed session must not build on the half-written
+        // one) and re-broadcast the pre-turn doc over the live previews.
+        let _ = tokio::fs::write(&file_path, &agent_view).await;
+        let _ = ctx.events().send(Event::CanvasUpdated {
+            workspace_id: scene.workspace_id.clone(),
+            scene_id: scene.id.clone(),
+            doc: doc.clone(),
+        });
+        return Ok(Json(result_for(
+            &format,
+            &current,
+            "Stopped — the board was left as it was before this turn.".to_string(),
+        )));
     }
 
     // The committed source = the edited file, or the reply's block as a fallback.
@@ -377,30 +393,82 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Scenes with an assist turn in flight (S4-20).
-fn busy_scenes() -> &'static std::sync::Mutex<std::collections::HashSet<Id>> {
-    static BUSY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Id>>> =
-        std::sync::OnceLock::new();
+/// Scenes with an assist turn in flight (S4-20) → that turn's stop flag.
+type BusyScenes = std::collections::HashMap<Id, Arc<std::sync::atomic::AtomicBool>>;
+
+fn busy_scenes() -> &'static std::sync::Mutex<BusyScenes> {
+    static BUSY: std::sync::OnceLock<std::sync::Mutex<BusyScenes>> = std::sync::OnceLock::new();
     BUSY.get_or_init(Default::default)
 }
 
-/// A claimed per-scene assist slot; released on drop.
-struct SceneBusy(Id);
+/// A claimed per-scene assist slot (with the turn's stop flag); released on drop.
+struct SceneBusy {
+    scene: Id,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl SceneBusy {
     fn claim(scene: &Id) -> Option<Self> {
-        busy_scenes()
-            .lock()
-            .unwrap()
-            .insert(scene.clone())
-            .then(|| Self(scene.clone()))
+        let mut busy = busy_scenes().lock().unwrap();
+        if busy.contains_key(scene) {
+            return None;
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        busy.insert(scene.clone(), Arc::clone(&stop));
+        Some(Self {
+            scene: scene.clone(),
+            stop,
+        })
+    }
+
+    /// True once [`request_stop`] flagged this turn.
+    fn stopped(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
 impl Drop for SceneBusy {
     fn drop(&mut self) {
-        busy_scenes().lock().unwrap().remove(&self.0);
+        let mut busy = busy_scenes().lock().unwrap();
+        // Only our own entry (a later turn may hold the slot by now).
+        if busy.get(&self.scene).is_some_and(|f| Arc::ptr_eq(f, &self.stop)) {
+            busy.remove(&self.scene);
+        }
     }
+}
+
+/// Flag the scene's in-flight assist turn as stopped. Returns false when no
+/// turn is running.
+fn request_stop(scene: &Id) -> bool {
+    match busy_scenes().lock().unwrap().get(scene) {
+        Some(flag) => {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            true
+        }
+        None => false,
+    }
+}
+
+/// `POST /canvas/scenes/{id}/assist/stop` — mark the scene's running Ask AI
+/// turn as stopped (S4-20). The UI interrupts the agent's PTY separately
+/// (Esc keeps the session resumable); when the turn then settles, a stopped
+/// turn commits NOTHING — the board, its backing file and every viewer are
+/// restored to the pre-turn document instead of a half-written diagram.
+/// `{ stopping: false }` when no turn is running.
+pub async fn stop_assist<C: CanvasAssistCtx>(
+    Path(id): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    let scene = ctx
+        .canvas_repo()
+        .get(&id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("canvas scene {id}"))))?;
+    crate::assist_ctx::require_ws_role(&ctx, &user, &scene.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    Ok(Json(serde_json::json!({ "stopping": request_stop(&scene.id) })))
 }
 
 /// Throwaway-preview teardown (S4-11): kill the session (once `on_ready` saw
@@ -1066,6 +1134,22 @@ mod tests {
         );
         drop(a);
         assert!(SceneBusy::claim(&id).is_some(), "released on drop");
+    }
+
+    /// S4-20: Stop flags only the scene's in-flight turn; a scene with no
+    /// turn reports `false`, and a later turn starts unflagged.
+    #[test]
+    fn stop_flags_only_the_running_turn() {
+        let id: Id = "scene-stop-test".into();
+        assert!(!request_stop(&id), "nothing running");
+        let turn = SceneBusy::claim(&id).expect("claim");
+        assert!(!turn.stopped());
+        assert!(request_stop(&id));
+        assert!(turn.stopped(), "the running turn sees the stop");
+        assert!(!request_stop(&"other-scene".into()));
+        drop(turn);
+        let next = SceneBusy::claim(&id).expect("re-claim");
+        assert!(!next.stopped(), "a new turn starts unflagged");
     }
 
     /// S4-12: dropping the guard aborts the poller (a bare JoinHandle drop

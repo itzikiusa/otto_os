@@ -519,3 +519,46 @@ async fn stop_story_agents_kills_rewrite_test_and_plan_sessions() {
     let s = sessions.get(&kept.id).await.unwrap();
     assert_ne!(s.status, otto_core::domain::SessionStatus::Exited);
 }
+
+/// S4-20 / S4-26: the canvas Ask-AI stop route is workspace-scoped (a
+/// non-member gets nothing), and with no turn running it reports
+/// `stopping: false` without side effects.
+#[tokio::test]
+async fn canvas_assist_stop_is_scoped_and_idempotent() {
+    let w = world().await;
+    let app = Router::new()
+        .route(
+            "/canvas/scenes/{id}/assist/stop",
+            post(otto_canvas::assist::stop_assist::<ServerCtx>),
+        )
+        .with_state(w.ctx.clone());
+    let ws_b = w
+        .ctx
+        .swarm_repo
+        .get_swarm(&w.swarm_b)
+        .await
+        .unwrap()
+        .workspace_id;
+    let mk = |ws: &str| otto_state::NewScene {
+        workspace_id: ws.to_string(),
+        story_id: None,
+        title: "board".into(),
+        doc_json: "{}".into(),
+        provider: "claude".into(),
+        section: None,
+        created_by: w.alice.id.clone(),
+    };
+    let own = w.ctx.canvas_repo.create(mk(&w.ws_a)).await.unwrap();
+    let foreign = w.ctx.canvas_repo.create(mk(&ws_b)).await.unwrap();
+
+    let uri = format!("/canvas/scenes/{}/assist/stop", foreign.id);
+    let (st, _) = call(&app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert!(
+        st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND,
+        "foreign scene: {st}"
+    );
+    let uri = format!("/canvas/scenes/{}/assist/stop", own.id);
+    let (st, body) = call(&app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["stopping"], false, "no turn is running");
+}

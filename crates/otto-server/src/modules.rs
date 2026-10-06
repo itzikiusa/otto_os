@@ -1059,6 +1059,10 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             post(otto_canvas::assist::assist_scene::<ServerCtx>),
         )
         .route(
+            "/canvas/scenes/{id}/assist/stop",
+            post(otto_canvas::assist::stop_assist::<ServerCtx>),
+        )
+        .route(
             "/canvas/assist/preview",
             post(otto_canvas::assist::assist_preview::<ServerCtx>),
         )
