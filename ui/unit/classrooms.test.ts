@@ -392,3 +392,11 @@ test('the box wires kick-out to ws.killSession and detention to the guarded ws.r
   // Destructive rows only for students the caller can manage.
   assert.match(src, /s\.canManage\s*\n?\s*\?/);
 });
+
+test('a kicked row is held in the model until its walk-out finishes (S14-304)', () => {
+  const src = readFileSync(join(import.meta.dirname, '..', 'src/modules/home/boxes/ClassroomsBox.svelte'), 'utf8');
+  // The held rows join the merged list unless a fresher source still has them…
+  assert.match(src, /for \(const \[id, row\] of walking\) if \(!m\.has\(id\)\) m\.set\(id, row\);\s*for \(const id of removed\) m\.delete\(id\);/);
+  // …and are released only when the scene's walk-out promise settles.
+  assert.match(src, /walking = new Map\(\[\.\.\.walking, \[id, row\]\]\);\s*return handle\.kickOut\(id\)\.finally\(/);
+});

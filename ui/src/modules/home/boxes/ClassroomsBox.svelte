@@ -62,6 +62,11 @@
   let error = $state('');
   /** Kicked out here: hidden at once, before the next refetch confirms it. */
   let removed = $state.raw<Set<string>>(new Set());
+  /** Rows whose walk-out is playing, held in the model until it finishes
+   *  (S14-304): the delete's `session_removed` refetch lands ~350 ms into the
+   *  1.4 s walk, and a student the model drops is settled — vanished — at
+   *  once, so the walk-out almost never completed. */
+  let walking = $state.raw<Map<string, Session>>(new Map());
 
   async function load(signal?: AbortSignal): Promise<boolean> {
     try {
@@ -98,6 +103,7 @@
     // The store's rows are event-patched (titles, archive state) — fresher.
     for (const s of ws.sessions) m.set(s.id, s);
     for (const s of ws.otherWsSessions) m.set(s.id, s);
+    for (const [id, row] of walking) if (!m.has(id)) m.set(id, row);
     for (const id of removed) m.delete(id);
     return [...m.values()];
   });
@@ -389,7 +395,16 @@
     const gone = await kickOut(s, {
       ask: (message, opts) => confirmer.ask(message, opts),
       kill: (id) => ws.killSession(id),
-      animate: (id) => handle?.kickOut(id) ?? Promise.resolve(),
+      animate: (id) => {
+        const row = sessions.find((x) => x.id === id);
+        if (!handle || !row) return Promise.resolve();
+        walking = new Map([...walking, [id, row]]);
+        return handle.kickOut(id).finally(() => {
+          const next = new Map(walking);
+          next.delete(id);
+          walking = next;
+        });
+      },
       restore: (id) => handle?.restore(id),
       done: (title, body) => toasts.success(title, body),
       failed: (title, e) => toastError(title, e),
