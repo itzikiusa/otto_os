@@ -180,6 +180,12 @@ for p in json.load(sys.stdin)["packages"]:
   fi
 fi
 
+# God-module LOC ratchet (CI: Rust job) — cheap, so whenever Rust changed.
+if [ -n "$RUST_CHANGED" ]; then
+  step "rust LOC ratchet"
+  run python3 scripts/loc-ratchet.py
+fi
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 if [ "$UI" = 1 ] && [ "$UI_CHANGED" = 1 ]; then
   step "ui: npm run check + test:unit + build + bundle budget"

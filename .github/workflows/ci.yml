@@ -80,6 +80,11 @@ jobs:
       - name: macOS workflow covers every crate with macOS-only code
         run: python3 scripts/macos-ci-crates.py --check
 
+      # God-module LOC ratchet (scripts/loc-baseline.json): tracked files and
+      # otto-server's total may only shrink; a new >=4000-line file fails.
+      - name: Rust LOC ratchet
+        run: python3 scripts/loc-ratchet.py
+
       # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.2
@@ -234,6 +239,10 @@ jobs:
       - name: Test the macOS crate-coverage guard
         working-directory: .
         run: python3 -B -m unittest discover -s scripts -p 'test_macos_ci_crates.py'
+
+      - name: Test the Rust LOC ratchet
+        working-directory: .
+        run: python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
