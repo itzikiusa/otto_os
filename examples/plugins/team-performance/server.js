@@ -1221,9 +1221,12 @@ async function loadScopeRaw(account, projectsParam) {
   // otherwise poison baselines with non-engineering work).
   const visible = records.filter((r) => !r.assignee_id || included(r.assignee_id));
   const matcher = A.makeAuthorMatcher(Object.fromEntries(Object.entries(flat).filter(([, p]) => p.included !== false)));
+  // "Is this git author known?" uses EVERY registry person (excluded ones too):
+  // an excluded person's mapped commits are known, just not credited.
+  const knownMatcher = A.makeAuthorMatcher(flat);
   return {
     account, projects, all_projects: all, config, scanned, capped, target_used: targetUsed,
-    records: visible, all_records: records, estimates, people: reg.people, flat_people: flat, canonical, matcher,
+    records: visible, all_records: records, estimates, people: reg.people, flat_people: flat, canonical, matcher, knownMatcher,
     epic_estimates: ep,
     side: {
       tags: featSide.deploy_tags || [], target_ref_age_days: featSide.target_ref_age_days || {}, prs: allPrs, git_at: featSide.scanned_at || null,
@@ -1257,7 +1260,7 @@ const nowStats = (scope, sinceMs = 0, untilMs = 0) => {
 
 /** Unmatched git authors for a record set (memoized per scope for the full set). */
 function unmatchedOf(scope, records = scope.records, tag = 'team') {
-  return scopeMemo(scope, `unmatched:${tag}`, () => A.unmatchedAuthors(records, scope.matcher));
+  return scopeMemo(scope, `unmatched:${tag}`, () => A.unmatchedAuthors(records, scope.knownMatcher || scope.matcher));
 }
 
 /**
@@ -1749,7 +1752,7 @@ async function overview(account, projectsParam, sinceMs = 0) {
     baseline: base.buckets.filter((b) => b.n >= 2),
     flags,
     routine: routineTotals,
-    unmatched_authors: A.unmatchedAuthors(records, scope.matcher).slice(0, 12),
+    unmatched_authors: A.unmatchedAuthors(records, scope.knownMatcher || scope.matcher).slice(0, 12),
     roles: config.roles,
     since: sinceMs || null,
     open_tasks: open
@@ -2692,7 +2695,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/people' && req.method === 'GET') {
       const reg = loadPeople();
       const scope = await loadScope(q.get('account') || '', '*');
-      const unmatched = scope ? A.unmatchedAuthors(scope.all_records, scope.matcher).slice(0, 30) : [];
+      const unmatched = scope ? A.unmatchedAuthors(scope.all_records, scope.knownMatcher || scope.matcher).slice(0, 30) : [];
       return send(res, 200, { people: reg.people, unmatched_authors: unmatched, roles: loadConfig().roles });
     }
     if (u.pathname === '/people' && req.method === 'PUT') {
