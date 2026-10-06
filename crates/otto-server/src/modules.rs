@@ -605,6 +605,11 @@ impl otto_product::ProductCtx for ServerCtx {
         story_id: &'a Id,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            // Rewrite / test-generation / plan sessions have no agent row:
+            // trip their story-keyed cancel flags (so recovery does not
+            // respawn) and kill every live session attributed to the story.
+            // (Killed last, after the analysis agents' flags are tripped too.)
+            otto_product::run::signal_story_cancels(&self.product_agent_cancels, story_id);
             let analyses = self
                 .product_repo
                 .list_analyses(story_id)
@@ -624,6 +629,16 @@ impl otto_product::ProductCtx for ServerCtx {
                     if let Some(sid) = ag.session_id.as_ref() {
                         let _ = self.manager.kill_session(sid).await;
                     }
+                }
+            }
+            if let Ok(story) = self.product_repo.get_story(story_id).await {
+                let live = self
+                    .manager
+                    .list_live_by_meta(&story.workspace_id, None, "work.story_id", story_id)
+                    .await
+                    .unwrap_or_default();
+                for s in live {
+                    let _ = self.manager.kill_session(&s.id).await;
                 }
             }
         })
@@ -676,6 +691,9 @@ impl otto_canvas::CanvasAssistCtx for ServerCtx {
     }
     fn ensure_trusted(&self, provider: &str, cwd: &str) {
         otto_sessions::trust::ensure_trusted(provider, cwd);
+    }
+    fn ensure_trusted_scratch(&self, provider: &str, root: &std::path::Path, cwd: &str) {
+        otto_sessions::trust::ensure_trusted_scratch(provider, root, cwd);
     }
     async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
         &self,
@@ -1039,6 +1057,10 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         .route(
             "/canvas/scenes/{id}/assist",
             post(otto_canvas::assist::assist_scene::<ServerCtx>),
+        )
+        .route(
+            "/canvas/scenes/{id}/assist/stop",
+            post(otto_canvas::assist::stop_assist::<ServerCtx>),
         )
         .route(
             "/canvas/assist/preview",

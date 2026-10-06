@@ -396,3 +396,234 @@ async fn stop_analysis_agent_refuses_a_foreign_agent() {
     let still = pr.get_analysis_agent(&agent_b.id).await.unwrap();
     assert_eq!(still.status, "running", "foreign agent untouched");
 }
+
+/// S4-301: an agent that ran in worktree mode before S4-08 owns the legacy
+/// branch `swarm/<s8>/<a8>`. The per-(agent, project) branch must not nest
+/// under it (git refs are paths: "cannot lock ref"), or every pre-existing
+/// worktree agent silently falls back to a scratch dir outside the repo.
+#[tokio::test]
+async fn worktree_survives_a_legacy_agent_branch() {
+    let w = world().await;
+    let repo_dir = tempfile::TempDir::new().unwrap();
+    let repo = repo_dir.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init", "-q", "-b", "main"]) {
+        return; // no git on PATH — nothing to assert
+    }
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    assert!(git(&["add", "."]));
+    assert!(git(&["commit", "-q", "-m", "init"]));
+    let short = |id: &str| id[id.len() - id.len().min(8)..].to_string();
+    let legacy = format!("swarm/{}/{}", short(&w.swarm_a), short(&w.agent_a));
+    assert!(git(&["branch", &legacy]), "create the legacy agent branch");
+
+    let repo_path = repo.to_string_lossy().to_string();
+    w.ctx
+        .swarm_repo
+        .update_project(
+            &w.project_a,
+            otto_state::ProjectPatch {
+                repo_path: Some(Some(repo_path.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let swarm = w.ctx.swarm_repo.get_swarm(&w.swarm_a).await.unwrap();
+    let agent = w.ctx.swarm_repo.get_agent(&w.agent_a).await.unwrap();
+    let project = w.ctx.swarm_repo.get_project(&w.project_a).await.unwrap();
+    let info = otto_swarm::runtime::workspace::ensure_cwd_info(
+        &w.ctx.swarm_rt(),
+        &swarm,
+        &agent,
+        Some(&project),
+    )
+    .await
+    .unwrap();
+    assert_eq!(info.mode, "worktree", "fell back to scratch: {info:?}");
+    let branch = info.branch.expect("agent branch");
+    assert!(!branch.starts_with(&format!("{legacy}/")), "{branch}");
+    assert!(std::path::Path::new(&info.path).join("README.md").exists());
+    // The legacy branch (and any unmerged work on it) is left in place.
+    assert!(git(&["rev-parse", "--verify", "-q", &legacy]));
+}
+
+/// S4-23: deleting a story stops its rewrite / test / plan runs too — their
+/// story-keyed cancel flags are tripped (no recovery respawn) and every live
+/// session attributed to the story is killed; another story's are untouched.
+#[tokio::test]
+async fn stop_story_agents_kills_rewrite_test_and_plan_sessions() {
+    use otto_product::ProductCtx;
+    let w = world().await;
+    let mk_story = || otto_state::NewStory {
+        workspace_id: w.ws_a.clone(),
+        source_kind: "draft".into(),
+        account_id: String::new(),
+        source_key: otto_core::new_id(),
+        title: "s".into(),
+        url: String::new(),
+        issue_type: None,
+        stage: "draft".into(),
+        cwd: None,
+        parent_id: None,
+        tree_kind: "story".into(),
+        folder: String::new(),
+        created_by: w.alice.id.clone(),
+    };
+    let pr = &w.ctx.product_repo;
+    let doomed = pr.create_story(mk_story()).await.unwrap();
+    let other = pr.create_story(mk_story()).await.unwrap();
+    let sessions = otto_state::SessionsRepo::new(w.ctx.pool.clone());
+    let mk_session = |sid: &str| otto_state::NewSession {
+        workspace_id: w.ws_a.clone(),
+        kind: otto_core::domain::SessionKind::Agent,
+        provider: "claude".into(),
+        title: "Product: rewrite".into(),
+        cwd: "/tmp".into(),
+        provider_session_id: None,
+        connection_id: None,
+        created_by: w.alice.id.clone(),
+        meta: json!({ "work": { "story_id": sid, "origin": "product" } }),
+    };
+    let rewrite = sessions.create(mk_session(&doomed.id)).await.unwrap();
+    let kept = sessions.create(mk_session(&other.id)).await.unwrap();
+    // An in-flight rewrite run's flag (registered the way product_host does).
+    let key = otto_product::run::story_run_cancel_key(&doomed.id);
+    let other_key = otto_product::run::story_run_cancel_key(&other.id);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let other_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut reg = w.ctx.product_agent_cancels.lock().unwrap();
+        reg.insert(key, flag.clone());
+        reg.insert(other_key, other_flag.clone());
+    }
+
+    w.ctx.stop_story_agents(&doomed.id).await;
+
+    use std::sync::atomic::Ordering;
+    assert!(flag.load(Ordering::SeqCst), "the story's run is cancelled");
+    assert!(
+        !other_flag.load(Ordering::SeqCst),
+        "another story's run is not"
+    );
+    let s = sessions.get(&rewrite.id).await.unwrap();
+    assert_eq!(s.status, otto_core::domain::SessionStatus::Exited);
+    let s = sessions.get(&kept.id).await.unwrap();
+    assert_ne!(s.status, otto_core::domain::SessionStatus::Exited);
+}
+
+/// S4-20 / S4-26: the canvas Ask-AI stop route is workspace-scoped (a
+/// non-member gets nothing), and with no turn running it reports
+/// `stopping: false` without side effects.
+#[tokio::test]
+async fn canvas_assist_stop_is_scoped_and_idempotent() {
+    let w = world().await;
+    let app = Router::new()
+        .route(
+            "/canvas/scenes/{id}/assist/stop",
+            post(otto_canvas::assist::stop_assist::<ServerCtx>),
+        )
+        .with_state(w.ctx.clone());
+    let ws_b = w
+        .ctx
+        .swarm_repo
+        .get_swarm(&w.swarm_b)
+        .await
+        .unwrap()
+        .workspace_id;
+    let mk = |ws: &str| otto_state::NewScene {
+        workspace_id: ws.to_string(),
+        story_id: None,
+        title: "board".into(),
+        doc_json: "{}".into(),
+        provider: "claude".into(),
+        section: None,
+        created_by: w.alice.id.clone(),
+    };
+    let own = w.ctx.canvas_repo.create(mk(&w.ws_a)).await.unwrap();
+    let foreign = w.ctx.canvas_repo.create(mk(&ws_b)).await.unwrap();
+
+    let uri = format!("/canvas/scenes/{}/assist/stop", foreign.id);
+    let (st, _) = call(&app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert!(
+        st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND,
+        "foreign scene: {st}"
+    );
+    let uri = format!("/canvas/scenes/{}/assist/stop", own.id);
+    let (st, body) = call(&app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["stopping"], false, "no turn is running");
+}
+
+/// S4-10 / S4-26: the boot reaper finalizes an analysis orphaned `running`
+/// by a restart as `partial` (else the story answers 409 forever), and leaves
+/// finished analyses alone.
+#[tokio::test]
+async fn boot_reaper_finalizes_a_running_analysis() {
+    let w = world().await;
+    let pr = &w.ctx.product_repo;
+    let story = pr
+        .create_story(otto_state::NewStory {
+            workspace_id: w.ws_a.clone(),
+            source_kind: "draft".into(),
+            account_id: String::new(),
+            source_key: otto_core::new_id(),
+            title: "s".into(),
+            url: String::new(),
+            issue_type: None,
+            stage: "draft".into(),
+            cwd: None,
+            parent_id: None,
+            tree_kind: "story".into(),
+            folder: String::new(),
+            created_by: w.alice.id.clone(),
+        })
+        .await
+        .unwrap();
+    let mk = |status: &str| otto_state::NewAnalysis {
+        story_id: story.id.clone(),
+        source_version_id: None,
+        status: status.into(),
+        created_by: w.alice.id.clone(),
+    };
+    let orphan = pr.create_analysis(mk("running")).await.unwrap();
+    let done = pr.create_analysis(mk("done")).await.unwrap();
+
+    // While it is `running`, Analyze answers 409 and spawns nothing (S4-15).
+    let app = Router::new()
+        .route(
+            "/workspaces/{ws}/product/stories/{sid}/analyze",
+            post(otto_product::analysis::analyze::<ServerCtx>),
+        )
+        .with_state(w.ctx.clone());
+    let uri = format!(
+        "/workspaces/{}/product/stories/{}/analyze",
+        w.ws_a, story.id
+    );
+    let (st, body) = call(&app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        pr.list_analyses(&story.id).await.unwrap().len(),
+        2,
+        "no new row"
+    );
+
+    otto_product::run::reap_orphaned_agents_on_startup(w.ctx.clone()).await;
+
+    let o = pr.get_analysis(&orphan.id).await.unwrap();
+    assert_eq!(o.status, "partial");
+    assert_eq!(o.summary, otto_product::run::INTERRUPTED_SUMMARY);
+    assert!(o.finished_at.is_some());
+    assert_eq!(pr.get_analysis(&done.id).await.unwrap().status, "done");
+}

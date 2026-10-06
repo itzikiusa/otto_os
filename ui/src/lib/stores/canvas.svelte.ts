@@ -358,6 +358,15 @@ class CanvasStore {
     }
     return api.post<AssistResult>(`/canvas/assist/preview`, body);
   }
+
+  /** Mark the open scene's running Ask AI turn as stopped (S4-20) so it
+   *  commits nothing when it settles — the board stays as it was before the
+   *  turn. Pair with an Esc interrupt of the agent's PTY. */
+  async stopAssist(): Promise<boolean> {
+    if (!this.currentId) return false;
+    const r = await api.post<{ stopping: boolean }>(`/canvas/scenes/${this.currentId}/assist/stop`, {});
+    return r.stopping;
+  }
 }
 
 export const canvas = new CanvasStore();

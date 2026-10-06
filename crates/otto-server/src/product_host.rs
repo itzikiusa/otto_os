@@ -341,7 +341,16 @@ async fn run_agent_with_recovery(
     appearance: &SessionAppearance,
     on_session: Option<&(dyn Fn(&Id) + Send + Sync)>,
 ) -> LensRunResult {
-    let cancel_key = agent_id.map(|a| a.to_string());
+    // No agent row (rewrite / tests / plan): key the flag by the story the
+    // run is attributed to, so deleting the story stops it (S4-23).
+    let cancel_key = match agent_id {
+        Some(a) => Some(a.to_string()),
+        None => work
+            .as_ref()
+            .and_then(|w| w.get("story_id"))
+            .and_then(|v| v.as_str())
+            .map(otto_product::run::story_run_cancel_key),
+    };
     let cancel = cancel_key
         .as_deref()
         .map(|key| register_cancel(&ctx.product_agent_cancels, key));
