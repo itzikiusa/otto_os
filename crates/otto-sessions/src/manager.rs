@@ -3495,6 +3495,14 @@ impl SessionManager {
         self.live.contains_key(id)
     }
 
+    /// True when `id`'s live PTY runs in a PTY holder (it is detached, not
+    /// killed, by [`Self::shutdown_for_restart`] — when persistence is on).
+    pub fn runs_in_holder(&self, id: &Id) -> bool {
+        self.live
+            .get(id)
+            .is_some_and(|e| e.value().holder().is_some())
+    }
+
     /// Register a WS terminal viewer for `id` (called on attach). Returns an
     /// [`AttachGuard`] that decrements the count on drop, so every WS exit path
     /// (clean close, error, drop) releases the attachment. Each guard carries a

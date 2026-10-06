@@ -158,15 +158,28 @@ struct SessionOut {
     session: Session,
     live: bool,
     viewers: u32,
+    /// The live PTY runs in a PTY holder AND session persistence is on: a
+    /// daemon restart (deploy) leaves it running. `false` for every other
+    /// row — those die with the daemon (deploy.sh's session-loss prompt).
+    held: bool,
 }
 
-fn with_live<S: SessionsCtx>(ctx: &S, session: Session) -> SessionOut {
+/// Whether held PTYs survive a restart — read only when some row could use
+/// it (a settings lookup, skipped for lists with no holder-backed PTY).
+async fn persistence_for<S: SessionsCtx>(ctx: &S, sessions: &[Session]) -> bool {
+    sessions.iter().any(|s| ctx.manager().runs_in_holder(&s.id))
+        && ctx.manager().persistence_enabled().await
+}
+
+fn with_live<S: SessionsCtx>(ctx: &S, session: Session, persistence: bool) -> SessionOut {
     let live = ctx.manager().is_live(&session.id);
     let viewers = ctx.manager().attached_count(&session.id) as u32;
+    let held = persistence && ctx.manager().runs_in_holder(&session.id);
     SessionOut {
         session,
         live,
         viewers,
+        held,
     }
 }
 
@@ -379,10 +392,11 @@ async fn visible_out<S: SessionsCtx>(
 ) -> Vec<SessionOut> {
     // One batched check: the caller is loaded once per request and each
     // (resource, op) is authorized once, not once per row (F9).
-    ctx.check_resources(user, sessions)
-        .await
+    let sessions = ctx.check_resources(user, sessions).await;
+    let persistence = persistence_for(ctx, &sessions).await;
+    sessions
         .into_iter()
-        .map(|session| with_live(ctx, session))
+        .map(|session| with_live(ctx, session, persistence))
         .collect()
 }
 
@@ -434,7 +448,8 @@ async fn get_session<S: SessionsCtx>(
 ) -> ApiResult<Json<SessionOut>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
-    Ok(Json(with_live(&ctx, session)))
+    let persistence = persistence_for(&ctx, std::slice::from_ref(&session)).await;
+    Ok(Json(with_live(&ctx, session, persistence)))
 }
 
 /// `session.meta` keys a PATCH may never change (an unchanged round-trip is
