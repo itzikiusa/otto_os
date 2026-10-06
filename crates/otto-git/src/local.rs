@@ -3643,6 +3643,18 @@ impl LocalGit {
     /// other's ref mid-checkout. A fetch that failed for a reason other than
     /// a missing ref (expired token, network) is reported as that upstream
     /// error instead of the misleading "no pull/merge-request ref".
+    /// Delete a `refs/otto/pr-review/*` ref [`Self::fetch_pr_head`] created
+    /// (S2-309: one per reviewed head, each pinning a fork head's objects
+    /// against gc forever). Refuses any other ref — this never touches a
+    /// user's branch or tag.
+    pub async fn delete_pr_review_ref(&self, name: &str) -> Result<()> {
+        if !name.starts_with("refs/otto/pr-review/") || name.contains("..") {
+            return Err(Error::Invalid(format!("not a PR review ref: {name}")));
+        }
+        Self::guard_ref(name)?;
+        self.run(&["update-ref", "-d", name]).await.map(|_| ())
+    }
+
     pub async fn fetch_pr_head(
         &self,
         pr_number: u64,

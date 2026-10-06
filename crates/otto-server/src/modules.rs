@@ -3042,7 +3042,16 @@ async fn branch_retry_checkout(
         let branch = format!("otto-review-{review_id}{suffix}");
         let _ = git.worktree_remove(&path).await;
         match git.worktree_add(&path, &branch, h).await {
-            Ok(()) => return (path.clone(), Some(PrWorktree { path, branch })),
+            Ok(()) => {
+                return (
+                    path.clone(),
+                    Some(PrWorktree {
+                        path,
+                        branch,
+                        review_ref: None,
+                    }),
+                )
+            }
             Err(e) => {
                 tracing::warn!(review = %review_id, "retry worktree at {h} failed: {e}; using repo path")
             }
