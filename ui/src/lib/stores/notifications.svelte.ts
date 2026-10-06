@@ -247,8 +247,39 @@ class NotificationStore {
   /** Whether we've already asked the OS for notification permission this run. */
   private permissionRequested = false;
 
+  /** The first load in flight, for {@link ensureLoaded} to join. */
+  private inflight: Promise<void> | null = null;
+
+  /** Make sure notices are loaded at least once: joins a load already in
+   *  flight instead of queueing a second fetch (Home and Settings mount while
+   *  the bell's first load is still out — a queued reload doubled boot's
+   *  `/notifications` + `/notifications/settings` requests). Use {@link load}
+   *  when newer server state is wanted (reconnect resync, Retry). */
+  ensureLoaded(): Promise<void> {
+    if (untrack(() => this.loaded)) return Promise.resolve();
+    const running = untrack(() => this.inflight);
+    if (running) return running;
+    return this.load();
+  }
+
   /** Load notices + settings from the daemon. Safe to call more than once. */
-  async load(): Promise<void> {
+  load(): Promise<void> {
+    // Already fetching: loadOnce queues one trailing reload; hand back the
+    // running load rather than recording the queued no-op as "in flight".
+    const running = untrack(() => this.inflight);
+    if (running && untrack(() => this.loading)) {
+      void this.loadOnce();
+      return running;
+    }
+    const p = this.loadOnce();
+    this.inflight = p;
+    void p.finally(() => {
+      if (this.inflight === p) this.inflight = null;
+    });
+    return p;
+  }
+
+  private async loadOnce(): Promise<void> {
     // Read the re-entrancy guard UNtracked: callers like NotificationBell wrap
     // this in a bare `$effect(() => void notifications.load())` intending a
     // load-once-on-mount. Reading `this.loading` inside that effect's tracking

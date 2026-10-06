@@ -296,7 +296,7 @@ class TodayStore {
   start(): void {
     this.users += 1;
     if (this.users > 1) return;
-    if (!notifications.loaded) void notifications.load();
+    void notifications.ensureLoaded();
     // Event-fed: approvals, Mission Control, designs and scheduled runs each
     // announce changes; a burst (an agent editing a design) is coalesced to at
     // most one reload per ~15 s. POLL_MS only while the event socket is down.
