@@ -751,6 +751,28 @@
     padding: 0 4px;
     max-inline-size: 220px;
   }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+  }
+  .seg button {
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--fs-s);
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+  .seg button + button {
+    border-inline-start: 1px solid var(--border);
+  }
+  .seg button.on {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
   .logs {
     flex: 1;
     min-height: 0;
