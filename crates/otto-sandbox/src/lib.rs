@@ -284,6 +284,11 @@ const CLI_STATE_DIRS: &[(&str, &[&str])] = &[
             "jobs",
             "state",
             "telemetry",
+            // The background-session daemon's control socket dir + key (a
+            // runtime handshake, never loaded as code; readable anyway).
+            "daemon",
+            // NOT `downloads`: the native installer stages the next claude
+            // binary there — code every later session runs.
         ],
     ),
     (
@@ -304,9 +309,24 @@ const CLI_STATE_DIRS: &[(&str, &[&str])] = &[
             "rollout-migrations",
             "generated_images",
             "ambient-suggestions",
+            // The curated-skills listing cache (JSON metadata; installing a
+            // skill still writes `skills/`, which stays denied).
+            "vendor_imports",
+            // NOT `packages` (codex's own standalone binaries) nor
+            // `computer-use` (ships the Computer Use .app bundle): code.
         ],
     ),
-    (".gemini", &["antigravity-cli", "tmp", "history"]),
+    (
+        ".gemini",
+        &[
+            "antigravity-cli",
+            "tmp",
+            "history",
+            // Per-project state only — `config/` itself holds
+            // `mcp_config.json`, whose `mcpServers` every gemini/agy starts.
+            "config/projects",
+        ],
+    ),
 ];
 
 /// Executable-script extensions never writable as a direct child of a CLI

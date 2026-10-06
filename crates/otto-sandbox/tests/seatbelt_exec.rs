@@ -630,6 +630,8 @@ fn seatbelt_agent_cli_homes_are_state_allow_lists() {
         ".codex/skills/s/SKILL.md",
         ".codex/rules/default.rules",
         ".codex/packages/standalone/codex",
+        ".codex/computer-use/Codex Computer Use.app/Contents/MacOS/x",
+        ".gemini/config/mcp_config.json",
         ".gemini/GEMINI.md",
         ".gemini/extensions/e/gemini-extension.json",
         ".gemini/skills/s/SKILL.md",
@@ -665,6 +667,9 @@ fn seatbelt_agent_cli_homes_are_state_allow_lists() {
         ".codex/log/codex-tui.log",
         ".gemini/oauth_creds.json",
         ".gemini/antigravity-cli/cli.log",
+        ".gemini/config/projects/p.json",
+        ".claude/daemon/dispatch/s",
+        ".codex/vendor_imports/skills-curated-cache.json",
     ] {
         assert!(
             can_write(&pol, &home.join(allowed)),
