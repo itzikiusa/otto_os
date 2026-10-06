@@ -556,8 +556,16 @@ mod tests {
         let cpu = std::fs::read_to_string(probe.with_extension("cpu")).unwrap();
         assert_eq!(cpu.trim(), CHILD_CPU_SECS.to_string());
         let data = std::fs::read_to_string(probe.with_extension("data")).unwrap();
-        // `ulimit -d` reports KiB.
-        assert_eq!(data.trim(), (CHILD_MEMORY_CAP / 1024).to_string());
+        // `ulimit -d` reports KiB. macOS ignores RLIMIT_DATA (it reads back
+        // "unlimited") — there the peak-RSS watchdog is the bound.
+        if cfg!(target_os = "macos") {
+            assert!(
+                ["unlimited", &(CHILD_MEMORY_CAP / 1024).to_string()[..]].contains(&data.trim()),
+                "{data}"
+            );
+        } else {
+            assert_eq!(data.trim(), (CHILD_MEMORY_CAP / 1024).to_string());
+        }
     }
 
     /// S6-307: a child stopped by its memory watchdog is reported as a
