@@ -392,3 +392,72 @@ pub async fn secrets_secure(
     .await;
     Ok(Json(res?))
 }
+
+#[cfg(test)]
+mod secrets_reset_tests {
+    use super::*;
+    use otto_core::auth::AuthContext;
+
+    fn person(is_root: bool) -> otto_core::domain::User {
+        otto_core::domain::User {
+            id: "u-reset".into(),
+            username: "u-reset".into(),
+            display_name: "u-reset".into(),
+            is_root,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn auth(user: &otto_core::domain::User, agent: bool) -> crate::auth::CurrentAuthContext {
+        crate::auth::CurrentAuthContext(AuthContext {
+            real_user: user.clone(),
+            effective_user: user.clone(),
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: agent.then(|| "agent-session".into()),
+        })
+    }
+
+    /// S7-305: the reset-store recovery is root + a person's own credential:
+    /// a non-root user and a root-owned AGENT token are both refused (403)
+    /// before the secret store is touched.
+    #[tokio::test]
+    async fn reset_store_refuses_non_root_and_agent_tokens() {
+        let pool = otto_state::db::test_pool().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
+        for (user, agent) in [(person(false), false), (person(true), true)] {
+            let err = secrets_reset_store(
+                State(ctx.clone()),
+                auth(&user, agent),
+                CurrentUser(user.clone()),
+                Json(SecureSecretsReq { confirm: true }),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err();
+            assert!(
+                matches!(err.0, otto_core::Error::Forbidden(_)),
+                "root={} agent={agent}: {:?}",
+                user.is_root,
+                err.0
+            );
+        }
+        // A person's root credential without `confirm` is a 400, never a reset.
+        let root = person(true);
+        let err = secrets_reset_store(
+            State(ctx.clone()),
+            auth(&root, false),
+            CurrentUser(root.clone()),
+            Json(SecureSecretsReq { confirm: false }),
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+        assert!(matches!(err.0, otto_core::Error::Invalid(_)), "{:?}", err.0);
+    }
+}
