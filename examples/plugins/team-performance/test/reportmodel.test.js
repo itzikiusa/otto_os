@@ -6,6 +6,15 @@ const assert = require('node:assert/strict');
 
 const RM = require('../lib/reportmodel.js');
 
+// Strip every <script>…</script> block (case-insensitive, repeated until
+// stable) so text assertions only see rendered markup.
+function withoutScripts(html) {
+  let prev;
+  let out = String(html);
+  do { prev = out; out = out.replace(/<script\b[\s\S]*?<\/script\s*>/gi, ''); } while (out !== prev);
+  return out;
+}
+
 const NAMES = ['Alice Example', 'Bob Sample', 'Carol Tester'];
 const KEYS = ['ABC-1', 'ABC-22', 'XYZ-303', 'ABC-4040'];
 
@@ -83,7 +92,7 @@ test('render: masked output has no links and no planted names or keys', () => {
   const html = RM.renderReport(m, NARR);
   assert.doesNotMatch(html, /\/browse\//);
   assert.deepEqual(RM.leakCheck(html, [...NAMES, ...NAMES.map((n) => n.split(' ')[0]), ...KEYS, 'example.atlassian']), []);
-  assert.doesNotMatch(html.replace(/<script[\s\S]*<\/script>/, ''), /\b[A-Z][A-Z0-9]+-\d+\b/);
+  assert.doesNotMatch(withoutScripts(html), /\b[A-Z][A-Z0-9]+-\d+\b/);
   assert.match(html, /Person A/);
   assert.match(html, /Ticket 1/);
 });
@@ -100,7 +109,7 @@ test('render: self-contained, a single nonce script, deterministic apart from th
   const a = RM.renderReport(m, NARR);
   const b = RM.renderReport(RM.buildReportModel(fixture()), NARR);
   assert.equal(a.replace(NONCE_RE, 'nonce$1$2N'), b.replace(NONCE_RE, 'nonce$1$2N'));
-  const scripts = a.match(/<script\b[^>]*>/g);
+  const scripts = a.match(/<script\b[^>]*>/gi);
   assert.equal(scripts.length, 1);
   const nonce = scripts[0].match(/nonce="([^"]+)"/)[1];
   assert.ok(a.includes(`script-src 'nonce-${nonce}'`));
@@ -288,7 +297,7 @@ test('masking: every new section is masked (names, keys, epic titles)', () => {
   const m = RM.buildReportModel(rich({ mask: true, report_kind: 'dev' }));
   const html = RM.renderReport(m, NARR, { comments: [{ anchor: 'dora', text: 'Ask Bob Sample about ABC-22', author: 'Alice Example', at: 1759651200000 }] });
   assert.deepEqual(RM.leakCheck(html, [...NAMES, ...NAMES.map((n) => n.split(' ')[0]), ...KEYS, 'XYZ-303', 'Checkout epic', 'Prod bug', 'example.atlassian']), []);
-  assert.doesNotMatch(html.replace(/<script[\s\S]*<\/script>/, ''), /\b[A-Z][A-Z0-9]+-\d+\b/);
+  assert.doesNotMatch(withoutScripts(html), /\b[A-Z][A-Z0-9]+-\d+\b/);
   for (const id of [...NEW_SECTIONS, 'goals', 'flow', 'rework', 'people']) assert.ok(sectionHtml(html, id), id);
   assert.match(sectionHtml(html, 'outliers'), /Ticket \d+/);
   assert.match(sectionHtml(html, 'flow'), /Ticket \d+/);
@@ -449,7 +458,7 @@ test('comment anchors: every tile is section:metric, ticket rows are t:key, coun
   assert.match(html, /href="#dora" data-goto="dora:lead-time-for-changes"/);
   // every anchor the page carries is one the comments API accepts
   const S = require('../lib/sanitize.js');
-  for (const [, a] of html.replace(/<script[\s\S]*<\/script>/, '').matchAll(/data-anchor="([^"]+)"/g)) assert.ok(S.validAnchor(a), a);
+  for (const [, a] of withoutScripts(html).matchAll(/data-anchor="([^"]+)"/g)) assert.ok(S.validAnchor(a), a);
 });
 
 test('masked: anchors scrubbed, free-text note shown, no real key in any attribute', () => {
@@ -484,7 +493,7 @@ test('security: a fresh nonce per render, matching the CSP and the only script t
   const nonces = new Set();
   for (let i = 0; i < 5; i++) {
     const html = RM.renderReport(m, {});
-    const tags = html.match(/<script\b[^>]*>/g);
+    const tags = html.match(/<script\b[^>]*>/gi);
     assert.equal(tags.length, 1);
     const n = /nonce="([A-Za-z0-9]{16,})"/.exec(tags[0])[1];
     assert.ok(html.includes(`script-src 'nonce-${n}'`));
@@ -514,7 +523,7 @@ test('security: <img src=x onerror=1> in EVERY string field reaches no unescaped
   input.report_kind = 'dev';
   const html = RM.renderReport(RM.buildReportModel(input), { summary: X, strengths: [X], goals: [X] }, { comments: [{ anchor: X, label: X, text: X, author: X }] });
   assert.doesNotMatch(html, /<img/i);
-  const [, script] = /<script[^>]*>([\s\S]*)<\/script>/.exec(html);
+  const [, script] = /<script\b[^>]*>([\s\S]*)<\/script\s*>/i.exec(html);
   assert.doesNotMatch(html.replace(script, ''), /onerror=1(?!&)/, 'no live handler attribute outside escaped text');
   assert.doesNotMatch(script, /<img|<\/script/i, 'embedded JSON escapes "<"');
   assert.ok((html.match(/&lt;img src=x onerror=1&gt;/g) || []).length > 20, 'payload rendered as text');
