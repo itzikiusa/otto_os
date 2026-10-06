@@ -1074,13 +1074,27 @@ struct AuditQuery {
     decision: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// `true` → the [`AuditPage`] envelope instead of the bare row array.
+    #[serde(default)]
+    paged: bool,
+}
+
+/// `GET /mcp/audit?paged=true`: one page of visible rows plus whether the
+/// LEDGER has more. Rows are filtered by visibility AFTER the ledger read, so
+/// a short (even empty) page doesn't mean the end — `has_more` is decided
+/// from the raw read (S17-304).
+#[derive(serde::Serialize)]
+struct AuditPage {
+    rows: Vec<otto_state::McpCallLogRow>,
+    next_offset: i64,
+    has_more: bool,
 }
 
 async fn list_audit<S: McpCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<AuditQuery>,
-) -> ApiResult<Json<Vec<otto_state::McpCallLogRow>>> {
+) -> ApiResult<Response> {
     let ws = accessible_ws(&ctx, &user).await?;
     // A non-root caller's workspace-less `otto.*` rows are their own only.
     let me = ws.as_ref().map(|_| user.id.clone());
@@ -1093,9 +1107,18 @@ async fn list_audit<S: McpCtx>(
         limit: q.limit.unwrap_or(200),
         offset: q.offset.unwrap_or(0),
     };
+    // The effective page size the ledger read applies (`CallLogRepo::list`).
+    let limit = if query.limit <= 0 {
+        200
+    } else {
+        query.limit.min(1000)
+    };
+    let offset = query.offset.max(0);
     let mut visible = Vec::new();
     let mut memo = VisibilityMemo::default();
-    for row in ctx.mcp().call_log().list(&query).await? {
+    let raw = ctx.mcp().call_log().list(&query).await?;
+    let raw_len = raw.len() as i64;
+    for row in raw {
         if visible_record_memo(
             &ctx,
             &user,
@@ -1108,7 +1131,15 @@ async fn list_audit<S: McpCtx>(
             visible.push(row);
         }
     }
-    Ok(Json(visible))
+    if q.paged {
+        return Ok(Json(AuditPage {
+            rows: visible,
+            next_offset: offset + raw_len,
+            has_more: raw_len >= limit,
+        })
+        .into_response());
+    }
+    Ok(Json(visible).into_response())
 }
 
 async fn stats<S: McpCtx>(
