@@ -106,6 +106,16 @@ export function sortDocs(docs: readonly WorkbenchDoc[]): WorkbenchDoc[] {
   });
 }
 
+/** Shown when a save hits the daemon's "doc is in the trash" 409. */
+export const TRASHED_SAVE_ERROR = 'This doc is in the trash — restore it to keep saving. Your text is kept here.';
+
+/** The daemon answers a save to a trashed doc with 409 too (otto-state
+ *  workbench.rs `update`); only the message tells it apart from a stale
+ *  `if_hash`, and it must not raise the "changed in another window" banner. */
+export function isTrashConflict(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 409 && /\btrash\b/i.test(e.message);
+}
+
 class WorkbenchStore {
   ws: string | null = $state(null);
   docs: WorkbenchDoc[] = $state([]);
@@ -517,7 +527,14 @@ class WorkbenchStore {
       if (this.ws === ws) this.upsertMeta(meta);
     } catch (e) {
       const cur = this.open[id];
-      if (cur && e instanceof ApiError && e.status === 409 && !force) {
+      if (cur && isTrashConflict(e)) {
+        // Not a lost race: the doc was trashed (here or in another window).
+        // "Reload / Keep mine" can't resolve that — say what will (S18-307);
+        // the buffer (and its localStorage copy) stays as-is.
+        cur.remoteChanged = false;
+        cur.saveError = TRASHED_SAVE_ERROR;
+        this.rerun.delete(id);
+      } else if (cur && e instanceof ApiError && e.status === 409 && !force) {
         // Someone else's save won the race: ask (banner) instead of erroring.
         this.markRemoteChanged(id);
         this.rerun.delete(id);

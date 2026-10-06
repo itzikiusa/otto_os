@@ -69,3 +69,29 @@ test('eval results are normalised whether quoted or raw', () => {
   assert.equal(fillResult('"filled"'), 'filled');
   assert.equal(fillResult('no-password-field'), 'no-password-field');
 });
+
+test('the in-page origin check survives a page that poisons String built-ins (S18-307)', () => {
+  const js = buildFillScript('example.com', 'ann', 's3cr3t');
+  const proto = String.prototype as unknown as Record<string, unknown>;
+  const saved = { slice: proto.slice, replace: proto.replace, toLowerCase: proto.toLowerCase };
+  const G = globalThis as unknown as { String: unknown };
+  const savedString = G.String;
+  // Every override makes a naive `h === D || h.slice(...) === '.' + D` pass.
+  proto.slice = () => '.example.com';
+  proto.replace = () => 'example.com';
+  proto.toLowerCase = () => 'example.com';
+  G.String = () => 'example.com';
+  try {
+    for (const url of ['https://evil.example/login', 'https://example.com.evil.io/']) {
+      const r = runAt(url, js);
+      assert.equal(r.result, 'origin-changed', url);
+      assert.equal(r.pwd.value, '', `password leaked into ${url}`);
+    }
+    assert.equal(runAt('https://login.example.com/', js).result, 'filled');
+  } finally {
+    Object.assign(proto, saved);
+    G.String = savedString;
+  }
+  assert.equal(runAt('https://example.com./', js).result, 'filled', 'a trailing-dot host still matches');
+  assert.equal(runAt('http://localhost/', buildFillScript('localhost', 'a', 'p')).result, 'filled');
+});
