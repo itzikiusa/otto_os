@@ -1,0 +1,8 @@
+# S9-305 RATCHET — this crate is NOT yet covered by the workspace-root
+# `clippy.toml` blocking-call list (std::process::Command::output/status,
+# std::fs::{read_dir,remove_dir_all}, SecretStore::{get,put,delete}): it still
+# has calls to triage. Move each async-path hit to tokio::process / tokio::fs /
+# spawn_blocking (or `#[allow(clippy::disallowed_methods)]` + a reason for a
+# reviewed sync context), then DELETE this file so the root list applies.
+# (A separate Cargo workspace that sits under the repo root, so the root list
+# would otherwise reach it too.)

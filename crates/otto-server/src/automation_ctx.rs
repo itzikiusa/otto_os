@@ -277,3 +277,103 @@ impl AutomationCtx for ServerCtx {
         .await;
     }
 }
+
+#[cfg(test)]
+mod handoff_tests {
+    use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+    use otto_automation::AutomationCtx;
+    use otto_core::workflows::{RunStatus, WorkflowGraph};
+    use otto_state::{NewScheduledRun, NewScheduledTask, WorkflowsRepo};
+    use serde_json::json;
+
+    /// S3-303: a daemon restart while a workflow-kind scheduled run waits on
+    /// its workflow must not record a false "interrupted" failure — boot
+    /// re-attaches the waiter (without blocking), and the run settles with the
+    /// workflow's REAL outcome once boot recovery lets the workflow finish.
+    #[tokio::test]
+    async fn restart_reattaches_a_workflow_handoff_and_records_its_real_outcome() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ho-ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let wfs = WorkflowsRepo::new(pool.clone());
+        let wf = wfs
+            .create(
+                &"ho-ws".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u".into(),
+            )
+            .await
+            .unwrap();
+        let wf_run = wfs
+            .create_run(&wf.id, &"ho-ws".into(), &json!({}), None)
+            .await
+            .unwrap();
+        let repo = ctx.scheduled_tasks();
+        let task = repo
+            .create(NewScheduledTask {
+                kind: "workflow".into(),
+                workflow_id: Some(wf.id.clone()),
+                schedule: json!({"cadence": "interval", "every_min": 60}),
+                destination: json!({"type": "none"}),
+                ..NewScheduledTask::defaults("ho-ws".into(), "T".into())
+            })
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(NewScheduledRun {
+                task_id: task.id.clone(),
+                workspace_id: "ho-ws".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        repo.set_run_workflow_run(&run.id, &wf_run.id)
+            .await
+            .unwrap();
+
+        // Boot: the reap leaves the hand-off alone and returns at once.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::scheduled_tasks_scheduler::reap_interrupted(&ctx),
+        )
+        .await
+        .expect("boot reap never blocks on the workflow");
+        assert_eq!(repo.get_run(&run.id).await.unwrap().status, "running");
+
+        // The resumed workflow finishes; the re-attached waiter records it.
+        wfs.update_run_if(
+            &wf_run.id,
+            &[RunStatus::Pending, RunStatus::Running],
+            RunStatus::Success,
+            &[],
+            None,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("workflow run settled");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let r = repo.get_run(&run.id).await.unwrap();
+            if r.status != "running" {
+                assert_eq!(r.status, "ok", "{:?}", r.error);
+                assert_eq!(r.workflow_run_id.as_deref(), Some(wf_run.id.as_str()));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the re-attached waiter never settled the run"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+}

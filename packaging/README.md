@@ -210,7 +210,13 @@ mv /Applications/.Otto.app.previous /Applications/Otto.app
 #    remove the WAL/SHM files so SQLite can't replay the newer log onto it.
 D="$HOME/Library/Application Support/Otto"
 ls -1t "$D/backups"/otto.db.pre-*            # newest first
-cp "$D/otto.db" "$D/otto.db.broken.$(date +%s)"
+# Keep the damaged DB for forensics WITH its WAL/SHM, under one stamp — the
+# newest commits (what you want to investigate) live in the -wal file. Named
+# <db>-wal / <db>-shm so SQLite opens the copy together with its log.
+B="$D/otto.db.broken.$(date +%s)"
+for s in "" -wal -shm; do
+  [ -e "$D/otto.db$s" ] && cp "$D/otto.db$s" "$B$s"
+done
 cp "$D/backups/otto.db.pre-<version>-<stamp>" "$D/otto.db"
 rm -f "$D/otto.db-wal" "$D/otto.db-shm"
 chmod 600 "$D/otto.db"

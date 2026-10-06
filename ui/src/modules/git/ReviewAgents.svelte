@@ -128,11 +128,14 @@
           </button>
         {/if}
         {#if i < lastRetryable && (agent.status === 'done' || agent.status === 'error' || agent.status === 'skipped')}
+          <!-- A single agent is retryable only once the whole review has settled:
+               the run's end-of-review cleanup would delete a retried agent's
+               files mid-read (the server answers 409 too). -->
           <button
             class="btn small ghost"
-            disabled={retrying[i]}
+            disabled={retrying[i] || review.status === 'running'}
             onclick={() => retryAgent(i)}
-            title="Re-run this agent"
+            title={review.status === 'running' ? 'Retry once the review has finished' : 'Re-run this agent'}
           >
             {retrying[i] ? 'Retrying…' : 'Retry'}
           </button>

@@ -173,7 +173,7 @@ impl ConfluenceClient {
         query: &[(&str, &str)],
         max_pages: usize,
         what: &str,
-    ) -> Result<Vec<serde_json::Value>> {
+    ) -> Result<(Vec<serde_json::Value>, bool)> {
         let mut all = Vec::new();
         let mut next: Option<String> = None;
         for _ in 0..max_pages {
@@ -220,7 +220,8 @@ impl ConfluenceClient {
                 "confluence: listing TRUNCATED at the page cap — later results are not shown"
             );
         }
-        Ok(all)
+        // `true` = truncated at the cap (the caller surfaces it to the user).
+        Ok((all, next.is_some()))
     }
 
     /// Fetch a page by its numeric ID.
@@ -455,9 +456,15 @@ impl ConfluenceClient {
     /// List all current Confluence spaces, following `_links.next` (capped
     /// at 20 pages — 4000 spaces at the requested size).
     pub async fn list_spaces(&self) -> Result<Vec<ConfluenceSpace>> {
+        Ok(self.list_spaces_paged().await?.0)
+    }
+
+    /// [`Self::list_spaces`] plus whether the listing stopped at the page cap
+    /// (`true` = later spaces exist but are not shown — the picker says so).
+    pub async fn list_spaces_paged(&self) -> Result<(Vec<ConfluenceSpace>, bool)> {
         self.ensure_tls()?;
         let url = self.api("/space");
-        let all = self
+        let (all, truncated) = self
             .get_all_pages(
                 &url,
                 &[("limit", "200"), ("status", "current")],
@@ -485,7 +492,7 @@ impl ConfluenceClient {
             }
             spaces.push(ConfluenceSpace { key, name });
         }
-        Ok(spaces)
+        Ok((spaces, truncated))
     }
 
     /// Search Confluence pages using CQL.
@@ -614,7 +621,7 @@ impl ConfluenceClient {
         // requested 100 when `body.storage` is expanded — stopping on the
         // first short page left later comments invisible to the story
         // watcher. Capped at 40 pages.
-        let all = self
+        let (all, _) = self
             .get_all_pages(
                 &url,
                 &[("expand", "body.storage,version,history"), ("limit", "100")],
@@ -2793,5 +2800,32 @@ mod tests {
             .unwrap();
         let keys: Vec<_> = spaces.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, ["A", "B", "C"]);
+        let (_, truncated) = ConfluenceClient::new(&base, "e", "t")
+            .list_spaces_paged()
+            .await
+            .unwrap();
+        assert!(!truncated, "the walk reached the last page");
+    }
+
+    /// S5-22: a listing that is still pointing at a next page when the cap
+    /// is hit reports `truncated` (surfaced to the picker), not just a log.
+    #[tokio::test]
+    async fn list_spaces_reports_truncation_at_the_cap() {
+        let router = axum::Router::new().route(
+            "/wiki/rest/api/space",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "results": [{"key": "A", "name": "a"}],
+                    "_links": {"next": "/rest/api/space?start=1&limit=1&status=current"}
+                }))
+            }),
+        );
+        let base = fixture(router).await;
+        let (spaces, truncated) = ConfluenceClient::new(&base, "e", "t")
+            .list_spaces_paged()
+            .await
+            .unwrap();
+        assert!(truncated);
+        assert_eq!(spaces.len(), 20, "one per page, at the 20-page cap");
     }
 }

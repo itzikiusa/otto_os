@@ -119,7 +119,7 @@
 
   function stopRecruit() {
     // Kill the live recruiter session server-side, then abandon the UI wait.
-    if (swarm.detail) void swarm.stopAgentRun(swarm.detail.id);
+    if (swarm.detail) void swarm.stopAgentRun(swarm.detail.id, 'recruit');
     recruitCtl?.abort();
   }
 

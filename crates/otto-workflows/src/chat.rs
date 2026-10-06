@@ -654,6 +654,8 @@ pub fn binding_matches(
 /// each candidate on the owning workflow's `workspace_id` before trusting it
 /// — otherwise a channel bound by one workspace's Slack/Telegram integration
 /// could leak that channel's content into another workspace's workflow runs.
+/// Net effect: only the LISTING is global — the candidates that can fire are
+/// the receiving workspace's own, the same rule as name-addressed commands.
 fn binding_candidates<'a>(
     triggers: &'a [WorkflowTrigger],
     channel: &str,

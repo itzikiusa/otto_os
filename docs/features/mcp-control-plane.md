@@ -946,7 +946,13 @@ session (MCP Admin). Calls stay audited (`auto_approved`). If it still asks: a
 workspace rule only covers calls landing in that workspace (for PRs, the repo's
 workspace), a session rule only that session's own calls, and `merge_pr` is
 irreversible — no category rule covers it; it needs its own rule with the second
-toggle.
+toggle. The workspace is always the OBJECT's: a workflow, scheduled task or swarm
+named by bare id is looked up first, so an agent in Sandbox calling
+`run_workflow` on a Prod workflow is never covered by a Sandbox rule (and its card
+is filed under Prod). Tools that act outside any one workspace — the vault library,
+Kubernetes / AWS / Jira / Confluence, improvement edits, work items, the Assistant's
+memory — take no workspace rule at all (creating one is refused); use a global or
+session rule for them.
 
 **An agent says a repo "doesn't exist" / asks you to search again.** Repos are
 registered in exactly one workspace. `otto_list_repos` now lists every workspace you

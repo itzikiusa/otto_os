@@ -295,11 +295,14 @@
   }
   $effect(() => {
     const id = run?.id;
-    return () => {if (id) {runRead?.abort(); runRead = null;}};
+    // Abort only THIS run's read: by the time the switch's cleanup runs,
+    // `startRun` has already made `runRead` the NEW run's catch-up — aborting
+    // it left a re-run on "Queued" until the 15 s poll (S17-301).
+    return () => {if (id && runReadFor === id) {runRead?.abort(); runRead = null; runReadFor = null;}};
   });
   $effect(() => {
     const visibility = () => {
-      if (document.hidden) {runRead?.abort();runRead = null;}
+      if (document.hidden) {runRead?.abort();runRead = null;runReadFor = null;}
       else if (run) void refetchRun(run.id);
     };
     document.addEventListener('visibilitychange',visibility);
@@ -805,26 +808,56 @@
   // first; when the open workflow goes, open its neighbour instead of leaving
   // an empty "Pick a workflow" pane.
   async function del(wf: Workflow): Promise<void> {
-    // Say how many runs are still going: deleting stops them, and their
-    // history goes with the workflow.
-    let active: number | null = null;
+    // The server REFUSES (409) to delete a workflow with live runs, so the
+    // confirm never promises to stop them silently: with runs going it offers
+    // "Cancel N runs and delete", which cancels each, waits for them to
+    // settle, then deletes (S17-302).
+    let liveIds: string[] | null = null;
+    const isLive = (r: { status: string }) => r.status === 'pending' || r.status === 'running';
     try {
       const rows = await api.get<typeof runs>(`/workflows/${wf.id}/runs?summary=true`);
-      active = rows.filter((r) => r.status === 'pending' || r.status === 'running').length;
+      liveIds = rows.filter(isLive).map((r) => r.id);
     } catch {
-      active = null; // unknown — the confirm says so rather than claiming none
+      liveIds = null; // unknown — the confirm says so rather than claiming none
     }
+    const active = liveIds?.length ?? 0;
     const runsNote =
-      active === null
-        ? ' Otto couldn’t check for running runs — any still going are stopped.'
+      liveIds === null
+        ? ' Otto couldn’t check for running runs — if one is still going, the delete is refused until it’s canceled.'
         : active > 0
-          ? ` ${active === 1 ? '1 run is' : `${active} runs are`} still going and will be stopped.`
+          ? ` ${active === 1 ? '1 run is' : `${active} runs are`} still going — ${active === 1 ? 'it is' : 'they are'} canceled first.`
           : '';
     const ok = await confirmer.ask(
       `Delete “${wf.name}”?${runsNote} Its run history and triggers are deleted with it. This can’t be undone.`,
-      { title: 'Delete workflow', confirmLabel: 'Delete workflow', danger: true },
+      {
+        title: 'Delete workflow',
+        confirmLabel: active > 0 ? `Cancel ${active === 1 ? 'run' : `${active} runs`} and delete` : 'Delete workflow',
+        danger: true,
+      },
     );
     if (!ok) return;
+    if (liveIds && liveIds.length > 0) {
+      try {
+        await Promise.all(liveIds.map((id) => api.post(`/workflow-runs/${encodeURIComponent(id)}/cancel`, {})));
+      } catch (e) {
+        toastError('Couldn’t cancel the running runs — the workflow was not deleted', e);
+        return;
+      }
+      // A cancel settles at the run's next boundary: wait (bounded) for the
+      // rows to leave pending/running before the delete.
+      let settled = false;
+      for (let i = 0; i < 20 && !destroyed; i++) {
+        await new Promise((r) => setTimeout(r, 750));
+        try {
+          const rows = await api.get<typeof runs>(`/workflows/${wf.id}/runs?summary=true`);
+          if (!rows.some(isLive)) {settled = true; break;}
+        } catch { /* keep waiting */ }
+      }
+      if (!settled) {
+        toasts.error('Runs are still stopping', 'The workflow was not deleted — try again in a moment.');
+        return;
+      }
+    }
     try {
       await api.del(`/workflows/${wf.id}`);
       const idx = workflows.findIndex((w) => w.id === wf.id);

@@ -22,6 +22,7 @@ import type {
   ImportMcpPoliciesResp,
   McpApproval,
   McpApprovalCount,
+  McpAuditPage,
   McpAuditQuery,
   McpAllowlistEntry,
   McpCallLogRow,
@@ -117,16 +118,24 @@ export const mcpCpApi = {
     api.post<McpApproval>(`/mcp/approvals/${id}/decide`, body),
 
   // --- audit + stats ---
-  cpAudit: (q: McpAuditQuery = {}) =>
-    api.get<McpCallLogRow[]>(
+  cpAudit: async (q: McpAuditQuery = {}): Promise<McpAuditPage> => {
+    const res = await api.get<McpAuditPage | McpCallLogRow[]>(
       `/mcp/audit${qs({
         server_id: q.server_id,
         tool: q.tool,
         decision: q.decision,
         limit: q.limit,
         offset: q.offset,
+        paged: 'true',
       })}`,
-    ),
+    );
+    // An older daemon ignores `paged` and returns the bare array: the best it
+    // allows is "a non-empty page may have more".
+    if (Array.isArray(res)) {
+      return { rows: res, next_offset: (q.offset ?? 0) + (q.limit ?? 200), has_more: res.length > 0 };
+    }
+    return res;
+  },
   cpStats: () => api.get<McpToolStats[]>(`/mcp/stats`),
 
   // --- outward Otto-as-MCP-server admin ---

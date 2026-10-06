@@ -103,5 +103,38 @@ async fn retrying_a_live_review_agent_is_a_conflict() {
     let after = ctx.reviews_store.get_review(&review.id).await.unwrap();
     assert_eq!(after.agents[0].status, "running");
     assert_eq!(after.agents[0].session_id.as_deref(), Some("sess-live"));
+
+    // S2-303: a SETTLED agent of a review that is still Running is refused
+    // too — the original run's end-of-review sweep would delete the retried
+    // agent's diff/prompt/findings files mid-read.
+    assert_eq!(after.status, otto_core::domain::ReviewStatus::Running);
+    let rows = vec![
+        agent("done"),
+        agent("running"),
+        agent("pending"),
+        agent("pending"),
+    ];
+    ctx.reviews_store
+        .set_agents(&review.id, &rows)
+        .await
+        .unwrap();
+    let r = client
+        .post(format!("{origin}/reviews/{}/agents/0/retry", review.id))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409, "retry of a done agent in a running review");
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("still running")
+            || body.to_string().contains("still running"),
+        "{body}"
+    );
+    let after = ctx.reviews_store.get_review(&review.id).await.unwrap();
+    assert_eq!(after.agents[0].status, "done", "nothing was reset");
     server.abort();
 }

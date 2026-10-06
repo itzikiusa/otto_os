@@ -135,14 +135,20 @@ pub(crate) async fn resolve_for_call(
         .managed_session_id
         .as_deref()
         .or(auth.mcp_session_id.as_deref());
-    // A global-row tool (K8s cluster, AWS account, issue account…) lands in
-    // no workspace: workspace-scoped rules never apply to it — neither via a
-    // caller-sent `workspace_id` (dropped upstream) nor via the calling
-    // session's workspace. Only global and session rules do.
-    let ws = match call_ws {
-        Some(w) => Some(w.to_string()),
-        None if crate::mcp_outward::pin_global(short) => None,
-        None => crate::agent_refs::caller_session_ws(ctx, auth).await,
+    // A global-row tool (K8s cluster, AWS account, issue account…), one
+    // whose target's workspace Otto cannot verify (an improvement edit, a
+    // work item, the Assistant's memory) and one on the global vault library
+    // land in no workspace: workspace-scoped rules never apply to them —
+    // neither via a caller-sent `workspace_id` nor via the calling session's
+    // workspace (an agent in Sandbox must not borrow a Sandbox rule to act on
+    // a Prod object). Only global and session rules do.
+    let ws = if crate::mcp_outward::workspace_rules_never_apply(short) {
+        None
+    } else {
+        match call_ws {
+            Some(w) => Some(w.to_string()),
+            None => crate::agent_refs::caller_session_ws(ctx, auth).await,
+        }
     };
     let rules = match repo(ctx).list_applicable(ws.as_deref(), session).await {
         Ok(r) => r,
@@ -325,6 +331,30 @@ fn validate_target(
     }
 }
 
+/// A workspace rule must be able to match something: refuse one whose tool
+/// (or every tool of whose category) addresses no single workspace — global
+/// rows, unverifiable targets, the vault library — instead of storing a rule
+/// that silently never applies (or, before S5-306, applied to every vault).
+/// Pure (catalog lookups only) — unit-tested.
+fn workspace_rule_can_apply(kind: &str, target: &str) -> Result<(), Error> {
+    use crate::mcp_outward::workspace_rules_never_apply;
+    let never = match kind {
+        TARGET_TOOL => workspace_rules_never_apply(target),
+        _ => mutating_categories()
+            .iter()
+            .find(|(c, _)| c == target)
+            .is_some_and(|(_, tools)| tools.iter().all(|t| workspace_rules_never_apply(t))),
+    };
+    if never {
+        return Err(Error::Invalid(format!(
+            "'{target}' does not act inside one workspace (a global library, a global row, or \
+             a target Otto cannot place in a workspace) — a workspace rule would never apply; \
+             use a global or session rule"
+        )));
+    }
+    Ok(())
+}
+
 fn default_name(kind: &str, target: &str, scope: &str) -> String {
     let what = if kind == TARGET_CATEGORY {
         format!("{target} writes")
@@ -425,6 +455,7 @@ pub async fn create_rule(
                 )));
             }
             ctx.workspaces.get(ws).await.map_err(ApiError)?;
+            workspace_rule_can_apply(req.target_kind.as_str(), &target).map_err(ApiError)?;
         }
         SCOPE_SESSION => {
             let Some(sid) = &session_id else {

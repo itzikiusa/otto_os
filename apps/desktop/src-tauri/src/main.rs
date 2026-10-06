@@ -187,7 +187,10 @@ fn main() {
             // and surfaces state, so failures here are non-fatal.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let report = supervisor::ensure_daemon().await;
+                let report = supervisor::ensure_daemon(|interim| {
+                    let _ = handle.emit("otto://daemon-state", interim);
+                })
+                .await;
                 let _ = handle.emit("otto://daemon-state", &report);
             });
 

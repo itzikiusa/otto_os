@@ -865,6 +865,28 @@ async fn the_audit_list_does_not_query_per_row() {
         many <= 9,
         "200 rows cost {many} statements vs {one} for 1 — visibility is per row again"
     );
+    // S17-304: the paged envelope decides `has_more` from the LEDGER read
+    // (visibility filtering can shorten a page — even to empty — without it
+    // being the end), and `next_offset` counts ledger rows.
+    let (st, page) = d
+        .send("GET", &d.human, "/mcp/audit?paged=true&limit=150", None)
+        .await;
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(page["rows"].as_array().unwrap().len(), 150);
+    assert_eq!(page["next_offset"], 150);
+    assert_eq!(page["has_more"], true);
+    let (st, page) = d
+        .send(
+            "GET",
+            &d.human,
+            "/mcp/audit?paged=true&limit=150&offset=150",
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(page["rows"].as_array().unwrap().len(), 50);
+    assert_eq!(page["next_offset"], 200);
+    assert_eq!(page["has_more"], false);
 }
 
 /// The Enforced variant of [`the_audit_list_does_not_query_per_row`]
@@ -1291,13 +1313,16 @@ async fn a_spoofed_workspace_never_selects_an_auto_approve_rule() {
 
     // An irreversible K8s rule for the CALLING session's workspace (and the
     // caller naming it) does not cover a cluster, which is global.
+    // Such a rule is refused at creation (S5-306: it could never apply)…
     let (st, rule) = d
         .rule(
             json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
                      "target": "k8s_action", "allow_irreversible": true}),
         )
         .await;
-    assert_eq!(st, 201, "{rule}");
+    assert_eq!(st, 400, "{rule}");
+    // …and whatever workspace the caller names, the cluster call is never
+    // auto-approved.
     for args in [
         json!({"cluster_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V", "action": "delete_pod",
                "namespace": "prod", "name": "api-0", "workspace_id": "ws1"}),
@@ -1308,6 +1333,136 @@ async fn a_spoofed_workspace_never_selects_an_auto_approve_rule() {
         assert_ne!(env["executed"], true, "{env}");
         assert!(env.get("auto_approved_by").is_none(), "{env}");
     }
+}
+
+/// S5-301: a session in ws1 naming a ws2 workflow / scheduled task by bare
+/// id (no `workspace_id`) is never covered by a ws1 rule — the object is
+/// looked up and its OWN workspace keys the decision and the approval card.
+/// An improvement-edit approval (whose target's workspace Otto cannot
+/// verify) borrows no workspace at all: its card is filed under none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_id_from_another_workspaces_session_is_never_auto_approved() {
+    let d = boot().await;
+    enable_tools(
+        &d,
+        &[
+            "run_workflow",
+            "run_scheduled_task",
+            "approve_improvement_edit",
+        ],
+    )
+    .await;
+    let (st, wf) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws2/workflows",
+            Some(json!({"name": "Prod deploy"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{wf}");
+    let wf_id = wf["id"].as_str().unwrap().to_string();
+    let (st, task) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws2/scheduled-tasks",
+            Some(json!({"name": "Prod export", "prompt": "export", "enabled": false})),
+        )
+        .await;
+    assert_eq!(st, 200, "{task}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+    // The operator auto-approves these tools in ws1 — where the agent runs.
+    for tool in ["run_workflow", "run_scheduled_task"] {
+        let (st, rule) = d
+            .rule(
+                json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                         "target": tool}),
+            )
+            .await;
+        assert_eq!(st, 201, "{rule}");
+    }
+    // An unverifiable tool takes no workspace rule at all.
+    let (st, rule) = d
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                     "target": "approve_improvement_edit"}),
+        )
+        .await;
+    assert_eq!(st, 400, "{rule}");
+
+    for (tool, args, card_ws) in [
+        ("run_workflow", json!({"workflow_id": wf_id}), json!("ws2")),
+        (
+            "run_scheduled_task",
+            json!({"task_id": task_id}),
+            json!("ws2"),
+        ),
+        (
+            "approve_improvement_edit",
+            json!({"edit_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V"}),
+            Value::Null,
+        ),
+    ] {
+        let env = invoke_as(&d, &d.agent, tool, args, json!({"wait_seconds": 0})).await;
+        assert_eq!(env["decision"], "pending_approval", "{tool}: {env}");
+        assert!(env.get("auto_approved_by").is_none(), "{tool}: {env}");
+        let card = d
+            .pending_approvals()
+            .await
+            .into_iter()
+            .find(|a| a["tool"] == format!("otto.{tool}"))
+            .unwrap_or_else(|| panic!("{tool}: no card"));
+        assert_eq!(card["workspace_id"], card_ws, "{tool}: {card}");
+    }
+    // The same calls inside ws1 ARE covered (the rule is not dead): a ws1
+    // workflow by bare id runs auto-approved.
+    let (st, wf1) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws1/workflows",
+            Some(json!({"name": "Sandbox deploy"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{wf1}");
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "run_workflow",
+        json!({"workflow_id": wf1["id"]}),
+        json!({"dry_run": true}),
+    )
+    .await;
+    assert_eq!(env["decision"], "dry_run", "{env}");
+    assert_eq!(env["preview"]["arguments"]["workspace_id"], "ws1", "{env}");
+    let row = d.last_audit("run_workflow").await;
+    assert!(
+        row["decision_reason"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "covered by the ws1 rule: {row}"
+    );
+}
+
+/// S5-305: a probed read's caller-sent `workspace_id` never becomes the audit
+/// row's workspace — the executor ignores it; the row falls back to the
+/// calling session's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probed_reads_spoofed_workspace_never_reaches_the_audit() {
+    let d = boot().await;
+    enable_tools(&d, &["get_session"]).await;
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "get_session",
+        json!({"session_id": d.sid, "workspace_id": "ws2"}),
+        json!({}),
+    )
+    .await;
+    assert_ne!(env["decision"], "denied", "{env}");
+    let row = d.last_audit("get_session").await;
+    assert_eq!(row["workspace_id"], "ws1", "{row}");
 }
 
 /// S5-04: two identical calls waiting on ONE card both wake on the decision;

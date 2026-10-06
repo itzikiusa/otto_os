@@ -347,8 +347,9 @@ impl ProgressSink {
 /// Where a run reports back to: the chat integration + channel/thread the trigger
 /// arrived on. Resolved once from the run input.
 struct ChatTarget {
-    /// Workspace whose integration received the trigger (workflows are global, so
-    /// this may differ from the workflow's own workspace).
+    /// Workspace whose integration reports the run — always the workflow's own
+    /// (see `result_workspace`; chat triggers only start workflows of the
+    /// receiving workspace, S3-03).
     ws: String,
     channel: Channel,
     chat: String,
@@ -1564,6 +1565,15 @@ pub(crate) async fn sweep_orphaned_runs(ctx: &ServerCtx, prev: &HashSet<Id>) -> 
                 &nodes,
                 false,
             );
+            // The same cleanup a cancel gets (S3-305): a panicked driver left
+            // its agents running, its chat/webhook origin on "▶ started" and
+            // its worktrees provisioned.
+            kill_run_sessions(ctx, &nodes).await;
+            if let Ok(wf) = repo.get(&run.workflow_id).await {
+                spawn_recovery_delivery(ctx, &wf, &nodes, RunStatus::Error, &run.input);
+            }
+            clear_skip_markers(ctx, &id);
+            reap_run_worktrees(ctx, &id).await;
         }
     }
     suspects
@@ -2902,9 +2912,12 @@ pub async fn run_workflow(
                 finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
                 return;
             }
+            // The row is still live: delivering a result now would disagree
+            // with the `error` the orphan sweep writes once this driver exits
+            // — the sweep delivers and cleans up instead (S3-305).
             Err(e) => {
-                tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
-                0
+                tracing::warn!(%run_id, "workflow run finalize write failed (left to the orphan sweep): {e}");
+                return;
             }
         };
         deliver_run_result(
@@ -2961,9 +2974,12 @@ pub async fn run_workflow(
             finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
             return;
         }
+        // The row is still live: delivering a result now would disagree with
+        // the `error` the orphan sweep writes once this driver exits — the
+        // sweep delivers and cleans up instead (S3-305).
         Err(e) => {
-            tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
-            0
+            tracing::warn!(%run_id, "workflow run finalize write failed (left to the orphan sweep): {e}");
+            return;
         }
     };
     // The run's deliverable: a copy of the last content-bearing step's handoff
@@ -3051,20 +3067,7 @@ async fn finalize_canceled_run(
             crate::modules::cancel_running_review(ctx, &review, &workflow.workspace_id).await;
         }
     }
-    // Stop every agent session this run spawned — a cancel must halt the live
-    // agents (each is a real claude/codex PTY that would otherwise keep working
-    // and burning tokens), not just flip the run row. Includes agent steps AND
-    // review reviewers/summarizer (their ids are harvested into `sessions`).
-    // Best-effort: a failure on one session is logged and never blocks the rest.
-    let session_ids: Vec<Id> = states
-        .iter()
-        .flat_map(|s| s.sessions.iter().cloned())
-        .collect();
-    for sid in session_ids {
-        if let Err(e) = ctx.manager.kill_session(&sid).await {
-            tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
-        }
-    }
+    kill_run_sessions(ctx, states).await;
     for s in states.iter_mut() {
         if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
             s.status = NodeStatus::Skipped;
@@ -3117,6 +3120,24 @@ async fn finalize_canceled_run(
     );
     clear_skip_markers(ctx, run_id);
     reap_run_worktrees(ctx, run_id).await;
+}
+
+/// Stop every agent session a run spawned — a cancel (or an orphaned run)
+/// must halt the live agents (each is a real claude/codex PTY that would
+/// otherwise keep working and burning tokens), not just flip the run row.
+/// Includes agent steps AND review reviewers/summarizer (their ids are
+/// harvested into `sessions`). Best-effort: a failure on one session is
+/// logged and never blocks the rest.
+async fn kill_run_sessions(ctx: &ServerCtx, states: &[NodeRunState]) {
+    let session_ids: Vec<Id> = states
+        .iter()
+        .flat_map(|s| s.sessions.iter().cloned())
+        .collect();
+    for sid in session_ids {
+        if let Err(e) = ctx.manager.kill_session(&sid).await {
+            tracing::warn!("workflow: failed to kill run session {sid}: {e}");
+        }
+    }
 }
 
 /// Assemble the proof pack for a completed workflow run: each node's output is a
@@ -5089,7 +5110,7 @@ async fn execute_node(
                 // repos. Never a bare "missing repo_id" for a workflow that was
                 // given a working directory.
                 let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
-                    .await
+                    .await?
                     .ok_or_else(|| {
                         otto_core::Error::Invalid(
                             "review_run: no repo_id; pass repo_id or a working_directory/worktree_path \
@@ -5916,7 +5937,7 @@ async fn execute_node(
             if targets.is_empty() {
                 // One implicit target from the run context (the common case).
                 let repo_id = resolve_step_repo_id(ctx, ws, p, &input, run_cwd)
-                    .await
+                    .await?
                     .ok_or_else(|| {
                         otto_core::Error::Invalid(
                         "git_pr: no repo_id; pass repo_id or a working_directory/worktree_path \
@@ -5979,7 +6000,15 @@ async fn execute_node(
             let mut opened_n: u64 = 0;
             for (repo_id, worktree, base) in &resolved {
                 let repo = match ctx.git_store.get_repo(repo_id).await {
-                    Ok(r) => r,
+                    // S3-302: only this workflow's workspace's repos (and their
+                    // git accounts) — a target's repo_id may come from run input.
+                    Ok(r) if r.workspace_id == ws.id => r,
+                    Ok(_) => {
+                        notes.push(format!(
+                            "{repo_id}: not registered in this workflow's workspace — skipped"
+                        ));
+                        continue;
+                    }
                     Err(e) => {
                         notes.push(format!("{repo_id}: repo missing: {e}"));
                         continue;
@@ -7172,21 +7201,26 @@ fn expand_tilde(p: &str) -> String {
 /// the step's `worktree_path`, the run's `working_directory`, or `run_cwd`.
 /// See design §B — this is what makes such steps resilient instead of failing
 /// with a bare "missing repo_id".
+///
+/// An explicit `repo_id` must be registered in the workflow's OWN workspace
+/// (S3-302): a run never drives another workspace's checkout or git account,
+/// the same rule Run-with-Otto enforces (S15-05).
 async fn resolve_step_repo_id(
     ctx: &ServerCtx,
     ws: &Workspace,
     p: &Value,
     input: &Value,
     run_cwd: &str,
-) -> Option<String> {
+) -> otto_core::Result<Option<String>> {
     let explicit = p
         .get("repo_id")
         .and_then(Value::as_str)
         .or_else(|| input.get("repo_id").and_then(Value::as_str))
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty());
-    if explicit.is_some() {
-        return explicit;
+    if let Some(id) = explicit {
+        ensure_repo_in_workspace(ctx, &ws.id, &id).await?;
+        return Ok(Some(id));
     }
     let hint = p
         .get("worktree_path")
@@ -7194,7 +7228,23 @@ async fn resolve_step_repo_id(
         .or_else(|| input.get("working_directory").and_then(Value::as_str))
         .map(str::to_string)
         .unwrap_or_else(|| run_cwd.to_string());
-    resolve_repo_id_for_path(ctx, &ws.id, &hint).await
+    Ok(resolve_repo_id_for_path(ctx, &ws.id, &hint).await)
+}
+
+/// `repo_id` names a repo registered in `workspace_id` — else `Invalid` (a
+/// foreign or unknown id reads the same, so ids of other workspaces don't
+/// leak). S3-302.
+pub(crate) async fn ensure_repo_in_workspace(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    repo_id: &str,
+) -> otto_core::Result<()> {
+    match ctx.git_store.get_repo(&repo_id.to_string()).await {
+        Ok(r) if &r.workspace_id == workspace_id => Ok(()),
+        _ => Err(otto_core::Error::Invalid(format!(
+            "repo '{repo_id}' is not registered in this workflow's workspace"
+        ))),
+    }
 }
 
 /// Gather the set of PR targets a `git_pr` node should open — one per changed
@@ -7792,13 +7842,19 @@ async fn resolve_repo_entries(
         // The origin repo's display name — filled from whichever registered repo
         // we resolve to, so `repos.json` names the repo even for a worktree-only run.
         let mut repo_name: Option<String> = None;
-        if let Ok(r) = ctx.git_store.get_repo(&e.repo).await {
+        // Only the workflow's OWN workspace's repos (S3-302): a declared id or
+        // name never resolves to another workspace's checkout + git account.
+        let by_id = ctx
+            .git_store
+            .get_repo(&e.repo)
+            .await
+            .ok()
+            .filter(|r| &r.workspace_id == workspace_id);
+        if let Some(r) = by_id {
             rid = Some(r.id.clone());
             repo_name = Some(r.name.clone());
             root = Some(r.path);
-        } else if let Ok(repos) = ctx.git_store.list_all_repos().await {
-            // Match a declared repo NAME across ALL workspaces (git accounts are
-            // global; a repo the user names may be registered in another workspace).
+        } else if let Ok(repos) = ctx.git_store.list_repos(workspace_id).await {
             if let Some(r) = repos.into_iter().find(|r| r.name == e.repo) {
                 rid = Some(r.id);
                 repo_name = Some(r.name.clone());
@@ -7890,23 +7946,28 @@ async fn resolve_repo_id_for_path(
     workspace_id: &Id,
     path: &str,
 ) -> Option<String> {
-    // Match by PATH across ALL workspaces, not just the run's. Repos are
-    // workspace-scoped, but a `Working Directory:` the user points at should
-    // resolve to whatever repo is registered THERE — with its (global) git
-    // account — even when that repo lives in a different workspace. Otherwise a
-    // path nested under a repo registered in the RUN's workspace (e.g. the home
-    // dir) wins over the exact repo registered elsewhere, giving the wrong repo
-    // and "no git account". `match_repo_path` picks the deepest/exact match, so
-    // ~/proj/app → the app repo, not a containing parent-dir repo.
+    // Match by PATH against ALL registered repos, then keep the winner only
+    // when it is registered in the RUN's workspace (S3-302, S15-05: a run
+    // never drives another workspace's checkout or git account). Matching
+    // globally first matters: otherwise a path nested under a repo registered
+    // in the run's workspace (e.g. the home dir) would win over the exact repo
+    // registered elsewhere and silently target the wrong repo — a foreign
+    // winner resolves to `None` instead. `match_repo_path` picks the
+    // deepest/exact match, so ~/proj/app → the app repo, not a parent-dir repo.
     let expanded = expand_tilde(path);
     let all = ctx.git_store.list_all_repos().await.ok()?;
     let pairs: Vec<(String, String)> = all.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
+    let own = |id: String| -> Option<String> {
+        all.iter()
+            .any(|r| r.id == id && &r.workspace_id == workspace_id)
+            .then_some(id)
+    };
     if let Some(id) = match_repo_path(&expanded, &pairs) {
-        return Some(id);
+        return own(id);
     }
     if let Some(main) = git_main_worktree(&expanded).await {
         if let Some(id) = match_repo_path(&main, &pairs) {
-            return Some(id);
+            return own(id);
         }
     }
     // Last resort (unchanged): a run workspace with exactly one repo → use it.
@@ -8691,7 +8752,13 @@ mod tests {
             repo.get_run(&orphan.id).await.unwrap().status,
             RunStatus::Pending
         );
+        // S3-305: the run's provisioned dir (no worktrees left in it) is
+        // reaped by the sweep, as a canceled run's would be.
+        let run_dir = ctx.data_dir.join("workflow-runs").join(&orphan.id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("run-brief.md"), "x").unwrap();
         sweep_orphaned_runs(&ctx, &first).await;
+        assert!(!run_dir.exists(), "orphan's run dir is reaped");
         let swept = repo.get_run(&orphan.id).await.unwrap();
         assert_eq!(swept.status, RunStatus::Error);
         assert!(swept

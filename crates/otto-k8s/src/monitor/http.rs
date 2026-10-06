@@ -17,7 +17,6 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
-use otto_core::access::ResourceKind;
 use otto_core::auth::AuthUser;
 use otto_core::domain::User;
 use otto_core::{Error, Id};
@@ -123,36 +122,54 @@ impl NsScope {
 /// not even discoverable to them (callers answer 404, like every cluster
 /// read). Namespace candidates come from the policy's child selections, so
 /// the cost is bounded by the grants, not by the cluster's namespace count.
+/// A handler asking about many clusters loads one [`Evaluator`] and calls
+/// [`metrics_scope_with`] per cluster instead (S6-309).
+///
+/// [`Evaluator`]: crate::access::Evaluator
 pub async fn metrics_scope(
     pool: &DbPool,
     user: &User,
     id: &Id,
 ) -> otto_core::Result<Option<NsScope>> {
-    use crate::access::allowed;
-    if !allowed(pool, user, id, "discover", None).await? {
-        return Ok(None);
+    let ev = crate::access::Evaluator::load(pool, user).await?;
+    metrics_scope_with(&ev, pool, id).await
+}
+
+/// [`metrics_scope`] with the caller's tier and groups already loaded: one
+/// policy read for the cluster, then in-memory evaluation.
+pub async fn metrics_scope_with(
+    ev: &crate::access::Evaluator,
+    pool: &DbPool,
+    id: &Id,
+) -> otto_core::Result<Option<NsScope>> {
+    Ok(ev
+        .policy(pool, id)
+        .await?
+        .and_then(|policy| metrics_scope_in(ev, &policy, id)))
+}
+
+/// Pure half of [`metrics_scope_with`].
+fn metrics_scope_in(
+    ev: &crate::access::Evaluator,
+    policy: &otto_core::access::AccessPolicy,
+    id: &Id,
+) -> Option<NsScope> {
+    if !ev.allows(policy, id, "discover", None) {
+        return None;
     }
-    if allowed(pool, user, id, "metrics", None).await? {
-        return Ok(Some(NsScope::All));
+    if ev.allows(policy, id, "metrics", None) {
+        return Some(NsScope::All);
     }
-    let policy = otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
-        .get_policy(ResourceKind::K8sCluster, id)
-        .await?;
-    let candidates: BTreeSet<String> = policy
+    let granted: BTreeSet<String> = policy
         .rules
         .iter()
         .filter_map(|r| r.children.as_ref())
         .flatten()
         .filter_map(|c| c.strip_prefix("namespace:"))
+        .filter(|ns| ev.allows(policy, id, "metrics", Some(*ns)))
         .map(str::to_string)
         .collect();
-    let mut granted = BTreeSet::new();
-    for ns in candidates {
-        if allowed(pool, user, id, "metrics", Some(&ns)).await? {
-            granted.insert(ns);
-        }
-    }
-    Ok(Some(NsScope::Only(granted)))
+    Some(NsScope::Only(granted))
 }
 
 /// `metrics` on cluster `id`, for namespace `ns` when one is named (it is
@@ -204,6 +221,31 @@ fn scope_workloads(mut out: Value, scope: &NsScope) -> Value {
     }
     if let Some(list) = out.get_mut("namespaces").and_then(Value::as_array_mut) {
         list.retain(|n| scope.allows(n.as_str().unwrap_or("")));
+    }
+    // The collector's status row is cluster-wide: its pod counts cover every
+    // namespace and `last_error` / a `forbidden: …` metrics-server message can
+    // name pods or namespaces outside the grant (S6-306). A scoped caller keeps
+    // the shape and the cycle timestamps (is the collector alive?), nothing
+    // that describes the rest of the cluster.
+    if let Some(status) = out.get_mut("status").and_then(Value::as_object_mut) {
+        for k in ["pods_seen", "pods_scraped", "pods_failed", "cycle_ms"] {
+            if status.contains_key(k) {
+                status.insert(k.into(), json!(0));
+            }
+        }
+        if status.contains_key("last_error") {
+            status.insert("last_error".into(), json!(""));
+        }
+        if let Some(ms) = status.get_mut("metrics_server") {
+            let head = ms
+                .as_str()
+                .and_then(|m| m.split(':').next())
+                .unwrap_or("unknown")
+                .trim()
+                .to_string();
+            *ms = json!(head);
+        }
+        status.insert("restricted".into(), json!(true));
     }
     out
 }
@@ -523,9 +565,10 @@ async fn overview<S: K8sCtx>(
     // without cluster-wide `metrics` gets a stub row (no pod / workload /
     // error figures) — the cached full row is cluster-wide data.
     let pool = ctx.pool();
+    let ev = crate::access::Evaluator::load(&pool, &user).await?;
     let mut visible = Vec::new();
     for cluster in Clusters::new(&ctx).list().await? {
-        match metrics_scope(&pool, &user, &cluster.id).await? {
+        match metrics_scope_with(&ev, &pool, &cluster.id).await? {
             None => {}
             Some(scope) => visible.push((cluster, scope == NsScope::All)),
         }

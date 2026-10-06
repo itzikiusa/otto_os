@@ -1,6 +1,9 @@
 //! E2E: the Obsidian-compatible vault — write-through to markdown notes, and
 //! re-indexing a (shared/git-synced) vault folder back into the store.
 
+// Test harness: blocking std calls (ps, kill, read_dir) are fine here.
+#![allow(clippy::disallowed_methods)]
+
 use otto_memory::vault::{parse_to_new, to_markdown};
 use otto_memory::{MemoryQuery, MemoryService, NewMemory, Scope, SearchMode};
 

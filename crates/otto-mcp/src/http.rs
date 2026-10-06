@@ -386,7 +386,9 @@ async fn create_server<S: McpCtx>(
     if !req.secret_env.is_empty() || !req.secret_headers.is_empty() {
         let blob = json!({ "env": req.secret_env, "headers": req.secret_headers }).to_string();
         let sref = McpService::secret_ref(&server.id);
-        ctx.mcp_secrets().put(&sref, &blob).map_err(ApiErr)?;
+        otto_core::secrets::put_async(ctx.mcp_secrets(), &sref, &blob)
+            .await
+            .map_err(ApiErr)?;
         ctx.mcp()
             .registry()
             .set_secret_meta(
@@ -487,7 +489,9 @@ async fn update_server<S: McpCtx>(
         let headers = req.secret_headers.clone().unwrap_or_default();
         let blob = json!({ "env": env, "headers": headers }).to_string();
         let sref = McpService::secret_ref(&id);
-        ctx.mcp_secrets().put(&sref, &blob).map_err(ApiErr)?;
+        otto_core::secrets::put_async(ctx.mcp_secrets(), &sref, &blob)
+            .await
+            .map_err(ApiErr)?;
         let ek: Vec<String> = env.keys().cloned().collect();
         let hk: Vec<String> = headers.keys().cloned().collect();
         ctx.mcp()
@@ -535,7 +539,8 @@ async fn delete_server<S: McpCtx>(
     .await?;
     // Best-effort secret cleanup.
     if server.has_secret {
-        let _ = ctx.mcp_secrets().delete(&McpService::secret_ref(&id));
+        let _ =
+            otto_core::secrets::delete_async(ctx.mcp_secrets(), &McpService::secret_ref(&id)).await;
     }
     ctx.mcp().evict_client(&id);
     ctx.mcp().registry().delete(&id).await.map_err(ApiErr)?;
@@ -1076,13 +1081,27 @@ struct AuditQuery {
     decision: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// `true` → the [`AuditPage`] envelope instead of the bare row array.
+    #[serde(default)]
+    paged: bool,
+}
+
+/// `GET /mcp/audit?paged=true`: one page of visible rows plus whether the
+/// LEDGER has more. Rows are filtered by visibility AFTER the ledger read, so
+/// a short (even empty) page doesn't mean the end — `has_more` is decided
+/// from the raw read (S17-304).
+#[derive(serde::Serialize)]
+struct AuditPage {
+    rows: Vec<otto_state::McpCallLogRow>,
+    next_offset: i64,
+    has_more: bool,
 }
 
 async fn list_audit<S: McpCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Query(q): Query<AuditQuery>,
-) -> ApiResult<Json<Vec<otto_state::McpCallLogRow>>> {
+) -> ApiResult<Response> {
     let ws = accessible_ws(&ctx, &user).await?;
     // A non-root caller's workspace-less `otto.*` rows are their own only.
     let me = ws.as_ref().map(|_| user.id.clone());
@@ -1095,9 +1114,18 @@ async fn list_audit<S: McpCtx>(
         limit: q.limit.unwrap_or(200),
         offset: q.offset.unwrap_or(0),
     };
+    // The effective page size the ledger read applies (`CallLogRepo::list`).
+    let limit = if query.limit <= 0 {
+        200
+    } else {
+        query.limit.min(1000)
+    };
+    let offset = query.offset.max(0);
     let mut visible = Vec::new();
     let mut memo = VisibilityMemo::default();
-    for row in ctx.mcp().call_log().list(&query).await? {
+    let raw = ctx.mcp().call_log().list(&query).await?;
+    let raw_len = raw.len() as i64;
+    for row in raw {
         if visible_record_memo(
             &ctx,
             &user,
@@ -1110,7 +1138,15 @@ async fn list_audit<S: McpCtx>(
             visible.push(row);
         }
     }
-    Ok(Json(visible))
+    if q.paged {
+        return Ok(Json(AuditPage {
+            rows: visible,
+            next_offset: offset + raw_len,
+            has_more: raw_len >= limit,
+        })
+        .into_response());
+    }
+    Ok(Json(visible).into_response())
 }
 
 async fn stats<S: McpCtx>(
