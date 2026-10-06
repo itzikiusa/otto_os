@@ -74,7 +74,7 @@ connection library unusable for every non-root account.)
 | 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number`. Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
-| 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
+| 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session — an agent session's `cwd` may not be `/`, `$HOME` or a parent of it (except a workspace rooted at `$HOME`, at that root), nor Otto's data dir or a non-work-area path inside it (400). An agent session's own credential may only use a `cwd` inside the workspace root, its own folder, or a worktree of the same repo (403) |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
 | 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id`, `meta.delegated_by`, the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` and the confinement keys `meta.read_only` / `project_settings` / `allow_subagents` / `personal_agent` / `account_id` are **server-owned** (create-only): a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). An agent session's own credential may PATCH, DELETE, restart, resume, kill, archive or unarchive (and bulk-act on) only its own session or a worker whose `meta.delegated_by` is that session — `403` otherwise (bulk: `ok:false`). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
@@ -233,12 +233,25 @@ Notes:
   a working / streaming / engine-held / open-turn session is reloaded once it goes
   idle (re-checked every 30 s for up to 12 h; skipped if its process was already
   replaced). Restarts are staggered.
-- `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", providers:str[]}`
+- `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", exempt_providers?:str[], providers?:str[]}`
   — opt-in **OS-level confinement** for spawned agent/shell sessions (macOS Apple
-  Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
-  agent CLI runs under a Seatbelt profile that denies filesystem **writes** outside
-  the workspace cwd, the resolved git dir (so worktree commits still work), the
-  agent CLIs' own config/cache dirs and temp — while leaving reads global. Otto's
+  Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, EVERY
+  agent session is confined — user-added providers included — except providers a
+  person lists in `exempt_providers`; the legacy `providers` list still exempts the
+  built-in `claude`/`codex`/`agy`/`shell` it leaves out, but never a provider it
+  doesn't know. Each confined agent CLI runs under a Seatbelt profile that denies
+  filesystem **writes** outside the workspace cwd (never one at or above `$HOME`),
+  the resolved git dir (so worktree commits still work), the agent CLIs' own
+  STATE dirs (an allow-list: `~/.claude/{projects,todos,statsig,sessions,…}`,
+  `~/.codex/{sessions,log,sqlite,tmp,…}`, `~/.gemini/{antigravity-cli,tmp,history}`
+  plus the top-level state files of those homes, never a script) and temp — while
+  leaving reads global. The shared package caches (`~/.npm`, `~/.cache`,
+  `~/Library/Caches`) and `~/.otto` are NOT writable; the session's
+  `npm_config_cache` / `UV_CACHE_DIR` / `XDG_CACHE_HOME` / `PRE_COMMIT_HOME` /
+  `PIP_CACHE_DIR` / `GOCACHE` / `YARN_CACHE_FOLDER` / `BUN_INSTALL_CACHE_DIR` point
+  at a private `<tmp>/otto-agent-cache/<session id>/` instead (a codex session's
+  shadow `CODEX_HOME` in its context bundle is re-opened, minus its config, skills
+  and instruction files). Otto's
   own data dir is write-denied even under those roots (only its agent work areas —
   `workflow-runs`, `workflow-context`, `scheduled`, `personal`, `goal-loops`,
   `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize`,
@@ -250,14 +263,21 @@ Notes:
   is the daemon's configured one — `$OTTO_DATA_DIR`-aware). Files that make
   unsandboxed programs run agent-chosen code are write-denied
   (`~/.claude.json`, `~/.claude/settings.json`, `~/.claude/settings.local.json`,
-  `~/.claude/{plugins,hooks,agents,commands}/`, `~/.codex/config.toml`,
-  `~/.gemini/settings.json`, `~/.config/git/`, `~/.config/gh/`; the same claude/codex
-  files inside the session's own account home; a repo's `.git/config`,
+  `~/.claude/CLAUDE.md`, `~/.claude/{plugins,hooks,agents,commands,skills,output-styles}/`,
+  `~/.codex/{config.toml,AGENTS.md,AGENTS.override.md}`,
+  `~/.codex/{prompts,skills,plugins,rules,packages}/`, `~/.gemini/{settings.json,GEMINI.md}`,
+  `~/.gemini/{extensions,skills}/`, `~/.otto/context/`, `~/.config/git/`, `~/.config/gh/`,
+  any `*.sh`/`*.py`/`*.js`… directly in a CLI home; the same claude/codex
+  files + `CLAUDE.md`/`AGENTS.md`/`skills/`/`prompts/`/`rules/` inside the session's own account home; a repo's `.git/config`,
   `config.worktree`, `commondir`, `hooks/` and `worktrees/*/gitdir`); of `~/.config`
   only `configstore/` is writable. A `meta.read_only` session (always confined)
   additionally cannot write its own folder's `.claude/settings*.json`,
-  `.claude/{hooks,agents,commands}/` or `.mcp.json`. A scheduled `shell` task runs
-  under the same profile when `providers` covers `shell`. `/bin/launchctl` cannot be executed,
+  `.claude/{hooks,agents,commands,skills,output-styles}/`, `.mcp.json`, `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.agents/skills/`, `.codex/` or `.gemini/`,
+  nor claude's per-project auto-memory (`~/.claude/projects/*/memory/`), and cannot
+  even READ `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.netrc`,
+  `~/.git-credentials`, `~/.docker/config.json`, `~/.config/gcloud` or `~/.azure`. A scheduled `shell` task runs
+  under the same profile unless `shell` is exempt. `/bin/launchctl` cannot be executed,
   and mach lookups are limited to an allow-list (directory/logging/prefs/fsevents,
   network configuration + DNS, TLS trust and the keychain) — LaunchServices and
   AppleEvents are unreachable, so `open -a …` can't start an unsandboxed process. `network`
@@ -1483,7 +1503,7 @@ occurrence_count, created_at, updated_at`.
 |---|---|---|---|
 | POST /workspaces/{id}/broadcast | ws editor; an agent session's credential reaches only its own session and the workers it opened (others are skipped, not delivered) | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` — text from an agent credential is recorded on the target's trail as agent-originated (`source: agent`, "from session …"), never as the person's message |
 | POST /workspaces/{id}/relay | ws editor; same agent-credential confinement as `/broadcast` | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
-| POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`; `meta.delegated_by` = the calling agent session, stamped from the credential — a body value is dropped) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait` |
+| POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`; `meta.delegated_by` = the calling agent session, stamped from the credential — a body value is dropped) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait`. Same `cwd` rules as #18: an agent credential's `cwd` must lie inside the workspace root, the caller's own folder or a worktree of the same repo (403) |
 
 Relay delivers a **name-addressed** message: the leading token(s) of `text` may
 name session handles (`ronaldo: …`, `ronaldo, messi: …`, bare `ronaldo do X`) or

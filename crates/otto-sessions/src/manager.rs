@@ -2615,7 +2615,26 @@ impl SessionManager {
         if let Some(account_home) = self.provider_home(session) {
             extra.push(account_home);
         }
-        let policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
+        let mut policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
+        // Codex runs with `CODEX_HOME` = the shadow home in its context bundle
+        // (`~/.otto/context/codex/<cwd>/codex-home`), which the profile
+        // otherwise write-denies with the rest of `~/.otto/context`: re-open
+        // that one home, minus its config / skills / instruction files.
+        if let Some(shadow) = spec
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "CODEX_HOME")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .filter(|p| p.is_absolute() && !p.starts_with(&data_dir))
+        {
+            policy = policy.allow_provider_home(&shadow);
+        }
+        // Package managers / build tools cache into a private per-session dir
+        // (under temp, which is writable): the user's shared caches hold code
+        // unsandboxed programs run later, so they are not writable roots.
+        spec.env
+            .extend(otto_sandbox::agent_cache_env(&agent_cache_dir(&session.id)));
         let (program, args) = policy.wrap(&spec.program, &spec.args);
         spec.program = program;
         spec.args = args;
@@ -2936,6 +2955,86 @@ impl SessionManager {
         self.networks.status(id)
     }
 
+    /// S11-302: refuse an agent session whose folder is `/`, `$HOME` or one of
+    /// its parents, or Otto's data dir (or a non-work-area path inside it) —
+    /// the session's cwd becomes a Seatbelt write grant and is pre-trusted,
+    /// so `$HOME` would hand a "confined" agent `~/.zshrc` and
+    /// `~/Library/LaunchAgents`. The one exception is a workspace a person
+    /// rooted at `$HOME` itself, opened at that root (its sandbox profile
+    /// simply carries no cwd grant — `SandboxPolicy::for_agent` never grants
+    /// a root covering `$HOME`).
+    fn check_session_cwd(&self, ws: &Workspace, cwd: &str) -> Result<()> {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let data_dir = self.sandbox_data_dir(&home);
+        let path = std::path::Path::new(cwd);
+        let Some(why) = otto_sandbox::unsafe_session_cwd(path, &home, &data_dir) else {
+            return Ok(());
+        };
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+        let workspace_home_root = !home.as_os_str().is_empty()
+            && canon(path).is_some()
+            && canon(path) == canon(&home)
+            && canon(path) == canon(std::path::Path::new(&ws.root_path));
+        if workspace_home_root {
+            return Ok(());
+        }
+        Err(Error::Invalid(format!(
+            "refusing to start an agent session in {cwd}: it is {why}"
+        )))
+    }
+
+    /// S11-302: where an agent's OWN credential (`caller` = its session) may
+    /// open another session. Inside the workspace root, inside the caller's
+    /// own folder, or in a worktree of the same repository as either (same
+    /// git common dir) — never an arbitrary folder, whose tree the new
+    /// session's sandbox would make writable and its trust pre-seeding would
+    /// trust. `None` (the workspace root) is always fine. A person's
+    /// credential never comes here.
+    pub async fn check_agent_cwd(
+        &self,
+        ws: &Workspace,
+        caller: &Id,
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
+            return Ok(());
+        };
+        let want = std::path::Path::new(cwd);
+        if !want.is_absolute() {
+            return Err(Error::Forbidden(
+                "an agent may only open sessions at an absolute folder".into(),
+            ));
+        }
+        let want = std::fs::canonicalize(want)
+            .map_err(|_| Error::Forbidden(format!("an agent may not open a session in {cwd}")))?;
+        let mut bases: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(&ws.root_path)];
+        if let Ok(own) = self.get(caller).await {
+            if !own.cwd.trim().is_empty() {
+                bases.push(std::path::PathBuf::from(own.cwd));
+            }
+        }
+        let bases: Vec<std::path::PathBuf> = bases
+            .iter()
+            .filter_map(|b| std::fs::canonicalize(b).ok())
+            .collect();
+        if bases.iter().any(|b| want.starts_with(b)) {
+            return Ok(());
+        }
+        if let Some(common) = resolve_git_common_dir(&want).await {
+            for b in &bases {
+                if resolve_git_common_dir(b).await.as_ref() == Some(&common) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(Error::Forbidden(format!(
+            "an agent may only open sessions inside the workspace, its own folder \
+             or a worktree of the same repository (not {cwd})"
+        )))
+    }
+
     /// Create a session row, spawn its PTY and start the status task.
     ///
     /// `spec_override` is used by connection sessions (the connections crate
@@ -2974,6 +3073,9 @@ impl SessionManager {
             }
         }
         let cwd = req.cwd.clone().unwrap_or_else(|| ws.root_path.clone());
+        if req.kind == SessionKind::Agent {
+            self.check_session_cwd(ws, &cwd)?;
+        }
 
         let (provider, mut spec, provider_session_id) = match spec_override {
             Some(spec) => {
@@ -6474,10 +6576,17 @@ fn evict_if_same(live: &DashMap<Id, Arc<PtyHandle>>, id: &Id, handle: &Arc<PtyHa
     live.remove_if(id, |_, h| Arc::ptr_eq(h, handle)).is_some()
 }
 
+/// The providers the legacy `process_sandbox.providers` allow-list defaulted to.
+const SANDBOX_BUILTIN_PROVIDERS: &[&str] = &["claude", "codex", "agy", "shell"];
+
 /// Decide whether a session should be sandboxed and with what network posture,
 /// from the `process_sandbox` setting JSON. `None` means "do not sandbox". Pure
-/// (no I/O) so the gating is unit-testable: only `Agent` sessions whose provider
-/// is in the configured set (default: all agent providers) when `enabled`.
+/// (no I/O) so the gating is unit-testable. When `enabled`, EVERY `Agent`
+/// session is confined — a user-added provider (`opencode`, a custom CLI)
+/// included — unless a person exempted its provider: `exempt_providers`, or
+/// (legacy) a `providers` list that leaves out one of the built-in
+/// [`SANDBOX_BUILTIN_PROVIDERS`]. A provider the legacy list never knew about
+/// is never exempt by omission (S11-309).
 fn sandbox_decision(
     cfg: &serde_json::Value,
     kind: SessionKind,
@@ -6493,22 +6602,21 @@ fn sandbox_decision(
     {
         return None;
     }
-    let providers: Vec<String> = cfg
-        .get("providers")
-        .and_then(|v| v.as_array())
-        .map(|a| {
+    let list = |key: &str| -> Option<Vec<String>> {
+        cfg.get(key).and_then(|v| v.as_array()).map(|a| {
             a.iter()
                 .filter_map(|x| x.as_str().map(String::from))
                 .collect()
         })
-        .unwrap_or_else(|| {
-            ["claude", "codex", "agy", "shell"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        });
-    if !providers.iter().any(|p| p == provider) {
+    };
+    if list("exempt_providers").is_some_and(|ex| ex.iter().any(|p| p == provider)) {
         return None;
+    }
+    if let Some(legacy) = list("providers") {
+        let builtin = SANDBOX_BUILTIN_PROVIDERS.contains(&provider);
+        if builtin && !legacy.iter().any(|p| p == provider) {
+            return None;
+        }
     }
     Some(
         match cfg
@@ -6523,11 +6631,6 @@ fn sandbox_decision(
     )
 }
 
-/// Resolve a repo's git **common dir** (absolute, canonicalized) for `cwd`, so
-/// the sandbox can grant write access to it. For a linked worktree this is the
-/// main repo's `.git` (which holds the objects + the worktree's gitdir), which
-/// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
-/// commit. Best-effort: `None` when `cwd` isn't a git repo.
 /// The Seatbelt policy for one agent session. A read-only session (untrusted
 /// input, always confined) additionally may not plant project-scope claude
 /// config (`.claude/settings*.json`, hooks, `.mcp.json`) in its own folder —
@@ -6543,12 +6646,25 @@ fn sandbox_policy(
 ) -> otto_sandbox::SandboxPolicy {
     let policy = otto_sandbox::SandboxPolicy::for_agent(cwd, home, data_dir, extra, network);
     if read_only {
-        policy.deny_project_agent_config(cwd)
+        policy.harden_read_only(cwd, home)
     } else {
         policy
     }
 }
 
+/// A sandboxed session's private package / build cache dir
+/// (`<tmp>/otto-agent-cache/<session id>`; see [`otto_sandbox::agent_cache_env`]).
+fn agent_cache_dir(session_id: &Id) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-agent-cache")
+        .join(session_id.as_str())
+}
+
+/// Resolve a repo's git **common dir** (absolute, canonicalized) for `cwd`, so
+/// the sandbox can grant write access to it. For a linked worktree this is the
+/// main repo's `.git` (which holds the objects + the worktree's gitdir), which
+/// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
+/// commit. Best-effort: `None` when `cwd` isn't a git repo.
 async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     let out = otto_git::hardened_command()
         .arg("-C")
@@ -9804,6 +9920,60 @@ mod tests {
             None
         );
         assert!(sandbox_decision(&on, SessionKind::Agent, "shell").is_some());
+    }
+
+    /// S11-309: with the sandbox on, a provider nobody listed (a user-added
+    /// CLI) is confined; only a person's explicit exemption (or the legacy
+    /// list leaving out a BUILT-IN provider) lets one run unconfined.
+    #[test]
+    fn sandbox_decision_confines_unlisted_providers_by_default() {
+        let on = serde_json::json!({ "enabled": true });
+        for p in ["opencode", "grok", "gemini", "my-cli"] {
+            assert!(
+                sandbox_decision(&on, SessionKind::Agent, p).is_some(),
+                "{p}"
+            );
+        }
+        let legacy = serde_json::json!({ "enabled": true, "providers": ["claude"] });
+        assert!(sandbox_decision(&legacy, SessionKind::Agent, "opencode").is_some());
+        assert!(sandbox_decision(&legacy, SessionKind::Agent, "claude").is_some());
+        assert_eq!(sandbox_decision(&legacy, SessionKind::Agent, "codex"), None);
+        let exempt = serde_json::json!({ "enabled": true, "exempt_providers": ["opencode"] });
+        assert_eq!(
+            sandbox_decision(&exempt, SessionKind::Agent, "opencode"),
+            None
+        );
+        assert!(sandbox_decision(&exempt, SessionKind::Agent, "claude").is_some());
+    }
+
+    /// S11-302: no agent session at `/`, a parent of `$HOME`, or Otto's data
+    /// dir — refused before anything spawns; an ordinary folder is fine.
+    #[tokio::test]
+    async fn create_refuses_unsafe_session_folders() {
+        let (mgr, _repo, ws, _user) = test_manager().await;
+        let data = tempfile::tempdir().unwrap();
+        let mgr = Arc::try_unwrap(mgr)
+            .ok()
+            .expect("sole owner")
+            .with_data_dir(data.path());
+        for cwd in ["/", data.path().to_str().unwrap()] {
+            let err = mgr.check_session_cwd(&ws, cwd).unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{cwd}: {err:?}");
+        }
+        let bin = data.path().join("bin");
+        assert!(mgr.check_session_cwd(&ws, bin.to_str().unwrap()).is_err());
+        let run = data.path().join("workflow-runs/r1");
+        assert!(mgr.check_session_cwd(&ws, run.to_str().unwrap()).is_ok());
+        assert!(mgr.check_session_cwd(&ws, "/tmp").is_ok());
+        if let Ok(home) = std::env::var("HOME") {
+            if std::path::Path::new(&home).is_dir() {
+                assert!(mgr.check_session_cwd(&ws, &home).is_err(), "$HOME");
+                // …unless the workspace itself is rooted there.
+                let mut home_ws = ws.clone();
+                home_ws.root_path = home.clone();
+                assert!(mgr.check_session_cwd(&home_ws, &home).is_ok());
+            }
+        }
     }
 
     #[test]
