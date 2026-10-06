@@ -43,6 +43,8 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { runPull } from './pullFlow';
   import { gitBridge } from './gitBridge.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { routeGraphRef } from './deepLink';
 
   /** Strip trailing slashes so worktree paths match registered repo paths. */
   function normPath(p: string): string {
@@ -2743,6 +2745,26 @@
     const sha = t.sha || commits.find((c) => c.refs.some((r) => r === `tag: ${t.name}`))?.sha;
     if (sha) void revealSha(sha, t.name);
   }
+
+  // A deep link `#/git/<repo>/graph/<branch>` (Run with Otto's "View branch
+  // diff", S20-301) jumps to that branch's tip — once per link — as soon as
+  // the refs and the first history page are in.
+  const routeRef = $derived(routeGraphRef(router.parts, repoId));
+  let routeRefSeen = '';
+  $effect(() => {
+    const name = routeRef;
+    const r: RefsResp | null = refs;
+    if (!name || !r || commitsLoading || name === routeRefSeen) return;
+    routeRefSeen = name;
+    untrack(() => {
+      const b =
+        r.local.find((x) => x.name === name) ??
+        r.remote.find((x) => x.name === name) ??
+        r.remote.find((x) => x.name.endsWith(`/${name}`));
+      if (b) selectBranchRow(b);
+      else toasts.info('Branch not found', `${name} isn’t in this repository any more (it may have been deleted).`);
+    });
+  });
 
   // Set of remote-branch names (e.g. "origin/main") from the refs response, used
   // to classify a decoration token that isn't obviously a tag/HEAD.
