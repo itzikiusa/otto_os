@@ -2715,6 +2715,8 @@ export interface ImportCreateResult {
   skipped: string[];
   created: Connection[];
   failed: { name: string; error: string }[];
+  /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */
+  user_owned: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -4705,6 +4707,8 @@ export interface InstallBundledResp {
   backed_up: boolean;
   /** Path of the backup taken before overwriting, when backed_up is true. */
   backup_path: string | null;
+  /** Provider skill paths (`~/.claude/skills/<name>`, …) left untouched because a user-owned skill of that name lives there. Omitted when empty. */
+  user_owned?: string[];
 }
 
 /** Result of installing every bundled skill (optionally a single category). */

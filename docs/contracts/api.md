@@ -2057,8 +2057,8 @@ choices. The UI surfaces this distinction in the preview.
 |---|---|---|---|
 | GET /library/bundled | root | — | bundled skill catalog |
 | GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
-| POST /library/bundled/{name}/install | root | — | install/update one bundled skill |
-| POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}]}`. Skips skills already up to date, and ones whose installed copy is ahead of the bundled version unless `force=true`; a failing skill is reported in `failed` and the rest still install. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
+| POST /library/bundled/{name}/install | root | — | install/update one bundled skill → `{name, installed, backed_up, backup_path, user_owned?}`. Also mirrors it into `~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`, but never replaces an entry Otto's `.otto-managed.json` does not own (or any symlink) — those paths come back in `user_owned` |
+| POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}], user_owned}` (`user_owned`: provider skill paths left untouched because a user-owned skill of that name lives there). Skips skills already up to date, and ones whose installed copy is ahead of the bundled version unless `force=true`; a failing skill is reported in `failed` and the rest still install. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
 
 Each catalog entry carries `{name, category, version, description, installed_version,
 state, update_available}`. `state` is `not_installed | up_to_date | update_available
