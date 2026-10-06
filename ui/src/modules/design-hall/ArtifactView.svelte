@@ -859,17 +859,17 @@
         <aside class="right" aria-label="Design details">
           <button class="btn small ghost compact-details back-design" bind:this={designButton} onclick={() => void setDetails(false)}>Back to design</button>
           <div class="tabs segmented" role="tablist" aria-label="Details panel">
-            <button role="tab" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
+            <button role="tab" id="dh-tab-otto" aria-controls="dh-panel" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">
               Otto
             </button>
-            <button role="tab" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
+            <button role="tab" id="dh-tab-links" aria-controls="dh-panel" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
               Links <span class="count">{split.uses.length + split.usedIn.length}</span>
             </button>
-            <button role="tab" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
+            <button role="tab" id="dh-tab-references" aria-controls="dh-panel" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">
               References
             </button>
           </div>
-          <div class="panel" role="tabpanel">
+          <div class="panel" role="tabpanel" id="dh-panel" aria-labelledby="dh-tab-{rightTab}">
             {#if brief && rightTab !== 'otto'}
               <div class="brief">
                 <span class="k"><Icon name="sparkle" size={12} /> Brief</span>
