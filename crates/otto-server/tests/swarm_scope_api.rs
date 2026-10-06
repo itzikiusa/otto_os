@@ -396,3 +396,65 @@ async fn stop_analysis_agent_refuses_a_foreign_agent() {
     let still = pr.get_analysis_agent(&agent_b.id).await.unwrap();
     assert_eq!(still.status, "running", "foreign agent untouched");
 }
+
+/// S4-301: an agent that ran in worktree mode before S4-08 owns the legacy
+/// branch `swarm/<s8>/<a8>`. The per-(agent, project) branch must not nest
+/// under it (git refs are paths: "cannot lock ref"), or every pre-existing
+/// worktree agent silently falls back to a scratch dir outside the repo.
+#[tokio::test]
+async fn worktree_survives_a_legacy_agent_branch() {
+    let w = world().await;
+    let repo_dir = tempfile::TempDir::new().unwrap();
+    let repo = repo_dir.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init", "-q", "-b", "main"]) {
+        return; // no git on PATH — nothing to assert
+    }
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    assert!(git(&["add", "."]));
+    assert!(git(&["commit", "-q", "-m", "init"]));
+    let short = |id: &str| id[id.len() - id.len().min(8)..].to_string();
+    let legacy = format!("swarm/{}/{}", short(&w.swarm_a), short(&w.agent_a));
+    assert!(git(&["branch", &legacy]), "create the legacy agent branch");
+
+    let repo_path = repo.to_string_lossy().to_string();
+    w.ctx
+        .swarm_repo
+        .update_project(
+            &w.project_a,
+            otto_state::ProjectPatch {
+                repo_path: Some(Some(repo_path.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let swarm = w.ctx.swarm_repo.get_swarm(&w.swarm_a).await.unwrap();
+    let agent = w.ctx.swarm_repo.get_agent(&w.agent_a).await.unwrap();
+    let project = w.ctx.swarm_repo.get_project(&w.project_a).await.unwrap();
+    let info = otto_swarm::runtime::workspace::ensure_cwd_info(
+        &w.ctx.swarm_rt(),
+        &swarm,
+        &agent,
+        Some(&project),
+    )
+    .await
+    .unwrap();
+    assert_eq!(info.mode, "worktree", "fell back to scratch: {info:?}");
+    let branch = info.branch.expect("agent branch");
+    assert!(!branch.starts_with(&format!("{legacy}/")), "{branch}");
+    assert!(std::path::Path::new(&info.path).join("README.md").exists());
+    // The legacy branch (and any unmerged work on it) is left in place.
+    assert!(git(&["rev-parse", "--verify", "-q", &legacy]));
+}
