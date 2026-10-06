@@ -672,12 +672,15 @@ pub(crate) struct SelfCaller {
 }
 
 impl SelfCaller {
-    pub(crate) async fn open(ctx: &ServerCtx, user: &User) -> Result<Self, Error> {
+    /// Opened for `auth`'s caller: an agent's lookups are made with a
+    /// credential bound to its session (S8-305), a person's with their own.
+    pub(crate) async fn open(ctx: &ServerCtx, auth: &AuthContext) -> Result<Self, Error> {
         let lease = crate::self_call::lease(
             &ctx.pool,
             &ctx.base_url,
-            &user.id,
+            &auth.effective_user.id,
             crate::self_call::LABEL_REFS,
+            crate::mcp_outward::self_call_binding(auth),
         )
         .await?;
         Ok(Self {
@@ -886,7 +889,7 @@ pub(crate) async fn resolve(
     ws_filter: Option<&str>,
     prefer: Option<&str>,
 ) -> Result<(Candidate, MatchedBy), Error> {
-    let caller = SelfCaller::open(ctx, &auth.effective_user).await?;
+    let caller = SelfCaller::open(ctx, auth).await?;
     let r = resolve_with(&caller, auth, kind, arg, reference, ws_filter, prefer).await;
     caller.close().await;
     r
@@ -912,7 +915,7 @@ pub(crate) async fn directory_json(
     ws_filter: Option<&str>,
     current: Option<&str>,
 ) -> Result<Value, Error> {
-    let caller = SelfCaller::open(ctx, &auth.effective_user).await?;
+    let caller = SelfCaller::open(ctx, auth).await?;
     let cands = load_candidates(&caller, kind, pin_of(auth), ws_filter, current).await;
     caller.close().await;
     let cands = cands?;

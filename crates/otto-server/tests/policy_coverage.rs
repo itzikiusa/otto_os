@@ -280,21 +280,16 @@ fn policy_decisions_match_the_golden_snapshot() {
     );
 }
 
-/// S8-305: every governed `otto.*` tool replays its REST call through
-/// `self_call` with a PERSON-classed credential (the self-call PAT has no
-/// session binding), so `credential_class_gate` never sees the agent behind
-/// it. That is only safe while no tool maps onto a person-only route: this
-/// pins every `route_for` target to a route whose credential class is
-/// neither Admin nor Secret. A new tool that targets one fails here — bind
-/// its self-call to the calling session instead, or drop the mapping.
-/// Governed tools whose self-call target is person-only, each reviewed: the
-/// tool must stay approval-gated (`DANGEROUS`) for the exception to hold.
-const GOVERNED_PERSON_ONLY: &[&str] = &[
-    "approve_improvement_edit",
-    "reject_improvement_edit",
-    "rollback_improvement_edit",
-];
-
+/// S8-305: a governed `otto.*` tool replays its REST call through
+/// `self_call` with the CALLER's credential class — bound to the calling agent
+/// session for an agent, so `credential_class_gate` and the other agent rules
+/// see the agent behind it. A tool whose target is a person-only (Admin /
+/// Secret) route would therefore simply not work for agents, except the
+/// reviewed [`otto_mcp::outward::PERSON_ONLY_TOOLS`]: the governed path always
+/// files a human approval for an agent caller and replays only the approved
+/// call as that person. This pins every OTHER `route_for` target to a route
+/// that is neither Admin nor Secret, and each person-only tool to an
+/// approval-gated (`DANGEROUS`) tool whose target really is person-only.
 #[test]
 fn governed_self_call_targets_are_never_person_only_routes() {
     use axum::http::Method;
@@ -357,6 +352,7 @@ fn governed_self_call_targets_are_never_person_only_routes() {
 
     let mut checked = 0usize;
     let mut wrong = Vec::new();
+    let mut person_only_seen = Vec::new();
     for spec in otto_tool_specs() {
         let Some(bare) = spec["name"].as_str().and_then(|n| n.strip_prefix("otto.")) else {
             continue;
@@ -374,14 +370,19 @@ fn governed_self_call_targets_are_never_person_only_routes() {
         if let Some(c @ (RouteClass::Admin | RouteClass::Secret)) = route_class(&method, &template)
         {
             // Reviewed exceptions: the improvement-edit decisions are the
-            // governed twin of an Admin-tagged gate (S11-308). They stay
-            // reachable ONLY because each call files a human approval first
-            // (DANGEROUS) — the person who approves the MCP call decides.
-            let reviewed =
-                GOVERNED_PERSON_ONLY.contains(&bare) && otto_mcp::outward::tool_is_dangerous(bare);
+            // governed twin of an Admin-tagged gate (S11-308). An agent's
+            // call always files a human approval first (forced, never
+            // auto-approved) and only the approved call replays as the person.
+            let reviewed = otto_mcp::outward::tool_is_person_only(bare)
+                && otto_mcp::outward::tool_is_dangerous(bare);
             if !reviewed {
                 wrong.push(format!("{bare}: {method} {template} is {c:?}"));
             }
+            person_only_seen.push(bare.to_string());
+        } else if otto_mcp::outward::tool_is_person_only(bare) {
+            wrong.push(format!(
+                "{bare}: listed in PERSON_ONLY_TOOLS but {method} {template} is not person-only"
+            ));
         }
     }
     assert!(
@@ -392,5 +393,15 @@ fn governed_self_call_targets_are_never_person_only_routes() {
         wrong.is_empty(),
         "governed self-calls must not target person-only routes:\n{}",
         wrong.join("\n")
+    );
+    person_only_seen.sort();
+    let mut expected: Vec<String> = otto_mcp::outward::PERSON_ONLY_TOOLS
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        person_only_seen, expected,
+        "every PERSON_ONLY_TOOLS entry must resolve to its person-only route"
     );
 }

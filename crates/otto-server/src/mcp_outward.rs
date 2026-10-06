@@ -316,10 +316,22 @@ pub(crate) async fn governed_invoke(
     if let crate::personal_agent_policy::AgentGate::Deny(reason) = &agent_gate {
         return Ok(deny_audit(ctx, &mut audit, reason).await);
     }
+    // S8-305: an agent's governed self-call carries its own session binding,
+    // so a person-only target refuses it. Deciding an improvement edit is
+    // therefore ALWAYS a person's call for a non-human caller: force the
+    // approval (never covered by an auto-approve rule or a token grant), and
+    // only the approved call replays as that person (`SelfCallAs` below).
+    let person_only_by_agent =
+        otto_mcp::outward::tool_is_person_only(&short) && !crate::ui_bridge::is_human(auth);
     let forced_approval = match &agent_gate {
         crate::personal_agent_policy::AgentGate::ForceApproval { reason, risk } => {
             Some((reason.clone(), *risk))
         }
+        _ if person_only_by_agent => Some((
+            "deciding an improvement edit is a person's decision — approve to apply it as yourself"
+                .to_string(),
+            "dangerous",
+        )),
         _ => None,
     };
 
@@ -686,7 +698,25 @@ pub(crate) async fn governed_invoke(
             crate::agent_refs::directory_json(ctx, auth, kind, ws, session_ws.as_deref().or(ws))
                 .await
         }
-        None => execute_otto_tool(ctx, user, &short, arguments).await,
+        None => {
+            let as_ = if !person_only_by_agent {
+                SelfCallAs::Caller(self_call_binding(auth))
+            } else if audit.approval_id.is_some() {
+                // The person who approved THIS call (single-use card, bound to
+                // the args hash and the requesting session) decided it.
+                SelfCallAs::Caller(None)
+            } else {
+                SelfCallAs::Refused
+            };
+            match as_ {
+                SelfCallAs::Caller(binding) => {
+                    execute_otto_tool(ctx, user, &short, arguments, binding).await
+                }
+                SelfCallAs::Refused => Err(Error::Forbidden(format!(
+                    "{short} needs a person's approval when an agent calls it"
+                ))),
+            }
+        }
     };
     let latency = started.elapsed().as_millis() as i64;
     match result {
@@ -1044,7 +1074,7 @@ async fn fill_refs(
     }
     let learn = must_learn_ws(tool, pin.is_some(), forced);
     let prefer = crate::agent_refs::caller_session_ws(ctx, auth).await;
-    let caller = crate::agent_refs::SelfCaller::open(ctx, &auth.effective_user).await?;
+    let caller = crate::agent_refs::SelfCaller::open(ctx, auth).await?;
     let r = fill_refs_with(&caller, auth, tool, out, prefer.as_deref(), learn).await;
     caller.close().await;
     r.map(Some)
@@ -1237,11 +1267,37 @@ async fn fill_repo_ref(
     }))
 }
 
+/// Which credential a governed self-call replays with (S8-305).
+enum SelfCallAs<'a> {
+    /// The caller's own class: bound to its agent session (`Some`), or a
+    /// person-classed token for a person's own call (`None`).
+    Caller(Option<&'a otto_core::Id>),
+    /// A person-only tool an agent called without a person's approval.
+    Refused,
+}
+
+/// The agent session a governed self-call for `auth` is bound to: the
+/// calling session of any non-human credential (an agent session's API
+/// token or its internal MCP credential). `None` for a person's own
+/// credential — and for an external MCP token, which has no session to bind
+/// (its person-only tools are force-approved instead, see `governed_invoke`).
+pub(crate) fn self_call_binding(auth: &AuthContext) -> Option<&otto_core::Id> {
+    if crate::ui_bridge::is_human(auth) {
+        None
+    } else {
+        crate::ui_bridge::calling_session(auth)
+    }
+}
+
+/// Run a governed tool as a self-call. `session` binds the credential to the
+/// calling agent session ([`self_call_binding`]); `None` replays it as the
+/// person `user` (their own call, or a person-only tool they approved).
 pub(crate) async fn execute_otto_tool(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
     tool: &str,
     args: &Value,
+    session: Option<&otto_core::Id>,
 ) -> Result<Value, Error> {
     if tool == "ask_human_approval" {
         return ask_human_approval(ctx, user, args).await;
@@ -1257,6 +1313,7 @@ pub(crate) async fn execute_otto_tool(
         &ctx.base_url,
         &user.id,
         crate::self_call::LABEL_EXEC,
+        session,
     )
     .await?;
     let client = crate::self_call::client();
