@@ -162,7 +162,7 @@ async fn manual_workflow_run_with_a_foreign_repo_id_is_refused() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (ctx, pool, owner, token, ws_b, repo_a) = two_workspaces_with_repo(&tmp).await;
     let graph: otto_core::workflows::WorkflowGraph = serde_json::from_value(json!({
-        "nodes": [{"id": "n", "kind": "agent", "params": {"prompt": "x"}}], "edges": []
+        "nodes": [{"id": "n", "kind": "log", "params": {}}], "edges": []
     }))
     .unwrap();
     let wf = otto_state::WorkflowsRepo::new(pool.clone())
