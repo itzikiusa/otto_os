@@ -94,9 +94,9 @@ connection library unusable for every non-root account.)
 | 30b | POST /api/v1/workspaces/{id}/connections/import/scan | ws editor | `{source: ImportSource}` | ImportScanResult — locates + reads + parses the chosen tool's default config into `ParsedConnection[]` (ready-to-create Otto params; unsupported engines listed with `supported:false`) |
 | 30c | POST /api/v1/workspaces/{id}/connections/import/create | ws editor | ImportCreateReq | ImportCreateResult `{created: Connection[], updated: Connection[], skipped: string[], failed: {name,error}[]}` — best-effort batch create through the normal create path with `secret:null` (tools keep passwords encrypted/in an OS keychain — unrecoverable; the user adds them later via edit) |
 | 31 | GET /api/v1/git/accounts | member | — | `GitAccount[]` (own accounts only; token never present) |
-| 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount |
+| 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount — `api_base_url` (here, on PATCH when changed, and on `/git/accounts/test`) must be an `https` URL with no credentials, query or fragment, whose host is not loopback / link-local (cloud metadata) / unspecified, literally or by DNS — `400` otherwise. Private ranges are allowed (self-hosted forges); plain `http` only when the daemon runs with `OTTO_GIT_ALLOW_HTTP_API=1` |
 | 33 | DELETE /api/v1/git/accounts/{id} | member (owner) | — | 204 |
-| 33a | PATCH /api/v1/git/accounts/{id} | member (owner) | `UpdateGitAccountReq {label?, username?, namespace?, api_base_url?, token?}` — `namespace`/`api_base_url` `""` clears; a non-empty `token` rotates the Keychain secret, empty/absent keeps it | GitAccount |
+| 33a | PATCH /api/v1/git/accounts/{id} | member (owner) | `UpdateGitAccountReq {label?, username?, namespace?, api_base_url?, token?}` — `namespace`/`api_base_url` `""` clears; a non-empty `token` rotates the Keychain secret (the old secret is deleted only after the row points at the new one), empty/absent keeps it | GitAccount |
 | 34 | GET /api/v1/workspaces/{id}/repos | ws viewer | — | `Repo[]` |
 | 35 | POST /api/v1/workspaces/{id}/repos | ws editor | AddRepoReq | Repo (clone runs async; Notice events report progress/done) |
 | 36 | DELETE /api/v1/repos/{id} | ws editor | — | 204 (unregisters; never deletes files) |

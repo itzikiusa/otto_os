@@ -114,6 +114,19 @@ impl Gitlab {
         ))
     }
 
+    /// A GitLab discussion id is 40 hex chars; anything else (`../`, `?`) is
+    /// refused before it can steer the request to another endpoint (S2-312).
+    fn discussion_id(id: &str) -> Result<&str> {
+        let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit());
+        if ok {
+            Ok(id)
+        } else {
+            Err(Error::Invalid(format!(
+                "not a GitLab discussion id: {id:?}"
+            )))
+        }
+    }
+
     fn project_id(r: &RemoteRef) -> String {
         urlencoding::encode(&format!("{}/{}", r.owner, r.repo)).into_owned()
     }
@@ -582,6 +595,7 @@ impl super::GitProvider for Gitlab {
     async fn comment(&self, r: &RemoteRef, number: u64, c: &NewPrCommentReq) -> Result<PrComment> {
         // Reply to an existing discussion (id = discussion id, as exposed by get_pr).
         if let Some(disc_id) = &c.in_reply_to {
+            let disc_id = Self::discussion_id(disc_id)?;
             let v = self
                 .http
                 .json(
@@ -643,6 +657,7 @@ impl super::GitProvider for Gitlab {
         thread_id: &str,
         resolved: bool,
     ) -> Result<()> {
+        let thread_id = Self::discussion_id(thread_id)?;
         self.http
             .ok(self
                 .req(
@@ -1017,8 +1032,25 @@ pub(crate) fn merge_body(strategy: MergeStrategy, delete_source_branch: bool) ->
 mod tests {
     use super::{
         create_mr_body, member_to_collaborator, note_to_comment, parse_gitlab_expiry,
-        parse_pipeline_fixture, strip_draft_prefix, summary_from,
+        parse_pipeline_fixture, strip_draft_prefix, summary_from, Gitlab,
     };
+
+    /// S2-312: only a hex discussion id reaches the API path.
+    #[test]
+    fn discussion_ids_are_hex_only() {
+        let id = "6a9c1750b37d513a43987b574953fceb50b03ce7";
+        assert_eq!(Gitlab::discussion_id(id).unwrap(), id);
+        for bad in [
+            "",
+            "../../../users",
+            "abc?x=1",
+            "abc/def",
+            "zz",
+            &"a".repeat(65),
+        ] {
+            assert!(Gitlab::discussion_id(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn note_resolved_flag_maps() {
