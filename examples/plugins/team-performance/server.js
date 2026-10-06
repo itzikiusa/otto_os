@@ -1101,7 +1101,9 @@ async function loadScopeRaw(account, projectsParam) {
   await tick();
   {
     const keyset = new Map(records.map((r) => [r.key, r]));
-    for (const [ek, fe] of Object.entries(ep)) {
+    for (const [ek, fe0] of Object.entries(ep)) {
+      // the lead's correction on the EPIC itself is the feature total when present
+      const fe = estimates[ek] && estimates[ek].overridden ? { ...fe0, days: estimates[ek].days } : fe0;
       if (!fe || !(fe.days > 0) || !keyset.has(ek)) continue;
       const kids = (fe.kids || []).filter((k) => estimates[k] && estimates[k].days > 0);
       if (kids.length < 2) continue;
