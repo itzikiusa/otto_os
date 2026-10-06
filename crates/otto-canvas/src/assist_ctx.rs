@@ -53,6 +53,13 @@ pub trait CanvasAssistCtx: CanvasCtx {
     /// Pre-trust `cwd` for `provider` so the PTY doesn't stall on a first-run
     /// trust prompt.
     fn ensure_trusted(&self, provider: &str, cwd: &str);
+    /// Pre-trust a throwaway `cwd` created under the stable scratch `root`
+    /// without adding a config entry per call (S4-303): hosts grant `root`
+    /// once for CLIs whose trust check walks parents. Default: trust `cwd`.
+    fn ensure_trusted_scratch(&self, provider: &str, root: &std::path::Path, cwd: &str) {
+        let _ = root;
+        self.ensure_trusted(provider, cwd);
+    }
     /// Run ONE interactive agent turn (the long idle backstop) and return
     /// `(reply_text, session_id)`. `on_ready` fires the moment the session exists.
     fn run_agent_turn<F: FnOnce(&Id) + Send>(

@@ -692,6 +692,9 @@ impl otto_canvas::CanvasAssistCtx for ServerCtx {
     fn ensure_trusted(&self, provider: &str, cwd: &str) {
         otto_sessions::trust::ensure_trusted(provider, cwd);
     }
+    fn ensure_trusted_scratch(&self, provider: &str, root: &std::path::Path, cwd: &str) {
+        otto_sessions::trust::ensure_trusted_scratch(provider, root, cwd);
+    }
     async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
         &self,
         t: otto_canvas::AgentTurn<'_>,

@@ -181,6 +181,7 @@ pub async fn analyze<C: ProductStudioHost>(
     // Spawn the fan-out; errors are isolated inside run_analysis. Each lens
     // (and the summarizer) runs as a real session on behalf of the current
     // user, mirroring the PR-review mechanism.
+    crate::run::spawn_scratch_sweep(ctx.pool().clone());
     let crash_ctx = ctx.clone();
     let crash_id = analysis.id.clone();
     spawn_supervised(
@@ -344,6 +345,7 @@ pub async fn rewrite<C: ProductStudioHost>(
     let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_rewrite.
+    crate::run::spawn_scratch_sweep(ctx.pool().clone());
     tokio::spawn(crate::run::run_rewrite(
         ctx.clone(),
         ws.clone(),
@@ -408,6 +410,7 @@ pub async fn generate_tests<C: ProductStudioHost>(
     let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_generate_tests.
+    crate::run::spawn_scratch_sweep(ctx.pool().clone());
     tokio::spawn(crate::run::run_generate_tests(
         ctx.clone(),
         ws.clone(),
@@ -505,6 +508,7 @@ pub async fn generate_plan<C: ProductStudioHost>(
     let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_generate_plan.
+    crate::run::spawn_scratch_sweep(ctx.pool().clone());
     tokio::spawn(crate::run::run_generate_plan(
         ctx.clone(),
         ws.clone(),

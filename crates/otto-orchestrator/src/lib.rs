@@ -579,13 +579,21 @@ mod cli_exec_tests {
     }
 }
 
-/// A per-call scratch cwd for [`Orchestrator::run_agent_untrusted`], removed
-/// on drop (incl. a dropped/cancelled future).
+/// The stable parent of every [`Orchestrator::run_agent_untrusted`] scratch
+/// cwd (S4-305). The host pre-trusts THIS dir once (claude's folder-trust
+/// check walks parents), so an unattended turn never meets the trust dialog
+/// in its fresh child — and `~/.claude.json` gains one entry, not one per call.
+pub fn untrusted_scratch_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("otto-untrusted")
+}
+
+/// A per-call scratch cwd for [`Orchestrator::run_agent_untrusted`] under
+/// [`untrusted_scratch_root`], removed on drop (incl. a dropped/cancelled future).
 struct UntrustedScratch(std::path::PathBuf);
 
 impl UntrustedScratch {
     fn create() -> otto_core::Result<Self> {
-        let p = std::env::temp_dir().join(format!("otto-untrusted-{}", uuid::Uuid::new_v4()));
+        let p = untrusted_scratch_root().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&p)
             .map_err(|e| otto_core::Error::Internal(format!("untrusted scratch dir: {e}")))?;
         Ok(Self(p))

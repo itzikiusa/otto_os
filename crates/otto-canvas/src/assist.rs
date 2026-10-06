@@ -319,11 +319,8 @@ pub async fn assist_preview<C: CanvasAssistCtx>(
     // left a stray file in the repo root, and a full-tool session has no
     // business in the user's checkout for a text-only preview. The guard
     // removes the dir and kills the session even when the request is dropped.
-    let scratch = ctx
-        .data_dir()
-        .join("canvas")
-        .join("preview")
-        .join(otto_core::new_id());
+    let preview_root = ctx.data_dir().join("canvas").join("preview");
+    let scratch = preview_root.join(otto_core::new_id());
     tokio::fs::create_dir_all(&scratch)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("canvas preview dir: {e}"))))?;
@@ -340,7 +337,9 @@ pub async fn assist_preview<C: CanvasAssistCtx>(
         .resolve_provider(Some(&ws), None)
         .await
         .map_err(ApiError)?;
-    ctx.ensure_trusted(&provider, &cwd);
+    // Trust the stable preview ROOT, not each fresh dir (S4-303): one entry
+    // per dead preview dir piled up in `~/.claude.json` forever.
+    ctx.ensure_trusted_scratch(&provider, &preview_root, &cwd);
     let sid_slot = Arc::clone(&cleanup.sid);
     let (raw, _sid) = ctx
         .run_agent_turn(

@@ -96,9 +96,10 @@ pub fn turn_args(sid: &str, model: Option<&str>, mode: TurnMode) -> Vec<String> 
     match mode {
         TurnMode::FullTools => args.push("--dangerously-skip-permissions".to_string()),
         TurnMode::Untrusted => {
-            // Nothing is permission-gated once no tool exists; keeping the
-            // flag only avoids an unanswerable folder-trust dialog in the
-            // fresh scratch dir.
+            // Nothing is permission-gated once no tool exists. The flag is
+            // belt-and-braces: the folder-trust dialog is avoided by the host
+            // pre-trusting `untrusted_scratch_root()` (S4-305) — Seatbelt
+            // denies claude's own write of a trust grant to `~/.claude.json`.
             args.push("--dangerously-skip-permissions".to_string());
             args.push("--tools".to_string());
             args.push(String::new());
