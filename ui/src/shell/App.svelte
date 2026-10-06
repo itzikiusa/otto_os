@@ -47,7 +47,7 @@
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { RIGHT_TABS, SESSION_PANEL } from '../lib/rightTabs';
   import { startWindowDrag } from '../lib/windowDrag';
-  import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
+  import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute, closePopoutWindow } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
   import {
     pageKeyOf,
@@ -481,7 +481,8 @@
         ui.newSessionOpen = true;
         break;
       case 'closeTab':
-        ws.closeActiveTab();
+        // Off the Agents page there is no tab to close: a pop-out closes itself.
+        if (!ws.closeActiveTab()) void closePopoutWindow();
         break;
       case 'reopenTab':
         void ws.reopenClosedTab();
