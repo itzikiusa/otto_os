@@ -1584,6 +1584,22 @@ fn unregister_review_agent_cancel(
     }
 }
 
+/// Remove the review's `otto-review-<id>*` temp files when NO agent of it is
+/// registered any more (no original run, no other retry in flight). Checked
+/// and swept under the registry lock, so a retry registering concurrently
+/// either sees its files kept or writes them after the sweep. Sync: run it on
+/// the blocking pool (the temp-dir walk blocks).
+fn sweep_review_temp_files_if_idle(reg: &crate::skill_eval::CancelRegistry, review_id: &str) {
+    let Ok(m) = reg.lock() else {
+        return;
+    };
+    let mine = format!("{review_id}:");
+    if m.keys().any(|k| k.starts_with(&mine)) {
+        return;
+    }
+    remove_review_temp_files_in(&std::env::temp_dir(), &format!("otto-review-{review_id}"));
+}
+
 /// Load ReviewConfig from settings or fall back to the default. The default
 /// config's reviewer agents follow the global default agent
 /// (`default_provider` setting, else "claude"); a stored config is used as-is.
@@ -2999,6 +3015,14 @@ async fn branch_retry_checkout(
         .as_deref()
         .filter(|c| std::path::Path::new(c).is_dir())
     {
+        // A LOCAL review ran in the user's own checkout and diffed its working
+        // tree (uncommitted + untracked included). Committing those changes
+        // moves HEAD, and a worktree at the OLD head would not contain them
+        // at all — the checkout itself is still where the reviewed code lives
+        // (S2-310). Only Run/workflow worktrees fall back to the recorded head.
+        if same_dir(cwd, &repo.path) {
+            return (cwd.to_string(), None);
+        }
         let at = otto_git::LocalGit::new(cwd).rev_parse("HEAD").await.ok();
         let same = match (head, at.as_deref()) {
             (None, _) => true,
@@ -3025,6 +3049,15 @@ async fn branch_retry_checkout(
         }
     }
     (repo.path.clone(), None)
+}
+
+/// True when `a` and `b` name the same directory (symlinks / trailing `/`
+/// resolved; falls back to a plain string compare when either is missing).
+fn same_dir(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a.trim_end_matches('/') == b.trim_end_matches('/'),
+    }
 }
 
 /// Fetch PR diff + Jira context and delegate to `run_review_core`.
@@ -4469,6 +4502,12 @@ async fn retry_review_agent(
     // pre-0100 reviews have no stored diff and keep the old behavior). The
     // restored length also feeds the grace-period heuristic, which previously
     // collapsed to the 10-minute floor whenever the temp file was gone.
+    // Register a FRESH per-agent cancel flag (replacing any tripped one from a
+    // prior Stop) so the retried agent is stoppable exactly like the original.
+    // Registered BEFORE the diff is re-materialised: a sibling retry's
+    // end-of-retry temp sweep (below) skips while any agent of this review is
+    // registered, so it can never delete the file this retry is about to use.
+    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let diff_file = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
     let mut diff_len = std::fs::metadata(&diff_file)
         .map(|m| m.len() as usize)
@@ -4498,9 +4537,6 @@ async fn retry_review_agent(
             .collect();
         stage_review_skills(&ctx.context_library, &names)
     };
-    // Register a FRESH per-agent cancel flag (replacing any tripped one from a
-    // prior Stop) so the retried agent is stoppable exactly like the original.
-    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
     let slots = reviewer_slots();
     let ctx_bg = ctx.clone();
@@ -4545,6 +4581,12 @@ async fn retry_review_agent(
             teardown_pr_worktree(&repo.path, wt).await;
         }
         unregister_review_agent_cancel(&agent_cancels_reg, &review_id_bg, index);
+        // The last retry of this (settled) review out sweeps the temp files it
+        // re-materialised — only `run_review` swept them before (S2-310).
+        let () = crate::offload::blocking(move || {
+            sweep_review_temp_files_if_idle(&agent_cancels_reg, &review_id_bg)
+        })
+        .await;
     });
 
     Ok(Json(
@@ -7493,7 +7535,7 @@ mod agent_input_rule_tests {
 
 #[cfg(test)]
 mod review_retry_tests {
-    use super::agent_retry_block;
+    use super::{agent_retry_block, same_dir, sweep_review_temp_files_if_idle};
     use otto_core::domain::{ReviewAgentState, ReviewStatus};
 
     /// S2-303: a settled agent is retryable only once the review has settled.
@@ -7539,5 +7581,39 @@ mod review_retry_tests {
             .is_none());
         let meta = crate::review_session::review_session_meta("r1", 0, false);
         assert!(meta.get("allow_subagents").is_none());
+    }
+
+    /// S2-310: a local review's recorded cwd IS the repo checkout — matched
+    /// through symlinks / a trailing slash — so its retry stays there even
+    /// after HEAD moved; a Run worktree elsewhere is not the repo.
+    #[test]
+    fn local_review_checkout_is_recognised_as_the_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let r = repo.to_string_lossy().into_owned();
+        assert!(same_dir(&r, &format!("{r}/")));
+        assert!(same_dir(&link.to_string_lossy(), &r));
+        let wt = tmp.path().join("otto-run-1");
+        std::fs::create_dir_all(&wt).unwrap();
+        assert!(!same_dir(&wt.to_string_lossy(), &r));
+    }
+
+    /// S2-310: a retry's temp files are swept once no agent of the review is
+    /// registered — never while a sibling retry still is.
+    #[test]
+    fn retry_sweeps_temp_files_only_when_no_agent_is_left() {
+        let reg: crate::skill_eval::CancelRegistry = Default::default();
+        let rid = format!("t{}", otto_core::new_id());
+        let diff = std::env::temp_dir().join(format!("otto-review-{rid}.diff"));
+        std::fs::write(&diff, "d").unwrap();
+        let _flag = super::register_review_agent_cancel(&reg, &rid, 1);
+        sweep_review_temp_files_if_idle(&reg, &rid);
+        assert!(diff.exists(), "a sibling retry is still registered");
+        super::unregister_review_agent_cancel(&reg, &rid, 1);
+        sweep_review_temp_files_if_idle(&reg, &rid);
+        assert!(!diff.exists(), "the last retry out sweeps");
     }
 }
