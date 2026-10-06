@@ -205,7 +205,7 @@ pub fn metadata_id(_m: &std::fs::Metadata) -> Option<FileId> {
     None
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Kind {
     /// Otto's own state: data dirs + log dirs.
     Otto,
