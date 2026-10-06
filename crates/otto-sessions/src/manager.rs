@@ -2122,6 +2122,16 @@ impl SessionManager {
         self
     }
 
+    /// [`missing_cwd_refusal_in`] against this daemon's data dir: the
+    /// configured one (`with_data_dir` / `$OTTO_DATA_DIR`), never a hard-coded
+    /// default (S1-306).
+    fn missing_cwd_refusal(&self, session: &Session) -> Option<String> {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        missing_cwd_refusal_in(session, &self.sandbox_data_dir(&home))
+    }
+
     /// The data dir the sandbox protects: the configured one, else resolved
     /// exactly like `ottod::config` (`$OTTO_DATA_DIR`, then the default).
     fn sandbox_data_dir(&self, home: &std::path::Path) -> std::path::PathBuf {
@@ -5609,7 +5619,7 @@ impl SessionManager {
         }
         // Checked BEFORE the old process is retired: a refusal leaves it as is.
         if session.kind == SessionKind::Agent {
-            if let Some(msg) = missing_cwd_refusal(&session) {
+            if let Some(msg) = self.missing_cwd_refusal(&session) {
                 return Err(Error::Conflict(msg));
             }
         }
@@ -5889,6 +5899,7 @@ impl SessionManager {
         let sid = sid.clone();
         if handle.has_exited() {
             tracing::info!(session = %sid, "session's process exited while the daemon was down");
+            self.deferred_holders.remove(&sid);
             drop(handle);
             return false;
         }
@@ -5906,6 +5917,7 @@ impl SessionManager {
             Ok(s) => s,
             Err(Error::NotFound(_)) => {
                 tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
+                self.deferred_holders.remove(&sid);
                 drop(handle);
                 return false;
             }
@@ -5927,6 +5939,7 @@ impl SessionManager {
         };
         if session.archived || !is_user_started(&session) || self.is_live(&sid) {
             tracing::info!(session = %sid, "pty holder not re-adoptable (archived / engine-owned / already live) — ending it");
+            self.deferred_holders.remove(&sid);
             drop(handle);
             return false;
         }
@@ -5993,7 +6006,17 @@ impl SessionManager {
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         let mut adopted = Vec::new();
-        for (sid, path) in pending {
+        for (sid, _) in pending {
+            // Under the session's resume lock, like `ensure_live` (S1-305):
+            // otherwise a user opening the session mid-lookup finds no
+            // deferred entry and nothing live, resumes a second CLI, and this
+            // adoption then "ends" the original holder mid-turn. Re-read the
+            // entry under the lock — an open may have decided it already.
+            let lock = self.resume_lock(&sid);
+            let _guard = lock.lock().await;
+            let Some(path) = self.deferred_holders.get(&sid).map(|p| p.clone()) else {
+                continue;
+            };
             if self.adopt_deferred(&sid, path).await {
                 adopted.push(sid);
             }
@@ -6002,6 +6025,9 @@ impl SessionManager {
     }
 
     /// One deferred holder: adopt it if its session can be decided now.
+    /// Callers hold the session's resume lock. The `deferred_holders` entry is
+    /// kept until the holder is decided (adopted, gone, or ended), so the
+    /// dormant pass and the credential sweep keep skipping it meanwhile.
     async fn adopt_deferred(&self, sid: &Id, path: std::path::PathBuf) -> bool {
         if self.is_live(sid) {
             self.deferred_holders.remove(sid);
@@ -6015,9 +6041,8 @@ impl SessionManager {
                     drop(handle);
                     return false;
                 }
-                // Not deferred any more unless this lookup fails again
-                // (`adopt_one` re-records it then).
-                self.deferred_holders.remove(sid);
+                // `adopt_one` drops the entry once it has decided, and keeps
+                // it when this lookup fails again.
                 self.adopt_one(sid, handle).await
             }
             Ok(Err(otto_pty::AdoptError::Failed(e))) => {
@@ -6554,14 +6579,8 @@ async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::Path
 /// project had been wiped and could start recreating files. A moved/deleted
 /// repo is the user's to restore — say so instead (409). Exempt (still
 /// recreated on spawn): the scratch ("No workspace") home and Otto-managed
-/// folders under its data dir, which are Otto's to rebuild.
-fn missing_cwd_refusal(session: &Session) -> Option<String> {
-    let home = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default();
-    missing_cwd_refusal_in(session, &home.join("Library/Application Support/Otto"))
-}
-
+/// folders under its data dir (the CONFIGURED one — S1-306), which are
+/// Otto's to rebuild.
 fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Option<String> {
     let cwd = std::path::Path::new(&session.cwd);
     if session.cwd.trim().is_empty()
@@ -6612,6 +6631,80 @@ mod tests {
                 .is_none()
         );
         assert!(missing_cwd_refusal_in(&mk("ws", &data.join("db-assist/x")), &data).is_none());
+    }
+
+    /// S1-305: a deferred-adoption retry serializes with `ensure_live` on the
+    /// session's resume lock — while an open holds it, the retry waits rather
+    /// than deciding the holder underneath it — and re-reads the entry under
+    /// the lock, so a holder the open already decided is not touched again.
+    #[tokio::test]
+    async fn deferred_adoption_retry_waits_for_the_resume_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (events, _rx) = broadcast::channel(16);
+        let mgr = Arc::new(SessionManager::new(
+            SessionsRepo::new(pool),
+            events,
+            ProviderRegistry::new(None),
+        ));
+        let sid: Id = "deferred-1".into();
+        mgr.deferred_holders
+            .insert(sid.clone(), dir.path().join("gone.sock"));
+        let lock = mgr.resume_lock(&sid);
+        let guard = lock.lock().await;
+        let retry = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.retry_deferred_adoptions().await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!retry.is_finished(), "the retry must wait for the open");
+        assert!(
+            mgr.deferred_holders.contains_key(&sid),
+            "nothing decided while the open holds the lock"
+        );
+        // The open decided it (e.g. adopted the holder) and dropped the entry.
+        mgr.deferred_holders.remove(&sid);
+        drop(guard);
+        assert!(retry.await.unwrap().is_empty());
+    }
+
+    /// S1-306: the "Otto-managed, recreate on spawn" exemption follows the
+    /// CONFIGURED data dir — a daemon on `$OTTO_DATA_DIR` (e2e, dev, custom
+    /// installs) still recreates a cleaned workflow/db-assist scratch dir.
+    #[tokio::test]
+    async fn missing_cwd_exemption_uses_the_configured_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (events, _rx) = broadcast::channel(16);
+        let custom = dir.path().join("custom-data");
+        let mgr = SessionManager::new(SessionsRepo::new(pool), events, ProviderRegistry::new(None))
+            .with_data_dir(custom.clone());
+        let mk = |cwd: &std::path::Path| Session {
+            id: "s".into(),
+            workspace_id: "ws".into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: SessionStatus::Exited,
+            cwd: cwd.to_string_lossy().into_owned(),
+            provider_session_id: Some("p".into()),
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta: serde_json::json!({}),
+        };
+        assert!(
+            mgr.missing_cwd_refusal(&mk(&custom.join("workflow-runs/r1")))
+                .is_none(),
+            "an Otto-managed dir under the configured data dir is recreated"
+        );
+        assert!(
+            mgr.missing_cwd_refusal(&mk(&dir.path().join("user-repo")))
+                .is_some(),
+            "a user's moved repo is still refused"
+        );
     }
     use otto_state::NewSession;
 
