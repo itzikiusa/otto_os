@@ -542,6 +542,13 @@ async fn read_stderr_capped(mut stderr: tokio::process::ChildStderr) -> std::io:
 /// SIGTERM the whole process group (git plus the `ssh` / `git-remote-https`
 /// children it forked), give it 2 s to unwind — git removes `index.lock` on
 /// SIGTERM — then SIGKILL whatever is left.
+/// Why [`LocalGit::spawn_capture`]'s task failed: the spawn itself (mapped to
+/// `Internal("spawn git: …")`) or I/O while collecting (`io_err`).
+enum SpawnErr {
+    Spawn(String),
+    Io(std::io::Error),
+}
+
 async fn kill_group(pid: libc::pid_t) {
     // SAFETY: signalling a process group we created ourselves with
     // `process_group(0)`; ESRCH (already gone and reaped) is ignored.
@@ -961,8 +968,12 @@ impl LocalGit {
     /// agent session can rewrite the hooks)? A relative value is resolved
     /// against the work tree root, so it counts as inside. Errors (no repo,
     /// unset key) are `false`: the repo's own `.git/hooks` is Seatbelt-denied.
-    async fn hooks_path_in_worktree(&self) -> bool {
-        let run = |args: &'static [&'static str]| {
+    ///
+    /// Returns an OWNED future (both commands are built up front) so a
+    /// detached write can run the probe inside its own task — see
+    /// [`Self::spawn_capture`].
+    fn hooks_path_in_worktree(&self) -> impl std::future::Future<Output = bool> + Send + 'static {
+        let cmd = |args: &'static [&'static str]| {
             let mut cmd = self.base_cmd();
             // Read the REPO's value: the hardened `core.hooksPath=/dev/null`
             // would otherwise answer for it. Neither `config --get` nor
@@ -970,24 +981,28 @@ impl LocalGit {
             cmd.env("GIT_CONFIG_PARAMETERS", HOOKED_GIT_CONFIG)
                 .args(args)
                 .kill_on_drop(true);
-            async move {
-                let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
-                    .await
-                    .ok()?
-                    .ok()?;
-                out.status
-                    .success()
-                    .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-                    .filter(|s| !s.is_empty())
-            }
+            cmd
         };
-        let Some(hooks) = run(&["config", "--get", "core.hooksPath"]).await else {
-            return false;
-        };
-        hooks_path_inside(
-            &hooks,
-            run(&["rev-parse", "--show-toplevel"]).await.as_deref(),
-        )
+        async fn run(mut cmd: Command) -> Option<String> {
+            let out = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
+                .await
+                .ok()?
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        }
+        let (get, top) = (
+            cmd(&["config", "--get", "core.hooksPath"]),
+            cmd(&["rev-parse", "--show-toplevel"]),
+        );
+        async move {
+            let Some(hooks) = run(get).await else {
+                return false;
+            };
+            hooks_path_inside(&hooks, run(top).await.as_deref())
+        }
     }
 
     /// Spawn `bin` instead of `git` (tests: a shim that sleeps/traps signals).
@@ -1412,43 +1427,54 @@ impl LocalGit {
         mut limit: StdoutLimit,
     ) -> Result<(std::process::Output, Cut)> {
         cmd.process_group(0).kill_on_drop(true);
-        let config = if HOOK_VERBS.contains(&verb)
-            && !self.person_initiated
-            && self.hooks_path_in_worktree().await
-        {
-            tracing::info!(
-                repo = %self.repo_path.display(),
-                verb,
-                "core.hooksPath lies inside the work tree; daemon-initiated git runs without hooks"
-            );
-            HARDENED_GIT_CONFIG
-        } else {
-            hardened_config_for(verb)
-        };
-        cmd.env("GIT_CONFIG_PARAMETERS", config);
-        if class == SpawnClass::LocalRead {
-            // A read must never take `index.lock`: `git status` otherwise
-            // refreshes the index opportunistically, and an agent's concurrent
-            // `git commit`/`git add` (which do NOT retry) dies with "index.lock
-            // exists". Covers every status refresh and the worktree probe.
-            cmd.env("GIT_OPTIONAL_LOCKS", "0");
-        }
-        if stdin.is_some() {
-            cmd.stdin(Stdio::piped());
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Error::Internal(format!("spawn git: {e}")))?;
-        // stdin is written INSIDE `collect`, concurrently with the readers and
-        // under the time budget: written up front, a large patch could block
-        // forever on a full pipe (git waiting on its own full stdout), and an
-        // early git exit surfaced as "Broken pipe" instead of git's stderr.
-        let stdin_pipe =
-            stdin.map(|bytes| (child.stdin.take().expect("piped stdin"), bytes.to_vec()));
-        let pid = child.id().expect("spawned") as libc::pid_t;
+        // The hooks-path probe for a hook verb runs INSIDE the (for writes,
+        // detached) task below, before the spawn: awaited here, a request
+        // dropped during the probe would cancel a commit before it started.
+        let probe = (HOOK_VERBS.contains(&verb) && !self.person_initiated)
+            .then(|| self.hooks_path_in_worktree());
+        let base_config = hardened_config_for(verb);
+        let repo = self.repo_path.clone();
+        let verb_owned = verb.to_string();
+        let stdin = stdin.map(<[u8]>::to_vec);
         limit.max = limit.max.min(GIT_STDOUT_CAP);
-        let kill_pid = (class == SpawnClass::LocalRead).then_some(pid);
+        // The spawned git's pid, for the timeout's group kill (0 = not yet).
+        let pid_cell = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let pid_seen = pid_cell.clone();
         let collect = async move {
+            let in_worktree = match probe {
+                Some(p) => p.await,
+                None => false,
+            };
+            let config = if in_worktree {
+                tracing::info!(
+                    repo = %repo.display(),
+                    verb = %verb_owned,
+                    "core.hooksPath lies inside the work tree; daemon-initiated git runs without hooks"
+                );
+                HARDENED_GIT_CONFIG
+            } else {
+                base_config
+            };
+            cmd.env("GIT_CONFIG_PARAMETERS", config);
+            if class == SpawnClass::LocalRead {
+                // A read must never take `index.lock`: `git status` otherwise
+                // refreshes the index opportunistically, and an agent's concurrent
+                // `git commit`/`git add` (which do NOT retry) dies with "index.lock
+                // exists". Covers every status refresh and the worktree probe.
+                cmd.env("GIT_OPTIONAL_LOCKS", "0");
+            }
+            if stdin.is_some() {
+                cmd.stdin(Stdio::piped());
+            }
+            let mut child = cmd.spawn().map_err(|e| SpawnErr::Spawn(e.to_string()))?;
+            // stdin is written INSIDE `collect`, concurrently with the readers and
+            // under the time budget: written up front, a large patch could block
+            // forever on a full pipe (git waiting on its own full stdout), and an
+            // early git exit surfaced as "Broken pipe" instead of git's stderr.
+            let stdin_pipe = stdin.map(|bytes| (child.stdin.take().expect("piped stdin"), bytes));
+            let pid = child.id().expect("spawned") as libc::pid_t;
+            pid_cell.store(pid, std::sync::atomic::Ordering::SeqCst);
+            let kill_pid = (class == SpawnClass::LocalRead).then_some(pid);
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr = child.stderr.take().expect("piped stderr");
             let feed = async move {
@@ -1469,15 +1495,15 @@ impl LocalGit {
                 read_stdout_capped(stdout, &mut limit, kill_pid),
                 read_stderr_capped(stderr)
             );
-            let (stdout, cut) = so?;
-            let stderr = se?;
-            fed?;
-            let mut status = child.wait().await?;
+            let (stdout, cut) = so.map_err(SpawnErr::Io)?;
+            let stderr = se.map_err(SpawnErr::Io)?;
+            fed.map_err(SpawnErr::Io)?;
+            let mut status = child.wait().await.map_err(SpawnErr::Io)?;
             if cut != Cut::None && kill_pid.is_some() {
                 use std::os::unix::process::ExitStatusExt;
                 status = std::process::ExitStatus::from_raw(0);
             }
-            Ok::<_, std::io::Error>((
+            Ok::<_, SpawnErr>((
                 std::process::Output {
                     status,
                     stdout,
@@ -1486,18 +1512,25 @@ impl LocalGit {
                 cut,
             ))
         };
+        let lift = |r: std::result::Result<_, SpawnErr>| {
+            r.map_err(|e| match e {
+                SpawnErr::Spawn(m) => Error::Internal(format!("spawn git: {m}")),
+                SpawnErr::Io(e) => io_err(e),
+            })
+        };
         let budget = self.budget_override.unwrap_or_else(|| budget_for(class));
         let secs = budget.as_secs();
         let waited = match class {
-            SpawnClass::LocalRead => tokio::time::timeout(budget, collect)
-                .await
-                .map(|r| r.map_err(io_err)),
+            SpawnClass::LocalRead => tokio::time::timeout(budget, collect).await.map(lift),
             SpawnClass::LocalWrite | SpawnClass::Remote => {
+                // Detached: dropping the request future stops the WAIT, not
+                // the probe + git (a commit already started must finish).
                 let jh = tokio::spawn(collect);
                 tokio::time::timeout(budget, async move {
-                    jh.await
-                        .map_err(|e| Error::Internal(format!("git task: {e}")))?
-                        .map_err(io_err)
+                    match jh.await {
+                        Ok(r) => lift(r),
+                        Err(e) => Err(Error::Internal(format!("git task: {e}"))),
+                    }
                 })
                 .await
             }
@@ -1505,7 +1538,10 @@ impl LocalGit {
         match waited {
             Ok(r) => r,
             Err(_) => {
-                kill_group(pid).await;
+                let pid = pid_seen.load(std::sync::atomic::Ordering::SeqCst);
+                if pid > 0 {
+                    kill_group(pid).await;
+                }
                 Err(Error::Upstream(format!(
                     "git {verb} timed out after {secs}s — if it was writing, \
                      `.git/index.lock` may be left behind; remove it once no git \
