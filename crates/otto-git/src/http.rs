@@ -19,7 +19,7 @@ use otto_core::api::{
     StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq, UpdateRepoReq,
     WorktreeInfo,
 };
-use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
+use otto_core::auth::{authorize_owner, AuthContext, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::secrets::SecretStore;
@@ -196,6 +196,35 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .merge(crate::ops::router::<S>())
         .merge(crate::recovery::router::<S>())
         .layer(axum::middleware::from_fn(invalidate_status_after_write))
+        .layer(axum::middleware::from_fn(mark_person_call))
+}
+
+tokio::task_local! {
+    /// True while a request carrying a PERSON's own credential is handled
+    /// (S11-304). Read by [`repo_ctx`] to decide whether in-work-tree hooks
+    /// may run; absent (daemon-internal callers, unit harnesses) means no.
+    static PERSON_CALL: bool;
+}
+
+/// True iff `auth` is a person's own credential — not an agent session's API
+/// token or internal MCP credential, not an MCP-restricted token, not a share
+/// link. Mirrors `otto_server::ui_bridge::is_human`.
+fn is_person_credential(auth: &AuthContext) -> bool {
+    auth.managed_session_id.is_none()
+        && auth.mcp_session_id.is_none()
+        && !auth.mcp_only
+        && !auth.is_scoped()
+}
+
+/// Scope the handler in [`PERSON_CALL`], resolved from the [`AuthContext`]
+/// the auth middleware inserted. The flag lives for the handler's own future,
+/// which is where [`repo_ctx`] builds the `LocalGit` that carries it on.
+async fn mark_person_call(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let person = req
+        .extensions()
+        .get::<AuthContext>()
+        .is_some_and(is_person_credential);
+    PERSON_CALL.scope(person, next.run(req)).await
 }
 
 /// Every non-GET under `/repos/{id}/…` (stage, commit, checkout, stash, PR
@@ -285,10 +314,18 @@ pub(crate) async fn repo_ctx<S: GitCtx>(
 ) -> Result<(Repo, LocalGit)> {
     let repo = s.store().get_repo(repo_id).await?;
     s.roles().check(&user.0, &repo.workspace_id, min).await?;
-    // A git route call is a person's deliberate act: their hooks run, an
-    // in-work-tree `core.hooksPath` (husky) included. (An agent's own token
-    // calling these routes is the open outward-route decision, S11-05.)
-    let git = LocalGit::new(&repo.path).person_initiated();
+    // A git route call on a PERSON's credential is their deliberate act: their
+    // hooks run, an in-work-tree `core.hooksPath` (husky) included. An agent
+    // session's own token is not (S11-304): it could have just written those
+    // hook files from inside its sandbox, and ottod runs git unconfined — so
+    // its commit/merge/checkout skips in-work-tree hooks like any
+    // daemon-internal call.
+    let git = LocalGit::new(&repo.path);
+    let git = if PERSON_CALL.try_with(|p| *p).unwrap_or(false) {
+        git.person_initiated()
+    } else {
+        git
+    };
     Ok((repo, git))
 }
 
@@ -4034,5 +4071,68 @@ mod tests {
         assert!(r.is_err());
         assert!(after);
         forget_repo_locks(&id);
+    }
+}
+
+#[cfg(test)]
+mod person_call_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    fn auth(agent: Option<&str>, mcp: Option<&str>) -> AuthContext {
+        let user = otto_core::domain::User {
+            id: "u".into(),
+            username: "u".into(),
+            display_name: "u".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        AuthContext {
+            real_user: user.clone(),
+            effective_user: user,
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: mcp.map(Into::into),
+            managed_session_id: agent.map(Into::into),
+        }
+    }
+
+    /// What `repo_ctx` would see for a request carrying `ctx`.
+    async fn person_call(ctx: Option<AuthContext>) -> bool {
+        async fn probe() -> String {
+            PERSON_CALL.try_with(|p| *p).unwrap_or(false).to_string()
+        }
+        let app: Router = Router::new()
+            .route("/repos/{id}/commit", post(probe))
+            .layer(axum::middleware::from_fn(mark_person_call));
+        let mut req = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/repos/r1/commit")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        if let Some(ctx) = ctx {
+            req.extensions_mut().insert(ctx);
+        }
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        body.as_ref() == b"true"
+    }
+
+    /// S11-304: only a person's own credential makes a git route call
+    /// `person_initiated` (in-work-tree hooks run); an agent session's API
+    /// token or internal MCP credential — and a request with no credential
+    /// context at all — does not.
+    #[tokio::test]
+    async fn only_a_person_s_credential_runs_in_worktree_hooks() {
+        assert!(person_call(Some(auth(None, None))).await);
+        assert!(!person_call(Some(auth(Some("agent-sess"), None))).await);
+        assert!(!person_call(Some(auth(None, Some("agent-sess")))).await);
+        let mut mcp_only = auth(None, None);
+        mcp_only.mcp_only = true;
+        assert!(!person_call(Some(mcp_only)).await);
+        assert!(!person_call(None).await);
     }
 }
