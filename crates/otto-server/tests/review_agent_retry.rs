@@ -85,7 +85,7 @@ async fn retrying_a_live_review_agent_is_a_conflict() {
     let origin = format!("http://{}/api/v1", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = reqwest::Client::new();
-    for index in 0..3 {
+    for (index, row) in rows.iter().enumerate().take(3) {
         let r = client
             .post(format!(
                 "{origin}/reviews/{}/agents/{index}/retry",
@@ -95,7 +95,7 @@ async fn retrying_a_live_review_agent_is_a_conflict() {
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), 409, "retry of a {} agent", rows[index].status);
+        assert_eq!(r.status(), 409, "retry of a {} agent", row.status);
         let body: serde_json::Value = r.json().await.unwrap();
         assert_eq!(body["code"], "conflict", "{body}");
     }

@@ -67,7 +67,7 @@ pub fn session_cwd(requested: &str) -> String {
     // under ONE stable root (S4-14) that is swept of day-old leftovers here, so
     // scratch dirs no longer accumulate in `$TMPDIR` forever.
     let root = temp.join(SCRATCH_ROOT);
-    sweep_stale_scratch(&root, SCRATCH_MAX_AGE);
+    spawn_scratch_sweep(root.clone());
     let unique = root.join(uuid::Uuid::new_v4().to_string());
     if let Err(e) = std::fs::create_dir_all(&unique) {
         tracing::debug!("product_run: create session cwd {}: {e}", unique.display());
@@ -81,8 +81,31 @@ pub const SCRATCH_ROOT: &str = "otto-product-scratch";
 /// (a product run never takes a day; the agents' sessions are long done).
 pub const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+/// Run [`sweep_stale_scratch`] off the async workers: [`session_cwd`] is called
+/// from async run code, and a directory walk + recursive delete blocks. One
+/// sweep at a time; a call while one is running skips (the next call sweeps).
+fn spawn_scratch_sweep(root: std::path::PathBuf) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SWEEPING: AtomicBool = AtomicBool::new(false);
+    if SWEEPING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let run = move || {
+        sweep_stale_scratch(&root, SCRATCH_MAX_AGE);
+        SWEEPING.store(false, Ordering::Release);
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(run);
+        }
+        Err(_) => run(),
+    }
+}
+
 /// Remove children of `root` last modified more than `max_age` ago
-/// (best-effort; a missing root is fine).
+/// (best-effort; a missing root is fine). Blocking: call it from the blocking
+/// pool (see [`spawn_scratch_sweep`]) or a test.
+#[allow(clippy::disallowed_methods)] // sync helper: only run via spawn_scratch_sweep's spawn_blocking (or a test)
 pub fn sweep_stale_scratch(root: &std::path::Path, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;

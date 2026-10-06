@@ -272,7 +272,7 @@ pub(crate) fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
     ];
     let mut i = 0;
     while let Some(&a) = args.get(i) {
-        if TAKES_VALUE.iter().any(|t| *t == a) {
+        if TAKES_VALUE.contains(&a) {
             i += 2;
         } else if a.starts_with('-') {
             i += 1;

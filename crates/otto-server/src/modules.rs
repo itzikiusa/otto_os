@@ -1778,7 +1778,6 @@ async fn run_review(
 /// only grew the temp dir (100+ files per few days of reviews).
 pub(crate) async fn remove_review_temp_files(review_id: &str) {
     let prefix = format!("otto-review-{review_id}");
-    #[allow(clippy::disallowed_methods)] // runs on the blocking pool via offload::blocking
     let () = crate::offload::blocking(move || {
         remove_review_temp_files_in(&std::env::temp_dir(), &prefix)
     })
@@ -1787,6 +1786,7 @@ pub(crate) async fn remove_review_temp_files(review_id: &str) {
 
 /// [`remove_review_temp_files`] over an explicit dir — FILES only, so the
 /// `otto-review-wt-<id>` worktree directory is never touched.
+#[allow(clippy::disallowed_methods)] // sync helper: runs on the blocking pool via offload::blocking (or a test)
 pub(crate) fn remove_review_temp_files_in(dir: &std::path::Path, prefix: &str) {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.flatten() {

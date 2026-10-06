@@ -4462,13 +4462,11 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
 /// (or `None` for a notification, which gets no reply).
 async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-    let id = msg.get("id").cloned();
     // Notifications carry no `id` and MUST NOT be answered — nor executed:
     // a notification-form `tools/call` would run a tool (possibly a writer)
     // whose result nobody receives.
-    if id.is_none() {
-        return None;
-    }
+    let id = msg.get("id").cloned();
+    id.as_ref()?;
 
     match method {
         "initialize" => {

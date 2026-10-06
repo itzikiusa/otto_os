@@ -2503,12 +2503,12 @@ mod writer_policy_tests {
         assert_eq!(parked_action(&full, false, MAX_DEFER), ParkedAction::Wake);
     }
 
-    /// S9-01: the writer flushes at most every 90 s (or per 2k rows), not every
-    /// 15 s / 200 rows — each flush is a part that gets merged into the month.
-    #[test]
-    fn flush_cadence_is_coarse() {
-        assert!(FLUSH_INTERVAL >= Duration::from_secs(60));
+    // S9-01: the writer flushes at most every 90 s (or per 2k rows), not every
+    // 15 s / 200 rows — each flush is a part that gets merged into the month.
+    // Checked at compile time.
+    const _: () = {
+        assert!(FLUSH_INTERVAL.as_secs() >= 60);
         assert!(FLUSH_BATCH >= 1_000);
-        assert!(MAX_DEFER <= Duration::from_secs(30 * 60));
-    }
+        assert!(MAX_DEFER.as_secs() <= 30 * 60);
+    };
 }
