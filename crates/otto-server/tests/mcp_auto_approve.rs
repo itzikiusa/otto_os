@@ -1554,6 +1554,60 @@ async fn two_calls_share_one_card() -> bool {
     true
 }
 
+/// A call parked on a card that a sibling call already SPENT (approved, then
+/// consumed by the other waiter) settles as "approval already used" as soon as
+/// it re-reads the card — it neither idles to its `wait_seconds` deadline nor
+/// answers `pending_approval` with a dead card id (the flake behind
+/// `one_approval_runs_one_of_two_waiting_calls`: the loser of the consume race
+/// woke on the `consumed` status and kept waiting).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiter_on_a_card_a_sibling_spent_is_denied_promptly() {
+    let d = Arc::new(boot().await);
+    let started = tokio::time::Instant::now();
+    let waiter = {
+        let d = d.clone();
+        tokio::spawn(async move {
+            d.send(
+                "POST",
+                &d.agent,
+                "/mcp/otto-tools/invoke",
+                Some(json!({"tool": "otto.create_pr", "arguments": pr_args(),
+                            "wait_seconds": 20})),
+            )
+            .await
+            .1
+        })
+    };
+    let id = loop {
+        if let Some(a) = d.pending_approvals().await.first() {
+            break a["id"].as_str().unwrap().to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    // The sibling's whole story in one write: approved, then consumed.
+    sqlx::query("UPDATE mcp_approvals SET status = 'consumed', consumed_at = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&id)
+        .execute(&d.pool)
+        .await
+        .unwrap();
+    let _ = d.events.send(otto_core::event::Event::McpApprovalChanged {
+        approval_id: Some(id.clone()),
+        workspace_id: Some("ws1".into()),
+        status: "consumed".into(),
+    });
+    let env = waiter.await.unwrap();
+    assert_eq!(env["decision"], "denied", "{env}");
+    assert_eq!(env["executed"], json!(false), "{env}");
+    // Woken by the event, or at worst by the 5 s fallback re-read — never the
+    // 20 s deadline.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(12),
+        "settled after {:?}",
+        started.elapsed()
+    );
+}
+
 /// S5-13: an approval a human granted for one session's call is not spent
 /// by a sibling session of the same owner making the identical call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

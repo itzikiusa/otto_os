@@ -782,7 +782,12 @@ async fn wait_for_decision_within(
     loop {
         if let Ok(a) = ctx.mcp.approvals().get(&id).await {
             match a.status.as_str() {
-                "approved" => return Some(true),
+                // `consumed` = a sibling call waiting on the same shared card
+                // already spent the approval. Report it as decided so the
+                // caller's single-use `consume` refuses it ("approval already
+                // used") instead of this call idling to its deadline and then
+                // telling the agent to resubmit a card that can never run.
+                "approved" | "consumed" => return Some(true),
                 "denied" | "expired" | "cancelled" => return Some(false),
                 _ => {}
             }
