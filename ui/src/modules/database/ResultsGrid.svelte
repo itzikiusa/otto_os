@@ -29,6 +29,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { obviousWriteVerb } from './sql-dialect';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
   import { filterValMatches, type FilterVal } from './filter-chips';
   import { databaseAccessChild } from '../../lib/access-options';
@@ -1192,12 +1193,17 @@
       { label: `Download JSON${exportScope}`, icon: 'download', disabled: !canExport, action: exportJson },
     ];
     if (connectionId && statement) {
+      // Export RE-RUNS the statement uncapped — for an obvious write
+      // (`UPDATE … RETURNING *`) that would apply it twice, so it's disabled
+      // with the reason (the daemon runs exports read-only regardless).
+      const writeVerb = obviousWriteVerb(statement);
       items.push(
         { separator: true },
         {
           label: result?.truncated ? 'Export all rows… (result is capped)' : 'Export all rows…',
           icon: 'arrowDown',
-          disabled: !canExport,
+          disabled: !canExport || !!writeVerb,
+          title: writeVerb ? `Export re-runs the statement — not available for a write (${writeVerb})` : undefined,
           action: openExportDialog,
         },
       );

@@ -168,3 +168,11 @@ function walk(dir: string): string[] {
     e.isDirectory() ? walk(join(dir, e.name)) : /\.(ts|svelte)$/.test(e.name) ? [join(dir, e.name)] : [],
   );
 }
+
+test('export refuses statements that are obvious writes (S16-303)', async () => {
+  const { obviousWriteVerb } = await import('../src/modules/database/sql-dialect.ts');
+  assert.equal(obviousWriteVerb('UPDATE counters SET n = n + 1 RETURNING *'), 'UPDATE');
+  assert.equal(obviousWriteVerb('INSERT INTO t (a) VALUES (1) RETURNING id'), 'INSERT');
+  assert.equal(obviousWriteVerb('WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d'), 'DELETE');
+  assert.equal(obviousWriteVerb('SELECT * FROM t'), null);
+});
