@@ -4285,6 +4285,13 @@ export interface IssueProject {
   name: string;
 }
 
+/** `GET /issue/projects?meta=1` / `/issue/confluence/spaces?meta=1`: the
+ *  listing plus whether it stopped at its page cap (later rows not shown). */
+export interface ListingPage<T> {
+  items: T[];
+  truncated: boolean;
+}
+
 export interface IssueSummary {
   key: string;
   summary: string;
@@ -4378,6 +4385,17 @@ export interface ListenerStatus {
   last_error_at?: string;
   /** Consecutive failed attempts since the last good connection. */
   failures: number;
+  /** Last senders the allow-list dropped, newest first (omitted when none). */
+  rejected_senders?: RejectedSender[];
+}
+
+/** A sender a channel's allow-list turned away (`ListenerStatus.rejected_senders`). */
+export interface RejectedSender {
+  /** Channel-native user id — what goes into `allowed_users`. */
+  user: string;
+  /** @handle / display name when the platform sent one (display only). */
+  name?: string;
+  at: string;
 }
 
 export interface UpsertIntegrationReq {

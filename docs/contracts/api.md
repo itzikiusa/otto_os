@@ -1693,10 +1693,10 @@ configured Jira/Confluence account.
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
 | PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq (absent fields keep their value; `token_expires_at` is tri-state — absent keeps, `null` clears, an ISO timestamp sets) | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
-| GET /issue/projects | member | — | available projects |
+| GET /issue/projects | member | — | available projects (`IssueProject[]`). `?meta=1` → `ListingPage<IssueProject>` `{items, truncated}` — `truncated` = the walk stopped at its page cap (20 × 100) and later projects are not shown |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
 | GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (`assignee = currentUser()`, statusCategory != Done, newest first, one page of 100) with parent/project context for the Focus view hierarchy |
-| GET /issue/confluence/spaces | member | — | Confluence spaces |
+| GET /issue/confluence/spaces | member | — | Confluence spaces (`ConfluenceSpace[]`). `?meta=1` → `{items, truncated}` (`truncated` = stopped at the 20-page cap) |
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
 | POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq (`body_md` Markdown **or** `body_html` storage XHTML) | `ConfluencePageResp` (created) |
@@ -1767,7 +1767,7 @@ state already exists, logging a warning — its status reads `conflict`.)
 `ListenerStatus` per **enabled** Slack / Telegram integration (webhooks have no
 listener; a disabled integration has no entry):
 `{workspace_id, channel, state, detail?, since, connected_at?, last_event_at?,
-last_error?, last_error_at?, failures}`. `state` is one of
+last_error?, last_error_at?, failures, rejected_senders?}`. `state` is one of
 `waiting_for_token` (a token isn't saved / the Keychain isn't readable yet — retried
 every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram poll),
 `reconnecting` (dropped or a failed attempt; retrying with 3 s → 60 s backoff),
@@ -1776,7 +1776,12 @@ every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram p
 at the backoff ceiling, but it needs the user), or `conflict` (another enabled
 workspace already listens with this token; not started). `detail` is the user-facing
 reason (secret-bearing URLs redacted, ≤300 chars); `failures` counts consecutive failed
-attempts since the last good connection. Times are RFC 3339.
+attempts since the last good connection. `rejected_senders` (omitted when empty) lists the
+last 10 senders the allow-list dropped, newest first, one per user:
+`{user, name?, at}` — `user` is the channel-native id to add to `allowed_users`
+(a Telegram numeric id is not visible in the Telegram app), `name` the platform's
+@handle / display name when sent (untrusted, display only). In-memory; kept across
+listener restarts. Times are RFC 3339.
 
 ### Inbound webhook trigger
 

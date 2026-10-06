@@ -94,12 +94,88 @@ struct Queued {
 }
 
 impl Queued {
+    /// Wait for the place without a notice (the bridge always uses
+    /// [`Queued::acquire_or_notify`]; the queue-order tests use this).
+    #[cfg(test)]
     async fn acquire(self) -> tokio::sync::OwnedMutexGuard<()> {
         match self.now {
             Some(guard) => guard,
             None => self.wait.await,
         }
     }
+
+    /// [`Queued::acquire`], running `on_wait` once when the place has not come
+    /// up within `after` — the "queued behind the running turn" notice, so a
+    /// message waiting on a long turn is not met with silence.
+    async fn acquire_or_notify<F>(
+        self,
+        after: Duration,
+        on_wait: F,
+    ) -> tokio::sync::OwnedMutexGuard<()>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if let Some(guard) = self.now {
+            return guard;
+        }
+        let mut wait = self.wait;
+        tokio::select! {
+            guard = wait.as_mut() => return guard,
+            _ = tokio::time::sleep(after) => {}
+        }
+        on_wait.await;
+        wait.await
+    }
+}
+
+/// Hold a turn until `turn_done` resolves (its Final, a stopped tailer, the
+/// cap) OR an `idle` poll reads the session idle — a turn that ends WITHOUT
+/// a Final (Esc in the app, a CLI crash, a usage-limit stop) then frees the
+/// next message within a poll instead of at the 10-minute cap. Returns
+/// whether the idle probe released it. Pure plumbing — tested.
+async fn hold_until_done_or_idle<D, P, Fut>(turn_done: D, mut idle: P, poll: Duration) -> bool
+where
+    D: std::future::Future<Output = ()>,
+    P: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    tokio::pin!(turn_done);
+    let mut tick = tokio::time::interval(poll);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // the immediate first tick: the turn just started
+    loop {
+        tokio::select! {
+            () = &mut turn_done => return false,
+            _ = tick.tick() => {
+                if idle().await {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+/// Keep `session_id`'s turn lock until its turn is over — see
+/// [`hold_until_done_or_idle`]. "Idle" is the session manager's own
+/// would-a-restart-interrupt-work probe (status, engine holds, 30 s of PTY
+/// quiet, an open transcript turn), so a live turn is never cut short.
+async fn hold_turn(manager: &Arc<SessionManager>, mirror: &Mirror, session_id: &Id, label: &str) {
+    let released_idle = hold_until_done_or_idle(
+        mirror.wait_turn_done(session_id, crate::mirror::TURN_HOLD_CAP),
+        move || async move { !manager.busy_for_restart(session_id).await },
+        TURN_IDLE_POLL,
+    )
+    .await;
+    if released_idle {
+        info!(channel = %label, session = %session_id, "bridge: turn ended without a final reply (interrupted?) — releasing the next message");
+    }
+}
+
+/// Whether an inbound message goes on to an agent session: a fresh message
+/// always does (it may create one); an EDIT only when its conversation
+/// already has a live session (S5-304). Pure — tested.
+fn edit_forwards(edited: bool, has_live_session: bool) -> bool {
+    !edited || has_live_session
 }
 
 /// Where a bridge-side failure is reported back to the human: a short
@@ -192,6 +268,20 @@ const TUI_SETTLE: Duration = Duration::from_millis(600);
 // before we assume the Enter was dropped and retry it once.
 const DISPATCH_WAIT: Duration = Duration::from_secs(5);
 const DISPATCH_POLL: Duration = Duration::from_millis(200);
+/// How often a held turn re-checks whether its session went idle without a
+/// Final (see [`hold_until_done_or_idle`]).
+const TURN_IDLE_POLL: Duration = Duration::from_secs(5);
+/// How long a message waits on the previous turn before the thread is told
+/// it is queued.
+const QUEUED_NOTICE_AFTER: Duration = Duration::from_secs(5);
+/// Posted (once) when a message is queued behind a running turn.
+const QUEUED_REPLY: &str =
+    "⏳ Queued behind the turn that is still running — this message goes in as soon as it finishes.";
+/// Posted when an EDIT arrives for a message that has no live conversation
+/// (it started a workflow / run / swarm, or its session is gone): edits are
+/// never re-run.
+const EDIT_NOT_RERUN_REPLY: &str =
+    "✏️ Edits aren't re-run — send a new message to start or re-trigger this.";
 
 fn agent_paste_input(text: &str) -> Vec<u8> {
     let text = sanitize_paste_text(text);
@@ -428,9 +518,7 @@ async fn submit_to_agent(
     //    next message's attach / begin_turn must not reset the mirror mid-turn.
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed — session is processing the relay");
-        mirror
-            .wait_turn_done(&session_id, crate::mirror::TURN_HOLD_CAP)
-            .await;
+        hold_turn(&manager, &mirror, &session_id, &label).await;
         return;
     }
     warn!(channel = %label, session = %session_id, "bridge: agent did not start within {DISPATCH_WAIT:?}; re-sending Enter");
@@ -440,9 +528,7 @@ async fn submit_to_agent(
     }
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed after retry");
-        mirror
-            .wait_turn_done(&session_id, crate::mirror::TURN_HOLD_CAP)
-            .await;
+        hold_turn(&manager, &mirror, &session_id, &label).await;
     } else {
         warn!(channel = %label, session = %session_id, "bridge: agent still not dispatched — prompt may be sitting in the input box");
     }
@@ -650,6 +736,14 @@ impl Bridge {
                 user = %msg.user,
                 "bridge: user not in allowed_users, dropping"
             );
+            // Listed in Settings → Channels with an "Allow" action, so the
+            // owner can find the (invisible) Telegram id to admit.
+            crate::health::rejected(
+                &msg.workspace_id,
+                adapter.channel(),
+                &msg.user,
+                msg.user_name.as_deref(),
+            );
             return;
         }
 
@@ -821,6 +915,23 @@ impl Bridge {
             let existing = self
                 .lookup_live_session(&key, adapter.channel().as_str())
                 .await;
+            // An edit only ever reaches a conversation that is already live:
+            // with none bound (the original was a workflow / run / swarm
+            // trigger, or its session is gone) it would spawn a brand-new
+            // agent seeded with the trigger text — drop it and say so.
+            if !edit_forwards(msg.edited, existing.is_some()) {
+                info!(
+                    channel = %adapter.channel().as_str(),
+                    workspace = %msg.workspace_id,
+                    chat = %msg.chat,
+                    "bridge: edit of a message with no live session — not re-run"
+                );
+                drop(_conv);
+                let _ = adapter
+                    .send_notice(&msg.chat, msg.thread.as_deref(), EDIT_NOT_RERUN_REPLY)
+                    .await;
+                return;
+            }
 
             let sid = if let Some(sid) = existing {
                 // A follow-up is activity. `last_active_at` only moves on a
@@ -931,7 +1042,16 @@ impl Bridge {
         // submit → dispatch confirmation completes before this one attaches
         // its turn and pastes (two quick messages used to merge into one
         // prompt). Held by `submit_to_agent` until the turn's final reply.
-        let turn = turn.acquire().await;
+        let queued = ChatReply {
+            adapter: Arc::clone(&adapter),
+            chat: msg.chat.clone(),
+            thread: msg.thread.clone(),
+        };
+        let turn = turn
+            .acquire_or_notify(QUEUED_NOTICE_AFTER, async move {
+                queued.say(QUEUED_REPLY).await;
+            })
+            .await;
 
         // --- 5. Compose the message text ---
         // Always wrap the user's message in a trusted-context block telling the
@@ -1215,6 +1335,94 @@ mod conv_lock_tests {
             .await
             .expect("released")
             .unwrap();
+    }
+
+    /// S5-303: a turn that ends WITHOUT its Final (the watch never goes idle)
+    /// releases the next message on the first idle poll, not at the cap; a
+    /// busy session keeps holding until its Final.
+    #[tokio::test]
+    async fn a_turn_without_a_final_releases_on_idle() {
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p = Arc::clone(&polls);
+        let started = std::time::Instant::now();
+        let released = tokio::time::timeout(
+            Duration::from_secs(2),
+            hold_until_done_or_idle(
+                std::future::pending::<()>(), // no Final ever
+                move || {
+                    let n = p.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move { n >= 1 } // busy once, then idle
+                },
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("released by the idle probe, not the cap");
+        assert!(released);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // A busy session: the Final releases it, and the probe says so.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let hold = tokio::spawn(hold_until_done_or_idle(
+            async move {
+                let _ = rx.await;
+            },
+            || async { false },
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(!hold.is_finished(), "a busy turn keeps the lock");
+        tx.send(()).unwrap();
+        let by_idle = tokio::time::timeout(Duration::from_secs(1), hold)
+            .await
+            .expect("released on the Final")
+            .unwrap();
+        assert!(!by_idle);
+    }
+
+    /// S5-303: a message queued behind a running turn is told so once; one
+    /// whose place comes up at once is not.
+    #[tokio::test]
+    async fn a_queued_message_gets_one_notice() {
+        let turns: KeyedLocks<Id> = KeyedLocks::default();
+        let sid: Id = "s1".into();
+        let notices = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = Arc::clone(&notices);
+        let first = turns
+            .enqueue(&sid)
+            .await
+            .acquire_or_notify(Duration::from_millis(10), async move {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await;
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let second = turns.enqueue(&sid).await;
+        let n = Arc::clone(&notices);
+        let waiter = tokio::spawn(async move {
+            let _g = second
+                .acquire_or_notify(Duration::from_millis(20), async move {
+                    n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!waiter.is_finished());
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("acquired once the first turn ends")
+            .unwrap();
+        assert_eq!(notices.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// S5-304: an edit is forwarded only to a live conversation — never
+    /// turned into a new session.
+    #[test]
+    fn an_edit_without_a_live_session_is_not_forwarded() {
+        assert!(edit_forwards(false, false), "a fresh message may spawn");
+        assert!(edit_forwards(false, true));
+        assert!(edit_forwards(true, true), "an edit reaches its live agent");
+        assert!(!edit_forwards(true, false), "an edit never spawns one");
     }
 
     #[tokio::test]

@@ -25,6 +25,24 @@ use serde::Serialize;
 /// Longest `detail` / `last_error` kept (chars) — a reason, not a log dump.
 const MAX_DETAIL_CHARS: usize = 300;
 
+/// Most recent rejected senders kept per listener (newest first).
+pub const MAX_REJECTED_SENDERS: usize = 10;
+
+/// A sender the allow-list turned away — shown in Settings → Channels with an
+/// "Allow" action, because a Telegram numeric user id is not visible in the
+/// Telegram app (without it the owner's only way to make the bot answer was
+/// "Open to everyone").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RejectedSender {
+    /// Channel-native user id — what goes into `allowed_users`.
+    pub user: String,
+    /// Display name / @handle when the platform sent one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// When their latest message was dropped.
+    pub at: DateTime<Utc>,
+}
+
 /// Where a listener is in its connect / reconnect cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +87,10 @@ pub struct ListenerStatus {
     pub last_error_at: Option<DateTime<Utc>>,
     /// Consecutive failed attempts since the last good connection.
     pub failures: u32,
+    /// The last [`MAX_REJECTED_SENDERS`] senders the allow-list dropped,
+    /// newest first, one row per user (survives reconnects).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rejected_senders: Vec<RejectedSender>,
     #[serde(skip)]
     generation: u64,
 }
@@ -99,6 +121,7 @@ fn reset(ws: &str, channel: Channel, state: ListenerState, detail: Option<&str>)
     let detail = detail.map(clip);
     let prev = reg.get(&key);
     let last_event_at = prev.and_then(|s| s.last_event_at);
+    let rejected_senders = prev.map(|s| s.rejected_senders.clone()).unwrap_or_default();
     // The supervisor re-reports a still-missing token every rescan: keep
     // "since" at when it first went that way, not the latest rescan.
     let since = prev
@@ -117,10 +140,36 @@ fn reset(ws: &str, channel: Channel, state: ListenerState, detail: Option<&str>)
             last_error: None,
             last_error_at: None,
             failures: 0,
+            rejected_senders,
             generation,
         },
     );
     generation
+}
+
+/// Record that `(ws, channel)`'s allow-list dropped a message from `user`
+/// (any generation — the list describes the integration, not one
+/// connection). A repeat sender moves to the front; the list is capped.
+/// No-op when the listener has no entry (a webhook, a stopped listener).
+pub fn rejected(ws: &str, channel: Channel, user: &str, name: Option<&str>) {
+    let user = user.trim();
+    if user.is_empty() {
+        return;
+    }
+    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = reg.get_mut(&(ws.to_string(), channel.as_str())) else {
+        return;
+    };
+    s.rejected_senders.retain(|r| r.user != user);
+    s.rejected_senders.insert(
+        0,
+        RejectedSender {
+            user: clip(user),
+            name: name.map(clip).filter(|n| !n.is_empty()),
+            at: Utc::now(),
+        },
+    );
+    s.rejected_senders.truncate(MAX_REJECTED_SENDERS);
 }
 
 /// Record that an integration is enabled but its token isn't readable yet.
@@ -254,6 +303,34 @@ mod tests {
     use super::*;
 
     // The registry is process-global: every test uses its own workspace ids.
+
+    /// S5-308: dropped senders are listed newest-first, one row per user,
+    /// capped, and kept across a listener restart.
+    #[test]
+    fn rejected_senders_are_listed_deduped_and_capped() {
+        let ws = "ws_health_rejected";
+        // No listener entry yet: nothing to record into.
+        rejected(ws, Channel::Telegram, "1", None);
+        assert!(snapshot(ws).is_empty());
+        let _h = Health::begin(ws, Channel::Telegram);
+        rejected(ws, Channel::Telegram, "111", Some("@alice"));
+        rejected(ws, Channel::Telegram, "222", None);
+        rejected(ws, Channel::Telegram, "111", Some("@alice"));
+        rejected(ws, Channel::Telegram, "  ", None);
+        let s = &snapshot(ws)[0];
+        let users: Vec<&str> = s.rejected_senders.iter().map(|r| r.user.as_str()).collect();
+        assert_eq!(users, ["111", "222"]);
+        assert_eq!(s.rejected_senders[0].name.as_deref(), Some("@alice"));
+        for i in 0..(MAX_REJECTED_SENDERS + 5) {
+            rejected(ws, Channel::Telegram, &format!("u{i}"), None);
+        }
+        assert_eq!(snapshot(ws)[0].rejected_senders.len(), MAX_REJECTED_SENDERS);
+        // A restarted listener (new generation) keeps the list.
+        let _h2 = Health::begin(ws, Channel::Telegram);
+        assert_eq!(snapshot(ws)[0].rejected_senders.len(), MAX_REJECTED_SENDERS);
+        let json = serde_json::to_value(&snapshot(ws)[0]).unwrap();
+        assert!(json["rejected_senders"][0]["user"].is_string(), "{json}");
+    }
 
     #[test]
     fn a_listener_walks_connecting_connected_reconnecting() {

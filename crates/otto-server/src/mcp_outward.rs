@@ -342,7 +342,7 @@ pub(crate) async fn governed_invoke(
     // workspace of an id-only object for a workspace-pinned token. Same
     // placement and contract as the repo fill: after the scope + enable gates,
     // and the resolved arguments replace the caller's for everything below.
-    let ref_fill = match fill_refs(ctx, auth, &short, arguments).await {
+    let ref_fill = match fill_refs(ctx, auth, &short, arguments, forced_approval.is_some()).await {
         Ok(fill) => fill,
         Err(Error::Forbidden(reason)) => {
             return Ok(deny_audit(ctx, &mut audit, &reason).await);
@@ -403,8 +403,13 @@ pub(crate) async fn governed_invoke(
             .map(str::to_string)
     };
     // The RESOLVED workspace (a named object / repo / artifact's own) wins.
-    if let Some(w) = ws.clone().or_else(|| session_ws.clone()) {
-        audit.workspace_id = Some(w);
+    // A probed tool's caller-sent `workspace_id` was dropped by `fill_refs`
+    // (the executor never reads it), so it must not survive as the audit
+    // row's workspace either.
+    match ws.clone().or_else(|| session_ws.clone()) {
+        Some(w) => audit.workspace_id = Some(w),
+        None if PIN_PROBES.iter().any(|(t, ..)| *t == short) => audit.workspace_id = None,
+        None => {}
     }
     // The gate applies (before any opt-out rule) to a DANGEROUS tool without a
     // trusted token grant, under the global `mcp_require_approval_dangerous`.
@@ -897,9 +902,35 @@ fn directory_kind(tool: &str) -> Option<&'static crate::agent_refs::RefKind> {
         .and_then(|(_, k)| crate::agent_refs::kind_of(k))
 }
 
+/// Whether a WORKSPACE-scoped auto-approve rule can never apply to `short`:
+/// a global-row tool ([`pin_global`]), one whose target's workspace Otto
+/// cannot verify ([`PIN_UNVERIFIABLE`] — the calling session's workspace is
+/// not the object's), and one addressing a global LIBRARY (vaults, product
+/// stories), whose `workspace_id` only selects the role check — a "Sandbox"
+/// rule would otherwise auto-approve writes to every vault. Only global and
+/// session rules apply to these. Pure — unit-tested.
+pub(crate) fn workspace_rules_never_apply(short: &str) -> bool {
+    pin_global(short)
+        || PIN_UNVERIFIABLE.contains(&short)
+        || REF_ARGS.iter().any(|(t, _, k)| {
+            *t == short
+                && crate::agent_refs::kind_of(k)
+                    .is_some_and(|k| k.scope == crate::agent_refs::Scope::Library)
+        })
+}
+
+/// Whether the call's DECISION workspace must be learned from the object it
+/// addresses: under a workspace pin (checked against it), for an
+/// approval-gated tool (the auto-approve scope and the approval card key on
+/// it — the calling session's workspace is not the object's), and when a
+/// forced approval (agent rule) files a card. Pure.
+fn must_learn_ws(tool: &str, pinned: bool, forced: bool) -> bool {
+    pinned || forced || tool_is_dangerous(tool)
+}
+
 /// Whether [`fill_refs`] needs directory lookups for this call (so a plain-id
-/// call from an unpinned caller costs nothing extra). Pure — unit-tested.
-fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
+/// read from an unpinned caller costs nothing extra). Pure — unit-tested.
+fn refs_need_lookup(tool: &str, args: &Value, pinned: bool, forced: bool) -> bool {
     let s = |k: &str| -> Option<String> {
         match args.get(k)? {
             Value::String(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
@@ -911,6 +942,7 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
         return true;
     }
     let has_ws = s("workspace_id").is_some();
+    let learn = must_learn_ws(tool, pinned, forced);
     for (t, arg, kind) in REF_ARGS {
         if *t != tool {
             continue;
@@ -925,12 +957,13 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
                 }
             }
             Some(v) => {
-                // A workspace-owned object is looked up (within the call's
-                // workspace) whenever that workspace matters: under a pin,
-                // or when the caller NAMES one — which then scopes the
-                // approval / auto-approve decision, so it must be verified.
+                // A workspace-owned object is looked up whenever its
+                // workspace matters: under a pin, for an approval-gated call
+                // (a bare id must not inherit the CALLING session's
+                // workspace as the decision scope), or when the caller NAMES
+                // one — which then scopes the decision, so it is verified.
                 if !crate::agent_refs::looks_like_id(&v)
-                    || ((pinned || has_ws) && k.scope == crate::agent_refs::Scope::Workspace)
+                    || ((learn || has_ws) && k.scope == crate::agent_refs::Scope::Workspace)
                 {
                     return true;
                 }
@@ -944,11 +977,11 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
     }
     // An id-only object is probed for a pinned token ALWAYS (a caller-supplied
     // `workspace_id`, which the executor ignores, proves nothing), and for any
-    // caller of an approval-gated tool — the probed workspace is what the
-    // approval / auto-approve decision keys on.
+    // caller of an approval-gated (or force-approved) call — the probed
+    // workspace is what the approval / auto-approve decision keys on.
     PIN_PROBES
         .iter()
-        .any(|(t, arg, ..)| *t == tool && (pinned || (tool_is_dangerous(tool) && s(arg).is_some())))
+        .any(|(t, arg, ..)| *t == tool && (pinned || (learn && s(arg).is_some())))
 }
 
 /// Resolve every friendly reference in a governed call (see [`REF_ARGS`]), a
@@ -962,6 +995,7 @@ async fn fill_refs(
     auth: &AuthContext,
     tool: &str,
     args: &Value,
+    forced: bool,
 ) -> Result<Option<Value>, Error> {
     let Some(obj) = args.as_object() else {
         return Ok(None);
@@ -979,6 +1013,13 @@ async fn fill_refs(
             }
         }
     }
+    // A probed tool's executor never reads `workspace_id`: a caller-sent one
+    // is only a claim, so it is dropped — never the audit row's workspace or
+    // a forced-approval card's. The probe below re-learns the real one when
+    // the decision needs it.
+    if PIN_PROBES.iter().any(|(t, ..)| *t == tool) && out.remove("workspace_id").is_some() {
+        changed = true;
+    }
     let has_ws = out
         .get("workspace_id")
         .and_then(Value::as_str)
@@ -991,12 +1032,13 @@ async fn fill_refs(
     }
 
     let current = Value::Object(out.clone());
-    if !refs_need_lookup(tool, &current, pin.is_some()) {
+    if !refs_need_lookup(tool, &current, pin.is_some(), forced) {
         return Ok(changed.then_some(current));
     }
+    let learn = must_learn_ws(tool, pin.is_some(), forced);
     let prefer = crate::agent_refs::caller_session_ws(ctx, auth).await;
     let caller = crate::agent_refs::SelfCaller::open(ctx, &auth.effective_user).await?;
-    let r = fill_refs_with(&caller, auth, tool, out, prefer.as_deref()).await;
+    let r = fill_refs_with(&caller, auth, tool, out, prefer.as_deref(), learn).await;
     caller.close().await;
     r.map(Some)
 }
@@ -1008,6 +1050,7 @@ async fn fill_refs_with(
     tool: &str,
     mut out: serde_json::Map<String, Value>,
     prefer: Option<&str>,
+    learn: bool,
 ) -> Result<Value, Error> {
     use crate::agent_refs::{kind_of, looks_like_id, resolve_with, Scope};
     let pinned = crate::agent_refs::pin_of(auth).is_some();
@@ -1048,7 +1091,7 @@ async fn fill_refs_with(
             None => kind.sole_default,
             Some(v) => {
                 !looks_like_id(v)
-                    || ((pinned || text(&out, "workspace_id").is_some())
+                    || ((learn || text(&out, "workspace_id").is_some())
                         && kind.scope == Scope::Workspace)
             }
         };
@@ -1109,11 +1152,11 @@ async fn fill_refs_with(
     // echoing the pin back must not pass the pin check); no id, a failed
     // probe or a probe without a workspace leaves none ⇒ `pin_verdict`
     // denies (fail closed).
-    // Unpinned callers of an approval-gated tool are probed too (when they
-    // name the object), so the approval decision keys on the object's
-    // workspace, never a spoofed one.
+    // Unpinned callers of an approval-gated (or force-approved) call are
+    // probed too (when they name the object), so the approval decision keys
+    // on the object's workspace, never a spoofed one.
     if let Some((_, arg, prefix, ptr)) = PIN_PROBES.iter().find(|(t, ..)| *t == tool) {
-        if pinned || (tool_is_dangerous(tool) && text(&out, arg).is_some()) {
+        if pinned || (learn && text(&out, arg).is_some()) {
             out.remove("workspace_id");
             if let Some(id) = text(&out, arg) {
                 let v = caller.get(&format!("{prefix}{}", seg(&id))).await?;
@@ -1926,52 +1969,65 @@ mod tests {
         assert!(!refs_need_lookup(
             "get_workflow",
             &json!({"workflow_id": id}),
+            false,
             false
         ));
         assert!(refs_need_lookup(
             "get_workflow",
             &json!({"workflow_id": "Nightly"}),
+            false,
             false
         ));
         // A pinned token must learn a workspace-owned object's workspace.
         assert!(refs_need_lookup(
             "get_workflow",
             &json!({"workflow_id": id}),
-            true
+            true,
+            false
         ));
         // …but not a global row's.
         assert!(!refs_need_lookup(
             "k8s_top",
             &json!({"cluster_id": id}),
-            true
+            true,
+            false
         ));
         // Omitted issue account → the sole account is looked up.
         assert!(refs_need_lookup(
             "search_issues",
             &json!({"query":"x"}),
+            false,
             false
         ));
         // A workspace NAME, a transition NAME, a pinned probe.
         assert!(refs_need_lookup(
             "list_sessions",
             &json!({"workspace_id":"Casino"}),
+            false,
             false
         ));
         assert!(refs_need_lookup(
             "transition_issue",
             &json!({"account_id": id, "key":"K-1", "transition_id":"Done"}),
+            false,
             false
         ));
         assert!(refs_need_lookup(
             "get_session",
             &json!({"session_id": id}),
-            true
+            true,
+            false
         ));
         // A pinned probe runs even when the caller names a workspace (the
         // pin-echo bypass): the executor ignores it for every probed tool.
         for (t, arg, ..) in PIN_PROBES {
             assert!(
-                refs_need_lookup(t, &json!({ (*arg): id, "workspace_id": "ws-pin" }), true),
+                refs_need_lookup(
+                    t,
+                    &json!({ (*arg): id, "workspace_id": "ws-pin" }),
+                    true,
+                    false
+                ),
                 "{t}"
             );
         }
@@ -1980,12 +2036,77 @@ mod tests {
         assert!(!refs_need_lookup(
             "get_session",
             &json!({"session_id": id}),
+            false,
             false
         ));
         assert!(refs_need_lookup(
             "send_message",
             &json!({"session_id": id}),
+            false,
             false
         ));
+        // …and a read an agent rule force-approves: its card keys on the
+        // probed workspace too (S5-305).
+        assert!(refs_need_lookup(
+            "get_session",
+            &json!({"session_id": id}),
+            false,
+            true
+        ));
+    }
+
+    /// S5-301: an approval-gated call naming a workspace-owned object by bare
+    /// id (and no `workspace_id`) is looked up, so the decision keys on the
+    /// OBJECT's workspace — never the calling session's.
+    #[test]
+    fn a_gated_bare_id_call_learns_the_objects_workspace() {
+        let id = "01KZTKNK3Z8N6VD9Q0MTDQSJ3V";
+        for (tool, arg) in [
+            ("run_workflow", "workflow_id"),
+            ("run_scheduled_task", "task_id"),
+            ("update_scheduled_task", "task_id"),
+            ("delete_scheduled_task", "task_id"),
+            ("post_swarm_board", "swarm_id"),
+        ] {
+            assert!(tool_is_dangerous(tool), "{tool}");
+            assert!(
+                refs_need_lookup(tool, &json!({ arg: id }), false, false),
+                "{tool}"
+            );
+        }
+        // A plain read by id still costs nothing.
+        assert!(!refs_need_lookup(
+            "get_scheduled_task",
+            &json!({"task_id": id}),
+            false,
+            false
+        ));
+    }
+
+    /// S5-301 / S5-306: workspace-scoped auto-approve rules never apply to a
+    /// tool whose target Otto cannot place in a workspace, nor to the global
+    /// vault library (whose `workspace_id` only picks the role check).
+    #[test]
+    fn workspace_rules_skip_unverifiable_and_library_tools() {
+        for t in [
+            "approve_improvement_edit",
+            "rollback_improvement_edit",
+            "create_work_item",
+            "assistant_forget",
+            "vault_write",
+            "vault_delete",
+            "vault_rename",
+            "k8s_action",
+        ] {
+            assert!(workspace_rules_never_apply(t), "{t}");
+        }
+        for t in [
+            "run_workflow",
+            "run_scheduled_task",
+            "send_message",
+            "create_pr",
+        ] {
+            assert!(!workspace_rules_never_apply(t), "{t}");
+        }
     }
 }

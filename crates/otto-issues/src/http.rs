@@ -15,13 +15,13 @@ use otto_core::api::{
     Problem, UpdateConfluencePageReq, UpdateIssueAccountReq,
 };
 use otto_core::auth::{authorize_owner, AuthUser};
-use otto_core::domain::{IssueAccount, IssueDetail, IssueProject, IssueSummary, MyWorkIssue};
+use otto_core::domain::{IssueAccount, IssueDetail, IssueSummary, MyWorkIssue};
 use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::ConfluenceClient;
-use crate::confluence::{markdown_to_storage, ConfluencePageSummary, ConfluenceSpace, PageComment};
+use crate::confluence::{markdown_to_storage, ConfluencePageSummary, PageComment};
 use crate::jira::{
     CommentRef, DevStatus, EditableField, IssueFull, JiraClient, JiraTransition, JiraUser,
 };
@@ -302,11 +302,29 @@ async fn delete_account<S: IssuesCtx>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `?meta=1` asks for `{items, truncated}` instead of the bare array, so a
+/// picker can say "not every result is shown" when a listing stopped at its
+/// page cap (S5-22). Without it the response is unchanged.
+fn wants_meta(params: &HashMap<String, String>) -> bool {
+    params
+        .get("meta")
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true"))
+}
+
+/// The listing body for [`wants_meta`]: the bare array, or `{items, truncated}`.
+fn listing<T: serde::Serialize>(items: Vec<T>, truncated: bool, meta: bool) -> serde_json::Value {
+    if meta {
+        serde_json::json!({ "items": items, "truncated": truncated })
+    } else {
+        serde_json::json!(items)
+    }
+}
+
 async fn list_projects<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
-) -> ApiResult<Json<Vec<IssueProject>>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let account_id: Id = params
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
@@ -316,8 +334,8 @@ async fn list_projects<S: IssuesCtx>(
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
-    let projects = client.list_projects().await?;
-    Ok(Json(projects))
+    let (projects, truncated) = client.list_projects_paged().await?;
+    Ok(Json(listing(projects, truncated, wants_meta(&params))))
 }
 
 async fn search_issues<S: IssuesCtx>(
@@ -388,7 +406,7 @@ async fn list_spaces_cf<S: IssuesCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Query(params): Query<HashMap<String, String>>,
-) -> ApiResult<Json<Vec<ConfluenceSpace>>> {
+) -> ApiResult<Json<serde_json::Value>> {
     let account_id: Id = params
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
@@ -398,8 +416,8 @@ async fn list_spaces_cf<S: IssuesCtx>(
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
-    let spaces = client.list_spaces().await?;
-    Ok(Json(spaces))
+    let (spaces, truncated) = client.list_spaces_paged().await?;
+    Ok(Json(listing(spaces, truncated, wants_meta(&params))))
 }
 
 async fn search_pages_cf<S: IssuesCtx>(
@@ -942,6 +960,21 @@ mod tests {
     fn root_can_access_any_account() {
         let account = account_owned_by("alice");
         assert!(authorize_account(&account, &user("root", true)).is_ok());
+    }
+
+    /// S5-22: `?meta=1` wraps a listing with its truncation flag; without it
+    /// the bare array is unchanged.
+    #[test]
+    fn a_listing_carries_truncation_only_when_asked() {
+        let mut params = HashMap::new();
+        assert!(!wants_meta(&params));
+        assert_eq!(listing(vec![1, 2], true, false), serde_json::json!([1, 2]));
+        params.insert("meta".to_string(), "1".to_string());
+        assert!(wants_meta(&params));
+        assert_eq!(
+            listing(vec![1], true, true),
+            serde_json::json!({"items": [1], "truncated": true})
+        );
     }
 
     /// S17-06: a host change without a fresh token is refused; the same
