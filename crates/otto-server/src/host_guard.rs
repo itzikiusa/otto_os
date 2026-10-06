@@ -96,6 +96,8 @@ pub(crate) fn tailscale_name_allowed(host: &str, extra: &[String]) -> bool {
 fn own_mdns_names() -> &'static [String] {
     static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| {
+        // Only the macOS branch below pushes; elsewhere the vec stays as-is.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut names = vec!["otto.local".to_string()];
         #[cfg(target_os = "macos")]
         if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
