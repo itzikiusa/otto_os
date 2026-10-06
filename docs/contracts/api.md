@@ -2721,6 +2721,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /admin/secrets/status | root | — | `SecretsStatus {mode: plaintext\|encrypted\|keychain, plaintext_file, plaintext_entries, key_state: unlocked\|locked\|not_loaded\|error, migration_available, migrating, backup_present}` · 404 when the daemon has no managed store |
 | POST /admin/secrets/secure | root | `{confirm: true}` | `SecretsMigrationReport {migrated, total, duration_ms}` · 400 without `confirm` · 409 when not in plaintext mode / already running / a key differs between the files · 502 when the Keychain is locked or a prompt is waiting (nothing changed) |
+| POST /admin/secrets/reset-store | root (human credential) | `{confirm: true}` | `{set_aside: string\|null}` — moves an UNREADABLE `secrets.enc` (master key missing from the Keychain, or the file no longer decrypts) aside to `secrets.enc.orphaned-<secs>` (kept, never deleted) so secrets can be saved again · 400 without `confirm` · 409 when the store is readable or not in encrypted mode · audited `secrets.reset_store`. A `Missing` master key is also re-probed every 30 s, so restoring the Keychain item needs no restart |
 
 - Stores (`otto_keychain`): `encrypted` = `secrets.enc` (AES-256-GCM, 0600,
   atomic writes) sealed with ONE random master key in a single Keychain item

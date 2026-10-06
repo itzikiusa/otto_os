@@ -285,6 +285,62 @@ pub async fn secrets_status(
     Ok(Json(st))
 }
 
+/// Response of `POST /admin/secrets/reset-store`.
+#[derive(serde::Serialize)]
+pub struct ResetSecretStoreResp {
+    /// Where the unreadable `secrets.enc` was moved (kept, never deleted);
+    /// `null` when there was no file.
+    pub set_aside: Option<String>,
+}
+
+/// `POST /admin/secrets/reset-store` — recovery for an orphaned encrypted
+/// store (S7-305): its Keychain master key is gone (or the file no longer
+/// decrypts), so every secret save 409s. Moves `secrets.enc` aside to
+/// `secrets.enc.orphaned-<secs>` (restoring the old key makes it readable
+/// again) so new secrets can be saved. Root + human + explicit `confirm`;
+/// audited. 409 when the store is readable or not encrypted.
+pub async fn secrets_reset_store(
+    State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<SecureSecretsReq>,
+) -> ApiResult<Json<ResetSecretStoreResp>> {
+    require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
+    if !body.confirm {
+        return Err(otto_core::Error::Invalid(
+            "resetting the secret store requires an explicit confirm: true".into(),
+        )
+        .into());
+    }
+    let c = secrets_control()?;
+    let res = tokio::task::spawn_blocking(move || c.reset_store())
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("secrets reset task: {e}")))?;
+    let set_aside = res
+        .as_ref()
+        .ok()
+        .and_then(|p| p.as_ref())
+        .map(|p| p.to_string_lossy().into_owned());
+    ctx.audit(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: if res.is_ok() {
+            "secrets.reset_store".into()
+        } else {
+            "secrets.reset_store_failed".into()
+        },
+        target: None,
+        detail: Some(match &res {
+            Ok(_) => serde_json::json!({ "set_aside": set_aside }),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
+        }),
+        ip: None,
+    })
+    .await;
+    res?;
+    Ok(Json(ResetSecretStoreResp { set_aside }))
+}
+
 /// Body of `POST /admin/secrets/secure`: `confirm: true` is required — the UI
 /// sends it only after a `confirmer.ask` that explains the Keychain prompt.
 #[derive(serde::Deserialize)]
