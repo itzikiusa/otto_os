@@ -1270,9 +1270,7 @@ async fn workspace_relay(
         return Err(ApiError(Error::Invalid("relay text is empty".into())));
     }
     let who = Typist::new(&user.id, &auth);
-    let candidates = input_agents(&ctx, who, &ws_id)
-        .await
-        .map_err(ApiError)?;
+    let candidates = input_agents(&ctx, who, &ws_id).await.map_err(ApiError)?;
     let addressable: Vec<_> = candidates
         .iter()
         .map(|s| otto_sessions::names::Addressable {

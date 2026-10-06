@@ -16,7 +16,7 @@
 //! full access.
 //!
 //! Task 3.3 additions:
-//! - #L9: terminal attach (`GET /ws/term/{id}?token=`) is now owner-only; a
+//! - #L9: terminal attach (`GET /ws/term/{id}`) is now owner-only; a
 //!   workspace editor who is not the owner gets 403 before the WS upgrade.
 //! - #L8: `POST /app/kill-sessions` requires root; non-root gets 403.
 
@@ -465,13 +465,15 @@ async fn mint_share(pool: &DbPool, owner: &str, session_id: &Id, role: Workspace
 }
 
 /// Send a bare GET (no WS upgrade headers) to the terminal endpoint with the
-/// given raw token in the query string and return the status code. When the
+/// given raw token in the `otto-bearer` subprotocol header (the only place it
+/// is accepted — S11-312) and return the status code. When the
 /// auth/owner gate fires the handler returns 403 *before* the upgrade, so this
 /// lets us distinguish "forbidden" from "auth passed, upgrade rejected".
 async fn term_ws_status(app: &Router, session_id: &Id, token: &str) -> StatusCode {
     let req = Request::builder()
         .method(Method::GET)
-        .uri(format!("/ws/term/{session_id}?token={token}"))
+        .uri(format!("/ws/term/{session_id}"))
+        .header("sec-websocket-protocol", format!("otto-bearer, {token}"))
         .body(Body::empty())
         .unwrap();
     app.clone().oneshot(req).await.unwrap().status()
@@ -819,7 +821,11 @@ async fn agent_token_controls_only_its_own_session_and_workers() {
         (Method::POST, format!("/sessions/{sibling}/unarchive")),
     ] {
         let (st, _) = agent_status(&app, &alice, &me, method.clone(), &uri, none.clone()).await;
-        assert_eq!(st, StatusCode::FORBIDDEN, "agent token on sibling: {method} {uri}");
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "agent token on sibling: {method} {uri}"
+        );
     }
     // Bulk skips the sibling rather than failing the batch.
     let (st, body) = agent_status(
@@ -871,7 +877,13 @@ async fn agent_token_controls_only_its_own_session_and_workers() {
     assert!(meta.get("project_settings").is_none(), "{meta}");
     // A person's credential (no AuthContext agent binding) is unchanged.
     assert_ne!(
-        status_as(&app, &alice, Method::POST, &format!("/sessions/{sibling}/archive")).await,
+        status_as(
+            &app,
+            &alice,
+            Method::POST,
+            &format!("/sessions/{sibling}/archive")
+        )
+        .await,
         StatusCode::FORBIDDEN
     );
 }

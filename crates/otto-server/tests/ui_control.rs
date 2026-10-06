@@ -163,10 +163,19 @@ async fn boot() -> Daemon {
 
 impl Daemon {
     async fn ws(&self, token: &str) -> Ws {
-        let (ws, _) =
-            tokio_tungstenite::connect_async(format!("{}/ws/events?token={token}", self.ws_base))
-                .await
-                .expect("ws connect");
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        // The bearer rides in the `otto-bearer` subprotocol — the only place
+        // `/ws/events` accepts it (S11-312).
+        let mut req = format!("{}/ws/events", self.ws_base)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            format!("otto-bearer, {token}").parse().unwrap(),
+        );
+        let (ws, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("ws connect");
         ws
     }
 
