@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="2.5 2.5 19 19" width="256" height="256">
+  <!-- Codex cloud + >_ prompt (from ProviderIcon.svelte), on transparent -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9a8df7" />
+      <stop offset="1" stop-color="#3a49ea" />
+    </linearGradient>
+  </defs>
+  <g fill="#ffffff">
+    <circle cx="12" cy="12" r="6.6" /><circle cx="12" cy="7.2" r="4.1" /><circle cx="16.2" cy="9.6" r="4.1" />
+    <circle cx="16.2" cy="14.4" r="4.1" /><circle cx="12" cy="16.8" r="4.1" /><circle cx="7.8" cy="14.4" r="4.1" />
+    <circle cx="7.8" cy="9.6" r="4.1" />
+  </g>
+  <g fill="url(#g)">
+    <circle cx="12" cy="12" r="5.6" /><circle cx="12" cy="7.2" r="3.1" /><circle cx="16.2" cy="9.6" r="3.1" />
+    <circle cx="16.2" cy="14.4" r="3.1" /><circle cx="12" cy="16.8" r="3.1" /><circle cx="7.8" cy="14.4" r="3.1" />
+    <circle cx="7.8" cy="9.6" r="3.1" />
+  </g>
+  <g stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <polyline points="9.1,9.6 11.4,12 9.1,14.4" />
+    <line x1="13.2" y1="14.6" x2="16" y2="14.6" />
+  </g>
+</svg>

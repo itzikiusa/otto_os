@@ -1,0 +1,278 @@
+{
+  "version": 1,
+  "files": {
+    "kid-claude.glb": {
+      "bytes": 740720,
+      "sha256": "4d4485ff1a8cf6da811186a5440cede29c4720278f23f4dd0c18e1c85c85d9ed",
+      "tris": 6846,
+      "clips": [
+        "Sit_Type",
+        "Sit_Idle",
+        "Sit_RaiseHand",
+        "Sit_Slump",
+        "Stand_Up",
+        "Sit_Down",
+        "Walk",
+        "Idle_Stand",
+        "Talk",
+        "Look_Around",
+        "Wave"
+      ],
+      "nodes": [],
+      "durations": {
+        "Sit_Type": 2.0,
+        "Sit_Idle": 4.0,
+        "Sit_RaiseHand": 1.6,
+        "Sit_Slump": 4.0,
+        "Stand_Up": 0.8,
+        "Sit_Down": 0.8,
+        "Walk": 1.3333,
+        "Idle_Stand": 1.6667,
+        "Talk": 2.4,
+        "Look_Around": 4.0,
+        "Wave": 1.6667
+      }
+    },
+    "kid-codex.glb": {
+      "bytes": 684624,
+      "sha256": "24325ffd0acfdf194d9ced5d21a1eb98f0536443a5256a626f26ee80d078086b",
+      "tris": 6004,
+      "clips": [
+        "Sit_Type",
+        "Sit_Idle",
+        "Sit_RaiseHand",
+        "Sit_Slump",
+        "Stand_Up",
+        "Sit_Down",
+        "Walk",
+        "Idle_Stand",
+        "Talk",
+        "Look_Around",
+        "Wave"
+      ],
+      "nodes": [],
+      "durations": {
+        "Sit_Type": 2.0,
+        "Sit_Idle": 4.0,
+        "Sit_RaiseHand": 1.6,
+        "Sit_Slump": 4.0,
+        "Stand_Up": 0.8,
+        "Sit_Down": 0.8,
+        "Walk": 1.3333,
+        "Idle_Stand": 1.6667,
+        "Talk": 2.4,
+        "Look_Around": 4.0,
+        "Wave": 1.6667
+      }
+    },
+    "kid-grok.glb": {
+      "bytes": 690860,
+      "sha256": "a7c2a54e65ba405489093046d38a124a5bb7ee3a6389f4f9d543721bd4035f21",
+      "tris": 6208,
+      "clips": [
+        "Sit_Type",
+        "Sit_Idle",
+        "Sit_RaiseHand",
+        "Sit_Slump",
+        "Stand_Up",
+        "Sit_Down",
+        "Walk",
+        "Idle_Stand",
+        "Talk",
+        "Look_Around",
+        "Wave"
+      ],
+      "nodes": [],
+      "durations": {
+        "Sit_Type": 2.0,
+        "Sit_Idle": 4.0,
+        "Sit_RaiseHand": 1.6,
+        "Sit_Slump": 4.0,
+        "Stand_Up": 0.8,
+        "Sit_Down": 0.8,
+        "Walk": 1.3333,
+        "Idle_Stand": 1.6667,
+        "Talk": 2.4,
+        "Look_Around": 4.0,
+        "Wave": 1.6667
+      }
+    },
+    "kid-agy.glb": {
+      "bytes": 740480,
+      "sha256": "bec356e19e51068ab3df9ce88b8178e206bb8dac24cfd0d80e9aa7f84db6fb5b",
+      "tris": 6862,
+      "clips": [
+        "Sit_Type",
+        "Sit_Idle",
+        "Sit_RaiseHand",
+        "Sit_Slump",
+        "Stand_Up",
+        "Sit_Down",
+        "Walk",
+        "Idle_Stand",
+        "Talk",
+        "Look_Around",
+        "Wave"
+      ],
+      "nodes": [],
+      "durations": {
+        "Sit_Type": 2.0,
+        "Sit_Idle": 4.0,
+        "Sit_RaiseHand": 1.6,
+        "Sit_Slump": 4.0,
+        "Stand_Up": 0.8,
+        "Sit_Down": 0.8,
+        "Walk": 1.3333,
+        "Idle_Stand": 1.6667,
+        "Talk": 2.4,
+        "Look_Around": 4.0,
+        "Wave": 1.6667
+      }
+    },
+    "kid-shell.glb": {
+      "bytes": 599144,
+      "sha256": "e6b42489009becfc741bca8b745e237006a852be0fc0d2b449e8e99836138985",
+      "tris": 4966,
+      "clips": [
+        "Sit_Type",
+        "Sit_Idle",
+        "Sit_RaiseHand",
+        "Sit_Slump",
+        "Stand_Up",
+        "Sit_Down",
+        "Walk",
+        "Idle_Stand",
+        "Talk",
+        "Look_Around",
+        "Wave"
+      ],
+      "nodes": [],
+      "durations": {
+        "Sit_Type": 2.0,
+        "Sit_Idle": 4.0,
+        "Sit_RaiseHand": 1.6,
+        "Sit_Slump": 4.0,
+        "Stand_Up": 0.8,
+        "Sit_Down": 0.8,
+        "Walk": 1.3333,
+        "Idle_Stand": 1.6667,
+        "Talk": 2.4,
+        "Look_Around": 4.0,
+        "Wave": 1.6667
+      }
+    },
+    "kid-custom.glb": {
+      "bytes": 644596,
+      "sha256": "a7fc13e6e0e7413d1bfe9bc4dba16f85af9ecf088f959a2393016dbae846ead7",
+      "tris": 5704,
+      "clips": [
+        "Sit_Type",
+        "Sit_Idle",
+        "Sit_RaiseHand",
+        "Sit_Slump",
+        "Stand_Up",
+        "Sit_Down",
+        "Walk",
+        "Idle_Stand",
+        "Talk",
+        "Look_Around",
+        "Wave"
+      ],
+      "nodes": [],
+      "durations": {
+        "Sit_Type": 2.0,
+        "Sit_Idle": 4.0,
+        "Sit_RaiseHand": 1.6,
+        "Sit_Slump": 4.0,
+        "Stand_Up": 0.8,
+        "Sit_Down": 0.8,
+        "Walk": 1.3333,
+        "Idle_Stand": 1.6667,
+        "Talk": 2.4,
+        "Look_Around": 4.0,
+        "Wave": 1.6667
+      }
+    },
+    "headmaster-otto.glb": {
+      "bytes": 454380,
+      "sha256": "1a39babab9bcbe0d09d75e46e42a43724194b43266afda19bfc590119b7c179a",
+      "tris": 4137,
+      "clips": [
+        "Idle",
+        "Walk",
+        "Nod",
+        "Scold",
+        "Wave",
+        "ThumbsUp",
+        "Inspect_Screen",
+        "Point_Board"
+      ],
+      "nodes": [],
+      "durations": {
+        "Idle": 3.3333,
+        "Walk": 0.9583,
+        "Nod": 1.6667,
+        "Scold": 1.6667,
+        "Wave": 1.8333,
+        "ThumbsUp": 1.5833,
+        "Inspect_Screen": 3.3333,
+        "Point_Board": 3.3333
+      }
+    },
+    "school-kit.glb": {
+      "bytes": 3473720,
+      "sha256": "4a8aace1810080ea368a6f0489f8f29c6dfb5a4ed51adb2cbb6c46b64e82233f",
+      "tris": 22119,
+      "clips": [],
+      "nodes": [
+        "Backpack",
+        "Bench",
+        "Board",
+        "Book",
+        "Book_Open",
+        "Bookshelf",
+        "Ceiling_Light",
+        "Chair",
+        "Clock",
+        "Corkboard",
+        "Corridor_Door",
+        "Corridor_Floor",
+        "Corridor_Wall",
+        "Floor_Tile",
+        "Plant",
+        "Plant_Desk",
+        "Poster_1",
+        "Poster_2",
+        "Poster_3",
+        "Poster_4",
+        "Poster_5",
+        "Poster_6",
+        "TeacherDesk",
+        "Trashcan",
+        "Wall",
+        "Wall_Door",
+        "Wall_Window",
+        "Water_Bottle",
+        "Workstation"
+      ]
+    }
+  },
+  "notes": {
+    "units": "metres, Y up, fronts face +Z, origins on the floor unless noted",
+    "paintedPlanes": "Screen, BoardTitle, NamePlate, DoorSign: TEXCOORD_0 (0,0) = bottom-left as seen, (1,1) = top-right \u2014 i.e. use texture.flipY = true (three.js CanvasTexture default). Each has its own material; the embedded default map is stored pre-flipped.",
+    "Board": "origin x-centre, y = 0 (floor), z = wall surface; board spans y 0.9\u20132.3",
+    "Ceiling_Light": "origin at the emitting face centre (y = 0), housing rises to y = 0.1",
+    "Clock": "child nodes Clock_HourHand / Clock_MinuteHand pivot at the centre about Z (rest: 10:10)",
+    "DoorLeaf": "origin on the hinge (\u2212X edge); rotate about Y to open",
+    "kidSeat": "Sit_* clips: kid origin on the Chair origin; Workstation at (0, 0, +0.55)",
+    "Stand_Up": "in place: ends standing on the chair origin \u2014 slide the kid \u00b1X into the aisle while it plays",
+    "extras": "optional decor nodes in school-kit.glb: Backpack, Trashcan, Plant_Desk, Book, Book_Open, Water_Bottle, Corkboard (floor-origin, front +Z; Corkboard origin at the wall-surface centre)"
+  },
+  "env": {
+    "file": "env.hdr",
+    "bytes": 1594619,
+    "sha256": "d4d0d267d4c943337d5ad86b19b3b07dfd0483c1c975c2e88a5fcda4758a4ddc",
+    "source": "Poly Haven 'Empty Play Room' 1k (CC0)",
+    "loader": "RGBELoader"
+  }
+}
