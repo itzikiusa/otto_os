@@ -91,10 +91,10 @@ async function enterOurRoom(page: Page): Promise<void> {
   if (d?.view.kind !== 'corridor' && d?.view.roomId === wsId) return;
   if (d?.view.kind !== 'corridor') {
     await box(page).getByRole('button', { name: 'Corridor', exact: true }).click();
-    await expect.poll(() => debug(page).then((x) => x?.view.kind)).toBe('corridor');
+    await expect.poll(() => debug(page).then((x) => x?.view.kind), { timeout: 45_000 }).toBe('corridor');
   }
   await clickOn(page, { kind: 'door', id: wsId }, 60);
-  await expect.poll(() => debug(page).then((x) => `${x?.view.kind}:${x?.view.roomId}`), { timeout: 15_000 }).toBe(`room:${wsId}`);
+  await expect.poll(() => debug(page).then((x) => `${x?.view.kind}:${x?.view.roomId}`), { timeout: 45_000 }).toBe(`room:${wsId}`);
 }
 
 test.beforeAll(async () => {
@@ -185,7 +185,7 @@ test('click a kid → its card; look at its screen; open the session', async ({ 
   await expect(card(page)).toContainText('Printer Kid');
   await expectFullyInViewport(page, card(page), 'school kid card');
   await card(page).getByRole('button', { name: 'Look at screen' }).click();
-  await expect.poll(() => debug(page).then((d) => `${d?.view.kind}:${d?.view.kidId}`), { timeout: 10_000 }).toBe(`screen:${ids.printer}`);
+  await expect.poll(() => debug(page).then((d) => `${d?.view.kind}:${d?.view.kidId}`), { timeout: 30_000 }).toBe(`screen:${ids.printer}`);
   await box(page).locator('.stage').screenshot({ path: test.info().outputPath('school-screen.png') });
   await card(page).getByRole('button', { name: 'Open session' }).click();
   await expect(page).toHaveURL(new RegExp(`#/agents/${ids.printer}$`));
@@ -220,7 +220,7 @@ test('detention: the kid walks to the bench and the session is archived; release
       return r.ok() ? ((await r.json()) as { archived: boolean }[])[0]?.archived ?? false : false;
     }, { timeout: 15_000 })
     .toBe(true);
-  await expect.poll(async () => (await debug(page))?.kids.find((k) => k.id === ids.bench)?.mode, { timeout: 30_000 }).toBe('bench');
+  await expect.poll(async () => (await debug(page))?.kids.find((k) => k.id === ids.bench)?.mode, { timeout: 90_000 }).toBe('bench');
   // Release from the bench.
   await clickOn(page, { kind: 'kid', id: ids.bench }, 30);
   await card(page).getByRole('button', { name: 'Release from detention' }).click();
@@ -237,10 +237,10 @@ test('keyboard: Escape walks back out to the corridor; Enter walks through the d
   await enterOurRoom(page);
   await box(page).locator('.stage').focus();
   await page.keyboard.press('Escape');
-  await expect.poll(() => debug(page).then((d) => d?.view.kind), { timeout: 10_000 }).toBe('corridor');
+  await expect.poll(() => debug(page).then((d) => d?.view.kind), { timeout: 45_000 }).toBe('corridor');
   // The corridor camera stands at our door facing it after walking out.
   await page.keyboard.press('Enter');
-  await expect.poll(() => debug(page).then((d) => `${d?.view.kind}:${d?.view.roomId}`), { timeout: 10_000 }).toBe(`room:${wsId}`);
+  await expect.poll(() => debug(page).then((d) => `${d?.view.kind}:${d?.view.roomId}`), { timeout: 45_000 }).toBe(`room:${wsId}`);
 });
 
 test('dark theme renders the school too', async ({ page }) => {

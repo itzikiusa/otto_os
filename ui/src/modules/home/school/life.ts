@@ -347,7 +347,7 @@ export class Life {
   /** Advance the world. */
   step(dtMs: number): void {
     if (!this.room) return;
-    const dt = Math.min(250, Math.max(0, dtMs));
+    const dt = Math.min(1000, Math.max(0, dtMs));
     this.clock += dt;
     let up = 0;
     let idle = 0;

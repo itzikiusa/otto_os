@@ -178,6 +178,19 @@ function build(
   renderer.toneMappingExposure = 1.05;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = T.PCFShadowMap;
+  // A software rasteriser (SwiftShader / llvmpipe — CI, VMs, no GPU) can't
+  // afford soft shadows at 2× pixels: drop both so the room stays live.
+  try {
+    const gl = renderer.getContext();
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    if (/swiftshader|llvmpipe|softpipe|software/i.test(name)) {
+      renderer.shadowMap.enabled = false;
+      renderer.setPixelRatio(1);
+    }
+  } catch {
+    /* keep the defaults */
+  }
   const canvas = renderer.domElement;
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', opts.label);
@@ -990,25 +1003,33 @@ function build(
   let raf = 0;
   let last = performance.now();
   let acc = 0;
+  /** Uncapped time since the last drawn frame (camera flights run on it). */
+  let accRaw = 0;
   const frameFns: (() => void)[] = [];
   const lostFns: (() => void)[] = [];
 
   function frame(now: number): void {
     raf = 0;
     if (!active) return;
-    const dt = Math.min(100, now - last);
+    const raw = Math.max(0, now - last);
+    const dt = Math.min(1000, raw);
     last = now;
     acc += dt;
+    accRaw += raw;
     if (acc < FPS_MS) {
       raf = requestAnimationFrame(frame);
       return;
     }
+    // Life steps are capped at 1 s (a long stall never teleports anyone, a
+    // slow GPU still walks in real time); camera flights use real time.
     const step = acc;
+    const elapsed = accRaw;
     acc = 0;
+    accRaw = 0;
     // Camera.
     if (cam.tween) {
       const tw = cam.tween;
-      tw.t += step;
+      tw.t += elapsed;
       const k = ease(Math.min(1, tw.t / tw.ms));
       cam.pos.lerpVectors(tw.from[0], tw.to[0], k);
       cam.target.lerpVectors(tw.from[1], tw.to[1], k);
