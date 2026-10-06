@@ -5651,6 +5651,9 @@ mod tests {
         }
         assert_eq!(std::fs::read(dir.join("blob")).unwrap(), b"ours\0bytes");
 
+        // git leaves the modified side in the tree; the conflict this guards
+        // is one whose working file is gone (removed by hand / a tool).
+        let _ = std::fs::remove_file(dir.join("gone.txt"));
         let gone = git.conflict_file("gone.txt").await.unwrap();
         assert!(!gone.worktree_present && gone.segments.is_empty());
         let err = git.write_resolution("gone.txt", "").await.unwrap_err();
