@@ -307,11 +307,7 @@ mod tests {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         "hello world".hash(&mut h);
         let siphash = format!("{:016x}", h.finish());
-        for stored in [
-            siphash.as_str(),
-            "b94d27b9934d3e08",
-            "s1:b94d27b9934d3e08",
-        ] {
+        for stored in [siphash.as_str(), "b94d27b9934d3e08", "s1:b94d27b9934d3e08"] {
             assert!(report_hash_matches(stored, " hello\n world"), "{stored}");
             assert!(!report_hash_matches(stored, "hello worlds"), "{stored}");
         }

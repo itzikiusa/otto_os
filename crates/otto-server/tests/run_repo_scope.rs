@@ -268,7 +268,10 @@ async fn webhook_body_cannot_set_reserved_run_input_keys() {
         "pr",
         "pr_branch",
     ] {
-        assert!(!input.contains_key(k), "webhook body set reserved {k}: {input:?}");
+        assert!(
+            !input.contains_key(k),
+            "webhook body set reserved {k}: {input:?}"
+        );
     }
     server.abort();
 }
