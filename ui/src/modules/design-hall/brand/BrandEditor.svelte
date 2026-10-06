@@ -53,6 +53,7 @@
   import { copyWithToast } from './edit';
   import { diffTokens, normalizeBrandDoc, parseBrandDoc, rulesForKit, serializeBrandDoc, validateBrandDoc } from './tokens';
   import { guardUnsaved } from '../../../lib/leaveGuard';
+  import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
     id: string;
@@ -77,11 +78,22 @@
   let newerHead = $state<string | null>(null);
   let saving = $state(false);
 
+  /** Only the newest load (for the current kit) may assign (S18-09). */
+  let loadSeq = 0;
+
   async function load(): Promise<void> {
+    const my = ++loadSeq;
+    const target = id;
+    const current = () => my === loadSeq && target === id;
+    // Edits typed WHILE this load is in flight (a live event or a resync
+    // triggered it) win: the fetched head becomes "a newer version" instead.
+    const sameKit = artifact?.id === target && phase === 'ready';
+    const typedAt = sameKit ? serializeBrandDoc(doc) : null;
     if (phase !== 'ready') phase = 'loading';
     loadError = null;
     try {
-      const d = await api.getArtifact(id, { content: true });
+      const d = await api.getArtifact(target, { content: true });
+      if (!current()) return;
       artifact = d.artifact;
       head = d.head;
       approved = d.approved;
@@ -90,7 +102,13 @@
         return;
       }
       let text = d.content;
-      if (text == null || d.content_truncated) text = (await api.fetchContent(id, { asText: true })).text ?? '{}';
+      if (text == null || d.content_truncated) text = (await api.fetchContent(target, { asText: true })).text ?? '{}';
+      if (!current()) return;
+      if (typedAt !== null && serializeBrandDoc(doc) !== typedAt) {
+        newerHead = d.content_version_id ?? d.head?.id ?? null;
+        phase = 'ready';
+        return;
+      }
       const parsed = parseBrandDoc(text, d.artifact.title) ?? normalizeBrandDoc({}, d.artifact.title);
       doc = parsed;
       baseText = serializeBrandDoc(parsed);
@@ -100,6 +118,7 @@
       void loadUsage();
       void loadRules(d.artifact.workspace_id);
     } catch (e) {
+      if (!current()) return;
       if (e instanceof ApiError && e.status === 404) phase = 'gone';
       else {
         loadError = errText(e);
@@ -447,7 +466,7 @@
 {:else if phase === 'error'}
   <PageHeader title="Brand Kit" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
   <PageBody>
-    <p class="err" role="alert"><Icon name="warning" size={14} /> Couldn’t load the brand kit. <span class="dim">{loadError}</span> <button class="btn small" onclick={() => void load()}>Retry</button></p>
+    <LoadState variant="compact" what="the brand kit" error={loadError || 'No details were reported.'} empty onretry={() => void load()} />
   </PageBody>
 {:else if phase === 'gone'}
   <PageHeader title="Brand Kit" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
@@ -711,19 +730,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: var(--fs-s);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-  }
-  .dim {
-    color: var(--text-dim);
   }
   @media (max-width: 1024px) {
     .brand-grid {

@@ -374,12 +374,16 @@
       if (ev.data.type === 'otto-element' && takeover) {
         // Only the take-over frame's own picker may open the comment popover.
         if (!frame || ev.source !== frame.contentWindow) return;
-        const { desc, x, y, url } = ev.data as {
-          desc: string;
-          x: number;
-          y: number;
-          url: string;
-        };
+        // The framed page is untrusted and can post these at will: never let
+        // one wipe a comment the user is writing, and never take its `url`
+        // (it becomes the "while reviewing {url}" line sent to the agent) —
+        // the tab's own loaded URL is the truth (S18-19).
+        if (popover.open && popoverComment.trim()) return;
+        const raw = ev.data as { desc?: unknown; x?: unknown; y?: unknown };
+        const desc = String(raw.desc ?? '').slice(0, 2000);
+        const x = Number(raw.x) || 0;
+        const y = Number(raw.y) || 0;
+        const url = current;
 
         // x/y are the click's clientX/Y inside the iframe; the popover is
         // positioned in .browser, where the frame starts below the tab strip
@@ -433,6 +437,10 @@
   // ── Global Esc handler ────────────────────────────────────────────────────
   $effect(() => {
     function onKeydown(e: KeyboardEvent): void {
+      // Only an Esc meant for THIS panel: not when it's off screen, not one a
+      // Modal/menu/terminal already handled, and not with focus elsewhere —
+      // it used to close the comment box (losing the draft) from anywhere.
+      if (!active || e.defaultPrevented || !browserEl?.contains(document.activeElement)) return;
       if (e.key === 'Escape') {
         if (popover.open) closePopover();
         else if (takeover) releaseTakeover();

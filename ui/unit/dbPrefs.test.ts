@@ -58,3 +58,33 @@ test('Settings → Appearance reads the prefs module, never the database store',
   const src = readFileSync(new URL('../src/modules/settings/Appearance.svelte', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /stores\/database\.svelte/);
 });
+
+test('a change made in another window is adopted here and fires keep-alive listeners once (S13-11)', () => {
+  const store = new Map<string, string>();
+  const handlers: ((e: { key: string | null }) => void)[] = [];
+  const context: any = {
+    exports: {},
+    localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) },
+    window: { addEventListener: (t: string, fn: (e: { key: string | null }) => void) => { if (t === 'storage') handlers.push(fn); } },
+    $state: Object.assign((v: unknown) => v, { raw: (v: unknown) => v }),
+  };
+  const src = readFileSync(new URL('../src/lib/stores/dbPrefs.svelte.ts', import.meta.url), 'utf8');
+  runInNewContext(ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  const { dbPrefs } = context.exports;
+  const seen: boolean[] = [];
+  dbPrefs.onKeepAliveChange((on: boolean) => seen.push(on));
+  assert.equal(handlers.length, 1);
+  // The pop-out turned keep-alive off.
+  store.set('otto_db_keep_alive', '0');
+  handlers[0]({ key: 'otto_db_keep_alive' });
+  assert.equal(dbPrefs.keepAlive, false);
+  assert.deepEqual(seen, [false]);
+  // A repeat (no real change) does not re-fire.
+  handlers[0]({ key: 'otto_db_keep_alive' });
+  assert.deepEqual(seen, [false]);
+  store.set('otto_db_warm_on_click', '1');
+  handlers[0]({ key: 'otto_db_warm_on_click' });
+  assert.equal(dbPrefs.warmRestored, 'on-click');
+  handlers[0]({ key: 'unrelated' });
+  assert.deepEqual(seen, [false]);
+});

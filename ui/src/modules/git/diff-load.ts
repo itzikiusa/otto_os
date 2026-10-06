@@ -40,8 +40,16 @@ export function fileFor(resp: DiffResp, path: string): FileDiff | null {
   };
 }
 
-function pick(resp: DiffResp, file: FileDiff): FileDiff | null {
-  return fileFor(resp, file.path) ?? resp.files[0] ?? null;
+/** The fetched entry for `file`. A lone entry is accepted only when it is the
+ *  same file under its other name (a rename reported from the other side) —
+ *  any other file's hunks must never render under this file's header. */
+export function pick(resp: DiffResp, file: FileDiff): FileDiff | null {
+  const hit = fileFor(resp, file.path);
+  if (hit) return hit;
+  const only = resp.files.length === 1 ? resp.files[0] : null;
+  if (!only) return null;
+  const names = new Set([file.path, file.old_path].filter((p): p is string => !!p));
+  return names.has(only.path) || (only.old_path !== null && names.has(only.old_path)) ? only : null;
 }
 
 /** Loader for a local repo diff target (`worktree` | `staged` | `working` |

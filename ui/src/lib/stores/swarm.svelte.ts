@@ -30,6 +30,7 @@ import type {
   UpdateTriggerReq,
 } from '../../modules/swarm/types';
 import { announceModule } from '../lazyModule';
+import { latestOnly } from '../latest';
 
 type Lifecycle = 'start' | 'pause' | 'abort' | 'resume';
 
@@ -268,7 +269,12 @@ class SwarmStore {
     }
   }
 
+  /** Open A then B: A's detail landing last used to overwrite B's (and the
+   *  page's URL effect then rewrote the hash back to A). */
+  private openSeq = latestOnly();
+
   async openSwarm(sid: string): Promise<void> {
+    const t = this.openSeq.begin();
     this.loading = true;
     if (this.detail?.id !== sid) {
       // Never let the next swarm render tasks/runs cached for the previous one
@@ -286,8 +292,11 @@ class SwarmStore {
     this.detailError = null;
     try {
       try {
-        this.detail = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
+        const d = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
+        if (!t.current) return;
+        this.detail = d;
       } catch (e) {
+        if (!t.current) return;
         this.detailError = loadErrorText(e);
         throw e;
       }
@@ -299,6 +308,7 @@ class SwarmStore {
         this.loadBoard(),
         this.maybeLoadGraph(sid),
       ]);
+      if (!t.current || !this.detail) return;
       // Projects[0] can be an empty shell (e.g. a Discovery project) while all
       // the work lives in a sibling — a blind first-project pin then renders an
       // EMPTY board even though agents are visibly running. Once tasks are
@@ -311,7 +321,7 @@ class SwarmStore {
         if (busiest && busiest.n > 0) this.selectedProjectId = busiest.id;
       }
     } finally {
-      this.loading = false;
+      if (t.current) this.loading = false;
     }
   }
 

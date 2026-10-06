@@ -1,7 +1,7 @@
 // Events WS client (/ws/events) with auto-reconnect + exponential backoff.
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
-import { getToken, resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
+import { api, getToken, resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
 import { inLane } from './api/lane';
 import { invalidateMissionSummary } from './api/missionControl';
 import { auth } from './stores/auth.svelte';
@@ -400,6 +400,27 @@ export type EventsState = 'connecting' | 'connected' | 'offline';
  *  a new event-fed view never has to be added to `resyncAfterReconnect`. */
 export const liveEvents = appLive;
 
+/** Event types whose handler failure was already reported this page life. */
+const reportedHandlerErrors = new Set<string>();
+
+/** A WS event handler threw: console + one `/client/errors` report per type. */
+function reportHandlerError(type: unknown, e: unknown): void {
+  const kind = typeof type === 'string' ? type : 'unknown';
+  console.error(`[otto] /ws/events handler for "${kind}" failed`, e);
+  if (reportedHandlerErrors.has(kind)) return;
+  reportedHandlerErrors.add(kind);
+  const err = e as { message?: unknown; stack?: unknown } | null;
+  void api.bg
+    .post('/client/errors', {
+      kind: 'ws_event_handler',
+      message: `${kind}: ${String(err?.message ?? e)}`.slice(0, 2000),
+      stack: String(err?.stack ?? '').slice(0, 4000),
+      route: typeof location !== 'undefined' ? location.hash : '',
+      action: 'none',
+    })
+    .catch(() => {});
+}
+
 class EventsClient {
   state: EventsState = $state('offline');
 
@@ -426,6 +447,11 @@ class EventsClient {
   // happened to drop — reconnect as soon as the stored token changes.
   private socketToken: string | null = null;
   private authWired = false;
+  // Set when the token changed (S13-02): the next socket open resets the
+  // identity-scoped caches and resyncs every store, instead of the plain
+  // first-connect path that left the previous identity's notices, needs-you
+  // items, activity and proof packs on screen.
+  private identityPending = false;
 
   /** Send a client frame on the open socket (dropped while disconnected —
    *  the next `hello` carries the current state anyway). */
@@ -488,6 +514,7 @@ class EventsClient {
   private onAuthChanged(): void {
     if (this.stopped || getToken() === this.socketToken) return;
     this.everConnected = false;
+    this.identityPending = true;
     // Between sockets (backoff): the next connect already sends the new token.
     if (this.sock === null) return;
     // reconnectNow() is a no-op while connecting — that handshake carries the
@@ -512,10 +539,22 @@ class EventsClient {
     if (this.presenceTimer) clearTimeout(this.presenceTimer);
     this.presenceTimer = null;
     uiSocketClosed();
+    // Detach first (as reconnectNow does, S13-08): a quick stop→start would
+    // otherwise let this socket's late onclose schedule a SECOND connection,
+    // and every event / toast / notice would then be dispatched twice.
+    this.detach(this.sock);
     this.sock?.close();
     this.sock = null;
     this.state = 'offline';
     liveEvents.setConnected(false);
+  }
+
+  private detach(sock: WebSocket | null): void {
+    if (!sock) return;
+    sock.onopen = null;
+    sock.onmessage = null;
+    sock.onclose = null;
+    sock.onerror = null;
   }
 
   /** Force an immediate reconnect: cancel any pending backoff timer, drop the
@@ -533,10 +572,7 @@ class EventsClient {
     // Detach handlers first so the old socket's onclose can't schedule a
     // competing reconnect after we've already started a fresh one.
     if (this.sock) {
-      this.sock.onopen = null;
-      this.sock.onmessage = null;
-      this.sock.onclose = null;
-      this.sock.onerror = null;
+      this.detach(this.sock);
       this.sock.close();
     }
     this.sock = null;
@@ -554,6 +590,19 @@ class EventsClient {
     // here goes to the bg lane — capped, and on the alias host — instead of
     // a dozen-request burst per document on the six interactive sockets.
     inLane('bg', () => this.resyncStores());
+  }
+
+  /** First open after an identity change: drop what the previous identity
+   *  read, then refetch everything like a reconnect. */
+  private resyncForIdentity(): void {
+    notifications.resetForIdentity();
+    activity.reset();
+    if (ws.currentId) {
+      void activity.loadSummary(ws.currentId);
+      if (ws.activeSessionId) void activity.load(ws.currentId, ws.activeSessionId, true);
+    }
+    proof.identityChanged();
+    this.resyncAfterReconnect();
   }
 
   private resyncStores(): void {
@@ -644,7 +693,10 @@ class EventsClient {
       // The daemon answers again: probe the alias host now (it was suspended
       // on close). A RESTARTED daemon is re-read from /meta on `hello_ack`.
       if (reconnected) resumeAltLoopback();
-      if (reconnected) this.resyncAfterReconnect();
+      const identityChanged = this.identityPending;
+      this.identityPending = false;
+      if (identityChanged) this.resyncForIdentity();
+      else if (reconnected) this.resyncAfterReconnect();
       // The Assistant's needs-you badge lives in the sidebar, so it loads on
       // first connect too (quietly: an older daemon without the route → no badge)
       // — unless a page's own first load (Home's Today) already has it.
@@ -652,8 +704,13 @@ class EventsClient {
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
+      let data: unknown;
       try {
-        const data: unknown = JSON.parse(ev.data);
+        data = JSON.parse(ev.data);
+      } catch {
+        return; // malformed frame — ignore
+      }
+      try {
         // Per-connection `resync` (ws.md): the daemon's bounded bus dropped
         // events for this socket — refetch like after a reconnect.
         if ((data as Partial<EventsResyncFrame> | null)?.type === 'resync') {
@@ -895,8 +952,12 @@ class EventsClient {
           if (parsed.type === 'session_meta_updated' || parsed.type === 'session_removed') uiControl.applyEvent(parsed);
           ws.applyEvent(parsed);
         }
-      } catch {
-        /* malformed frame — ignore */
+      } catch (e) {
+        // A store handler threw (S13-06): this used to vanish with the
+        // "malformed frame" catch, hiding contract drift (a field the TS
+        // union calls required, missing on the wire). Log it, and report it
+        // once per event type to the daemon log.
+        reportHandlerError((data as { type?: unknown } | null)?.type, e);
       }
     };
     this.sock.onclose = (ev?: CloseEvent) => {

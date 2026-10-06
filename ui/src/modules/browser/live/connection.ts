@@ -83,14 +83,18 @@ export function reduce(s: ConnState, ev: ConnEvent, jitter = 0.5): ConnState {
       return { ...s, status: 'connecting', retryInMs: 0, hasFrame: false };
     case 'open':
       if (s.status !== 'connecting') return s;
-      return { ...s, status: 'live', attempt: 0, retryInMs: 0, reason: '', awaitingSince: 0 };
+      // `attempt` is NOT reset here: a server that accepts the socket and
+      // closes it at once would otherwise retry every ~500 ms forever. The
+      // backoff resets on the first frame — proof the session really works.
+      return { ...s, status: 'live', retryInMs: 0, reason: '', awaitingSince: 0 };
     case 'frame':
       // Steady-state frames change nothing: return `s` itself so a 30 fps
       // stream doesn't re-run every effect that reads the connection (perf
       // SB-17). Only the first frame and one answering an input are news.
       if (s.status !== 'live') return s;
-      if (s.hasFrame && !s.awaitingSince) return s;
-      return { ...s, awaitingSince: 0, hasFrame: true };
+      // The first frame after a (re)connect also resets the backoff.
+      if (s.hasFrame && !s.awaitingSince && s.attempt === 0) return s;
+      return { ...s, awaitingSince: 0, hasFrame: true, attempt: 0 };
     case 'input':
       if (s.status !== 'live' || s.awaitingSince) return s;
       return { ...s, awaitingSince: ev.at };

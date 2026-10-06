@@ -1,7 +1,7 @@
 <script lang="ts">
   import { rowMenu } from '../../lib/rowMenu';
   // Personal Agents module. Routes: `#/personal-agents` (agent cards),
-  // `#/personal-agents/rooms` (agent rooms), `#/personal-agents/<agentId>[/<tab>]`
+  // `#/personal-agents/rooms` (agent channels), `#/personal-agents/<agentId>[/<tab>]`
   // (one agent's page). The first list GET seeds four disabled example agents
   // server-side — they render as normal cards, marked "Example".
   import RelTime from '../../lib/components/RelTime.svelte';
@@ -17,6 +17,7 @@
   import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -77,7 +78,7 @@
   $effect(() =>
     registry.register('personal-agents', [
       { id: 'personal-agents.new', title: 'New personal agent…', group: 'Personal Agents', keywords: 'create agent assistant schedule', run: () => { if (sub) router.go('personal-agents'); creating = true; } },
-      { id: 'personal-agents.rooms', title: 'Open agent rooms', group: 'Personal Agents', keywords: 'rooms channel agents talk', run: () => router.go('personal-agents/rooms') },
+      { id: 'personal-agents.rooms', title: 'Open agent channels', group: 'Personal Agents', keywords: 'channel agent rooms talk', run: () => router.go('personal-agents/rooms') },
       ...agents.flatMap((a) => [
         { id: `personal-agents.open.${a.id}`, title: `Open ${a.name}`, group: 'Personal Agents', detail: 'Personal agent', keywords: 'agent page settings runs', run: () => router.go(`personal-agents/${a.id}`) },
         { id: `personal-agents.chat.${a.id}`, title: `Chat with ${a.name}`, group: 'Personal Agents', keywords: 'agent message talk', run: () => router.go(`personal-agents/${a.id}/chat`) },
@@ -153,12 +154,13 @@
     {#snippet tabs()}
       <div class="segmented" role="tablist" aria-label="Personal agents view" tabindex="-1" onkeydown={onTabKey}>
         <button role="tab" aria-selected={sub !== 'rooms'} tabindex={sub !== 'rooms' ? 0 : -1} class:active={sub !== 'rooms'} onclick={() => router.go('personal-agents')}>Agents</button>
-        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Agent rooms</button>
+        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Agent channels</button>
       </div>
     {/snippet}
     {#snippet actions()}
+      <AutomateGuideButton current="personal-agents" />
       <!-- One primary per view: Rooms has its own create (the list's name
-           field / the empty state's "Create a room"). -->
+           field / the empty state's "Create a channel"). -->
       {#if ws.currentId && sub !== 'rooms' && agents.length > 0}
         <button class="btn small primary" data-icon="plus" onclick={() => (creating = true)}><Icon name="plus" size={12} /> New agent</button>
       {/if}
@@ -168,7 +170,7 @@
   <div class="pa">
     {#if !ws.currentId}
       <EmptyState variant="page" icon="user" title="Add a workspace to get started"
-        body="Personal agents and rooms belong to a workspace. Add your project folder to create them."
+        body="Personal agents and their channels belong to a workspace. Add your project folder to create them."
         actionLabel="Add workspace" actionIcon="plus" onaction={() => (ui.newWorkspaceOpen = true)} />
     {:else if sub === 'rooms'}
       <RoomsView />
@@ -186,7 +188,7 @@
           <EmptyState
             icon="user"
             title="No personal agents yet"
-            body="A personal agent is a named persona on a pinned provider and model, with its own schedules, memory and delivery. Agents talk to each other only in rooms you can read. Start blank or from a template."
+            body="A personal agent is a named persona on a pinned provider and model, with its own schedules, memory and delivery. Agents talk to each other only in channels you can read. Start blank or from a template."
             actionLabel="New agent"
             actionIcon="plus"
             variant="page"

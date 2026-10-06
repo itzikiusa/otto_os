@@ -481,9 +481,14 @@
       } catch {
         /* a corrupt frame: skip it, the next one repaints */
       }
+      if (mine !== gen) break; // never ack an old connection's seq on the new one
       send({ type: 'ack', seq: f.header.seq });
     }
     decoding = false;
+    // A reconnect during the decode broke the loop above: the NEW connection's
+    // frame may already be waiting. The daemon paces on acks, so leaving it
+    // undrawn and unacked froze the screencast (S18-17).
+    if (pendingFrame) void pump();
   }
 
   function draw(): void {

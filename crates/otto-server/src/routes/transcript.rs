@@ -1055,6 +1055,17 @@ pub(crate) fn confine_history_path(
     )))
 }
 
+/// History's "Resume in Otto" gate for an Otto session row: the CLI left
+/// resumable state (a provider session id). Deliberately NOT gated on status —
+/// `ensure_live` resumes any agent with a provider id (History's transcripts
+/// are claude/codex only, both resume-capable), so an ENDED conversation is
+/// resumable; the old `status != Exited` check greyed it out with a false
+/// "no resumable state" reason. Reconnectable rows always are. Archived rows
+/// stay `resumable` and carry `archived: true` (the UI offers Unarchive).
+pub(crate) fn history_resumable(s: &Session) -> bool {
+    s.provider_session_id.is_some() || s.status == SessionStatus::Reconnectable
+}
+
 /// `GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit=` —
 /// the workspace's sessions (all statuses incl. archived; own sessions only for
 /// non-admins) merged with indexed transcripts no session claims (`on_disk`),
@@ -1176,8 +1187,8 @@ pub async fn history(
             turns: row.and_then(|r| r.turns).map(|t| t.max(0) as u64),
             status: s.status.as_str().to_string(),
             transcript_path: path_str,
-            resumable: s.provider_session_id.is_some() && s.status != SessionStatus::Exited
-                || s.status == SessionStatus::Reconnectable,
+            resumable: history_resumable(s),
+            archived: s.archived,
         });
     }
     for r in &rows {
@@ -1211,6 +1222,7 @@ pub async fn history(
             status: "on_disk".into(),
             transcript_path: r.path.clone(),
             resumable: r.provider_session_id.is_some(),
+            archived: false,
         });
     }
 
@@ -1549,5 +1561,38 @@ mod tests {
         assert_eq!(effective_provider(&s), "codex");
         s.provider = "claude".into();
         assert_eq!(effective_provider(&s), "claude");
+    }
+
+    /// S20-03: an ENDED (or archived) conversation with a provider id is
+    /// resumable — History used to grey it out ("no resumable state"), though
+    /// `ensure_live` resumes it fine.
+    #[test]
+    fn history_resumable_ignores_status_and_archive() {
+        let mut s = Session {
+            id: "s".into(),
+            workspace_id: "ws".into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: SessionStatus::Exited,
+            cwd: "/x".into(),
+            provider_session_id: Some("psid".into()),
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: true,
+            meta: serde_json::json!({}),
+        };
+        assert!(
+            history_resumable(&s),
+            "exited + archived with a provider id"
+        );
+        s.archived = false;
+        assert!(history_resumable(&s), "exited with a provider id");
+        s.provider_session_id = None;
+        assert!(!history_resumable(&s), "no provider id → nothing to resume");
+        s.status = SessionStatus::Reconnectable;
+        assert!(history_resumable(&s), "reconnectable always resumes");
     }
 }

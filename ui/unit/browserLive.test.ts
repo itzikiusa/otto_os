@@ -296,7 +296,21 @@ test('reducer walks connect → live → reconnecting → connecting → live', 
   assert.equal(s.retryInMs, 1000);
   s = reduce(reduce(s, { type: 'retry' }), { type: 'open' });
   assert.equal(s.status, 'live');
-  assert.equal(s.attempt, 0, 'a successful open resets the backoff');
+  assert.equal(s.attempt, 2, 'an open alone does not reset the backoff');
+  s = reduce(s, { type: 'frame', at: 2000 });
+  assert.equal(s.attempt, 0, 'the first frame after a reconnect resets the backoff');
+  const steady = reduce(s, { type: 'frame', at: 2033 });
+  assert.equal(steady, s, 'steady-state frames return the same state');
+});
+
+test('S18-18: accept-then-close servers exhaust the retries instead of looping forever', () => {
+  let s: ConnState = reduce(INITIAL, { type: 'connect' });
+  for (let i = 0; i < 100 && s.status !== 'ended'; i++) {
+    s = reduce(s, { type: 'open' });
+    s = reduce(s, { type: 'close', code: 1006 }, 0);
+    if (s.status === 'reconnecting') s = reduce(s, { type: 'retry' });
+  }
+  assert.equal(s.status, 'ended');
 });
 
 test('terminal close codes and closed frames end the session without retry', () => {

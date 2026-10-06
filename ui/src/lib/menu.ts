@@ -10,6 +10,7 @@ import { sidePane } from './stores/sidePane.svelte';
 import { nativePane } from './nativePane';
 import { isEmbedded } from './desktop';
 import { dismissTopDialog, modalKeyVerdict } from './keys';
+import { sessionVerbsApply } from './stores/sessionScope';
 
 export function handleMenu(id: string): void {
   // A dialog is up in this window: Close Tab closes it, and New Session /
@@ -71,7 +72,9 @@ export function handleMenu(id: string): void {
       // "End Session" — the same outcome as closing its tab, so it honours
       // Settings → Appearance "Closing a session tab" (ask / archive /
       // delete). It used to hard-DELETE the session with no confirm.
-      if (ws.activeSessionId) void ws.requestCloseTab(ws.activeSessionId);
+      // Only on the Agents page: elsewhere the "active" session is hidden
+      // behind Git / Vault / Settings and ending it would be a surprise.
+      if (sessionVerbsApply(router.module) && ws.activeSessionId) void ws.requestCloseTab(ws.activeSessionId);
       break;
     case 'walkthroughs':
       router.go('walkthroughs');

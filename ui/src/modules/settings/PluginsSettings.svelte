@@ -74,6 +74,16 @@
   }
 
   async function toggle(p: PluginRecord): Promise<void> {
+    // Enabling starts the plugin's helper process (its code runs as you) and
+    // puts its UI in every user's sidebar — ask first. Disabling needs no ask.
+    if (
+      !p.enabled &&
+      !(await confirmer.ask(
+        `Enable “${p.name}”? Its helper process starts and runs with your permissions, and its page appears in every user’s sidebar. Only enable plugins you trust.`,
+        { title: 'Enable plugin?', confirmLabel: 'Enable plugin', danger: true },
+      ))
+    )
+      return;
     busy = p.slug;
     try {
       await api.post(`/plugin-admin/${p.slug}/${p.enabled ? 'disable' : 'enable'}`);
@@ -90,7 +100,7 @@
     if (
       !(await confirmer.ask(
         `Remove the plugin “${p.name}”? Its helper process stops and it leaves every user’s sidebar. Its files under ~/otto-plugins are kept, so you can install it again.`,
-        { title: 'Remove plugin', confirmLabel: 'Remove' },
+        { title: 'Remove plugin', confirmLabel: 'Remove', danger: true },
       ))
     )
       return;

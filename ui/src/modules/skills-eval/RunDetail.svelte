@@ -33,6 +33,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Scorecard from './Scorecard.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { latestOnly } from '../../lib/latest';
 
   // Run / iteration / validator status → the shared run vocabulary
   // (lib/status.ts). The eval's in-flight phases read as "running" (info,
@@ -79,12 +80,23 @@
   let promoteName = $state('');
   let promoting = $state(false);
 
+  // One generation for load + poll: opening run B while A's request is in
+  // flight used to render A, push A into the parent list via `onupdate`, and
+  // — since the in-flight poll re-armed its timer after the cleanup ran — keep
+  // polling after unmount, for hours on a long eval.
+  const seq = latestOnly();
+  let disposed = false;
   $effect(() => {
     const id = evalId;
     void load(id);
     return () => {
+      seq.cancel();
       if (pollTimer !== null) clearTimeout(pollTimer);
+      pollTimer = null;
     };
+  });
+  $effect(() => () => {
+    disposed = true;
   });
 
   // Live refresh: a `skill_eval_updated` WS event for this run triggers an
@@ -105,20 +117,23 @@
     loadError = null;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollCount = 0;
+    const t = seq.begin();
     try {
       const r = await skillsEvalApi.get(id);
+      if (!t.current || disposed) return;
       run = r;
       lastPolled = '';
       onupdate?.(r);
       if (isActive(r)) schedulePoll();
     } catch (e) {
+      if (!t.current || disposed) return;
       const msg = loadErrorText(e);
       // Keep a loaded report on screen and just toast; with nothing to show,
       // put the error (and Retry) in the pane itself.
       if (run) toasts.error('Couldn’t refresh the evaluation', msg);
       else loadError = msg;
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 
@@ -130,6 +145,7 @@
   }
 
   function schedulePoll(delay = 2000): void {
+    if (disposed) return;
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = setTimeout(() => void poll(), delay);
   }
@@ -143,8 +159,13 @@
       return;
     }
     pollCount++;
+    // A poll never supersedes a load; a load (or unmount) supersedes the poll.
+    const gen = seq.gen;
+    const id = evalId;
+    const stale = () => seq.gen !== gen || disposed || id !== evalId;
     try {
-      const r = await skillsEvalApi.get(evalId);
+      const r = await skillsEvalApi.get(id);
+      if (stale()) return;
       const sig = JSON.stringify(r);
       if (sig !== lastPolled) {
         lastPolled = sig;
@@ -153,7 +174,7 @@
       }
       if (isActive(r)) schedulePoll(pollCount > 600 ? 5000 : 2000);
     } catch {
-      schedulePoll();
+      if (!stale()) schedulePoll();
     }
   }
 

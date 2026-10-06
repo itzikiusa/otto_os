@@ -1880,6 +1880,9 @@ export type OttoEvent =
        *  Deny" prompt (stores/uiControl.svelte.ts); the tool returns
        *  `pending_grant` and the agent retries once the user allows it. */
       type: 'ui_control_requested';
+      /** The session owner — the only user this event is delivered to. */
+      user_id: Id;
+      workspace_id: Id;
       session_id: Id;
       session_title: string;
       /** The paneKey of the module the command drives (`connections`, `shell`…). */
@@ -2019,7 +2022,8 @@ export type WorkKind =
   | 'review'
   | 'product_story'
   | 'pr'
-  | 'external_trigger';
+  | 'external_trigger'
+  | 'otto_run';
 export type WorkStatus =
   | 'pending'
   | 'running'
@@ -2816,7 +2820,7 @@ export interface UpdateGitAccountReq {
   api_base_url?: string;
   /** Non-empty rotates the Keychain secret; empty/absent keeps existing. */
   token?: string;
-  /** Set the user-entered token expiry (ISO); absent keeps current. */
+  /** User-entered token expiry (ISO): absent keeps current, `null` clears it. */
   token_expires_at?: string | null;
 }
 
@@ -3511,7 +3515,7 @@ export interface MergePrReq {
   delete_source_branch?: boolean;
   /** The `PrSummary.head_sha` the user reviewed. A PR whose head moved since
    *  is refused with 409 "PR changed — re-check" instead of merging. */
-  expected_head_sha?: string;
+  expected_head_sha?: string | null;
 }
 
 /** `POST /repos/{id}/branch/delete` body. */
@@ -4511,6 +4515,8 @@ export interface SkillFileContentResp {
 export interface WriteSkillFileReq {
   path: string;
   content: string;
+  /** "New file": 409 instead of overwriting an existing `path`. */
+  create_only?: boolean;
 }
 
 export interface CreateLibrarySkillReq {
@@ -6695,6 +6701,10 @@ export interface CreateShareResp {
   url: string;
   /** Metadata for the newly-minted share. */
   info: ShareInfo;
+  /** Whether another device can open `url`. False when the origin is loopback
+   *  or empty (no Public link domain and no network listener) — show the
+   *  "only works on this Mac" warning instead of the phone QR hint. */
+  reachable_remotely: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -6711,7 +6721,8 @@ export interface SetEmailSenderReq {
   app_password: string;
 }
 
-/** Response for `PUT` and `GET /api/v1/email-sender`. Never carries the app
+/** Response for `PUT` / `GET /api/v1/email-sender` and
+ *  `POST /api/v1/email-sender/verify` (re-check with the Keychain password). Never carries the app
  *  password. `gmail_address` is absent on GET when no sender is configured. */
 export interface EmailSenderResp {
   /** The configured Gmail address, or absent when no sender is set up. */
@@ -7685,6 +7696,12 @@ export interface ScheduledTaskRun {
 }
 
 /** A built-in template the create form can pre-fill from. */
+/** `POST /scheduled-tasks/preview` response (#137a): the next fires of an
+ *  unsaved schedule, RFC 3339 UTC — empty when it has none (a spent `once`). */
+export interface ScheduledTaskPreview {
+  next_fire_times: string[];
+}
+
 export interface ScheduledTaskPreset {
   id: string;
   name: string;
@@ -9613,7 +9630,12 @@ export interface HistoryEntry {
   turns: number | null;
   status: HistoryStatus;
   transcript_path: string;
+  /** The CLI left resumable state (a provider session id), whatever the
+   *  status — an ended conversation resumes too. Archived rows stay true;
+   *  resume refuses them (409) until unarchived. */
   resumable: boolean;
+  /** Archived Otto row (false for `on_disk`; absent from older daemons). */
+  archived?: boolean;
 }
 
 export interface HistoryQuery {
@@ -11715,6 +11737,9 @@ export interface WorkbenchUpdateReq {
   /** Opaque per-window id echoed in the WS event so a window can ignore its
    *  own writes. */
   client_id?: string;
+  /** Precondition for a `content` write: the `content_hash` the buffer was
+   *  based on. Mismatch → 409 (another window saved). Omit to overwrite. */
+  if_hash?: string;
 }
 
 export interface WorkbenchRevision {
@@ -11779,6 +11804,8 @@ export interface WorkbenchDocChangedEvent {
   doc_id: Id;
   action: 'created' | 'updated' | 'trashed' | 'restored' | 'deleted';
   rev: number;
+  /** Content hash after the change (a coalesced autosave keeps `rev`). */
+  content_hash: string;
   updated_at: string;
   client_id?: string | null;
 }

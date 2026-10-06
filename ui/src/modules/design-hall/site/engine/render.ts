@@ -571,7 +571,15 @@ export function sectionClasses(s: SiteSection, t: Theme): { classes: string[]; b
   for (const bp of s.responsive?.hide ?? []) c.push(`os-hide-${bp}`);
   if (s.responsive?.stack === 'media-first') c.push('os-stack-first');
   if (s.responsive?.mobile_align) c.push(`os-malign-${s.responsive.mobile_align}`);
-  return { classes: c, bgCss: bg.css };
+  // Every class is built from doc fields and lands in an attribute rendered
+  // with {@html}: keep only class-safe tokens here instead of trusting the
+  // server's enum validation alone (S18-23).
+  return { classes: c.map(classToken), bgCss: bg.css };
+}
+
+/** A class token: `[a-z0-9_-]` only (anything else becomes `-`). */
+export function classToken(c: string): string {
+  return String(c).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 }
 
 export function renderSection(s: SiteSection, ctx: RenderCtx): string {

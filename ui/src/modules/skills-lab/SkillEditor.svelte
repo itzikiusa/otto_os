@@ -145,10 +145,19 @@
       placeholder: 'references/notes.md',
     });
     if (!path) return;
+    // An existing path opens that file — "New file" must never empty it (the
+    // server also refuses with 409 via `create_only`, for a file the tree
+    // doesn't list yet).
+    const wanted = path.trim().replace(/^\.?\/+/, '');
+    if (files.some((f) => f.path === wanted)) {
+      toasts.info('That file already exists', 'Opened it instead.');
+      await open(wanted);
+      return;
+    }
     try {
-      const next = await skillLabApi.putFile(name, { path, content: '' });
+      const next = await skillLabApi.putFile(name, { path: wanted, content: '', create_only: true });
       onsaved(next, null);
-      await open(path);
+      await open(wanted);
     } catch (e) {
       toastError('Couldn’t add the file', e);
     }

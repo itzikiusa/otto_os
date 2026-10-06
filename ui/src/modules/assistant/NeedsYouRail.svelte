@@ -11,6 +11,7 @@
   import { formatCount } from '../../lib/metric-format';
   import { TASK_KIND, loadShare, providerName } from './model';
   import { whenLabel } from './format';
+  import NeedsYouLink from '../home/NeedsYouLink.svelte';
 
   interface Props {
     onopenthread: (id: string) => void;
@@ -33,7 +34,11 @@
 
 <aside class="rail" aria-label="Needs you, running and subscriptions" data-testid="assistant-rail">
   <section>
-    <h2 class="section-title">Needs you</h2>
+    <div class="rail-head">
+      <h2 class="section-title">Needs you</h2>
+      <!-- Assistant tasks only here; the canonical inbox joins every source — S20-07. -->
+      <NeedsYouLink />
+    </div>
     <LoadState
       what="what needs you"
       variant="compact"
@@ -128,7 +133,15 @@
     border-inline-start: 1px solid var(--border);
   }
   .section-title {
-    margin: 0 0 6px;
+    margin: 0;
+  }
+  .rail-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: space-between;
+    margin-block-end: 6px;
   }
   ul {
     list-style: none;

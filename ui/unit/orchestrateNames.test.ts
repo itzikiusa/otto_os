@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as commandParser from '../src/lib/commandParser.ts';
 import * as pluralMod from '../src/lib/plural.ts';
+import * as sessionBuckets from '../src/lib/stores/sessionBuckets.ts';
 import { loadSource } from './sourceHarness.ts';
 
 type Call = { path: string; body: any };
@@ -27,6 +28,7 @@ function engine() {
     './commandParser': commandParser,
     './providers': { allProviders: () => [] },
     './plural': pluralMod,
+    './stores/sessionBuckets': sessionBuckets,
   });
   return { mod, calls };
 }
@@ -111,4 +113,14 @@ test('close all / several / a working one / "stop <name>" ask first', async () =
   out = await mod.runEnglish('stop messi', ctx([sess('m', 'messi', 'messi')], archived));
   assert.equal(out.kind, 'confirm-close');
   assert.deepEqual(archived, [], 'nothing archived without the confirm');
+});
+
+test('a provider close never includes background workflow / review agents (S13-04)', async () => {
+  const { mod } = engine();
+  const step = { ...sess('wf', 'workflow step'), meta: { source: 'workflow' } };
+  const review = { ...sess('rv', 'review agent'), meta: { source: 'review' } };
+  const archived: string[] = [];
+  const out = await mod.runEnglish('close all claude sessions', ctx([sess('m', 'messi', 'messi'), step, review], archived));
+  assert.equal(out.kind, 'closed', 'one foreground match → no multi-close confirm');
+  same(archived, ['m']);
 });

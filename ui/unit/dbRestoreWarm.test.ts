@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 import * as resultBudgetMod from '../src/lib/stores/db-result-budget.ts';
+import * as filterChips from '../src/modules/database/filter-chips.ts';
+import * as sqlDialect from '../src/modules/database/sql-dialect.ts';
 
 type Call = { method: string; path: string; lane: 'int' | 'bg' };
 
@@ -79,6 +81,8 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
         unmaskQueryPlaceholders: (s: string) => s,
       },
       '../../modules/database/bson': { bsonScalar: (v: unknown) => v },
+      '../../modules/database/filter-chips': filterChips,
+      '../../modules/database/sql-dialect': sqlDialect,
       '../clipboard': { copyTextOrThrow: async () => {} },
       '../poll': poll,
       '../editor-history': {

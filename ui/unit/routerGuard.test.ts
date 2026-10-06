@@ -6,12 +6,31 @@ import assert from 'node:assert/strict';
 import { loadSource } from './sourceHarness.ts';
 import { captureRoomInvite, roomInvite, forgetRoom } from '../src/modules/rooms/room-access.ts';
 import { activeNavId } from '../src/lib/sidebar.ts';
+import { dropShareToken, storeShareToken, storedShareToken, type TokenStorage } from '../src/lib/shareTokenStore.ts';
 
 const flush = async () => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
 
-function fixture(initialHash = '#/home') {
+/** Tab-scoped sessionStorage shared across "reloads" (fresh router loads). */
+function fakeSession(): TokenStorage & { data: Map<string, string> } {
+  const data = new Map<string, string>();
+  return {
+    data,
+    getItem: (k) => data.get(k) ?? null,
+    setItem: (k, v) => void data.set(k, v),
+    removeItem: (k) => void data.delete(k),
+  };
+}
+function bindShareStore(st: TokenStorage) {
+  return {
+    storeShareToken: (sid: string, t: string) => storeShareToken(sid, t, st),
+    storedShareToken: (sid: string) => storedShareToken(sid, st),
+    dropShareToken: (sid: string) => dropShareToken(sid, st),
+  };
+}
+
+function fixture(initialHash = '#/home', shareStore = bindShareStore(fakeSession())) {
   const listeners: (() => void)[] = [];
   const location = { hash: initialHash };
   const fire = () => listeners.forEach((l) => l());
@@ -45,6 +64,7 @@ function fixture(initialHash = '#/home') {
       './desktop': { isEmbedded: false },
       '../modules/rooms/room-access': { captureRoomInvite },
       './sidebar': { activeNavId },
+      './shareTokenStore': shareStore,
     },
     { window, history },
   );
@@ -168,3 +188,36 @@ test('a newer route decision invalidates a pending workspace decision', async ()
   await flush();release(true);
   assert.equal(await changing,false);assert.equal(f.location.hash,'#/git');
 });
+
+test('a share token survives a reload of the guest page (tab sessionStorage), never in the URL', async () => {
+  const tab = fakeSession();
+  const first = fixture('#/s/sess1/tok-123', bindShareStore(tab));
+  await flush();
+  assert.equal(first.location.hash, '#/s/sess1', 'token stripped from the URL');
+  assert.equal(tab.data.get('otto_share:sess1'), 'tok-123');
+  assert.equal(tab.data.has('otto_token'), false, 'never the owner login key');
+  // Reload: a fresh router on the stripped hash, same tab storage.
+  const { getShareToken } = loadReloaded('#/s/sess1', tab);
+  assert.equal(getShareToken('sess1'), 'tok-123');
+  assert.equal(getShareToken('other'), null);
+  // A dead link forgets it — the next reload shows the no-token card.
+  dropShareToken('sess1', tab);
+  assert.equal(loadReloaded('#/s/sess1', tab).getShareToken('sess1'), null);
+});
+
+function loadReloaded(hash: string, tab: TokenStorage) {
+  const location = { hash };
+  return loadSource(
+    new URL('../src/lib/router.svelte.ts', import.meta.url),
+    {
+      'svelte/reactivity': { SvelteMap: Map },
+      './win': { winKey: (k: string) => k },
+      './storage': { lsGet: () => null, lsSet: () => {} },
+      './desktop': { isEmbedded: false },
+      '../modules/rooms/room-access': { captureRoomInvite },
+      './sidebar': { activeNavId },
+      './shareTokenStore': bindShareStore(tab),
+    },
+    { window: { location, addEventListener: () => {}, removeEventListener: () => {} }, history: { replaceState: () => {} } },
+  );
+}

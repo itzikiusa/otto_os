@@ -103,7 +103,7 @@ test('rooms: pending creation prevents duplicate Enter and preserves newer name'
     posts++; const response = await r.fetch(); await gate; await r.fulfill({ response });
   });
   await page.goto('/#/personal-agents/rooms');
-  const input = page.getByLabel('New room name');
+  const input = page.getByLabel('New channel name');
   await input.fill('Review team'); await input.press('Enter');
   await expect.poll(() => posts).toBe(1);
   await input.fill('Release team'); await input.press('Enter');

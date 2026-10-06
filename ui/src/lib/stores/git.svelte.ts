@@ -3,6 +3,7 @@
 // the Git module manages its own deeper state on top).
 
 import { api } from '../api/client';
+import { latestOnly } from '../latest';
 import { loadErrorText } from '../loadError';
 import { mergeTouched, touches, type TouchedPaths } from '../gitLivePaths';
 import type {
@@ -150,6 +151,13 @@ class GitStore {
   notARepo = $state(false);
   private loadedFor: Id | null = null;
   private detectedCwd: string | null = null;
+  // Stale-response guards (S13-03): switching workspace / focused session
+  // A→B used to let A's slower status / PR list / repo list land last and
+  // show repo A's branch and PRs under repo B's name.
+  private reposGen = latestOnly();
+  private primaryGen = latestOnly();
+  private prsGen = latestOnly();
+  private detectGen = latestOnly();
 
   // ── Git page top-level repo tabs (GitKraken-style, workspace-independent) ──
   // The set of repos the user has OPEN as tabs, the active one, and each repo's
@@ -351,8 +359,11 @@ class GitStore {
     if (!force && this.loadedFor === workspaceId) return;
     this.loadedFor = workspaceId;
     this.loading = true;
+    const t = this.reposGen.begin();
     try {
-      this.repos = await api.get<Repo[]>(`/workspaces/${workspaceId}/repos`);
+      const repos = await api.get<Repo[]>(`/workspaces/${workspaceId}/repos`);
+      if (!t.current) return; // a newer workspace's load owns the panel
+      this.repos = repos;
       this.primary = this.repos[0] ?? null;
       this.primaryStatus = null;
       this.prs = [];
@@ -360,48 +371,64 @@ class GitStore {
         await this.selectPrimary(this.primary);
       }
     } catch {
+      if (!t.current) return;
       this.repos = [];
       this.primary = null;
       this.primaryStatus = null;
       this.prs = [];
+      // Not sticky: the next loadRepos for this workspace retries.
+      this.loadedFor = null;
     } finally {
-      this.loading = false;
+      if (t.current) this.loading = false;
     }
   }
 
-  /** Make `repo` the primary repo and load its status + PRs. */
+  /** Make `repo` the primary repo and load its status + PRs. A later
+   *  selection supersedes this one: its status/PRs are then dropped (the
+   *  per-repo status cache still takes them — they are keyed by repo). */
   async selectPrimary(repo: Repo): Promise<void> {
+    const t = this.primaryGen.begin();
     this.primary = repo;
     if (!this.repos.some((r) => r.id === repo.id)) this.repos = [...this.repos, repo];
     try {
       const s = this.freshFetchStatus(repo.id) ?? await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
-      this.primaryStatus = s;
       this.setStatus(repo.id, s);
+      if (!t.current || this.primary?.id !== repo.id) return;
+      this.primaryStatus = s;
     } catch {
+      if (!t.current || this.primary?.id !== repo.id) return;
       this.primaryStatus = null;
     }
     void this.loadPrs(repo.id);
   }
 
   async loadPrs(repoId: Id): Promise<void> {
+    const t = this.prsGen.begin();
     this.prsLoading = true;
     this.prError = null;
+    // Results for a repo that is no longer primary (or superseded by a newer
+    // load) are dropped — they would list repo A's PRs under repo B.
+    const mine = () => t.current && (this.primary === null || this.primary.id === repoId);
     try {
-      this.prs = (await api.get<PrListResp>(`/repos/${repoId}/prs?state=open`)).items;
+      const items = (await api.get<PrListResp>(`/repos/${repoId}/prs?state=open`)).items;
+      if (!mine()) return;
+      this.prs = items;
     } catch (e) {
+      if (!mine()) return;
       this.prs = [];
       // Surface the upstream reason (e.g. a 401 bad token) instead of a
       // misleading "no pull requests".
       this.prError = e instanceof Error ? e.message : String(e);
     } finally {
-      this.prsLoading = false;
+      if (t.current) this.prsLoading = false;
     }
   }
 
   /**
    * Detect (and register, idempotently) the git repo containing `cwd` and make
    * it primary. Used by the right-panel Git tab so being inside a repo "just
-   * works" without manual registration. No-op if cwd unchanged.
+   * works" without manual registration. No-op if cwd unchanged. A newer
+   * detect (focus moved to another session) supersedes this one.
    */
   async detectFor(workspaceId: Id, cwd: string, force = false): Promise<void> {
     if (!cwd) return;
@@ -409,24 +436,29 @@ class GitStore {
     this.detectedCwd = cwd;
     this.detecting = true;
     this.notARepo = false;
+    const t = this.detectGen.begin();
     try {
       const repo = await api.post<Repo>(`/workspaces/${workspaceId}/repos/detect`, { path: cwd });
+      if (!t.current) return;
       await this.selectPrimary(repo);
     } catch {
+      if (!t.current) return;
       // cwd isn't inside a git repo — fall back to any registered repo.
       this.notARepo = !this.primary;
     } finally {
-      this.detecting = false;
+      if (t.current) this.detecting = false;
     }
   }
 
   async refreshPrimary(): Promise<void> {
-    if (!this.primary) return;
+    const repo = this.primary;
+    if (!repo) return;
     try {
-      const s = this.freshFetchStatus(this.primary.id) ?? await api.get<RepoStatusResp>(`/repos/${this.primary.id}/status`);
+      const s = this.freshFetchStatus(repo.id) ?? await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
+      this.setStatus(repo.id, s);
+      if (this.primary?.id !== repo.id) return; // primary moved on meanwhile
       this.primaryStatus = s;
-      this.setStatus(this.primary.id, s);
-      void this.loadPrs(this.primary.id);
+      void this.loadPrs(repo.id);
     } catch {
       /* keep stale status */
     }

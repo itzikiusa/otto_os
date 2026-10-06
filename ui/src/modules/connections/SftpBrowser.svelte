@@ -190,6 +190,17 @@
 
   async function doUpload(localPath: string): Promise<void> {
     uploadOpen = false;
+    // Overwriting an existing remote file asks first on EVERY environment (the
+    // upload replaces it with no undo); prod gets its own confirm below anyway.
+    const base = localPath.split(/[\\/]/).pop() ?? '';
+    if (!isProd && base && view.entries.some((e) => e.name === base)) {
+      const ok = await confirmer.ask(`“${base}” already exists in ${view.cwd || '/'} on ${hostLabel()}. Uploading replaces it.`, {
+        title: 'Replace the existing file?',
+        confirmLabel: 'Replace',
+        danger: true,
+      });
+      if (!ok) return;
+    }
     if (isProd) {
       const ok = await confirmProd({
         env: conn.environment,

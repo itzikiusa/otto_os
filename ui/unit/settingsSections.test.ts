@@ -89,3 +89,17 @@ test('every section page titles itself from the registry', () => {
   }
   assert.equal(sectionLabel('tokens'), 'Personal access tokens');
 });
+
+// S17-14: these sections only call root-only handlers (`GET|PUT /settings`,
+// `/audit-log`, `/security-posture`, `/logs/daemon` → `require_root`). A
+// non-root settings admin must not get nav entries that can only 403.
+test('sections backed by root-only handlers are gated on root, not settings:admin', () => {
+  const settingsAdmin: SettingsAccess = { can: (f, level) => f === 'settings' && level === 'admin', isRoot: false };
+  const ids = availableSections(settingsAdmin).map((s) => s.id);
+  for (const id of ['providers', 'daemon', 'trust-safety', 'logs']) {
+    assert.equal(findSection(id)!.gate, 'root', `${id} must be root-gated`);
+    assert.ok(!ids.includes(id as never), `${id} shown to a non-root settings admin`);
+  }
+  // Sections whose handlers accept settings admins stay open to them.
+  assert.ok(ids.includes('skills'));
+});

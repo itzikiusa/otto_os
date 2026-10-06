@@ -517,17 +517,18 @@
 
   async function publishTests(): Promise<void> {
     if (!activeRun || publishingRun) return;
+    // Pin the run: `activeRun` is derived and may point elsewhere after the awaits.
+    const run = activeRun;
     publishingRun = true;
     try {
-      await product.publishTests(activeRun.id, {
+      // publishTests reloads the runs itself (for confluence_url) — no second fetch.
+      await product.publishTests(run.id, {
         space_key: publishSpaceKey.trim() || null,
         parent_id: publishParentId.trim() || null,
       });
       showPublishForm = false;
-      // Refresh to get confluence_url.
-      await product.loadTestcases();
-      const updatedRun = product.testcaseRuns.find((r) => r.run.id === activeRun.id);
-      const url = updatedRun?.run.confluence_url ?? activeRun.confluence_url;
+      const updatedRun = product.testcaseRuns.find((r) => r.run.id === run.id);
+      const url = updatedRun?.run.confluence_url ?? run.confluence_url;
       if (url) {
         toasts.success('Published to Confluence', url);
       } else {

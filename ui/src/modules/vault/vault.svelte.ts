@@ -395,10 +395,13 @@ class VaultStore {
   /** Never advance a dirty buffer's base hash to an external version. */
   async refreshOpenNote(): Promise<void> {
     if (!this.current || !this.notePath || this.saving) return;
-    const id = this.current.id, path = this.notePath;
+    const id = this.current.id, path = this.notePath, epoch = this.saveEpoch;
     let n: VaultNote;
     try { n = await vaultNote(this.wsId, id, path); } catch { return; }
-    if (this.current?.id !== id || this.notePath !== path || this.saving) return;
+    // A save that started (or finished) during this GET makes the response
+    // older than our own write: adopting it reverted the editor and raised a
+    // false conflict on the next keystroke (S18-20).
+    if (this.current?.id !== id || this.notePath !== path || this.saving || epoch !== this.saveEpoch) return;
     if (this.dirty) {
       if (n.meta.hash !== this.note?.meta.hash) this.conflict = true;
     } else {
@@ -565,10 +568,35 @@ class VaultStore {
     this.persistView();
   }
 
+  /** Open / Rename / Trash / tab switches all pass through here. A refusal
+   *  says why (S18-21) — a silent no-op read as a dead click. */
   private async canLeaveNote(): Promise<boolean> {
-    if (this.conflict && this.dirty) return false;
-    if (this.dirty || this.saving) return this.saveNow();
+    if (this.conflict && this.dirty) {
+      this.warnLeaveBlocked();
+      return false;
+    }
+    if (this.dirty || this.saving) {
+      const ok = await this.saveNow();
+      // A generic failure already toasted inside saveNow; name the cases
+      // that otherwise return quietly.
+      if (!ok && this.conflict) this.warnLeaveBlocked();
+      else if (!ok && this.holdAutosave) {
+        toasts.warn(`Answer the pending “Save?” for ${this.noteLabel()} first`, 'Otto’s edit is waiting for your OK.');
+      }
+      return ok;
+    }
     return true;
+  }
+
+  private noteLabel(): string {
+    return this.notePath?.split('/').pop() || 'this note';
+  }
+
+  private warnLeaveBlocked(): void {
+    toasts.warn(
+      `Resolve the conflict on ${this.noteLabel()} first`,
+      'The banner above the note lets you keep your version or load the one on disk.',
+    );
   }
 
   /** Commit navigation only after a successful save and read. */
@@ -629,6 +657,11 @@ class VaultStore {
    */
   private persistDraft(debounce = false): void {
     if (!this.current || !this.notePath) return;
+    // An agent's staged, UNCONFIRMED text is never a recovery draft: after a
+    // reload it came back as the user's own dirty edit and autosaved on the
+    // next keystroke (S18-22). The staging requires a clean buffer, so there
+    // is no user draft to lose here.
+    if (this.holdAutosave) return;
     const key = this.draftKey(this.current.id, this.notePath);
     if (this.draftPending && this.draftPending.key !== key) this.flushDraft();
     this.draftPending = { key, content: this.draft, hash: this.note?.meta.hash, dirty: this.dirty };

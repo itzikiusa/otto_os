@@ -90,11 +90,22 @@
     return i >= 0 ? doc.slice(0, i) + LINK_BRIDGE + doc.slice(i) : doc + LINK_BRIDGE;
   }
   let frameEl = $state<HTMLIFrameElement | null>(null);
+  // The report's JS is agent-written (possibly prompt-injected): it may post
+  // `otto-insights-open` itself, without a click. Only open on a real user
+  // gesture (a click inside the frame activates its ancestors too) and at most
+  // one tab per OPEN_GAP_MS, so a script can't spray system-browser tabs.
+  const OPEN_GAP_MS = 1_000;
+  let lastOpenAt = 0;
   function onFrameMessage(ev: MessageEvent): void {
     if (!frameEl || ev.source == null || ev.source !== frameEl.contentWindow) return;
     const m = ev.data as { type?: unknown; url?: unknown } | null;
     if (!m || m.type !== 'otto-insights-open' || typeof m.url !== 'string') return;
     if (!/^https?:\/\//i.test(m.url)) return;
+    const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
+    if (activation && !activation.isActive) return;
+    const now = Date.now();
+    if (now - lastOpenAt < OPEN_GAP_MS) return;
+    lastOpenAt = now;
     void openExternal(m.url);
   }
 
@@ -102,10 +113,15 @@
   let htmlFor = $state<string | null>(null);
   let htmlError = $state<string | null>(null);
   let htmlLoading = $state(false);
+  /** The path whose last load FAILED: the auto-load skips it (a missing or
+   *  mid-write file used to re-fire the GET back to back forever, flickering
+   *  skeleton ↔ error); Retry clears it. */
+  let htmlFailedFor = $state<string | null>(null);
 
   async function loadHtml(path: string): Promise<void> {
     htmlLoading = true;
     htmlError = null;
+    htmlFailedFor = null;
     try {
       const text = await insightsApi.readText(path);
       if (report.html_path === path) {
@@ -113,14 +129,17 @@
         htmlFor = path;
       }
     } catch (e) {
-      htmlError = e instanceof Error ? e.message : String(e);
+      if (report.html_path === path) {
+        htmlError = e instanceof Error ? e.message : String(e);
+        htmlFailedFor = path;
+      }
     } finally {
       htmlLoading = false;
     }
   }
   $effect(() => {
     const p = report.html_path;
-    if (effectiveMode === 'html' && p && htmlFor !== p && !htmlLoading) void loadHtml(p);
+    if (effectiveMode === 'html' && p && htmlFor !== p && htmlFailedFor !== p && !htmlLoading) void loadHtml(p);
   });
 
   // ---- Display helpers ------------------------------------------------------

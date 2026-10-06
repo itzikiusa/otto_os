@@ -221,11 +221,20 @@ function composerOn(at: ComposerAt | null, l: DiffLine | null): boolean {
   return !!at && !!l && at.oldLine === l.old_line && at.newLine === l.new_line;
 }
 
+/** Path/suffix separator inside row keys — a control char no sane path has,
+ *  but NOT NUL (CSS.escape turns NUL into U+FFFD, so ⌘F / jump-to-file never
+ *  found the mounted row). */
+export const ROW_KEY_SEP = '\u001f';
+
 /** Flatten ONE file into rows. Callers memoize per file on the inputs, so a
  *  toggle / composer / comment change rebuilds one file, not the diff. */
 export function buildFileRows(i: FileRowsInput): Row[] {
   const { file, eff } = i;
-  const k = `${file.path}\u0000`;
+  // Row keys land in `data-rk` and are found again with
+  // `[data-rk="${CSS.escape(key)}"]`. The separator must survive that round
+  // trip: CSS.escape maps NUL to U+FFFD (never matching), while U+001F is
+  // escaped as a code point and matches. See ROW_KEY_SEP.
+  const k = `${file.path}${ROW_KEY_SEP}`;
   const rows: Row[] = [{ kind: 'file', key: `${k}f`, file, collapsed: i.collapsed, first: i.first }];
   if (i.collapsed) return rows;
   const stat = fileStat(file);

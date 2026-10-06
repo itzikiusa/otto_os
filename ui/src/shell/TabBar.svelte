@@ -244,7 +244,7 @@
 
   async function archiveTab(id: string): Promise<void> {
     try {
-      await ws.archiveSession(id);
+      await ws.requestArchive(id); // confirms first when the agent is mid-turn
     } catch (e) {
       toastError('Couldn’t archive the session', e);
     }

@@ -257,6 +257,37 @@
   }
 
   // ── DSN / URI paste import ──────────────────────────────────────────────────
+  /** `decodeURIComponent` that never throws: a malformed escape (`%zz`) keeps
+   *  the raw text instead of aborting the import with an uncaught error. */
+  function safeDecode(v: string): string {
+    try {
+      return decodeURIComponent(v);
+    } catch {
+      return v;
+    }
+  }
+  /** Split the password out of a URI's RAW text (scheme://user:PASS@hosts/…):
+   *  the template keeps every other byte as pasted. `URL.password` can't be
+   *  used to find it — WHATWG re-encodes characters like `^ { } | " < > \` and
+   *  space, so a replace on its form missed and left the cleartext password in
+   *  the visible connection-string field. */
+  function splitUriPassword(text: string): { template: string; password: string } | null {
+    const start = text.indexOf('://');
+    if (start < 0) return null;
+    const authStart = start + 3;
+    const rest = text.slice(authStart);
+    const end = rest.search(/[/?#]/);
+    const authority = end < 0 ? rest : rest.slice(0, end);
+    const at = authority.lastIndexOf('@');
+    if (at < 0) return null;
+    const userinfo = authority.slice(0, at);
+    const colon = userinfo.indexOf(':');
+    if (colon < 0) return null;
+    return {
+      template: text.slice(0, authStart) + userinfo.slice(0, colon) + ':{secret}' + text.slice(authStart + at),
+      password: safeDecode(userinfo.slice(colon + 1)),
+    };
+  }
   // Parses a standard connection URI (mysql://, redis://, mongodb://, etc.) and
   // fills the form fields in-place. Unrecognized schemes are ignored with a toast.
   function parseDsn(raw: string): void {
@@ -297,16 +328,17 @@
 
     if (mapped === 'mongodb') {
       // Keep topology/options intact but move credentials to the secret field.
-      secret = url.password ? decodeURIComponent(url.password) : '';
-      fConnString = url.password ? s.replace(`:${url.password}@`, ':{secret}@') : s;
+      const split = splitUriPassword(s);
+      secret = split?.password ?? '';
+      fConnString = split ? split.template : s;
     } else {
       if (url.hostname) fHost = url.hostname;
       if (url.port)     fPort = url.port;
-      if (url.username) fUser = decodeURIComponent(url.username);
-      if (url.password) secret = decodeURIComponent(url.password);
+      if (url.username) fUser = safeDecode(url.username);
+      if (url.password) secret = safeDecode(url.password);
       // The first path segment is the database/db-index.
       const dbPart = url.pathname.replace(/^\//, '').split('/')[0];
-      if (dbPart) fDb = decodeURIComponent(dbPart);
+      if (dbPart) fDb = safeDecode(dbPart);
     }
 
     if (scheme === 'rediss' || scheme === 'clickhouse+https') tlsMode = 'required';

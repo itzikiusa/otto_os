@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latestOnly } from '../../lib/latest';
   import { onDestroy, tick, untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -10,6 +11,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -399,6 +401,49 @@
     return { cadence: 'weekly', at: fAt, weekday: fWeekday };
   }
 
+  // ── "Next fires" preview (S20-17) ─────────────────────────────────────────
+  // The form asks the daemon's own cadence evaluator (the one that stamps
+  // `next_run_at`) for the next fires of the UNSAVED schedule, so `0 9 * * 0`
+  // typed for Monday reads "Sun …" before Save — same idea as the workflow
+  // trigger preview, but live (debounced) instead of behind a button.
+  let firePreview = $state<{ key: string; times: string[]; tz: string; error: string } | null>(null);
+  const previewKey = $derived.by(() => {
+    if (!(creating || editId) || fCadence === 'interval' || !tzOk) return '';
+    if (fCadence === 'cron' && cronFieldCount !== 5) return '';
+    if (fCadence === 'once' && !fRunAt) return '';
+    return JSON.stringify([buildSchedule(), fTimezone.trim() || 'UTC']);
+  });
+  $effect(() => {
+    const key = previewKey;
+    if (!key) {
+      firePreview = null;
+      return;
+    }
+    const [schedule, timezone] = JSON.parse(key) as [Record<string, unknown>, string];
+    const timer = setTimeout(() => {
+      scheduledTasksApi
+        .preview(schedule, timezone)
+        .then((r) => {
+          if (alive && previewKey === key) firePreview = { key, times: r.next_fire_times, tz: timezone, error: '' };
+        })
+        .catch((e: unknown) => {
+          if (alive && previewKey === key) {
+            firePreview = { key, times: [], tz: timezone, error: e instanceof Error ? e.message : 'The daemon couldn’t check this schedule.' };
+          }
+        });
+    }, 350);
+    return () => clearTimeout(timer);
+  });
+  /** Only a preview for the CURRENT form is shown (never a stale one). */
+  const shownPreview = $derived(firePreview && firePreview.key === previewKey ? firePreview : null);
+  function fireLabel(at: string, tz: string): string {
+    try {
+      return new Date(at).toLocaleString(undefined, { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return new Date(at).toLocaleString();
+    }
+  }
+
   function buildDestination(): Record<string, unknown> {
     switch (fDestType) {
       case 'slack':
@@ -687,10 +732,31 @@
     void scheduledTasks.loadRuns(t.id);
   }
 
+  /** "Workflow run" opens THAT run — not the task's current workflow (which
+   *  may have been re-pointed since). The run names its own workflow. */
+  async function openWorkflowRun(runId: string, fallbackWorkflowId: string | null | undefined): Promise<void> {
+    let workflowId = fallbackWorkflowId ?? null;
+    try {
+      workflowId = (await api.get<{ workflow_id: string }>(`/workflow-runs/${encodeURIComponent(runId)}`)).workflow_id;
+    } catch {
+      /* fall back to the task's workflow */
+    }
+    if (!workflowId) return;
+    if (!(await router.goChecked(`workflows/${encodeURIComponent(workflowId)}`))) return;
+    try {
+      const { workflowsPagePort } = await import('../../lib/uiCommands/workflows');
+      const page = await workflowsPagePort.get(new AbortController().signal);
+      if (await page.open(workflowId)) await page.openRun(workflowId, runId);
+    } catch (e) {
+      toasts.error('Couldn’t open the workflow run', errText(e));
+    }
+  }
+
   function openSession(sessionId: string | null | undefined): void {
     if (sessionId) ws.navigateToSession(sessionId);
   }
 
+  const reportSeq = latestOnly();
   async function viewReport(run: ScheduledTaskRun, taskName: string, plain = false): Promise<void> {
     reportRun = run;
     reportTaskName = taskName;
@@ -699,12 +765,16 @@
     reportLoading = true;
     reportText = '';
     reportError = '';
+    // Only the report last asked for may land (A's slow text used to fill
+    // the modal opened for B).
+    const t = reportSeq.begin();
     try {
-      reportText = await authedText(scheduledTasksApi.reportPath(run.id));
+      const text = await authedText(scheduledTasksApi.reportPath(run.id));
+      if (t.current) reportText = text;
     } catch (e) {
-      reportError = loadErrorText(e);
+      if (t.current) reportError = loadErrorText(e);
     } finally {
-      reportLoading = false;
+      if (t.current) reportLoading = false;
     }
   }
 
@@ -770,6 +840,7 @@
     {/if}
   {/snippet}
   {#snippet actions()}
+    <AutomateGuideButton current="scheduled-tasks" />
     {#if !(creating || editId) && list.length > 0}
       <button class="btn small primary" onclick={startCreate}><Icon name="plus" size={12} /> New task</button>
     {/if}
@@ -918,11 +989,27 @@
           </label>
         {/if}
       </div>
+      {#if shownPreview}
+        <div class="fire-preview" class:bad={!!shownPreview.error} role="status" aria-live="polite" data-testid="sched-next-fires">
+          {#if shownPreview.error}
+            <Icon name="warning" size={12} /> {shownPreview.error}
+          {:else if shownPreview.times.length}
+            <span class="fp-h">Next fires ({shownPreview.tz}):</span>
+            <ul>
+              {#each shownPreview.times.slice(0, 3) as at (at)}<li>{fireLabel(at, shownPreview.tz)}</li>{/each}
+            </ul>
+          {:else}
+            <span class="fp-h">This schedule has no upcoming run.</span>
+          {/if}
+        </div>
+      {/if}
 
       <div class="frow">
-        <label class="field">
-          <span>Destination</span>
-          <select class="input" bind:value={fDestType}>
+        <!-- A div, not a <label>: the hints and their buttons sat inside the
+             label and became part of the select's accessible name. -->
+        <div class="field">
+          <label for="sched-dest-type">Destination</label>
+          <select id="sched-dest-type" class="input" bind:value={fDestType} aria-describedby="sched-dest-hint-ch sched-dest-hint-email">
             <option value="none">None (store only)</option>
             <option value="slack" disabled={destBlocked('slack')}>Slack{destBlocked('slack') ? ' — not set up' : ''}</option>
             <option value="telegram" disabled={destBlocked('telegram')}>Telegram{destBlocked('telegram') ? ' — not set up' : ''}</option>
@@ -930,18 +1017,18 @@
             <option value="webhook">HTTP webhook</option>
           </select>
           {#if destReady && (!destReady.slack || !destReady.telegram)}
-            <span class="field-hint" class:bad={(fDestType === 'slack' && !destReady.slack) || (fDestType === 'telegram' && !destReady.telegram)}>
+            <span id="sched-dest-hint-ch" class="field-hint" class:bad={(fDestType === 'slack' && !destReady.slack) || (fDestType === 'telegram' && !destReady.telegram)}>
               {fDestType === 'slack' && !destReady.slack ? 'Slack isn’t set up for this workspace.' : fDestType === 'telegram' && !destReady.telegram ? 'Telegram isn’t set up for this workspace.' : 'Slack / Telegram need a workspace integration.'}
               <button type="button" class="btn small ghost" onclick={() => router.go('settings/channels')}>Set up in Settings → Channels</button>
             </span>
           {/if}
           {#if destReady && !destReady.email}
-            <span class="field-hint" class:bad={fDestType === 'email'}>
+            <span id="sched-dest-hint-email" class="field-hint" class:bad={fDestType === 'email'}>
               Email needs a verified sender.
               <button type="button" class="btn small ghost" onclick={() => router.go('settings/sharing')}>Set up in Settings → Sharing</button>
             </span>
           {/if}
-        </label>
+        </div>
         {#if fDestType === 'slack' || fDestType === 'telegram'}
           <label class="field">
             <span>Chat / channel id (optional)</span>
@@ -1116,7 +1203,7 @@
                     {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
                     {#if r.proof_pack_id}<Badge tone="ok" label="Proof" title="A proof pack is attached to this run" />{/if}
                     {#if r.workflow_run_id && t.workflow_id}
-                      <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => router.go(`workflows/${t.workflow_id}`)}>Workflow run</button>
+                      <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => void openWorkflowRun(r.workflow_run_id!, t.workflow_id)}>Workflow run</button>
                     {:else if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
@@ -1216,11 +1303,16 @@
   /* Shared .field (app.css); the form's gap spaces the rows, so no bottom margin. */
   .frow .field { flex: 1; min-width: 180px; }
   .field { margin-bottom: 0; font-size: var(--fs-s); color: var(--text); min-width: 0; }
-  .field > span { color: var(--text-dim); font-weight: 500; }
+  .field > span, .field > label { color: var(--text-dim); font-weight: 500; }
   .field :global(.input) { width: 100%; }
   .field :global(.mono) { font-family: var(--font-mono); }
   .field .field-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .field .field-hint.bad { color: var(--danger); }
+  .fire-preview { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--text-dim); }
+  .fire-preview.bad { color: var(--danger); align-items: center; }
+  .fire-preview .fp-h { font-weight: 600; }
+  .fire-preview ul { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; padding: 0; list-style: none; }
+  .fire-preview li { font-variant-numeric: tabular-nums; }
   .toggles { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
   .adv { border-block-start: 1px solid var(--border); padding-block-start: 10px; }
   .adv-toggle {

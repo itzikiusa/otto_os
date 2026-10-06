@@ -79,7 +79,7 @@ connection library unusable for every non-root account.)
 | 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id` and the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` are **server-owned**: a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
-| — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, or when the provider's active-conversation guard refuses a fork. Resume errors propagate; this never falls back to an unconditional restart. |
+| — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, when the provider's active-conversation guard refuses a fork, or when an agent's folder no longer exists (`folder X no longer exists — restore it…`; every resume/restart path refuses rather than recreating it empty — the scratch home and Otto-managed folders under its data dir are still recreated). Resume errors propagate; this never falls back to an unconditional restart. |
 | 23 | POST /api/v1/workspaces/{id}/orchestrate | ws editor | OrchestrateReq | OrchestrateResp |
 | 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` — the plan is re-validated against the live workspace first (1..=10 actions, known providers/sessions/connections, `spawn_sessions.count` 1..=8); an invalid plan is 400 and nothing runs. |
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
@@ -496,7 +496,7 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo}` (token shown once) |
+| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo, reachable_remotely}` (token shown once). Origin: `share_base_url` setting → non-loopback request Host → `https://<lan-ip>:<port>` when the network listener is on → the request Host. `reachable_remotely=false` ⇔ the origin is loopback/empty. With `recipient_email` on a loopback origin → 409 (set a Public link domain first) |
 | GET /api/v1/sessions/{id}/shares | session owner / ws admin | — | `ListSharesResp {shares: ShareInfo[]}` (live, non-revoked) |
 | GET /api/v1/auth/shares | member (self-owned) | — | `MyShare[]` = `ShareInfo` fields + `session_title: string \| null` (null when the session is gone) — the caller's live (non-revoked, non-expired) links across ALL sessions, newest first, capped at 500. Never another user's links, never the secret |
 | DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
@@ -534,6 +534,7 @@ configured address + verified flag and **never** the password.
 |---|---|---|---|
 | PUT /api/v1/email-sender | member (self-owned) | `SetEmailSenderReq {gmail_address, app_password}` | `EmailSenderResp {gmail_address, verified}` (502 on SMTP verify failure → not verified) |
 | GET /api/v1/email-sender | member (self-owned) | — | `EmailSenderResp {gmail_address?, verified}` (never the password) |
+| POST /api/v1/email-sender/verify | member (self-owned) | — (no body) | `EmailSenderResp {gmail_address, verified: true}` — re-runs the SMTP check for the caller's EXISTING sender with the App Password already in the Keychain (Settings → Re-verify). 400 when no sender is configured or its Keychain entry is missing (re-enter the password via `PUT`); 502 when SMTP still fails (stays unverified) |
 
 `EmailSenderResp` = `{gmail_address?, verified}` — `gmail_address` is omitted on
 `GET` when no sender is configured; `verified` is `true` once a real SMTP login
@@ -1199,7 +1200,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | POST /workspaces/{wid}/db/widgets | ws editor | CreateWidgetReq | Widget |
 | PATCH /db/widgets/{id} | ws editor + owner/ws-Admin/root | UpdateWidgetReq | Widget |
 | DELETE /db/widgets/{id} | ws editor + owner/ws-Admin/root | — | 204 |
-| POST /db/widgets/{id}/run | ws editor (on the widget's CONNECTION) + owner/ws-Admin/root | — | widget query result |
+| POST /db/widgets/{id}/run | ws editor (on the widget's CONNECTION) + owner/ws-Admin/root | — | widget query result — always run **read-only** (`QueryRequest.read_only`): a widget re-runs unattended on every refresh, so a write/DDL statement is refused with the read-only 403 on every connection (the UI also refuses an obvious write at save time) |
 
 `UpdateSavedQueryReq` = `{ name?, statement? }` — a partial update; an absent
 field is left unchanged (so a rename and a statement-edit can be sent
@@ -1687,7 +1688,7 @@ configured Jira/Confluence account.
 |---|---|---|---|
 | GET /issue/accounts | member | — | `IssueAccount[]` (own; token never present) |
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
-| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
+| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq (absent fields keep their value; `token_expires_at` is tri-state — absent keeps, `null` clears, an ISO timestamp sets) | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
 | GET /issue/projects | member | — | available projects |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
@@ -1926,7 +1927,7 @@ are root; per-workspace context selection is workspace-scoped.
 | DELETE /library/skills/{name} | root | — | 204 (also removes Otto-managed user-level provider copies — see Bundled skills) |
 | GET /library/skills/{name}/files | root | — | `SkillFileEntry[]` (multi-file tree) |
 | GET /library/skills/{name}/file | root | `?path=<rel>` | SkillFileContentResp (one file's text) |
-| PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`) | `SkillFileEntry[]` (refreshed tree; evicts cache) |
+| PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`, `create_only?` — default false; true → **409** when `path` already exists instead of overwriting, used by "New file") | `SkillFileEntry[]` (refreshed tree; evicts cache) |
 | DELETE /library/skills/{name}/file | root | `?path=<rel>` | 204 (SKILL.md cannot be deleted) |
 | GET /library/provider-skills | any member | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only) |
 | GET /library/provider-skills/{provider}/{name} | any member | — | ProviderSkillContent (body + file list) |
@@ -4240,6 +4241,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 135 | GET /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks view + ws viewer | — | `ScheduledTask[]` |
 | 136 | POST /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks edit + ws editor | `{name, prompt?, kind?, provider?, model?, cwd?, skill?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 137 | GET /api/v1/scheduled-tasks/presets | scheduled_tasks view | — | `ScheduledTaskPreset[]` |
+| 137a | POST /api/v1/scheduled-tasks/preview | scheduled_tasks edit | `{schedule, timezone?}` | `{next_fire_times: string[]}` — the next five fires (RFC 3339 UTC) of an UNSAVED schedule via the scheduler's cadence evaluator; 400 on an invalid schedule/timezone (same checks as create); empty for a spent `once`; saves nothing |
 | 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
 | 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
@@ -5851,7 +5853,7 @@ returns 400 rather than truncating data. Other errors: 400 invalid scope/format,
 
 Requires workspace Viewer; non-admins see only their own agent sessions in that workspace. Admin/root additionally see globally unclaimed indexed transcripts. A provider session id claimed by any workspace/provider excludes the corresponding on-disk entry. The legacy `/history` array endpoint remains unchanged.
 
-Returns `{"entries":[HistoryEntry],"next_cursor":"opaque-or-null"}`. Limit 1–1000, default 100. Stable order is descending activity then ascending source identity. Cursor is versioned, ≤4 KiB, and bound to actor/role/workspace/filters; malformed or mismatched cursors return 400 and require reloading. Authorization is reevaluated on every page.
+Returns `{"entries":[HistoryEntry],"next_cursor":"opaque-or-null"}`. `HistoryEntry.resumable` is true when the row carries a provider session id (or is `reconnectable`), **whatever its status** — an ended conversation resumes (`ensure_live` respawns any agent with a provider id); `on_disk` rows: an indexed provider id. `HistoryEntry.archived` (bool, default false; always false for `on_disk`) marks an archived Otto row: resume refuses those with 409, so the UI offers Unarchive first. The legacy `/history` array returns the same two fields. Limit 1–1000, default 100. Stable order is descending activity then ascending source identity. Cursor is versioned, ≤4 KiB, and bound to actor/role/workspace/filters; malformed or mismatched cursors return 400 and require reloading. Authorization is reevaluated on every page.
 
 Each request scans/resolves at most `4*limit` metadata candidates. Unicode substring search uses Rust lowercase parity, with literal `%`/`_`; exact-or-descendant cwd matching is case-sensitive. An empty entries array may still include next_cursor when matching conversations occur beyond the current scan budget. Follow the cursor to continue; only null indicates exhaustion. The UI exposes Load more for this case.
 
@@ -6050,7 +6052,7 @@ retention job touches them. Doc content cap 5 MB; asset cap 20 MB.
 | GET /workspaces/{ws}/workbench/docs | member (Agents:View) | `?trash=true` lists the trash | `WorkbenchDoc[]` (no content) — live: pinned first then newest; trash: most recently trashed first |
 | POST /workspaces/{ws}/workbench/docs | member (Agents:Edit) | `WorkbenchCreateReq {name, language?='auto', content?='', folder?, tags?, pinned?}` | `201 WorkbenchDocFull` (rev 1, kind `create`) |
 | GET /workspaces/{ws}/workbench/docs/{id} | member (Agents:View) | — | `WorkbenchDocFull` (`content` = current text; for `language:"image"` the asset id) |
-| PATCH /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `WorkbenchUpdateReq {content?, name?, language?, pinned?, folder?, tags?, checkpoint?, client_id?}` | `WorkbenchDoc`; `409` while trashed; `400` on validation (empty name, bad language, content > 5 MB) |
+| PATCH /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `WorkbenchUpdateReq {content?, name?, language?, pinned?, folder?, tags?, checkpoint?, client_id?, if_hash?}` | `WorkbenchDoc`; `409` while trashed, or when `if_hash` (with `content`) ≠ the doc's current `content_hash` (another window saved — the UI shows its "changed in another window" banner; omit `if_hash` to overwrite); `400` on validation (empty name, bad language, content > 5 MB) |
 | DELETE /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `?permanent=true` = irreversible purge | soft: `200 WorkbenchDoc` (`deleted_at` set, history kept); permanent: `204` — only for a TRASHED doc (live doc → `409`), removes the doc, every revision and unreferenced blobs |
 | POST /workspaces/{ws}/workbench/docs/{id}/restore | member (Agents:Edit) | `{}` | `WorkbenchDoc` (out of the trash) |
 | GET /workspaces/{ws}/workbench/docs/{id}/revisions | member (Agents:View) | `?limit=100&before_seq=<seq>`; limit clamped 1–200, exclusive cursor | `WorkbenchRevision[]` newest first `{seq, kind, content_hash, size, created_at, updated_at, saves, restored_from}` |

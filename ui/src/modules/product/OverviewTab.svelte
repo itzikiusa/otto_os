@@ -48,6 +48,17 @@
 
   // The detail object for the currently selected story.
   const detail = $derived(product.detail);
+
+  // ProductPage keys this tab by story ({#key product.selectedId}), so every
+  // story gets a fresh instance. A request started by an instance can still
+  // settle after it was torn down (or after A → B → A reopened A in a NEW
+  // instance), so each loader/writer captures its story and re-checks this
+  // after every await before assigning state or sending a Jira write.
+  let destroyed = false;
+  $effect(() => () => { destroyed = true; });
+  function onStory(s: { id: string }): boolean {
+    return !destroyed && product.selectedId === s.id;
+  }
   const story = $derived(detail?.story ?? null);
   const source = $derived(detail?.source ?? null);
 
@@ -155,6 +166,9 @@
   // IDs currently being fetched — prevents duplicate in-flight requests across
   // overlapping resolver runs (mirrors AttachmentsPanel.loadAttUrl guard).
   const bodyAttFetching = new Set<string>();
+  /** Bumped per resolve pass and on story change — a pass that settles after a
+   *  newer one (or after a switch) drops its result and frees its blobs. */
+  let resolveSeq = 0;
 
   // HTML of renderedBody with markdown image tokens rewritten to <img> tags with blob URLs.
   let resolvedBody = $state('');
@@ -251,6 +265,17 @@
     // Reset editable-field state.
     editmeta = null;
     editmetaLoading = false;
+    // Loading flags too: a stale `issueLoading` blocked B's own /full load and
+    // let A's response win (S18-02). Inline editors close so A's text can
+    // never be saved "to B" (S18-01).
+    issueLoading = false;
+    transitionsLoading = false;
+    assignablesLoading = false;
+    editingTitle = false;
+    titleDraft = '';
+    editingDesc = false;
+    descDraft = '';
+    ++resolveSeq;
     editingField = null;
     fieldDraft = null;
     fieldSaving = false;
@@ -380,14 +405,20 @@
     const html = renderedBody;
     if (!html || html === lastResolvedInput) return;
     lastResolvedInput = html;
-    void resolveAttachmentTokens(html);
+    void resolveAttachmentTokens(html, ++resolveSeq);
   });
+
+  function decodeEntities(s: string): string {
+    return s.replace(/&(amp|lt|gt|quot|#39);/g, (_, e: string) =>
+      ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e] ?? _,
+    );
+  }
 
   function escapeHtmlAttr(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  async function resolveAttachmentTokens(html: string): Promise<void> {
+  async function resolveAttachmentTokens(html: string, seq: number): Promise<void> {
     // Match literal markdown image syntax `![alt](attachment:<id>)` in the HTML
     // (renderMarkdown outputs these as-is since it doesn't handle image syntax).
     const tokenRe = /!\[([^\]]*)\]\(attachment:([A-Za-z0-9]+)\)/g;
@@ -412,6 +443,10 @@
       uncached.map(async (id) => {
         try {
           const url = await authedBlobUrl(`/product/attachments/${id}`);
+          if (destroyed || seq !== resolveSeq) {
+            URL.revokeObjectURL(url); // stale pass — never cached, so free it now
+            return;
+          }
           bodyAttObjectUrls.push(url);
           collected[id] = url;
         } catch (e) {
@@ -421,6 +456,9 @@
         }
       }),
     );
+    // A newer pass (or a story switch) owns resolvedBody now: never let A's
+    // body replace B's description.
+    if (destroyed || seq !== resolveSeq) return;
     if (Object.keys(collected).length > 0) {
       bodyAttUrls = { ...bodyAttUrls, ...collected };
     }
@@ -429,7 +467,11 @@
     for (const { full, alt, id } of matches) {
       const blobUrl = bodyAttUrls[id];
       if (blobUrl) {
-        out = out.replace(full, `<img class="body-attachment" alt="${escapeHtmlAttr(alt)}" src="${blobUrl}">`);
+        // `alt` comes from already-rendered HTML (entities escaped once):
+        // decode, then escape for the attribute — escaping again showed
+        // "&amp;amp;". A replacer function keeps `$&`/`$1` in alt literal.
+        const img = `<img class="body-attachment" alt="${escapeHtmlAttr(decodeEntities(alt))}" src="${blobUrl}">`;
+        out = out.replace(full, () => img);
       }
     }
     resolvedBody = out;
@@ -437,16 +479,19 @@
 
   async function loadIssueFull(): Promise<void> {
     if (!story) return;
+    const s = story;
     issueLoading = true;
     issueError = null;
     try {
-      issueFull = await api.get<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/full`,
+      const full = await api.get<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/full`,
       );
+      if (!onStory(s)) return;
+      issueFull = full;
     } catch (e) {
-      issueError = loadErrorText(e);
+      if (onStory(s)) issueError = loadErrorText(e);
     } finally {
-      issueLoading = false;
+      if (onStory(s)) issueLoading = false;
     }
   }
 
@@ -454,38 +499,48 @@
   // and the on-open effect can both call it safely.
   async function loadDevStatus(): Promise<void> {
     if (devLoaded || !story) return;
+    const s = story;
     devLoading = true;
     devError = null;
     try {
       const idParam = issueFull?.id ? `?issueId=${encodeURIComponent(issueFull.id)}` : '';
-      devStatus = await api.get<DevStatus>(
-        `/issue/${story.account_id}/${story.source_key}/devstatus${idParam}`,
+      const dev = await api.get<DevStatus>(
+        `/issue/${s.account_id}/${s.source_key}/devstatus${idParam}`,
       );
+      if (!onStory(s)) return;
+      devStatus = dev;
     } catch (e) {
-      devError = loadErrorText(e);
+      if (onStory(s)) devError = loadErrorText(e);
     } finally {
       // Mark loaded even on error: the on-open $effect gates on `devLoaded`, so
       // leaving it false after a failed fetch would re-trigger this every time
       // the request settles → an infinite retry loop. (Same guard rationale as
       // ensureEditmeta's `editmeta = []` on error.) The explicit refresh path
       // resets `devLoaded = false` to force a fresh fetch.
-      devLoaded = true;
-      devLoading = false;
+      if (onStory(s)) {
+        devLoaded = true;
+        devLoading = false;
+      }
     }
   }
 
   async function loadTransitions(): Promise<void> {
     if (transitionsLoaded || !story) return;
+    const s = story;
     transitionsLoading = true;
     try {
-      transitions = await api.get<JiraTransition[]>(
-        `/issue/${story.account_id}/${story.source_key}/transitions`,
+      const rows = await api.get<JiraTransition[]>(
+        `/issue/${s.account_id}/${s.source_key}/transitions`,
       );
+      // Transition ids are per issue: A's ids must never be offered (and
+      // POSTed) against B after a switch during this await.
+      if (!onStory(s)) return;
+      transitions = rows;
       transitionsLoaded = true;
     } catch (e) {
-      toastError('Couldn’t load transitions', e);
+      if (onStory(s)) toastError('Couldn’t load transitions', e);
     } finally {
-      transitionsLoading = false;
+      if (onStory(s)) transitionsLoading = false;
     }
   }
 
@@ -538,7 +593,8 @@
 
   async function applyTransition(t: JiraTransition): Promise<void> {
     if (!story) return;
-    const key = story.source_key;
+    const s = story;
+    const key = s.source_key;
     const ok = await confirmOutward({
       verb: `Move to ${t.to_status}`,
       title: `Move ${key} to ${t.to_status}?`,
@@ -546,10 +602,10 @@
       what: `Status: ${issueFull?.status ?? 'current'} → ${t.to_status}${t.name !== t.to_status ? ` (transition “${t.name}”)` : ''}`,
       who: `Everyone with access to ${key} sees the change; watchers are notified and Jira workflow rules may run.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     transitionWorking = true;
     try {
-      await api.post(`/issue/${story.account_id}/${story.source_key}/transitions`, {
+      await api.post(`/issue/${s.account_id}/${s.source_key}/transitions`, {
         transition_id: t.id,
       });
       // Available transitions depend on the status — refetch on next open, or
@@ -567,23 +623,27 @@
 
   async function loadAssignables(): Promise<void> {
     if (assignablesLoaded || !story) return;
+    const s = story;
     assignablesLoading = true;
     try {
-      assignables = await api.get<JiraUser[]>(
-        `/issue/${story.account_id}/${story.source_key}/assignable`,
+      const rows = await api.get<JiraUser[]>(
+        `/issue/${s.account_id}/${s.source_key}/assignable`,
       );
+      if (!onStory(s)) return;
+      assignables = rows;
       assignablesLoaded = true;
     } catch (e) {
-      toastError('Couldn’t load assignable users', e);
+      if (onStory(s)) toastError('Couldn’t load assignable users', e);
     } finally {
-      assignablesLoading = false;
+      if (onStory(s)) assignablesLoading = false;
     }
   }
 
   /** Assign `u`, or unassign when null — confirmed first (see Live Jira writes). */
   async function assignUser(u: JiraUser | null): Promise<void> {
     if (!story) return;
-    const key = story.source_key;
+    const s = story;
+    const key = s.source_key;
     const cur = issueFull?.assignee?.display_name ?? 'Unassigned';
     const ok = await confirmOutward({
       verb: u ? `Assign to ${u.display_name}` : 'Unassign',
@@ -592,10 +652,10 @@
       what: `Assignee: ${cur} → ${u ? u.display_name : 'Unassigned'}`,
       who: `Jira notifies the old and new assignee and ${key}'s watchers.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     assigneeWorking = true;
     try {
-      await api.put(`/issue/${story.account_id}/${story.source_key}/assignee`, {
+      await api.put(`/issue/${s.account_id}/${s.source_key}/assignee`, {
         account_id: u ? u.account_id : '',
       });
       toasts.info('Assignee updated');
@@ -613,16 +673,20 @@
    *  so everything stays read-only and we don't retry-loop. */
   async function ensureEditmeta(): Promise<void> {
     if (editmeta !== null || editmetaLoading || !story) return;
+    const s = story;
     editmetaLoading = true;
     try {
-      editmeta = await api.get<EditableField[]>(
-        `/issue/${story.account_id}/${story.source_key}/editmeta`,
+      const meta = await api.get<EditableField[]>(
+        `/issue/${s.account_id}/${s.source_key}/editmeta`,
       );
+      if (!onStory(s)) return;
+      editmeta = meta;
     } catch (e) {
+      if (!onStory(s)) return;
       toastError('Couldn’t load editable fields', e);
       editmeta = []; // loaded-but-empty: every field stays read-only
     } finally {
-      editmetaLoading = false;
+      if (onStory(s)) editmetaLoading = false;
     }
   }
 
@@ -757,13 +821,16 @@
   /** PUT a single field then swap in the refreshed issue returned by the server. */
   async function saveField(ef: EditableField): Promise<void> {
     if (!story) return;
+    const s = story;
     fieldSaving = true;
     try {
       const value = buildFieldValue(ef, fieldDraft);
-      issueFull = await api.put<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/fields`,
+      const full = await api.put<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/fields`,
         { fields: { [ef.key]: value } },
       );
+      if (!onStory(s)) return;
+      issueFull = full;
       editingField = null;
       fieldDraft = null;
       toasts.info('Field updated');
@@ -787,23 +854,36 @@
   /** Save the story summary via the generic fields endpoint (native string). */
   async function saveTitle(): Promise<void> {
     if (!story) return;
+    const s = story;
     const next = titleDraft.trim();
     if (!next) return; // the empty field says so inline (titleEmpty)
-    if (next === story.title) {
+    if (next === s.title) {
       cancelEditTitle();
       return;
     }
+    // The summary is a live Jira write like every other in this file: name the
+    // issue and show old → new before sending (watchers are notified).
+    const ok = await confirmOutward({
+      verb: 'Rename issue',
+      title: `Rename ${s.source_key}?`,
+      where: jiraWhere(),
+      what: `Title: “${s.title}” → “${next}”`,
+      who: `Everyone with access to ${s.source_key} sees the new title; watchers are notified.`,
+    });
+    if (!ok || !onStory(s)) return;
     titleSaving = true;
     try {
-      issueFull = await api.put<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/fields`,
+      const full = await api.put<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/fields`,
         { fields: { summary: next } },
       );
       // Reflect the new title in the header + story list without a full refresh.
-      product.patchLocalTitle(next);
+      product.patchLocalTitle(s.id, next);
+      toasts.info('Title updated', s.source_key);
+      if (!onStory(s)) return;
+      issueFull = full;
       editingTitle = false;
       titleDraft = '';
-      toasts.info('Title updated');
     } catch (e) {
       toastError('Couldn’t update title', e);
     } finally {
@@ -823,28 +903,32 @@
   /** Save the description via the dedicated (ADF-aware) description endpoint. */
   async function saveDesc(): Promise<void> {
     if (!story) return;
+    const s = story;
+    const draft = descDraft;
     // The whole description is replaced upstream (not merged) — the one inline
     // Jira write that can silently lose someone else's text, so it asks first.
     const ok = await confirmOutward({
       verb: `Replace description`,
-      title: `Replace the description of ${story.source_key}?`,
+      title: `Replace the description of ${s.source_key}?`,
       where: jiraWhere(),
-      what: descDraft.trim() || '(empty description)',
-      who: `Everyone with access to ${story.source_key} sees the new text; the previous description is only in Jira’s history.`,
+      what: draft.trim() || '(empty description)',
+      who: `Everyone with access to ${s.source_key} sees the new text; the previous description is only in Jira’s history.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     descSaving = true;
     try {
-      issueFull = await api.put<IssueFull>(
-        `/issue/${story.account_id}/${story.source_key}/description`,
-        { body_md: descDraft },
+      const full = await api.put<IssueFull>(
+        `/issue/${s.account_id}/${s.source_key}/description`,
+        { body_md: draft },
       );
       // The body column reads from the cached source version — patch it locally
       // with exactly what we just sent so the change shows without a refresh.
-      product.patchLocalBody(descDraft);
+      product.patchLocalBody(s.id, draft);
+      toasts.info('Description updated', s.source_key);
+      if (!onStory(s)) return;
+      issueFull = full;
       editingDesc = false;
       descDraft = '';
-      toasts.info('Description updated');
     } catch (e) {
       toastError('Couldn’t update description', e);
     } finally {
@@ -854,17 +938,22 @@
 
   async function loadAttachmentUrl(attId: string): Promise<void> {
     if (!story || attachmentUrls[attId] || attachmentLoading[attId]) return;
+    const s = story;
     attachmentLoading = { ...attachmentLoading, [attId]: true };
     try {
       const url = await authedBlobUrl(
-        `/issue/${story.account_id}/${story.source_key}/attachment/${attId}`,
+        `/issue/${s.account_id}/${s.source_key}/attachment/${attId}`,
       );
+      if (!onStory(s)) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       createdObjectUrls.push(url);
       attachmentUrls = { ...attachmentUrls, [attId]: url };
     } catch (e) {
       console.warn('[OverviewTab] attachment load failed', attId, e);
     } finally {
-      attachmentLoading = { ...attachmentLoading, [attId]: false };
+      if (onStory(s)) attachmentLoading = { ...attachmentLoading, [attId]: false };
     }
   }
 
@@ -1072,19 +1161,21 @@
 
   async function addComment(): Promise<void> {
     if (!story || !newCommentBody.trim()) return;
-    const key = story.source_key;
+    const s = story;
+    const key = s.source_key;
+    const body = newCommentBody.trim();
     const ok = await confirmOutward({
       verb: 'Post comment',
       title: `Post comment to ${key}?`,
       where: jiraWhere(),
-      what: newCommentBody.trim(),
+      what: body,
       who: `Everyone with access to ${key} in Jira; watchers are notified.`,
     });
-    if (!ok) return;
+    if (!ok || !onStory(s)) return;
     postingComment = true;
     try {
-      await api.post(`/issue/${story.account_id}/${story.source_key}/comment`, {
-        body: newCommentBody.trim(),
+      await api.post(`/issue/${s.account_id}/${s.source_key}/comment`, {
+        body,
       });
       newCommentBody = '';
       toasts.success('Comment posted');

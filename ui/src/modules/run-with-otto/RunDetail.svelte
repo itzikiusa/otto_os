@@ -14,7 +14,9 @@
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { humanize, isTerminal, runStatusInfo, sourceLabel } from './runStatus';
+  import { humanize, isTerminal, prNumberFromUrl, runStatusInfo, sourceLabel } from './runStatus';
+  import { router } from '../../lib/router.svelte';
+  import { runEvidenceLinks } from './runEvidence';
 
   interface Props {
     run: OttoRun;
@@ -28,6 +30,9 @@
   let deciding = $state<'approve' | 'deny' | null>(null);
 
   const events = $derived(runWithOtto.eventsByRun[run.id] ?? []);
+  /** In-app evidence behind the gate counts (proof pack, findings, goal loop,
+   *  branch) — so Approve is never blind (S20-02). */
+  const evidence = $derived(runEvidenceLinks(run));
 
   // Best-effort parse of the stored PR draft into title/description.
   const prDraft = $derived.by(() => {
@@ -106,6 +111,17 @@
   }
 </script>
 
+<!-- Review / Post comments live in Otto's PR detail — link there, not only to the forge. -->
+{#snippet prLinks(url: string)}
+  {@const n = prNumberFromUrl(url)}
+  {#if n !== null && run.repo_id}
+    <button class="btn primary" onclick={() => router.go(`git/${run.repo_id}/pr/${n}`)}>Open in Otto</button>
+    <a class="btn" href={url} target="_blank" rel="noreferrer">View on forge <Icon name="external" size={12} /></a>
+  {:else}
+    <a class="btn primary" href={url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
+  {/if}
+{/snippet}
+
 <aside class="detail">
   <header class="d-head">
     <div class="d-title">
@@ -159,7 +175,15 @@
   <!-- proof + findings -->
   <section class="block stats">
     {#if run.proof_pack_id && run.proof_status}
-      <ProofStatusChip status={run.proof_status} risk={run.risk_score} />
+      <button
+        type="button"
+        class="chip-btn"
+        onclick={() => router.go(`proof/${encodeURIComponent(run.proof_pack_id ?? '')}`)}
+        aria-label="Open the proof pack"
+        title="Open the proof pack"
+      >
+        <ProofStatusChip status={run.proof_status} risk={run.risk_score} />
+      </button>
     {/if}
     <span class="findings">
       <span class="fnum">{run.findings_total}</span> {run.findings_total === 1 ? 'finding' : 'findings'}
@@ -211,6 +235,20 @@
         · {plural(run.findings_total, 'finding')}{run.findings_blocking > 0 ? ` (${run.findings_blocking} blocking)` : ''}
         · {run.proof_status ? `proof ${run.proof_status}` : 'no proof pack yet'}{run.result_summary ? ` · ${run.result_summary}` : ''}
       </p>
+      {#if evidence.length > 0}
+        <div class="gate-review" data-testid="run-gate-evidence">
+          <span class="gate-review-h">Review before approving</span>
+          <div class="actions">
+            {#each evidence as ev (ev.key)}
+              <button type="button" class="btn small" title={ev.title} onclick={() => router.go(ev.route)}>
+                <Icon name={ev.icon} size={12} /> {ev.label}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {:else}
+        <p class="gate-what">No proof pack, findings or branch to inspect yet.</p>
+      {/if}
       <p class="gate-note">
         Approve to draft the PR from <span class="mono">{run.branch || 'the run branch'}</span>. Nothing is pushed
         until you open the PR. Deny ends the run and removes its worktree.
@@ -239,7 +277,7 @@
       {#if prDraft.description}<pre class="pr-desc">{prDraft.description}</pre>{/if}
       <div class="actions">
         {#if run.pr_url}
-          <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
+          {@render prLinks(run.pr_url)}
         {:else}
           <button class="btn primary" disabled={busy || !!prBlock} title={prBlock || 'Push the branch and open this draft as a real pull request'} onclick={openPr}>Open PR</button>
           {#if prBlock}<span class="muted hint">{prBlock}.</span>{/if}
@@ -249,7 +287,7 @@
   {:else if run.pr_url}
     <section class="block pr">
       <h3 class="h">Pull request</h3>
-      <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
+      {@render prLinks(run.pr_url)}
     </section>
   {/if}
 
@@ -317,6 +355,17 @@
     background: var(--warning-soft);
   }
   .gate-who, .gate-what { margin: 0; font-size: var(--fs-s); color: var(--text-dim); line-height: 1.45; overflow-wrap: anywhere; }
+  .gate-review { display: flex; flex-direction: column; gap: 6px; }
+  .gate-review-h { font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); }
+  .chip-btn {
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    border-radius: 999px;
+  }
+  .chip-btn:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; }
   .gate-note { margin: 0; font-size: var(--fs-s); color: var(--text); line-height: 1.45; }
   .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .hint { font-size: var(--fs-s); }

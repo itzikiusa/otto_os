@@ -18,6 +18,7 @@
   import { library } from './library.svelte';
   import BrandEditor from './brand/BrandEditor.svelte';
   import NewKitModal from './brand/NewKitModal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   $effect(() => {
     void designBus.resyncTick;
@@ -81,10 +82,7 @@
     {#if (library.loading && !library.loaded) || (library.loaded && kits.length > 0)}
       <Skeleton rows={2} height={200} />
     {:else if library.error && !library.loaded}
-      <div class="err" role="alert">
-        <Icon name="warning" size={14} /> Couldn’t load brand kits. <span class="dim">{library.error}</span>
-        <button class="btn small" onclick={() => void library.load()}>Retry</button>
-      </div>
+      <LoadState variant="compact" what="brand kits" error={library.error} empty onretry={() => void library.load()} />
     {:else}
       <EmptyState
         variant="page"
@@ -102,19 +100,3 @@
 {#if creating && ws.currentId}
   <NewKitModal workspaceId={ws.currentId} onclose={() => (creating = false)} oncreated={created} />
 {/if}
-
-<style>
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: var(--fs-s);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-  }
-  .dim {
-    color: var(--text-dim);
-  }
-</style>

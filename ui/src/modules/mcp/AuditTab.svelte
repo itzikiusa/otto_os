@@ -59,7 +59,10 @@
       if (gen !== generation) return;
       rows = page;
       nextOffset = PAGE;
-      hasMore = page.length === PAGE;
+      // The server reads PAGE rows and THEN drops the ones this caller can't
+      // see, so a short page doesn't mean the end (non-admins lost "Load more"
+      // and older rows). Only an empty page proves there's nothing older.
+      hasMore = page.length > 0;
       loadError = null;
     } catch (e) {
       if (gen === generation) loadError = loadErrorText(e);
@@ -80,7 +83,7 @@
       const seen = new Set(rows.map((r) => r.id));
       rows = [...rows, ...page.filter((r) => !seen.has(r.id))];
       nextOffset += PAGE;
-      hasMore = page.length === PAGE;
+      hasMore = page.length > 0;
       moreError = null;
     } catch (e) {
       if (gen === generation) moreError = loadErrorText(e);

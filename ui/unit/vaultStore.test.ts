@@ -10,6 +10,9 @@ import { strictRequire, unused } from './strictRequire.ts';
 // Execute the actual store methods; the harness supplies only transport and
 // browser globals. State proxies are immaterial to these transition tests.
 class ApiError extends Error { status = 409; }
+/** Toast warnings and localStorage writes the store made (reset per setup). */
+const warned: string[] = [];
+const stored: Array<[string, string]> = [];
 const note = (path: string, raw = `disk-${path}`) => ({raw, meta: {path, hash: raw}, outgoing: []});
 function setup(overrides: Record<string, unknown> = {}) {
   const api = {
@@ -19,6 +22,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     vaultDir: async () => ({entries: []}), vaultTags: async () => [], vaultBacklinks: async () => [],
     ...overrides,
   };
+  warned.length = 0; stored.length = 0;
   const source = readFileSync(new URL('../src/modules/vault/vault.svelte.ts', import.meta.url), 'utf8');
   const context = {
     exports: {} as Record<string, any>, $state: (v: unknown) => v,
@@ -28,8 +32,8 @@ function setup(overrides: Record<string, unknown> = {}) {
       ['/api/client', {ApiError, authedBlobUrl: unused('client.authedBlobUrl')}],
       ['/api/types', unused('/api/types')],
       ['/workspace.svelte', {ws: {current: {id: 'ws'}}}],
-      ['/toast.svelte', {toasts: {error() {}, success() {}, warn() {}}}],
-      ['/storage', {lsGet: () => null, lsSet() {}, lsRemove() {}}],
+      ['/toast.svelte', {toasts: {error() {}, success() {}, warn(t: string) { warned.push(t); }}}],
+      ['/storage', {lsGet: () => null, lsSet(k: string, v: string) { stored.push([k, v]); }, lsRemove() {}}],
       ['/loadError', unused('/loadError')],
       ['/confirm.svelte', unused('/confirm.svelte')],
       ['/poll', unused('/poll')],
@@ -275,4 +279,34 @@ test('own save re-reads the note once when its link set changed', async () => {
   assert.equal(await v.saveNow(), true);
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(reads, 1);
+});
+
+test('S18-20: a poll read issued before an autosave never reverts the editor after it', async () => {
+  const slow = deferred<unknown>();
+  let reads = 0;
+  const v = setup({vaultNote: (_ws: string, _id: number, p: string) => (++reads === 1 ? slow.promise : Promise.resolve(note(p, 'saved text')))});
+  v.dirty = false; v.draft = 'saved text'; v.note = note('a.md', 'pre-save text');
+  const polling = v.refreshOpenNote(); // GET issued while the buffer is clean
+  v.draft = 'saved text'; v.dirty = true;
+  assert.equal(await v.saveNow(), true); // the autosave lands first
+  slow.resolve(note('a.md', 'pre-save text')); await polling; // then the stale GET
+  assert.equal(v.draft, 'saved text', 'editor kept the saved text');
+  assert.equal(v.conflict, false);
+});
+
+test('S18-21: navigation blocked by a conflict says why', async () => {
+  const v = setup(); v.conflict = true;
+  await v.open('b.md');
+  assert.equal(v.notePath, 'a.md');
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /Resolve the conflict on a\.md/);
+});
+
+test('S18-22: agent-staged text is never written as a recovery draft', async () => {
+  const v = setup(); v.dirty = false; v.draft = v.note.raw;
+  v.holdAutosave = true;
+  v.onDraftChange('agent proposal');
+  await new Promise((r) => setTimeout(r, 450)); // past the 400 ms draft debounce
+  assert.ok(!stored.some(([, val]) => val.includes('agent proposal')), JSON.stringify(stored));
+  v.holdAutosave = false;
 });

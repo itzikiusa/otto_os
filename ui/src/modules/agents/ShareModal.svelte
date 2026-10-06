@@ -41,6 +41,9 @@
   // ── minted-link state (shown after POST) ────────────────────────────────────
   let mintedUrl = $state<string | null>(null);
   let mintedToken = $state<string | null>(null);
+  /** Whether another device can open the minted link (false ⇒ loopback-only:
+   *  no Public link domain and no network listener — S20-01). */
+  let mintedRemote = $state(true);
   /** Which share the URL/QR panel shows — revoking ANOTHER link keeps it. */
   let mintedShareId: string | null = null;
   let qrCanvas: HTMLCanvasElement | null = $state(null);
@@ -145,6 +148,8 @@
       );
       mintedUrl = resp.url;
       mintedToken = resp.token;
+      // Older daemons omit the flag — treat absence as reachable (old behaviour).
+      mintedRemote = resp.reachable_remotely !== false;
       mintedShareId = resp.info.id;
       // Optimistically prepend the new share to the list.
       shares = [resp.info, ...shares];
@@ -152,7 +157,9 @@
         'Share link created',
         email
           ? `A 6-digit code was emailed to ${email}. The recipient must enter it before attaching.`
-          : 'Copy the URL or scan the QR code.',
+          : mintedRemote
+            ? 'Copy the URL or scan the QR code.'
+            : 'This link only works on this Mac — see the note below.',
       );
     } catch (e) {
       toastError('Couldn’t create share link', e);
@@ -361,10 +368,28 @@
           </button>
         </div>
 
-        <div class="sm-qr-wrap">
-          <canvas bind:this={qrCanvas} class="sm-qr"></canvas>
-          <p class="sm-qr-hint">Scan to open on your phone</p>
-        </div>
+        {#if mintedRemote}
+          <div class="sm-qr-wrap">
+            <canvas bind:this={qrCanvas} class="sm-qr"></canvas>
+            <p class="sm-qr-hint">Scan to open on your phone</p>
+          </div>
+        {:else}
+          <!-- The origin is loopback (the desktop app always talks to 127.0.0.1):
+               a phone scanning this would open ITSELF. Say so instead of a QR. -->
+          <div class="sm-sender-warn sm-local-warn" role="note" data-testid="share-local-only">
+            <Icon name="warning" size={12} />
+            <span>
+              This link only works on this Mac —
+              <a
+                href="#/settings/sharing"
+                onclick={(e) => { e.preventDefault(); onclose(); router.go('settings/sharing'); }}
+              >
+                set a Public link domain
+              </a>
+              (or turn on the network listener) to share it.
+            </span>
+          </div>
+        {/if}
 
         {#if role === 'viewer'}
           <p class="sm-role-note">
@@ -471,6 +496,10 @@
     color: var(--accent-text);
     text-decoration: underline;
     cursor: pointer;
+  }
+  .sm-local-warn {
+    align-items: flex-start;
+    line-height: 1.45;
   }
   .sm-note {
     font-size: var(--fs-xs);

@@ -440,6 +440,12 @@
         {/if}
       </div>
 
+      {#if previewStoryId && previewStoryId !== product.selectedId}
+        <!-- Publish is disabled for this reason: say so instead of a silent grey button. -->
+        <div class="field-error" role="status" data-testid="publish-story-changed">
+          A different story is open now. Close this dialog and open Publish again to review what will be sent.
+        </div>
+      {/if}
       {#if formError}
         <div class="field-error">
           {formError}

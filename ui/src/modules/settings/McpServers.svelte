@@ -261,8 +261,17 @@
     if (!ok) return;
     movingId = s.id;
     try {
-      await mcpCpApi.cpCreate(wsId, { name: s.name, transport: 'stdio', command: s.command, args: s.args, env: s.env, enabled: true });
-      if (s.enabled) await mcpApi.update(s.id, { enabled: false });
+      const created = await mcpCpApi.cpCreate(wsId, { name: s.name, transport: 'stdio', command: s.command, args: s.args, env: s.env, enabled: true });
+      if (s.enabled) {
+        try {
+          await mcpApi.update(s.id, { enabled: false });
+        } catch (e) {
+          // Never leave the server live in BOTH registries (written to
+          // .mcp.json twice): undo the Control Plane copy, then report.
+          await mcpCpApi.cpDelete(created.id).catch(() => {});
+          throw e;
+        }
+      }
       await load(wsId);
       toasts.success(`${s.name} is now governed`, 'Review its tools on the MCP Control Plane.');
     } catch (e) {

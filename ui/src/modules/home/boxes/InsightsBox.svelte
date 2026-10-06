@@ -12,6 +12,7 @@
   import type { InsightReport } from '../../../lib/api/types';
   import type { HomeBox } from '../home.svelte';
   import { freshness, livePoll, type Poller } from './poll';
+  import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
     box: HomeBox;
@@ -85,9 +86,7 @@
   {#if loading && reports.length === 0}
     <Skeleton rows={3} />
   {:else if error && reports.length === 0}
-    <EmptyState icon="warning" title="Couldn’t load Insights" body={error}>
-      <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
-    </EmptyState>
+    <LoadState what="Insights" error={error} empty onretry={() => poller?.now()} />
   {:else if reports.length === 0}
     <EmptyState icon="gauge" title="No reports yet" body="Turn on daily or weekly reports, or run one now.">
       <button class="btn small" onclick={() => router.go('insights')}>Open Insights</button>

@@ -24,6 +24,10 @@
     children?: Snippet;
   }
   let { label, hint, checked, disabled = false, title, onchange, testid, children }: Props = $props();
+  // The hint is a DESCRIPTION, not part of the name: inside the wrapping
+  // <label> it would otherwise read as one long accessible name.
+  const uid = $props.id();
+  const hasHint = $derived(!!children || !!hint);
 
   async function change(e: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const el = e.currentTarget;
@@ -36,13 +40,21 @@
 </script>
 
 <label class="st" class:disabled {title}>
-  <input type="checkbox" {checked} {disabled} onchange={change} data-testid={testid} />
+  <input
+    type="checkbox"
+    {checked}
+    {disabled}
+    onchange={change}
+    data-testid={testid}
+    aria-labelledby="{uid}-label"
+    aria-describedby={hasHint ? `${uid}-hint` : undefined}
+  />
   <span class="st-text">
-    <span class="st-label">{label}</span>
+    <span class="st-label" id="{uid}-label">{label}</span>
     {#if children}
-      <span class="st-hint">{@render children()}</span>
+      <span class="st-hint" id="{uid}-hint">{@render children()}</span>
     {:else if hint}
-      <span class="st-hint">{hint}</span>
+      <span class="st-hint" id="{uid}-hint">{hint}</span>
     {/if}
   </span>
 </label>

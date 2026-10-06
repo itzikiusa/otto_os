@@ -550,9 +550,11 @@ every member with `viewer`+ on the event's `workspace_id` (root receives all);
 `assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
 `notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
-`mcp_approval_changed`) reach every authenticated client. There are 74
+`mcp_approval_changed`) reach every authenticated client. There are 79
 variants (the sections below cover them; each `## …`/`### …` heading is one
-feature family).
+feature family). `ui/unit/eventContract.test.ts` checks every variant's tag is
+documented here and that its fields match the `OttoEvent` union in
+`ui/src/lib/api/types.ts`.
 
 Session lifecycle (session-family — owner/admin/root, viewer-gated):
 
@@ -1057,7 +1059,7 @@ blind timer.
 - Emitted by the `workgraph_projector` when a Mission Control work item is
   created or its normalized status changes (cost/title-only refreshes stay
   quiet). `kind` is the work kind (`session|swarm|goal_loop|workflow|review|
-  product_story|pr|external_trigger`); `status` is the normalized lifecycle.
+  product_story|pr|external_trigger|otto_run`); `status` is the normalized lifecycle.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Mission Control page re-fetches the workspace summary/list on a matching
   tick instead of polling.
@@ -1753,8 +1755,11 @@ and, if the doc is open in this window and `client_id` is not this window's
 own (the `client_id` the PATCH sent), refetch the doc.
 
 ```json
-{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
+{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"content_hash":"9f2c…","updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
 ```
+
+`content_hash` is the doc's hash after the change: a coalesced autosave keeps
+`rev`, so a window compares the hash (not just `rev`) to know its copy is stale.
 
 `action` ∈ `created` | `updated` (content, metadata or a revision restore) |
 `trashed` | `restored` | `deleted` (permanent). `client_id` is omitted unless

@@ -30,7 +30,10 @@ export function lazyComponent<T extends Component<any>>(loader: () => Promise<{ 
   let mod = $state.raw<T | null>(null);
   let error = $state<string | null>(null);
   let pending: Promise<void> | null = null;
-  function load(): void {
+  /** `silent` (a hover/idle prefetch): a failure is forgotten instead of
+   *  surfacing — the first real open then retries rather than showing an
+   *  error nobody asked to load yet. */
+  function load(silent = false): void {
     if (mod || pending) return;
     pending = loader().then(
       (m) => {
@@ -38,7 +41,7 @@ export function lazyComponent<T extends Component<any>>(loader: () => Promise<{ 
       },
       (e: unknown) => {
         pending = null;
-        error = e instanceof Error ? e.message : String(e);
+        if (!silent) error = e instanceof Error ? e.message : String(e);
       },
     );
   }
@@ -46,13 +49,13 @@ export function lazyComponent<T extends Component<any>>(loader: () => Promise<{ 
     get component() {
       // Starting a load from a template read is safe: the state writes land in a
       // later microtask, never during the render that read it.
-      if (!mod && !pending && error === null) queueMicrotask(load);
+      if (!mod && !pending && error === null) queueMicrotask(() => load());
       return mod;
     },
     get error() {
       return error;
     },
-    prefetch: load,
+    prefetch: () => load(true),
     retry() {
       error = null;
       load();

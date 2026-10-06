@@ -41,6 +41,7 @@
     SchemaNode,
   } from '../../lib/api/types';
   import { extractVars, type SplitMode } from './sql-util';
+  import { splitModeFor } from './sql-dialect';
   import {
     buildTargets,
     clusterLine,
@@ -65,7 +66,8 @@
   const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'];
   const kind = $derived(database.selectedConn?.kind ?? null);
   const isClickhouse = $derived(kind === 'clickhouse');
-  const splitMode = $derived<SplitMode>(kind === 'redis' ? 'line' : 'sql');
+  // Engine lexing (Redis per line, Postgres dollar quotes / no `#` comments).
+  const splitMode = $derived<SplitMode>(splitModeFor(kind));
   /** Same-engine connections — one script, one dialect. */
   const candidates = $derived<Connection[]>(
     database.connections.filter((c) => c.kind === kind && DB_KINDS.includes(c.kind)),
@@ -133,7 +135,7 @@
     untrack(() => {
       const tabVars = database.tab.vars ?? {};
       const out: Record<string, ParamDraft> = {};
-      for (const n of extractVars(statement, database.selectedConn?.kind === 'redis' ? 'line' : 'sql')) {
+      for (const n of extractVars(statement, splitMode)) {
         const v = tabVars[n];
         out[n] = { text: v?.value ?? '', type: v?.type ?? 'string', escape: v?.escape ?? true };
       }

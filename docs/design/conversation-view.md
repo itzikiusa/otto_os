@@ -23,7 +23,7 @@ crate extracted from `otto-usage`**, so cost, usage and the chat agree.
 | Session rows + provider ids + transcript path resolution | `otto-state` sessions, `otto-sessions::lifecycle` | locating the transcript |
 | PTY prompt submission | `SessionManager::submit_text` (`otto-sessions/src/manager.rs`) / `review_session::submit_prompt` — NOT `send_input`, which pastes `text\n` as one burst and never submits | the chat composer + board nudge |
 | Activity trail + `agent_tasks` (TodoWrite) + Claude Stop/PostToolUse hook ingest | `routes/activity.rs`, migration 0016 (`agent_tasks`), `ui/src/lib/stores/activity.svelte.ts`, `panels/ActivityPanel.svelte` | task tracker, live signals |
-| Mission Control surfaces (needs_you / working / …) | `routes/mission.rs`, `agents/MissionControl.svelte` | the board that gets sub-tasks |
+| Mission Control surfaces (needs_you / working / …) | `routes/mission.rs`, `agents/WorkQueue.svelte` | the board that gets sub-tasks |
 | Work graph (`work_items`, `work_artifacts`) | `otto-workgraph`, migration 0083 | artifact registration |
 | Right panel tabs (Git/Files/Activity/Canvas/Info/Browser) | `ui/src/shell/RightPanel.svelte` | new **Tasks** and **Outputs** tabs |
 | Markdown: `marked` + `sanitizeHtml` combined in `ui/src/modules/vault/mdRender.ts` (NOT `lib/md.ts`, which is unsanitized) · sandboxed iframe: `product/MockupViewer.svelte` · diffs: `git/DiffViewer.svelte` (takes `DiffResp`) · windowing: `lib/components/VirtualList.svelte` · per-session persisted keys: `workspace.svelte.ts::winKey` · resizable pane: `shell/RightPanel.svelte:27-44` splitter | rendering |

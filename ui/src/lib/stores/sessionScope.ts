@@ -24,3 +24,10 @@ export function workspaceCommandScope<S extends { id: string; workspace_id: stri
   if (currentId === null) return sessions.slice();
   return sessions.filter((s) => s.workspace_id !== SCRATCH_WORKSPACE_ID || openTabs.includes(s.id));
 }
+
+/** Whether the session verbs that act on the focused pane's session (⌘W
+ *  Close Tab, Session ▸ End Session) apply on `module`. Only the Agents page
+ *  shows that session; anywhere else they would end a hidden session. */
+export function sessionVerbsApply(module: string): boolean {
+  return module === 'agents';
+}

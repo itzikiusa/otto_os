@@ -3582,6 +3582,27 @@ mod tests {
         assert!(ensure_widget_statement(Engine::Mysql, "SHOW TABLES").is_ok());
     }
 
+    /// S16-08: a dashboard widget re-runs unattended on every refresh, so its
+    /// request is read-only — and the read-only gate refuses a saved write.
+    #[test]
+    fn widget_request_is_read_only_and_refuses_writes() {
+        let req = widget_request("UPDATE counters SET n = n + 1".into());
+        assert!(req.read_only);
+        assert_eq!(req.max_rows, Some(5000));
+        for (engine, write) in [
+            (Engine::Mysql, "UPDATE counters SET n = n + 1"),
+            (Engine::Postgres, "DELETE FROM sessions WHERE id = 1"),
+            (Engine::Redis, "DEL k"),
+        ] {
+            let err = ensure_read_only_request(engine, write).unwrap_err();
+            assert!(
+                err.to_string().contains(READ_ONLY_PREFIX),
+                "{engine:?} {write}: {err}"
+            );
+        }
+        ensure_read_only_request(Engine::Postgres, "SELECT count(*) FROM orders").unwrap();
+    }
+
     /// DB2-07: the reaper's sweep drops expired schema graphs without anyone
     /// requesting a diagram, and keeps fresh ones.
     #[test]

@@ -12,6 +12,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     repoId: string;
@@ -106,11 +107,7 @@
     {#if loading}
       <Skeleton rows={2} height={38} />
     {:else if loadFailed}
-      <div class="rp-err" role="alert">
-        <Icon name="warning" size={12} />
-        <span>Couldn’t load remotes: {error}</span>
-        <button class="btn small" onclick={() => loadRev++}>Retry</button>
-      </div>
+      <LoadState variant="compact" what="remotes" error={error || 'No details were reported.'} empty onretry={() => loadRev++} />
     {:else if remotes.length === 0}
       <p class="rp-empty">This repository has no remotes. Add one to fetch, pull or push.</p>
     {:else}

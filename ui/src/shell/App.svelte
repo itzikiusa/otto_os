@@ -77,7 +77,7 @@
   // Old bookmarks lead to the workspace's existing context editor.
   $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   import { git } from '../lib/stores/git.svelte';
-  import { auth } from '../lib/stores/auth.svelte';
+  import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
   import { dismissTopDialog, installKeyMap, modalKeyVerdict, routeFind, type KeyAction } from '../lib/keys';
   import { attachMenuBridge, attachCloseHandler, handleMenu } from '../lib/menu';
@@ -210,25 +210,17 @@
   });
 
   // ---- impersonation countdown ---
-  // The admin token is saved in localStorage with a timestamp so we can show a
-  // 30-minute countdown from when the impersonation started. If no timestamp is
-  // stored we treat the start as "now" (conservative: 30 min from this load).
-  const IMP_START_KEY = 'otto_imp_start_ms';
+  // Counts down the 30-minute impersonation token from when THIS tab started
+  // it (kept in sessionStorage next to the admin token — see
+  // `impersonationStartedMs`). Unknown start (an older build's session) →
+  // the conservative "30 min from this load".
   const IMP_DURATION_MS = 30 * 60 * 1000;
-
-  $effect(() => {
-    if (auth.isImpersonating && !localStorage.getItem(IMP_START_KEY)) {
-      localStorage.setItem(IMP_START_KEY, String(Date.now()));
-    }
-    if (!auth.isImpersonating) {
-      localStorage.removeItem(IMP_START_KEY);
-    }
-  });
+  const impLoadedAt = Date.now();
 
   const impSecsLeft = $derived.by(() => {
     if (!auth.isImpersonating) return 0;
     void now(); // reactive tick
-    const startMs = parseInt(localStorage.getItem(IMP_START_KEY) ?? '0', 10) || Date.now();
+    const startMs = impersonationStartedMs() ?? impLoadedAt;
     const elapsed = Date.now() - startMs;
     return Math.max(0, Math.ceil((IMP_DURATION_MS - elapsed) / 1000));
   });
@@ -724,7 +716,7 @@
     const isAgent = active.kind === 'agent';
     const cmds = [
       { id: 'focus.restart', title: 'Restart focused session', group: 'Session', keywords: 'reload reboot relaunch active current', run: () => void ws.requestRestart(active.id) },
-      { id: 'focus.archive', title: 'Archive focused session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
+      { id: 'focus.archive', title: 'Archive focused session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.requestArchive(active.id).catch((e: unknown) => toastError('Couldn’t archive the session', e)) },
       { id: 'focus.rename', title: 'Rename focused session…', group: 'Session', keywords: 'title name active current', run: () => void renameActiveSession() },
       ...(isAgent
         ? [{ id: 'focus.handover', title: 'Hand over focused session…', group: 'Session', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]

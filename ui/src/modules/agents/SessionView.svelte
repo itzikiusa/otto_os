@@ -380,6 +380,8 @@
 
   async function saveDirs(alsoRestart: boolean): Promise<void> {
     if (dirsBusy) return;
+    // Same working-guard as every other restart path (ws.requestRestart).
+    if (alsoRestart && !(await ws.confirmRestart(sessionId))) return;
     dirsBusy = true;
     try {
       const dirs = collectDirs();
@@ -448,7 +450,7 @@
 
   async function archive(): Promise<void> {
     try {
-      await ws.archiveSession(sessionId);
+      await ws.requestArchive(sessionId);
     } catch (e) {
       toastError('Couldn’t archive the session', e);
     }

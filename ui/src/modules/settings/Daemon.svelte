@@ -121,7 +121,7 @@
       !savedListener.enabled &&
       !(await confirmer.ask(
         `After the daemon restarts, Otto's login page is served on https://0.0.0.0:${port} — anyone on your network can reach it. Only do this on a trusted network.`,
-        { title: 'Expose Otto on your network?', confirmLabel: 'Enable listener', danger: false },
+        { title: 'Expose Otto on your network?', confirmLabel: 'Enable listener', danger: true },
       ))
     )
       return;

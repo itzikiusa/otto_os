@@ -19,6 +19,9 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { api } from '../../lib/api/client';
+  import type { FsBrowse } from '../../lib/api/types';
+  import { browsePath, checkFolder } from '../../lib/folderCheck';
   import { agentProviders as registryAgentProviders, providerReadiness } from '../../lib/providers';
 
   interface Props {
@@ -57,7 +60,10 @@
   // --- Step 2: workspace -----------------------------------------------------
   const hasWorkspace = $derived(ws.workspaces.length > 0 && ws.current !== null);
   let wsName = $state('');
-  let wsPath = $state('~/');
+  // Empty (not `~/`): the home folder must not be one click from becoming the
+  // workspace root. Typed paths are checked like onboarding's (folderCheck).
+  let wsPath = $state('');
+  let pathError = $state('');
   let wsBusy = $state(false);
   let pickerOpen = $state(false);
   // Suggest a name from the trailing path segment until the user types one.
@@ -72,7 +78,14 @@
   async function createWorkspace(): Promise<void> {
     if (!canCreateWs) return;
     wsBusy = true;
+    pathError = '';
     try {
+      const check = await checkFolder(wsPath, (p) => api.get<FsBrowse>(browsePath(p)));
+      if (!check.ok) {
+        pathError = check.message;
+        return;
+      }
+      wsPath = check.path;
       const w = await ws.createWorkspace(wsName, wsPath);
       toasts.success('Workspace created', w.name);
     } catch (e) {
@@ -273,9 +286,20 @@
           <div class="ws-form">
             <input dir="auto" class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
             <div class="path-row">
-              <input class="input mono path-input" aria-label="Workspace folder" dir="ltr" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
+              <input
+                class="input mono path-input"
+                aria-label="Workspace folder"
+                dir="ltr"
+                bind:value={wsPath}
+                oninput={() => (pathError = '')}
+                aria-invalid={pathError !== ''}
+                aria-describedby="frc-path-err"
+                spellcheck="false"
+                placeholder="~/code/my-project"
+              />
               <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
             </div>
+            <span id="frc-path-err" class="path-err" role="status">{pathError}</span>
             <button class="btn small primary ws-create" disabled={!canCreateWs} onclick={createWorkspace}>
               {wsBusy ? 'Creating…' : 'Create workspace'}
             </button>
@@ -338,9 +362,10 @@
 {#if pickerOpen}
   <FolderPicker
     title="Choose project directory"
-    start={wsPath}
+    start={wsPath || '~'}
     onpick={(p) => {
       wsPath = p;
+      pathError = '';
       pickerOpen = false;
     }}
     onclose={() => (pickerOpen = false)}
@@ -559,5 +584,12 @@
     .coach-head {
       padding-inline-end: 20px;
     }
+  }
+  .path-err {
+    font-size: var(--fs-xs);
+    color: var(--danger);
+  }
+  .path-err:empty {
+    display: none;
   }
 </style>
