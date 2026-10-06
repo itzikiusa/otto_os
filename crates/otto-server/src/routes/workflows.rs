@@ -1898,9 +1898,23 @@ mod tests {
             builder = builder.header("content-type", "application/json");
         }
         let mut request = builder.body(request_body).unwrap();
-        request.extensions_mut().insert(otto_core::auth::AuthUser(
-            crate::routes::browser::tests::root_user(),
-        ));
+        let root = crate::routes::browser::tests::root_user();
+        request
+            .extensions_mut()
+            .insert(otto_core::auth::AuthUser(root.clone()));
+        // A person's own credential: graph writes need one (S3-301).
+        request
+            .extensions_mut()
+            .insert(otto_core::auth::AuthContext {
+                real_user: root.clone(),
+                effective_user: root,
+                scope: None,
+                mcp_only: false,
+                mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
+                managed_session_id: None,
+            });
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
