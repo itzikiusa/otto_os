@@ -312,16 +312,47 @@ pub async fn with_request_credential<F: Future>(cred: RequestCredential, fut: F)
     REQUEST_CREDENTIAL.scope(cred, fut).await
 }
 
-/// The current request's credential facts. Outside a request (background
-/// jobs, unit tests that call a handler directly) this is the default — a
-/// person, nothing withheld — so only the guarded HTTP path is affected.
+/// The credential facts assumed OUTSIDE any request scope — daemon-internal
+/// work (schedulers, recovery, unit harnesses) and, crucially, any task a
+/// handler `tokio::spawn`ed without [`carry_request_credential`] (task-locals
+/// do not cross a spawn). It is NOT a person: consent signals — a
+/// `confirm_write` / `confirm` body flag, running in-work-tree git hooks —
+/// need a positively identified person's credential, so a spawned task fails
+/// CLOSED on them. Root authority is not withheld: daemon-internal jobs act as
+/// their owner and every root-gated route is already refused at the request
+/// boundary, before anything is spawned.
+pub const OUTSIDE_REQUEST: RequestCredential = RequestCredential {
+    agent: true,
+    root_withheld: false,
+};
+
+/// The current request's credential facts, or [`OUTSIDE_REQUEST`] when no
+/// request scope is active.
 pub fn request_credential() -> RequestCredential {
-    REQUEST_CREDENTIAL.try_with(|c| *c).unwrap_or_default()
+    REQUEST_CREDENTIAL
+        .try_with(|c| *c)
+        .unwrap_or(OUTSIDE_REQUEST)
 }
 
-/// `true` when the current request carries a non-human credential.
+/// Wrap `fut` so it runs with the CURRENT request's credential — use it on
+/// every `tokio::spawn` from a handler whose task re-checks a consent or root
+/// gate. Outside a request scope it is a no-op wrapper ([`OUTSIDE_REQUEST`]).
+pub fn carry_request_credential<F: Future>(fut: F) -> impl Future<Output = F::Output> {
+    with_request_credential(request_credential(), fut)
+}
+
+/// `true` when the current request carries a non-human credential — or there
+/// is no request at all (fails closed, see [`OUTSIDE_REQUEST`]).
 pub fn request_is_agent() -> bool {
     request_credential().agent
+}
+
+/// `true` only inside a request carrying a PERSON's own credential (not an
+/// agent session's API token or MCP credential, not an MCP-only or scoped
+/// token). Gates "a person deliberately did this" behaviour such as running
+/// in-work-tree git hooks (S11-304).
+pub fn request_is_person() -> bool {
+    !request_is_agent()
 }
 
 /// Whether `user` may exercise ROOT authority on the current request:
@@ -361,6 +392,20 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         assert!(root_authority(&root), "outside a request: unchanged");
+        assert!(request_is_agent(), "outside a request: not a person");
+        assert!(!request_is_person());
+        let person = RequestCredential::default();
+        assert!(with_request_credential(person, async { request_is_person() }).await);
+        // A spawned task loses the scope unless the credential is carried.
+        let spawned = with_request_credential(person, async {
+            let lost = tokio::spawn(async { request_is_person() }).await.unwrap();
+            let carried = tokio::spawn(carry_request_credential(async { request_is_person() }))
+                .await
+                .unwrap();
+            (lost, carried)
+        })
+        .await;
+        assert_eq!(spawned, (false, true), "spawned tasks fail closed");
         let agent_write = RequestCredential {
             agent: true,
             root_withheld: true,

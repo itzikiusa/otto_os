@@ -87,10 +87,12 @@ where
 }
 
 /// The [`otto_core::auth::RequestCredential`] for `req` (its `AuthContext`,
-/// method and matched template). No `AuthContext` ⇒ the default (a person).
+/// method and matched template). No `AuthContext` ⇒ not a positively
+/// identified person ([`otto_core::auth::OUTSIDE_REQUEST`]): consent signals
+/// fail closed.
 pub fn request_credential_for(req: &Request) -> otto_core::auth::RequestCredential {
     let Some(ctx) = req.extensions().get::<AuthContext>() else {
-        return Default::default();
+        return otto_core::auth::OUTSIDE_REQUEST;
     };
     let agent = !crate::ui_bridge::is_human(ctx);
     let method = req.method();

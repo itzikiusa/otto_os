@@ -43,7 +43,8 @@ pub(crate) const AGENT_CONFIRM_REFUSED: &str =
 /// `confirm_write` as a PERSON asserted it: the flag is a body field the
 /// client sets, so a non-human credential (an agent session's own token, a
 /// session MCP credential) never counts as having confirmed (S6-304). Outside
-/// an HTTP request (no request credential) it is the flag itself.
+/// an HTTP request (no request credential — e.g. a spawned task that did not
+/// carry it) nobody confirmed: it fails closed.
 pub(crate) fn person_confirmed(confirm_write: bool) -> bool {
     confirm_write && !otto_core::auth::request_is_agent()
 }
@@ -55,8 +56,8 @@ mod person_confirm_tests {
     #[tokio::test]
     async fn an_agent_credential_never_confirms_a_guarded_write() {
         assert!(
-            super::person_confirmed(true),
-            "a person (or no request) confirms"
+            !super::person_confirmed(true),
+            "no request credential: nobody confirmed (fails closed)"
         );
         assert!(!super::person_confirmed(false));
         let agent = RequestCredential {

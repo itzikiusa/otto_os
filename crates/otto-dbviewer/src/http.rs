@@ -781,8 +781,7 @@ async fn export_query<S: DbViewerCtx>(
     let writer_tx = tx.clone();
     // Carry the request credential into the task: the export / import
     // re-checks `confirm_write` there (S6-304).
-    let cred = otto_core::auth::request_credential();
-    tokio::spawn(otto_core::auth::with_request_credential(cred, async move {
+    tokio::spawn(otto_core::auth::carry_request_credential(async move {
         let w: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::with_capacity(
             64 * 1024,
             ChannelWriter { tx: writer_tx },
@@ -940,8 +939,7 @@ async fn export_to_path<S: DbViewerCtx>(
 
     // Carry the request credential into the task: the export / import
     // re-checks `confirm_write` there (S6-304).
-    let cred = otto_core::auth::request_credential();
-    tokio::spawn(otto_core::auth::with_request_credential(cred, async move {
+    tokio::spawn(otto_core::auth::carry_request_credential(async move {
         let export = db.export_to_path(
             &conn_id,
             &uid,
@@ -1062,8 +1060,7 @@ async fn import_query<S: DbViewerCtx>(
         tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(4);
     // Carry the request credential into the task: the export / import
     // re-checks `confirm_write` there (S6-304).
-    let cred = otto_core::auth::request_credential();
-    tokio::spawn(otto_core::auth::with_request_credential(cred, async move {
+    tokio::spawn(otto_core::auth::carry_request_credential(async move {
         let line = match db
             .import_from_path(&conn_id, &uid, &path, format, &table, batch_size, confirm)
             .await
