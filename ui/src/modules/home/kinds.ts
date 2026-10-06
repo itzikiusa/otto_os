@@ -95,7 +95,7 @@ export const HOME_KINDS: HomeBoxKindDef[] = [
   {
     kind: 'classrooms',
     label: 'Classrooms',
-    blurb: 'A live 3D campus: workspaces are classrooms, sessions are students at their desks.',
+    blurb: 'Otto School in 3D: walk the corridor into each workspace’s classroom — every session is a kid at a PC with its live screen.',
     icon: 'people',
     feature: 'agents',
     w: 8,

@@ -1,23 +1,22 @@
 <script lang="ts">
+  // Otto School — the Home "Classrooms" box: a real 3D school of your agent
+  // sessions. You start in the corridor (one door per workspace, with a live
+  // sign: who needs you, who's working); walk in and every session is a kid at
+  // a desk (one character per provider) whose PC shows that session's live
+  // terminal, the robot headmaster patrols and checks on them, idle kids
+  // wander around, archived sessions sit on the detention bench.
+  //
+  // Data: the cross-workspace `GET /sessions?archived=false` (incl. engine
+  // rows) + the last archived ones for the bench, refreshed on session events
+  // and overlaid with the workspace store's live rows; status / needs-you from
+  // the store's event-fed maps. Live screens: `GET /sessions/{id}/screen`, for
+  // the kids the camera can see in the room you're in (school/screens.ts).
+  //
+  // The canvas is never the only path: the same kids are a list of real
+  // buttons (List view, no-WebGL, and screen readers / keyboard in 3D view),
+  // and the selected kid's card carries every action as a button.
+  import { onDestroy, untrack } from 'svelte';
   import { rowMenu } from '../../../lib/rowMenu';
-  // Classrooms box: a 3D live view of every session — workspaces are
-  // classrooms, sessions are students at desks, and the user is the headmaster
-  // standing at the door of the current classroom. Students type while their
-  // agent works, raise a hand when it needs you, sit still when idle and fade
-  // to a ghost at an empty desk when suspended/ended; engine sessions
-  // (workflow / swarm / review…) sit in a separate back row.
-  //
-  // Data: the cross-workspace `GET /sessions?archived=false` (#17b — the same
-  // feed as the all-workspaces sidebar, but with background rows), refreshed on
-  // session events, overlaid with the workspace store's live rows; status and
-  // "needs you" come from the store's event-fed maps. three.js is lazy-loaded
-  // by classrooms/scene.ts; the pure mapping lives in classrooms/model.ts.
-  //
-  // The canvas is never the only path: the same students are a list of real
-  // buttons — visible in List view (and whenever WebGL is unavailable), and
-  // screen-reader/keyboard reachable in 3D view, where focusing a row
-  // highlights that student and shows its tooltip.
-  import { onDestroy, tick as svelteTick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -32,17 +31,17 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import { loadErrorText } from '../../../lib/loadError';
-  import { readTokenColors } from '../../../lib/cssColor';
   import { now } from '../../../lib/stores/now.svelte';
   import { plural } from '../../../lib/plural';
   import { relTime } from '../../mission-control/lib';
   import { SCRATCH_ID } from '../../../lib/stores/sessionBuckets';
-  import type { Session } from '../../../lib/api/types';
+  import type { Session, SessionScreen } from '../../../lib/api/types';
   import { home, type HomeBox } from '../home.svelte';
   import { livePoll, type Poller } from './poll';
-  import { buildClassrooms, providerLabel, roomSummary, studentAriaLabel, tooltipLines, type Student } from '../classrooms/model';
-  import { kickOut, sendToDetention } from '../classrooms/actions';
-  import { mountClassroomScene, SCENE_TOKENS, webglAvailable, type SceneHandle } from '../classrooms/scene';
+  import { buildSchool, kidAriaLabel, kidLines, providerLabel, roomSummary, type Kid } from '../school/model';
+  import { kickOut, release, sendToDetention } from '../school/actions';
+  import { pollScreens, type ScreenFeed } from '../school/screens';
+  import { mountSchool, webglAvailable, type SchoolHandle, type SchoolPick, type SchoolView } from '../school/scene';
 
   interface Props {
     box: HomeBox;
@@ -51,27 +50,29 @@
     tick: number;
     active?: boolean;
   }
-  let { box, viewId, zoomed: _zoomed, tick, active: onScreen = true }: Props = $props();
+  let { box, viewId, zoomed, tick, active: onScreen = true }: Props = $props();
 
   const reducedMotion = (): boolean =>
     typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ── Data ─────────────────────────────────────────────────────────────────
   let fetched = $state.raw<Session[]>([]);
+  let archivedRows = $state.raw<Session[]>([]);
   let loaded = $state(false);
   let error = $state('');
-  /** Kicked out here: hidden at once, before the next refetch confirms it. */
+  /** Kicked out here: hidden at once, before the refetch confirms it. */
   let removed = $state.raw<Set<string>>(new Set());
-  /** Rows whose walk-out is playing, held in the model until it finishes
-   *  (S14-304): the delete's `session_removed` refetch lands ~350 ms into the
-   *  1.4 s walk, and a student the model drops is settled — vanished — at
-   *  once, so the walk-out almost never completed. */
-  let walking = $state.raw<Map<string, Session>>(new Map());
+  /** Rows held in the model while their walk (out / to the bench) plays. */
+  let held = $state.raw<Map<string, Session>>(new Map());
 
   async function load(signal?: AbortSignal): Promise<boolean> {
     try {
-      const rows = await api.bg.get<Session[]>('/sessions?archived=false&limit=1000', signal);
+      const [rows, arch] = await Promise.all([
+        api.bg.get<Session[]>('/sessions?archived=false&limit=1000', signal),
+        api.bg.get<Session[]>('/sessions?archived=true&limit=60', signal).catch(() => [] as Session[]),
+      ]);
       fetched = rows.filter(visibleOnThisDevice);
+      archivedRows = arch.filter(visibleOnThisDevice);
       error = '';
       return true;
     } catch (e) {
@@ -100,26 +101,27 @@
   const sessions = $derived.by(() => {
     const m = new Map<string, Session>();
     for (const s of fetched) m.set(s.id, s);
-    // The store's rows are event-patched (titles, archive state) — fresher.
     for (const s of ws.sessions) m.set(s.id, s);
     for (const s of ws.otherWsSessions) m.set(s.id, s);
-    for (const [id, row] of walking) if (!m.has(id)) m.set(id, row);
+    for (const [id, row] of held) m.set(id, { ...row, archived: false });
     for (const id of removed) m.delete(id);
     return [...m.values()];
   });
+  const archived = $derived(archivedRows.filter((s) => !removed.has(s.id) && !held.has(s.id) && !sessions.some((x) => x.id === s.id && !x.archived)));
 
-  const model = $derived(
-    buildClassrooms({
+  const school = $derived(
+    buildSchool({
       workspaces: ws.workspaces,
       currentId: ws.currentId,
       sessions,
+      archived,
       statusOf: (id) => ws.statusMap[id],
       needsYou: (id) => ws.needsYou[id] === true,
       stale: events.state !== 'connected',
       canEditAgents: auth.can('agents', 'edit'),
     }),
   );
-  const byId = $derived(new Map(model.students.map((s) => [s.id, s] as const)));
+  const byId = $derived(new Map(school.kids.map((k) => [k.id, k] as const)));
 
   // ── View mode ────────────────────────────────────────────────────────────
   const gl = typeof document !== 'undefined' && webglAvailable();
@@ -131,375 +133,557 @@
   // ── Scene ────────────────────────────────────────────────────────────────
   let host = $state<HTMLElement | null>(null);
   let stage = $state<HTMLElement | null>(null);
-  let handle = $state<SceneHandle | null>(null);
+  let handle = $state<SchoolHandle | null>(null);
   let sceneError = $state('');
   let sceneAttempt = $state(0);
+  let view = $state<SchoolView>({ kind: 'corridor' });
+  /** Kid the camera / card is on. */
+  let selected = $state<string | null>(null);
+  let hover = $state<SchoolPick | null>(null);
+  const dark = $derived(ui.resolvedScheme === 'dark');
 
   $effect(() => {
     const el = host;
     void sceneAttempt;
     if (!el || mode !== '3d') return;
     let dead = false;
-    let h: SceneHandle | null = null;
+    let h: SchoolHandle | null = null;
     sceneError = '';
-    // scene.ts lazy-loads three.js itself (the box chunk stays small).
-    mountClassroomScene(el, { reducedMotion: reducedMotion(), label: 'Classrooms: workspaces as rooms, sessions as students' })
-      .then(
-        (x) => {
-          if (dead) {
-            x.destroy();
-            return;
-          }
-          h = x;
-          x.onFrame(placeOverlay);
-          x.onContextLost(() => {
-            if (dead || h !== x) return;
-            // A blank stage with no way out otherwise: drop the scene and
-            // show the error + Retry (which remounts a fresh context).
-            h = null;
-            handle = null;
-            x.destroy();
-            sceneError = 'The 3D view lost its graphics context (too many 3D views open at once).';
-          });
-          x.setColors(readTokenColors(SCENE_TOKENS));
-          x.setActive(untrack(() => onScreen));
-          handle = x;
-        },
-        (e: unknown) => {
-          if (!dead) sceneError = loadErrorText(e);
-        },
-      );
+    mountSchool(el, { reducedMotion: reducedMotion(), label: 'Otto School: workspaces are classrooms, agent sessions are the kids', dark: untrack(() => dark) }).then(
+      (x) => {
+        if (dead) {
+          x.destroy();
+          return;
+        }
+        h = x;
+        x.onFrame(placeOverlay);
+        x.onView((v) => {
+          view = v;
+          if (v.kind === 'corridor') selected = null;
+        });
+        x.onContextLost(() => {
+          if (dead || h !== x) return;
+          h = null;
+          handle = null;
+          x.destroy();
+          sceneError = 'The 3D school lost its graphics context (too many 3D views open at once).';
+        });
+        x.setActive(untrack(() => onScreen));
+        handle = x;
+        // The room you were last in (or the current workspace's) opens
+        // straight away once the data is in.
+        const last = untrack(() => box.config.room as string | undefined);
+        if (last) pendingRoom = last;
+      },
+      (e: unknown) => {
+        if (!dead) sceneError = loadErrorText(e);
+      },
+    );
     return () => {
       dead = true;
       h?.destroy();
       handle = null;
     };
   });
-  // Push every model change (and the model a fresh handle starts from).
+  let pendingRoom: string | null = null;
   $effect(() => {
     const h = handle;
-    const m = model;
-    h?.update(m);
+    const s = school;
+    if (!h) return;
+    h.update(s);
+    if (pendingRoom && s.rooms.some((r) => r.id === pendingRoom)) {
+      const id = pendingRoom;
+      pendingRoom = null;
+      void h.enterRoom(id);
+    }
   });
   $effect(() => {
     handle?.setActive(onScreen);
   });
-  // Theme / scheme / accent changes repaint from the resolved tokens.
   $effect(() => {
-    const h = handle;
-    if (!h) return;
-    const mo = new MutationObserver(() => h.setColors(readTokenColors(SCENE_TOKENS)));
-    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-scheme', 'style', 'class'] });
-    return () => mo.disconnect();
+    handle?.setTheme(dark);
+  });
+  $effect(() => {
+    handle?.setSelected(selected);
+  });
+  $effect(() => {
+    handle?.setHover(hover);
+  });
+  // Remember the room you're in for the next visit.
+  $effect(() => {
+    const v = view;
+    const room = v.kind === 'corridor' ? null : v.roomId;
+    if ((untrack(() => box.config.room) ?? null) !== room) untrack(() => home.updateBoxConfig(viewId, box.id, { room }));
+  });
+  // A kid that left takes the card with it.
+  $effect(() => {
+    if (selected && !byId.has(selected) && !held.has(selected)) selected = null;
+  });
+  // e2e: the stage carries the handle (read-only inspection in Playwright).
+  $effect(() => {
+    if (stage) (stage as unknown as { __ottoSchool?: SchoolHandle | null }).__ottoSchool = handle;
   });
 
-  // ── Overlay labels (HTML, so text stays crisp and ≥ 11 px) ───────────────
-  const roomEls = new Map<string, HTMLElement>();
-  const nameEls = new Map<string, HTMLElement>();
-  let youEl = $state<HTMLElement | null>(null);
-  function roomLabel(node: HTMLElement, id: string) {
-    roomEls.set(id, node);
-    queueMicrotask(() => handle?.redraw());
-    return { destroy: () => roomEls.delete(id) };
-  }
-  function nameLabel(node: HTMLElement, id: string) {
-    nameEls.set(id, node);
-    queueMicrotask(() => handle?.redraw());
-    return { destroy: () => nameEls.delete(id) };
-  }
-  /** Students that carry a floating provider tag: all of them on a small
-   *  campus, the current room's on a big one (labels would pile up). */
-  const tagged = $derived.by(() => {
-    if (model.total <= 60) return model.students;
-    const cur = model.rooms.find((r) => r.current) ?? model.rooms[0];
-    return cur ? [...cur.students, ...cur.backRow].slice(0, 40) : [];
+  const openRoomModel = $derived.by(() => {
+    const v = view;
+    return v.kind === 'corridor' ? null : (school.rooms.find((r) => r.id === v.roomId) ?? null);
   });
-  function place(el: HTMLElement | null | undefined, p: { x: number; y: number; visible: boolean } | null, origin: DOMRect): void {
+
+  // ── Live screens ─────────────────────────────────────────────────────────
+  const feeds = new Map<string, ScreenFeed>();
+  function pushScreen(k: Kid): void {
+    handle?.setScreen(k.id, { title: k.title, provider: k.provider, character: k.character, pose: k.pose, feed: feeds.get(k.id) ?? null });
+  }
+  $effect(() => {
+    const r = openRoomModel;
+    if (!handle || !r) return;
+    for (const k of r.kids) pushScreen(k);
+  });
+  $effect(() => {
+    const h = handle;
+    if (!h || !openRoomModel || !onScreen) return;
+    const p = pollScreens({
+      wanted: () =>
+        h
+          .visibleScreens()
+          .filter((id) => {
+            const k = byId.get(id);
+            return !!k && k.pose !== 'away';
+          }),
+      fetch: async (id, signal) => {
+        const r = await api.bg.get<SessionScreen>(`/sessions/${encodeURIComponent(id)}/screen`, signal);
+        return { live: r.live, lines: r.lines };
+      },
+      onFeed: (id, f) => {
+        feeds.set(id, f);
+        const k = byId.get(id);
+        if (k) pushScreen(k);
+      },
+    });
+    return () => p.stop();
+  });
+
+  // ── Overlay (HTML: crisp text, ≥ 11 px) ──────────────────────────────────
+  const bubbleEls = new Map<string, HTMLElement>();
+  let tagEl = $state<HTMLElement | null>(null);
+  let cardEl = $state<HTMLElement | null>(null);
+  function bubble(node: HTMLElement, id: string) {
+    bubbleEls.set(id, node);
+    queueMicrotask(placeOverlay);
+    return { destroy: () => bubbleEls.delete(id) };
+  }
+  const needsKids = $derived(openRoomModel ? openRoomModel.kids.filter((k) => k.pose === 'needs-you') : []);
+  const hoverKid = $derived(hover?.kind === 'kid' && hover.id !== selected ? (byId.get(hover.id) ?? null) : null);
+  const hoverRoom = $derived(hover?.kind === 'door' && view.kind === 'corridor' ? (school.rooms.find((r) => r.id === hover!.id) ?? null) : null);
+  const selKid = $derived(selected ? (byId.get(selected) ?? null) : null);
+
+  function place(el: HTMLElement | null | undefined, p: { x: number; y: number; visible: boolean } | null, origin: DOMRect, below = false): void {
     if (!el) return;
     if (!p || !p.visible) {
       el.style.visibility = 'hidden';
       return;
     }
     el.style.visibility = 'visible';
-    el.style.transform = `translate(${Math.round(p.x - origin.left)}px, ${Math.round(p.y - origin.top)}px) translate(-50%, -100%)`;
+    el.style.transform = `translate(${Math.round(p.x - origin.left)}px, ${Math.round(p.y - origin.top)}px) translate(-50%, ${below ? '0' : '-100%'})`;
   }
   function placeOverlay(): void {
     const h = handle;
     if (!h || !stage) return;
     const origin = stage.getBoundingClientRect();
-    for (const [id, el] of roomEls) place(el, h.projectRoom(id), origin);
-    for (const [id, el] of nameEls) place(el, h.projectStudent(id), origin);
-    place(youEl, h.projectHeadmaster(), origin);
-    positionTip();
+    for (const [id, el] of bubbleEls) place(el, h.project({ kind: 'kid', id }), origin);
+    if (hover) place(tagEl, h.project(hover), origin);
+    else if (tagEl) tagEl.style.visibility = 'hidden';
   }
 
-  // ── Tooltip ──────────────────────────────────────────────────────────────
-  let tip = $state<{ id: string; pinned: boolean } | null>(null);
-  let tipEl = $state<HTMLElement | null>(null);
-  let focusId = $state<string | null>(null);
-  let hideTimer: ReturnType<typeof setTimeout> | null = null;
-  const tipStudent = $derived(tip ? (byId.get(tip.id) ?? null) : null);
-  const tipText = $derived(tipStudent ? tooltipLines(tipStudent, now() ? relTime(tipStudent.lastActiveAt) : '') : null);
-
-  function cancelHide(): void {
-    if (hideTimer) clearTimeout(hideTimer);
-    hideTimer = null;
-  }
-  function scheduleHide(): void {
-    cancelHide();
-    hideTimer = setTimeout(() => {
-      if (!tip?.pinned) tip = null;
-    }, 250);
-  }
-  function showTip(id: string, pinned = false): void {
-    cancelHide();
-    tip = { id, pinned };
-  }
-  const tipId = $derived(`classrooms-tip-${box.id}`);
-  /** Keyboard focus on a row's control (either button): highlight that
-   *  student and, in 3D view, show its card — the visible focus indicator
-   *  while the list itself is visually hidden. */
-  function focusStudent(id: string): void {
-    focusId = id;
-    if (mode === '3d') showTip(id);
-  }
-  function blurStudent(id: string): void {
-    if (focusId === id) focusId = null;
-    if (mode === '3d') scheduleHide();
-  }
-  function closeTip(): void {
-    cancelHide();
-    tip = null;
-  }
-  $effect(() => {
-    handle?.setHighlight(tip?.id ?? focusId);
-  });
-  // A student that left (kicked out, archived) takes its tooltip with it.
-  $effect(() => {
-    if (tip && !byId.has(tip.id)) tip = null;
-  });
-  $effect(() => {
-    void tip;
-    void tipEl;
-    void svelteTick().then(positionTip);
-  });
-
-  /** Fixed-position tooltip anchored above the student, CLAMPED into the
-   *  viewport (AGENTS.md floating-UI rule) — never flipped without a floor. */
-  function positionTip(): void {
-    const el = tipEl;
-    if (!el || !tip) return;
-    let ax: number;
-    let ay: number;
-    let below = 0;
-    const p = mode === '3d' ? handle?.projectStudent(tip.id) : null;
-    if (p && p.visible) {
-      ax = p.x;
-      ay = p.y;
-    } else {
-      // List view / off-camera: anchor to the student's row.
-      const row = listEl?.querySelector<HTMLElement>(`[data-student-id="${CSS.escape(tip.id)}"]`);
-      const r = row?.getBoundingClientRect() ?? stage?.getBoundingClientRect();
-      if (!r) return;
-      ax = r.left + Math.min(r.width / 2, 160);
-      ay = r.top;
-      below = r.height;
-    }
-    const m = 8;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let x = ax - w / 2;
-    let y = ay - h - 10;
-    if (y < m) y = ay + below + 10;
-    x = Math.min(Math.max(m, x), Math.max(m, vw - w - m));
-    y = Math.min(Math.max(m, y), Math.max(m, vh - h - m));
-    el.style.left = `${Math.round(x)}px`;
-    el.style.top = `${Math.round(y)}px`;
-  }
-
-  // ── Pointer on the canvas ────────────────────────────────────────────────
-  let down: { x: number; y: number } | null = null;
-  function onPointerMove(e: PointerEvent): void {
-    if (!handle || e.pointerType === 'touch' || down) return;
-    const id = handle.pick(e.clientX, e.clientY);
-    if (host) host.style.cursor = id ? 'pointer' : '';
-    if (id) showTip(id, tip?.pinned && tip.id === id);
-    else if (tip && !tip.pinned) scheduleHide();
-  }
+  // ── Pointer ──────────────────────────────────────────────────────────────
+  let down: { x: number; y: number; lx: number; ly: number; dragging: boolean; id: number } | null = null;
+  let lastClick = { id: '', at: 0 };
   function onPointerDown(e: PointerEvent): void {
-    down = { x: e.clientX, y: e.clientY };
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, dragging: false, id: e.pointerId };
+    stage?.focus({ preventScroll: true });
+  }
+  function onPointerMove(e: PointerEvent): void {
+    const h = handle;
+    if (!h) return;
+    if (down && down.id === e.pointerId) {
+      if (!down.dragging && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) {
+        down.dragging = true;
+        host?.setPointerCapture(e.pointerId);
+      }
+      if (down.dragging) {
+        h.drag(e.clientX - down.lx, e.clientY - down.ly);
+        down.lx = e.clientX;
+        down.ly = e.clientY;
+        return;
+      }
+    }
+    if (e.pointerType === 'touch') return;
+    const p = h.pick(e.clientX, e.clientY);
+    if (host) host.style.cursor = p && p.kind !== 'head' ? 'pointer' : '';
+    if (JSON.stringify(p) !== JSON.stringify(hover)) hover = p;
   }
   function onPointerUp(e: PointerEvent): void {
     const d = down;
     down = null;
-    if (!d || !handle || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) return; // an orbit drag
-    const id = handle.pick(e.clientX, e.clientY);
-    if (!id) {
-      closeTip();
+    if (host?.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
+    if (!d || d.dragging || !handle) return;
+    const p = handle.pick(e.clientX, e.clientY);
+    void activate(p, e.timeStamp);
+  }
+  async function activate(p: SchoolPick | null, at = performance.now()): Promise<void> {
+    const h = handle;
+    if (!h) return;
+    if (!p) {
+      selected = null;
       return;
     }
-    if (e.pointerType === 'touch') {
-      // Touch: first tap shows the tooltip, a second tap on the same student opens it.
-      if (tip?.id === id && tip.pinned) void open(byId.get(id));
-      else showTip(id, true);
+    if (p.kind === 'door') {
+      if (view.kind === 'corridor') await h.enterRoom(p.id);
+      else await h.toCorridor();
       return;
     }
-    if (e.button === 0) void open(byId.get(id));
+    if (p.kind === 'head') {
+      toasts.info('Otto, the headmaster', 'Walks the aisles, checks every screen — and goes straight to anyone who raised a hand.');
+      return;
+    }
+    const k = byId.get(p.id);
+    if (!k) return;
+    // Double click opens the session.
+    if (lastClick.id === k.id && at - lastClick.at < 400) {
+      lastClick = { id: '', at: 0 };
+      void open(k);
+      return;
+    }
+    lastClick = { id: k.id, at };
+    selected = k.id;
   }
   function onContextMenu(e: MouseEvent): void {
-    const id = handle?.pick(e.clientX, e.clientY);
-    const s = id ? byId.get(id) : null;
-    if (!s) return;
-    closeTip();
-    studentMenu(e, s);
+    const p = handle?.pick(e.clientX, e.clientY);
+    const k = p?.kind === 'kid' ? byId.get(p.id) : null;
+    if (!k) return;
+    e.preventDefault();
+    selected = k.id;
+    kidMenu(e, k);
   }
-
+  function onWheel(e: WheelEvent): void {
+    // Zoom only when the school has focus (or fills the page) — otherwise the
+    // wheel scrolls Home like everywhere else.
+    if (!handle || (!zoomed && document.activeElement !== stage)) return;
+    e.preventDefault();
+    handle.wheel(e.deltaY);
+  }
   function stopTouch(e: TouchEvent): void {
     e.stopPropagation();
   }
   function onPointerLeave(): void {
-    down = null;
-    if (tip && !tip.pinned) scheduleHide();
+    if (!down?.dragging) hover = null;
   }
   $effect(() => {
     const el = host;
     if (!el) return;
-    const on: [string, (e: never) => void][] = [
-      ['pointermove', onPointerMove],
+    const on: [string, (e: never) => void, AddEventListenerOptions?][] = [
       ['pointerdown', onPointerDown],
+      ['pointermove', onPointerMove],
       ['pointerup', onPointerUp],
+      ['pointercancel', onPointerUp],
       ['pointerleave', onPointerLeave],
       ['contextmenu', onContextMenu],
-      // An orbit drag is not Home's swipe-between-spaces gesture.
+      ['wheel', onWheel, { passive: false }],
       ['touchstart', stopTouch],
       ['touchend', stopTouch],
     ];
-    for (const [t, f] of on) el.addEventListener(t, f as EventListener);
+    for (const [t, f, o] of on) el.addEventListener(t, f as EventListener, o);
     return () => {
       for (const [t, f] of on) el.removeEventListener(t, f as EventListener);
     };
   });
 
-  // ── Actions ──────────────────────────────────────────────────────────────
-  async function open(s: Student | null | undefined): Promise<void> {
-    if (!s) return;
-    closeTip();
-    if (s.workspaceId === SCRATCH_ID || s.workspaceId === ws.currentId) ws.navigateToSession(s.id);
-    else await ws.openInWorkspace(s.workspaceId, s.id);
+  // ── Keyboard (on the focused stage) ──────────────────────────────────────
+  function onStageKey(e: KeyboardEvent, isDown: boolean): void {
+    const h = handle;
+    if (!h) return;
+    if (h.key(e, isDown)) {
+      e.preventDefault();
+      return;
+    }
+    if (!isDown) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (view.kind === 'corridor') {
+        const d = h.facingDoor();
+        if (d) void h.enterRoom(d);
+      } else if (selKid) {
+        if (view.kind === 'screen') void open(selKid);
+        else void h.lookAtScreen(selKid.id);
+      }
+    } else if (e.key === 'Escape') {
+      if (view.kind === 'corridor' && !selected) return; // Home's Esc (exit zoom)
+      e.preventDefault();
+      back();
+    }
+  }
+  /** Make the stage a keyboard surface (focusable; keys move the camera). */
+  function stageKeys(node: HTMLElement) {
+    node.tabIndex = 0;
+    const kd = (e: KeyboardEvent) => onStageKey(e, true);
+    const ku = (e: KeyboardEvent) => onStageKey(e, false);
+    const bl = () => handle?.key(new KeyboardEvent('keyup', { key: 'w' }), false);
+    node.addEventListener('keydown', kd);
+    node.addEventListener('keyup', ku);
+    node.addEventListener('blur', bl);
+    return {
+      destroy() {
+        node.removeEventListener('keydown', kd);
+        node.removeEventListener('keyup', ku);
+        node.removeEventListener('blur', bl);
+      },
+    };
   }
 
-  async function kick(s: Student): Promise<void> {
-    closeTip();
-    const gone = await kickOut(s, {
+  function back(): void {
+    const h = handle;
+    if (!h) return;
+    if (view.kind === 'screen') void h.backToRoom();
+    else if (selected) selected = null;
+    else if (view.kind === 'room') void h.toCorridor();
+  }
+
+  // ── Actions ──────────────────────────────────────────────────────────────
+  async function open(k: Kid | null | undefined): Promise<void> {
+    if (!k) return;
+    if (k.detention) {
+      await free(k);
+      return;
+    }
+    if (k.workspaceId === SCRATCH_ID || k.workspaceId === ws.currentId) ws.navigateToSession(k.id);
+    else await ws.openInWorkspace(k.workspaceId, k.id);
+  }
+
+  function hold(id: string): void {
+    const row = sessions.find((x) => x.id === id);
+    if (row) held = new Map(held).set(id, row);
+  }
+  function unhold(id: string): void {
+    const next = new Map(held);
+    next.delete(id);
+    held = next;
+  }
+
+  async function kick(k: Kid): Promise<void> {
+    const gone = await kickOut(k, {
       ask: (message, opts) => confirmer.ask(message, opts),
       kill: (id) => ws.killSession(id),
       animate: (id) => {
-        const row = sessions.find((x) => x.id === id);
-        if (!handle || !row) return Promise.resolve();
-        walking = new Map(walking).set(id, row);
-        return handle.kickOut(id).finally(() => {
-          const next = new Map(walking);
-          next.delete(id);
-          walking = next;
-        });
+        if (!handle || view.kind === 'corridor') return Promise.resolve();
+        hold(id);
+        return handle.kickOut(id).finally(() => unhold(id));
       },
-      restore: (id) => handle?.restore(id),
+      restore: (id) => {
+        unhold(id);
+        handle?.restore(id);
+      },
       done: (title, body) => toasts.success(title, body),
       failed: (title, e) => toastError(title, e),
     });
-    if (gone) removed = new Set([...removed, s.id]);
-  }
-
-  async function detention(s: Student): Promise<void> {
-    closeTip();
-    if (await sendToDetention(s, { archive: (id, hint) => ws.requestArchive(id, hint), failed: (title, e) => toastError(title, e) })) {
-      removed = new Set([...removed, s.id]);
-      void poller?.now();
+    if (gone) {
+      removed = new Set([...removed, k.id]);
+      if (selected === k.id) selected = null;
     }
   }
 
-  function studentMenu(e: MouseEvent | KeyboardEvent, s: Student): void {
+  async function detention(k: Kid): Promise<void> {
+    const ok = await sendToDetention(k, {
+      archive: (id, hint) => ws.requestArchive(id, hint),
+      animate: (id) => {
+        if (!handle || view.kind === 'corridor') return Promise.resolve();
+        hold(id);
+        return handle.detention(id);
+      },
+      restore: (id) => {
+        unhold(id);
+        handle?.restore(id);
+      },
+      failed: (title, e) => toastError(title, e),
+    });
+    if (ok) {
+      await poller?.now();
+      unhold(k.id);
+      if (selected === k.id) selected = null;
+    }
+  }
+
+  async function free(k: Kid): Promise<void> {
+    if (
+      await release(k, {
+        unarchive: (id) => ws.unarchiveSession(id),
+        done: (title) => toasts.success(title),
+        failed: (title, e) => toastError(title, e),
+      })
+    )
+      await poller?.now();
+  }
+
+  function checkOn(k: Kid): void {
+    handle?.inspect(k.id);
+  }
+
+  function kidMenu(e: MouseEvent | KeyboardEvent, k: Kid): void {
+    const inRoom = view.kind !== 'corridor' && openRoomModel?.id === k.workspaceId;
+    if (k.detention) {
+      ctxMenu.show(e, [
+        { label: 'Release from detention', icon: 'undo', disabled: !k.canManage, action: () => void free(k) },
+      ]);
+      return;
+    }
     ctxMenu.show(e, [
-      { label: 'Open session', icon: 'external', action: () => void open(s) },
-      ...(s.canManage
+      { label: 'Open session', icon: 'external', action: () => void open(k) },
+      ...(inRoom ? [{ label: 'Look at the screen', icon: 'eye' as const, action: () => void handle?.lookAtScreen(k.id) }] : []),
+      ...(inRoom ? [{ label: 'Headmaster: check on them', icon: 'search' as const, action: () => checkOn(k) }] : []),
+      ...(k.canManage
         ? [
             { separator: true as const },
-            { label: 'Send to detention (archive)', icon: 'archive' as const, action: () => void detention(s) },
-            { label: 'Kick out…', icon: 'trash' as const, danger: true, action: () => void kick(s) },
+            { label: 'Send to detention (archive)', icon: 'archive' as const, action: () => void detention(k) },
+            { label: 'Kick out…', icon: 'trash' as const, danger: true, action: () => void kick(k) },
           ]
         : []),
     ]);
   }
 
-  function onKey(e: KeyboardEvent): void {
-    if (e.key === 'Escape' && tip && !e.defaultPrevented) {
-      e.preventDefault(); // Home's Esc (exit zoom) skips a handled key
-      closeTip();
-    }
+  /** List-view row → into the 3D room and onto that kid. */
+  async function showIn3d(k: Kid): Promise<void> {
+    if (mode !== '3d' || !handle) return;
+    if (view.kind === 'corridor' || openRoomModel?.id !== k.workspaceId) await handle.enterRoom(k.workspaceId);
+    selected = k.id;
   }
 
-  let listEl = $state<HTMLElement | null>(null);
-  onDestroy(cancelHide);
+  onDestroy(() => {
+    handle?.destroy();
+  });
 
-  const empty = $derived(model.total === 0);
-  const nRooms = $derived(model.rooms.length);
+  const empty = $derived(school.total === 0);
+  const crumbs = $derived.by(() => {
+    const out: { label: string; go?: () => void }[] = [{ label: 'Corridor', go: view.kind === 'corridor' ? undefined : () => void handle?.toCorridor() }];
+    if (openRoomModel) out.push({ label: openRoomModel.name, go: view.kind === 'screen' ? () => void handle?.backToRoom() : undefined });
+    if (view.kind === 'screen') out.push({ label: `${byId.get(view.kidId)?.title ?? 'Screen'}` });
+    return out;
+  });
+  const hint = $derived(
+    view.kind === 'corridor'
+      ? 'Click a door to walk in · drag to look · W A S D to walk'
+      : view.kind === 'room'
+        ? 'Click a kid · double-click opens the session · drag to look around · Esc for the corridor'
+        : 'Enter opens the session · Esc goes back',
+  );
 </script>
 
-<svelte:window onkeydown={onKey} />
-
-<div class="cr">
+<div class="school">
   <div class="bar">
-    <span class="sum">
-      {plural(nRooms, 'classroom')} · {plural(model.total, 'student')}
-    </span>
+    {#if mode === '3d'}
+      <nav class="crumbs" aria-label="Where you are in the school">
+        {#each crumbs as c, i (i)}
+          {#if i > 0}<Icon name="chevronRight" size={12} />{/if}
+          {#if c.go}
+            <button class="crumb link" onclick={c.go}>{c.label}</button>
+          {:else}
+            <span class="crumb ellipsis" aria-current="location">{c.label}</span>
+          {/if}
+        {/each}
+      </nav>
+    {:else}
+      <span class="sum">{plural(school.rooms.length, 'classroom')} · {plural(school.total, 'kid')}</span>
+    {/if}
     {#if gl}
-      <div class="segmented" role="group" aria-label="Classrooms view">
+      <div class="segmented" role="group" aria-label="School view">
         <button class="seg" class:active={mode === '3d'} aria-pressed={mode === '3d'} onclick={() => setMode('3d')}>3D</button>
         <button class="seg" class:active={mode === 'list'} aria-pressed={mode === 'list'} onclick={() => setMode('list')}>List</button>
       </div>
     {/if}
     {#if mode === '3d'}
-      <button class="icon-btn" onclick={() => handle?.resetView()} disabled={!handle} title="Reset view" aria-label="Reset classrooms view"><Icon name="refresh" size={12} /></button>
+      <button class="icon-btn" onclick={() => handle?.resetView()} disabled={!handle} title="Reset view" aria-label="Reset the school view"><Icon name="refresh" size={12} /></button>
+      <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit full page' : 'Fill the page'} aria-label={zoomed ? 'Exit full page' : 'Fill the page'}>
+        <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
+      </button>
     {/if}
   </div>
 
   {#if !loaded && fetched.length === 0 && ws.sessions.length === 0}
-    <LoadState what="classrooms" loading={true} variant="compact" rows={3} />
+    <LoadState what="the school" loading={true} variant="compact" rows={3} />
   {:else if error && fetched.length === 0 && ws.sessions.length === 0}
-    <LoadState what="classrooms" error={error} variant="compact" onretry={() => poller?.now()} />
+    <LoadState what="the school" error={error} variant="compact" onretry={() => poller?.now()} />
   {:else}
     {#if !gl}
-      <p class="note" role="note"><Icon name="info" size={12} />3D isn’t available here (WebGL is off), so the classrooms are listed instead.</p>
+      <p class="note" role="note"><Icon name="info" size={12} />3D isn’t available here (WebGL is off), so the school is listed instead.</p>
     {/if}
     {#if mode === '3d'}
-      <div class="stage" bind:this={stage}>
-        <!-- Pointer surface only (listeners attached in script): the keyboard
-             path to every student is the companion list below. -->
+      <!-- Focusable 3D surface: tabindex + key listeners are attached in
+           script (stageKeys) — it is a widget (role=application) driven by
+           the keyboard like a game, with the list below as the plain path. -->
+      <div
+        class="stage"
+        bind:this={stage}
+        use:stageKeys
+        role="application"
+        aria-label="Otto School 3D view. Arrow keys or W A S D move, Enter walks through the door you face or looks at the selected kid’s screen, Escape goes back."
+      >
         <div class="canvas" bind:this={host}></div>
         {#if handle}
           <div class="overlay" aria-hidden="true">
-            {#each model.rooms as r (r.id)}
-              <div class="room-label" class:current={r.current} use:roomLabel={r.id}>
-                <b>{r.name}</b><small>{roomSummary(r)}{r.overflow > 0 ? ` · +${r.overflow} more` : ''}</small>
-              </div>
+            {#each needsKids as k (k.id)}
+              <div class="bubble" use:bubble={k.id}>✋</div>
             {/each}
-            {#each tagged as s (s.id)}
-              <div class="seat-id" class:needs={s.visual === 'needs-you'} use:nameLabel={s.id}>{s.initials}</div>
-            {/each}
-            <div class="you" bind:this={youEl}>You · headmaster</div>
+            <div class="hover-tag" bind:this={tagEl}>
+              {#if hoverKid}
+                <b>{hoverKid.title}</b><small>{providerLabel(hoverKid.provider)} · {hoverKid.stateLabel}</small>
+              {:else if hoverRoom}
+                <b>{hoverRoom.name}</b><small>{roomSummary(hoverRoom)} · click to walk in</small>
+              {:else if hover?.kind === 'head'}
+                <b>Otto</b><small>the headmaster</small>
+              {:else if hover?.kind === 'door'}
+                <b>Back to the corridor</b>
+              {/if}
+            </div>
           </div>
+          <p class="hint">{hint}</p>
+          {#if selKid && view.kind !== 'corridor'}
+            <div class="kid-card" role="group" aria-label="{selKid.title} — details" bind:this={cardEl}>
+              <div class="card-head">
+                <ProviderIcon provider={selKid.provider} size={16} />
+                <b class="ellipsis">{selKid.title}</b>
+                <button class="icon-btn" onclick={() => (selected = null)} aria-label="Close details" title="Close"><Icon name="x" size={12} /></button>
+              </div>
+              {#each kidLines(selKid, now() ? relTime(selKid.lastActiveAt) : '') as line, i (i)}
+                <div class="card-line" class:needs={i === 0 && selKid.pose === 'needs-you'}>{line}</div>
+              {/each}
+              <div class="card-actions">
+                {#if selKid.detention}
+                  <button class="btn small primary" disabled={!selKid.canManage} onclick={() => selKid && void free(selKid)}>Release from detention</button>
+                {:else}
+                  <button class="btn small primary" onclick={() => void open(selKid)}>Open session</button>
+                  {#if view.kind === 'screen'}
+                    <button class="btn small" onclick={() => void handle?.backToRoom()}>Back to the room</button>
+                  {:else}
+                    <button class="btn small" onclick={() => selKid && void handle?.lookAtScreen(selKid.id)}>Look at screen</button>
+                  {/if}
+                  <button class="btn small" onclick={() => selKid && checkOn(selKid)} title="Send the headmaster over">Check on</button>
+                  {#if selKid.canManage}
+                    <button class="btn small" onclick={() => selKid && void detention(selKid)} title="Archive — resumable, with Undo">Detention</button>
+                    <button class="btn small danger" onclick={() => selKid && void kick(selKid)} title="Delete this session and its history">Kick out…</button>
+                  {/if}
+                {/if}
+              </div>
+            </div>
+          {/if}
         {:else if sceneError}
           <div class="scene-state">
-            <LoadState what="the 3D view" error={sceneError} variant="compact" onretry={() => (sceneAttempt += 1)} />
+            <LoadState what="the 3D school" error={sceneError} variant="compact" onretry={() => (sceneAttempt += 1)} />
           </div>
         {:else}
-          <div class="scene-state"><span class="spinner" aria-hidden="true"></span><span class="dim">Setting up the classrooms…</span></div>
+          <div class="scene-state"><span class="spinner" aria-hidden="true"></span><span class="dim">Opening the school…</span></div>
         {/if}
-        {#if empty && handle}
+        {#if empty && handle && view.kind === 'corridor'}
           <div class="empty-over">
-            <EmptyState icon="people" title="Every desk is empty" body="Start a session and a student takes a seat in its workspace’s classroom.">
+            <EmptyState icon="people" title="School’s out" body="Start a session and a kid takes a seat in its workspace’s classroom.">
               <button class="btn small" onclick={() => (ui.newSessionOpen = true)}><Icon name="plus" size={12} />New session</button>
             </EmptyState>
           </div>
@@ -507,62 +691,51 @@
       </div>
     {/if}
 
-    <!-- The accessible companion: every classroom and student as real
-         buttons. Visible in List view; in 3D view it stays keyboard /
-         screen-reader reachable, and focusing a student highlights it in 3D
-         and shows its tooltip. -->
-    <div class="list" class:sr-only={mode === '3d'} bind:this={listEl} role="region" aria-label="Classrooms list">
+    <!-- The accessible companion: every classroom and kid as real buttons.
+         Visible in List view; in 3D it stays keyboard / screen-reader
+         reachable, and activating a row walks into that room onto the kid. -->
+    <div class="list" class:sr-only={mode === '3d'} role="region" aria-label="School list">
       {#if mode === 'list' && empty}
-        <EmptyState icon="people" title="Every desk is empty" body="Start a session and a student takes a seat in its workspace’s classroom.">
+        <EmptyState icon="people" title="School’s out" body="Start a session and a kid takes a seat in its workspace’s classroom.">
           <button class="btn small" onclick={() => (ui.newSessionOpen = true)}><Icon name="plus" size={12} />New session</button>
         </EmptyState>
       {/if}
-      {#each model.rooms as r (r.id)}
-        {#if r.counts.total > 0 || mode === 'list'}
+      {#each school.rooms as r (r.id)}
+        {#if r.counts.total + r.bench.length > 0 || mode === 'list'}
           <section class="lroom" aria-label="Classroom {r.name}">
             <h4 class="lroom-head">
               <span class="ellipsis">{r.name}</span>
               {#if r.current}<span class="cur">current</span>{/if}
               <small>{roomSummary(r)}</small>
+              {#if mode === '3d'}
+                <button class="btn small" onclick={() => void handle?.enterRoom(r.id)} disabled={!handle}>Walk in</button>
+              {/if}
             </h4>
-            {#if r.students.length + r.backRow.length > 0}
+            {#if r.kids.length + r.bench.length > 0}
               <ul>
-                {#each [...r.students, ...r.backRow] as s (s.id)}
-                  <li use:rowMenu class="lrow" data-student-id={s.id} oncontextmenu={(e) => studentMenu(e, s)}>
+                {#each [...r.kids, ...r.bench] as k (k.id)}
+                  <li use:rowMenu class="lrow" data-kid-id={k.id} oncontextmenu={(e) => kidMenu(e, k)}>
                     <button
                       class="lmain"
-                      aria-label="Open {studentAriaLabel(s, now() ? relTime(s.lastActiveAt) : '')}"
-                      aria-describedby={tip?.id === s.id ? tipId : undefined}
-                      onclick={() => void open(s)}
-                      onfocus={() => focusStudent(s.id)}
-                      onblur={() => blurStudent(s.id)}
-                      onmouseenter={() => mode === 'list' && showTip(s.id)}
-                      onmouseleave={() => mode === 'list' && scheduleHide()}
+                      aria-label="{k.detention ? 'Release' : 'Open'} {kidAriaLabel(k, now() ? relTime(k.lastActiveAt) : '')}"
+                      onclick={() => void open(k)}
+                      onfocus={() => void showIn3d(k)}
                     >
-                      <i class="dot" data-visual={s.visual}></i>
-                      <ProviderIcon provider={s.provider} size={12} />
-                      <span class="ellipsis t">{s.title}</span>
-                      {#if s.background}<span class="bg-tag">back row</span>{/if}
-                      <span class="st">{s.stateLabel}</span>
+                      <i class="dot" data-pose={k.detention ? 'bench' : k.pose}></i>
+                      <ProviderIcon provider={k.provider} size={12} />
+                      <span class="ellipsis t">{k.title}</span>
+                      {#if k.background}<span class="bg-tag">back row</span>{/if}
+                      {#if k.detention}<span class="bg-tag">detention</span>{/if}
+                      <span class="st">{k.stateLabel}</span>
                     </button>
-                    <!-- In 3D view the list is visually hidden, so EVERY tab stop
-                         in a row (this one too) shows the 3D highlight + card —
-                         otherwise focus would have no visible indicator. -->
-                    <button
-                      class="icon-btn"
-                      aria-label="More actions for {s.title}"
-                      title="More actions"
-                      aria-haspopup="menu"
-                      onclick={(e) => studentMenu(e, s)}
-                      onfocus={() => focusStudent(s.id)}
-                      onblur={() => blurStudent(s.id)}
-                    >
+                    <button class="icon-btn" aria-label="More actions for {k.title}" title="More actions" aria-haspopup="menu" onclick={(e) => kidMenu(e, k)}>
                       <Icon name="more" size={12} />
                     </button>
                   </li>
                 {/each}
               </ul>
             {/if}
+            {#if r.overflow > 0}<p class="more">+{r.overflow} more not seated</p>{/if}
           </section>
         {/if}
       {/each}
@@ -570,42 +743,8 @@
   {/if}
 </div>
 
-{#if tip && tipStudent && tipText}
-  <!-- Hover / focus / tap card. Fixed + clamped into the viewport; it holds
-       its own actions so a pointer user can act without the menu. -->
-  <!-- Not role="tooltip": it holds buttons. A labelled group the focused row
-       points at with aria-describedby. -->
-  <div
-    class="tip"
-    role="group"
-    aria-label="{tipText.title} — details"
-    id={tipId}
-    bind:this={tipEl}
-    onpointerenter={cancelHide}
-    onpointerleave={() => {
-      if (!tip?.pinned) scheduleHide();
-    }}
-  >
-    <div class="tip-head">
-      <ProviderIcon provider={tipStudent.provider} size={14} />
-      <b class="ellipsis">{tipText.title}</b>
-    </div>
-    {#each tipText.lines as line, i (i)}
-      <div class="tip-line" class:needs={i === 0 && tipStudent.visual === 'needs-you'}>{line}</div>
-    {/each}
-    <div class="tip-actions">
-      <button class="btn small primary" onclick={() => void open(tipStudent)}>Open</button>
-      {#if tipStudent.canManage}
-        <button class="btn small" onclick={() => tipStudent && void detention(tipStudent)} title="Archive — resumable, with Undo">Detention</button>
-        <button class="btn small danger" onclick={() => tipStudent && void kick(tipStudent)} title="Delete this session and its history">Kick out…</button>
-      {/if}
-    </div>
-    <span class="sr-only">{providerLabel(tipStudent.provider)}</span>
-  </div>
-{/if}
-
 <style>
-  .cr {
+  .school {
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -617,6 +756,36 @@
     align-items: center;
     gap: 8px;
     flex: none;
+    min-width: 0;
+  }
+  .crumbs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+  }
+  .crumb {
+    min-width: 0;
+    max-width: 220px;
+  }
+  .crumb.link {
+    background: none;
+    border: 0;
+    padding: 2px 4px;
+    border-radius: var(--radius-s);
+    color: var(--accent-text);
+    cursor: pointer;
+    font: inherit;
+  }
+  .crumb.link:hover {
+    background: var(--surface-2);
+  }
+  span.crumb {
+    color: var(--text);
+    font-weight: 600;
   }
   .sum {
     flex: 1;
@@ -638,10 +807,14 @@
   .stage {
     position: relative;
     flex: 1;
-    min-height: 0;
+    min-height: 260px;
     border-radius: var(--radius-m);
     background: var(--surface-2);
     overflow: hidden;
+    outline: none;
+  }
+  .stage:focus-visible {
+    box-shadow: 0 0 0 2px var(--accent-solid);
   }
   .canvas {
     position: absolute;
@@ -653,224 +826,217 @@
     pointer-events: none;
     overflow: hidden;
   }
-  .room-label,
-  .seat-id,
-  .you {
+  .bubble,
+  .hover-tag {
     position: absolute;
     top: 0;
     left: 0; /* ui-guards: allow — origin of projected screen coordinates, not layout */
     visibility: hidden;
     white-space: nowrap;
   }
-  .room-label {
+  .bubble {
+    font-size: var(--fs-l);
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: var(--radius-m);
+    background: var(--warning-soft);
+    border: 1px solid var(--warning);
+    animation: otto-pulse 1.4s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bubble {
+      animation: none;
+    }
+  }
+  .hover-tag {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 2px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-s);
     background: var(--surface);
     border: 1px solid var(--border);
     box-shadow: var(--shadow-xs);
-    max-width: 220px;
+    max-width: 260px;
   }
-  .room-label b {
+  .hover-tag:empty {
+    display: none;
+  }
+  .hover-tag b {
     font-size: var(--fs-s);
     font-weight: 600;
     color: var(--text);
-    max-width: 200px;
+    max-width: 240px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .room-label small {
+  .hover-tag small {
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .room-label.current {
-    border-color: var(--accent-line-strong);
-  }
-  .room-label.current b {
-    color: var(--accent-text);
-  }
-  /* The provider identifier floating over a student (projected, not a pill). */
-  .seat-id {
-    padding: 0 4px;
+  .hint {
+    position: absolute;
+    inset-inline-start: 8px;
+    bottom: 8px;
+    margin: 0;
+    padding: 4px 8px;
+    max-width: calc(100% - 16px);
     border-radius: var(--radius-s);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    line-height: 1.4;
-    color: var(--text);
     background: var(--surface);
     border: 1px solid var(--border);
-  }
-  .seat-id.needs {
-    color: var(--warning);
-    border-color: var(--warning);
-  }
-  .you {
-    padding: 0 6px;
-    border-radius: var(--radius-s);
+    color: var(--text-dim);
     font-size: var(--fs-xs);
-    color: var(--accent-contrast);
-    background: var(--accent-solid);
+    pointer-events: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .kid-card {
+    position: absolute;
+    inset-inline-end: 8px;
+    top: 8px;
+    width: min(320px, calc(100% - 16px));
+    max-height: calc(100% - 16px);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px;
+    border-radius: var(--radius-m);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-card);
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .card-head b {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-m);
+  }
+  .card-line {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .card-line.needs {
+    color: var(--warning);
+    font-weight: 600;
+  }
+  .card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
   }
   .scene-state {
     position: absolute;
     inset: 0;
-    display: grid;
-    place-items: center;
-    align-content: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     gap: 8px;
   }
   .empty-over {
     position: absolute;
-    inset-inline: 0;
-    bottom: 8px;
-    display: grid;
-    place-items: center;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     pointer-events: none;
   }
-  .empty-over :global(button) {
+  .empty-over :global(*) {
     pointer-events: auto;
   }
-  .dim {
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
-  .list:not(.sr-only) {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
+  .list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
+    overflow-y: auto;
+    min-height: 0;
+  }
+  .lroom-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 4px;
+    font-size: var(--fs-s);
+  }
+  .lroom-head small {
+    flex: 1;
+    color: var(--text-dim);
+    font-weight: 400;
+    font-size: var(--fs-xs);
+  }
+  .cur {
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
   }
   .lroom ul {
     list-style: none;
     margin: 0;
     padding: 0;
   }
-  .lroom-head {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    margin: 0 0 2px;
-    font-size: var(--fs-s);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .lroom-head small {
-    font-weight: 400;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    margin-inline-start: auto;
-    white-space: nowrap;
-  }
-  .cur {
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    color: var(--accent-text);
-  }
   .lrow {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: 4px;
   }
   .lmain {
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 4px 8px;
-    border: none;
-    background: transparent;
-    color: var(--text);
+    gap: 6px;
+    padding: 4px 6px;
+    border: 0;
+    background: none;
     border-radius: var(--radius-s);
+    color: var(--text);
     font: inherit;
     font-size: var(--fs-s);
     text-align: start;
     cursor: pointer;
   }
   .lmain:hover {
-    background: var(--hover);
-  }
-  .lmain:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
+    background: var(--surface-2);
   }
   .t {
     flex: 1;
     min-width: 0;
   }
   .st,
-  .bg-tag {
+  .bg-tag,
+  .more {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    white-space: nowrap;
+  }
+  .more {
+    margin: 2px 6px;
   }
   .dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     flex: none;
-    background: var(--status-idle);
+    background: var(--text-dim);
   }
-  .dot[data-visual='working'] {
-    background: var(--status-working);
+  .dot[data-pose='working'] {
+    background: var(--success);
   }
-  .dot[data-visual='needs-you'] {
-    background: var(--status-warn);
+  .dot[data-pose='needs-you'] {
+    background: var(--warning);
   }
-  .dot[data-visual='away'],
-  .dot[data-visual='stale'] {
-    background: transparent;
-    border: 1px solid var(--status-idle);
+  .dot[data-pose='away'],
+  .dot[data-pose='bench'] {
+    background: var(--border-strong);
   }
   .ellipsis {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .tip {
-    position: fixed;
-    z-index: var(--z-drawer);
-    width: max-content;
-    max-width: min(320px, calc(100vw - 16px));
-    max-height: calc(100vh - 16px);
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 8px 10px;
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-card);
-    font-size: var(--fs-s);
-    color: var(--text);
-  }
-  .tip-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    font-size: var(--fs-m);
-  }
-  .tip-head b {
-    font-weight: 600;
-  }
-  .tip-line {
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    overflow-wrap: anywhere;
-  }
-  .tip-line.needs {
-    color: var(--warning);
-  }
-  .tip-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 6px;
   }
 </style>
