@@ -353,7 +353,7 @@
         </div>
       {/if}
       <div class="cp-footer-actions">
-        <button class="footer-btn" class:on={attachOpen} onclick={toggleAttachPicker}>
+        <button class="footer-btn" class:on={attachOpen} aria-expanded={attachOpen} onclick={toggleAttachPicker}>
           <Icon name="plug" size={12} /> Attach scene…
         </button>
         <button class="footer-btn" disabled={creating} onclick={createNewScene}>

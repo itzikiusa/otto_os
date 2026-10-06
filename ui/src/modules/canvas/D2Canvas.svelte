@@ -409,6 +409,7 @@
           <button
             class="sketch-toggle"
             class:on={sketch}
+            aria-pressed={sketch}
             onclick={toggleSketch}
             title="Hand-drawn sketch style"
           >

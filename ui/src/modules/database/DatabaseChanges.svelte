@@ -147,7 +147,7 @@
       <LoadState what="database changes" {loading} error={loadError} empty={changes.length===0} onretry={()=>void refresh()} variant="compact">
         {#snippet emptyView()}<p class="hint">No visible changes yet.</p>{/snippet}
         {#each changes as change (change.id)}
-          <button class="item" class:active={selected?.id===change.id} onclick={()=>void select(change)} disabled={busy}>
+          <button class="item" class:active={selected?.id===change.id} aria-current={selected?.id===change.id ? 'true' : undefined} onclick={()=>void select(change)} disabled={busy}>
             <strong>{change.title}</strong>
             <span>{sentenceCase(change.status)} · r{change.revision}</span>
           </button>

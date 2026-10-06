@@ -480,12 +480,12 @@
       <div class="field">
         <span class="lbl">Background</span>
         <div class="swatches" role="group" aria-label="Background">
-          <button class="sw none" class:on={!section.style?.background} onclick={() => setBg('')} disabled={readonly} aria-label="Default background" title="Default (surface)"></button>
+          <button class="sw none" class:on={!section.style?.background} aria-pressed={!section.style?.background} onclick={() => setBg('')} disabled={readonly} aria-label="Default background" title="Default (surface)"></button>
           {#each brandSwatches as s (s.value)}
-            <button class="sw" class:on={section.style?.background === s.value} style:background={s.color} onclick={() => setBg(s.value)} disabled={readonly} aria-label={`Brand ${s.label}`} title={`${s.label} (${s.color})`}></button>
+            <button class="sw" class:on={section.style?.background === s.value} aria-pressed={section.style?.background === s.value} style:background={s.color} onclick={() => setBg(s.value)} disabled={readonly} aria-label={`Brand ${s.label}`} title={`${s.label} (${s.color})`}></button>
           {/each}
           {#each GRADIENTS as g (g)}
-            <button class="sw grad" data-g={g} class:on={section.style?.background === `gradient:${g}`} style:--sw-a={g === 'ink' ? theme.night : g === 'soft' ? theme.surfaceAlt : theme.primary} style:--sw-b={g === 'soft' ? theme.primary : theme.accent} onclick={() => setBg(`gradient:${g}`)} disabled={readonly} aria-label={`Gradient ${g}`} title={`Gradient · ${g}`}></button>
+            <button class="sw grad" data-g={g} class:on={section.style?.background === `gradient:${g}`} aria-pressed={section.style?.background === `gradient:${g}`} style:--sw-a={g === 'ink' ? theme.night : g === 'soft' ? theme.surfaceAlt : theme.primary} style:--sw-b={g === 'soft' ? theme.primary : theme.accent} onclick={() => setBg(`gradient:${g}`)} disabled={readonly} aria-label={`Gradient ${g}`} title={`Gradient · ${g}`}></button>
           {/each}
           <input dir="auto" class="input hex" placeholder="# hex" bind:value={hexDraft} disabled={readonly} aria-label="Custom color (hex)" onchange={commitHex} />
         </div>

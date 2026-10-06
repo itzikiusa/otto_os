@@ -160,8 +160,9 @@
 //                     switch is exempt only when it is keyboard-complete
 //                     (onTabKey / tabKeys wired in it — components.md §3); the
 //                     class alone no longer is.
-//   segmented-state   a button inside a `.segmented` group that marks its
-//                     selection with `active` but carries no `aria-pressed`,
+//   segmented-state   a button inside a `.segmented` / `.seg*` group, a
+//                     `role="group"` or a `<nav>` that marks its selection
+//                     with `active|on|selected|sel|current` but carries no `aria-pressed`,
 //                     `aria-selected`/`aria-checked` or `role="tab|radio"` —
 //                     VoiceOver reads identical buttons with no state. Plain
 //                     action groups (no `active`) are fine.
@@ -343,7 +344,7 @@ const RULES = {
   'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
   'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
   'focus-ring-token': 'focus ring in var(--accent-solid) — under 3:1 on dark grounds; use var(--accent-text) like the global :focus-visible (app.css)',
-  'segmented-state': '.segmented value picker whose selected button (class:active) has no aria-pressed / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
+  'segmented-state': 'picker / view-switch button (in .segmented, .seg*, role="group" or <nav>) marked active|on|selected without aria-pressed / aria-current / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
   'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
@@ -749,17 +750,33 @@ for (const f of files) {
       hit('local-tablist', f, m.index, m[0].slice(0, 80));
     }
   }
-  // A `.segmented` group (up to its first closing </div>; segments don't nest
-  // divs) whose `active`-marked buttons expose no state.
-  for (const g of markup.matchAll(/<div\b[^>]*\bclass="[^"]*\bsegmented\b[^"]*"[^>]*>([\s\S]*?)<\/div>/g)) {
-    const body = g[1];
-    for (const b of body.matchAll(/<button\b/g)) {
-      const end = tagEnd(body, b.index + 7);
-      if (end === -1) continue;
-      const tag = body.slice(b.index, end);
-      if (!/\bclass:active\b|\bclass="[^"]*\bactive\b|\{[^}]*'active'/.test(tag)) continue;
-      if (/\baria-(?:pressed|selected|checked)\b|\brole="(?:tab|radio|menuitemradio)"/.test(tag)) continue;
-      hit('segmented-state', f, g.index + g[0].indexOf(body) + b.index, tag.slice(0, 80));
+  // A value picker / view switch — a `.segmented` or `.seg*` group, a
+  // `role="group"`, or a `<nav>` (up to its first closing tag; segments don't
+  // nest) — whose state-marked buttons (`active|on|selected|sel|current`)
+  // expose no state (S19-302). Row-selection lists use aria-current and pane
+  // toggles aria-expanded; both count as exposed state.
+  const STATE_MARK = /\bclass:(?:active|on|selected|sel|current)(?![\w-])|\bclass="[^"]*(?<![\w-])(?:active|on|selected|sel|current)(?![\w-])|\{[^}]*'(?:active|on|selected|sel|current)'/;
+  const GROUPS = [
+    /<div\b[^>]*\bclass="[^"]*\b(?:segmented|seg[\w-]*)\b[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
+    /<div\b[^>]*\brole="group"[^>]*>([\s\S]*?)<\/div>/g,
+    /<nav\b[^>]*>([\s\S]*?)<\/nav>/g,
+  ];
+  const seenState = new Set();
+  for (const re of GROUPS) {
+    for (const g of markup.matchAll(re)) {
+      const body = g[1];
+      for (const b of body.matchAll(/<button\b/g)) {
+        const at = g.index + g[0].indexOf(body) + b.index;
+        if (seenState.has(at)) continue;
+        const end = tagEnd(body, b.index + 7);
+        if (end === -1) continue;
+        const tag = body.slice(b.index, end);
+        if (!STATE_MARK.test(tag)) continue;
+        // A menu button names its current pick in its label (aria-haspopup).
+        if (/\baria-(?:pressed|selected|checked|current|expanded|haspopup)\b|\brole="(?:tab|radio|menuitemradio|option)"/.test(tag)) continue;
+        seenState.add(at);
+        hit('segmented-state', f, at, tag.slice(0, 80));
+      }
     }
   }
 }

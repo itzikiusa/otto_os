@@ -104,6 +104,7 @@
       {#each DESIGN_FORMATS as f (f)}
         <button
           class:on={mockupAssist.format === f}
+          aria-pressed={mockupAssist.format === f}
           disabled={locked}
           onclick={() => setFormat(f)}
           title={FORMATS[f].hint}

@@ -1179,6 +1179,7 @@
       <button
         class="btn small ghost"
         class:on={database.planOpen}
+        aria-expanded={database.planOpen}
         onclick={() => void database.explainPlan()}
         disabled={!hasStatement || tab.running}
         title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
@@ -1190,6 +1191,7 @@
     <button
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'ask'}
+      aria-expanded={database.assistOpen && database.assistMode === 'ask'}
       onclick={() => database.openAssist('ask')}
       disabled={!canQuery || !auth.can('agents','edit')}
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Ask the DB Assistant about this connection — it opens beside the editor'}
@@ -1200,6 +1202,7 @@
     <button
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'nl'}
+      aria-expanded={database.assistOpen && database.assistMode === 'nl'}
       onclick={() => database.openAssist('nl')}
       disabled={!canQuery || !auth.can('agents','edit')}
       title={!canQuery || !auth.can('agents','edit') ? 'Needs agent access and query permission on this connection' : 'Describe what you want in plain English — the DB Assistant drafts a query you can insert or run'}
