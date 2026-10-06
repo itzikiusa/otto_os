@@ -83,7 +83,7 @@ function impHarness(api: Record<string, unknown>) {
   const lsRemoved: string[] = [];
   const shared = { token: 'admin' as string | null, writes: [] as (string | null)[] };
   const tab = { imp: null as string | null };
-  const mod = loadSource(new URL('../src/lib/stores/auth.svelte.ts', import.meta.url), {
+  const mod: Record<string, any> = loadSource(new URL('../src/lib/stores/auth.svelte.ts', import.meta.url), {
     '../api/client': {
       api, ApiError, UNAUTHORIZED_EVENT: 'u', setAltLoopbackBase() {},
       getToken: () => tab.imp ?? shared.token,
@@ -96,7 +96,7 @@ function impHarness(api: Record<string, unknown>) {
       ssGet: (k: string) => ss.get(k) ?? null, ssSet: (k: string, v: string) => void ss.set(k, v), ssRemove: (k: string) => void ss.delete(k),
     },
   });
-  return { ...mod, ss, lsRemoved, shared, tab };
+  return { auth: mod.auth, impersonationStartedMs: mod.impersonationStartedMs as () => number | null, ss, lsRemoved, shared, tab };
 }
 
 const me = (id: string, real = 'root') => ({ user: { id }, real_user: { id: real } });
