@@ -88,3 +88,10 @@ export function invalidatePr(repoId: string, num?: number): void {
     prCommitsCache.delete(prKey(repoId, num));
   }
 }
+
+/** The head a merge is pinned to (S15-305): the head the merge modal read
+ *  itself when it opened (or on Retry / after a 409), else the parent view's
+ *  copy — which may be a minutes-old cache hit, so it is only the fallback. */
+export function pinnedHead(live: string | null, parent: string | null): string | null {
+  return live || parent || null;
+}
