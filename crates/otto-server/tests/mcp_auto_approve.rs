@@ -1323,7 +1323,11 @@ async fn a_bare_id_from_another_workspaces_session_is_never_auto_approved() {
     let d = boot().await;
     enable_tools(
         &d,
-        &["run_workflow", "run_scheduled_task", "approve_improvement_edit"],
+        &[
+            "run_workflow",
+            "run_scheduled_task",
+            "approve_improvement_edit",
+        ],
     )
     .await;
     let (st, wf) = d
@@ -1349,21 +1353,29 @@ async fn a_bare_id_from_another_workspaces_session_is_never_auto_approved() {
     // The operator auto-approves these tools in ws1 — where the agent runs.
     for tool in ["run_workflow", "run_scheduled_task"] {
         let (st, rule) = d
-            .rule(json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
-                         "target": tool}))
+            .rule(
+                json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                         "target": tool}),
+            )
             .await;
         assert_eq!(st, 201, "{rule}");
     }
     // An unverifiable tool takes no workspace rule at all.
     let (st, rule) = d
-        .rule(json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
-                     "target": "approve_improvement_edit"}))
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                     "target": "approve_improvement_edit"}),
+        )
         .await;
     assert_eq!(st, 400, "{rule}");
 
     for (tool, args, card_ws) in [
         ("run_workflow", json!({"workflow_id": wf_id}), json!("ws2")),
-        ("run_scheduled_task", json!({"task_id": task_id}), json!("ws2")),
+        (
+            "run_scheduled_task",
+            json!({"task_id": task_id}),
+            json!("ws2"),
+        ),
         (
             "approve_improvement_edit",
             json!({"edit_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V"}),
@@ -1404,7 +1416,9 @@ async fn a_bare_id_from_another_workspaces_session_is_never_auto_approved() {
     assert_eq!(env["preview"]["arguments"]["workspace_id"], "ws1", "{env}");
     let row = d.last_audit("run_workflow").await;
     assert!(
-        row["decision_reason"].as_str().is_some_and(|r| !r.is_empty()),
+        row["decision_reason"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
         "covered by the ws1 rule: {row}"
     );
 }

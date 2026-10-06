@@ -342,8 +342,7 @@ pub(crate) async fn governed_invoke(
     // workspace of an id-only object for a workspace-pinned token. Same
     // placement and contract as the repo fill: after the scope + enable gates,
     // and the resolved arguments replace the caller's for everything below.
-    let ref_fill = match fill_refs(ctx, auth, &short, arguments, forced_approval.is_some()).await
-    {
+    let ref_fill = match fill_refs(ctx, auth, &short, arguments, forced_approval.is_some()).await {
         Ok(fill) => fill,
         Err(Error::Forbidden(reason)) => {
             return Ok(deny_audit(ctx, &mut audit, &reason).await);
@@ -2023,7 +2022,12 @@ mod tests {
         // pin-echo bypass): the executor ignores it for every probed tool.
         for (t, arg, ..) in PIN_PROBES {
             assert!(
-                refs_need_lookup(t, &json!({ (*arg): id, "workspace_id": "ws-pin" }), true, false),
+                refs_need_lookup(
+                    t,
+                    &json!({ (*arg): id, "workspace_id": "ws-pin" }),
+                    true,
+                    false
+                ),
                 "{t}"
             );
         }
@@ -2096,7 +2100,12 @@ mod tests {
         ] {
             assert!(workspace_rules_never_apply(t), "{t}");
         }
-        for t in ["run_workflow", "run_scheduled_task", "send_message", "create_pr"] {
+        for t in [
+            "run_workflow",
+            "run_scheduled_task",
+            "send_message",
+            "create_pr",
+        ] {
             assert!(!workspace_rules_never_apply(t), "{t}");
         }
     }

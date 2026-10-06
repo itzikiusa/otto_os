@@ -185,6 +185,11 @@
       <label class="field">
         <span>Env <em>(KEY=value, one per line)</em></span>
         <textarea dir="ltr" bind:value={envText} rows="2" class="mono" placeholder="LOG_LEVEL=info"></textarea>
+        <span class="env-note">
+          The server does not inherit Otto's environment — only PATH, HOME, the locale, temp dir, proxy
+          (HTTPS_PROXY, NO_PROXY…), CA bundle (NODE_EXTRA_CA_CERTS, SSL_CERT_FILE…), DOCKER_HOST and XDG_*
+          variables. Set anything else it needs here.
+        </span>
       </label>
       <label class="field">
         <span>Secret env <em>(KEY=value — stored in Keychain, never shown again)</em></span>
@@ -272,6 +277,10 @@
   .field em {
     font-style: normal;
     opacity: 0.7;
+  }
+  .field > .env-note {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .row2 {
     display: grid;
