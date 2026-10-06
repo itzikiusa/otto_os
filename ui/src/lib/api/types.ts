@@ -3358,11 +3358,17 @@ export interface ConflictFile {
 }
 
 /** `POST /repos/{id}/conflict/resolve` — send `content` (the rebuilt file), or
- *  `side` to take one side wholesale (`content` is ignored then). */
+ *  `side` to take one side wholesale (`content` is ignored then). `content` is
+ *  400 for a binary working file, and when empty for an absent one. */
 export interface ResolveConflictReq {
   path: string;
   content: string;
-  side?: 'ours' | 'theirs';
+  side?: 'ours' | 'theirs' | 'keep' | 'delete';
+}
+
+/** `GET /repos/{id}/head/remotes` — remote-tracking refs containing HEAD. */
+export interface HeadRemotesResp {
+  remotes: string[];
 }
 
 /** `POST /repos/{id}/merge/commit` */
@@ -3944,6 +3950,9 @@ export interface ReviewComment {
 export interface EditReviewCommentReq {
   body?: string;
   restore_draft?: boolean;
+  /** Record an approved-but-unposted comment as posted WITHOUT sending it
+   *  (its copy was found on the PR). Alone; 409 unless approved + unposted. */
+  mark_posted?: boolean;
 }
 
 export interface Review {

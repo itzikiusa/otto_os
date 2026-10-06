@@ -341,6 +341,7 @@ test('bus polls keep refreshing after the timer budget is spent, toasting once',
 
 test('merge sends expected_head_sha and explains a moved head', async () => {
   const bodies: Record<string, unknown>[] = [];
+  let stale = 0;
   class ApiError extends Error {
     status: number;
     constructor(status: number, msg: string) {
@@ -354,7 +355,14 @@ test('merge sends expected_head_sha and explains a moved head', async () => {
     repoId: 'r1',
     strategy: 'squash',
     deleteSource: false,
-    pr: { head_sha: 'abc123' },
+    pr: { head_sha: 'stale00' },
+    // S15-305: the modal pins the head IT read, not the parent's copy.
+    pinSha: 'abc123',
+    probeTick: 0,
+    mergeAnyway: true,
+    onstale() {
+      stale++;
+    },
     merging: false,
     error: null,
     disposed: false,
@@ -371,6 +379,10 @@ test('merge sends expected_head_sha and explains a moved head', async () => {
   await s.doMerge();
   assert.equal(bodies[0].expected_head_sha, 'abc123');
   assert.match(s.error, /changed since these checks ran/);
+  // …and recovers: probes + head re-read, parent told, "Merge anyway" reset.
+  assert.equal(s.probeTick, 1);
+  assert.equal(stale, 1);
+  assert.equal(s.mergeAnyway, false);
 });
 
 // ── S15-12 / S15-13 / S15-21 / S15-22 · diff model + view state ─────────────

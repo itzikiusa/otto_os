@@ -117,6 +117,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         )
         .route("/repos/{id}/log", get(repo_log::<S>))
         .route("/repos/{id}/stashes", get(repo_stashes::<S>))
+        .route("/repos/{id}/head/remotes", get(repo_head_remotes::<S>))
         .route("/repos/{id}/worktrees", get(repo_worktrees::<S>))
         .route(
             "/repos/{id}/worktrees/remove",
@@ -2254,6 +2255,19 @@ async fn repo_stashes<S: GitCtx>(
 ) -> ApiResult<Json<Vec<StashInfo>>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     Ok(Json(git.stash_list().await?))
+}
+
+/// `GET /repos/{id}/head/remotes` → `{remotes: string[]}`: remote-tracking
+/// refs that already contain HEAD. Asked only when the user ticks "Amend" —
+/// a `--contains` walk is too costly for every status poll.
+async fn repo_head_remotes<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let remotes = git.head_remote_refs().await?;
+    Ok(Json(serde_json::json!({ "remotes": remotes })))
 }
 
 async fn repo_worktrees<S: GitCtx>(

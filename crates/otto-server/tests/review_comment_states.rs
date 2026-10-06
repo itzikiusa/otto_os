@@ -116,5 +116,43 @@ async fn approving_a_declined_comment_is_a_conflict_until_restored() {
         .await
         .unwrap();
     assert_eq!(approved["state"], "approved");
+    assert_eq!(approved["posted"], false, "a local review never posts");
+
+    // S15-302: the retry guard found the copy a failed attempt created on the
+    // PR — record it posted (nothing is sent) so it stops being postable.
+    let mark = |c: &reqwest::Client| {
+        c.patch(url(""))
+            .bearer_auth(&token)
+            .json(&json!({"mark_posted": true}))
+            .send()
+    };
+    let marked: Value = mark(&client).await.unwrap().json().await.unwrap();
+    assert_eq!(marked["state"], "approved");
+    assert_eq!(marked["posted"], true);
+    assert_eq!(
+        mark(&client).await.unwrap().status(),
+        409,
+        "an already-posted comment can't be marked again"
+    );
+    let draft = ctx
+        .reviews_store
+        .add_comment(&review.id, None, None, CommentSeverity::Info, "draft")
+        .await
+        .unwrap();
+    let draft_mark = client
+        .patch(format!("{origin}/pr-review-comments/{}", draft.id))
+        .bearer_auth(&token)
+        .json(&json!({"mark_posted": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(draft_mark.status(), 409, "a draft was never attempted");
+    assert!(
+        !ctx.reviews_store
+            .get_comment(&draft.id)
+            .await
+            .unwrap()
+            .posted
+    );
     server.abort();
 }

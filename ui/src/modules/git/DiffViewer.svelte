@@ -55,7 +55,7 @@
     type Row,
   } from './diff-model';
   import { findScroller, resum, rowAt } from './diff-virtual';
-  import { carryViewState, carryViewed } from './diff-viewstate';
+  import { carryViewState, carryViewed, unchangedPaths } from './diff-viewstate';
   import { registerFindProvider } from '../../lib/findProviders';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { ListWindow } from './list-window.svelte';
@@ -103,9 +103,6 @@
      *  re-fetched diff with the same key keeps viewed marks, expansions and
      *  the open composer for paths that still exist (a push re-fetches). */
     stateKey?: string;
-    /** Revision the diff's NEW side is at (a commit / PR head). History and
-     *  Blame open there instead of the local HEAD. */
-    rev?: string;
   }
   let {
     diff,
@@ -119,7 +116,6 @@
     wip,
     loadFile,
     stateKey,
-    rev,
   }: Props = $props();
 
   let mode = $state<'unified' | 'split'>('unified');
@@ -183,13 +179,28 @@
   const diffPaths = $derived(new Set(diff.files.map((f) => f.path)));
   /** Same identity, new diff object (a reload): carry, don't reset. */
   const sameKey = (k: string | undefined): boolean => stateKey !== undefined && k === stateKey;
+  // Carried only for files whose content didn't change (S15-304).
   const vs: ViewState = $derived(
     vsRaw.for === diff
       ? vsRaw
       : sameKey(vsRaw.key)
-        ? { ...freshState(diff), ...carryViewState(vsRaw, diffPaths) }
+        ? { ...freshState(diff), ...carryViewState(vsRaw, unchangedPaths(vsRaw.for, diff)) }
         : freshState(diff),
   );
+  // The open composer's file changed under it: its anchor was dropped above.
+  // Keep the typed text for the next composer and say why it closed.
+  let keepComposerText = false;
+  let reanchorToasted: ComposerAt | null = null;
+  $effect(() => {
+    const prev = vsRaw;
+    if (prev.for === diff || !prev.composer || vs.composer || !sameKey(prev.key)) return;
+    if (!diffPaths.has(prev.composer.path) || reanchorToasted === prev.composer) return;
+    if (untrack(() => composerText).trim() !== '') {
+      reanchorToasted = prev.composer;
+      keepComposerText = true;
+      toasts.info('File changed — re-anchor your comment', `${prev.composer.path} changed with the new push. Your text is kept; open the comment on the line you mean.`);
+    }
+  });
   /** Patch the view state of diff `d` — a no-op once `d` is no longer shown. */
   function patchVs(p: Partial<ViewState>, d: DiffResp = diff): void {
     if (d !== diff) return;
@@ -201,7 +212,7 @@
     viewedRaw.for === diff
       ? viewedRaw.v
       : sameKey(viewedRaw.key)
-        ? carryViewed(viewedRaw.v, diffPaths)
+        ? carryViewed(viewedRaw.v, unchangedPaths(viewedRaw.for, diff))
         : new Set<string>(),
   );
 
@@ -886,7 +897,8 @@
     patchVs({
       composer: same ? null : { path, oldLine: line.old_line, newLine: line.new_line, line: a.line, side: a.side },
     });
-    composerText = '';
+    if (!keepComposerText) composerText = '';
+    keepComposerText = false;
   }
   async function submitComment(): Promise<void> {
     const c = vs.composer;
@@ -1011,19 +1023,26 @@
 
   /** File header ⋯ — the diff is the only place a path is at hand, so this is
    *  where History / Blame hang off. The panels live in RepoView; `gitBridge`
-   *  carries the request there without prop-drilling the whole graph. */
+   *  carries the request there without prop-drilling the whole graph.
+   *
+   *  Offered only with `repoId`, i.e. the WORKING-TREE diff (WipPanel), where
+   *  the local HEAD is the right revision — so no `rev` is sent. A commit
+   *  diff in the graph opens Blame at its own sha (GraphView's file menu); a
+   *  PR diff has no drawer to open into and passes no `repoId` (S15-309: a
+   *  `rev` prop that no caller set was removed rather than left as dead
+   *  plumbing). */
   function fileToolsMenu(e: MouseEvent, file: FileDiff): void {
     if (!repoId) return;
     ctxMenu.show(e, [
       {
         label: 'History',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path, rev }),
+        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path }),
       },
       {
         label: 'Blame',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path, rev }),
+        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path }),
       },
     ]);
   }

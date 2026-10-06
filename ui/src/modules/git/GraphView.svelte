@@ -1388,10 +1388,12 @@
           action: () => void deleteLocalBranch(localName, false),
         });
         items.push({
-          label: 'Delete local + remote…',
+          label: `Delete ${localName} + ${b.name}…`,
           icon: 'trash',
           danger: true,
-          action: () => void deleteLocalBranch(localName, true),
+          // The remote half targets THIS row's remote (S15-303) — never origin
+          // by default when the row says `upstream/x`.
+          action: () => void deleteLocalBranch(localName, true, remoteName),
         });
       }
       items.push({ separator: true });
@@ -1451,8 +1453,13 @@
       items.push({ separator: true });
       items.push({ label: 'GitFlow', disabled: true });
       items.push(...gitFlowItems(b.name));
-      // A matching remote branch (origin/<name>) → offer remote deletes too.
-      const hasRemote = remoteNames.has(`origin/${b.name}`);
+      // A matching remote branch → offer remote deletes too. The remote is the
+      // branch's TRACKING remote when it tracks the same name (a fork's
+      // `upstream/x`), else origin — "local + remote" must delete the twin the
+      // user sees, not whatever origin holds under that name (S15-303).
+      const up = b.upstream ? splitRemoteRef(b.upstream) : null;
+      const trackRemote = up && up.branch === b.name ? up.remote : 'origin';
+      const hasRemote = remoteNames.has(`${trackRemote}/${b.name}`);
       // Never offer Delete on the checked-out branch (git refuses).
       if (!isCurrent) {
         items.push({ separator: true });
@@ -1464,16 +1471,16 @@
         });
         if (hasRemote) {
           items.push({
-            label: `Delete origin/${b.name}…`,
+            label: `Delete ${trackRemote}/${b.name}…`,
             icon: 'trash',
             danger: true,
-            action: () => void deleteRemoteBranch(b.name),
+            action: () => void deleteRemoteBranch(b.name, trackRemote),
           });
           items.push({
-            label: 'Delete local + remote…',
+            label: `Delete ${b.name} + ${trackRemote}/${b.name}…`,
             icon: 'trash',
             danger: true,
-            action: () => void deleteLocalBranch(b.name, true),
+            action: () => void deleteLocalBranch(b.name, true, trackRemote),
           });
         }
       }
@@ -1528,10 +1535,13 @@
     await mutate('/branch/rename', { from, to }, 'Branch renamed', `${from} → ${to}`);
   }
 
-  async function deleteLocalBranch(name: string, alsoRemote: boolean): Promise<void> {
+  /** `remote` names WHICH remote the `alsoRemote` half deletes on; it is sent
+   *  as `remote_name` on both the safe and the forced request (the daemon
+   *  otherwise defaults to origin). */
+  async function deleteLocalBranch(name: string, alsoRemote: boolean, remote = 'origin'): Promise<void> {
     const ok = await confirmer.ask(
       alsoRemote
-        ? `Delete branch “${name}” locally AND on origin? This cannot be undone.`
+        ? `Delete branch “${name}” locally AND “${remote}/${name}” on the remote “${remote}”? This cannot be undone.`
         : `Delete local branch “${name}”?`,
       { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
     );
@@ -1544,6 +1554,7 @@
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch/delete`, {
         name,
         remote: alsoRemote,
+        ...(alsoRemote ? { remote_name: remote } : {}),
       });
       await refreshAfter(s);
       toasts.success(okTitle, name);
@@ -1560,7 +1571,12 @@
         { title: 'Branch not fully merged', confirmLabel: 'Force delete', danger: true },
       );
       if (!force) return;
-      await mutate('/branch/delete', { name, remote: alsoRemote, force: true }, okTitle, name);
+      await mutate(
+        '/branch/delete',
+        { name, remote: alsoRemote, ...(alsoRemote ? { remote_name: remote } : {}), force: true },
+        okTitle,
+        name,
+      );
     }
   }
 
