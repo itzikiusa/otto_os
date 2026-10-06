@@ -175,12 +175,6 @@ fn file_name(tok: &str) -> String {
         .to_string()
 }
 
-/// Find the agent CLI running underneath `root` (the session's PTY process).
-///
-/// Walks the whole descendant tree, not just direct children: the user's shell
-/// may sit under `tmux`, a `sudo`, or a nested shell. When several match (an
-/// agent that shelled out to another agent) the OLDEST wins — that is the one
-/// the user launched and the one whose conversation the terminal is really in.
 /// Whether `pid` has at least one child process — one cheap syscall, so the
 /// nested-agent sweep can skip its whole-machine `ps` while every live shell
 /// just sits at a prompt (S9-10). Errs on `true` (scan) when unsure.
@@ -207,6 +201,12 @@ pub fn has_children(_pid: u32) -> bool {
     true
 }
 
+/// Find the agent CLI running underneath `root` (the session's PTY process).
+///
+/// Walks the whole descendant tree, not just direct children: the user's shell
+/// may sit under `tmux`, a `sudo`, or a nested shell. When several match (an
+/// agent that shelled out to another agent) the OLDEST wins — that is the one
+/// the user launched and the one whose conversation the terminal is really in.
 pub fn find_nested_agent(root: u32, table: &[ProcInfo]) -> Option<(ProcInfo, &'static str)> {
     use std::collections::HashMap;
     let mut children: HashMap<u32, Vec<usize>> = HashMap::new();

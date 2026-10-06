@@ -110,8 +110,10 @@ impl SwarmHost for ServerCtx {
         session_id: &str,
         since: chrono::DateTime<chrono::Utc>,
     ) -> Option<(u64, u64, f64)> {
+        // Background (S9-303): flush-and-wait so this turn's rows count, and
+        // never reset ClickHouse's idle clock from autonomous work.
         self.usage
-            .session_totals_for(session_id, Some(since))
+            .session_totals_for_background(session_id, Some(since))
             .await
             .map(|t| (t.input_tokens, t.output_tokens, t.cost_usd))
     }

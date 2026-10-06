@@ -970,7 +970,13 @@ async fn check_budgets(ctx: &ServerCtx, dedup: &mut otto_usage::BudgetDedup) {
     if dedup.unchanged_since_last_check(&stamp) {
         return;
     }
-    let status = crate::routes::usage::budget_status_pub(ctx, cfg).await;
+    // Background read (S9-303): never resets ClickHouse's idle clock (each
+    // flush bumps the generation, so a stamping scan here kept an always-on
+    // agent's server up forever) and never wakes a parked one — no spend to
+    // judge yet means "check again next tick", so the stamp is not marked.
+    let Some(status) = crate::routes::usage::budget_status_background(ctx, cfg).await else {
+        return;
+    };
     dedup.mark_checked(stamp);
     for row in &status.rows {
         let signal = dedup.apply(&row.scope, &row.key, row.exceeded);

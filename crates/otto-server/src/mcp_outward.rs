@@ -156,8 +156,15 @@ pub struct OttoInvokeReq {
 pub async fn otto_tools_invoke(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,
+    untimed: Option<axum::Extension<crate::telemetry::UntimedMark>>,
     Json(req): Json<OttoInvokeReq>,
 ) -> ApiResult<Json<Value>> {
+    // `wait_session` parks up to ~14 min: not an operation latency (S9-304).
+    if let Some(axum::Extension(mark)) = &untimed {
+        if crate::telemetry::long_poll_tool(&req.tool) {
+            mark.mark();
+        }
+    }
     let mut env = governed_invoke(
         &ctx,
         &auth,

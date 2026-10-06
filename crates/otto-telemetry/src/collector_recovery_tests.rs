@@ -1,5 +1,7 @@
 //! Isolated process-lifecycle fixtures. No ClickHouse, downloads, user state,
 //! process-name matching, or broad kill commands are involved.
+// Test fixtures: compiling the fake collector with `cc` blocks by design.
+#![allow(clippy::disallowed_methods)]
 use super::*;
 use std::{fs, process::Child as StdChild};
 

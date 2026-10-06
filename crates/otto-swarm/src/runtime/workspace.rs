@@ -611,6 +611,7 @@ pub const HELPER_NAMES: [&str; 4] = [
 /// the user's PR (or, in per-agent repo mode, straight into the checkout).
 /// Root-anchored lines go into the repo's `info/exclude` (shared by all its
 /// worktrees, never committed); a cwd that is not a git checkout is a no-op.
+#[allow(clippy::disallowed_methods)] // sync by contract: provision_agent runs in spawn_blocking
 pub fn exclude_helpers(cwd: &str) {
     let Ok(out) = otto_git::hardened_std_command()
         .args(["-C", cwd, "rev-parse", "--git-path", "info/exclude"])
@@ -697,6 +698,7 @@ mod tests {
 
     /// S4-09: the helpers are git-ignored via `info/exclude`, idempotently.
     #[test]
+    #[allow(clippy::disallowed_methods)] // test: blocking git setup
     fn helpers_are_excluded_from_git_in_a_checkout() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();

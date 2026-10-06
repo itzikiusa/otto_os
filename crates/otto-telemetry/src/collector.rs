@@ -39,6 +39,12 @@ pub(crate) struct ExporterStats {
     pub send_failed: u64,
     /// Records still waiting in the exporters' sending queues.
     pub queue_size: u64,
+    /// Spans the traces exporter wrote / gave up on (S9-307): a batch a
+    /// consumer took off the queue and is still retrying is in NEITHER the
+    /// queue nor these counters, so only `sent + failed == accepted` proves
+    /// every accepted span was settled.
+    pub sent_spans: u64,
+    pub failed_spans: u64,
 }
 /// Sum the exporter counters out of a Prometheus text exposition. Unknown
 /// lines and malformed values are ignored, never treated as zero failures.
@@ -60,6 +66,12 @@ pub(crate) fn parse_exporter_stats(text: &str) -> Option<ExporterStats> {
         };
         if name.starts_with("otelcol_exporter_send_failed_") {
             stats.send_failed += value as u64;
+            if name.starts_with("otelcol_exporter_send_failed_spans") {
+                stats.failed_spans += value as u64;
+            }
+            seen = true;
+        } else if name.starts_with("otelcol_exporter_sent_spans") {
+            stats.sent_spans += value as u64;
             seen = true;
         } else if name == "otelcol_exporter_queue_size" {
             stats.queue_size += value as u64;
@@ -157,9 +169,11 @@ impl Collector {
                 "connection_params":{"max_open_conns":"2","max_idle_conns":"1"},
                 "sending_queue":{"enabled":true,"num_consumers":1,"queue_size":16384,"sizer":"items","batch":{"min_size":2048,"max_size":8192,"flush_timeout":"10s","sizer":"items"}},
                 // Retries must give up before the daemon's drain deadline (S9-03):
-                // batch flush (10 s) + retries (≤ 10 s) + one 5 s attempt
-                // fit DRAIN_DEADLINE (25 s); anything left is reported, not lost silently.
-                "retry_on_failure":{"enabled":true,"initial_interval":"1s","max_interval":"4s","max_elapsed_time":"10s"}
+                // batch flush (10 s) + retries (≤ 6 s) + one 5 s attempt = 21 s,
+                // leaving DRAIN_DEADLINE (25 s) a 4 s margin for the final
+                // failure to reach the counters the drain polls every 500 ms
+                // (S9-307); anything left is reported, not lost silently.
+                "retry_on_failure":{"enabled":true,"initial_interval":"1s","max_interval":"4s","max_elapsed_time":"6s"}
             }));
         }
         let config = json!({

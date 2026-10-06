@@ -505,7 +505,9 @@ otelcol_exporter_sent_spans_total{exporter=\"clickhouse/traces\"} 900\n";
         collector::parse_exporter_stats(text),
         Some(collector::ExporterStats {
             send_failed: 8,
-            queue_size: 15
+            queue_size: 15,
+            sent_spans: 900,
+            failed_spans: 7,
         })
     );
     assert_eq!(collector::parse_exporter_stats("# nothing yet\n"), None);
@@ -632,8 +634,8 @@ fn drain_settlement_never_claims_unconfirmed_exports() {
     use collector::ExporterStats;
     let stalled = settle(
         Some(ExporterStats {
-            send_failed: 0,
             queue_size: 40,
+            ..Default::default()
         }),
         40,
     );
@@ -654,6 +656,8 @@ fn drain_settlement_never_claims_unconfirmed_exports() {
     let partial = settle(
         Some(ExporterStats {
             send_failed: 3,
+            failed_spans: 3,
+            sent_spans: 7,
             queue_size: 0,
         }),
         10,
@@ -661,7 +665,23 @@ fn drain_settlement_never_claims_unconfirmed_exports() {
     assert_eq!((partial.exported, partial.failed), (7, 3));
     assert!(partial.error.is_some());
 
-    let clean = settle(Some(ExporterStats::default()), 10);
+    // S9-307: queues empty, but 4 accepted spans are neither sent nor failed
+    // (a batch mid-retry when the collector stopped) — not a clean run.
+    let mid_retry = ExporterStats {
+        sent_spans: 6,
+        ..Default::default()
+    };
+    assert!(!drained(&mid_retry, 10), "the drain must keep waiting");
+    let settled = settle(Some(mid_retry), 10);
+    assert_eq!((settled.exported, settled.failed), (6, 4));
+    assert!(settled.error.as_deref().is_some_and(|e| e.contains('4')));
+
+    let done = ExporterStats {
+        sent_spans: 10,
+        ..Default::default()
+    };
+    assert!(drained(&done, 10));
+    let clean = settle(Some(done), 10);
     assert_eq!(
         clean,
         Settlement {
