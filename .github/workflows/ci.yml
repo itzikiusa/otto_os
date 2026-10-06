@@ -6,7 +6,8 @@ name: CI
 # these Linux runners: macos.yml's `desktop` job runs its fmt/clippy/`cargo test`
 # (supervisor plist + keep_previous_daemon, browser allow-list, window registry,
 # the no-remote-webviews capability pin) on every PR touching apps/desktop/**
-# and nightly. The daemon crates' macOS cfg branches run in macos-server.yml.
+# and nightly. The daemon crates' macOS cfg branches run in macos.yml's `daemon`
+# job (crate list kept in sync by scripts/macos-ci-crates.py --check, below).
 
 on:
   push:
@@ -72,6 +73,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # Linux never compiles `cfg(target_os = "macos")` code: every crate that
+      # has some must be linted + tested by macos.yml, and macos.yml must
+      # trigger on it and its reverse dependents (S12-306). Metadata only.
+      - name: macOS workflow covers every crate with macOS-only code
+        run: python3 scripts/macos-ci-crates.py --check
 
       # Caches ~/.cargo registry/git + ./target, keyed on Cargo.lock.
       - name: Cache cargo
@@ -223,6 +230,10 @@ jobs:
       - name: Test the nextest override-filter guard (parsing)
         working-directory: .
         run: python3 -B -m unittest discover -s scripts -p 'test_check_nextest_filters.py'
+
+      - name: Test the macOS crate-coverage guard
+        working-directory: .
+        run: python3 -B -m unittest discover -s scripts -p 'test_macos_ci_crates.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
