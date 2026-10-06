@@ -3349,11 +3349,12 @@ export interface ConflictFile {
 }
 
 /** `POST /repos/{id}/conflict/resolve` — send `content` (the rebuilt file), or
- *  `side` to take one side wholesale (`content` is ignored then). */
+ *  `side` to take one side wholesale (`content` is ignored then). `content` is
+ *  400 for a binary working file, and when empty for an absent one. */
 export interface ResolveConflictReq {
   path: string;
   content: string;
-  side?: 'ours' | 'theirs';
+  side?: 'ours' | 'theirs' | 'keep' | 'delete';
 }
 
 /** `POST /repos/{id}/merge/commit` */
