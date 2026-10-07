@@ -938,6 +938,10 @@ function build(
         if ((o.userData.pick as SchoolPick | undefined)?.kind === 'door') targets.push(o);
       });
     }
+    // Data updates can rebuild hit meshes between rendered frames. Raycaster
+    // reads matrixWorld without refreshing it, so sync only the pick targets
+    // (and their parents), rather than waiting for the next GPU render.
+    for (const target of targets) target.updateWorldMatrix(true, false);
     const hit = ray.intersectObjects(targets, false)[0];
     if (!hit) return null;
     const desk = hit.object.userData.desk as string | undefined;

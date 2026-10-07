@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { randomUUID } from 'node:crypto';
@@ -266,6 +267,36 @@ test.describe('School regressions', () => {
   // as many pixels; CI spent 29 s capturing the card. This reduces capture cost,
   // not WebGL render resolution: scene.ts pins SwiftShader's pixel ratio to 1.
   test.use({ reducedMotion: 'reduce', viewport: { width: 1100, height: 800 }, deviceScaleFactor: 0.5 });
+test('new corridor doors can be picked before their first rendered frame', async ({ page }) => {
+  await boot(page, { view: 'list' });
+  const result = await page.evaluate(async () => {
+    const scenePath = '/src/modules/home/school/scene.ts';
+    const modelPath = '/src/modules/home/school/model.ts';
+    const { mountSchool } = await import(/* @vite-ignore */ scenePath) as typeof import('../src/modules/home/school/scene');
+    const { buildSchool } = await import(/* @vite-ignore */ modelPath) as typeof import('../src/modules/home/school/model');
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;inset:0;width:1000px;height:650px;z-index:10000';
+    document.body.append(host);
+    let scene: Awaited<ReturnType<typeof mountSchool>> | undefined;
+    try {
+      scene = await mountSchool(host, { reducedMotion: true, dark: true, label: 'Picking regression' });
+      await new Promise<void>((resolve) => scene!.onFrame(resolve));
+      // Data can arrive between animation frames. Keep the real renderer and
+      // camera, but prevent a render from incidentally updating hit matrices.
+      scene.setActive(false);
+      const frames = scene.debug().frames;
+      scene.update(buildSchool({ workspaces: [{ id: 'picking-room', name: 'Picking room' }], currentId: 'picking-room', sessions: [] }));
+      const point = scene.project({ kind: 'door', id: 'picking-room' })!;
+      return { visible: point.visible, picked: scene.pick(point.x, point.y + 60), frames, after: scene.debug().frames };
+    } finally {
+      scene?.destroy();
+      host.remove();
+    }
+  });
+  expect(result.visible).toBe(true);
+  expect(result.after, 'picking must not depend on another render').toBe(result.frames);
+  expect(result.picked).toEqual({ kind: 'door', id: 'picking-room' });
+});
 for (const key of ['Enter', 'Space']) {
   test(`native card controls retain ${key} activation inside the stage`, async ({ page }) => {
     // Check on deliberately does not animate in reduced-motion mode.
