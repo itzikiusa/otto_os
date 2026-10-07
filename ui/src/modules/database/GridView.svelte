@@ -717,6 +717,9 @@
   }
 
   function onGridKeydown(e: KeyboardEvent): void {
+    // Inline editors consume Enter/Escape before the event reaches the grid.
+    // Committing clears flow.editing synchronously; don't reopen that cell.
+    if (e.defaultPrevented) return;
     if (mini || !result || flow.editing || flow.reviewSql || flow.viewer || flow.docEditor) return;
     // Typing in the filter row must not move the cell cursor.
     if ((e.target as HTMLElement | null)?.closest('.filter-row')) return;
