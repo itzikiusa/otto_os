@@ -40,10 +40,6 @@ type Layout =
   | 'list' // LRANGE: one element per row, index = start + row
   | 'members'; // SMEMBERS / ZRANGE: one member per row — delete only
 
-/** Placeholder a list delete writes over the element before `LREM`ing it —
- *  Redis has no delete-by-index. */
-const LIST_TOMBSTONE = '__otto_deleted__';
-
 /** JS port of the driver's `split_args` (`redis.rs`): whitespace-separated
  *  tokens, a double-quoted run keeps its spaces, and `\"` / `\\` are the only
  *  escapes (inside quotes). Mirrors the Rust byte for byte so a statement the
@@ -344,15 +340,12 @@ export const redisAdapter: EditAdapter = {
         const sql = [skipNote, safe.length > 0 ? `${verb} ${key} ${safe.map(redisQuote).join(' ')}` : ''].filter(Boolean).join('\n');
         return { title: `Review ${verb} (${plural(safe.length, noun)})`, sql };
       }
-      case 'list': {
-        // No delete-by-index: overwrite each element with a tombstone (every
-        // index is still valid at that point), then remove them all at once.
-        const sets = idxs.map((i) => `LSET ${key} ${(t.start ?? 0) + i} ${redisString(LIST_TOMBSTONE)}`);
-        return {
-          title: `Review LSET + LREM (${plural(idxs.length, 'element')})`,
-          sql: [...sets, `LREM ${key} 0 ${redisString(LIST_TOMBSTONE)}`].join('\n'),
-        };
-      }
+      case 'list':
+        // Redis has no delete-by-index in this line-by-line execution flow.
+        // A sentinel + LREM can remove unrelated values (including outside
+        // the loaded LRANGE) and can leave partial writes on failure. Refuse
+        // deletion entirely; exact-index LSET edits remain available.
+        return null;
     }
   },
 

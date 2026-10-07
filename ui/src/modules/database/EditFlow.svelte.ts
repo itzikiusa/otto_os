@@ -812,8 +812,10 @@ export class EditFlow {
   }
 
   deleteRows(indices: number[]): void {
+    if (!this.result || !this.editable || indices.length === 0) return;
     const built = this.buildDelete(indices);
     if (built) this.openReview(built.title, built.sql);
+    else toasts.info('Row deletion unavailable', 'These rows cannot be deleted safely from the results editor. You can still edit values.');
   }
   deleteSelected(): void {
     this.deleteRows([...this.selected].filter((i) => i >= 0 && i < this.liveRows.length));

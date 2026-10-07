@@ -15,6 +15,50 @@ const mod = loadSource(new URL('../src/modules/database/edit-redis.ts', import.m
 });
 const adapter = mod.redisAdapter;
 
+for (const fixture of [
+  { statement: 'LRANGE k 0 -1', rows: [['__otto_deleted__'], ['chosen'], ['__otto_deleted__']], indices: [1] },
+  { statement: 'LRANGE k 40 42', rows: [['duplicate'], ['duplicate'], ['__otto_deleted__']], indices: [0, 1] },
+  { statement: 'LRANGE k 4 4', rows: [['chosen']], indices: [0] },
+]) test(`list index deletion is refused without an executable mutation: ${fixture.statement}`, () => {
+  assert.equal(adapter.buildDelete(fixture.indices, ctx(fixture.statement, fixture.rows)), null);
+});
+
+test('refusing list deletion retains safe edits at the actual LRANGE offset', () => {
+  const patch = { cells: new Map([[0, 'replacement']]), set: new Map(), unset: new Set(), rename: new Map() };
+  const built = adapter.buildUpdate([{ rowIdx: 1, patch }], ctx('LRANGE k 40 42', [['same'], ['same']]));
+  assert.equal(built.sql, 'LSET k 41 "replacement"');
+});
+
+test('the grid delete flow cannot open or execute a Redis list mutation', async () => {
+  let writes = 0;
+  const explanations: string[][] = [];
+  const { EditFlow } = loadSource(new URL('../src/modules/database/EditFlow.svelte.ts', import.meta.url), {
+    '../../lib/toast.svelte': { toasts: { info: (...message: string[]) => explanations.push(message) } },
+    '../../lib/stores/database.svelte': { database: { runManagedStatement: () => { writes++; } } },
+    './results-format': { SET_NULL, SET_EMPTY },
+    './edit-types': { adapterFor: () => adapter },
+    './edit-sql': {}, './edit-mongo': {}, './expansion-plan': {},
+    '../../lib/toastError': {}, '../../lib/plural': plural,
+  });
+  const flow = new EditFlow();
+  // The source harness runs plain runes; explicitly supply the resolved
+  // editable target that the real grid's reactive target resolution produces.
+  Object.assign(flow, {
+    editable: true, result: { columns: [{ name: 'value' }] }, engine: 'redis',
+    editDb: 'LRANGE k 40 42', editTable: 'k', editPkCols: ['key'],
+    connectionId: 'fixture', liveRows: [['__otto_deleted__'], ['chosen'], ['chosen']],
+    selected: new Set([1, 2]),
+  });
+  flow.deleteSelected();
+  assert.equal(flow.reviewSql, null);
+  await flow.runReview();
+  assert.equal(writes, 0);
+  flow.deleteRows([1]);
+  assert.equal(flow.reviewSql, null);
+  assert.equal(explanations.length, 2, 'both delete entry points explain the refusal');
+  assert.match(explanations[0].join(' '), /cannot be deleted safely/i);
+});
+
 function ctx(statement: string, rows: unknown[][], columns = ['value']) {
   const t = adapter.target(statement, columns);
   assert.ok(t.target, t.reason ?? 'no target');
