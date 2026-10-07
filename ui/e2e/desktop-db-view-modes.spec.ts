@@ -108,9 +108,10 @@ test('⌘⇧V cycles and the pick survives reload', async ({ page }) => {
   await expect(activeView(page)).toHaveText('Grid');
   await expect(autoChip(page)).toBeVisible();
 
-  // "Auto" clears the tab's pick → back to the engine default (Vertical).
+  // Auto clears the tab override and follows the remembered connection pick.
+  await expect(autoChip(page)).toHaveAttribute('title', /Back to automatic: Grid/);
   await autoChip(page).click();
-  await expect(activeView(page)).toHaveText('Vertical');
+  await expect(activeView(page)).toHaveText('Grid');
   await expect(autoChip(page)).toHaveCount(0);
 });
 

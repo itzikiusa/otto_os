@@ -353,10 +353,18 @@ test('account card shows the LocalStack identity, the endpoint, and green S3/SQS
   // `sts get-caller-identity` against LocalStack → the fixed dev account.
   await expect(card).toContainText('000000000000', { timeout: 20_000 });
   const chip = (label: string) => card.locator('a.chip', { hasText: new RegExp(`^\\s*${label}\\s*$`) });
-  for (const s of ['S3', 'SQS', 'EC2']) await expect(chip(s)).toHaveClass(/\ballowed\b/, { timeout: 30_000 });
+  for (const s of ['S3', 'SQS', 'EC2']) {
+    await expect(chip(s)).toHaveClass(/\bok\b/, { timeout: 30_000 });
+    await expect(chip(s)).toHaveAttribute('aria-disabled', 'false');
+    await expect(chip(s)).toHaveAttribute('href', `#/aws/${env.accountId}/${s.toLowerCase()}`);
+    await expect(chip(s)).toHaveAttribute('title', s);
+  }
   // Athena / EKS are not in SERVICES — LocalStack answers with a non-IAM
   // error, so they must NOT be green (denied or unknown are both fine).
-  for (const s of ['Athena', 'EKS']) await expect(chip(s)).not.toHaveClass(/\ballowed\b/);
+  for (const s of ['Athena', 'EKS']) {
+    await expect(chip(s)).not.toHaveClass(/\bok\b/);
+    await expect(chip(s)).toHaveClass(/\bperm-(denied|unknown)\b/);
+  }
   expect(realErrors(errors), `console errors: ${errors.join('\n')}`).toEqual([]);
 });
 

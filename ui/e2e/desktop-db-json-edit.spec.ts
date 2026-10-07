@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ── JSON editing in the results grid (desktop-browser; needs the docker Mongo) ──
@@ -18,6 +19,8 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 // Works on a scratch collection so the shared seed data other specs assert on
 // (customers/orders/…) is never mutated.
 
+// Every worker owns its scratch collection; parallel tests cannot erase peers.
+const COLL = `json_edit_${randomUUID().replaceAll('-', '')}`;
 let workspaceId = '';
 let mongoConnId: string | null = null;
 
@@ -43,7 +46,7 @@ test.beforeEach(async ({ page }) => {
 async function openConn(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mongodb' });
+  const conn = page.locator(`.conn-row[data-connection-id="${mongoConnId}"] .conn-name`);
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
@@ -69,11 +72,11 @@ async function runStatement(page: Page, statement: string): Promise<void> {
 
 /** Confirm the review modal shows the expected statement, run it, wait out. */
 async function runReviewModal(page: Page, mustContain: string[]): Promise<void> {
-  const modal = page.locator('.review-modal');
+  const modal = page.getByRole('dialog').filter({ has: page.locator('.review-modal') });
   await expect(modal).toBeVisible();
   const sql = await modal.locator('.review-sql').inputValue();
   for (const frag of mustContain) expect(sql, `review statement should contain ${frag}`).toContain(frag);
-  await modal.locator('.tb-btn.primary', { hasText: 'Run' }).click();
+  await modal.getByRole('button', { name: 'Run', exact: true }).click();
   await expect(modal).toBeHidden({ timeout: 20_000 });
 }
 
@@ -84,15 +87,15 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await openConn(page);
 
   // Idempotence: a failed prior run leaves mutated docs behind — start clean.
-  await runStatement(page, 'db.e2e_json_edit.deleteMany({})');
+  await runStatement(page, `db.${COLL}.deleteMany({})`);
   await page.waitForTimeout(500);
 
   // Scratch doc with a complex (array-of-objects) field.
   await runStatement(
     page,
-    'db.e2e_json_edit.insertOne({ k: "doc1", items: [{ productId: 1, qty: 1 }], status: "pending" })',
+    `db.${COLL}.insertOne({ k: "doc1", items: [{ productId: 1, qty: 1 }], status: "pending" })`,
   );
-  await runStatement(page, 'db.e2e_json_edit.find({})');
+  await runStatement(page, `db.${COLL}.find({})`);
   // Mongo opens in Vertical by default — this half of the spec is about the grid.
   await page.locator('.view-seg .vs', { hasText: 'Grid' }).click();
   await expect(page.locator('.view-seg .vs.on')).toHaveText('Grid');
@@ -102,7 +105,7 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await page.locator('.cell.json').first().click();
   const viewer = page.locator('.cell-viewer');
   await expect(viewer).toBeVisible();
-  await viewer.locator('.tb-btn', { hasText: 'Edit' }).click();
+  await viewer.getByRole('button', { name: 'Edit', exact: true }).click();
   const cellEditor = viewer.locator('.cv-edit');
   await expect(cellEditor).toBeVisible();
   await cellEditor.fill('[{ "productId": 1, "qty": 5 }]');
@@ -116,7 +119,7 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await pendingBar.locator('.btn.primary', { hasText: 'Review & apply' }).click();
   await runReviewModal(page, ['updateOne', '"items"', '"qty":5']);
 
-  await runStatement(page, 'db.e2e_json_edit.find({})');
+  await runStatement(page, `db.${COLL}.find({})`);
   await expect(page.locator('.cell.json').first()).toContainText('"qty":5', { timeout: 20_000 });
 
   // ── 2. JSON view: whole-document edit → replaceOne ──
@@ -134,7 +137,7 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await page.locator('.cell-viewer .btn.primary', { hasText: 'Save' }).click();
   await runReviewModal(page, ['replaceOne', '"status":"paid"']);
 
-  await runStatement(page, 'db.e2e_json_edit.find({})');
+  await runStatement(page, `db.${COLL}.find({})`);
   await page.locator('.vs', { hasText: 'JSON' }).click();
   await expect(page.locator('.alt-json').first()).toContainText('paid', { timeout: 20_000 });
 
@@ -146,20 +149,24 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await expect(page.locator('.cv-err')).toBeVisible();
   await expect(page.locator('.review-modal')).toBeHidden();
   await page.locator('.cell-viewer .btn.ghost', { hasText: 'Cancel' }).click();
+  const discard = page.getByRole('dialog', { name: 'Discard changes', exact: true });
+  await expect(discard).toContainText('Discard your changes to this document?');
+  await discard.getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect(docEd).toHaveCount(0);
 
   // Cleanup the scratch collection.
-  await runStatement(page, 'db.e2e_json_edit.deleteMany({})');
+  await runStatement(page, `db.${COLL}.deleteMany({})`);
 });
 
 /** Reset the scratch collection to ONE known document and show it in Vertical. */
 async function seedAndOpenVertical(page: Page): Promise<void> {
-  await runStatement(page, 'db.e2e_json_edit.deleteMany({})');
+  await runStatement(page, `db.${COLL}.deleteMany({})`);
   await page.waitForTimeout(500);
   await runStatement(
     page,
-    'db.e2e_json_edit.insertOne({ k: "doc1", items: [{ productId: 1, qty: 1 }], status: "pending" })',
+    `db.${COLL}.insertOne({ k: "doc1", items: [{ productId: 1, qty: 1 }], status: "pending" })`,
   );
-  await runStatement(page, 'db.e2e_json_edit.find({})');
+  await runStatement(page, `db.${COLL}.find({})`);
   await page.locator('.view-seg .vs', { hasText: 'Vertical' }).click();
   await expect(page.locator('.view-seg .vs.on')).toHaveText('Vertical');
   await expect(page.locator('.vrec').first()).toBeVisible({ timeout: 20_000 });
@@ -200,18 +207,18 @@ test('Vertical: nested dbl-click → $set dotted path with diff', async ({ page 
   // Review: the diff table names the dotted path; the statement is ONE
   // updateOne with a dotted-path $set (not a replace).
   await pendingBar.locator('.btn.primary', { hasText: 'Review & apply' }).click();
-  const modal = page.locator('.review-modal');
+  const modal = page.getByRole('dialog').filter({ has: page.locator('.review-modal') });
   await expect(modal).toBeVisible();
   await expect(modal.locator('.review-diff tr.op-set .rd-path')).toHaveText('items.0.qty');
   await expect(modal.locator('.review-diff tr.op-set .rd-val').first()).toHaveText('1');
   await runReviewModal(page, ['updateOne', '"$set"', '"items.0.qty": 7']);
 
-  await runStatement(page, 'db.e2e_json_edit.find({})');
+  await runStatement(page, `db.${COLL}.find({})`);
   await page.locator('.view-seg .vs', { hasText: 'Vertical' }).click();
   await expect(fieldRow(page, page.locator('.vrec').first(), 'qty').locator('.vv')).toHaveText('7', { timeout: 20_000 });
 
   // Cleanup the scratch collection.
-  await runStatement(page, 'db.e2e_json_edit.deleteMany({})');
+  await runStatement(page, `db.${COLL}.deleteMany({})`);
 });
 
 test('Vertical: field menu → Delete field parks a $unset', async ({ page }) => {
@@ -232,19 +239,19 @@ test('Vertical: field menu → Delete field parks a $unset', async ({ page }) =>
   await expect(pendingBar).toBeVisible();
   await expect(fieldRow(page, rec, 'status')).toHaveClass(/dirty/);
   await pendingBar.locator('.btn.primary', { hasText: 'Review & apply' }).click();
-  const modal = page.locator('.review-modal');
+  const modal = page.getByRole('dialog').filter({ has: page.locator('.review-modal') });
   await expect(modal).toBeVisible();
   await expect(modal.locator('.review-diff tr.op-unset .rd-path')).toHaveText('status');
   await runReviewModal(page, ['updateOne', '"$unset"', '"status": ""']);
 
-  await runStatement(page, 'db.e2e_json_edit.find({})');
+  await runStatement(page, `db.${COLL}.find({})`);
   await page.locator('.view-seg .vs', { hasText: 'Vertical' }).click();
   // The field is gone from the document — and, columns being inferred from
   // the returned documents, from the result's columns too.
   await expect(page.locator('.vrec').first()).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.vrec').first().locator('.vk', { hasText: /^status$/ })).toHaveCount(0);
 
-  await runStatement(page, 'db.e2e_json_edit.deleteMany({})');
+  await runStatement(page, `db.${COLL}.deleteMany({})`);
 });
 
 test('Vertical: record menu → Insert document… reviews an insertOne', async ({ page }) => {
@@ -262,14 +269,14 @@ test('Vertical: record menu → Insert document… reviews an insertOne', async 
   await expect(page.getByRole('dialog', { name: 'Insert document' })).toBeVisible();
   await docEd.fill('{ "k": "doc2" }');
   await page.locator('.cell-viewer .btn.primary', { hasText: 'Save' }).click();
-  const modal = page.locator('.review-modal');
+  const modal = page.getByRole('dialog').filter({ has: page.locator('.review-modal') });
   await expect(modal).toBeVisible();
   await expect(modal.locator('.review-diff tr.op-set .rd-path')).toHaveText('k');
   await runReviewModal(page, ['insertOne', '"k": "doc2"']);
 
-  await runStatement(page, 'db.e2e_json_edit.find({})');
+  await runStatement(page, `db.${COLL}.find({})`);
   await page.locator('.view-seg .vs', { hasText: 'Vertical' }).click();
   await expect(page.locator('.vrec')).toHaveCount(2, { timeout: 20_000 });
 
-  await runStatement(page, 'db.e2e_json_edit.deleteMany({})');
+  await runStatement(page, `db.${COLL}.deleteMany({})`);
 });

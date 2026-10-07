@@ -12,8 +12,8 @@ import { ensureGridView, editorSelectAll } from './helpers';
 // table, and streams batched INSERTs through the guarded write path.
 //
 // MySQL: CSV → an existing table → verify the row count via a follow-up query.
-// MongoDB: CSV → collection via the same dialog (insertMany batches; the toolbar
-//   "Import file…" shows for mongo and the tree "Import into…" covers collections).
+// MongoDB: the restricted connection refuses imports without native scope;
+//   the dialog retains the error and the real collection stays empty.
 //
 // Device-family spec (verified on iphone-portrait). Fixture names are
 // per-project so parallel device projects can't collide on the same table.
@@ -26,8 +26,8 @@ let mysqlReady = false;
 const PHONE_MAX = 640;
 let MYSQL_TABLE = 'e2e_import_ui';
 let MONGO_COLL = 'e2e_import_ui';
-const MYSQL_CONTAINER = 'otto-dbv-mysql';
-const MONGO_CONTAINER = 'otto-dbv-mongo';
+const MYSQL_CONTAINER = process.env.OTTO_E2E_MYSQL_CONTAINER ?? 'otto-dbv-mysql';
+const MONGO_CONTAINER = process.env.OTTO_E2E_MONGO_CONTAINER ?? 'otto-dbv-mongo';
 
 function mysqlExec(sql: string): void {
   execFileSync('docker', ['exec', '-i', MYSQL_CONTAINER, 'mysql', '-uotto', '-pottopw', 'shopdb'], {
@@ -36,12 +36,12 @@ function mysqlExec(sql: string): void {
   });
 }
 
-function mongoExec(js: string): void {
-  execFileSync(
+function mongoExec(js: string): string {
+  return execFileSync(
     'docker',
     ['exec', MONGO_CONTAINER, 'mongosh', '-u', 'otto', '-p', 'ottopw',
      '--authenticationDatabase', 'admin', '--quiet', 'shopdb', '--eval', js],
-    { stdio: ['ignore', 'ignore', 'ignore'] },
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   );
 }
 
@@ -139,7 +139,8 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function openConn(page: Page, name: string): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const c = page.locator('.conn-list .conn-name', { hasText: name });
+  const id = name === 'e2e-mysql' ? conn.mysql : conn.mongodb;
+  const c = page.locator(`.conn-row[data-connection-id="${id}"] .conn-name`, { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
@@ -175,7 +176,7 @@ test('MySQL: import a CSV into a table via the dialog', async ({ page }) => {
   // Run any query so the grid toolbar (with "Import file…") is present.
   await runStatement(page, 'SELECT * FROM customers ORDER BY id');
 
-  await page.locator('.grid-toolbar .tb-btn', { hasText: 'Export' }).click();
+  await page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true }).click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();
   await expect(page.locator('.imp-form')).toBeVisible({ timeout: 10_000 });
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
@@ -193,12 +194,12 @@ test('MySQL: import a CSV into a table via the dialog', async ({ page }) => {
   await expect(page.locator('.grid tbody')).toContainText('3');
 });
 
-test('MongoDB: import a CSV into a collection via the dialog', async ({ page }) => {
+test('MongoDB: restricted import refuses unsupported native scope without writes', async ({ page }) => {
   test.skip(!conn.mongodb, 'mongodb docker not reachable');
   await openConn(page, 'e2e-mongodb');
   // Mongo find to surface the results toolbar (if an import entry existed).
   await runStatement(page, 'db.orders.find({})');
-  const exportBtn = page.locator('.grid-toolbar .tb-btn', { hasText: 'Export' });
+  const exportBtn = page.locator('.grid-toolbar').getByTitle('Download, export all rows, or import a file', { exact: true });
   await expect(exportBtn).toBeVisible({ timeout: 10_000 });
   await exportBtn.click();
   await page.locator('.ctx-item', { hasText: 'Import file' }).click();
@@ -206,9 +207,11 @@ test('MongoDB: import a CSV into a collection via the dialog', async ({ page }) 
   await page.locator('input[placeholder="~/Downloads/data.csv"]').fill(join(importDir, 'people.csv'));
   await page.locator('input[placeholder="target_table"]').fill(MONGO_COLL);
   await page.getByLabel('Import file into a table').getByRole('button', { name: 'Import', exact: true }).click();
-  await expect(page.locator('.toast.success', { hasText: 'Imported' })).toBeVisible({
-    timeout: 30_000,
-  });
-  await runStatement(page, `db.${MONGO_COLL}.find({})`);
-  await expect(page.locator('.grid tbody tr:not(.spacer)')).toHaveCount(3, { timeout: 10_000 });
+  const dialog = page.getByRole('dialog', { name: 'Import file into a table' });
+  await expect(dialog.getByRole('status')).toContainText('native_scope_required');
+  await expect(dialog.getByRole('status')).toContainText('restricted imports are unsupported');
+  await expect(dialog.getByRole('button', { name: 'Import', exact: true })).toBeEnabled();
+  await expect(page.locator('.toast.success', { hasText: 'Imported' })).toHaveCount(0);
+  // Verify refusal at the actual fixture database, independently of Otto's UI.
+  expect(Number(mongoExec(`db.${MONGO_COLL}.countDocuments({})`).trim())).toBe(0);
 });

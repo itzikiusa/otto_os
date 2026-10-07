@@ -98,22 +98,23 @@ test('⌥⌘→ / ⌥⌘← switch query tabs', async ({ page }) => {
   await expect(tabs.nth(1)).toHaveClass(/active/, { timeout: 5_000 });
 });
 
-test('running overlay shows during a slow query; Esc cancels it', async ({ page }) => {
+test('running status shows during a slow query; Esc cancels it', async ({ page }) => {
   test.skip(!mysqlConn, 'mysql docker not reachable');
   await openMysql(page);
   await typeStatement(page, 'SELECT SLEEP(5)');
   // Kick the run — the Run button flips to Stop while in flight.
   await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
 
-  // The running overlay (dimmed grid + elapsed counter + Cancel) is visible.
-  await expect(page.locator('.rg-overlay')).toBeVisible({ timeout: 10_000 });
+  // The first result renders the accessible loading skeleton with elapsed time.
+  const running = page.getByRole('status', { name: 'Running query', exact: true });
+  await expect(running).toBeVisible({ timeout: 10_000 });
   await expect(page.locator('.rg-overlay-text')).toContainText(/Running…/);
 
   // Esc cancels the in-flight query (engine KILL + client abort) well before the
-  // 5s SLEEP would finish — the overlay clears and the Run button returns.
+  // 5s SLEEP would finish — the running status clears and the Run button returns.
   await page.locator('.qe-edit .cm-content').click();
   await page.keyboard.press('Escape');
-  await expect(page.locator('.rg-overlay')).toHaveCount(0, { timeout: 8_000 });
+  await expect(running).toHaveCount(0, { timeout: 8_000 });
   await expect(page.locator('.btn.small.primary', { hasText: 'Run' }).first()).toBeVisible({
     timeout: 8_000,
   });

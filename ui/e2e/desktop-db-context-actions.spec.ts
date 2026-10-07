@@ -211,9 +211,15 @@ test.describe('JSON view renders one object per row', () => {
     expect(await page.locator('.jrec').count()).toBe(rows);
     await expect(page.locator('.jrec-head', { hasText: '#1' })).toBeVisible();
     await expect(page.locator('.jrec-head', { hasText: '#2' })).toBeVisible();
-    // Each block is a standalone JSON object.
-    const first = ((await page.locator('.jrec .alt-json').first().textContent()) ?? '').trim();
-    expect(first.startsWith('{')).toBe(true);
-    expect(first.endsWith('}')).toBe(true);
+    // The tree adds disclosure controls; validate the record's real JSON copy
+    // rather than treating its entire rendered text as a serialized document.
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    const first = page.locator('.jrec').first();
+    await expect(first.locator('[data-jpath="id"]')).toBeVisible();
+    await expect(first.locator('[data-jpath="name"]')).toBeVisible();
+    await first.getByRole('button', { name: 'Copy row JSON', exact: true }).click();
+    const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
+    expect(Array.isArray(copied)).toBe(false);
+    expect(copied).toMatchObject({ id: expect.any(Number), name: expect.any(String) });
   });
 });

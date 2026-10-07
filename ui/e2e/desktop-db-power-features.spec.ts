@@ -111,6 +111,8 @@ test('MySQL: Format unwraps Java string-concatenation into clean SQL', async ({ 
   await openConn(page, 'e2e-mysql');
   await setEditor(page, '"SELECT * FROM " + products + " WHERE id = " + 1');
   await page.getByRole('button', { name: /Format/ }).click();
+  // Formatting lazily imports the SQL formatter; wait for the transformed buffer.
+  await expect.poll(() => editorText(page)).not.toContain('"SELECT');
   await expect(page.locator('.toast', { hasText: 'Format failed' })).toHaveCount(0);
   const t = await editorText(page);
   expect(t).toContain('SELECT');
@@ -156,7 +158,7 @@ test('MySQL: Table Designer can add an index and a foreign key', async ({ page }
   await openConn(page, 'e2e-mysql');
   const lbl = await objectLabel(page, 'orders');
   await lbl.click(); // open structure
-  await page.getByRole('button', { name: /Design/ }).first().click();
+  await page.getByRole('button', { name: 'Design', exact: true }).click();
   await expect(page.locator('.td-modal')).toBeVisible({ timeout: 10_000 });
 
   await page.getByRole('button', { name: /Add index/ }).click();
@@ -216,7 +218,7 @@ test('Mongo: index builder offers NESTED field paths, and filters the list', asy
   });
   // The field picker is a searchable LIST (60+ sampled paths make chips
   // unscannable) — typing narrows it.
-  await page.locator('.ib-search').fill('city');
+  await page.locator('.idx-builder').getByRole('searchbox', { name: 'Filter index fields', exact: true }).fill('city');
   await expect(page.locator('.ib-row', { hasText: 'address.city' })).toHaveCount(1);
   await expect(page.locator('.ib-row', { hasText: 'userId' })).toHaveCount(0);
 });
@@ -284,14 +286,14 @@ test('MySQL: Drop index prepares ALTER TABLE … DROP INDEX (and DROP PRIMARY KE
   await row.getByRole('button', { name: 'Drop index idx_orders_status' }).click();
   await expect
     .poll(() => editorText(page), { timeout: 15_000 })
-    .toContain('ALTER TABLE `orders` DROP INDEX `idx_orders_status`;');
+    .toContain('ALTER TABLE `shopdb`.`orders` DROP INDEX `idx_orders_status`;');
 
   // MySQL names the PK index PRIMARY, which DROP INDEX can't take.
   const pk = await indexRow(page, 'orders', 'PRIMARY');
   await pk.getByRole('button', { name: 'Drop index PRIMARY' }).click();
   await expect
     .poll(() => editorText(page), { timeout: 15_000 })
-    .toContain('ALTER TABLE `orders` DROP PRIMARY KEY;');
+    .toContain('ALTER TABLE `shopdb`.`orders` DROP PRIMARY KEY;');
 });
 
 // ── Index conditions (partial indexes) ──────────────────────────────────────
@@ -302,7 +304,7 @@ async function newIndexOn(page: Page, object: string, field: string): Promise<vo
   const lbl = await objectLabel(page, object);
   await lbl.click();
   await page.getByRole('button', { name: /New index/ }).click();
-  await page.locator('.ib-search').fill(field);
+  await page.locator('.idx-builder').getByRole('searchbox', { name: 'Filter index fields', exact: true }).fill(field);
   await page.locator('.ib-row', { hasText: field }).first().click();
   await expect(page.locator('.ib-row.on', { hasText: field }).first()).toBeVisible();
 }
@@ -365,7 +367,7 @@ test('Postgres: a condition becomes a native WHERE clause', async ({ page }) => 
   await addCondition(page, 'status', 'exists');
   await page.getByRole('button', { name: /Prepare CREATE INDEX/ }).click();
   const stmt = await editorText(page);
-  expect(stmt).toContain('ON "orders" ("status") WHERE "status" IS NOT NULL;');
+  expect(stmt).toContain('ON "public"."orders" ("status") WHERE "status" IS NOT NULL;');
   expect(stmt).not.toContain('CASE'); // native support — no emulation
 });
 
@@ -376,7 +378,7 @@ test('Postgres: Drop index uses DROP INDEX, but DROP CONSTRAINT for the PK', asy
   await row.getByRole('button', { name: 'Drop index idx_orders_status' }).click();
   await expect
     .poll(() => editorText(page), { timeout: 15_000 })
-    .toContain('DROP INDEX "idx_orders_status";');
+    .toContain('DROP INDEX "public"."idx_orders_status";');
 
   // `orders_pkey` BACKS the primary-key constraint — Postgres rejects DROP INDEX
   // on it and points at the constraint, so we must emit the constraint form.
@@ -384,5 +386,5 @@ test('Postgres: Drop index uses DROP INDEX, but DROP CONSTRAINT for the PK', asy
   await pk.getByRole('button', { name: 'Drop index orders_pkey' }).click();
   await expect
     .poll(() => editorText(page), { timeout: 15_000 })
-    .toContain('ALTER TABLE "orders" DROP CONSTRAINT "orders_pkey";');
+    .toContain('ALTER TABLE "public"."orders" DROP CONSTRAINT "orders_pkey";');
 });

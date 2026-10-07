@@ -196,10 +196,12 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
       'seedDockerConnection(clickhouse) returned null — the ClickHouse driver/daemon could not reach the seeded Docker ClickHouse (investigate the HTTP/TLS handling)',
     ).not.toBeNull();
     await openConn(page);
-    // The engine chip in the status row confirms the engine wired up.
-    await expect(page.locator('.cap-chip', { hasText: 'clickhouse' })).toBeVisible({
-      timeout: 15_000,
-    });
+    // Capabilities populate the chip even where compact CSS hides it. The
+    // selected connection tab supplies the visible, accessible identity.
+    await expect(page.locator('.cap-chip')).toHaveText('clickhouse', { timeout: 15_000 });
+    const active = page.getByRole('tablist', { name: 'Open connections' }).getByRole('tab', { name: 'e2e-clickhouse', exact: true });
+    await expect(active).toBeVisible();
+    await expect(active).toHaveAttribute('aria-selected', 'true');
   });
 
   // ── 2/3. READ: a narrow SELECT and a WIDE many-column SELECT ────────────────
@@ -323,9 +325,13 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
     );
 
     // Prove it actually scrolls (not just that it's overflowing).
-    await scroll.evaluate((el) => {
+    await scroll.evaluate(async (el) => {
       el.scrollLeft = el.scrollWidth;
       el.scrollTop = el.scrollHeight;
+      // WebKit commits the virtual rows/spacers across rendering frames.
+      // Observe the settled position without issuing a second scroll.
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
     });
     const after = await scroll.evaluate((el) => ({ left: el.scrollLeft, top: el.scrollTop }));
     expect(after.left, 'grid scrolled horizontally').toBeGreaterThan(0);
