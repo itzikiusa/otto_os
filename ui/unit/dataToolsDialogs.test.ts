@@ -352,9 +352,11 @@ test('database dialogs + page reach storage only through the guarded helpers (S1
   // A throwing accessor (blocked storage) broke the Database page at mount and
   // turned a finished import/export into "Couldn’t …" (skipping ondone/onclose).
   for (const f of ['ImportDialog.svelte', 'ExportDialog.svelte', 'DatabasePage.svelte']) {
+    // Whitespace preserves token boundaries; removing comments outright can
+    // accidentally construct tokens that were never in the source.
     const code = readFileSync(new URL(`../src/modules/database/${f}`, import.meta.url), 'utf8')
-      .replace(/\/\/[^\n]*/g, '')
-      .replace(/<!--[\s\S]*?-->/g, '');
+      .replace(/\/\/[^\n]*/g, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ');
     assert.doesNotMatch(code, /\blocalStorage\s*\./, f);
   }
 });
