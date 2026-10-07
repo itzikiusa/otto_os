@@ -5367,34 +5367,40 @@ impl SessionManager {
             return 0;
         }
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-        let all = match self.repo.list_all().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("auto-archive: list failed: {e}");
-                return 0;
-            }
-        };
         let mut archived = 0;
-        for s in all {
-            // Cheap pre-filter on the snapshot; re-decided under the lock.
-            if !is_auto_archive_candidate(&s, cutoff)
-                || self.is_live(&s.id)
-                || self.is_attached(&s.id)
+        let mut after_id = String::new();
+        loop {
+            let candidates = match self
+                .repo
+                .auto_archive_candidate_ids(cutoff, &after_id, 128)
+                .await
             {
-                continue;
-            }
-            match self.archive_if_stale(&s.id, cutoff).await {
-                Ok(false) => {
-                    tracing::debug!(session = %s.id, "auto-archive: session became active mid-sweep; skipped");
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::warn!("auto-archive: candidate page failed: {e}");
+                    break;
                 }
-                Ok(true) => {
-                    archived += 1;
-                    tracing::info!(
-                        session = %s.id, title = %s.title,
-                        "auto-archived session idle for over {days} day(s)"
-                    );
+            };
+            let Some(last) = candidates.last() else {
+                break;
+            };
+            // Advance over skipped or failed rows too, otherwise a page of
+            // pinned/attached sessions would starve every later candidate.
+            after_id.clone_from(last);
+            for id in candidates {
+                if self.is_live(&id) || self.is_attached(&id) {
+                    continue;
                 }
-                Err(e) => tracing::warn!(session = %s.id, "auto-archive failed: {e}"),
+                match self.archive_if_stale(&id, cutoff).await {
+                    Ok(false) => {
+                        tracing::debug!(session = %id, "auto-archive: session became active mid-sweep; skipped")
+                    }
+                    Ok(true) => {
+                        archived += 1;
+                        tracing::info!(session = %id, "auto-archived session idle for over {days} day(s)");
+                    }
+                    Err(e) => tracing::warn!(session = %id, "auto-archive failed: {e}"),
+                }
             }
         }
         archived
@@ -5565,7 +5571,7 @@ impl SessionManager {
 
     /// [`Self::archive`] for the auto-archive sweep: archive only if the
     /// session is STILL stale under its resume lock (review S1-17). The
-    /// sweep's checks run on a `list_all` snapshot outside the lock, so a
+    /// sweep's candidate query runs outside the lock, so a
     /// session the user opened as the sweep reached it was resumed and then
     /// immediately killed and archived. `Ok(false)` = no longer stale.
     async fn archive_if_stale(
@@ -7354,66 +7360,8 @@ mod tests {
         assert_eq!(manager.live_count(), 0);
     }
 
-    /// Review S1-17: auto-archive re-decides under the resume lock against
-    /// the CURRENT row, so a session that became active after the sweep's
-    /// snapshot is left alone.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn auto_archive_rechecks_staleness_under_the_lock() {
-        let (manager, repo, workspace, user) = test_manager().await;
-        let s = manager
-            .create(
-                &workspace,
-                &user,
-                CreateSessionReq {
-                    kind: SessionKind::Agent,
-                    provider: Some("shell".into()),
-                    title: Some("Stale".into()),
-                    cwd: Some("/tmp".into()),
-                    connection_id: None,
-                    model: None,
-                    meta: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        manager.kill_session(&s.id).await.unwrap();
-        // `kill_session` kills the PTY in place; the status task's exit arm
-        // evicts the handle from `live` and stamps `Exited` (+ last_active_at)
-        // later, under the resume lock. On a slow runner that lands after the
-        // stale stamp below — the session still looks live/fresh and the
-        // archive is (correctly) refused. Wait for the eviction, then take the
-        // lock once so the exit arm's status write is done too.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while manager.is_live(&s.id) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("killed PTY is evicted from live");
-        drop(manager.resume_lock(&s.id).lock().await);
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(3);
-        let set_active = |at: chrono::DateTime<chrono::Utc>| {
-            let pool = repo.pool();
-            let id = s.id.clone();
-            async move {
-                sqlx::query("UPDATE sessions SET last_active_at = ? WHERE id = ?")
-                    .bind(at.to_rfc3339())
-                    .bind(&id)
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-            }
-        };
-        // The snapshot said stale, but the row is fresh now (the user opened it).
-        set_active(chrono::Utc::now()).await;
-        assert!(!manager.archive_if_stale(&s.id, cutoff).await.unwrap());
-        assert!(!repo.get(&s.id).await.unwrap().archived);
-        // Still stale under the lock → archived.
-        set_active(chrono::Utc::now() - chrono::Duration::days(10)).await;
-        assert!(manager.archive_if_stale(&s.id, cutoff).await.unwrap());
-        assert!(repo.get(&s.id).await.unwrap().archived);
-    }
+    #[path = "archive.rs"]
+    mod archive;
 
     async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
         // A migrated on-disk sqlite (in a tempdir) via otto-state's opener.
