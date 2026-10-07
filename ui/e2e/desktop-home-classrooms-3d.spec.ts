@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { randomUUID } from 'node:crypto';
 import { expectFullyInViewport } from './helpers';
 
 // Home → Otto School (the Classrooms box), the REAL 3D path: Chromium gets a
@@ -20,7 +21,7 @@ test.use({
 // models + the HDRI) alone can take most of Playwright's default 45 s.
 test.describe.configure({ timeout: 150_000 });
 
-const WS_NAME = `School E2E ${Date.now().toString(36)}`;
+const WS_NAME = `School E2E ${randomUUID()}`;
 const MARKER = `OTTO_SCHOOL_${Date.now().toString(36).toUpperCase()}`;
 let wsId = '';
 let base = '';
@@ -291,7 +292,7 @@ for (const key of ['Enter', 'Space']) {
     await expect(card(page)).toHaveCount(0);
     // Check on moves the headmaster beside this kid and can occlude a canvas
     // hit. Keyboard focus is the supported accessible way to reselect them.
-    await box(page).getByRole('region', { name: 'School list', exact: true }).getByRole('button', { name: /^Open Printer Kid,/ }).focus();
+    await box(page).getByRole('region', { name: `Classroom ${WS_NAME}`, exact: true }).getByRole('button', { name: /^Open Printer Kid,/ }).focus();
     await activate('Open session');
     await expect(page).toHaveURL(new RegExp(`#/agents/${ids.printer}$`));
   });
@@ -300,13 +301,15 @@ for (const key of ['Enter', 'Space']) {
 test('keyboard companion reveals the focused row and its menu in 3D', async ({ page }) => {
   await boot(page);
   const list = box(page).getByRole('region', { name: 'School list', exact: true });
-  const row = list.getByRole('button', { name: /^Open Printer Kid/ });
+  // Other workers legitimately have a Printer Kid in their own classroom.
+  const room = list.getByRole('region', { name: `Classroom ${WS_NAME}`, exact: true });
+  const row = room.getByRole('button', { name: /^Open Printer Kid/ });
   await row.focus();
   await expect(row).toBeFocused();
   await expect.poll(() => list.evaluate((el) => el.getBoundingClientRect().height)).toBeGreaterThan(50);
   await expectFullyInViewport(page, row, 'focused school row');
   await page.keyboard.press('Tab');
-  const more = list.getByRole('button', { name: 'More actions for Printer Kid' });
+  const more = room.getByRole('button', { name: 'More actions for Printer Kid' });
   await expect(more).toBeFocused();
   await expectFullyInViewport(page, more, 'focused school menu control');
   await box(page).screenshot({ path: test.info().outputPath('school-keyboard-focus.png') });

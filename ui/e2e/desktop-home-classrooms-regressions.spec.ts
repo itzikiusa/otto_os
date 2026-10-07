@@ -1,10 +1,11 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { randomUUID } from 'node:crypto';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 test.use({ launchOptions: { args: ['--disable-webgl'] }, serviceWorkers: 'block' });
 let wsId = '';
-const wsName = `School fallback ${Date.now().toString(36)}`;
+const wsName = `School fallback ${randomUUID()}`;
 const box = (page: Page) => page.locator('section.hbox[data-kind="classrooms"]');
 
 test.beforeAll(async () => {
@@ -59,7 +60,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await page.route('**/api/v1/sessions?archived=false&limit=1000', (route) => route.fulfill({ json: sessions }));
     await boot(page);
     await expect(box(page)).toContainText('WebGL is off');
-    const list = box(page).getByRole('region', { name: 'School list', exact: true });
+    const school = box(page).getByRole('region', { name: 'School list', exact: true });
+    await expect(school).toBeVisible();
+    // School also merges live sessions from other workers' workspaces. Count
+    // every fixture member in our classroom, including the eight back-row kids.
+    const list = school.getByRole('region', { name: `Classroom ${wsName}`, exact: true });
     await expect(list.locator('.lrow')).toHaveCount(46);
     const last = list.getByRole('button', { name: /^Open Overflow student 45,/ });
     await last.focus();
@@ -115,7 +120,9 @@ test('failed School refresh retains the loaded list and exposes Retry until reco
       created_at: '2026-01-01T00:00:00Z', last_active_at: '2026-01-01T00:00:00Z' }],
   }));
   await boot(page);
-  const list = box(page).getByRole('region', { name: 'School list', exact: true });
+  const school = box(page).getByRole('region', { name: 'School list', exact: true });
+  await expect(school).toBeVisible();
+  const list = school.getByRole('region', { name: `Classroom ${wsName}`, exact: true });
   const retained = list.getByRole('button', { name: /^Open Retained student,/ });
   await expect(retained).toBeVisible();
   failed = true;
