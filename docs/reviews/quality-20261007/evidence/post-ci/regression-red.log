@@ -1,0 +1,99 @@
+[WebServer] (node:73309) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-D9zPTW OTTO_PORT=7897
+2026-10-07T12:06:33.018287Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-D9zPTW/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 73317); root onboarded.
+
+Running 2 tests using 1 worker
+
+(node:73418) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 3:06:34 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✘  1 [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:9:1 › Enter commits a cell draft once and Escape cancels a later edit (12.1s)
+(node:73674) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  2 [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:233:1 › cluster metadata refresh preserves an unsaved monitor draft for the same cluster (11.4s)
+
+
+  1) [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:9:1 › Enter commits a cell draft once and Escape cancels a later edit
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.grid .cell-input')
+    Expected: 0
+    Received: 1
+    Timeout:  10000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.grid .cell-input') with timeout 10000ms
+      - waiting for locator('.grid .cell-input')
+        24 × locator resolved to 1 element
+           - unexpected value "1"
+
+
+      37 |   await input.press('Enter');
+      38 |   // The same Enter must not reopen editing as it bubbles to the grid cursor.
+    > 39 |   await expect(input).toHaveCount(0);
+         |                       ^
+      40 |   const dirty = page.locator('.grid .cell.dirty');
+      41 |   await expect(dirty).toHaveCount(1);
+      42 |   await expect(dirty).toHaveText('reviewed');
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-db-grid-keyboard.spec.ts:39:23
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-regression-red/desktop-db-grid-keyboard-E-95d02-Escape-cancels-a-later-edit-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-regression-red/desktop-db-grid-keyboard-E-95d02-Escape-cancels-a-later-edit-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-regression-red/desktop-db-grid-keyboard-E-95d02-Escape-cancels-a-later-edit-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-regression-red/desktop-db-grid-keyboard-E-95d02-Escape-cancels-a-later-edit-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:233:1 › cluster metadata refresh preserves an unsaved monitor draft for the same cluster
+
+    Error: expect(locator).toHaveValue(expected) failed
+
+    Locator:  getByTestId('k8s-monitor-interval')
+    Expected: "120"
+    Received: "60"
+    Timeout:  10000ms
+
+    Call log:
+      - Expect "toHaveValue" getByTestId('k8s-monitor-interval') with timeout 10000ms
+      - waiting for getByTestId('k8s-monitor-interval')
+        24 × locator resolved to <input min="15" max="3600" type="number" class="input svelte-1kux848" data-testid="k8s-monitor-interval"/>
+           - unexpected value "60"
+
+
+      253 |     expect(update.ok(), await update.text()).toBeTruthy();
+      254 |     await expect(page.getByTestId('k8s-monitor-cluster-pick')).toContainText(refreshedName);
+    > 255 |     await expect(interval).toHaveValue('120');
+          |                            ^
+      256 |   } finally {
+      257 |     const restore = await ctx.patch(`${base}/api/v1/k8s/clusters/${clusterId}`, { data: { name: originalName } });
+      258 |     expect(restore.ok(), await restore.text()).toBeTruthy();
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-k8s-monitor.spec.ts:255:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-regression-red/desktop-k8s-monitor-cluste-199eb--draft-for-the-same-cluster-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-regression-red/desktop-k8s-monitor-cluste-199eb--draft-for-the-same-cluster-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-regression-red/desktop-k8s-monitor-cluste-199eb--draft-for-the-same-cluster-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-regression-red/desktop-k8s-monitor-cluste-199eb--draft-for-the-same-cluster-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2 failed
+    [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:9:1 › Enter commits a cell draft once and Escape cancels a later edit
+    [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:233:1 › cluster metadata refresh preserves an unsaved monitor draft for the same cluster

@@ -1,0 +1,49 @@
+[WebServer] (node:84661) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-SmS9YB OTTO_PORT=7897
+2026-10-07T13:47:17.471401Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-SmS9YB/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 84662); root onboarded.
+
+Running 1 test using 1 worker
+
+(node:84740) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+native-scroll-events [{"kind":"write","value":2160,"stack":"set@\n@\nevaluate@\n@"},{"t":8327,"kind":"event"},{"t":8343,"kind":"event"}]
+  ✘  1 [iphone-portrait] › e2e/db-sweep-clickhouse.spec.ts:312:3 › Database Explorer — ClickHouse sweep (mobile + tablet) › the grid scrolls horizontally (wide cols) and vertically (many rows) (9.1s)
+
+
+  1) [iphone-portrait] › e2e/db-sweep-clickhouse.spec.ts:312:3 › Database Explorer — ClickHouse sweep (mobile + tablet) › the grid scrolls horizontally (wide cols) and vertically (many rows)
+
+    Error: grid scrolled vertically
+
+    expect(received).toBeGreaterThan(expected)
+
+    Expected: > 0
+    Received:   0
+
+      359 |     console.log('native-scroll-events', await scroll.evaluate(el => JSON.stringify((el as HTMLElement & { __events: unknown[] }).__events)));
+      360 |     expect(after.left, 'grid scrolled horizontally').toBeGreaterThan(0);
+    > 361 |     expect(after.top, 'grid scrolled vertically').toBeGreaterThan(0);
+          |                                                   ^
+      362 |   });
+      363 |
+      364 |   // ── 7. schema tree usable in this orientation ───────────────────────────────
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/db-sweep-clickhouse.spec.ts:361:51
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-scroll-no-event-read/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-scroll-no-event-read/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-scroll-no-event-read/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-scroll-no-event-read/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [iphone-portrait] › e2e/db-sweep-clickhouse.spec.ts:312:3 › Database Explorer — ClickHouse sweep (mobile + tablet) › the grid scrolls horizontally (wide cols) and vertically (many rows)

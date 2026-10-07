@@ -1,0 +1,89 @@
+[WebServer] (node:87202) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-GJt1eo OTTO_PORT=7897
+2026-10-07T13:48:47.823821Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-GJt1eo/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 87203); root onboarded.
+
+Running 2 tests using 1 worker
+
+(node:87297) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 [iphone-portrait] › e2e/db-sweep-clickhouse.spec.ts:312:3 › Database Explorer — ClickHouse sweep (mobile + tablet) › the grid scrolls horizontally (wide cols) and vertically (many rows) (8.8s)
+(node:87735) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  2 [iphone-portrait] › e2e/db-sweep-redis.spec.ts:389:3 › DB Explorer — Redis (mobile sweep) › grid scrolls VERTICALLY when rows overflow its block (11.4s)
+
+
+  1) [iphone-portrait] › e2e/db-sweep-clickhouse.spec.ts:312:3 › Database Explorer — ClickHouse sweep (mobile + tablet) › the grid scrolls horizontally (wide cols) and vertically (many rows)
+
+    Error: grid scrolled vertically
+
+    expect(received).toBeGreaterThan(expected)
+
+    Expected: > 0
+    Received:   0
+
+      349 |     const after = await scroll.evaluate(el => ({ left: el.scrollLeft, top: el.scrollTop }));
+      350 |     expect(after.left, 'grid scrolled horizontally').toBeGreaterThan(0);
+    > 351 |     expect(after.top, 'grid scrolled vertically').toBeGreaterThan(0);
+          |                                                   ^
+      352 |   });
+      353 |
+      354 |   // ── 7. schema tree usable in this orientation ───────────────────────────────
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/db-sweep-clickhouse.spec.ts:351:51
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-clickhouse-Databa-3cda9-s-and-vertically-many-rows--iphone-portrait/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [iphone-portrait] › e2e/db-sweep-redis.spec.ts:389:3 › DB Explorer — Redis (mobile sweep) › grid scrolls VERTICALLY when rows overflow its block
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: locator('.grid-scroll').locator('tbody .rownum-n').filter({ hasText: /^60$/ })
+    Expected: visible
+    Timeout: 10000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toBeVisible" locator('.grid-scroll').locator('tbody .rownum-n').filter({ hasText: /^60$/ }) with timeout 10000ms
+      - waiting for locator('.grid-scroll').locator('tbody .rownum-n').filter({ hasText: /^60$/ })
+
+
+      415 |       await grid.evaluate(el => { el.scrollTop = el.scrollHeight; });
+      416 |       const finalRow = grid.locator('tbody .rownum-n').filter({ hasText: new RegExp(`^${VSCROLL_COUNT}$`) });
+    > 417 |       await expect(finalRow).toBeVisible();
+          |                              ^
+      418 |       await expect(finalRow).toBeInViewport({ ratio: 0.5 });
+      419 |       await expect.poll(() => grid.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+      420 |       await expect.poll(async () => Number(await grid.locator('tbody .rownum-n').first().textContent())).toBeGreaterThan(1);
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/db-sweep-redis.spec.ts:417:30
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-redis-DB-Explorer-6e4e5-hen-rows-overflow-its-block-iphone-portrait/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-redis-DB-Explorer-6e4e5-hen-rows-overflow-its-block-iphone-portrait/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-redis-DB-Explorer-6e4e5-hen-rows-overflow-its-block-iphone-portrait/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-scroll-no-containment/db-sweep-redis-DB-Explorer-6e4e5-hen-rows-overflow-its-block-iphone-portrait/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2 failed
+    [iphone-portrait] › e2e/db-sweep-clickhouse.spec.ts:312:3 › Database Explorer — ClickHouse sweep (mobile + tablet) › the grid scrolls horizontally (wide cols) and vertically (many rows)
+    [iphone-portrait] › e2e/db-sweep-redis.spec.ts:389:3 › DB Explorer — Redis (mobile sweep) › grid scrolls VERTICALLY when rows overflow its block

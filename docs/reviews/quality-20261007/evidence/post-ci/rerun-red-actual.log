@@ -1,0 +1,49 @@
+[WebServer] (node:89985) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-XDnCr8 OTTO_PORT=7897
+2026-10-07T13:50:53.530411Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-XDnCr8/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 89986); root onboarded.
+
+Running 1 test using 1 worker
+
+(node:90089) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 4:50:54 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✘  1 [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:59:1 › rerunning the same result columns preserves the grid scroll position (12.0s)
+
+
+  1) [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:59:1 › rerunning the same result columns preserves the grid scroll position
+
+    Error: expect(received).toBeLessThanOrEqual(expected)
+
+    Expected: <= 2
+    Received:    400
+
+    Call Log:
+    - Timeout 10000ms exceeded while waiting on the predicate
+
+      118 |   }
+      119 |   expect(generation).toBe(2);
+    > 120 |   await expect.poll(() => grid.evaluate((el, before) => Math.abs(el.scrollTop - before), settledScrollTop)).toBeLessThanOrEqual(2);
+          |                                                                                                             ^
+      121 | });
+      122 |
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-db-grid-keyboard.spec.ts:120:109
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-rerun-red-actual/desktop-db-grid-keyboard-r-1b022-es-the-grid-scroll-position-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-rerun-red-actual/desktop-db-grid-keyboard-r-1b022-es-the-grid-scroll-position-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-rerun-red-actual/desktop-db-grid-keyboard-r-1b022-es-the-grid-scroll-position-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-rerun-red-actual/desktop-db-grid-keyboard-r-1b022-es-the-grid-scroll-position-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:59:1 › rerunning the same result columns preserves the grid scroll position

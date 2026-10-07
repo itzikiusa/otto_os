@@ -1,0 +1,45 @@
+[WebServer] (node:87304) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-kCVa3v OTTO_PORT=7897
+2026-10-07T12:14:46.578665Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-kCVa3v/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 87325); root onboarded.
+
+Running 15 tests using 1 worker
+
+(node:87399) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 3:14:48 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   1 [desktop-browser] › e2e/desktop-home-classrooms-3d.spec.ts:267:3 › School regressions › native card controls retain Enter activation inside the stage (14.0s)
+[WebServer] 3:15:01 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   2 [desktop-browser] › e2e/desktop-home-classrooms-3d.spec.ts:267:3 › School regressions › native card controls retain Space activation inside the stage (10.4s)
+[WebServer] 3:15:12 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   3 [desktop-browser] › e2e/desktop-home-classrooms-3d.spec.ts:301:1 › School regressions › keyboard companion reveals the focused row and its menu in 3D (5.2s)
+(node:88300) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 3:15:17 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   4 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:48:3 › no-WebGL list retains overflow sessions and menus at 1440px (696ms)
+[WebServer] 3:15:18 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   5 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:48:3 › no-WebGL list retains overflow sessions and menus at 390px (612ms)
+[WebServer] 3:15:19 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   6 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:112:1 › failed School refresh retains the loaded list and exposes Retry until recovery (624ms)
+(node:88326) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   7 [desktop-browser] › e2e/desktop-ux-r2-automation.spec.ts:74:1 › goal definition: workspace switching asks before discarding the complete draft (750ms)
+  ✓   8 [desktop-browser] › e2e/desktop-ux-r2-automation.spec.ts:118:1 › rooms: failed messages never claim an empty conversation and Retry recovers (613ms)
+[WebServer] 3:15:21 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   9 [desktop-browser] › e2e/desktop-ux-r2-cloud.spec.ts:252:1 › SQS send validates delay and labels dynamic message attributes (2.5s)
+[WebServer] 3:15:24 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  10 [desktop-browser] › e2e/desktop-ux-r3-access.spec.ts:88:1 › first account finishes after optional workspace failure and explains recovery (763ms)
+[WebServer] 3:15:24 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  11 [desktop-browser] › e2e/desktop-ux-r3-data.spec.ts:134:1 › Completed offset reset cannot replace another selected group (2.1s)
+[WebServer] 3:15:26 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  12 [desktop-browser] › e2e/desktop-ux-r3-help.spec.ts:137:1 › coach workspace and first-agent flow retries safely and sends the starter prompt (17.5s)
+[WebServer] 3:15:44 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  13 [desktop-browser] › e2e/desktop-ux-r4-access.spec.ts:25:1 › first account Back then Skip does not submit the previously entered workspace (816ms)
+[WebServer] 3:15:45 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  14 [desktop-browser] › e2e/desktop-ux-r4-cloud.spec.ts:286:1 › SQS queue drafts stay with their queue during a pending send (2.0s)
+[WebServer] 3:15:47 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  15 [desktop-browser] › e2e/desktop-ux-r4-insights.spec.ts:193:1 › Insights report timeout releases generation and retry detects the new result (13.6s)
+
+  15 passed (1.3m)

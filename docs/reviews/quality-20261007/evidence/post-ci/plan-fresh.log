@@ -1,0 +1,213 @@
+[WebServer] (node:11374) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-SzjWsk OTTO_PORT=7897
+2026-10-07T12:44:05.271490Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-SzjWsk/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 11393); root onboarded.
+
+Running 5 tests using 1 worker
+
+(node:11471) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 [desktop-browser] › e2e/desktop-db-compact-output.spec.ts:90:3 › first Explain light: plan has visible output before any query ran (12.0s)
+(node:11821) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  2 [desktop-browser] › e2e/desktop-db-compact-output.spec.ts:90:3 › first Explain dark: plan has visible output before any query ran (10.0s)
+(node:11997) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  3 [desktop-browser] › e2e/desktop-db-plan.spec.ts:76:3 › DB Explorer — query-plan panel › MySQL: unindexed scan → plan tree + full-scan warning; raw toggle + close (45.1s)
+(node:12467) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  4 [desktop-browser] › e2e/desktop-db-plan.spec.ts:102:3 › DB Explorer — query-plan panel › MySQL: primary-key lookup → plan tree with NO warning badge (1.1s)
+  ✓  5 [desktop-browser] › e2e/desktop-db-plan.spec.ts:113:3 › DB Explorer — query-plan panel › Redis: Explain button is hidden (no query-plan surface) (594ms)
+
+
+  1) [desktop-browser] › e2e/desktop-db-compact-output.spec.ts:90:3 › first Explain light: plan has visible output before any query ran
+
+    Error: plan owns enough height for its header and operation
+
+    plan owns enough height for its header and operation
+
+    expect(received).toBeGreaterThan(expected)
+
+    Expected: > 60
+    Received:   2
+
+    Call Log:
+    - Timeout 10000ms exceeded while waiting on the predicate
+
+      108 |     await expect(plan).toBeVisible();
+      109 |     await expect.poll(() => page.locator('.qe-results').evaluate(el => el.getBoundingClientRect().height), 'Explain reserves output height').toBeGreaterThan(80);
+    > 110 |     await expect.poll(() => plan.evaluate(el => el.getBoundingClientRect().height), 'plan owns enough height for its header and operation').toBeGreaterThan(60);
+          |                                                                                                                                             ^
+      111 |     await expectFullyInViewport(page, plan.locator('.plan-head'), 'first Explain header');
+      112 |     await expectFullyInViewport(page, plan.locator('.plan-op').last(), 'first Explain operation');
+      113 |     await expect(plan.locator('.plan-warn')).toHaveText('full table scan');
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-db-compact-output.spec.ts:110:141
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--7e5d6-output-before-any-query-ran-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--7e5d6-output-before-any-query-ran-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--7e5d6-output-before-any-query-ran-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--7e5d6-output-before-any-query-ran-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [desktop-browser] › e2e/desktop-db-compact-output.spec.ts:90:3 › first Explain dark: plan has visible output before any query ran
+
+    Error: plan owns enough height for its header and operation
+
+    plan owns enough height for its header and operation
+
+    expect(received).toBeGreaterThan(expected)
+
+    Expected: > 60
+    Received:   2
+
+    Call Log:
+    - Timeout 10000ms exceeded while waiting on the predicate
+
+      108 |     await expect(plan).toBeVisible();
+      109 |     await expect.poll(() => page.locator('.qe-results').evaluate(el => el.getBoundingClientRect().height), 'Explain reserves output height').toBeGreaterThan(80);
+    > 110 |     await expect.poll(() => plan.evaluate(el => el.getBoundingClientRect().height), 'plan owns enough height for its header and operation').toBeGreaterThan(60);
+          |                                                                                                                                             ^
+      111 |     await expectFullyInViewport(page, plan.locator('.plan-head'), 'first Explain header');
+      112 |     await expectFullyInViewport(page, plan.locator('.plan-op').last(), 'first Explain operation');
+      113 |     await expect(plan.locator('.plan-warn')).toHaveText('full table scan');
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-db-compact-output.spec.ts:110:141
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--c804a-output-before-any-query-ran-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--c804a-output-before-any-query-ran-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--c804a-output-before-any-query-ran-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-plan-fresh/desktop-db-compact-output--c804a-output-before-any-query-ran-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3) [desktop-browser] › e2e/desktop-db-plan.spec.ts:76:3 › DB Explorer — query-plan panel › MySQL: unindexed scan → plan tree + full-scan warning; raw toggle + close
+
+    Test timeout of 45000ms exceeded.
+
+    Error: locator.click: Test timeout of 45000ms exceeded.
+    Call log:
+      - waiting for locator('.plan-btn').filter({ hasText: 'Raw JSON' }).first()
+        - locator resolved to <button class="plan-btn svelte-7h59bl" title="Toggle the engine’s raw EXPLAIN JSON">…</button>
+      - attempting click action
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <div class="plan-panel svelte-7h59bl">…</div> intercepts pointer events
+      - retrying click action
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <div translate="no" role="textbox" autocorrect="off" spellcheck="false" data-language="sql" autocapitalize="off" aria-multiline="true" contenteditable="true" aria-autocomplete="list" writingsuggestions="false" class="cm-content cm-lineWrapping" aria-placeholder="Write a query — ⌘↵ to run">…</div> from <div class="qe-edit svelte-8r0i2a">…</div> subtree intercepts pointer events
+      - retrying click action
+        - waiting 20ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <div class="plan-panel svelte-7h59bl">…</div> intercepts pointer events
+      - retrying click action
+        - waiting 100ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <div class="grid-empty idle svelte-1cxzia5">…</div> intercepts pointer events
+      - retrying click action
+        - waiting 100ms
+        20 × waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <div class="plan-panel svelte-7h59bl">…</div> intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+           - waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <div translate="no" role="textbox" autocorrect="off" spellcheck="false" data-language="sql" autocapitalize="off" aria-multiline="true" contenteditable="true" aria-autocomplete="list" writingsuggestions="false" class="cm-content cm-lineWrapping" aria-placeholder="Write a query — ⌘↵ to run">…</div> from <div class="qe-edit svelte-8r0i2a">…</div> subtree intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+           - waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <div class="plan-panel svelte-7h59bl">…</div> intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+           - waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <div class="grid-empty idle svelte-1cxzia5">…</div> intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <div class="plan-panel svelte-7h59bl">…</div> intercepts pointer events
+      - retrying click action
+        - waiting 500ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <div translate="no" role="textbox" autocorrect="off" spellcheck="false" data-language="sql" autocapitalize="off" aria-multiline="true" contenteditable="true" aria-autocomplete="list" writingsuggestions="false" class="cm-content cm-lineWrapping" aria-placeholder="Write a query — ⌘↵ to run">…</div> from <div class="qe-edit svelte-8r0i2a">…</div> subtree intercepts pointer events
+      - retrying click action
+        - waiting 500ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <div class="plan-panel svelte-7h59bl">…</div> intercepts pointer events
+      - retrying click action
+        - waiting 500ms
+
+
+      88 |
+      89 |     // Raw JSON toggle swaps the tree for the engine's raw EXPLAIN JSON.
+    > 90 |     await page.locator('.plan-btn', { hasText: 'Raw JSON' }).first().click();
+         |                                                                      ^
+      91 |     await expect(page.locator('.plan-raw')).toBeVisible();
+      92 |     expect(await page.locator('.plan-op').count()).toBe(0);
+      93 |     // Toggle back to the tree.
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-db-plan.spec.ts:90:70
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-plan-fresh/desktop-db-plan-DB-Explore-79d31-an-warning-raw-toggle-close-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-plan-fresh/desktop-db-plan-DB-Explore-79d31-an-warning-raw-toggle-close-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-plan-fresh/desktop-db-plan-DB-Explore-79d31-an-warning-raw-toggle-close-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-plan-fresh/desktop-db-plan-DB-Explore-79d31-an-warning-raw-toggle-close-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3 failed
+    [desktop-browser] › e2e/desktop-db-compact-output.spec.ts:90:3 › first Explain light: plan has visible output before any query ran
+    [desktop-browser] › e2e/desktop-db-compact-output.spec.ts:90:3 › first Explain dark: plan has visible output before any query ran
+    [desktop-browser] › e2e/desktop-db-plan.spec.ts:76:3 › DB Explorer — query-plan panel › MySQL: unindexed scan → plan tree + full-scan warning; raw toggle + close
+  2 passed (1.2m)

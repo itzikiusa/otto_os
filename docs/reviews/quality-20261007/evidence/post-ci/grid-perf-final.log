@@ -1,0 +1,54 @@
+[WebServer] (node:4008) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-ZUDvKx OTTO_PORT=7897
+2026-10-07T13:57:22.324202Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-ZUDvKx/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 4047); root onboarded.
+
+Running 4 tests using 1 worker
+
+(node:4128) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 4:57:26 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[perf] 100k×30: DOM 1977 nodes; scroll step p50 5.0 / p95 6.0 ms; painted step p95 18.0 ms; jump 13.0 ms; sort 23 ms; search key→frame 20.0 ms, key→filtered 144 ms
+  ✓  1 [desktop-webkit] › e2e/desktop-db-results-perf.spec.ts:139:1 › 100k × 30 result: bounded DOM, fast scroll / jump / sort / search (6.1s)
+[WebServer] 4:57:31 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[perf] fat docs: scroll-in step p50 1.0 ms, max 2.0 ms
+  ✓  2 [desktop-webkit] › e2e/desktop-db-results-perf.spec.ts:210:1 › 40 × 50 KB documents: complex cells preview without serializing whole docs (1.9s)
+[WebServer] 4:57:33 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[perf] wide 20k×300: DOM 1191; head cells 13; row cells 12; v-step layout p95 4.0 ms; v-step painted p95 11.0 ms; h-step painted p95 13.0 ms
+  ✓  3 [desktop-webkit] › e2e/desktop-db-scale-perf.spec.ts:153:1 › wide 20k × 300 result: only the columns in view are mounted @ci (4.8s)
+[WebServer] 4:57:38 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✘  4 [desktop-webkit] › e2e/desktop-db-scale-perf.spec.ts:216:1 › wide 20k × 300 result in RTL: the column window follows a negative scrollLeft (3.0s)
+
+
+  1) [desktop-webkit] › e2e/desktop-db-scale-perf.spec.ts:216:1 › wide 20k × 300 result in RTL: the column window follows a negative scrollLeft
+
+    ReferenceError: hScrollFrameWork is not defined
+
+      224 |   expect(await page.locator('.grid-scroll thead tr:first-child th:not(.hpad)').count()).toBeLessThan(60);
+      225 |   // Scroll toward the inline end (left in RTL: scrollLeft goes negative).
+    > 226 |   const h = await hScrollFrameWork(page, '.grid-scroll', -400, 20);
+          |             ^
+      227 |   const res = await page.evaluate(() => {
+      228 |     const el = document.querySelector('.grid-scroll') as HTMLElement;
+      229 |     const tr = document.querySelector<HTMLTableRowElement>('.grid-scroll tbody tr:not(.spacer)')!;
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-db-scale-perf.spec.ts:226:13
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-grid-perf-final/desktop-db-scale-perf-wide-88e7b-llows-a-negative-scrollLeft-desktop-webkit/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-pr94-grid-perf-final/desktop-db-scale-perf-wide-88e7b-llows-a-negative-scrollLeft-desktop-webkit/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-pr94-grid-perf-final/desktop-db-scale-perf-wide-88e7b-llows-a-negative-scrollLeft-desktop-webkit/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-pr94-grid-perf-final/desktop-db-scale-perf-wide-88e7b-llows-a-negative-scrollLeft-desktop-webkit/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [desktop-webkit] › e2e/desktop-db-scale-perf.spec.ts:216:1 › wide 20k × 300 result in RTL: the column window follows a negative scrollLeft
+  3 passed (20.4s)

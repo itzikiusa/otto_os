@@ -1,0 +1,21 @@
+[WebServer] (node:75619) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-65wAKx OTTO_PORT=7897
+2026-10-07T12:08:10.895877Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-65wAKx/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 75650); root onboarded.
+
+Running 7 tests using 1 worker
+
+(node:75728) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 3:08:11 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  1 [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:9:1 › Enter commits a cell draft once and Escape cancels a later edit (2.2s)
+  ✓  2 [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:96:1 › overview renders a healthy and a degraded card with the RBAC hint (1.0s)
+  ✓  3 [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:111:1 › settings form validates locally, fills a preset, and the daemon rejects enable without ClickHouse (1.2s)
+  ✓  4 [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:148:1 › exclusions kind menu stays inside the viewport near the bottom of the page (822ms)
+  ✓  5 [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:160:1 › monitor switch persists immediately and preserves unsaved probe settings (1.6s)
+  ✓  6 [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:215:1 › monitor switch keeps confirmed state when persistence fails (651ms)
+  ✓  7 [desktop-browser] › e2e/desktop-k8s-monitor.spec.ts:233:1 › cluster metadata refresh preserves an unsaved monitor draft for the same cluster (999ms)
+
+  7 passed (10.4s)

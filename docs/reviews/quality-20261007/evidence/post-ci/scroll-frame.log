@@ -1,0 +1,15 @@
+[WebServer] (node:89024) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-4EGMNq OTTO_PORT=7897
+2026-10-07T13:49:56.988490Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-4EGMNq/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 89065); root onboarded.
+
+Running 2 tests using 1 worker
+
+(node:89143) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [iphone-portrait] › e2e/db-sweep-clickhouse.spec.ts:312:3 › Database Explorer — ClickHouse sweep (mobile + tablet) › the grid scrolls horizontally (wide cols) and vertically (many rows) (8.9s)
+  ✓  2 [iphone-portrait] › e2e/db-sweep-redis.spec.ts:389:3 › DB Explorer — Redis (mobile sweep) › grid scrolls VERTICALLY when rows overflow its block (1.2s)
+
+  2 passed (12.3s)
