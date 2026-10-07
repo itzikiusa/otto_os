@@ -7,6 +7,8 @@ import {
   api,
   ApiError,
   isAbortError,
+  withDeadline,
+  READ_DEADLINE_MS,
   dbAssistStart,
   dbAssistSummary,
   dbAssistClose,
@@ -3107,6 +3109,10 @@ class DatabaseStore {
     t.err_statement = null;
     t.pending = { queryId, connId: id, sql, node: scopeNode, startedAt: Date.now() };
     this.persistTabs();
+    // Stop clears ownership immediately; its HTTP wait stays alive until the
+    // native cancel responds, so the signal alone no longer identifies a live run.
+    const stopped = () => accessEpoch !== this.accessEpoch || controller.signal.aborted
+      || this.runControllers.get(t.id)?.controller !== controller || t.pending?.queryId !== queryId;
     try {
       // Honor an explicit LIMIT in the SQL; otherwise apply the configured
       // default row cap. The server also injects this LIMIT into the SQL so a
@@ -3149,6 +3155,7 @@ class DatabaseStore {
       try {
         result = await post(false);
       } catch (e) {
+        if (stopped()) throw e;
         if (readOnly && isReadOnlyRefusal(e)) {
           // An agent's read-only run hit a write/DDL: the human decides. A
           // guarded connection always takes the typed confirm (and re-runs with
@@ -3159,9 +3166,9 @@ class DatabaseStore {
           const ok = guarded
             ? await this.confirmGuardedWrite(origin, e, opts?.agentLabel)
             : await (opts?.confirmWrite?.() ?? Promise.resolve(false));
-          if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
+          if (!ok || stopped()) {
             toasts.info('Write canceled');
-            this.clearPending(t);
+            if (t.pending?.queryId === queryId) this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
           }
@@ -3173,9 +3180,9 @@ class DatabaseStore {
           // retry with the explicit confirm flag.
           opts?.awaitingHuman?.('Waiting for the typed write confirm');
           const ok = await this.confirmGuardedWrite(origin, e, opts?.agentLabel);
-          if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
+          if (!ok || stopped()) {
             toasts.info('Write canceled');
-            this.clearPending(t);
+            if (t.pending?.queryId === queryId) this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
           }
@@ -3184,7 +3191,7 @@ class DatabaseStore {
           throw e;
         }
       }
-      if(accessEpoch!==this.accessEpoch || controller.signal.aborted || t.pending?.queryId!==queryId){
+      if (stopped()) {
         if (outcome) Object.assign(outcome, { status: 'aborted', error: 'the run was stopped or superseded' });
         return null;
       }
@@ -3201,7 +3208,7 @@ class DatabaseStore {
       // What the Stop actually achieved is reported by `abortQuery` from the
       // server's cancel outcome — this only drops our wait, so it must not
       // claim the query stopped.
-      if (isAbortError(e) || controller.signal.aborted) {
+      if (isAbortError(e) || stopped()) {
         if (outcome) Object.assign(outcome, { status: 'aborted', error: 'the query was stopped' });
         return null;
       }
@@ -3449,25 +3456,29 @@ class DatabaseStore {
     const report = opts?.report === true;
     const id = tabId ?? this.tab?.id;
     if (id == null) return;
-    const t = this.tabs.find((x) => x.id === id);
-    if (t) {
-      this.abortRunForTab(t, report);
-      this.persistTabs(); // the pending marker is persisted with the tabs
+    const at = this.locateTab(id);
+    if (at) {
+      this.abortRunForTab(at.tab, report);
+      // A captured tab ID can belong to a parked connection. Persist its
+      // cleared marker there, so restoring/reloading cannot reattach the run.
+      this.persistTabsNow(at.connId);
       return;
     }
-    // No live tab (a parked/foreign run) — still drop the controller if held.
+    // No retained tab (a closed/foreign run) — still drop the controller if held.
     const entry = this.runControllers.get(id);
     if (!entry) return;
     this.runControllers.delete(id);
-    this.sendCancel(entry.connId, entry.queryId, report);
-    entry.controller.abort();
+    void this.sendCancel(entry.connId, entry.queryId, report).finally(() => entry.controller.abort());
   }
 
   /** Ask the server to cancel a run (`POST …/db/cancel`). With `report`, toast
    *  its outcome: only `cancelled` means the database stopped the work. */
-  private sendCancel(connId: Id, queryId: string, report: boolean): void {
-    void api
-      .post<DbCancelOutcome | undefined>(`${this.connBase(connId)}/cancel`, { query_id: queryId })
+  private sendCancel(connId: Id, queryId: string, report: boolean): Promise<void> {
+    // Writes have no default transport deadline. Bound Stop so a lost cancel
+    // response still releases the original query wait. Never retry cancellation.
+    const deadline = withDeadline(READ_DEADLINE_MS);
+    return api
+      .post<DbCancelOutcome | undefined>(`${this.connBase(connId)}/cancel`, { query_id: queryId }, deadline.signal)
       .then((out) => {
         if (!report) return;
         switch (out?.status) {
@@ -3492,7 +3503,8 @@ class DatabaseStore {
       })
       .catch((e) => {
         if (report) toasts.error('Couldn’t stop the query', errMsg(e));
-      });
+      })
+      .finally(deadline.done);
   }
 
   /**
@@ -3508,12 +3520,12 @@ class DatabaseStore {
     const target = entry ?? (t.pending ? { ...t.pending } : null);
     if (!target) return;
     this.runControllers.delete(t.id);
-    // 1) Ask the server to cancel the query engine-side (never awaited).
-    this.sendCancel(target.connId, target.queryId, report);
-    // 2) Abort our fetch (if still held) and clear the tab's run state. A user
-    // Stop also forgets the pending marker — re-attach must not resurrect a
-    // query the user explicitly killed.
-    entry?.controller.abort();
+    // Governed queries are owned by their HTTP request. Aborting that request
+    // first removes the native cancellation handle before /cancel can use it.
+    // Capture this controller: a new run may start before cancellation settles.
+    void this.sendCancel(target.connId, target.queryId, report).finally(() => entry?.controller.abort());
+    // Clear UI ownership immediately; late results/errors cannot affect this
+    // tab, and re-attach must not resurrect a run the user explicitly stopped.
     t.running = false;
     t.pending = null;
   }

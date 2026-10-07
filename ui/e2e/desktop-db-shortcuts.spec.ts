@@ -142,10 +142,19 @@ test('⌥⌘→ / ⌥⌘← switch query tabs', async ({ page }) => {
 test('running status shows during a slow query; Esc cancels it', async ({ page }) => {
   test.skip(!mysqlConn, 'mysql docker not reachable');
   await openMysql(page);
+  // Delay delivery, not the daemon's outcome: Stop must retain the running
+  // request's server-side registration until native cancellation arrives.
+  await page.route(`**/connections/${mysqlConn}/db/cancel`, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.continue();
+  });
   await withLockedTable(async (table) => {
     const sql = `SELECT COUNT(*) FROM shopdb.${table}`;
     await typeStatement(page, sql);
+    const queryRequest = page.waitForRequest((request) =>
+      request.url().endsWith(`/connections/${mysqlConn}/db/query`) && request.method() === 'POST');
     await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+    const queryId = (await queryRequest).postDataJSON().query_id;
 
     // Observe the actual engine waiting on our lock before cancelling: a brief
     // loading flash followed by a rejected query must not satisfy this test.
@@ -163,7 +172,9 @@ test('running status shows during a slow query; Esc cancels it', async ({ page }
       response.request().method() === 'POST');
     await page.locator('.qe-edit .cm-content').click();
     await page.keyboard.press('Escape');
+    await expect(running).toHaveCount(0, { timeout: 8_000 });
     const response = await cancelled;
+    expect(response.request().postDataJSON()).toMatchObject({ query_id: queryId });
     expect(response.ok()).toBeTruthy();
     expect(await response.json()).toMatchObject({ status: 'cancelled' });
     await expect(running).toHaveCount(0, { timeout: 8_000 });
