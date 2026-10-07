@@ -101,6 +101,16 @@ pub struct NewRun {
     pub trigger: String,
 }
 
+// Kept out of the HTTP run DTO. ScheduledTask deliberately skips its internal
+// epochs in serde, so persist those explicitly instead of recovering them as 0.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AdmittedTaskSnapshot {
+    version: u8,
+    schedule_generation: i64,
+    admission_generation: i64,
+    task: ScheduledTask,
+}
+
 /// Terminal state for a run — the engine fills this once the agent/workflow
 /// completes (success or failure) and delivery has been attempted.
 #[derive(Clone, Debug, Default)]
@@ -457,6 +467,13 @@ impl ScheduledTasksRepo {
         captured: &ScheduledTask,
         trigger: &str,
     ) -> Result<ScheduledTaskRun> {
+        let snapshot = serde_json::to_string(&AdmittedTaskSnapshot {
+            version: 1,
+            schedule_generation: captured.schedule_generation,
+            admission_generation: captured.admission_generation,
+            task: captured.clone(),
+        })
+        .map_err(|e| otto_core::Error::Internal(format!("encode admission snapshot: {e}")))?;
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -489,8 +506,8 @@ impl ScheduledTasksRepo {
         let now = fmt(Utc::now());
         let row = sqlx::query(
             "INSERT INTO scheduled_task_runs (id, task_id, workspace_id, status, trigger, \
-             started_at, summary, delivered, created_at) \
-             VALUES (?, ?, ?, 'running', ?, ?, '', 0, ?) RETURNING *",
+             started_at, summary, delivered, created_at, admitted_task_json) \
+             VALUES (?, ?, ?, 'running', ?, ?, '', 0, ?, ?) RETURNING *",
         )
         .bind(&id)
         .bind(&captured.id)
@@ -498,6 +515,7 @@ impl ScheduledTasksRepo {
         .bind(trigger)
         .bind(&now)
         .bind(&now)
+        .bind(snapshot)
         .fetch_one(&mut *tx)
         .await
         .map_err(dberr("insert admitted scheduled run"))?;
@@ -506,6 +524,41 @@ impl ScheduledTasksRepo {
             .await
             .map_err(dberr("commit scheduled task admission"))?;
         Ok(run)
+    }
+
+    /// The immutable definition admitted with this run. Missing legacy data,
+    /// invalid versions and malformed snapshots are errors: callers must not
+    /// substitute the editable task's current schedule or delivery destination.
+    pub async fn get_run_task_snapshot(&self, run_id: &str) -> Result<ScheduledTask> {
+        let row = sqlx::query(
+            "SELECT task_id, workspace_id, admitted_task_json FROM scheduled_task_runs WHERE id=?",
+        )
+        .bind(run_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("read admission snapshot"))?;
+        let raw: Option<String> = row.get("admitted_task_json");
+        let raw = raw.ok_or_else(|| {
+            otto_core::Error::Internal(
+                "admission snapshot is unavailable for this legacy run".into(),
+            )
+        })?;
+        let snapshot: AdmittedTaskSnapshot = serde_json::from_str(&raw)
+            .map_err(|_| otto_core::Error::Internal("admission snapshot is malformed".into()))?;
+        if snapshot.version != 1
+            || snapshot.schedule_generation < 0
+            || snapshot.admission_generation < 0
+            || snapshot.task.id != row.get::<String, _>("task_id")
+            || snapshot.task.workspace_id != row.get::<String, _>("workspace_id")
+        {
+            return Err(otto_core::Error::Internal(
+                "admission snapshot has an unsupported version or invalid ownership".into(),
+            ));
+        }
+        let mut task = snapshot.task;
+        task.schedule_generation = snapshot.schedule_generation;
+        task.admission_generation = snapshot.admission_generation;
+        Ok(task)
     }
 
     /// Raw history insertion for import/fixtures. Engine dispatch uses `admit_run`.
@@ -625,30 +678,44 @@ impl ScheduledTasksRepo {
         rows.iter().map(row_to_run).collect()
     }
 
-    /// Delete all but the most-recent `keep` runs for a task. Returns the
-    /// `report_path`s of deleted rows so the caller can unlink the report files.
+    /// Delete all but the most-recent `keep` runs for a task. Only return report
+    /// paths no remaining run owns: historical runs can share timestamp paths.
     pub async fn prune_runs(&self, task_id: &str, keep: i64) -> Result<Vec<String>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin scheduled run pruning"))?;
         let rows = sqlx::query(
-            "SELECT id, report_path FROM scheduled_task_runs WHERE task_id = ? \
-             ORDER BY started_at DESC LIMIT -1 OFFSET ?",
+            "DELETE FROM scheduled_task_runs WHERE id IN \
+             (SELECT id FROM scheduled_task_runs WHERE task_id=? \
+              ORDER BY started_at DESC, id DESC LIMIT -1 OFFSET ?) RETURNING report_path",
         )
         .bind(task_id)
         .bind(keep.max(0))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(dberr("select prunable runs"))?;
+        .map_err(dberr("prune scheduled task runs"))?;
+        let candidates: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r.get::<Option<String>, _>("report_path"))
+            .collect();
         let mut paths = Vec::new();
-        for r in &rows {
-            let id: String = r.get("id");
-            if let Some(p) = r.get::<Option<String>, _>("report_path") {
-                paths.push(p);
+        for path in candidates {
+            let referenced: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM scheduled_task_runs WHERE report_path=?)",
+            )
+            .bind(&path)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("check retained report ownership"))?;
+            if !referenced {
+                paths.push(path);
             }
-            let _ = sqlx::query("DELETE FROM scheduled_task_runs WHERE id = ?")
-                .bind(&id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("prune scheduled task run"))?;
         }
+        tx.commit()
+            .await
+            .map_err(dberr("commit scheduled run pruning"))?;
         Ok(paths)
     }
 
@@ -940,6 +1007,217 @@ mod tests {
         let deleted = repo.prune_runs(&t.id, 2).await.unwrap();
         assert_eq!(deleted.len(), 3);
         assert_eq!(repo.list_runs(&t.id, 100).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn quality_report_ownership_lookup_does_not_scan_run_history() {
+        let p = pool().await;
+        let rows = sqlx::query(
+            "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM scheduled_task_runs WHERE report_path=?)",
+        )
+        .bind("/tmp/retained-report.md")
+        .fetch_all(&p)
+        .await
+        .unwrap();
+        let plan: Vec<String> = rows.iter().map(|row| row.get("detail")).collect();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("SEARCH scheduled_task_runs")),
+            "each pruned report must use an indexed ownership lookup: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_admission_snapshot_preserves_nonzero_epochs_and_original_content() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let initial = repo.create(new_task("ws1", "original")).await.unwrap();
+        let captured = repo
+            .update(
+                &initial.id,
+                ScheduledTaskPatch {
+                    schedule: Some(json!({"cadence":"once", "run_at":"2000-01-01T10:00:00Z"})),
+                    destination: Some(json!({"type":"email", "to":"original@example.invalid"})),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(captured.schedule_generation > 0);
+        assert!(captured.admission_generation > 0);
+        let run = repo.admit_run(&captured, "schedule").await.unwrap();
+        repo.update(
+            &captured.id,
+            ScheduledTaskPatch {
+                name: Some("edited".into()),
+                prompt: Some("edited prompt".into()),
+                destination: Some(json!({"type":"none"})),
+                attach_proof: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Older SELECT * readers and finishing writes ignore the new column.
+        let read = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(read.task_id, captured.id);
+        assert!(serde_json::to_value(&read)
+            .unwrap()
+            .get("admitted_task_json")
+            .is_none());
+        repo.finish_run(
+            &run.id,
+            FinishRun {
+                status: "ok".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let recovered = ScheduledTasksRepo::new(p)
+            .get_run_task_snapshot(&run.id)
+            .await
+            .unwrap();
+        assert_eq!(recovered.schedule_generation, captured.schedule_generation);
+        assert_eq!(
+            recovered.admission_generation,
+            captured.admission_generation
+        );
+        assert_eq!(
+            serde_json::to_value(&recovered).unwrap(),
+            serde_json::to_value(&captured).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_old_insert_read_finish_paths_remain_compatible_with_snapshot_schema() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let task = repo.create(new_task("ws1", "legacy")).await.unwrap();
+        // create_run retains the previous build's exact column list.
+        let run = repo
+            .create_run(NewRun {
+                task_id: task.id,
+                workspace_id: "ws1".into(),
+                trigger: "schedule".into(),
+            })
+            .await
+            .unwrap();
+        let snapshot: Option<String> =
+            sqlx::query_scalar("SELECT admitted_task_json FROM scheduled_task_runs WHERE id=?")
+                .bind(&run.id)
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        assert!(snapshot.is_none());
+        assert!(repo
+            .get_run_task_snapshot(&run.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("legacy"));
+        repo.finish_run(
+            &run.id,
+            FinishRun {
+                status: "ok".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(repo.get_run(&run.id).await.unwrap().status, "ok");
+    }
+
+    #[tokio::test]
+    async fn quality_invalid_admission_snapshots_are_rejected_without_current_task_fallback() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let task = repo.create(new_task("ws1", "snapshot")).await.unwrap();
+        let run = repo.admit_run(&task, "schedule").await.unwrap();
+        let valid: String =
+            sqlx::query_scalar("SELECT admitted_task_json FROM scheduled_task_runs WHERE id=?")
+                .bind(&run.id)
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        let value: Value = serde_json::from_str(&valid).unwrap();
+        let mut invalid = vec!["{".to_string(), "{}".to_string(), "null".to_string()];
+        for (key, replacement) in [
+            ("version", json!(2)),
+            ("schedule_generation", json!(-1)),
+            ("admission_generation", json!(-1)),
+        ] {
+            let mut v = value.clone();
+            v[key] = replacement;
+            invalid.push(v.to_string());
+        }
+        for key in ["id", "workspace_id"] {
+            let mut v = value.clone();
+            v["task"][key] = json!("unrelated");
+            invalid.push(v.to_string());
+        }
+        let mut missing_epoch = value;
+        missing_epoch
+            .as_object_mut()
+            .unwrap()
+            .remove("schedule_generation");
+        invalid.push(missing_epoch.to_string());
+        for malformed in invalid {
+            sqlx::query("UPDATE scheduled_task_runs SET admitted_task_json=? WHERE id=?")
+                .bind(malformed)
+                .bind(&run.id)
+                .execute(&p)
+                .await
+                .unwrap();
+            assert!(repo.get_run_task_snapshot(&run.id).await.is_err());
+            assert!(repo.get(&task.id).await.unwrap().last_run_at.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn quality_prune_preserves_reports_still_owned_by_retained_runs() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let task = repo.create(new_task("ws1", "shared report")).await.unwrap();
+        for day in [1, 2] {
+            let run = repo
+                .create_run(NewRun {
+                    task_id: task.id.clone(),
+                    workspace_id: "ws1".into(),
+                    trigger: "manual".into(),
+                })
+                .await
+                .unwrap();
+            repo.finish_run(
+                &run.id,
+                FinishRun {
+                    status: "ok".into(),
+                    report_path: Some("/legacy/shared.md".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE scheduled_task_runs SET started_at=? WHERE id=?")
+                .bind(format!("2026-10-0{day}T00:00:00Z"))
+                .bind(&run.id)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        assert!(
+            repo.prune_runs(&task.id, 1).await.unwrap().is_empty(),
+            "a retained historical run still owns this colliding path"
+        );
+        assert_eq!(repo.list_runs(&task.id, 10).await.unwrap().len(), 1);
+        assert_eq!(
+            repo.prune_runs(&task.id, 0).await.unwrap(),
+            vec!["/legacy/shared.md"]
+        );
     }
 
     #[tokio::test]

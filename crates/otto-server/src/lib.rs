@@ -83,6 +83,7 @@ pub mod run_workspace;
 pub use otto_automation::scheduled_tasks_engine;
 pub use otto_automation::scheduled_tasks_scheduler;
 #[cfg(test)]
+#[path = "../tests/unit/scheduled_tasks_engine.rs"]
 mod scheduled_tasks_engine_tests;
 mod self_call;
 pub mod shutdown;
