@@ -3667,7 +3667,7 @@ fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> Que
 ///      a field path on the base collection (the field list already carries the
 ///      dotted paths, which the editor filters against the typed prefix);
 ///   3. failing any FROM table, the collection selected in the schema tree.
-fn resolve_sql_collection(
+pub(crate) fn resolve_sql_collection(
     sctx: &crate::complete::sql::SqlCtx,
     node_coll: Option<&str>,
 ) -> Option<String> {

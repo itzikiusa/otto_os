@@ -6121,6 +6121,8 @@ export interface ObjectDetail {
   foreign_keys: DbForeignKey[];
   ddl?: string | null;
   row_count?: number | null;
+  /** Enforced Mongo collection browsing retains only sampled_fields, sampled_paths
+   * and sampled_path_types (schema names/types), never sampled document values. */
   extra?: unknown;
 }
 

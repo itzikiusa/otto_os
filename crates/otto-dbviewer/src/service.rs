@@ -13,6 +13,7 @@
 //! cached connection valid — the two caches compose.
 
 mod changes;
+mod metadata;
 mod multirun;
 mod validation;
 
@@ -701,9 +702,12 @@ impl DbViewerService {
             finished: Arc::new(std::sync::Mutex::new(FinishedStore::default())),
             active_keys: Arc::new(std::sync::Mutex::new(HashMap::new())),
             completion_secrets: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            enforced_completions: Arc::new(crate::complete::CompletionCache::with_ttl(
-                ENFORCED_COMPLETION_TTL,
-            )),
+            enforced_completions: Arc::new(
+                crate::complete::CompletionCache::with_ttl_and_capacity(
+                    ENFORCED_COMPLETION_TTL,
+                    128,
+                ),
+            ),
             multi_runs: Arc::new(std::sync::Mutex::new(multirun::MultiRunStore::default())),
             graphs: Arc::new(GraphCache::default()),
         }
@@ -1805,7 +1809,12 @@ impl DbViewerService {
             {
                 result.ddl = None;
             }
-            result.extra = Value::Null;
+            result.extra =
+                if r.config.engine == Engine::Mongodb && result.kind == NodeKind::Collection {
+                    metadata::mongo_schema_extra(&result.extra)
+                } else {
+                    Value::Null
+                };
         }
         self.authorize(conn_id, user_id, Some(path), "db_browse")
             .await?;
@@ -3260,16 +3269,59 @@ impl DbViewerService {
             // after FROM, in-scope columns PK-first after WHERE, keywords.
             let svc = self.clone();
             let (cid, uid) = (conn_id.clone(), user_id.clone());
+            let collection = (r.config.engine == Engine::Mongodb)
+                .then(|| metadata::mongo_completion_collection(ctx))
+                .flatten();
+            let config_key = r.config.cache_key();
             let snap = tokio::spawn(async move {
-                let scope = format!("{uid}\u{0}{schema}");
-                svc.enforced_completions
+                let scope = format!("{uid}\0{schema}");
+                let snapshot = svc
+                    .enforced_completions
                     .snapshot_or_build(cid.as_str(), &scope, || async {
                         svc.schema_graph(&cid, &uid, &schema, ENFORCED_COMPLETION_MAX_TABLES)
                             .await
                             .ok()
-                            .map(|g| crate::complete::snapshot_from_graph(&g))
+                            .map(|graph| crate::complete::snapshot_from_graph(&graph))
                     })
-                    .await
+                    .await;
+                // The bulk Mongo graph is intentionally top-level only. Keep
+                // that shared snapshot; cache just the selected collection's
+                // nested fields separately, under its resolved credential scope.
+                let Some(collection) = collection else {
+                    return snapshot;
+                };
+                let Some(object) = snapshot
+                    .objects
+                    .iter()
+                    .find(|object| object.name == collection)
+                else {
+                    return snapshot;
+                };
+                let fields_scope = format!("{uid}\0{config_key}\0{schema}");
+                let fields = svc
+                    .enforced_completions
+                    .fields_or_build(cid.as_str(), &fields_scope, &collection, || async {
+                        let path = NodePath::parse(&format!("db:{schema}"))
+                            .child("coll", &collection)
+                            .to_id();
+                        match svc.object_detail(&cid, &uid, &path, false).await {
+                            Ok(detail) => metadata::mongo_completion_fields(&detail),
+                            Err(_) => Vec::new(),
+                        }
+                    })
+                    .await;
+                // A field slot only needs this collection. Do not clone/cache
+                // every other collection's columns for every word typed.
+                Arc::new(crate::complete::SchemaSnapshot {
+                    databases: snapshot.databases.clone(),
+                    objects: vec![crate::complete::ObjectSnap {
+                        name: object.name.clone(),
+                        kind: object.kind,
+                        fields: (*fields).clone(),
+                        fields_ready: true,
+                    }],
+                    routines: Vec::new(),
+                })
             })
             .await
             .map_err(|e| Error::Internal(format!("completion task failed: {e}")))?;
@@ -4116,3 +4168,5 @@ mod tests {
 mod lifecycle_tests;
 #[cfg(test)]
 mod perf_budget_tests;
+#[cfg(test)]
+mod scoped_metadata_tests;
