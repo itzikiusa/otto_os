@@ -18,11 +18,6 @@ interface MintedToken {
   info: TokenInfo;
 }
 
-interface OutwardStatus {
-  enabled: boolean;
-  tools: { name: string; enabled: boolean }[];
-}
-
 async function createSecondUser(ctx: APIRequestContext, base: string): Promise<string> {
   const username = `mcp-rotate-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const created = await ctx.post(`${base}/api/v1/users`, {
@@ -64,14 +59,11 @@ test('rotating one token leaves every other scoped token working', async ({ page
   const { ctx, base } = await apiCtx();
   const cleanupIds = new Set<string>();
   let legacyBeforeIds: Set<string> | null = null;
-  let originalStatus: OutwardStatus | null = null;
-
   try {
-    const statusResponse = await ctx.get(`${base}/api/v1/mcp/otto-server`);
-    expect(statusResponse.ok()).toBeTruthy();
-    originalStatus = (await statusResponse.json()) as OutwardStatus;
+    // Rotation tests credential identity, not catalog filtering. Keep the shared
+    // daemon's catalog intact; enabling the transport is an additive precondition.
     const enable = await ctx.patch(`${base}/api/v1/mcp/otto-server`, {
-      data: { enabled: true, tools: ['otto.get_context_packet'] },
+      data: { enabled: true },
     });
     expect(
       enable.ok(),
@@ -169,14 +161,6 @@ test('rotating one token leaves every other scoped token working', async ({ page
     }
     for (const id of cleanupIds) {
       await ctx.delete(`${base}/api/v1/mcp/tokens/${id}`);
-    }
-    if (originalStatus) {
-      await ctx.patch(`${base}/api/v1/mcp/otto-server`, {
-        data: {
-          enabled: originalStatus.enabled,
-          tools: originalStatus.tools.filter((tool) => tool.enabled).map((tool) => tool.name),
-        },
-      });
     }
     await ctx.dispose();
   }

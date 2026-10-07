@@ -1,7 +1,8 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as readline from 'node:readline';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
@@ -208,84 +209,130 @@ test('saved-request execute records an agent-sourced history row', async () => {
 
 test('inward mcp-tools advertises the API tools and lists the seeded request', async () => {
   test.setTimeout(120_000);
-  const { ctx, base, token } = await apiCtx();
-  const { dataDir } = daemonMeta();
-
-  // Its OWN workspace: the bridge's `otto_api_execute` really does write a
-  // history row, and the row-count specs in this file must not see it whichever
-  // way Playwright schedules the tests across workers.
+  const { ctx, base } = await apiCtx();
+  // A listening loopback fixture proves approval does not bypass the SSRF guard.
+  let transportAttempts = 0;
+  const upstream = createServer(socket => { transportAttempts++; socket.destroy(); });
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const address = upstream.address();
+  if (!address || typeof address === 'string') throw new Error('Fixture needs a TCP port');
+  const upstreamUrl = `http://127.0.0.1:${address.port}/healthz`;
   const bridgeRoot = mkdtempSync(join(tmpdir(), 'otto-apimcp-bridge-'));
-  const workspace = await postJson<{ id: string }>(ctx, `${base}/api/v1/workspaces`, {
-    name: 'API MCP Bridge',
-    root_path: bridgeRoot,
-  });
-  await postJson(ctx, `${base}/api/v1/workspaces/${workspace.id}/api-client/requests`, {
-    name: 'Alpha health',
-    method: 'GET',
-    url: 'http://alpha.e2e-nowhere.invalid/healthz',
-  });
-  // Spawning an agent session is what renders the workspace `.mcp.json`.
-  const session = await postJson<{ id: string }>(
-    ctx,
-    `${base}/api/v1/workspaces/${workspace.id}/sessions`,
-    { kind: 'agent', provider: 'shell', title: 'apimcp-bridge', cwd: bridgeRoot, meta: {} },
-  );
-  await ctx.dispose().catch(() => {});
-
-  const mcpDoc = JSON.parse(readFileSync(join(bridgeRoot, '.mcp.json'), 'utf8')) as {
-    mcpServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
-  };
-  const otto = mcpDoc.mcpServers?.otto;
-  expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
-
-  // `.mcp.json` is deliberately identity-neutral (command/args only — the daemon
-  // never persists a session token into a file several sessions share), so the
-  // routing env is ours to supply. Run the binary under test and point it at the
-  // isolated e2e daemon with a token/workspace that exist THERE.
-  const mcp = new McpStdio(
-    process.env.OTTO_E2E_BIN ?? otto!.command,
-    ['mcp-tools'],
-    bridgeEnv({
-      OTTO_MCP_BASE: base,
-      OTTO_MCP_TOKEN: token,
-      OTTO_SESSION_ID: session.id,
-      OTTO_WORKSPACE_ID: workspace.id,
-      OTTO_DATA_DIR: dataDir,
-    }),
-  );
   try {
-    await mcp.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'e2e', version: '1' },
-    });
-    mcp.notify('notifications/initialized');
+    const { dataDir } = daemonMeta();
 
-    const listed = await mcp.request('tools/list');
-    const names = ((listed.result as { tools: { name: string }[] }).tools ?? []).map((t) => t.name);
-    for (const name of API_TOOLS) {
-      expect(names, `tools/list must advertise ${name}`).toContain(name);
+    // Its OWN workspace: the bridge's `otto_api_execute` really does write a
+    // history row, and the row-count specs in this file must not see it whichever
+    // way Playwright schedules the tests across workers.
+    const workspace = await postJson<{ id: string }>(ctx, `${base}/api/v1/workspaces`, {
+      name: 'API MCP Bridge',
+      root_path: bridgeRoot,
+    });
+    const saved = await postJson<{ id: string }>(ctx, `${base}/api/v1/workspaces/${workspace.id}/api-client/requests`, {
+      name: 'Alpha health',
+      method: 'GET',
+      url: upstreamUrl,
+    });
+    // Spawning an agent session is what renders the workspace `.mcp.json`.
+    const session = await postJson<{ id: string }>(
+      ctx,
+      `${base}/api/v1/workspaces/${workspace.id}/sessions`,
+      { kind: 'agent', provider: 'shell', title: 'apimcp-bridge', cwd: bridgeRoot, meta: {} },
+    );
+    const tokenFile = join(bridgeRoot, '.fixture-session-token');
+    const capture = await ctx.post(`${base}/api/v1/sessions/${session.id}/input`, {
+      data: { text: `umask 077; printf '%s' \"$OTTO_MCP_TOKEN\" > '${tokenFile}'`, submit: true },
+    });
+    expect(capture.ok()).toBeTruthy();
+    await expect.poll(() => existsSync(tokenFile) && readFileSync(tokenFile, 'utf8').length > 0).toBeTruthy();
+    const token = readFileSync(tokenFile, 'utf8');
+    unlinkSync(tokenFile);
+
+    const mcpDoc = JSON.parse(readFileSync(join(bridgeRoot, '.mcp.json'), 'utf8')) as {
+      mcpServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
+    };
+    const otto = mcpDoc.mcpServers?.otto;
+    expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
+    expect(otto!.env, 'shared config must not persist session credentials').toBeUndefined();
+
+    // `.mcp.json` is deliberately identity-neutral (command/args only — the daemon
+    // never persists a session token into a file several sessions share), so the
+    // routing env is ours to supply. Run the binary under test and point it at the
+    // isolated e2e daemon with a token/workspace that exist THERE.
+    const mcp = new McpStdio(
+      process.env.OTTO_E2E_BIN ?? otto!.command,
+      ['mcp-tools'],
+      bridgeEnv({
+        OTTO_MCP_BASE: base,
+        OTTO_MCP_TOKEN: token,
+        OTTO_SESSION_ID: session.id,
+        OTTO_WORKSPACE_ID: workspace.id,
+        OTTO_DATA_DIR: dataDir,
+      }),
+    );
+    try {
+      await mcp.request('initialize', {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'e2e', version: '1' },
+      });
+      mcp.notify('notifications/initialized');
+
+      const listed = await mcp.request('tools/list');
+      const names = ((listed.result as { tools: { name: string }[] }).tools ?? []).map((t) => t.name);
+      for (const name of API_TOOLS) {
+        expect(names, `tools/list must advertise ${name}`).toContain(name);
+      }
+
+      const listCall = await mcp.request('tools/call', {
+        name: 'otto_api_list',
+        arguments: { q: 'alpha' },
+      });
+      expect(
+        McpStdio.isError(listCall),
+        `otto_api_list errored: ${McpStdio.rawText(listCall)}`,
+      ).toBeFalsy();
+      expect(McpStdio.rawText(listCall)).toContain('Alpha health');
+
+      const execute = () => mcp.request('tools/call', {
+        name: 'otto_api_execute',
+        arguments: { name: 'Alpha health', timeout_ms: 2000 },
+      });
+      const pendingCall = await execute();
+      expect(McpStdio.isError(pendingCall)).toBe(false);
+      const pending = JSON.parse(McpStdio.rawText(pendingCall)) as { decision: string; executed: boolean; approval_id: string };
+      expect(pending.decision).toBe('pending_approval');
+      expect(pending.executed).toBe(false);
+      expect(pending.approval_id).toBeTruthy();
+      expect(transportAttempts, 'approval must precede the HTTP send').toBe(0);
+      const historyUrl = `${base}/api/v1/workspaces/${workspace.id}/api-client/history?source=agent`;
+      const before = await ctx.get(historyUrl);
+      expect(before.ok()).toBeTruthy();
+      expect(await before.json()).toEqual([]);
+      const approved = await ctx.post(`${base}/api/v1/mcp/approvals/${pending.approval_id}/decide`, { data: { approved: true } });
+      expect(approved.ok()).toBeTruthy();
+      const executeCall = await execute();
+      expect(McpStdio.isError(executeCall)).toBe(true);
+      expect(transportAttempts, 'MCP approval must not bypass the workspace SSRF guard').toBe(0);
+      const executeText = McpStdio.rawText(executeCall);
+      expect(executeText).toContain('blocked address 127.0.0.1 (SSRF guard)');
+      expect(executeText).not.toContain('denied');
+      expect(executeText).not.toContain('request_id or name');
+      const historyResponse = await ctx.get(historyUrl);
+      expect(historyResponse.ok()).toBeTruthy();
+      const history = await historyResponse.json();
+      expect(history).toHaveLength(1);
+      expect(history[0].request.request_id).toBe(saved.id);
+      expect(history[0].request.source.kind).toBe('agent');
+      expect(history[0].response.error).toContain('blocked address 127.0.0.1 (SSRF guard)');
+    } finally {
+      mcp.kill();
     }
-
-    const listCall = await mcp.request('tools/call', {
-      name: 'otto_api_list',
-      arguments: { q: 'alpha' },
-    });
-    expect(
-      McpStdio.isError(listCall),
-      `otto_api_list errored: ${McpStdio.rawText(listCall)}`,
-    ).toBeFalsy();
-    expect(McpStdio.rawText(listCall)).toContain('Alpha health');
-
-    const executeCall = await mcp.request('tools/call', {
-      name: 'otto_api_execute',
-      arguments: { name: 'Alpha health' },
-    });
-    const executeText = McpStdio.rawText(executeCall);
-    expect(executeText).toMatch(/daemon returned|502/i);
-    expect(executeText).not.toContain('request_id or name');
   } finally {
-    mcp.kill();
+    const tokenFile = join(bridgeRoot, '.fixture-session-token');
+    if (existsSync(tokenFile)) unlinkSync(tokenFile);
+    await ctx.dispose();
+    await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()));
   }
 });
 
