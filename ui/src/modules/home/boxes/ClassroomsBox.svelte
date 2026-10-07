@@ -122,6 +122,9 @@
     }),
   );
   const byId = $derived(new Map(school.kids.map((k) => [k.id, k] as const)));
+  // Keep complete membership without mounting every session row at once.
+  const LIST_PAGE_SIZE = 100;
+  let memberPages = $state<Record<string, number>>({});
 
   // ── View mode ────────────────────────────────────────────────────────────
   const gl = typeof document !== 'undefined' && webglAvailable();
@@ -149,6 +152,9 @@
     let dead = false;
     let h: SchoolHandle | null = null;
     sceneError = '';
+    // Capture before async imports/assets; list mode and the initial corridor
+    // are not navigation and must never clear the remembered classroom.
+    pendingRoom = untrack(() => box.config.room as string | undefined) ?? null;
     mountSchool(el, { reducedMotion: reducedMotion(), label: 'Otto School: workspaces are classrooms, agent sessions are the kids', dark: untrack(() => dark) }).then(
       (x) => {
         if (dead) {
@@ -158,8 +164,13 @@
         h = x;
         x.onFrame(placeOverlay);
         x.onView((v) => {
+          if (dead || h !== x) return;
           view = v;
           if (v.kind === 'corridor') selected = null;
+          // Only scene-originated navigation persists. Initial state and
+          // async mounting (including List → 3D) do not emit this callback.
+          const room = v.kind === 'corridor' ? null : v.roomId;
+          if ((box.config.room ?? null) !== room) home.updateBoxConfig(viewId, box.id, { room });
         });
         x.onContextLost(() => {
           if (dead || h !== x) return;
@@ -170,10 +181,7 @@
         });
         x.setActive(untrack(() => onScreen));
         handle = x;
-        // The room you were last in (or the current workspace's) opens
-        // straight away once the data is in.
-        const last = untrack(() => box.config.room as string | undefined);
-        if (last) pendingRoom = last;
+        // The update effect restores the captured room when data is ready.
       },
       (e: unknown) => {
         if (!dead) sceneError = loadErrorText(e);
@@ -208,12 +216,6 @@
   });
   $effect(() => {
     handle?.setHover(hover);
-  });
-  // Remember the room you're in for the next visit.
-  $effect(() => {
-    const v = view;
-    const room = v.kind === 'corridor' ? null : v.roomId;
-    if ((untrack(() => box.config.room) ?? null) !== room) untrack(() => home.updateBoxConfig(viewId, box.id, { room }));
   });
   // A kid that left takes the card with it.
   $effect(() => {
@@ -401,6 +403,9 @@
 
   // ── Keyboard (on the focused stage) ──────────────────────────────────────
   function onStageKey(e: KeyboardEvent, isDown: boolean): void {
+    // Card buttons keep their native Enter/Space behavior. Camera shortcuts
+    // belong only to the stage, never its interactive descendants.
+    if (e.defaultPrevented || e.target !== e.currentTarget) return;
     const h = handle;
     if (!h) return;
     if (h.key(e, isDown)) {
@@ -426,9 +431,19 @@
   /** Make the stage a keyboard surface (focusable; keys move the camera). */
   function stageKeys(node: HTMLElement) {
     node.tabIndex = 0;
-    const kd = (e: KeyboardEvent) => onStageKey(e, true);
-    const ku = (e: KeyboardEvent) => onStageKey(e, false);
-    const bl = () => handle?.key(new KeyboardEvent('keyup', { key: 'w' }), false);
+    const pressed = new Set<string>();
+    const kd = (e: KeyboardEvent) => {
+      if (e.target === node && !e.defaultPrevented) pressed.add(e.key);
+      onStageKey(e, true);
+    };
+    const ku = (e: KeyboardEvent) => {
+      pressed.delete(e.key);
+      onStageKey(e, false);
+    };
+    const bl = () => {
+      for (const key of pressed) handle?.key(new KeyboardEvent('keyup', { key }), false);
+      pressed.clear();
+    };
     node.addEventListener('keydown', kd);
     node.addEventListener('keyup', ku);
     node.addEventListener('blur', bl);
@@ -529,7 +544,8 @@
   }
 
   function kidMenu(e: MouseEvent | KeyboardEvent, k: Kid): void {
-    const inRoom = view.kind !== 'corridor' && openRoomModel?.id === k.workspaceId;
+    const inRoom = view.kind !== 'corridor' && openRoomModel?.id === k.workspaceId
+      && [...openRoomModel.kids, ...openRoomModel.bench].some((kid) => kid.id === k.id);
     if (k.detention) {
       ctxMenu.show(e, [
         { label: 'Release from detention', icon: 'undo', disabled: !k.canManage, action: () => void free(k) },
@@ -553,6 +569,8 @@
   /** List-view row → into the 3D room and onto that kid. */
   async function showIn3d(k: Kid): Promise<void> {
     if (mode !== '3d' || !handle) return;
+    const room = school.rooms.find((r) => r.id === k.workspaceId);
+    if (!room || ![...room.kids, ...room.bench].some((kid) => kid.id === k.id)) return;
     if (view.kind === 'corridor' || openRoomModel?.id !== k.workspaceId) await handle.enterRoom(k.workspaceId);
     selected = k.id;
   }
@@ -608,10 +626,13 @@
   </div>
 
   {#if !loaded && fetched.length === 0 && ws.sessions.length === 0}
-    <LoadState what="the school" loading={true} variant="compact" rows={3} />
+    <LoadState what="the school" empty={true} loading={true} variant="compact" rows={3} />
   {:else if error && fetched.length === 0 && ws.sessions.length === 0}
-    <LoadState what="the school" error={error} variant="compact" onretry={() => poller?.now()} />
+    <LoadState what="the school" empty={true} error={error} variant="compact" onretry={() => poller?.now()} />
   {:else}
+    {#if error}
+      <LoadState what="the school" error={error} empty={false} variant="compact" onretry={() => poller?.now()} />
+    {/if}
     {#if !gl}
       <p class="note" role="note"><Icon name="info" size={12} />3D isn’t available here (WebGL is off), so the school is listed instead.</p>
     {/if}
@@ -676,10 +697,10 @@
           {/if}
         {:else if sceneError}
           <div class="scene-state">
-            <LoadState what="the 3D school" error={sceneError} variant="compact" onretry={() => (sceneAttempt += 1)} />
+            <LoadState what="the 3D school" empty={true} error={sceneError} variant="compact" onretry={() => (sceneAttempt += 1)} />
           </div>
         {:else}
-          <div class="scene-state"><span class="spinner" aria-hidden="true"></span><span class="dim">Opening the school…</span></div>
+          <div class="scene-state"><LoadState what="the 3D school" empty={true} loading={true} variant="compact" /></div>
         {/if}
         {#if empty && handle && view.kind === 'corridor'}
           <div class="empty-over">
@@ -701,7 +722,9 @@
         </EmptyState>
       {/if}
       {#each school.rooms as r (r.id)}
-        {#if r.counts.total + r.bench.length > 0 || mode === 'list'}
+        {@const lastPage = Math.max(0, Math.ceil(r.members.length / LIST_PAGE_SIZE) - 1)}
+        {@const page = Math.min(memberPages[r.id] ?? 0, lastPage)}
+        {#if r.members.length > 0 || mode === 'list'}
           <section class="lroom" aria-label="Classroom {r.name}">
             <h4 class="lroom-head">
               <span class="ellipsis">{r.name}</span>
@@ -711,9 +734,9 @@
                 <button class="btn small" onclick={() => void handle?.enterRoom(r.id)} disabled={!handle}>Walk in</button>
               {/if}
             </h4>
-            {#if r.kids.length + r.bench.length > 0}
+            {#if r.members.length > 0}
               <ul>
-                {#each [...r.kids, ...r.bench] as k (k.id)}
+                {#each r.members.slice(page * LIST_PAGE_SIZE, (page + 1) * LIST_PAGE_SIZE) as k (k.id)}
                   <li use:rowMenu class="lrow" data-kid-id={k.id} oncontextmenu={(e) => kidMenu(e, k)}>
                     <button
                       class="lmain"
@@ -735,7 +758,14 @@
                 {/each}
               </ul>
             {/if}
-            {#if r.overflow > 0}<p class="more">+{r.overflow} more not seated</p>{/if}
+            {#if lastPage > 0}
+              <nav class="member-pages" aria-label="Sessions in classroom {r.name}">
+                <button class="btn small" aria-label="Previous sessions in {r.name}" disabled={page === 0} onclick={() => (memberPages[r.id] = page - 1)}>Previous</button>
+                <span aria-live="polite">{page * LIST_PAGE_SIZE + 1}–{Math.min((page + 1) * LIST_PAGE_SIZE, r.members.length)} of {r.members.length}</span>
+                <button class="btn small" aria-label="Next sessions in {r.name}" disabled={page === lastPage} onclick={() => (memberPages[r.id] = page + 1)}>Next</button>
+              </nav>
+            {/if}
+            {#if r.overflow > 0}<p class="more">{r.overflow} not seated in 3D</p>{/if}
           </section>
         {/if}
       {/each}
@@ -952,11 +982,40 @@
     pointer-events: auto;
   }
   .list {
+    padding-inline: 4px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     overflow-y: auto;
     min-height: 0;
+  }
+  /* Keep the plain action path available to screen readers, and reveal its
+     context as soon as any keyboard control receives focus. */
+  .list.sr-only:focus-within {
+    position: static;
+    width: auto;
+    height: auto;
+    flex: 0 1 45%;
+    min-block-size: 100px;
+    max-block-size: 45%;
+    margin: 0;
+    padding: 6px;
+    overflow: auto;
+    clip: auto;
+    clip-path: none;
+    white-space: normal;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+  }
+  .member-pages {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding-block: 6px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .lroom-head {
     display: flex;

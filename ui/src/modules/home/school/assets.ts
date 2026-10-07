@@ -81,3 +81,18 @@ export async function loadSchoolAssets(T: Three, Loader: typeof GLTFLoader, base
     },
   };
 }
+
+/** Cloned actors own skeleton textures and animation bindings; their geometry
+ * and materials still belong to the asset templates. Shared skeleton references
+ * within an actor must be released only once. */
+export function disposeActor(actor: { obj: THREE_NS.Object3D; mixer: THREE_NS.AnimationMixer }): void {
+  actor.mixer.stopAllAction();
+  actor.mixer.uncacheRoot(actor.obj);
+  const skeletons = new Set<THREE_NS.Skeleton>();
+  actor.obj.traverse((node) => {
+    const mesh = node as THREE_NS.SkinnedMesh;
+    if (mesh.isSkinnedMesh && mesh.skeleton) skeletons.add(mesh.skeleton);
+  });
+  for (const skeleton of skeletons) skeleton.dispose();
+  actor.obj.removeFromParent();
+}
