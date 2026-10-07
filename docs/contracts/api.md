@@ -6215,11 +6215,13 @@ nullable `parent_span_id`, safe static `name`, `component`, `kind`,
 `start_unix_nano` (integer or decimal string on ingest), `duration_ms`, `status`,
 `attributes`. Browser spans accept only known module names and the operations
 `ui.navigation`, `ui.chunk`, `ui.render`, `ui.long_task`, `ui.frame_delay`, `http.client`,
-`ui.request.queue`, `ui.response.decode`. Server spans use matched route templates;
-while telemetry is enabled every instrumented response carries `x-otto-route` (the
-matched route TEMPLATE, e.g. `/api/v1/repos/{id}/fetch`, CORS-exposed) and the UI
-names its client span `http.client.<method>.<template>` (same shape as the server
-span name) so client latency rolls up per endpoint. A request whose client
+`ui.request.queue`, `ui.response.decode`. Browser client spans remain exactly
+`http.client`; arbitrary endpoint-derived browser names and raw route/URL
+attributes reject the entire batch atomically. Endpoint attribution remains in
+linked server spans, whose names use matched route templates. While telemetry
+is enabled every instrumented response carries `x-otto-route` (the matched route
+TEMPLATE, e.g. `/api/v1/repos/{id}/fetch`, CORS-exposed); this header does not
+rename the browser span. A request whose client
 disconnects before the response is recorded with `status:"cancelled"` and
 `http.response.status_code:499`, and is rolled up under its own operation
 `<name> [cancelled]` so aborted requests neither skew the real operation's

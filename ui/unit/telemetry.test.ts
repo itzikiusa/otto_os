@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -235,21 +236,31 @@ test('a newer disabled configuration wins over a pending runtime import', async 
   stop();
 });
 
-test('client spans are named by the daemon route template, never a concrete URL', () => {
+test('actual HTTP producer conforms to the shared ingest contract without exporting route identities', async () => {
+  const contract = JSON.parse(readFileSync(new URL('../../crates/otto-telemetry/fixtures/ui-ingest.json', import.meta.url), 'utf8'));
   const hooks = loadSource(new URL('../src/lib/telemetry.ts', import.meta.url), {});
-  assert.equal(hooks.clientSpanName('POST', '/api/v1/repos/{id}/fetch'), 'http.client.post.repos..id..fetch');
-  // No header (telemetry off server-side, older daemon) or anything that is
-  // not a template keeps the generic bucket.
-  assert.equal(hooks.clientSpanName('GET', null), 'http.client');
-  assert.equal(hooks.clientSpanName('GET', '/api/v1/repos/my private?x=1'), 'http.client');
-  assert.ok(hooks.clientSpanName('GET', `/api/v1/${'a/'.repeat(90)}`).length <= 96);
   const t = load();
   let spans: any[] = [];
   t.configureTelemetry(true, async (batch: any[]) => { spans = batch; });
-  t.startMeasurement('http.client', 'git', 'client').finish('ok', {}, 'http.client.get.repos..id..status');
-  t.startMeasurement('http.client', 'git', 'client').finish('ok', {}, 'Bad Name/../');
-  return t.flushTelemetry().then(() => {
-    assert.equal(JSON.stringify(spans.map((s) => s.name)), JSON.stringify(['http.client.get.repos..id..status', 'http.client']));
-    t.configureTelemetry(false);
-  });
+  const { api } = loadSource(new URL('../src/lib/api/client.ts', import.meta.url), {
+    '../telemetry': { ...t, clientSpanName: hooks.clientSpanName },
+    '../stores/serviceHealth.svelte': { serviceHealth: { report() {} } },
+    './lane': loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {}),
+  }, { location: { port: '7700', origin: 'http://localhost:7700' }, fetch: async () => new Response('{}', { headers: { 'x-otto-route': current.route } }) });
+  let current = contract.requests[0];
+  const done = t.beginNavigation('git');
+  for (current of contract.requests) {
+    if (current.method === 'POST') await api.post('/repos/private-project/fetch');
+    else await api.get('/repos/private-project');
+  }
+  t.startMeasurement('ui.render', 'git').finish();
+  done();
+  await t.flushTelemetry();
+  const clients = spans.filter((span) => span.kind === 'client');
+  assert.deepEqual(Array.from(clients, (span) => span.name), contract.requests.map((request: any) => request.name));
+  const navigation = spans.find((span) => span.name === 'ui.navigation');
+  assert.ok(navigation);
+  assert.ok(clients.every((span) => span.parent_span_id === navigation.span_id));
+  assert.ok(!JSON.stringify(spans).includes('private'));
+  t.configureTelemetry(false);
 });

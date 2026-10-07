@@ -201,6 +201,7 @@ async fn live_owner_blocks_duplicate_start_without_overwriting_config() {
         "http://127.0.0.1:1",
         &TelemetryConfig::default(),
         true,
+        Default::default(),
     )
     .await
     .err()
@@ -267,8 +268,15 @@ async fn relative_data_directory_launches_with_recoverable_absolute_config() {
     .unwrap();
     let identity = managed_identity(&absolute).unwrap().unwrap();
     let configuration = TelemetryConfig::default();
+    let sampled_process: crate::resource::CollectorProcess = Default::default();
     {
-        let starting = Collector::start(&relative, "http://127.0.0.1:1", &configuration, true);
+        let starting = Collector::start(
+            &relative,
+            "http://127.0.0.1:1",
+            &configuration,
+            true,
+            sampled_process.clone(),
+        );
         tokio::pin!(starting);
         let observed = async {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -293,9 +301,17 @@ async fn relative_data_directory_launches_with_recoverable_absolute_config() {
             result=&mut starting=>panic!("fixture exited before argv observation: {:?}",result.err()),
             _=observed=>{},
         }
+        assert!(
+            sampled_process.lock().unwrap().is_some(),
+            "startup must be sampled before readiness"
+        );
         // Dropping startup here exercises its cancellation cleanup too. The
         // fixture deliberately exposes no health server, so it cannot be ready.
     }
+    assert!(
+        sampled_process.lock().unwrap().is_none(),
+        "canceled startup left a sampled identity"
+    );
     let deadline = Instant::now() + Duration::from_secs(3);
     while snapshot(&identity).is_err() {
         assert!(
@@ -305,4 +321,63 @@ async fn relative_data_directory_launches_with_recoverable_absolute_config() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(snapshot(&identity).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn collector_resource_identity_covers_stop_exit_cancel_and_pid_reuse() {
+    use crate::resource::{CollectorProcess, CollectorRegistration, Sampler};
+    for ending in ["stop", "exit", "cancel"] {
+        let registry: CollectorProcess = Default::default();
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let sampled = CollectorRegistration::new(registry.clone(), child.id());
+        let mut collector = Collector {
+            child,
+            sampled: Some(sampled),
+            _owner_lock: None,
+            endpoint: String::new(),
+            health: String::new(),
+            metrics: String::new(),
+        };
+        let identity = registry.lock().unwrap().expect("owned child identity");
+        let mut sampler = Sampler::new();
+        let points = sampler.sample(&[], Some(identity));
+        let point = points
+            .iter()
+            .find(|p| p.process == "collector")
+            .expect("owned collector sample");
+        assert!(point.rss_mb.is_some());
+        assert_eq!(
+            point.cpu_percent, None,
+            "first observation has no CPU delta"
+        );
+        let mut reused = identity;
+        reused.start_time = reused.start_time.wrapping_add(1);
+        assert!(
+            !sampler
+                .sample(&[], Some(reused))
+                .iter()
+                .any(|p| p.process == "collector"),
+            "reused pid was attributed to the collector"
+        );
+        match ending {
+            "stop" => collector.stop().await,
+            "exit" => {
+                collector.child.kill().await.unwrap();
+                assert!(!collector.alive());
+            }
+            _ => drop(collector),
+        }
+        assert!(
+            registry.lock().unwrap().is_none(),
+            "{ending} kept its identity"
+        );
+        assert!(!sampler
+            .sample(&[], *registry.lock().unwrap())
+            .iter()
+            .any(|p| p.process == "collector"));
+    }
 }

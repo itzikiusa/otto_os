@@ -216,6 +216,36 @@ pub async fn ingest(
 mod tests {
     use super::*;
     #[test]
+    fn producer_contract_accepts_mixed_batch_and_rejects_private_names() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../otto-telemetry/fixtures/ui-ingest.json"
+        ))
+        .unwrap();
+        let mut spans = vec![
+            SpanRecord::new("ui.navigation", "git", 12.0),
+            SpanRecord::new("ui.render", "git", 2.0),
+        ];
+        for request in fixture["requests"].as_array().unwrap() {
+            let mut span = SpanRecord::new(
+                request["name"].as_str().unwrap(),
+                request["component"].as_str().unwrap(),
+                1.0,
+            );
+            span.kind = "client".into();
+            spans.push(span);
+        }
+        assert!(validate_ui(&spans).is_ok());
+        for name in fixture["rejected_names"].as_array().unwrap() {
+            spans.last_mut().unwrap().name = name.as_str().unwrap().into();
+            assert!(validate_ui(&spans).is_err(), "accepted {name}");
+        }
+        spans.last_mut().unwrap().name = "x".repeat(97);
+        assert!(validate_ui(&spans).is_err());
+        spans.last_mut().unwrap().name = "http.client".into();
+        spans.last_mut().unwrap().component = "private-project".into();
+        assert!(validate_ui(&spans).is_err());
+    }
+    #[test]
     fn ingestion_rejects_dynamic_names_and_routes_atomically() {
         let mut span = SpanRecord::new("ui.navigation", "agents", 12.0);
         assert!(validate_ui(&[span.clone()]).is_ok());

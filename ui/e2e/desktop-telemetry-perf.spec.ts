@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { processResources } from './process-resources';
 import { apiCtx, seedWorkspace } from './seed';
 import type { TelemetryConfig } from '../src/lib/api/types';
 
@@ -9,7 +9,11 @@ import type { TelemetryConfig } from '../src/lib/api/types';
 // No providers or production resources are contacted; the daemon is disposable.
 test.use({ serviceWorkers: 'block', trace: 'off', video: 'off' });
 test('all application modules: off/on navigation cost and concurrent CPU/RAM', async ({ page, context }, info) => {
-  test.setTimeout((Number(process.env.OTTO_TELEMETRY_LOAD_SECONDS ?? '20') * 6 + 300) * 1000);
+  const loadSeconds = Number(process.env.OTTO_TELEMETRY_LOAD_SECONDS ?? '20');
+  const recoverySeconds = Number(process.env.OTTO_TELEMETRY_RECOVERY_SECONDS ?? '60');
+  // Six measured phases + explicit recovery, up to 100 s collector startup,
+  // 160 s deferred storage, and 120 s for navigation/setup/fixture cleanup.
+  test.setTimeout((loadSeconds * 6 + recoverySeconds) * 1000 + 380_000);
   const { ctx, base, token } = await apiCtx();
   const workspace = await seedWorkspace(ctx, base);
   const original: TelemetryConfig = await (await ctx.get(`${base}/api/v1/telemetry/config`)).json();
@@ -18,38 +22,10 @@ test('all application modules: off/on navigation cost and concurrent CPU/RAM', a
   let modules: string[] = [];
   const rows: { enabled: boolean; module: string; duration_ms: number }[] = [];
   const requestPhases: { enabled: boolean; concurrency: number; seconds: number; requests: number; response_bytes: number; mean_request_ms: number; requests_per_second: number }[] = [];
-  const samples: { enabled: boolean; concurrency: number; process: string; phase: 'navigation' | 'load'; cpu_percent: number; rss_mb: number; at: number }[] = [];
+  const samples: { enabled: boolean; concurrency: number; process: string; phase: 'navigation' | 'load' | 'recovery'; cpu_percent: number; rss_mb: number; at: number }[] = [];
   const ownedSessions: string[] = [];
-  const measurement = (enabled: boolean, concurrency: number, phase: 'navigation' | 'load' = 'load') => {
-    const at = Date.now();
-    // Read only process IDs/parents and resource totals, never command arguments.
-    const output = execFileSync('ps', ['-axo', 'pid=,ppid=,%cpu=,rss=,comm='], { encoding: 'utf8' });
-    const processes = output.trim().split('\n').map((line) => {
-      const match = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.+)$/.exec(line);
-      return match ? { pid: Number(match[1]), parent: Number(match[2]), cpu: Number(match[3]), rss: Number(match[4]) / 1024, name: match[5] } : null;
-    }).filter((row): row is NonNullable<typeof row> => row !== null);
-    const parents = new Map(processes.map((row) => [row.pid, row.parent]));
-    const descendant = (pid: number, root: number): boolean => {
-      for (let depth = 0; depth < 64 && pid > 1; depth++) { if (pid === root) return true; pid = parents.get(pid) ?? 0; }
-      return false;
-    };
-    const groups = new Map<string, { cpu: number; rss: number }>();
-    for (const row of processes) {
-      let label: string;
-      if (row.pid === process.pid) label = 'load-driver';
-      else if (row.pid === daemon.pid) label = 'daemon';
-      else if (descendant(row.pid, daemon.pid)) label = row.name.includes('otelcol') ? 'collector' : row.name.includes('clickhouse') ? 'clickhouse' : 'agent-children';
-      else if (descendant(row.pid, process.pid) && /chromium|chrome|webkit|MiniBrowser/i.test(row.name)) label = 'browser';
-      else continue;
-      const group = groups.get(label) ?? { cpu: 0, rss: 0 };
-      group.cpu += row.cpu; group.rss += row.rss; groups.set(label, group);
-    }
-    const total = { cpu: 0, rss: 0 };
-    for (const [label, group] of groups) {
-      samples.push({ enabled, concurrency, process: label, phase, cpu_percent: group.cpu, rss_mb: group.rss, at });
-      if (label !== 'load-driver') { total.cpu += group.cpu; total.rss += group.rss; }
-    }
-    samples.push({ enabled, concurrency, process: 'total', phase, cpu_percent: total.cpu, rss_mb: total.rss, at });
+  const measurement = (enabled: boolean, concurrency: number, phase: 'navigation' | 'load' | 'recovery' = 'load') => {
+    samples.push(...processResources(daemon.pid).map((row) => ({ ...row, enabled, concurrency, phase })));
   };
   await context.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id);
@@ -103,10 +79,8 @@ test('all application modules: off/on navigation cost and concurrent CPU/RAM', a
       }
       await page.evaluate(async () => (await import(/* @vite-ignore */ String('/src/lib/router.svelte.ts'))).router.go('agents'));
       await expect(page.locator('.shell')).toBeVisible();
-      if (enabled) await expect.poll(async () => {
-        const overview = await (await ctx.get(`${base}/api/v1/telemetry/overview?hours=1`)).json();
-        return overview.operations.map((op: { name: string }) => op.name);
-      }, { timeout: 30_000 }).toEqual(expect.arrayContaining(['ui.navigation', 'ui.render']));
+      // Verify persisted UI operations after the workload. Waiting here would
+      // add an idle period solely to outwait the 120 s read-refresh throttle.
       // Concurrent read workloads, sampled over time. Separate from UI timings.
       for (const concurrency of [1, 3, 5]) {
         console.log(`telemetry load: collection=${enabled ? 'on' : 'off'}, agents=${concurrency}`);
@@ -130,7 +104,7 @@ test('all application modules: off/on navigation cost and concurrent CPU/RAM', a
             for (const socket of state.sockets) if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: btoa('telemetry-fixture '.repeat(60) + '\n') }));
           }, 250);
         }, { ids: sessions, base, token });
-        const duration = Number(process.env.OTTO_TELEMETRY_LOAD_SECONDS ?? '20');
+        const duration = loadSeconds;
         const phaseStarted = Date.now();
         const stop = phaseStarted + duration * 1000;
         const listUrl = `${base}/api/v1/workspaces/${workspace}/sessions?ids=${encodeURIComponent(sessions.join(','))}`;
@@ -173,10 +147,29 @@ test('all application modules: off/on navigation cost and concurrent CPU/RAM', a
     expect(new Set(rows.map((r) => r.module)).size).toBe(modules.length);
     expect(rows.every((r) => Number.isFinite(r.duration_ms) && r.duration_ms < 10_000)).toBeTruthy();
     await page.evaluate(async () => (await import(/* @vite-ignore */ String('/src/lib/telemetry.ts'))).flushTelemetry());
+    // Fixture sessions are gone. Preserve a quiet recovery curve separately
+    // from throughput phases so their RSS slopes cannot hide retained buffers.
+    for (let second = 0; second < recoverySeconds; second++) {
+      measurement(true, 0, 'recovery');
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    // Reads request a flush asynchronously. Samples taken during an export
+    // enter the next batch, so wait for that later export before inspecting
+    // collector coverage; minute maxima are not individual cadence samples.
+    await expect.poll(async () => {
+      const observed = await (await ctx.get(`${base}/api/v1/telemetry/overview?hours=1`)).json();
+      return {
+        operations: observed.operations.map((op: { name: string }) => op.name),
+        collector: observed.resources.some((row: { process: string; rss_mb: number | null }) => row.process === 'collector' && row.rss_mb !== null),
+      };
+    }, { timeout: 160_000, intervals: [1000, 3000, 5000] }).toEqual({
+      operations: expect.arrayContaining(['ui.navigation', 'ui.render']),
+      collector: true,
+    });
     const status = await (await ctx.get(`${base}/api/v1/telemetry/status`)).json();
     const overview = await (await ctx.get(`${base}/api/v1/telemetry/overview?hours=1`)).json();
     const output = info.outputPath('component-load.json');
-    writeFileSync(output, JSON.stringify({ engine: info.project.name, request_client: 'node-fetch', browser_trace: false, modules, rows, samples, request_phases: requestPhases, status, observed_operations: overview.operations, note: 'ps CPU is a platform process estimate, not exclusive operation CPU; time/RSS are sampled. Total excludes the separately reported load driver. Widget load cases are separate.' }, null, 2));
+    writeFileSync(output, JSON.stringify({ engine: info.project.name, request_client: 'node-fetch', browser_trace: false, modules, rows, samples, request_phases: requestPhases, status, observed_operations: overview.operations, observed_resources: overview.resources, recovery_seconds: recoverySeconds, note: 'ps CPU is a platform process estimate, not exclusive operation CPU; time/RSS are sampled. Total excludes the separately reported load driver. Widget load cases are separate. Internal resource points are minute maxima; external samples retain the observation times.' }, null, 2));
     await info.attach('component-load', { path: output, contentType: 'application/json' });
   } finally {
     for (const id of ownedSessions) await ctx.delete(`${base}/api/v1/sessions/${id}`).catch(() => {});

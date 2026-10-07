@@ -2,6 +2,49 @@ use crate::{now_seconds, ResourcePoint};
 use std::collections::BTreeMap;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+/// An exact process incarnation, captured from the child we just spawned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProcessIdentity {
+    pub pid: u32,
+    pub start_time: u64,
+}
+pub(crate) type CollectorProcess = std::sync::Arc<std::sync::Mutex<Option<ProcessIdentity>>>;
+
+/// Lives inside the owned collector, including readiness and drain. Dropping a
+/// canceled startup/export clears the sampling identity as well as the child.
+pub(crate) struct CollectorRegistration {
+    registry: CollectorProcess,
+    identity: Option<ProcessIdentity>,
+}
+impl CollectorRegistration {
+    pub fn new(registry: CollectorProcess, pid: Option<u32>) -> Self {
+        let identity = pid.and_then(|pid| {
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+                true,
+                ProcessRefreshKind::nothing().without_tasks(),
+            );
+            system
+                .process(Pid::from_u32(pid))
+                .map(|process| ProcessIdentity {
+                    pid,
+                    start_time: process.start_time(),
+                })
+        });
+        *registry.lock().unwrap() = identity;
+        Self { registry, identity }
+    }
+}
+impl Drop for CollectorRegistration {
+    fn drop(&mut self) {
+        let mut current = self.registry.lock().unwrap();
+        if *current == self.identity {
+            *current = None;
+        }
+    }
+}
+
 struct DesktopProcess {
     name: String,
     pid: u32,
@@ -23,7 +66,11 @@ impl Sampler {
             last_discovery: None,
         }
     }
-    pub fn sample(&mut self, processes: &[(String, u32)]) -> Vec<ResourcePoint> {
+    pub fn sample(
+        &mut self,
+        processes: &[(String, u32)],
+        collector: Option<ProcessIdentity>,
+    ) -> Vec<ResourcePoint> {
         if self
             .last_discovery
             .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(30))
@@ -34,6 +81,7 @@ impl Sampler {
         let processes: Vec<_> = processes
             .iter()
             .cloned()
+            .chain(collector.map(|owned| ("collector".into(), owned.pid)))
             .chain(
                 self.desktop_processes
                     .iter()
@@ -53,6 +101,11 @@ impl Sampler {
         let mut points = Vec::new();
         for (name, pid) in &processes {
             if let Some(process) = self.system.process(Pid::from_u32(*pid)) {
+                if name == "collector"
+                    && collector.is_none_or(|owned| owned.start_time != process.start_time())
+                {
+                    continue;
+                }
                 if self
                     .desktop_processes
                     .iter()

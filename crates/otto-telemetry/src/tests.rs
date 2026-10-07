@@ -764,3 +764,119 @@ async fn verified_digest_cache_is_keyed_by_file_identity() {
     assert_eq!(collector::verified_digest(changed), None);
     assert_eq!(collector::verified_digest(None), None);
 }
+
+#[tokio::test]
+async fn resource_sampling_continues_while_export_worker_is_blocked() {
+    let temp = tempfile::tempdir().unwrap();
+    let usage = UsageEngine::start(
+        otto_usage::UsageConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        temp.path().join("usage"),
+    )
+    .await;
+    let service = TelemetryService::start(
+        usage.clone(),
+        temp.path().join("telemetry"),
+        TelemetryConfig::default(),
+    )
+    .await;
+    // The export worker needs this lock before flushing. Hold it across more
+    // than two sampling periods; no collector/download/database is involved.
+    let blocked_export = service.runtime.lock().await;
+    service
+        .configure(TelemetryConfig {
+            enabled: true,
+            sample_interval_secs: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while service.last_sample.lock().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let first = *service.last_sample.lock().unwrap();
+    tokio::time::sleep(Duration::from_millis(4300)).await;
+    let subsequent = *service.last_sample.lock().unwrap();
+    // Release before assertions so both passing and failing tests tear down.
+    drop(blocked_export);
+    service.configure(TelemetryConfig::default()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    let stopped_sampling = service.last_sample.lock().unwrap().is_none();
+    service.shutdown().await;
+    usage.shutdown().await;
+    assert!(
+        stopped_sampling,
+        "sampling continued after disabling collection"
+    );
+    assert!(
+        subsequent > first,
+        "sampling stopped behind the export worker"
+    );
+    assert!(
+        service.points.lock().unwrap().is_empty(),
+        "disable clears samples"
+    );
+    assert!(service.last_sample.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn resource_sample_from_revoked_consent_cannot_publish_after_reenable() {
+    let temp = tempfile::tempdir().unwrap();
+    let usage = UsageEngine::start(
+        otto_usage::UsageConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        temp.path().join("usage"),
+    )
+    .await;
+    let service = TelemetryService::start(
+        usage.clone(),
+        temp.path().join("telemetry"),
+        TelemetryConfig::default(),
+    )
+    .await;
+    // Drive one real sample directly so the assertion cannot be satisfied by
+    // a newer background sample. No exporter or download runs in this fixture.
+    for task in [&service.worker, &service.sampling_worker] {
+        let task = task.lock().unwrap().take().unwrap();
+        task.abort();
+        let _ = task.await;
+    }
+    let enabled = TelemetryConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    service.configure(enabled.clone()).await.unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    *service.sample_publish_hook.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let sampling = {
+        let service = service.clone();
+        tokio::spawn(async move { service.sample().await.unwrap() })
+    };
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    service.configure(TelemetryConfig::default()).await.unwrap();
+    service.configure(enabled).await.unwrap();
+    release.notify_one();
+    sampling.await.unwrap();
+    assert!(
+        service.points.lock().unwrap().is_empty(),
+        "stale sample published under renewed consent"
+    );
+    service.sample().await.unwrap();
+    assert!(
+        !service.points.lock().unwrap().is_empty(),
+        "new consent cannot sample"
+    );
+    service.shutdown().await;
+    usage.shutdown().await;
+}
