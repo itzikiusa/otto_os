@@ -107,7 +107,9 @@
   {
     "file": "otto-quality-20261007-report-focus-red.log",
     "source": "/tmp/otto-quality-20261007-report-focus-red.log",
-    "sha256": "6e2afd33fcc63a1451b3282219b9fae4f2d8ad05650fc3ee797008e1983fea55"
+    "sha256": "33f843318aac79987a2998dd1cb99ccf133df5463c284f508cd4b1b78e08053e",
+    "source_sha256": "6e2afd33fcc63a1451b3282219b9fae4f2d8ad05650fc3ee797008e1983fea55",
+    "normalization": "Trailing whitespace and excess final blank lines removed; result text unchanged."
   },
   {
     "file": "otto-quality-20261007-native-lifecycle.log",
@@ -122,7 +124,9 @@
   {
     "file": "otto-quality-20261007-modal-resize-red.log",
     "source": "/tmp/otto-quality-20261007-modal-resize-red.log",
-    "sha256": "42b4c943ff3937554ba0046bfa9e959404dd371afdf82e894663c425b8d9406d"
+    "sha256": "ebe817b285fa27913431fe84d5f0b40b623052aa8ad495822cda0013dd6ac288",
+    "source_sha256": "42b4c943ff3937554ba0046bfa9e959404dd371afdf82e894663c425b8d9406d",
+    "normalization": "Trailing whitespace and excess final blank lines removed; result text unchanged."
   },
   {
     "file": "otto-quality-20261007-modal-resize-green.log",

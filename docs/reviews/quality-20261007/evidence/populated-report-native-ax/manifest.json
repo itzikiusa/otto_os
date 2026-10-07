@@ -78,7 +78,9 @@
       "source": "/tmp/otto-quality-20261007-report-fragment-red.log",
       "file": "otto-quality-20261007-report-fragment-red.log",
       "bytes": 1326,
-      "sha256": "00ae47780a6d146e87053ae8eb1e44438ce10f40af8d76e9b09175087fc5572c"
+      "sha256": "482fdfbed95b1ae6f0f09d42f590cb70fca74cd165a4d180d06c4a4a513fa670",
+      "source_sha256": "00ae47780a6d146e87053ae8eb1e44438ce10f40af8d76e9b09175087fc5572c",
+      "normalization": "Trailing whitespace and excess final blank lines removed; result text unchanged."
     },
     {
       "source": "/tmp/otto-quality-20261007-populated-report-green-final.log",

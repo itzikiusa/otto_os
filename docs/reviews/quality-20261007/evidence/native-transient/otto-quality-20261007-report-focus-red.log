@@ -13,9 +13,9 @@
 test at test/browser.e2e.test.js:713:1
 ✖ quality: report opening owns focus while its HTML is still loading (2707.691833ms)
   AssertionError [ERR_ASSERTION]: opening dialog must own focus before async content loads: {"owned":false,"id":"","tag":"BUTTON"}
-  
+
   false !== true
-  
+
       at TestContext.<anonymous> (/Users/itziklavon/claude_ade-quality-20261007/examples/plugins/team-performance/test/browser.e2e.test.js:736:12)
       at runNextTicks (node:internal/process/task_queues:65:5)
       at process.processImmediate (node:internal/timers:541:9)

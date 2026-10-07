@@ -32,3 +32,5 @@ Final audit: all category report headers and latest closure sections inspected. 
 The separate10-entry performance-artifact manifest also validates with no mismatches. No listener remained on owned test ports7821/5201/7897/5397 at final inspection.
 
 Publication follow-up: after this review audit, the user explicitly authorized one PR containing all changes and merging into main after all checks pass, including admin merge if needed. The earlier local/uncommitted statements describe the review checkpoint; the publication result is tracked in the PR.
+
+For publication, retained text logs normalize trailing whitespace only. Affected artifact manifests keep the original source SHA-256 separately from the normalized artifact SHA-256; test outcomes are unchanged.

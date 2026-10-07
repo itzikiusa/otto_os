@@ -13,9 +13,9 @@
 test at test/browser.e2e.test.js:778:3
 ✖ quality populated report @390px light: hierarchy, accessible data and keyboard navigation (2870.612ms)
   AssertionError [ERR_ASSERTION]: Contents must keep the report document: {"beforeJump":{"url":"about:srcdoc","base":"http://127.0.0.1:62651/index.html?theme=light#tab=reports&period=12","resolvedLink":"http://127.0.0.1:62651/index.html?theme=light#phases"},"afterJump":{"url":"http://127.0.0.1:62651/index.html?theme=light#phases","base":"http://127.0.0.1:62651/index.html?theme=light#phases","title":"Team Performance","heading":"Team Performance","hasPhase":false}}
-  
+
   false !== true
-  
+
       at TestContext.<anonymous> (/Users/itziklavon/claude_ade-quality-20261007/examples/plugins/team-performance/test/browser.e2e.test.js:827:14)
       at async Test.run (node:internal/test_runner/test:1409:7)
       at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {

@@ -12,7 +12,7 @@ Running 1 test using 1 worker
   ✘  1 [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts (11.9s)
 
 
-  1) [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts 
+  1) [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts
 
     Error: expect(locator).toBeFocused() failed
 
@@ -52,4 +52,4 @@ Running 1 test using 1 worker
     ────────────────────────────────────────────────────────────────────────────────────────────────
 
   1 failed
-    [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts 
+    [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts

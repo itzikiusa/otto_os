@@ -12,4 +12,3 @@ Traceback (most recent call last):
     if status!=200: raise RuntimeError(body[:2000])
                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 RuntimeError: Code: 241. DB::Exception: Query memory limit exceeded: would use 259.86 MiB (attempt to allocate chunk of 4.16 MiB), maximum: 256.00 MiB. (MEMORY_LIMIT_EXCEEDED) (version 26.7.1.237 (official build))
-
