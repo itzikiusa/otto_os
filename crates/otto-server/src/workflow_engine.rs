@@ -2526,8 +2526,8 @@ pub async fn run_workflow(
                     .await
                 }
             };
-            tokio::pin!(fut);
-            let attempt_res = loop {
+            let attempt_res = crate::workflow_node_driver::drive(fut, async |mut done| {
+                loop {
                 tokio::select! {
                     biased;
                     Some(sid) = sess_rx.recv() => {
@@ -2585,10 +2585,8 @@ pub async fn run_workflow(
                         }
                     }
                     wake = cancel_watch.next(&repo, || take_skip_marker(&ctx, &run_id, &node_id)) => {
-                        // A cancel flips the run's DB status to Canceled. Catch it
-                        // mid-node so a long agent turn stops promptly; dropping
-                        // `fut` ends our wait, and the finalize block kills the
-                        // sessions this run spawned.
+                        // Cancel drops the scoped node driver; finalization kills
+                        // this run's sessions. No node task remains detached.
                         let parked_at_approval = match wake {
                             CancelWake::Canceled => {
                                 canceled = true;
@@ -2614,9 +2612,10 @@ pub async fn run_workflow(
                             break Err(otto_core::Error::Internal("step skipped".into()));
                         }
                     }
-                    r = &mut fut => break r,
+                    r = &mut done => break r.unwrap_or_else(|_| Err(otto_core::Error::Internal("workflow node driver closed without a result".into()))),
                 }
-            };
+                }
+            }).await;
             match attempt_res {
                 Ok(ok) => break Ok(ok),
                 Err(e) => {

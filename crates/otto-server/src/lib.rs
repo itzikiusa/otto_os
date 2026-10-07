@@ -104,6 +104,7 @@ pub mod ui_bridge;
 pub use otto_mcp::outward::ui_commands;
 pub mod vault_docs_agent;
 pub mod workflow_engine;
+mod workflow_node_driver;
 pub mod workflow_trigger_scheduler;
 // Pure workflow pieces live in `otto-workflows`; aliased so `crate::workflow_*` paths resolve.
 pub use otto_workflows::chat as workflow_chat;
