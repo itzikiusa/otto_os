@@ -359,27 +359,27 @@ mod tests {
     use axum::{body::Body, http::Request, routing::post, Router};
     use tower::ServiceExt;
 
-    async fn fixture() -> (tempfile::TempDir, ServerCtx, String) {
+    async fn fixture() -> (tempfile::TempDir, ServerCtx, String, String) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = mem_pool().await;
         let username = format!("quality-login-{}", otto_core::new_id());
-        let hash = otto_rbac::hash_password("correct fixture password").unwrap();
+        let password = otto_core::new_id();
+        let hash = otto_rbac::hash_password(&password).unwrap();
         sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES(?,?,?,'Login fixture',0,?)")
             .bind(otto_core::new_id()).bind(&username).bind(hash)
             .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
         let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
-        (tmp, ctx, username)
+        (tmp, ctx, username, password)
     }
 
-    fn credentials(username: &str, correct: bool) -> LoginReq {
+    fn credentials(username: &str, password: &str, correct: bool) -> LoginReq {
         LoginReq {
             username: username.into(),
             password: if correct {
-                "correct fixture password"
+                password.to_owned()
             } else {
-                "wrong"
-            }
-            .into(),
+                otto_core::new_id()
+            },
         }
     }
 
@@ -400,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn quality_login_handler_rotating_peers_lock_username_but_desktop_can_recover() {
-        let (_tmp, ctx, username) = fixture().await;
+        let (_tmp, ctx, username, password) = fixture().await;
         let attempts = AttemptStore::default();
         for i in 0..FAILURE_THRESHOLD {
             let peer = IpAddr::from([203, 0, 113, i as u8 + 1]);
@@ -409,7 +409,7 @@ mod tests {
                 &attempts,
                 Some(peer),
                 false,
-                credentials(&username, false),
+                credentials(&username, &password, false),
             )
             .await;
             if i + 1 == FAILURE_THRESHOLD {
@@ -425,7 +425,7 @@ mod tests {
                 &attempts,
                 Some(IpAddr::from([198, 51, 100, 99])),
                 false,
-                credentials(&username, true),
+                credentials(&username, &password, true),
             )
             .await,
         )
@@ -433,11 +433,24 @@ mod tests {
         // A tunnel's loopback socket alone is insufficient for the exemption.
         let local = Some(IpAddr::from([127, 0, 0, 1]));
         assert_locked(
-            handle_login(&ctx, &attempts, local, false, credentials(&username, true)).await,
+            handle_login(
+                &ctx,
+                &attempts,
+                local,
+                false,
+                credentials(&username, &password, true),
+            )
+            .await,
         )
         .await;
-        let response =
-            handle_login(&ctx, &attempts, local, true, credentials(&username, true)).await;
+        let response = handle_login(
+            &ctx,
+            &attempts,
+            local,
+            true,
+            credentials(&username, &password, true),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 16384)
             .await
@@ -453,8 +466,14 @@ mod tests {
             .is_none());
         // Desktop still has its own IP+username budget.
         for i in 0..FAILURE_THRESHOLD {
-            let response =
-                handle_login(&ctx, &attempts, local, true, credentials(&username, false)).await;
+            let response = handle_login(
+                &ctx,
+                &attempts,
+                local,
+                true,
+                credentials(&username, &password, false),
+            )
+            .await;
             if i + 1 == FAILURE_THRESHOLD {
                 assert_locked(response).await;
             } else {
@@ -465,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn quality_login_handler_client_bucket_stops_username_spraying() {
-        let (_tmp, ctx, username) = fixture().await;
+        let (_tmp, ctx, username, password) = fixture().await;
         let attempts = AttemptStore::default();
         let peer = Some(IpAddr::from([198, 51, 100, 98]));
         for i in 0..CLIENT_FAILURE_THRESHOLD {
@@ -474,7 +493,7 @@ mod tests {
                 &attempts,
                 peer,
                 false,
-                credentials(&format!("{username}-{i}"), false),
+                credentials(&format!("{username}-{i}"), &password, false),
             )
             .await;
             if i + 1 == CLIENT_FAILURE_THRESHOLD {
@@ -484,7 +503,14 @@ mod tests {
             }
         }
         assert_locked(
-            handle_login(&ctx, &attempts, peer, false, credentials(&username, true)).await,
+            handle_login(
+                &ctx,
+                &attempts,
+                peer,
+                false,
+                credentials(&username, &password, true),
+            )
+            .await,
         )
         .await;
         assert_eq!(
@@ -493,7 +519,7 @@ mod tests {
                 &attempts,
                 Some(IpAddr::from([198, 51, 100, 97])),
                 false,
-                credentials(&username, true)
+                credentials(&username, &password, true)
             )
             .await
             .status(),
@@ -503,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn quality_login_router_ignores_spoofed_forwarding_headers_and_scopes_local_exemption() {
-        let (_tmp, ctx, username) = fixture().await;
+        let (_tmp, ctx, username, password) = fixture().await;
         otto_state::SettingsRepo::new(ctx.pool.clone())
             .put(
                 "share_base_url",
@@ -523,7 +549,7 @@ mod tests {
             let mut req = Request::builder().method("POST").uri("/auth/login")
                 .header("host", host).header("content-type", "application/json")
                 .header("x-forwarded-for", spoof).header("x-real-ip", spoof)
-                .body(Body::from(serde_json::json!({"username":username,"password":if correct {"correct fixture password"} else {"wrong"}}).to_string())).unwrap();
+                .body(Body::from(serde_json::json!({"username":username,"password":if correct {password.clone()} else {otto_core::new_id()}}).to_string())).unwrap();
             req.extensions_mut()
                 .insert(ConnectInfo(SocketAddr::new(peer, 12345)));
             req
