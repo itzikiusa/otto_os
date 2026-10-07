@@ -61,6 +61,9 @@
   const FORMATS: K8sProbeFormat[] = ['json', 'prometheus', 'health'];
   const UNITS: K8sUnit[] = ['number', 'bytes', 'bytes_human', 'duration_human', 'percent'];
   const NEEDS_NS = $derived(!cluster.default_namespace);
+  // Metadata refreshes replace the cluster object without changing the form's
+  // owner. Reload only on an identity change, preserving unsaved settings.
+  const clusterId = $derived(cluster.id);
 
   async function load(): Promise<void> {
     const generation = ++loadGeneration;
@@ -110,8 +113,7 @@
   }
 
   $effect(() => {
-    const id = cluster.id;
-    void id;
+    void clusterId;
     untrack(() => void load());
   });
 
