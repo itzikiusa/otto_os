@@ -1,0 +1,71 @@
+{
+  "algorithm": "sha256",
+  "artifacts": [
+    {
+      "artifact": "evidence/telemetry-raw-load-full.json",
+      "bytes": 1303370,
+      "sha256": "ab5586714bfe4e8bc411a515aa89d60d11da7b6addffc624465ed22758fd6ac4",
+      "source": "/tmp/otto-quality-20261007-telemetry-load-full/desktop-telemetry-perf-all-d650f-cost-and-concurrent-CPU-RAM-desktop-browser/component-load.json",
+      "source_sha256": "ab5586714bfe4e8bc411a515aa89d60d11da7b6addffc624465ed22758fd6ac4",
+      "byte_identical_to_source": true,
+      "json_identical_to_source": true
+    },
+    {
+      "artifact": "evidence/rendered-terminal-load-full.json",
+      "bytes": 598403,
+      "sha256": "1ecdc8189c743f0214a7243ff017129ba8dc65cd3cd7fff866e73ce9352168d8",
+      "source": "/tmp/otto-quality-20261007-rendered-corrected/desktop-terminal-rendered--2f7e7-e-curves-and-quiet-recovery-desktop-webkit/rendered-terminal-load.json",
+      "source_sha256": "1ecdc8189c743f0214a7243ff017129ba8dc65cd3cd7fff866e73ce9352168d8",
+      "byte_identical_to_source": true,
+      "json_identical_to_source": true
+    },
+    {
+      "artifact": "evidence/telemetry-matched-load-full.json",
+      "bytes": 445254,
+      "sha256": "a949614aa2c76909b021edb6672f740a7f99b3d2fcb556b93505fb59b6ef661d",
+      "source": "/tmp/otto-quality-20261007-matched-load/desktop-telemetry-matched--dff06-fore-off-and-quiet-recovery-desktop-browser/matched-n5-load.json",
+      "source_sha256": "965f6fe9115ee50086847eb929457b4428276ad1c4f081d5da51cab194e1f590",
+      "byte_identical_to_source": false,
+      "json_identical_to_source": true
+    },
+    {
+      "artifact": "evidence/self-times-100k-1m.json",
+      "bytes": 19280,
+      "sha256": "1c862830a164b5be52a6023ee1a6d34ee3f72c0405b2604b474cd4c0d0bb3901",
+      "source": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-quality-self-times-a_fi7hwh/report.json",
+      "source_sha256": "1c862830a164b5be52a6023ee1a6d34ee3f72c0405b2604b474cd4c0d0bb3901",
+      "byte_identical_to_source": true,
+      "json_identical_to_source": true
+    },
+    {
+      "artifact": "evidence/telemetry-raw-load-analysis.json",
+      "bytes": 12685,
+      "sha256": "c1dc47f7d858b962115a240dc7aa17a17d1c55a5ffc59a118d2bb016e1eedcab"
+    },
+    {
+      "artifact": "evidence/rendered-terminal-load-analysis.json",
+      "bytes": 22257,
+      "sha256": "955ad8a27c3ed4ddfdcfe31145490a6c541c12b3fddce46d7ba8d0a2b3e7d045"
+    },
+    {
+      "artifact": "evidence/telemetry-matched-load-analysis.json",
+      "bytes": 24804,
+      "sha256": "c8cab5bbb4ac920a0ba86b5216f617c78bc6bbba9c3e7067f31349482ec58f0e"
+    },
+    {
+      "artifact": "evidence/rendered-webkit-owned-processes.json",
+      "bytes": 1833,
+      "sha256": "a8647509a1ee2cac0627e7b35a705238bfd2cedeaf2d8d237371938ac7716fac"
+    },
+    {
+      "artifact": "evidence/live-installed-60s-corrected.json",
+      "bytes": 212579,
+      "sha256": "bdba99f0fe4ac9edfca21639f9e5327052f6578860510faf2190a10b409e89cd"
+    },
+    {
+      "artifact": "evidence/self-times-math-verification.json",
+      "bytes": 1639,
+      "sha256": "b30c7dc740b2a24f6a5ff4714f5e64586dbb2e15fb8d950756710b60d735dcba"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+# Playwright WebKit resource attribution repair
+
+The first full rendered-terminal run was interrupted and is not capacity evidence. Parent-only ancestry missed three Playwright WebKit XPC processes launched under `launchd` (PPID 1). A live read-only check confirmed the owned browser root and all three helpers shared resource coalition `431541`; the omitted helpers accounted for 344.98 MiB in that snapshot. See [attribution evidence](evidence/webkit-coalition-attribution.json). This establishes the harness defect, not an application memory regression.
+
+`ui/e2e/process-resources.ts` now matches helpers using both the owned Playwright engine distribution and its resource coalition. An owned root must remain a descendant of the current test driver. Installed system WebKit, foreign coalitions and the driver are excluded from browser totals. Report rows include contributing PIDs for auditing. Root coalition lookup failure stops measurement instead of silently producing partial browser totals.
+
+Lookups use one bounded Python/libproc batch for new or changed process identities, refresh after 30 seconds, and cap at 64 candidates. Cache keys include PID, process start time and executable. The Python batch rechecks start times before the coalition read. Chromium and non-macOS runs make no coalition subprocess calls. A process incarnation within the same one-second `ps lstart` resolution remains a theoretical cache identity limit; the short run and TTL bound its exposure.
+
+The concurrently running Chromium raw off/on benchmark imported the previous ancestry-only helper before this edit. Chromium ownership remains valid under ancestry; its results must be distinguished from the upcoming corrected WebKit rendered run.
+
+Regression fixtures exercise detached owned networking/GPU/WebContent attribution, foreign and system WebKit exclusion, driver exclusion, stable-identity cache reuse, PID reuse invalidation, owned-root exit, and Chromium ancestry without coalition lookup. The initial red run confirmed the old helper fails these cases. Green unit/type checks and a corrected WebKit smoke/full measurement remain queued with the coordinator; no heavy execution ran during the Chromium measurement.
+
+Acceptance for the corrected rendered run: inspect retained browser `pids` against the owned process snapshot and verify the root plus Networking, GPU and WebContent are included (at least four actual owned PIDs while all are alive). Browser-group presence alone is insufficient. If helpers restart, match the new live identities instead of requiring the initial PID list. Retain the mapping beside the capacity artifact.

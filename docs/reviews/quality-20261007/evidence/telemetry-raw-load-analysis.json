@@ -1,0 +1,404 @@
+{
+  "source": "component-load.json",
+  "phase_order": "off N1,N3,N5; on N1,N3,N5; one on-mode recovery",
+  "phases": [
+    {
+      "enabled": false,
+      "concurrency": 1,
+      "samples": 143,
+      "seconds": 149.995,
+      "mean_cpu_percent": 26.504195804195806,
+      "start_rss_mib": 1441.09375,
+      "end_rss_mib": 903.765625,
+      "mean_rss_mib": 1197.1921984265734,
+      "peak_rss_mib": 1441.09375,
+      "slope_rss_mib_per_minute": -246.71932234113504,
+      "max_sample_gap_seconds": 1.09,
+      "process_contributions": {
+        "daemon": {
+          "observations": 143,
+          "mean_rss_mib_over_phase": 157.43859265734267,
+          "mean_cpu_percent_over_phase": 1.7048951048951049
+        },
+        "clickhouse": {
+          "observations": 143,
+          "mean_rss_mib_over_phase": 399.73579545454544,
+          "mean_cpu_percent_over_phase": 0.0013986013986013986
+        },
+        "collector": {
+          "observations": 0,
+          "mean_rss_mib_over_phase": 0.0,
+          "mean_cpu_percent_over_phase": 0.0
+        },
+        "browser": {
+          "observations": 143,
+          "mean_rss_mib_over_phase": 625.3706293706293,
+          "mean_cpu_percent_over_phase": 24.727272727272727
+        },
+        "agent-children": {
+          "observations": 143,
+          "mean_rss_mib_over_phase": 14.647180944055943,
+          "mean_cpu_percent_over_phase": 0.07062937062937064
+        }
+      }
+    },
+    {
+      "enabled": false,
+      "concurrency": 3,
+      "samples": 144,
+      "seconds": 149.471,
+      "mean_cpu_percent": 34.62708333333333,
+      "start_rss_mib": 980.609375,
+      "end_rss_mib": 1014.9375,
+      "mean_rss_mib": 979.5463324652778,
+      "peak_rss_mib": 1014.9375,
+      "slope_rss_mib_per_minute": 21.255731433338376,
+      "max_sample_gap_seconds": 1.096,
+      "process_contributions": {
+        "daemon": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 111.15299479166667,
+          "mean_cpu_percent_over_phase": 5.742361111111111
+        },
+        "clickhouse": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 344.94520399305554,
+          "mean_cpu_percent_over_phase": 0.025694444444444447
+        },
+        "collector": {
+          "observations": 0,
+          "mean_rss_mib_over_phase": 0.0,
+          "mean_cpu_percent_over_phase": 0.0
+        },
+        "browser": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 488.77484809027777,
+          "mean_cpu_percent_over_phase": 28.29861111111111
+        },
+        "agent-children": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 34.67328559027778,
+          "mean_cpu_percent_over_phase": 0.5604166666666667
+        }
+      }
+    },
+    {
+      "enabled": false,
+      "concurrency": 5,
+      "samples": 144,
+      "seconds": 149.409,
+      "mean_cpu_percent": 42.295833333333334,
+      "start_rss_mib": 1090.921875,
+      "end_rss_mib": 1251.828125,
+      "mean_rss_mib": 1154.8995225694443,
+      "peak_rss_mib": 1251.828125,
+      "slope_rss_mib_per_minute": 52.752147090769384,
+      "max_sample_gap_seconds": 1.071,
+      "process_contributions": {
+        "daemon": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 120.37554253472223,
+          "mean_cpu_percent_over_phase": 11.680555555555555
+        },
+        "clickhouse": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 346.08799913194446,
+          "mean_cpu_percent_over_phase": 0.014583333333333334
+        },
+        "collector": {
+          "observations": 0,
+          "mean_rss_mib_over_phase": 0.0,
+          "mean_cpu_percent_over_phase": 0.0
+        },
+        "browser": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 592.4348958333334,
+          "mean_cpu_percent_over_phase": 28.489583333333332
+        },
+        "agent-children": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 96.00108506944444,
+          "mean_cpu_percent_over_phase": 2.111111111111111
+        }
+      }
+    },
+    {
+      "enabled": true,
+      "concurrency": 1,
+      "samples": 144,
+      "seconds": 149.443,
+      "mean_cpu_percent": 31.19375,
+      "start_rss_mib": 1616.6875,
+      "end_rss_mib": 1474.65625,
+      "mean_rss_mib": 1531.886501736111,
+      "peak_rss_mib": 1759.734375,
+      "slope_rss_mib_per_minute": -40.50370529729695,
+      "max_sample_gap_seconds": 1.049,
+      "process_contributions": {
+        "daemon": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 138.60633680555554,
+          "mean_cpu_percent_over_phase": 1.8729166666666666
+        },
+        "clickhouse": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 367.30121527777777,
+          "mean_cpu_percent_over_phase": 0.08263888888888889
+        },
+        "collector": {
+          "observations": 22,
+          "mean_rss_mib_over_phase": 27.021809895833332,
+          "mean_cpu_percent_over_phase": 0.3222222222222222
+        },
+        "browser": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 979.9061414930555,
+          "mean_cpu_percent_over_phase": 28.834722222222222
+        },
+        "agent-children": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 19.05099826388889,
+          "mean_cpu_percent_over_phase": 0.08125
+        }
+      }
+    },
+    {
+      "enabled": true,
+      "concurrency": 3,
+      "samples": 144,
+      "seconds": 149.328,
+      "mean_cpu_percent": 35.59166666666667,
+      "start_rss_mib": 1517.234375,
+      "end_rss_mib": 1732.59375,
+      "mean_rss_mib": 1583.7510850694443,
+      "peak_rss_mib": 1732.59375,
+      "slope_rss_mib_per_minute": 37.32144668213894,
+      "max_sample_gap_seconds": 1.053,
+      "process_contributions": {
+        "daemon": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 141.25520833333334,
+          "mean_cpu_percent_over_phase": 6.094444444444445
+        },
+        "clickhouse": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 376.12217881944446,
+          "mean_cpu_percent_over_phase": 0.13333333333333333
+        },
+        "collector": {
+          "observations": 43,
+          "mean_rss_mib_over_phase": 50.26551649305556,
+          "mean_cpu_percent_over_phase": 0.5902777777777778
+        },
+        "browser": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 958.7466362847222,
+          "mean_cpu_percent_over_phase": 28.167361111111113
+        },
+        "agent-children": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 57.361545138888886,
+          "mean_cpu_percent_over_phase": 0.6062500000000001
+        }
+      }
+    },
+    {
+      "enabled": true,
+      "concurrency": 5,
+      "samples": 144,
+      "seconds": 149.421,
+      "mean_cpu_percent": 43.68611111111111,
+      "start_rss_mib": 1773.828125,
+      "end_rss_mib": 1633.03125,
+      "mean_rss_mib": 1697.633029513889,
+      "peak_rss_mib": 1808.109375,
+      "slope_rss_mib_per_minute": 18.363550854345835,
+      "max_sample_gap_seconds": 1.052,
+      "process_contributions": {
+        "daemon": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 143.86024305555554,
+          "mean_cpu_percent_over_phase": 12.405555555555557
+        },
+        "clickhouse": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 385.30848524305554,
+          "mean_cpu_percent_over_phase": 0.2826388888888889
+        },
+        "collector": {
+          "observations": 69,
+          "mean_rss_mib_over_phase": 83.771484375,
+          "mean_cpu_percent_over_phase": 0.5013888888888889
+        },
+        "browser": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 988.8351779513889,
+          "mean_cpu_percent_over_phase": 28.292361111111113
+        },
+        "agent-children": {
+          "observations": 144,
+          "mean_rss_mib_over_phase": 95.85763888888889,
+          "mean_cpu_percent_over_phase": 2.2041666666666666
+        }
+      }
+    }
+  ],
+  "recovery": {
+    "daemon": {
+      "samples": 60,
+      "seconds": 62.405,
+      "mean_cpu_percent": 0.04833333333333333,
+      "start_rss_mib": 144.703125,
+      "end_rss_mib": 144.296875,
+      "mean_rss_mib": 144.3578125,
+      "peak_rss_mib": 144.703125,
+      "slope_rss_mib_per_minute": -0.2940925354498307,
+      "max_sample_gap_seconds": 1.068
+    },
+    "clickhouse": {
+      "samples": 60,
+      "seconds": 62.405,
+      "mean_cpu_percent": 0.09666666666666666,
+      "start_rss_mib": 387.796875,
+      "end_rss_mib": 386.8125,
+      "mean_rss_mib": 386.88984375,
+      "peak_rss_mib": 387.796875,
+      "slope_rss_mib_per_minute": -0.3121642291057755,
+      "max_sample_gap_seconds": 1.068
+    },
+    "browser": {
+      "samples": 60,
+      "seconds": 62.405,
+      "mean_cpu_percent": 0.5466666666666667,
+      "start_rss_mib": 1003.359375,
+      "end_rss_mib": 1000.8125,
+      "mean_rss_mib": 1001.1440104166667,
+      "peak_rss_mib": 1005.140625,
+      "slope_rss_mib_per_minute": -1.8598374408108422,
+      "max_sample_gap_seconds": 1.068
+    },
+    "total": {
+      "samples": 60,
+      "seconds": 62.405,
+      "mean_cpu_percent": 0.6916666666666668,
+      "start_rss_mib": 1535.859375,
+      "end_rss_mib": 1531.921875,
+      "mean_rss_mib": 1532.3916666666667,
+      "peak_rss_mib": 1537.640625,
+      "slope_rss_mib_per_minute": -2.4660942053664483,
+      "max_sample_gap_seconds": 1.068
+    },
+    "load-driver": {
+      "samples": 60,
+      "seconds": 62.405,
+      "mean_cpu_percent": 0.05,
+      "start_rss_mib": 191.25,
+      "end_rss_mib": 152.703125,
+      "mean_rss_mib": 176.55625,
+      "peak_rss_mib": 192.890625,
+      "slope_rss_mib_per_minute": -52.650927941204806,
+      "max_sample_gap_seconds": 1.068
+    }
+  },
+  "internal_coverage": {
+    "daemon": {
+      "minute_buckets": 9,
+      "with_cpu": 9,
+      "with_rss": 9,
+      "timestamps": [
+        1791367380,
+        1791367440,
+        1791367500,
+        1791367560,
+        1791367620,
+        1791367680,
+        1791367740,
+        1791367800,
+        1791367860
+      ]
+    },
+    "clickhouse": {
+      "minute_buckets": 9,
+      "with_cpu": 9,
+      "with_rss": 9,
+      "timestamps": [
+        1791367380,
+        1791367440,
+        1791367500,
+        1791367560,
+        1791367620,
+        1791367680,
+        1791367740,
+        1791367800,
+        1791367860
+      ]
+    },
+    "collector": {
+      "minute_buckets": 8,
+      "with_cpu": 7,
+      "with_rss": 8,
+      "timestamps": [
+        1791367380,
+        1791367440,
+        1791367560,
+        1791367620,
+        1791367680,
+        1791367740,
+        1791367800,
+        1791367860
+      ]
+    },
+    "host": {
+      "minute_buckets": 9,
+      "with_cpu": 0,
+      "with_rss": 0,
+      "timestamps": [
+        1791367380,
+        1791367440,
+        1791367500,
+        1791367560,
+        1791367620,
+        1791367680,
+        1791367740,
+        1791367800,
+        1791367860
+      ]
+    }
+  },
+  "external_collector_observations_by_minute": {
+    "1791367440": 11,
+    "1791367560": 11,
+    "1791367620": 22,
+    "1791367680": 12,
+    "1791367740": 30,
+    "1791367800": 25,
+    "1791367860": 23
+  },
+  "status": {
+    "enabled": true,
+    "collector_ready": true,
+    "collector_version": "0.162.0",
+    "queued": 1805,
+    "buffered_samples": 7,
+    "dropped": 0,
+    "exported": 25308,
+    "collector_send_failed": 0,
+    "collector_queue_size": 0,
+    "last_flush_at": 1791367894,
+    "last_error": null,
+    "last_analysis_at": null,
+    "next_analysis_at": 1791371020,
+    "native_profiling_supported": true
+  },
+  "limitations": [
+    "Sequential off/on phases share one browser and machine; cache, GC and unrelated host work can affect deltas.",
+    "Navigation has one measured sample per module per mode, so it is not a per-module latency percentile.",
+    "Requests are closed-loop with a 50 ms pause; compare achieved throughput and response bytes alongside CPU, not as fixed-rate exclusive request cost.",
+    "ps reports platform CPU estimates; RSS slope over a short phase is not proof of a memory leak.",
+    "Fixture agents exercise PTYs/API concurrency, not actual provider inference or remote databases.",
+    "Recovery exists once after all six phases, not after each off/on phase.",
+    "Internal persisted points are minute maxima; they cannot prove individual sampler cadence.",
+    "Collector phase means above include zero contribution while absent. Mean RSS over only its live observations must not be added to phase means.",
+    "Chromium ancestry attribution predates WebKit coalition repair and has no contributing PID arrays."
+  ]
+}

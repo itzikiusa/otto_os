@@ -1,0 +1,67 @@
+[
+  {
+    "file": "warm-dark-accent-link-focus.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-custo-189a9-and-focus-visible-warm-dark-desktop-browser/accent-link-focus.png",
+    "sha256": "d0e29c34e4afe1a9275e100dd2d83b2f8ee7c6021c767ccf5c56278bab4cd169"
+  },
+  {
+    "file": "warm-light-accent-link-focus.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-custo-69cc6-nd-focus-visible-warm-light-desktop-browser/accent-link-focus.png",
+    "sha256": "d21c9b120a0942316352cd91ed1e32cc8b655d9c6cf3cfb04ef0e81e4d444220"
+  },
+  {
+    "file": "warm-dark-setup-custom-accent.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-loade-7fe15-nd-setup-contrast-warm-dark-desktop-browser/setup-custom-accent.png",
+    "sha256": "f658be3357e818989b09a52185c01fa89a0345544325f91eece24aaa5ec5c565"
+  },
+  {
+    "file": "warm-dark-sheet-custom-accent.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-loade-7fe15-nd-setup-contrast-warm-dark-desktop-browser/sheet-custom-accent.png",
+    "sha256": "00cc4a1aa58a99fa8fa30833e2273f57ec94546749e2a72ac06f83c5692bacf5"
+  },
+  {
+    "file": "warm-dark-sheet-wallpaper.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-loade-7fe15-nd-setup-contrast-warm-dark-desktop-browser/sheet-wallpaper.png",
+    "sha256": "a913bc224ad4314971b43ed045999b61f72c8decd0e057f62031b22006b67bfd"
+  },
+  {
+    "file": "warm-light-setup-custom-accent.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-loade-dc850-d-setup-contrast-warm-light-desktop-browser/setup-custom-accent.png",
+    "sha256": "17f6dd3c3b7830062a322eedb997b0b018762042bfcb9090c774e2d9bf2832d2"
+  },
+  {
+    "file": "warm-light-sheet-custom-accent.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-loade-dc850-d-setup-contrast-warm-light-desktop-browser/sheet-custom-accent.png",
+    "sha256": "dfb339e6b3e3152b985851bbb9dfdd042ede9021ef69c9e67e406873ad429c79"
+  },
+  {
+    "file": "warm-light-sheet-wallpaper.png",
+    "source": "/tmp/otto-quality-20261007-representative-chromium/desktop-ux-r4-access-loade-dc850-d-setup-contrast-warm-light-desktop-browser/sheet-wallpaper.png",
+    "sha256": "5dfc60561dd2546cc5793d8fe888f0faa31a3caaaa515fb5bab4b589b27b813f"
+  },
+  {
+    "file": "design-hall-warm-dark-phone.png",
+    "source": "/tmp/otto-ux-r4-content-design-warm-dark-desktop-browser.png",
+    "sha256": "7c0099c7fdedbf62c669873bed0a3f6806af3c9566ed679dd405f1581d59a89c"
+  },
+  {
+    "file": "kafka-consume.png",
+    "source": "/tmp/otto-ux-r4-data-screenshots/kafka-consume.png",
+    "sha256": "01468570c08edd351223e3b61b4d9b8a71b5dc284d3bfd8a1cc9917c42770549"
+  },
+  {
+    "file": "redis-review.png",
+    "source": "/tmp/otto-ux-r4-data-screenshots/redis-review.png",
+    "sha256": "ee3379bed602f4bab66cb045b6e2b948ec41595aee4d5fb3fa94c092a0cd1abd"
+  },
+  {
+    "file": "chromium.log",
+    "source": "/tmp/otto-quality-20261007-representative-chromium.log",
+    "sha256": "8674dcba0c0bae75d43e4bcc8f21a8b5aeca7097ced9eb20b8ea708fe28bb371"
+  },
+  {
+    "file": "webkit.log",
+    "source": "/tmp/otto-quality-20261007-representative-webkit.log",
+    "sha256": "545c095b0199d26e6675e8c353fcc47c38a36219be28754c17671d13b6681831"
+  }
+]
