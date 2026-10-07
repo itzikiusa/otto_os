@@ -68,17 +68,17 @@ fn check_real_workflow_stack(test_name: &str, stack_bytes: usize, loop_node: boo
         let ws = WorkspacesRepo::new(pool.clone()).get(&"stack-ws".into()).await.unwrap();
         let repo = WorkflowsRepo::new(pool);
         let step = if loop_node {
-            json!({"id":"set","kind":"loop","name":"set","x":0,"y":0,"params":{"max_iterations":2,"steps":[{"kind":"transform","name":"tick","params":{"json":{"note":"ctx"}}}]}})
+            json!({"id":"b","kind":"loop","name":"set","x":0,"y":0,"params":{"max_iterations":2,"steps":[{"kind":"transform","name":"tick","params":{"json":{"note":"ctx"}}}]}})
         } else {
-            json!({"id":"set","kind":"transform","name":"set","x":0,"y":0,"params":{"json":{"note":"ctx"}}})
+            json!({"id":"b","kind":"transform","name":"set","x":0,"y":0,"params":{"json":{"note":"ctx"}}})
         };
         let graph: WorkflowGraph = serde_json::from_value(json!({"nodes": [
-            {"id":"trigger","kind":"manual_trigger","name":"trigger","x":0,"y":0},
+            {"id":"a","kind":"manual_trigger","name":"trigger","x":0,"y":0},
             step,
-            {"id":"tail","kind":"log","name":"tail","x":0,"y":0}
+            {"id":"c","kind":"log","name":"tail","x":0,"y":0}
         ], "edges": [
-            {"id":"a","source":"trigger","target":"set"},
-            {"id":"b","source":"set","target":"tail"}
+            {"id":"a-b","source":"a","target":"b"},
+            {"id":"b-c","source":"b","target":"c"}
         ]})).unwrap();
         let wf = repo.create(&ws.id, "stack probe", "", "", &graph, &"stack-u".into()).await.unwrap();
         let run = repo.create_run(&wf.id, &ws.id, &json!({}), None).await.unwrap();
