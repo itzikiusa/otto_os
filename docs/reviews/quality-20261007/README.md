@@ -1,6 +1,6 @@
 # Quality review — 2026-10-07
 
-Status: complete — all five independent category scores meet9.8/10 in the documented reviewed scope. Baseline `196048df` was pulled from main at the user's request; all repairs are local on `fix/quality-20261007` in `/Users/itziklavon/claude_ade-quality-20261007`.
+Status: the initial bounded review is complete, with all five category scores at 9.8/10. Publication follow-up is tracked in [PR #94](https://github.com/itzikiusa/otto_os/pull/94): broader CI exposed existing functional-suite failures plus new static-analysis findings, and final closure is tracked in [the publication follow-up](post-ci-closure.md). The scorecard below describes its original reviewed scope, not certification of every later repair. Baseline `196048df` was pulled from main; every change remains on `fix/quality-20261007` in one PR.
 
 ## Final scorecard — 11:21 UTC
 

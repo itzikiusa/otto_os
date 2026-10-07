@@ -1,0 +1,283 @@
+[
+  {
+    "source": "/tmp/otto-pr94-regression-red.log",
+    "artifact": "regression-red.log",
+    "source_sha256": "a8f9a6d960d8a37e8d4a33939cc07ff1d1b7c0abf354c4eb55adf79d597954a3",
+    "artifact_sha256": "625da7d7df5a2e17e1cedb3111a755aafe1589041c3df1c07303cfa3a73e3784",
+    "bytes": 7233
+  },
+  {
+    "source": "/tmp/otto-pr94-regression-green.log",
+    "artifact": "regression-green.log",
+    "source_sha256": "81d19888d2a3c6404f36e251d503a198c727d36778ae046087863e6fa20e375c",
+    "artifact_sha256": "81d19888d2a3c6404f36e251d503a198c727d36778ae046087863e6fa20e375c",
+    "bytes": 2064
+  },
+  {
+    "source": "/tmp/otto-pr94-workflow-green.log",
+    "artifact": "workflow-green.log",
+    "source_sha256": "2f4441918c56e4d6ce50d49a5e4d204b669ccbd6404d3d212bb97bca8d550ab7",
+    "artifact_sha256": "2f4441918c56e4d6ce50d49a5e4d204b669ccbd6404d3d212bb97bca8d550ab7",
+    "bytes": 4969
+  },
+  {
+    "source": "/tmp/otto-pr94-mongo-metadata-red.log",
+    "artifact": "mongo-metadata-red.log",
+    "source_sha256": "49040a605df3817342d4bc61db8634d4c3cb5f59f415cc4c21edc45eca07fe57",
+    "artifact_sha256": "49040a605df3817342d4bc61db8634d4c3cb5f59f415cc4c21edc45eca07fe57",
+    "bytes": 5470
+  },
+  {
+    "source": "/tmp/otto-pr94-dbviewer-final.log",
+    "artifact": "dbviewer-final.log",
+    "source_sha256": "210b32144526202cf6623565c885620639d087d01826f67603cede235fe2f419",
+    "artifact_sha256": "210b32144526202cf6623565c885620639d087d01826f67603cede235fe2f419",
+    "bytes": 33884
+  },
+  {
+    "source": "/tmp/otto-pr94-daemon-final.log",
+    "artifact": "daemon-final.log",
+    "source_sha256": "c1bf9e3b78c27cf53a9cc3c988269226fcbf6a1b0034affcacff144b2a855483",
+    "artifact_sha256": "c1bf9e3b78c27cf53a9cc3c988269226fcbf6a1b0034affcacff144b2a855483",
+    "bytes": 633
+  },
+  {
+    "source": "/tmp/otto-pr94-plan-fresh.log",
+    "artifact": "plan-fresh.log",
+    "source_sha256": "0141854368085cda989315cf68970f3ff9e4868ec2db0643f67f9e76226d9c81",
+    "artifact_sha256": "196b286515a8e054329b9b852eb2f34762d815e1b55d62224696e7a2b8702430",
+    "bytes": 15838
+  },
+  {
+    "source": "/tmp/otto-pr94-database-final.log",
+    "artifact": "database-final.log",
+    "source_sha256": "3bc9516771bee4e70aab0001ca2821bf9c52e04f08fba623af413cee39aaeb24",
+    "artifact_sha256": "3bc9516771bee4e70aab0001ca2821bf9c52e04f08fba623af413cee39aaeb24",
+    "bytes": 7048
+  },
+  {
+    "source": "/tmp/otto-pr94-remaining-desktop.log",
+    "artifact": "remaining-desktop.log",
+    "source_sha256": "bf0183126ec70daf51fd9acb9a6b85b77ea50e869f39f9a9a4ca7d2d475fe90c",
+    "artifact_sha256": "bf0183126ec70daf51fd9acb9a6b85b77ea50e869f39f9a9a4ca7d2d475fe90c",
+    "bytes": 4240
+  },
+  {
+    "source": "/tmp/otto-pr94-mobile-final.log",
+    "artifact": "mobile-final.log",
+    "source_sha256": "9609f6446cad0f994e9f094a03f19b3db0e7aff03fb158cbb4945e8696c310b1",
+    "artifact_sha256": "afa0f135df23751d6b7fa2ebd86475e4c4237c3a03dab2174868984f77f2a166",
+    "bytes": 7615
+  },
+  {
+    "source": "/tmp/otto-pr94-aws-final.log",
+    "artifact": "aws-final.log",
+    "source_sha256": "6e1ce6ac4d4ced5569eedbccfebc867040bc14d09e4416eb113e04997df89dbe",
+    "artifact_sha256": "6e1ce6ac4d4ced5569eedbccfebc867040bc14d09e4416eb113e04997df89dbe",
+    "bytes": 1112
+  },
+  {
+    "source": "/tmp/otto-pr94-ui-check.log",
+    "artifact": "ui-check.log",
+    "source_sha256": "c19dc5d12750a0c4b2ca1badb790a47d6dba75af0e1dfe00c597e9b6d38d8106",
+    "artifact_sha256": "c19dc5d12750a0c4b2ca1badb790a47d6dba75af0e1dfe00c597e9b6d38d8106",
+    "bytes": 553
+  },
+  {
+    "source": "/tmp/otto-pr94-database-final/desktop-db-compact-output--63097-t-stays-reachable-and-pages-desktop-browser/db-footer-390-dark.png",
+    "artifact": "db-footer-390-dark.png",
+    "sha256": "12dd7a0e4fe0b4b0380338f1d193ab2b48f28a04c91990c39e1694106e7f3a92",
+    "bytes": 54020
+  },
+  {
+    "source": "/tmp/otto-pr94-database-final/desktop-db-compact-output--7e5d6-output-before-any-query-ran-desktop-browser/db-first-explain-light.png",
+    "artifact": "db-first-explain-light.png",
+    "sha256": "4d32f4e4f8ee1858e70ebf06a26994f3599c9235064ad712dfc6d48be271c01a",
+    "bytes": 99175
+  },
+  {
+    "source": "/tmp/otto-pr94-database-final/desktop-db-compact-output--969c0-t-stays-reachable-and-pages-desktop-browser/db-footer-390-light.png",
+    "artifact": "db-footer-390-light.png",
+    "sha256": "356f8c560b54669a6e5a9ba3f92b606147184bae4cd104befb2d0ba4537587ed",
+    "bytes": 51778
+  },
+  {
+    "source": "/tmp/otto-pr94-database-final/desktop-db-compact-output--97263-t-stays-reachable-and-pages-desktop-browser/db-footer-560-dark.png",
+    "artifact": "db-footer-560-dark.png",
+    "sha256": "ac3c975d5adf9825906874ef8ff43de0478b12c7d2419aa8a8cd4f01b8342147",
+    "bytes": 60206
+  },
+  {
+    "source": "/tmp/otto-pr94-database-final/desktop-db-compact-output--9a0bf-t-stays-reachable-and-pages-desktop-browser/db-footer-560-light.png",
+    "artifact": "db-footer-560-light.png",
+    "sha256": "c708294121343f4530d08c7e50aba404f365f3c3655a99dff6d71895435d1155",
+    "bytes": 56369
+  },
+  {
+    "source": "/tmp/otto-pr94-database-final/desktop-db-compact-output--c804a-output-before-any-query-ran-desktop-browser/db-first-explain-dark.png",
+    "artifact": "db-first-explain-dark.png",
+    "sha256": "ca19d741e7a9e250ece16fca252efc8329216fbd2b4144ce2e54202d135a7f9c",
+    "bytes": 104565
+  },
+  {
+    "source": "/tmp/otto-pr94-final-gates.log",
+    "artifact": "final-gates.log",
+    "source_sha256": "255d06be2e3a0572189ca4dbcfa283e82f77d2ba71b76e1e970de3412eb3f47a",
+    "artifact_sha256": "255d06be2e3a0572189ca4dbcfa283e82f77d2ba71b76e1e970de3412eb3f47a",
+    "bytes": 520022
+  },
+  {
+    "source": "/tmp/otto-pr94-extraction-final.log",
+    "artifact": "extraction-final.log",
+    "source_sha256": "95a553940a8232ff064f576ba30a85772a77972581146aae7327d3fcecc57313",
+    "artifact_sha256": "95a553940a8232ff064f576ba30a85772a77972581146aae7327d3fcecc57313",
+    "bytes": 37599
+  },
+  {
+    "source": "/tmp/otto-pr94-ui-plugin-final.log",
+    "artifact": "ui-plugin-final.log",
+    "source_sha256": "729d1f56bc2fa43ebdbf3b5195f5991b7e0d731d217b7867a58d73aac9f37347",
+    "artifact_sha256": "adeb207b03686b145cd61833cf167c17b4035f6a84053b5e237ac6bb4f2fd778",
+    "bytes": 265733
+  },
+  {
+    "source": "/tmp/otto-pr94-mobile-clean.log",
+    "artifact": "mobile-clean.log",
+    "source_sha256": "b2333319f23537fbf08d8c2ac809f1a20da158a0effc574d80f55ce3b9f4d014",
+    "artifact_sha256": "056cacca41294774eff9f5920c50e1aa48352b40e670c0401015452d77d5ad8b",
+    "bytes": 13918
+  },
+  {
+    "source": "/tmp/otto-pr94-redis-scroll-diagnostic.log",
+    "artifact": "redis-scroll-diagnostic.log",
+    "source_sha256": "2474e6260a0fe906a9098ffb40276123cfa17e53318a606723ad2cddc8cfda34",
+    "artifact_sha256": "2474e6260a0fe906a9098ffb40276123cfa17e53318a606723ad2cddc8cfda34",
+    "bytes": 5726
+  },
+  {
+    "source": "/tmp/otto-pr94-redis-scroll-now.log",
+    "artifact": "redis-scroll-now.log",
+    "source_sha256": "d201a91578a55b7e2013e1b19450037bbbde43fa34c3f17cca1929c02a2ef8da",
+    "artifact_sha256": "d201a91578a55b7e2013e1b19450037bbbde43fa34c3f17cca1929c02a2ef8da",
+    "bytes": 5639
+  },
+  {
+    "source": "/tmp/otto-pr94-native-build.log",
+    "artifact": "native-build.log",
+    "source_sha256": "979fd29821e4bc5d2ab3469768d911b8f58747eca5489fe9ba9fd10329cde4f2",
+    "artifact_sha256": "979fd29821e4bc5d2ab3469768d911b8f58747eca5489fe9ba9fd10329cde4f2",
+    "bytes": 328
+  },
+  {
+    "source": "/tmp/otto-pr94-native-probe.log",
+    "artifact": "native-probe.log",
+    "source_sha256": "7d5e581704097065c422c661a073ad86d5fc04e99715c415606f9e126d3c2d7d",
+    "artifact_sha256": "7d5e581704097065c422c661a073ad86d5fc04e99715c415606f9e126d3c2d7d",
+    "bytes": 3908
+  },
+  {
+    "source": "/tmp/otto-pr94-native-ax-final.log",
+    "artifact": "native-ax-final.log",
+    "source_sha256": "46bdd724f9383566a6b5073acfbf56125be56e1bd324da212e787d4164371edc",
+    "artifact_sha256": "46bdd724f9383566a6b5073acfbf56125be56e1bd324da212e787d4164371edc",
+    "bytes": 5509
+  },
+  {
+    "source": "/tmp/otto-pr94-scroll-clean-repro.log",
+    "artifact": "scroll-clean-repro.log",
+    "source_sha256": "744016bef5e51885fbf1a30f7c4a1dd29cccf3573edbc85b17e7bc03d9e71eda",
+    "artifact_sha256": "6e1623aa437625bf248290ece46f3586ba700b86ebb7fbf8e72b57c0bdef2f9c",
+    "bytes": 13907
+  },
+  {
+    "source": "/tmp/otto-pr94-scroll-no-event-read.log",
+    "artifact": "scroll-no-event-read.log",
+    "source_sha256": "80e2309545a505823b40810f1a1039405b37576594eec271f9908f97b566eedd",
+    "artifact_sha256": "6ea8ced5ad0d5875556fb979c8771e4438cfe4b06be24fbfe986ecc04ea0fb76",
+    "bytes": 4058
+  },
+  {
+    "source": "/tmp/otto-pr94-scroll-native-auto.log",
+    "artifact": "scroll-native-auto.log",
+    "source_sha256": "8b8fd2470c1911c71f93f10a63f32e77e8a840a2be47658e11f9b98c77085f91",
+    "artifact_sha256": "51a29733185345fff99f02b82ab9b7785549fc74b0b19323f3fa8d5ce1442a60",
+    "bytes": 7275
+  },
+  {
+    "source": "/tmp/otto-pr94-scroll-no-containment.log",
+    "artifact": "scroll-no-containment.log",
+    "source_sha256": "bf34335ecd6c72b6b9a171f744bdeee619458951c60fa852a8c00aa405370865",
+    "artifact_sha256": "f5715c28c643bfd9e9a296bc4413ff91547aa0aa8a567381e8d75a02f184ddbf",
+    "bytes": 7343
+  },
+  {
+    "source": "/tmp/otto-pr94-anchor-injected.log",
+    "artifact": "anchor-injected.log",
+    "source_sha256": "763399f801334ae1c99b41861f365c5a9d61e6dc0168080e12d04ae33d3b385b",
+    "artifact_sha256": "6d1c68e1f710a3d2f1518ff32b19c0394511df8f25cd66d30073826e327587d5",
+    "bytes": 21108
+  },
+  {
+    "source": "/tmp/otto-pr94-scroll-frame.log",
+    "artifact": "scroll-frame.log",
+    "source_sha256": "bd9fa76f7873b5239036879c9d3bc13f123328b36dff3003e47ab375913633a5",
+    "artifact_sha256": "bd9fa76f7873b5239036879c9d3bc13f123328b36dff3003e47ab375913633a5",
+    "bytes": 1257
+  },
+  {
+    "source": "/tmp/otto-pr94-rerun-red-actual.log",
+    "artifact": "rerun-red-actual.log",
+    "source_sha256": "84f9e9e02ad8e6d6d3c2e585bc026e91f1c9177beaabc7b0bfdbaa18dfe158e4",
+    "artifact_sha256": "63cfb41e2236545f6f281af0c37112d94657ad92abb40675489450a57d0b5845",
+    "bytes": 3677
+  },
+  {
+    "source": "/tmp/otto-pr94-grid-final.log",
+    "artifact": "grid-final.log",
+    "source_sha256": "b39a45e2392aa6dc104c1144adeb8f9c67cb3633e606c1878eb40a621e86eb9c",
+    "artifact_sha256": "b39a45e2392aa6dc104c1144adeb8f9c67cb3633e606c1878eb40a621e86eb9c",
+    "bytes": 1385
+  },
+  {
+    "source": "/tmp/otto-pr94-mobile-green.log",
+    "artifact": "mobile-green.log",
+    "source_sha256": "420cb02e5ad0924b76e28ab5b1cc2509a61f64709e9fa28918aa10406ca87ec5",
+    "artifact_sha256": "420cb02e5ad0924b76e28ab5b1cc2509a61f64709e9fa28918aa10406ca87ec5",
+    "bytes": 5239
+  },
+  {
+    "source": "/tmp/otto-pr94-scroll-sizes.log",
+    "artifact": "scroll-sizes.log",
+    "source_sha256": "478a0fcb336b7a92bfbd09f5cd15e16053ca5188b94d523fe7cc096f74869ae3",
+    "artifact_sha256": "478a0fcb336b7a92bfbd09f5cd15e16053ca5188b94d523fe7cc096f74869ae3",
+    "bytes": 1785
+  },
+  {
+    "source": "/tmp/otto-pr94-ui-grid-final.log",
+    "artifact": "ui-grid-final.log",
+    "source_sha256": "9175e2d320d30d650c9a24e578ad5cdef32b06cc007d6297428a59be52924d35",
+    "artifact_sha256": "2b9fbc99824e6c904d90dc5677c93e3e8ccfc82cc8f0f0e445896f393e7991ad",
+    "bytes": 221272
+  },
+  {
+    "source": "/tmp/otto-pr94-grid-perf-final.log",
+    "artifact": "grid-perf-final.log",
+    "source_sha256": "ce680f73febee5b276e601eb24a74f7c01eaef0ea1f7f1b9999839b7b1105468",
+    "artifact_sha256": "c4545c8dc1b0dca5f313ee5879b26867284f62b6ded040afd3f549bdbe293559",
+    "bytes": 4917
+  },
+  {
+    "source": "/tmp/otto-pr94-grid-perf-rtl.log",
+    "artifact": "grid-perf-rtl.log",
+    "source_sha256": "e6c354097e75f12e3b45c185265f880ff66312f82a8d8ae4d94e525f587faaba",
+    "artifact_sha256": "e6c354097e75f12e3b45c185265f880ff66312f82a8d8ae4d94e525f587faaba",
+    "bytes": 1217
+  },
+  {
+    "source": "/tmp/otto-pr94-ui-final-check.log",
+    "artifact": "ui-final-check.log",
+    "source_sha256": "24d66d1e783e87017375eed91b066d4f728e2ef49e6a8dd7786677b6a92530c7",
+    "artifact_sha256": "24d66d1e783e87017375eed91b066d4f728e2ef49e6a8dd7786677b6a92530c7",
+    "bytes": 2971
+  }
+]
