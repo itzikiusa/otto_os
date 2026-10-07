@@ -215,6 +215,8 @@ function flowRecord(r, estimates) {
   const ph = r.phases;
   return {
     key: r.key,
+    project: r.project || String(r.key).split('-')[0],
+    assignee_name: r.assignee_name ?? null,
     type: r.type,
     priority: r.priority || null,
     labels: r.labels || [],

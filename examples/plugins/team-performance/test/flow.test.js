@@ -230,3 +230,37 @@ test('unplannedShare lists tickets; estimateAccuracy guardrail under 10 samples'
   assert.ok(!F.estimateAccuracy(many, W).weak_reasons.includes('low_sample'));
   assert.equal(F.estimateAccuracy(many, W).guardrail, null);
 });
+
+test('estimate accuracy contract: correction candidates and chart bins share the eligible population', () => {
+  const extra = [
+    { ...R[0], key: 'ZERO-1', estimate_days: 2, actual_days: 0 },
+    { ...R[0], key: 'BAD-1', estimate_days: Infinity },
+    { ...R[0], key: 'BAD-2', actual_days: null },
+    { ...R[0], key: 'BAD-3', estimate_days: 0 },
+    { ...R[0], key: 'CHILD-1', subtask: true, actual_days: 100 },
+    { ...R[0], key: 'OLD-1', done_at: W.since - 1, actual_days: 100 },
+  ];
+  const m = F.estimateAccuracy([...R, ...extra], W);
+  assert.deepEqual(m.value.worst.map((r) => r.key), ['ZERO-1', 'ABC-3', 'ABC-5', 'ABC-2']);
+  assert.equal(m.value.worst[0].ratio, 0, 'zero actual remains observed data');
+  assert.equal(m.value.worst[1].est_days, 4);
+  assert.equal(m.value.worst[1].actual_days, 1);
+  assert.equal(m.value.n, 6);
+  assert.equal(m.value.bins.reduce((sum, b) => sum + b.n, 0), m.n);
+  assert.deepEqual(m.value.bins.map((b) => b.n), Object.values(m.value.histogram));
+  assert.equal(m.value.within_25, m.value.pct_within_25);
+  assert.equal(m.value.pct_within_25, 0.333);
+});
+
+test('estimate accuracy contract: candidates are bounded and ties deterministic; empty data is explicit', () => {
+  const records = Array.from({ length: 45 }, (_, i) => ({ ...R[0], key: `ABC-${String(i).padStart(3, '0')}`, actual_days: 8 }));
+  const worst = F.estimateAccuracy(records.reverse(), W).value.worst;
+  assert.equal(worst.length, 30);
+  assert.equal(worst[0].key, 'ABC-000');
+  assert.equal(worst[29].key, 'ABC-029');
+  const empty = F.estimateAccuracy([], W).value;
+  assert.deepEqual(empty.worst, []);
+  assert.equal(empty.n, 0);
+  assert.equal(empty.within_25, null);
+  assert.ok(empty.bins.every((b) => b.n === 0));
+});

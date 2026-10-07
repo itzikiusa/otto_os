@@ -407,3 +407,35 @@ test('deploy: bare remote — origin/develop past a stale local develop; remote 
     for (const d of [bare, work, clone]) fs.rmSync(d, { recursive: true, force: true });
   }
 });
+
+test('quality: deploy ranges persist across workers and invalidate changed earlier tags', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-ranges-'));
+  const cache = path.join(scratch, 'ranges.json');
+  const trace = path.join(scratch, 'git.trace');
+  const worker = () => {
+    fs.writeFileSync(trace, '');
+    const out = JSON.parse(execFileSync(process.execPath, [path.join(__dirname, '../lib/gitscan.js')], {
+      encoding: 'utf8', env: { ...process.env, GIT_TRACE: trace },
+      input: JSON.stringify({ repos: [{ name: 'fix', path: repoDir }], config: { git_fetch: false }, tag_cache_path: cache }),
+    }));
+    return { out, walks: fs.readFileSync(trace, 'utf8').split('\n').filter((s) => /git log .*--stdin/.test(s)).length };
+  };
+  try {
+    const first = worker();
+    assert.ok(first.walks > 0);
+    const second = worker();
+    assert.deepEqual(second.out.deploy_tags, first.out.deploy_tags);
+    assert.equal(second.walks, 0, 'fresh worker must reuse unchanged deploy ranges');
+    git(['tag', '-a', 'quality-hf', '-m', 'older deployment', 'main'], at('2026-06-10T10:00:00Z'));
+    const added = worker();
+    assert.ok(added.walks > 0, 'adding an earlier divergent tag invalidates later exclusions');
+    git(['tag', '-f', '-a', 'quality-hf', '-m', 'move', 'develop'], at('2026-06-10T10:00:00Z'));
+    assert.ok(worker().walks > 0, 'moving a tag invalidates SHA-dependent ranges');
+    git(['tag', '-d', 'quality-hf']);
+    assert.deepEqual(worker().out.deploy_tags, first.out.deploy_tags);
+    assert.ok(fs.statSync(cache).size < 16 * 1024 * 1024, 'persisted cache is bounded');
+  } finally {
+    if (git(['tag', '--list', 'quality-hf']).trim()) git(['tag', '-d', 'quality-hf']);
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+});

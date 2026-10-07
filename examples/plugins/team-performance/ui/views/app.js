@@ -171,7 +171,26 @@
     $('fatal-retry').onclick = retry;
   }
 
+  let accountGeneration = 0, peopleGeneration = 0, overviewGeneration = 0, scanGeneration = 0;
   async function loadAccount(h = {}) {
+    TP.views.settings.capture();
+    const generation = ++accountGeneration;
+    const account = app.account;
+    const current = () => generation === accountGeneration && account === app.account;
+    ++peopleGeneration; ++overviewGeneration; ++scanGeneration;
+    clearTimeout(pollT);
+    pollAbort?.abort();
+    clearTimeout(app._projT);
+    lastStatus = null;
+    app.scan = null;
+    app.overview = null;
+    app.people = {};
+    app.projects = [];
+    app.selected = [];
+    $('scan-status').innerHTML = '';
+    $('scan').disabled = true;
+    $('view').innerHTML = TP.skeleton(6);
+    renderProjectLabel();
     const acct = app.accounts.find((a) => a.id === app.account);
     TP.state.jiraBase = (acct && (acct.base_url || acct.url)) || '';
     const p = store.get(acctKey('period'));
@@ -185,8 +204,11 @@
     $('period-date').value = app.periodDate;
     app.scanIncludedOnly = store.get(acctKey('scanIncluded')) === '1';
     try {
-      app.projects = await api(`/projects?account=${encodeURIComponent(app.account)}`);
+      const projects = await api(`/projects?account=${encodeURIComponent(account)}`);
+      if (!current()) return;
+      app.projects = projects;
     } catch (e) {
+      if (!current()) return;
       return fatal(`Couldn’t load Jira projects: ${e.message}`, loadAccount);
     }
     let saved = [];
@@ -200,25 +222,34 @@
     if (!app.selected.length && app.projects.length) app.selected = [app.projects[0].key];
     renderProjectLabel();
     await refreshPeople();
+    if (!current()) return;
     await refresh();
-    pollScan(true);
+    if (current()) pollScan(true);
   }
 
   async function refreshPeople() {
+    const generation = ++peopleGeneration, account = app.account;
+    const current = () => generation === peopleGeneration && account === app.account;
     try {
-      app.people = (await api(`/people?account=${encodeURIComponent(app.account)}`)).people || {};
+      const response = await api(`/people?account=${encodeURIComponent(account)}`);
+      if (current()) app.people = response.people || {};
     } catch {
-      app.people = {};
+      if (current()) app.people = {};
     }
   }
   app.refreshPeople = refreshPeople;
 
   // ---- data ----------------------------------------------------------------
   async function refresh() {
+    const generation = ++overviewGeneration, scope = app.scopeQ();
+    const current = () => generation === overviewGeneration && scope === app.scopeQ();
     app.overviewErr = null;
     try {
-      app.overview = await api(`/overview?${app.scopeQ()}`);
+      const overview = await api(`/overview?${scope}`);
+      if (!current()) return;
+      app.overview = overview;
     } catch (e) {
+      if (!current()) return;
       app.overview = null;
       if (e.status !== 404) app.overviewErr = e;
     }
@@ -365,12 +396,19 @@
 
   // ---- scan ----------------------------------------------------------------
   async function startScan(full) {
+    const account = app.account, generation = accountGeneration;
+    const current = () => account === app.account && generation === accountGeneration;
     const body = { account: app.account, projects: app.selected, full };
     if (app.scanIncludedOnly) body.assignees = Object.entries(app.people).filter(([, p]) => p.included !== false).map(([id]) => id);
     try {
       await post('/scan', body);
-      pollScan(false);
+      if (current()) {
+        app.scan = { state: 'running', step: 'starting' };
+        paintScan(app.scan);
+        pollScan(false);
+      }
     } catch (e) {
+      if (!current()) return;
       toast(e.status === 409 ? 'A scan is already running.' : `Scan failed to start: ${e.message}`, 'danger');
     }
   }
@@ -388,11 +426,12 @@
     return 'jira';
   }
   let pollT = null;
+  let pollAbort = null;
   let lastStatus = null;
   function paintScan(s) {
     const box = $('scan-status');
-    if (!s || s.state !== 'running') {
-      box.innerHTML = s && s.state === 'error' ? `${icon('warn')}<span>Scan failed: ${esc(s.error || 'unknown error')}</span>` : '';
+    if (!s || !['running', 'stopping'].includes(s.state)) {
+      box.innerHTML = s && s.state === 'error' ? `${icon('warn')}<span>Scan failed: ${esc(s.error || 'unknown error')}</span>` : s?.state === 'stopped' ? '<span>Scan stopped. Completed results were kept. Start Scan to continue.</span>' : '';
       return;
     }
     const cur = stepGroup(s);
@@ -407,36 +446,67 @@
       <span>${esc(s.step || 'working')}${count}${proj}</span>
       ${eta ? `<span class="dim">${esc(eta)}</span>` : ''}
       ${backoff ? TP.badge('warning', backoff) : ''}
-      ${s.estimate_remaining ? `<span class="dim">${s.estimate_remaining} estimates queued</span>` : ''}`;
+      ${s.estimate_remaining ? `<span class="dim">${s.estimate_remaining} estimates queued</span>` : ''}
+      <button type="button" class="compact" id="scan-stop" ${s.state === 'stopping' ? 'disabled' : ''}>${s.state === 'stopping' ? 'Stopping…' : 'Stop scan'}</button>`;
+    $('scan-stop').onclick = stopScan;
+  }
+  async function stopScan() {
+    const account = app.account, generation = accountGeneration;
+    const current = () => account === app.account && generation === accountGeneration;
+    const button = $('scan-stop');
+    if (button) button.disabled = true;
+    try {
+      await post('/scan/stop', { account });
+      if (current()) pollScan(false);
+    } catch (e) {
+      if (!current()) return;
+      toast(`Couldn’t stop scan: ${e.message}. Retry Stop scan.`, 'danger');
+      if (button) button.disabled = false;
+    }
   }
   function pollScan(passive) {
-    clearInterval(pollT);
+    clearTimeout(pollT);
+    pollAbort?.abort();
+    const generation = ++scanGeneration, account = app.account;
+    const current = () => generation === scanGeneration && account === app.account;
+    let lastUpdate = null;
     if (!passive) $('scan').disabled = true;
     const tick = async () => {
+      if (!current()) return;
       let s;
+      const controller = new AbortController();
+      pollAbort = controller;
+      const deadline = setTimeout(() => controller.abort(), 5000);
       try {
-        s = await api(`/scan/status?account=${encodeURIComponent(app.account)}`);
+        s = await api(`/scan/status?account=${encodeURIComponent(account)}`, { signal: controller.signal });
       } catch {
-        return; // transient — keep polling
-      }
+        if (!current()) return;
+        paintScan(app.scan);
+        $('scan-status').insertAdjacentHTML('beforeend', `<span role="status">Scan status unavailable — reconnecting. ${lastUpdate ? `Last update ${esc(TP.fmtAgo(lastUpdate))}.` : 'No status received yet.'}</span><button type="button" class="compact" id="scan-retry">Retry status</button>`);
+        $('scan-retry').onclick = () => pollScan(passive);
+        pollT = setTimeout(tick, 1000);
+        return;
+      } finally { clearTimeout(deadline); }
+      if (!current()) return;
+      lastUpdate = Date.now();
       app.scan = s;
-      $('scan').disabled = s.state === 'running';
-      $('scan').textContent = s.state === 'running' ? 'Scanning…' : 'Scan';
+      const running = ['running', 'stopping'].includes(s.state);
+      $('scan').disabled = running;
+      $('scan').textContent = running ? (s.state === 'stopping' ? 'Stopping…' : 'Scanning…') : 'Scan';
       paintScan(s);
-      const wasRunning = lastStatus === 'running';
+      const wasRunning = ['running', 'stopping'].includes(lastStatus);
       lastStatus = s.state;
-      if (s.state !== 'running') {
-        clearInterval(pollT);
+      if (running) pollT = setTimeout(tick, 1000);
+      else {
         renderFreshness();
-        if (s.state === 'done' && (wasRunning || !passive)) {
-          toast('Scan complete — metrics refreshed.', 'success');
+        if (['done', 'stopped'].includes(s.state) && (wasRunning || !passive)) {
+          if (s.state === 'done') toast('Scan complete — metrics refreshed.', 'success');
           await refreshPeople();
-          await refresh();
+          if (current()) await refresh();
         }
       }
     };
     tick();
-    pollT = setInterval(tick, 1000);
   }
 
   // ---- freshness -----------------------------------------------------------
@@ -537,6 +607,7 @@
     writeHash();
     renderTabs();
     renderCrumbs();
+    TP.views.settings.capture();
     const host = $('view');
     host.innerHTML = '';
     const ctx = { app, o: app.overview, host };

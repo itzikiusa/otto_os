@@ -11,14 +11,12 @@
 // never runs away on tokens; the remainder is picked up by the next scan.
 'use strict';
 
+const { check, wait } = require('./cancellation.js');
+
 const BATCH_SIZE = 15;
 const PACE_MS = 500; // between agent calls — the calls themselves are heavy
 const MAX_CORRECTIONS = 15; // lead corrections quoted in a batch prompt
 const SAVE_EVERY_MS = 5000; // debounce for incremental cache persistence
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 /** Coarse fingerprint of the git change — so an estimate refines as code lands. */
 function changeFingerprint(record) {
@@ -252,7 +250,8 @@ async function runEstimation(opts) {
 }
 
 async function estimationPass(opts, touch) {
-  const { records, cache, agentRun, rubric, corrections, instructions } = opts;
+  const { records, cache, agentRun, rubric, corrections, instructions, signal } = opts;
+  check(signal);
   const nowMs = opts.nowMs || Date.now();
   const ruler = rulerId(rubric, instructions);
   const targets = selectTargets(records, cache, opts.windowMonths ?? 6, nowMs, opts.sinceMs || 0, ruler);
@@ -282,17 +281,20 @@ async function estimationPass(opts, touch) {
 
   const lane = async (workerIdx) => {
     for (let bi = workerIdx; bi < batches.length; bi += workers.length) {
+      check(signal);
       const batch = batches[bi];
-      if (bi >= workers.length) await sleep(PACE_MS);
+      if (bi >= workers.length) await wait(PACE_MS, signal);
       let text = null;
       try {
         text = await agentRun(batchPrompt(batch, rubric, corrections, instructions), workers[workerIdx]);
       } catch {
+        check(signal);
         // Worker (provider) failed — retry this batch once on the first worker.
         if (workerIdx !== 0) {
           try {
             text = await agentRun(batchPrompt(batch, rubric, corrections, instructions), workers[0]);
           } catch {
+            check(signal);
             text = null;
           }
         }
@@ -312,8 +314,9 @@ async function estimationPass(opts, touch) {
   if (opts.mode === 'consensus') {
     const summarizer = opts.summarizer && opts.summarizer.provider ? opts.summarizer : null;
     for (let bi = 0; bi < batches.length; bi++) {
+      check(signal);
       const batch = batches[bi];
-      if (bi > 0) await sleep(PACE_MS);
+      if (bi > 0) await wait(PACE_MS, signal);
       const keys = batch.map((r) => r.key);
       // Fan out: each worker estimates this batch (a failed worker is skipped).
       const texts = await Promise.all(
@@ -330,7 +333,7 @@ async function estimationPass(opts, touch) {
       }
       // Reconcile: a summarizer agent if configured, else deterministic median.
       let reconciled = null;
-      if (summarizer) {
+      if (summarizer && !signal?.aborted) {
         try {
           const sText = await agentRun(consensusPrompt(batch, perWorker), summarizer);
           reconciled = parseBatch(sText, keys);
@@ -351,10 +354,14 @@ async function estimationPass(opts, touch) {
       done += batch.length;
       if (opts.onProgress) opts.onProgress(Math.min(done, total), total);
     }
+    check(signal);
     return { estimated, failed_batches: failed, remaining: Math.max(0, targets.length - total) };
   }
 
-  await Promise.all(workers.map((_, i) => lane(i)));
+  const lanes = await Promise.allSettled(workers.map((_, i) => lane(i)));
+  check(signal);
+  const failedLane = lanes.find((r) => r.status === 'rejected');
+  if (failedLane) throw failedLane.reason;
   return { estimated, failed_batches: failed, remaining: Math.max(0, targets.length - total) };
 }
 
@@ -425,37 +432,40 @@ Answer with STRICT JSON only: {"key":"${epic.key}","days":<number>}`;
  * The view then scales the children so Σ children = feature — slicing a
  * feature into more stories can no longer inflate its total.
  */
-async function runFeatureEstimation({ epics, cache, agentRun, workers, rubric, instructions, persistTo, saveEveryMs, writeJson, paceMs = PACE_MS }) {
+async function runFeatureEstimation({ epics, cache, agentRun, workers, rubric, instructions, persistTo, saveEveryMs, writeJson, signal, paceMs = PACE_MS }) {
   const saver = persistTo ? createDebouncedSaver(persistTo, cache, { intervalMs: saveEveryMs, write: writeJson }) : null;
   try {
-    return await featurePass({ epics, cache, agentRun, workers, rubric, instructions, paceMs, touch: saver ? () => saver.touch() : () => {} });
+    return await featurePass({ epics, cache, agentRun, workers, rubric, instructions, signal, paceMs, touch: saver ? () => saver.touch() : () => {} });
   } finally {
     if (saver) await saver.flush();
   }
 }
 
-async function featurePass({ epics, cache, agentRun, workers, rubric, instructions, paceMs, touch }) {
+async function featurePass({ epics, cache, agentRun, workers, rubric, instructions, signal, paceMs, touch }) {
   const ruler = rulerId(rubric, instructions);
   const ws = Array.isArray(workers) && workers.length ? workers : [{ provider: 'claude', model: '' }];
   let done = 0;
   for (const { epic, kids } of epics) {
+    check(signal);
     const h = `${ruler}|${kids.map((k) => k.key).sort().join(',')}`;
     if (cache[epic.key] && cache[epic.key].hash === h) continue;
     const vals = [];
     for (const w of ws) {
+      check(signal);
       try {
         const t = await agentRun(featurePrompt(epic, kids, rubric), w);
         const m = String(t || '').match(/"days"\s*:\s*([\d.]+)/);
         if (m) vals.push(Math.min(400, Math.max(0.5, +m[1])));
-      } catch { /* next worker */ }
+      } catch { check(signal); /* next worker */ }
     }
     if (!vals.length) continue;
     vals.sort((a, b) => a - b);
     cache[epic.key] = { hash: h, days: vals[Math.floor(vals.length / 2)], samples: vals, kids: kids.map((k) => k.key), at: Date.now() };
     touch();
     done++;
-    if (paceMs > 0) await sleep(paceMs);
+    if (paceMs > 0) await wait(paceMs, signal);
   }
+  check(signal);
   return { estimated: done };
 }
 

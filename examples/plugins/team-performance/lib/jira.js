@@ -18,10 +18,7 @@
 
 const http = require('node:http');
 const https = require('node:https');
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const { check, wait } = require('./cancellation.js');
 
 // A hung socket must NEVER wedge a scan: without an explicit timeout a request
 // whose connection dies silently (laptop sleep, VPN flip, a dropped NAT entry)
@@ -29,7 +26,7 @@ function sleep(ms) {
 // in turn makes the auto-scan cron bail on every tick, permanently.
 const REQUEST_TIMEOUT_MS = Number(process.env.OTTO_TP_HTTP_TIMEOUT_MS) || 60000;
 
-function request(urlStr, { method = 'GET', headers = {}, body = null } = {}) {
+function request(urlStr, { method = 'GET', headers = {}, body = null, signal } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const mod = u.protocol === 'https:' ? https : http;
@@ -37,6 +34,7 @@ function request(urlStr, { method = 'GET', headers = {}, body = null } = {}) {
     const req = mod.request(
       {
         method,
+        signal,
         hostname: u.hostname,
         port: u.port || (u.protocol === 'https:' ? 443 : 80),
         path: u.pathname + u.search,
@@ -75,22 +73,25 @@ function makeClient(creds, opts = {}) {
   async function call(pathname, opts2 = {}) {
     let lastErr = null;
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (state.calls++ > 0 && state.paceMs > 0) await sleep(state.paceMs);
+      check(opts.signal);
+      if (state.calls++ > 0 && state.paceMs > 0) await wait(state.paceMs, opts.signal);
       let res;
       try {
-        res = await request(base + pathname, { ...opts2, headers: { Authorization: auth, ...(opts2.headers || {}) } });
+        res = await request(base + pathname, { ...opts2, signal: opts.signal, headers: { Authorization: auth, ...(opts2.headers || {}) } });
       } catch (e) {
+        check(opts.signal);
         lastErr = e;
         state.retries++;
-        await sleep(250 * 2 ** attempt);
+        await wait(250 * 2 ** attempt, opts.signal);
         continue;
       }
+      check(opts.signal);
       if (res.status === 429 || res.status >= 500) {
         state.retries++;
         // Getting throttled means our pace is too hot — back off permanently.
         if (res.status === 429) state.paceMs = Math.min(MAX_PACE, Math.max(500, state.paceMs * 2));
         const ra = parseFloat(res.headers['retry-after']);
-        await sleep(Number.isFinite(ra) ? Math.min(ra * 1000, 30000) : 250 * 2 ** attempt);
+        await wait(Number.isFinite(ra) ? Math.min(ra * 1000, 30000) : 250 * 2 ** attempt, opts.signal);
         lastErr = new Error(`${res.status} from ${pathname}`);
         continue;
       }

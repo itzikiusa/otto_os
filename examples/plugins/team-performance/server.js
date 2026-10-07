@@ -29,12 +29,14 @@ const ST = require('./lib/subtasks.js');
 const JR = require('./lib/jira-rework.js');
 const PRS = require('./lib/prs.js');
 const { createPacer } = require('./lib/pacer.js');
-const { createScopeCache, scopeKey, windowKey } = require('./lib/scopecache.js');
+const { createScopeCache, scopeKey } = require('./lib/scopecache.js');
 const G = require('./lib/guardrails.js');
 const SAN = require('./lib/sanitize.js');
 const V = require('./lib/validate.js');
 const RM = require('./lib/reportmodel.js');
 const GS = require('./lib/gitscan.js');
+const { check } = require('./lib/cancellation.js');
+const { resolveViewWindow } = require('./lib/view-window.js');
 const SR = require('./lib/scope-rules.js');
 const RF = require('./lib/reportfeed.js');
 const zlib = require('zlib');
@@ -49,13 +51,15 @@ try { PLUGIN_VERSION = require('./otto-plugin.json').version || '?'; } catch { /
 
 // ---- host API ---------------------------------------------------------------
 
-function hostJson(method, pathname, body) {
+function hostJson(method, pathname, body, signal) {
+  check(signal);
   return new Promise((resolve, reject) => {
     const u = new URL(HOST_API + pathname);
     const data = body ? JSON.stringify(body) : null;
     const req = http.request(
       {
         method,
+        signal,
         hostname: u.hostname,
         port: u.port,
         path: u.pathname + u.search,
@@ -79,17 +83,19 @@ function hostJson(method, pathname, body) {
         });
       },
     );
+    // Headless provider runs may legitimately take up to ten minutes.
+    req.setTimeout(pathname === '/agents/run' ? 660000 : 60000, () => req.destroy(new Error('host request timed out')));
     req.on('error', reject);
     if (data) req.write(data);
     req.end();
   });
 }
-const hostGet = (p) => hostJson('GET', p);
-const hostPost = (p, b) => hostJson('POST', p, b);
+const hostGet = (p, signal) => hostJson('GET', p, null, signal);
+const hostPost = (p, b, signal) => hostJson('POST', p, b, signal);
 
 /** Registered repos, deduped by path (the registry may hold duplicates). */
-async function hostRepos() {
-  const repos = (await hostGet('/repos')) || [];
+async function hostRepos(signal) {
+  const repos = (await hostGet('/repos', signal)) || [];
   const seen = new Set();
   return repos.filter((r) => (seen.has(r.path) ? false : (seen.add(r.path), true)));
 }
@@ -100,23 +106,28 @@ async function hostRepos() {
  * hold the CPU for minutes — a child keeps this event loop (scan status,
  * views) responsive. 20-minute cap.
  */
-function buildIndexAsync(repos, config) {
+function buildIndexAsync(repos, config, signal) {
+  check(signal);
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'lib', 'gitscan.js')], {
-      stdio: ['pipe', 'pipe', 'inherit'],
+      stdio: ['pipe', 'pipe', 'inherit'], detached: true,
     });
+    const detach = cancelWorker(child, signal);
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      killWorker(child);
       reject(new Error('git index timed out'));
     }, 60 * 60 * 1000); // large repo fleets: parallel fetch + ~100s of log walks
     let out = '';
     child.stdout.on('data', (c) => (out += c));
     child.on('error', (e) => {
       clearTimeout(timer);
+      detach();
       reject(e);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      detach();
+      if (signal?.aborted) return reject(signal.reason);
       if (code !== 0) return reject(new Error(`git index worker exited ${code}`));
       try {
         const idx = JSON.parse(out);
@@ -136,19 +147,41 @@ function buildIndexAsync(repos, config) {
         reject(new Error('git index worker returned bad JSON'));
       }
     });
-    child.stdin.end(JSON.stringify({ repos, config }));
+    child.stdin.on('error', () => {}); // cancellation may close stdin before the payload drains
+    child.stdin.end(JSON.stringify({ repos, config, tag_cache_path: path.join(DATA_DIR, 'deploy-tag-ranges.json') }));
   });
 }
 
+// Each worker owns a process group, including synchronous git grandchildren.
+// Killing only node would orphan its current git log/fetch/blame subprocess.
+function killWorker(child) {
+  if (!child.pid) return;
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+}
+function cancelWorker(child, signal) {
+  const abort = () => killWorker(child);
+  if (signal) signal.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  return () => signal?.removeEventListener('abort', abort);
+}
+
 /** Git rework worker (lib/rework.js): blame of rewritten lines → pairs. */
-function reworkAsync(repoPaths, since) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [path.join(__dirname, 'lib', 'rework.js')], { stdio: ['pipe', 'pipe', 'inherit'] });
-    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(null); }, 60 * 60 * 1000);
+function reworkAsync(repoPaths, since, signal) {
+  check(signal);
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'lib', 'rework.js')], { stdio: ['pipe', 'pipe', 'inherit'], detached: true });
+    const detach = cancelWorker(child, signal);
+    const timer = setTimeout(() => killWorker(child), 60 * 60 * 1000);
     let out = '';
     child.stdout.on('data', (c) => (out += c));
-    child.on('error', () => { clearTimeout(timer); resolve(null); });
-    child.on('close', () => { clearTimeout(timer); try { resolve(JSON.parse(out)); } catch { resolve(null); } });
+    const finish = () => {
+      clearTimeout(timer); detach();
+      if (signal?.aborted) return reject(signal.reason);
+      try { resolve(JSON.parse(out)); } catch { resolve(null); }
+    };
+    child.on('error', finish);
+    child.on('close', finish);
+    child.stdin.on('error', () => {});
     child.stdin.end(JSON.stringify({ repos: repoPaths, since, cache_path: path.join(DATA_DIR, 'rework-cache.json') }));
   });
 }
@@ -161,23 +194,20 @@ const reworkPath = () => path.join(DATA_DIR, 'rework.json');
 const DAEMON_API = HOST_API.replace(/\/plugin-host\/?$/, '');
 const DAEMON_TOKEN = process.env.OTTO_TP_DAEMON_TOKEN || process.env.OTTO_API_TOKEN || '';
 const prPacer = createPacer(); // >= 2s between calls, 429 backoff
-let prClient = null;
 let prStatus = { state: 'idle', error: null, repos: {}, unregistered: [], at: null };
 const prRepoMapPath = () => path.join(DATA_DIR, 'data', 'prs', 'repo-map.json');
 
-function getPrClient(job) {
+function getPrClient(job, signal) {
   if (!DAEMON_API || !DAEMON_TOKEN) return null;
-  if (!prClient) {
-    prClient = PRS.createPrClient({
-      baseUrl: DAEMON_API, token: DAEMON_TOKEN, pacer: prPacer, dataDir: DATA_DIR,
-      onProgress: (p) => { if (job) { job.prs_progress = p; job.next_call_at = Date.now() + prPacer.nextCallEtaMs(); job.backoff_ms = prPacer.stats.last_backoff_ms || 0; } },
-    });
-  }
-  return prClient;
+  return PRS.createPrClient({
+    baseUrl: DAEMON_API, token: DAEMON_TOKEN, pacer: prPacer, dataDir: DATA_DIR, signal,
+    onProgress: (p) => { if (job) { job.prs_progress = p; job.next_call_at = Date.now() + prPacer.nextCallEtaMs(); job.backoff_ms = prPacer.stats.last_backoff_ms || 0; } },
+  });
 }
 
-async function syncPrs(repos, job) {
-  const client = getPrClient(job);
+async function syncPrs(repos, job, signal) {
+  check(signal);
+  const client = getPrClient(job, signal);
   if (!client) {
     prStatus = { ...prStatus, state: 'unavailable', error: 'no daemon API token in the plugin env (OTTO_TP_DAEMON_TOKEN) — PR data unavailable', at: Date.now() };
     return;
@@ -194,10 +224,12 @@ async function syncPrs(repos, job) {
   store.writeJsonAtomic(prRepoMapPath(), map);
   const since = new Date(Date.now() - 365 * A.DAY).toISOString();
   for (const id of new Set(Object.values(map))) {
+    check(signal);
     try {
       await client.syncRepo(id, { since });
       prStatus.repos[id] = { ok: true, at: Date.now() };
     } catch (e) {
+      check(signal);
       prStatus.repos[id] = { ok: false, status: e.status || null, error: String(e.message || e).slice(0, 200), at: Date.now() };
     }
   }
@@ -209,7 +241,7 @@ function loadAllPrs() {
   const map = store.readJson(prRepoMapPath(), null);
   if (!map) return null;
   const out = [];
-  const client = prClient || (DAEMON_API ? PRS.createPrClient({ baseUrl: DAEMON_API || 'http://x', token: '', pacer: prPacer, dataDir: DATA_DIR }) : null);
+  const client = DAEMON_API ? PRS.createPrClient({ baseUrl: DAEMON_API, token: '', pacer: prPacer, dataDir: DATA_DIR }) : null;
   if (!client) return null;
   for (const id of new Set(Object.values(map))) out.push(...client.loadPrs(id));
   return out;
@@ -509,6 +541,7 @@ function seedPeopleFromRecords(records) {
 // ---- scan job (one per account; loops the selected projects) -----------------
 
 const jobs = new Map(); // account -> status object
+const scanControllers = new WeakMap(); // private lifetime, never serialized
 
 // ---- auto-scan cron -----------------------------------------------------------
 // Every `auto_scan_minutes` the sidecar silently re-runs the LAST manual scan's
@@ -547,7 +580,8 @@ function reapStuckJob(account, job) {
   }
   if (Date.now() - seen.at < STUCK_AFTER_MS) return false;
   console.error(`scan for ${account} stuck at step "${job.step}" for ${Math.round((Date.now() - seen.at) / 60000)}m — reaping`);
-  job.state = 'error';
+  job.state = 'stopping';
+  scanControllers.get(job)?.abort();
   job.error = `stuck at "${job.step}" — abandoned by the watchdog`;
   job.finished_at = Date.now();
   return true;
@@ -560,10 +594,10 @@ function maybeAutoScan() {
   // Reap BEFORE the auto_scan_minutes gate — a wedged job should be cleared even
   // when auto-scan is switched off, so a manual scan isn't blocked either.
   if (running) reapStuckJob(params.account, running);
-  if (!config.auto_scan_minutes) return;
+  if (!config.auto_scan_minutes || params?.paused) return;
   if (!params || !params.account || !Array.isArray(params.projects) || !params.projects.length) return;
   const job = jobs.get(params.account);
-  if (job && job.state === 'running') return;
+  if (job && ['running', 'stopping'].includes(job.state)) return;
   const intervalMs = Number(process.env.OTTO_TP_AUTOSCAN_MS) || config.auto_scan_minutes * 60000;
   const lastFinished = job && job.finished_at ? job.finished_at : params.at || 0;
   if (Date.now() - lastFinished < intervalMs) return;
@@ -589,10 +623,12 @@ function fmtJqlUtc(ms) {
 }
 
 
-async function scanProject(client, account, project, full, assignees, config, gitIndex, job) {
+async function scanProject(client, account, project, full, assignees, config, gitIndex, job, signal) {
+  check(signal);
   const scanStart = Date.now();
   const corpusFile = store.corpusPath(DATA_DIR, account, project);
-  const corpus = (!full && store.readJson(corpusFile, null)) || { project, account, issues: {} };
+  const previousCorpus = store.readJson(corpusFile, null);
+  const corpus = (!full && previousCorpus) || { project, account, issues: {} };
 
   job.step = 'fields';
   const pointsField = corpus.points_field || detectPointsField(await client.fields());
@@ -642,6 +678,7 @@ async function scanProject(client, account, project, full, assignees, config, gi
   const rawIssues = [];
   const failedKeys = [];
   for (const stub of found) {
+    if (signal?.aborted) break;
     const known = corpus.issues[stub.key];
     const updatedMs = Date.parse(stub.fields && stub.fields.updated) || null;
     if (known && known.updated && updatedMs && known.updated === updatedMs) {
@@ -651,6 +688,7 @@ async function scanProject(client, account, project, full, assignees, config, gi
     try {
       rawIssues.push(await client.issueWithChangelog(stub.key, fields));
     } catch (e) {
+      if (signal?.aborted) break;
       job.errors = (job.errors || 0) + 1;
       failedKeys.push(stub.key);
       console.error(`scan: issue ${stub.key} failed:`, e.message);
@@ -660,6 +698,9 @@ async function scanProject(client, account, project, full, assignees, config, gi
     job.pace_ms = client.paceMs;
   }
 
+  // A stopped full rescan adds completed issues to the prior corpus; it must
+  // neither discard previous results nor advance the incremental watermark.
+  if (signal?.aborted && previousCorpus) corpus.issues = { ...previousCorpus.issues, ...corpus.issues };
   job.step = 'analyze';
   const statusMap = config.status_map[project] || {};
   const nowMs = Date.now();
@@ -705,27 +746,29 @@ async function scanProject(client, account, project, full, assignees, config, gi
 
   job.step = 'persist';
   corpus.points_field = pointsField;
-  corpus.scanned_at = Date.now();
-  corpus.last_scan_start = scanStart;
+  corpus.scanned_at = signal?.aborted ? previousCorpus?.scanned_at || null : Date.now();
+  corpus.last_scan_start = signal?.aborted ? previousCorpus?.last_scan_start || null : scanStart;
   // A small incremental fetch must not clear the banner while the corpus is
   // still the truncated set from an earlier capped scan.
   corpus.capped = full ? capped : Boolean(corpus.capped) || capped;
-  corpus.fetch_failed = failedKeys;
+  corpus.fetch_failed = signal?.aborted ? [...new Set([...failedKeys, ...found.map((stub) => stub.key)])] : failedKeys;
   corpus.target_used = gitIndex.target_used;
   corpus.scan_scope = assignees && assignees.length ? assignees : null;
   await store.writeJsonAtomicAsync(corpusFile, corpus);
   seedPeopleFromRecords(records);
+  check(signal);
   return corpus;
 }
 
 /** Agent runner for estimation workers: provider+model routed via the host. */
-function agentRunner() {
+function agentRunner(signal) {
   return async (prompt, worker) => {
+    check(signal);
     const r = await hostPost('/agents/run', {
       prompt,
       provider: worker && worker.provider ? worker.provider : 'claude',
       model: worker && worker.model ? worker.model : undefined,
-    });
+    }, signal);
     return r && r.text ? r.text : '';
   };
 }
@@ -761,8 +804,9 @@ function gatherCorrections(account) {
   return out.sort((a, b) => b.at - a.at).slice(0, 20);
 }
 
-async function estimateScope(account, projects, config, job) {
-  const agentRun = agentRunner();
+async function estimateScope(account, projects, config, job, signal) {
+  check(signal);
+  const agentRun = agentRunner(signal);
   const workers = config.estimate_workers;
   const corrections = gatherCorrections(account);
   // Estimation spends real agent calls — cover only the people the registry
@@ -792,6 +836,7 @@ async function estimateScope(account, projects, config, job) {
       return parent ? { ...r, epic_hint: parent.summary } : r;
     });
     const res = await E.runEstimation({
+      signal,
       records: withHints.filter((r) => included(r.assignee_id)),
       cache,
       windowMonths: config.estimate_window_months,
@@ -833,7 +878,7 @@ async function estimateScope(account, projects, config, job) {
     const cache = store.readJson(cacheFile, {}) || {};
     delete cache.schema;
     job.step = 'estimate features (epic level)';
-    await E.runFeatureEstimation({ epics, cache, persistTo: cacheFile, agentRun, workers, rubric: config.estimate_rubric, instructions: config.estimate_instructions });
+    await E.runFeatureEstimation({ signal, epics, cache, persistTo: cacheFile, agentRun, workers, rubric: config.estimate_rubric, instructions: config.estimate_instructions });
     store.writeJsonAtomic(cacheFile, cache);
   }
   // Git-only features share the same machinery under a synthetic project.
@@ -845,6 +890,7 @@ async function estimateScope(account, projects, config, job) {
     delete cache.schema;
     job.step = 'estimate features';
     const res = await E.runEstimation({
+      signal,
       records: feats.features.filter((f) => !(f.jira_keys || []).length).map(featureAsRecord),
       cache,
       windowMonths: config.estimate_window_months,
@@ -868,22 +914,26 @@ async function estimateScope(account, projects, config, job) {
 
 async function runScan(account, projects, full, assignees) {
   const job = jobs.get(account);
+  const controller = new AbortController();
+  scanControllers.set(job, controller);
+  const signal = controller.signal;
   try {
     const config = loadConfig();
-    const creds = await hostGet(`/jira/credentials?account=${encodeURIComponent(account)}`);
-    const client = makeClient(creds, { paceMs: config.pace_ms });
+    const creds = await hostGet(`/jira/credentials?account=${encodeURIComponent(account)}`, signal);
+    const client = makeClient(creds, { paceMs: config.pace_ms, signal });
 
     // One git pass for the whole scan — every project shares the same repos.
     job.step = config.git_fetch ? 'git fetch + index' : 'git index';
     job.phase = 'git';
-    const repos = await hostRepos();
+    const repos = await hostRepos(signal);
     // Diff evidence covers at least the estimation window (estimate_since wins,
     // else evidence_months back). ISO date string for `git log --since`.
     const evMs = config.estimate_since
       ? Date.parse(config.estimate_since)
       : Date.now() - (config.evidence_months || 18) * 30 * A.DAY;
     const gitCfg = { ...config, evidence_since: new Date(evMs).toISOString().slice(0, 10) };
-    const gitIndex = await buildIndexAsync(repos, gitCfg);
+    const gitIndex = await buildIndexAsync(repos, gitCfg, signal);
+    check(signal);
     // Always persisted: git-only features (opted-in repos) + unscoped fix work
     // (ABC-0000-style commits — real work that belongs to no story).
     store.writeJsonAtomic(store.featuresPath(DATA_DIR), {
@@ -898,37 +948,41 @@ async function runScan(account, projects, full, assignees) {
     // Bitbucket PRs through the Otto daemon — paced, incremental (cursor cache).
     job.step = 'prs';
     job.phase = 'prs';
-    await syncPrs(repos, job).catch((e) => { job.prs_error = String(e.message || e); });
+    await syncPrs(repos, job, signal).catch((e) => { check(signal); job.prs_error = String(e.message || e); });
     job.phase = 'jira';
 
     job.project_n = projects.length;
     for (const [i, project] of projects.entries()) {
+      check(signal);
       job.project = project;
       job.project_i = i + 1;
       job.fetched = 0;
       job.total = null;
-      await scanProject(client, account, project, full, assignees, config, gitIndex, job);
+      await scanProject(client, account, project, full, assignees, config, gitIndex, job, signal);
     }
 
-    if (config.estimate_enabled) await estimateScope(account, projects, config, job);
+    if (config.estimate_enabled) await estimateScope(account, projects, config, job, signal);
 
     // Rework: who rewrote whose recent code (blame) — charged back in views.
     job.step = 'git rework';
-    const rw = await reworkAsync((repos || []).map((r) => r.path).filter(Boolean), gitCfg.evidence_since);
+    const rw = await reworkAsync((repos || []).map((r) => r.path).filter(Boolean), gitCfg.evidence_since, signal);
+    check(signal);
     if (rw) store.writeJsonAtomic(reworkPath(), rw);
 
     scopeCache.invalidate(`${account}::`);
     await appendGoalSnapshots(account, config);
 
+    check(signal);
     job.state = 'done';
     job.finished_at = Date.now();
     job.last_scan = Date.now();
   } catch (e) {
-    console.error('scan failed:', e);
-    job.state = 'error';
-    job.error = 'scan failed — see plugin logs';
+    if (!signal.aborted) console.error('scan failed:', e);
+    job.state = signal.aborted && !job.error ? 'stopped' : 'error';
+    if (!signal.aborted) job.error = 'scan failed — see plugin logs';
     job.finished_at = Date.now();
-  }
+    scopeCache.invalidate(`${account}::`);
+  } finally { scanControllers.delete(job); }
 }
 
 // ---- scope loading (multi-project views) --------------------------------------
@@ -1265,10 +1319,11 @@ function unmatchedOf(scope, records = scope.records, tag = 'team') {
 
 /**
  * computeMetrics for (a subset of) the scope, memoized per data version,
- * subset tag and DAY-bucketed window ("now" moves every ms; a day does not).
+ * subset tag and exact window. Views share a day-stable observation window;
+ * report callers supply their explicit start/end without cache rounding.
  */
 function metricsFor(scope, window, { records = null, tag = 'team' } = {}) {
-  return scopeMemo(scope, `met:${tag}:${windowKey(window.since, window.until)}`, () => {
+  return scopeMemo(scope, `met:${tag}:${window.since}:${window.until}`, () => {
     const sub = records ? { ...scope, records } : scope;
     return M.computeMetrics(sub, window, { ...scope.side, unmatched_authors: unmatchedOf(scope, sub.records, tag), ...doraSide(scope) });
   });
@@ -1763,10 +1818,19 @@ async function overview(account, projectsParam, sinceMs = 0) {
   };
 }
 
+/** One observation window per scope/cutoff/day, matching the existing view
+ * metric cache cadence. Derive All time from the WHOLE scope before filtering
+ * to a person, so the team and person capacity denominators agree. Explicit
+ * report windows do not use this helper or have their timestamps rounded. */
+function viewWindow(scope, sinceMs) {
+  const until = Date.now();
+  return scopeMemo(scope, `view-window:${sinceMs}:${Math.floor(until / A.DAY)}`,
+    () => resolveViewWindow(scope, sinceMs, until));
+}
+
 /** The v0.8 metric suite for the overview (DORA, flow, phases, PRs, capacity, ONE guardrails array). */
 function overviewMetrics(scope, sinceMs, stats) {
-  const until = Date.now();
-  const window = { since: sinceMs || until - 90 * A.DAY, until };
+  const window = viewWindow(scope, sinceMs);
   const met = metricsFor(scope, window);
   const done = deliveredIn(scope.records, window);
   const extras = personExtras(scope, met, done);
@@ -1907,8 +1971,7 @@ async function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
     }));
 
   // Capacity (time off), phase summary, rework and substantive sub-tasks for this person.
-  const until = Date.now();
-  const win = { since: sinceMs || until - 90 * A.DAY, until };
+  const win = viewWindow(scope, sinceMs);
   const cap = require('./lib/capacity.js').availability(scope.people[assigneeId] || {}, win, { weekend: M.weekendOf(config.workweek) });
   const reworkRows = mine.filter((r) => A.isDone(r) && inViewPeriod(r, sinceMs));
   const rw = JR.reworkRate(reworkRows);
@@ -1937,7 +2000,7 @@ async function assigneeView(account, projectsParam, assigneeId, sinceMs = 0) {
 function personMetrics(scope, personId, window) {
   const recs = scope.records.filter((r) => r.assignee_id && scope.canonical(r.assignee_id) === personId);
   const prs = (scope.side.prs || []).filter((p) => personOf(scope, p.author, p.author_email) === personId);
-  const met = scopeMemo(scope, `met:p:${personId}:${windowKey(window.since, window.until)}`, () => M.computeMetrics(
+  const met = scopeMemo(scope, `met:p:${personId}:${window.since}:${window.until}`, () => M.computeMetrics(
     { ...scope, records: recs }, window,
     { ...scope.side, prs: scope.side.prs ? prs : null, unmatched_authors: [], ...doraSide(scope) },
   ));
@@ -2183,7 +2246,7 @@ function reportInput(scope, start, end, personId) {
   // is always the team's (labelled as team context in the person report).
   const teamMet = metricsFor(scope, window);
   const met = personId
-    ? scopeMemo(scope, `met:rp:${personId}:${windowKey(start, end)}`, () => {
+    ? scopeMemo(scope, `met:rp:${personId}:${start}:${end}`, () => {
       const prs = (scope.side.prs || []).filter((p) => personOf(scope, p.author, p.author_email) === personId);
       return M.computeMetrics({ ...scope, records: mineRecs }, window, { ...scope.side, prs: scope.side.prs ? prs : null, unmatched_authors: [], ...doraSide(scope) });
     })
@@ -2758,7 +2821,7 @@ const server = http.createServer(async (req, res) => {
       if (!account || !projects.length) return send(res, 400, { error: 'account and projects[] are required' });
       const assignees = Array.isArray(body.assignees) ? body.assignees.map(String).filter(Boolean) : null;
       const existing = jobs.get(account);
-      if (existing && existing.state === 'running') return send(res, 409, { error: 'scan already running' });
+      if (existing && ['running', 'stopping'].includes(existing.state)) return send(res, 409, { error: 'scan already running' });
       const job = {
         state: 'running',
         step: 'starting',
@@ -2782,6 +2845,22 @@ const server = http.createServer(async (req, res) => {
       rememberScanParams(account, projects, assignees); // the auto-scan cron repeats these
       runScan(account, projects, Boolean(body.full), assignees); // fire and forget; job records progress
       return send(res, 200, { started: true, projects });
+    }
+
+    if (u.pathname === '/scan/stop' && req.method === 'POST') {
+      const { account } = await readBody(req);
+      if (!account) return send(res, 400, { error: 'account is required' });
+      const job = jobs.get(account);
+      if (!job) return send(res, 404, { error: 'no scan for this account' });
+      if (['running', 'stopping'].includes(job.state)) {
+        job.state = 'stopping';
+        // Explicit Stop also pauses this remembered auto-scan until a manual
+        // Scan resumes it. A cron tick must not immediately undo the user's Stop.
+        const params = store.readJson(lastScanParamsPath(), null);
+        if (params?.account === account) store.writeJsonAtomic(lastScanParamsPath(), { ...params, paused: true });
+        scanControllers.get(job)?.abort();
+      }
+      return send(res, 200, { state: job.state });
     }
 
     if (u.pathname === '/scan/status' && req.method === 'GET') {
@@ -2909,7 +2988,7 @@ const server = http.createServer(async (req, res) => {
       const existing = reportJobs.get(jobKey);
       // Already running → don't error; hand back the key so the UI ATTACHES to
       // the live progress instead of silently doing nothing.
-      if (existing && existing.state === 'running') return send(res, 200, { started: false, already: true, job: jobKey, label });
+      if (existing && ['running', 'stopping'].includes(existing.state)) return send(res, 200, { started: false, already: true, job: jobKey, label });
       const job = { state: 'running', step: 'starting', started_at: Date.now(), finished_at: null, error: null, report: null, account, label };
       reportJobs.set(jobKey, job);
       runReport(account, opts); // fire and forget

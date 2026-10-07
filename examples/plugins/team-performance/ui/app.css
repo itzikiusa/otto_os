@@ -1182,13 +1182,14 @@ legend {
 }
 
 /* ---- guardrails, drill-down, honest states ---------------------------- */
-/* A 'bad' guardrail dims and hatches the value, and prints its reason. */
-.tile.weak,
+/* Weak metric cards retain a visible warning without obscuring the value. */
+.tile.weak {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
 .funnel .stage.weak,
 .weak-block {
   background-image: repeating-linear-gradient(45deg, color-mix(in srgb, var(--danger) 9%, transparent) 0 6px, transparent 6px 12px);
 }
-.tile.weak .value,
 .funnel .stage.weak .num {
   opacity: 0.6;
 }
@@ -1207,6 +1208,21 @@ legend {
   inline-size: 12px;
   block-size: 12px;
   margin-block-start: var(--sp-1);
+}
+.guard-details {
+  font-size: var(--fs-xs);
+}
+.guard-details > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.guard-details > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+.guard-details[open] > summary {
+  margin-block-end: var(--sp-2);
 }
 .funnel .stage .guard-reason {
   grid-column: 1 / -1;

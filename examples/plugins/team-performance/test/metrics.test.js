@@ -180,3 +180,20 @@ test('computeMetrics: a Fri/Sat weekend (Sun–Thu workweek) changes DORA lead t
   };
   assert.notStrictEqual(mk([1, 2, 3, 4, 5]), mk([0, 1, 2, 3, 4]));
 });
+
+test('estimate accuracy contract: corpus identity and effective estimate reach the correction action', () => {
+  const record = {
+    key: 'ABC-1', project: 'ABC', summary: 'Ship migration', type: 'Story',
+    assignee_id: 'u1', assignee_name: 'Person One', status_category: 'done',
+    done_at: t0 + DAY, eff_done_at: t0 + DAY, manual_days: 8,
+  };
+  const scope = scopeOf([record]);
+  scope.estimates['ABC-1'] = { days: 3, overridden: true };
+  const acc = M.computeMetrics(scope, { since: t0, until: t0 + 14 * DAY }).estimate_accuracy;
+  assert.deepStrictEqual(acc.worst[0], {
+    key: 'ABC-1', project: 'ABC', summary: 'Ship migration', assignee_id: 'u1',
+    assignee_name: 'Person One', est_days: 3, actual_days: 8, ratio: 2.667,
+  });
+  assert.equal(acc.n, 1);
+  assert.equal(acc.bins.reduce((sum, b) => sum + b.n, 0), 1);
+});
