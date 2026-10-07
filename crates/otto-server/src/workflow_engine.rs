@@ -2483,7 +2483,8 @@ pub async fn run_workflow(
         let result = loop {
             attempt += 1;
             attempt_started = std::time::SystemTime::now();
-            let fut = async {
+            // Heap-pin the large node future before the driver's nested select frames.
+            let fut = Box::pin(async {
                 if node.kind == "loop" {
                     let checkpoint = loop_checkpoint(node, &node.id, 0, 0, node_input.clone());
                     crate::workflow_checkpoint::execute(
@@ -2525,7 +2526,7 @@ pub async fn run_workflow(
                     )
                     .await
                 }
-            };
+            });
             let attempt_res = crate::workflow_node_driver::drive(fut, async |mut done| {
                 loop {
                 tokio::select! {

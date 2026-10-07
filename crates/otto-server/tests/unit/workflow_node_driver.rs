@@ -1,6 +1,102 @@
 use super::*;
 use otto_state::DbPool;
 
+/// Exercise CI's first workflow graph at Tokio's 2 MiB default. Debug stack
+/// layouts vary by ABI: 1 MiB is the measured macOS ARM negative-control budget,
+/// not a stricter Linux requirement. A subprocess contains a stack-overflow abort.
+#[test]
+fn real_workflow_fits_a_small_worker_stack() {
+    let stack_bytes = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        1024 * 1024
+    } else {
+        2 * 1024 * 1024
+    };
+    check_real_workflow_stack(
+        "real_workflow_fits_a_small_worker_stack",
+        stack_bytes,
+        false,
+    );
+}
+
+#[test]
+fn real_loop_fits_the_default_worker_stack() {
+    check_real_workflow_stack(
+        "real_loop_fits_the_default_worker_stack",
+        2 * 1024 * 1024,
+        true,
+    );
+}
+
+fn check_real_workflow_stack(test_name: &str, stack_bytes: usize, loop_node: bool) {
+    const CHILD: &str = "OTTO_WORKFLOW_STACK_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // This synchronous parent has no runtime; the child owns the Tokio probe.
+        #[allow(clippy::disallowed_methods)]
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!("workflow_node_driver::tests::{test_name}"))
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(stack_bytes)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use crate::routes::browser::tests::{seed_workspace, test_ctx};
+        use crate::workflow_engine::run_workflow;
+        use otto_core::workflows::{RunScope, RunStatus, WorkflowGraph};
+        use otto_state::{WorkflowsRepo, WorkspacesRepo};
+        use serde_json::json;
+
+        let (dir, pool) = fixture().await;
+        seed_workspace(&pool, "stack-ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('stack-u','stack-u','x','U',0,?)")
+            .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+        let ctx = test_ctx(&pool, dir.path().to_path_buf()).await;
+        let ws = WorkspacesRepo::new(pool.clone()).get(&"stack-ws".into()).await.unwrap();
+        let repo = WorkflowsRepo::new(pool);
+        let step = if loop_node {
+            json!({"id":"set","kind":"loop","name":"set","x":0,"y":0,"params":{"max_iterations":2,"steps":[{"kind":"transform","name":"tick","params":{"json":{"note":"ctx"}}}]}})
+        } else {
+            json!({"id":"set","kind":"transform","name":"set","x":0,"y":0,"params":{"json":{"note":"ctx"}}})
+        };
+        let graph: WorkflowGraph = serde_json::from_value(json!({"nodes": [
+            {"id":"trigger","kind":"manual_trigger","name":"trigger","x":0,"y":0},
+            step,
+            {"id":"tail","kind":"log","name":"tail","x":0,"y":0}
+        ], "edges": [
+            {"id":"a","source":"trigger","target":"set"},
+            {"id":"b","source":"set","target":"tail"}
+        ]})).unwrap();
+        let wf = repo.create(&ws.id, "stack probe", "", "", &graph, &"stack-u".into()).await.unwrap();
+        let run = repo.create_run(&wf.id, &ws.id, &json!({}), None).await.unwrap();
+        let future = run_workflow(ctx, ws, wf, run.id.clone(), json!({}), RunScope::default(), None);
+        eprintln!("real workflow future: {} bytes", std::mem::size_of_val(&future));
+        tokio::spawn(future).await.unwrap();
+        let finished = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(finished.status, RunStatus::Success, "{:?}", finished.error);
+        assert_eq!(finished.nodes.len(), 3);
+        let output = finished.nodes[1].output.as_ref().unwrap();
+        if loop_node {
+            assert_eq!(output["iterations"], 2);
+        } else {
+            assert_eq!(output["note"], "ctx");
+        }
+    });
+}
+
 async fn fixture() -> (tempfile::TempDir, DbPool) {
     let dir = tempfile::tempdir().unwrap();
     let pool = otto_state::open(&dir.path().join("driver.sqlite"))
