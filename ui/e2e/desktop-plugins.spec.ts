@@ -117,12 +117,14 @@ test('enabled plugins are listed and the section hosts the iframe', async ({ pag
   expect(slugs).toContain('team-performance');
 
   const frame = await pluginFrame(page, 'team-performance');
-  // The heading carries the running plugin's version (from its /config), so
+  // The version badge carries the running plugin's version (from its /config), so
   // the iframe is proven to talk to THIS install's sidecar, not just render.
   const { version } = JSON.parse(
     readFileSync(join(EXAMPLES, 'team-performance', 'otto-plugin.json'), 'utf8'),
   ) as { version: string };
-  await expect(frame.locator('h1')).toHaveText(`Team Performance v${version}`);
+  await expect(frame.getByRole('heading', { level: 1 })).toHaveText('Team Performance');
+  await expect(frame.locator('#tp-version')).toBeVisible();
+  await expect(frame.locator('#tp-version')).toHaveText(`v${version}`);
 });
 
 test('team-performance: scan → team dashboard with bars, predictions, estimation guide', async ({ page }) => {
@@ -135,76 +137,111 @@ test('team-performance: scan → team dashboard with bars, predictions, estimati
   // The project picker is a multi-select button labelled with the selection.
   await expect(frame.locator('#proj-btn')).toContainText('TP');
 
+  await frame.getByRole('tab', { name: 'Overview', exact: true }).click();
   await frame.locator('#scan').click();
-  // Team view renders once the scan lands: 2 developers.
-  await expect(frame.locator('#assignee-table tr.clickable')).toHaveCount(2, { timeout: 45_000 });
+  // Overview, People, Flow and Estimates now have separate tabs. Wait for
+  // scanned data, then follow the same visible navigation as a user.
+  const completedTile = frame.locator('.tile').filter({ has: frame.getByText('Completed tickets', { exact: true }) });
+  await expect(completedTile.locator('.value')).toHaveText('6', { timeout: 45_000 });
+  await expect(completedTile).toContainText('2 still open');
+  await frame.getByRole('tab', { name: 'People', exact: true }).click();
+  const people = frame.getByRole('table', { name: /^2 people ·/ });
+  await expect(people.locator('tbody tr')).toHaveCount(2);
+  await expect(people.getByRole('button', { name: 'Alice', exact: true })).toBeVisible();
+  await expect(people.getByRole('button', { name: 'Bob', exact: true })).toBeVisible();
 
-  // Phase-split bars (SVG marks) + legend.
-  await expect(frame.locator('#assignee-bars svg rect').first()).toBeVisible();
-  // Several charts share the area now (delivered, estimate vs actual, …);
-  // the phase-split one carries the phase legend.
-  const phaseLegend = frame.locator('#assignee-bars .legend', { hasText: 'implementation' });
-  await expect(phaseLegend).toHaveCount(1);
-  await expect(phaseLegend).toContainText('design');
+  await frame.getByRole('tab', { name: 'Flow', exact: true }).click();
+  const phases = frame.getByRole('region', { name: 'Cycle time by phase', exact: true });
+  await expect(phases.getByRole('img', { name: /^Cycle time by phase/ })).toBeVisible();
+  await expect(phases.locator('svg > rect').first()).toBeVisible();
+  await expect(phases.locator('.legend')).toContainText('Dev');
+  await expect(phases.locator('.legend')).toContainText('Design');
+  await phases.getByText('Show as table', { exact: true }).click();
+  const phaseTable = phases.getByRole('table', { name: /^Median working days per phase/ });
+  await expect(phaseTable.getByRole('columnheader', { name: 'Design', exact: true })).toBeVisible();
+  await expect(phaseTable.getByRole('columnheader', { name: 'Dev', exact: true })).toBeVisible();
+  await expect(phaseTable.locator('tbody tr').first()).toContainText(/\dd/);
 
-  // Team-level open tasks carry predictions + projected dates.
-  const openRows = frame.locator('#open-tasks tbody tr');
+  // Check the actual predicted duration and date cells, not merely an elapsed
+  // duration elsewhere on the row (which would pass with predictions missing).
+  const openRows = frame.getByRole('table', { name: '2 open tickets with predicted timelines', exact: true }).locator('tbody tr');
   await expect(openRows).toHaveCount(2);
-  await expect(openRows.filter({ hasText: 'TP-7' })).toContainText(/\dd/);
+  const aliceOpen = openRows.filter({ has: frame.getByRole('link', { name: 'TP-7', exact: true }) });
+  await expect(aliceOpen.locator('td').nth(4)).toContainText(/\dd/);
+  await expect(aliceOpen.locator('td').nth(6)).toHaveText(/\d{4}-\d{2}-\d{2}/);
 
-  // The estimation guide (baseline buckets) exists — the lead's timeline table.
-  await expect(frame.locator('#estimation-guide tbody tr').first()).toBeVisible();
-  await expect(frame.locator('#estimation-guide')).toContainText('Story');
-
-  // KPI tiles.
-  await expect(frame.locator('.kpi-tile').first()).toContainText('Completed');
+  await frame.getByRole('tab', { name: 'Estimates', exact: true }).click();
+  const guide = frame.getByRole('table', { name: 'Estimation guide', exact: true });
+  await expect(guide.locator('tbody tr').first()).toBeVisible();
+  await expect(guide).toContainText('Story');
+  await expect(guide.getByRole('columnheader', { name: 'Implementation', exact: true })).toBeVisible();
+  await expect(guide.locator('tbody tr').first().locator('td').last()).toContainText(/\dd/);
 });
 
-test('team-performance: developer drill-down — verdicts, bullet bars, evidence, goals', async ({ page }) => {
+async function openAlice(frame: FrameLocator): Promise<void> {
+  await frame.getByRole('tab', { name: 'People', exact: true }).click();
+  const people = frame.getByRole('table', { name: /^2 people ·/ });
+  await expect(people.locator('tbody tr')).toHaveCount(2, { timeout: 20_000 });
+  await people.getByRole('button', { name: 'Alice', exact: true }).click();
+}
+
+test('team-performance: developer drill-down — verdicts, phase durations, evidence, goals', async ({ page }) => {
   test.setTimeout(60_000);
   const frame = await pluginFrame(page, 'team-performance');
-  await expect(frame.locator('#assignee-table tr.clickable')).toHaveCount(2, { timeout: 20_000 });
+  await openAlice(frame);
 
-  await frame.locator('#assignee-table tr.clickable', { hasText: 'Alice' }).click();
+  // The current person view replaces bullet charts with explicit phase cells.
+  // Preserve the measured-time and verdict checks on Alice's three tickets.
+  const completed = frame.getByRole('table', { name: '3 completed tickets — estimate → actual, by phase', exact: true });
+  await expect(completed.locator('tbody tr')).toHaveCount(3);
+  for (const name of ['Estimate', 'Actual', 'Design', 'Dev', 'Verdict']) {
+    await expect(completed.getByRole('columnheader', { name, exact: true })).toBeVisible();
+  }
+  const ticket = completed.locator('tbody tr').filter({ has: frame.getByRole('link', { name: 'TP-1', exact: true }) });
+  // Ticket is a row header; the following cells are Type, Estimate, Actual,
+  // Design, Dev, Review, Deploy, Rework, Verdict and Details.
+  await expect(ticket.locator('td').nth(2)).toHaveText(/^[\d.]+[dh]$/);
+  await expect(ticket.locator('td').nth(3)).toHaveText(/^[\d.]+[dh]$/);
+  await expect(ticket.locator('td').nth(4)).toHaveText(/^[\d.]+[dh]$/);
+  await expect(ticket.locator('td').nth(8).locator('.badge')).toHaveText(/^(fast|on track|slow)$/);
 
-  // Completed tasks with per-phase verdict badges + bullet bars.
-  await expect(frame.locator('#completed-table tr.task-row')).toHaveCount(3);
-  await expect(frame.locator('#completed-table .badge').first()).toBeVisible();
-  await expect(frame.locator('#completed-table td.bullet svg').first()).toBeVisible();
-
-  // Evidence drill-down: click a row → stored status intervals appear.
-  await frame.locator('#completed-table tr.task-row').first().click();
-  // (The evidence row is a Status / Phase / Span / Calendar table.)
-  const history = frame.locator('.evidence.open table', { has: frame.locator('th', { hasText: 'Phase' }) });
-  await expect(history.locator('thead')).toContainText('Status');
+  await ticket.getByRole('button', { name: 'Details for TP-1', exact: true }).click();
+  const evidence = frame.getByRole('dialog', { name: 'TP-1 — evidence and corrections', exact: true });
+  await evidence.getByText('Status timeline', { exact: true }).click();
+  const history = evidence.getByRole('table', { name: 'Jira status intervals', exact: true });
+  await expect(history.getByRole('columnheader', { name: 'Status', exact: true })).toBeVisible();
+  await expect(history.getByRole('columnheader', { name: 'Phase', exact: true })).toBeVisible();
   await expect(history.locator('tbody tr').first()).toBeVisible();
+  await expect(history).toContainText('In Progress');
+  await evidence.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(evidence).toHaveCount(0);
 
-  // Open task prediction for Alice (TP-7).
-  await expect(frame.locator('#dev-open')).toContainText('TP-7');
+  const open = frame.getByRole('table', { name: 'In progress, with predictions', exact: true });
+  await expect(open.getByRole('link', { name: 'TP-7', exact: true })).toBeVisible();
+  await expect(open.locator('tbody tr')).toHaveCount(1);
+  await expect(open.locator('tbody td').nth(3)).toHaveText(/^[\d.]+[dh]$/);
 
-  // Goals: suggested rows exist; edit the cycle target and save.
-  const goalRow = frame.locator('#goals .goal[data-metric="median_cycle_days"]');
-  await expect(goalRow).toBeVisible();
-  await goalRow.locator('input.goal-target').fill('3.5');
-  // Assert the PERSISTED save (the PUT /goals response), not the transient
-  // "saved" span: the handler re-renders the section 400 ms later and wipes
-  // it, a window a loaded runner's expect polling missed (S12-304).
+  const goalRow = frame.getByRole('table', { name: 'Goals for Alice', exact: true }).locator('tr[data-metric="median_cycle_days"]');
+  await expect(goalRow.getByText('suggested', { exact: true })).toBeVisible();
+  await goalRow.getByRole('spinbutton', { name: 'Target for Median cycle (days)', exact: true }).fill('3.5');
   const saved = page.waitForResponse((r) => r.request().method() === 'PUT' && /\/goals(\?|$)/.test(r.url()));
-  await frame.locator('#save-goals').click();
-  expect((await saved).ok(), 'PUT /goals succeeded').toBe(true);
-  await expect(frame.locator('#goals .goal[data-metric="median_cycle_days"] input.goal-target')).toHaveValue('3.5');
+  await frame.getByRole('button', { name: 'Save goals', exact: true }).click();
+  const response = await saved;
+  expect(response.ok(), 'PUT /goals succeeded').toBe(true);
+  expect(response.request().postDataJSON()).toMatchObject({
+    assignee: 'u-alice', goals: expect.arrayContaining([{ metric: 'median_cycle_days', target: 3.5 }]),
+  });
+  await expect(goalRow.getByRole('spinbutton')).toHaveValue('3.5');
+  await expect(goalRow.getByText('suggested', { exact: true })).toHaveCount(0);
 });
 
 test('team-performance: goal target persists across a full reload', async ({ page }) => {
   test.setTimeout(60_000);
   const frame = await pluginFrame(page, 'team-performance');
-  await expect(frame.locator('#assignee-table tr.clickable')).toHaveCount(2, { timeout: 20_000 });
-  await frame.locator('#assignee-table tr.clickable', { hasText: 'Alice' }).click();
-
-  const goalRow = frame.locator('#goals .goal[data-metric="median_cycle_days"]');
-  await expect(goalRow.locator('input.goal-target')).toHaveValue('3.5');
-  // A saved goal is no longer marked as a suggestion.
-  await expect(goalRow).not.toContainText('(suggested)');
+  await openAlice(frame);
+  const goalRow = frame.getByRole('table', { name: 'Goals for Alice', exact: true }).locator('tr[data-metric="median_cycle_days"]');
+  await expect(goalRow.getByRole('spinbutton', { name: 'Target for Median cycle (days)', exact: true })).toHaveValue('3.5');
+  await expect(goalRow.getByText('suggested', { exact: true })).toHaveCount(0);
 });
 
 async function selectFixtureRepo(frame: FrameLocator): Promise<void> {
