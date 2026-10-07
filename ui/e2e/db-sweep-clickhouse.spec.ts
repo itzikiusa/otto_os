@@ -107,7 +107,10 @@ async function runSql(page: Page, sql: string): Promise<void> {
   await expect(editor).toBeVisible({ timeout: 15_000 });
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    await editor.click();
+    // The autocomplete popup can cover the editor's centre on a phone. Focus
+    // the textbox directly, then dismiss it before replacing the statement.
+    await editor.focus();
+    await page.keyboard.press('Escape');
     await page.keyboard.press(await editorSelectAll(page));
     await page.keyboard.press('Backspace');
     // Dismiss any open autocomplete popup that could swallow keys.
@@ -251,6 +254,15 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
   }, testInfo) => {
     expect(connId, 'connection must be seeded').not.toBeNull();
     await openConn(page);
+
+    // A completion popup can cover the editor's centre on a phone. Keep one
+    // open to exercise replacing a statement without clicking through it.
+    await ensureEditorOpen(page);
+    const editor = page.locator('.qe-edit .cm-content');
+    await editor.focus();
+    await page.keyboard.type('SELECT * FROM analytics.', { delay: 4 });
+    await page.keyboard.press('Control+Space');
+    await expect(page.locator('.cm-tooltip-autocomplete')).toBeVisible();
 
     const tbl = `analytics.e2e_scratch_${scratchSuffix(testInfo.project.name)}`;
 

@@ -273,9 +273,17 @@ for (const key of ['Enter', 'Space']) {
     await page.addInitScript((scheme) => localStorage.setItem('otto_scheme', scheme), key === 'Enter' ? 'light' : 'dark');
     await boot(page);
     await enterOurRoom(page);
-    await clickOn(page, { kind: 'kid', id: ids.printer }, 30);
+    // Select through the keyboard companion for this keyboard-controls test.
+    // A projected world point can sit behind the fixed Otto bar: CI clicked
+    // that bar at y=731 and opened its palette instead of selecting the kid.
+    // The original journeys above independently exercise real canvas picking.
+    const printerRow = box(page).getByRole('region', { name: `Classroom ${WS_NAME}`, exact: true })
+      .getByRole('button', { name: /^Open Printer Kid,/ });
+    await printerRow.focus();
+    const printerCard = page.getByRole('group', { name: 'Printer Kid — details', exact: true });
+    await expect(printerCard).toBeVisible();
     const activate = async (name: string) => {
-      const button = card(page).getByRole('button', { name, exact: true });
+      const button = printerCard.getByRole('button', { name, exact: true });
       await button.focus();
       await expect(button).toBeFocused();
       await button.press(key);
@@ -295,7 +303,7 @@ for (const key of ['Enter', 'Space']) {
     await expect(card(page)).toHaveCount(0);
     // Check on moves the headmaster beside this kid and can occlude a canvas
     // hit. Keyboard focus is the supported accessible way to reselect them.
-    await box(page).getByRole('region', { name: `Classroom ${WS_NAME}`, exact: true }).getByRole('button', { name: /^Open Printer Kid,/ }).focus();
+    await printerRow.focus();
     await activate('Open session');
     await expect(page).toHaveURL(new RegExp(`#/agents/${ids.printer}$`));
   });

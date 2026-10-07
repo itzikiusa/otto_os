@@ -256,6 +256,9 @@ test('Canvas same-scene reopen keeps the newer draft when an older save resolves
 // Real MessageChannel/iframe timeout with a bounded protocol fixture. The first
 // runtime never answers compile; already-queued callers must load a fresh one.
 test('D2 timed-out transport is disposed and the next queued render recovers', async ({ page }) => {
+  const compiling = new Set<string>();
+  await page.exposeFunction('d2CompileRequested', (source: string) => { compiling.add(source); });
+  await page.clock.install();
   await page.route('**/node_modules/@terrastruct/d2/dist/browser/index.js*', route => route.fulfill({
     contentType: 'text/javascript', body: `
       let loads = 0;
@@ -268,31 +271,49 @@ test('D2 timed-out transport is disposed and the next queued render recovers', a
         return { wasm: new ArrayBuffer(0), source: \`
           port.onmessage = ({ data: { type, data } }) => {
             if (type === 'init') port.postMessage({ type: 'ready' });
-            if (type === 'compile' && !\${fail}) port.postMessage({ type: 'result', data: { diagram: data.fs.index, renderOptions: {} } });
+            if (type === 'compile') {
+              parent.d2CompileRequested(data.fs.index);
+              if (!\${fail}) {
+                const reply = () => port.postMessage({ type: 'result', data: { diagram: data.fs.index, renderOptions: {} } });
+                if (data.fs.index === 'Still ready') setTimeout(reply, 150);
+                else reply();
+              }
+            }
             if (type === 'render') port.postMessage({ type: 'result', data: '<svg><text>' + data.diagram + '</text></svg>' });
           };
         \` };
       }
     `,
   }));
-  await page.route('**/src/modules/canvas/d2-frame.ts*', async route => {
-    const response = await route.fetch();
-    const body = await response.text();
-    expect(body).toContain('3e4');
-    await route.fulfill({ response, body: body.replace('3e4', '100') });
-  });
   await page.goto('/');
-  const result = await page.evaluate(async () => {
+  await page.clock.pauseAt(new Date());
+  const pending = page.evaluate(async () => {
     const path = '/src/modules/canvas/d2.ts';
     const { renderD2, parseD2 } = await import(path);
     const renders = await Promise.all([renderD2('first', 'Stalled'), renderD2('next', 'Recovered')]);
+    const recoveredFrame = document.querySelector('iframe[title="Diagram renderer"]');
     window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
-    return { renders, valid: await parseD2('Still ready'), frames: document.querySelectorAll('iframe[title="Diagram renderer"]').length };
+    return {
+      renders, valid: await parseD2('Still ready'),
+      frames: document.querySelectorAll('iframe[title="Diagram renderer"]').length,
+      retainedFrame: document.querySelector('iframe[title="Diagram renderer"]') === recoveredFrame,
+    };
   });
+  // Expire the real 30s deadline only after the first compile is in flight.
+  // Rewriting every deadline to 100ms made healthy recovery/parse responses
+  // race CI scheduling. Real MessageChannel traffic still drives the protocol.
+  await expect.poll(() => compiling.has('Stalled')).toBe(true);
+  await page.clock.fastForward(30_000);
+  await expect.poll(() => compiling.has('Still ready')).toBe(true);
+  // This valid response deliberately takes longer than the former 100ms test
+  // deadline, while remaining well inside the unchanged production deadline.
+  await page.clock.runFor(150);
+  const result = await pending;
   expect(result.renders[0].error).toContain('timed out');
   expect(result.renders[1].svg).toContain('Recovered');
   expect(result.valid).toBe(true);
   expect(result.frames).toBe(1);
+  expect(result.retainedFrame).toBe(true);
 });
 
 test('tablet Canvas gives the editor full width and toggles scenes without losing its draft', async ({ page }, info) => {

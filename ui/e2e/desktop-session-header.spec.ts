@@ -149,9 +149,13 @@ for (const scheme of ['light', 'dark'] as const) {
       await expect(page.locator('.pane.current')).toHaveCount(1);
       await expect(page.locator('.pane').first()).toHaveClass(/\bcurrent\b/);
       if (count > 1) {
-        const colours = await page.locator('.pane-title').evaluateAll((els) => els.map((el) => getComputedStyle(el).color));
-        expect(new Set(colours.slice(1)).size, 'inactive titles share one colour').toBe(1);
-        expect(colours[0], 'the active title differs from the inactive ones').not.toBe(colours[1]);
+        // The current class changes before the title's colour transition ends.
+        // Assert the visible contrast once it updates, not its starting colours.
+        await expect(async () => {
+          const colours = await page.locator('.pane-title').evaluateAll((els) => els.map((el) => getComputedStyle(el).color));
+          expect(new Set(colours.slice(1)).size, 'inactive titles share one colour').toBe(1);
+          expect(colours[0], 'the active title differs from the inactive ones').not.toBe(colours[1]);
+        }).toPass({ timeout: 10_000 });
       }
       await page.mouse.move(0, 450);
 

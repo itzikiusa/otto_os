@@ -40,3 +40,21 @@ Read all eight changed E2E specs against the relevant production paths and fixtu
 The reviewer personally executed the session/mobile batch and TypeScript/diff checks; the remaining completed run logs were inspected. Expected engine errors in cancellation/headless-refusal journeys are exercised outcomes, not hidden test failures.
 
 `advisory-red-baseline.json` lowers `max_failed` from 56 to **0**. PR 94 closure requires zero functional failures; the old allowance must not turn residual failures into a passing ratchet. Other broad cases, the new remote run across all shards, and the full post-merge review remain pending. The original failed CI result is not superseded by these focused local passes.
+
+## Second CI follow-up
+
+[CI run 37645751954](https://github.com/itzikiusa/otto_os/actions/runs/37645751954), head `228d7ebc223967afda0f984dcf4b706adc4f04a0`, completed with seven functional failures. The zero-failure ratchet correctly blocked it. Rust, UI, smoke, live drivers, macOS builds, security checks and both performance jobs passed. This run does not establish merge readiness.
+
+The second repair batch addresses the observed causes:
+
+- ClickHouse's completion popup covered the phone editor's click target. The query helper focuses the editor and dismisses completion before replacing SQL. A deliberately opened popup reproduces the old failure; the repaired six-case live ClickHouse suite passes (`/tmp/otto-pr94-ch-popup-red.log`, `/tmp/otto-pr94-ch-popup-green.log`).
+- Git's initial fetch finished before the test installed its observer; the next active fetch was correctly due after 60 seconds. Observation now starts before navigation and requires a successful response for the exact repository with `behind: 1`. All six cases pass (`/tmp/otto-pr94-git-fetch-green.log`).
+- Home's trace contained two versions of the shared Svelte runtime after Vite discovered a lazy dependency and reoptimized mid-document. Scanning lazy page/widget entries up front prevents that invalidation. A fresh-cache probe reproduced the changing dependency hash before the fix and verified a stable hash and working widget afterward (`/tmp/otto-pr94-vite-lazy-before.log`, `/tmp/otto-pr94-vite-lazy-after.log`).
+- Classroom list journeys now load the persisted List view directly. Separate real-canvas journeys retain view-switching coverage. Home and classroom-list specs pass together, ten cases (`/tmp/otto-pr94-home-fixed.log`).
+- The session-header assertion read colors before their CSS transition painted. A bounded assertion waits for the same active/inactive distinction and uniform inactive colors. All six cases pass (`/tmp/otto-pr94-session-header-fixed.log`).
+- The School keyboard regression's initial projected pointer landed on the floating command bar in CI. It now selects the intended child through the supported accessible companion before exercising Enter/Space on the same card actions. Both keyboard cases pass; independent pointer journeys remain (`/tmp/otto-school31-fixed.log`).
+- D2's test shortened every production deadline to 100 ms, including healthy recovery. It now advances a controlled browser clock through the unchanged 30-second stalled deadline, then allows a deliberately slower healthy reply. It still requires timeout, queued recovery, valid parsing and retained frame identity. All 17 content cases pass (`/tmp/otto-pr94-content-green.log`).
+
+These are focused local results. A fresh complete remote run on the committed repair head remains required before merging.
+
+Independent review of the second batch found no defects in the bounded repair diff: production deadlines, real protocol transport, pointer journeys, query outcomes and active-title distinctions remain covered; no skips, whole-test retries or failure-budget increases were added. The final local UI gate passed with zero type/style warnings, 1,698 unit tests, production build and bundle budget (`/tmp/otto-pr94-round2-gate.log`). Stable toolchain refresh and full workspace strict Clippy passed (`/tmp/otto-pr94-round2-clippy.log`).
