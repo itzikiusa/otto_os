@@ -206,17 +206,23 @@ pub struct TelemetryService {
     runtime: tokio::sync::Mutex<Runtime>,
     analysis_lock: tokio::sync::Mutex<()>,
     changed: Notify,
+    sampling_changed: Notify,
     stopped: AtomicBool,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    sampling_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    collector_process: resource::CollectorProcess,
     sampler: Arc<Mutex<resource::Sampler>>,
     spikes: Mutex<resource::SpikeDetector>,
     last_sample: Mutex<Option<Instant>>,
     last_profile: AtomicU64,
     profile_lock: tokio::sync::Mutex<()>,
+    /// Serializes consent changes with profiler launch and resource publication.
     profile_launch: Mutex<()>,
     profile_cancel: Notify,
     #[cfg(test)]
     profile_setup_hook: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    #[cfg(test)]
+    sample_publish_hook: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
     http: reqwest::Client,
 }
 impl TelemetryService {
@@ -265,8 +271,11 @@ impl TelemetryService {
             runtime: tokio::sync::Mutex::new(Runtime::default()),
             analysis_lock: tokio::sync::Mutex::new(()),
             changed: Notify::new(),
+            sampling_changed: Notify::new(),
             stopped: AtomicBool::new(false),
             worker: Mutex::new(None),
+            sampling_worker: Mutex::new(None),
+            collector_process: Arc::new(Mutex::new(None)),
             sampler: Arc::new(Mutex::new(resource::Sampler::new())),
             spikes: Mutex::new(resource::SpikeDetector::default()),
             last_sample: Mutex::new(None),
@@ -276,6 +285,8 @@ impl TelemetryService {
             profile_cancel: Notify::new(),
             #[cfg(test)]
             profile_setup_hook: Mutex::new(None),
+            #[cfg(test)]
+            sample_publish_hook: Mutex::new(None),
             http: reqwest::Client::builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(5))
@@ -292,6 +303,10 @@ impl TelemetryService {
         let worker = service.clone();
         *service.worker.lock().unwrap() = Some(tokio::spawn(async move {
             worker.run().await;
+        }));
+        let sampling = service.clone();
+        *service.sampling_worker.lock().unwrap() = Some(tokio::spawn(async move {
+            sampling.run_sampling().await;
         }));
         service
     }
@@ -354,6 +369,7 @@ impl TelemetryService {
             self.clear_buffers();
         }
         self.changed.notify_one();
+        self.sampling_changed.notify_one();
         if !config.enabled || !config.native_profiling {
             self.profile_cancel.notify_waiters();
         }
@@ -767,9 +783,14 @@ impl TelemetryService {
         }
         self.profile_cancel.notify_waiters();
         self.changed.notify_one();
+        self.sampling_changed.notify_one();
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {
             let _ = worker.await;
+        }
+        let sampling = self.sampling_worker.lock().unwrap().take();
+        if let Some(sampling) = sampling {
+            let _ = sampling.await;
         }
         self.runtime.lock().await.stop().await;
         self.clear_buffers();
@@ -809,7 +830,6 @@ impl TelemetryService {
         if !c.enabled {
             return Ok(());
         }
-        self.sample(&c).await?;
         if !self.enabled() {
             return Ok(());
         }
@@ -837,29 +857,74 @@ impl TelemetryService {
         }
         Ok(())
     }
+    /// Sampling is independent of collector startup, export and analysis I/O.
+    /// Only one blocking sample runs at a time, even across config changes.
+    async fn run_sampling(self: Arc<Self>) {
+        loop {
+            if self.stopped.load(Ordering::Relaxed) {
+                break;
+            }
+            if !self.enabled() {
+                self.sampling_changed.notified().await;
+                continue;
+            }
+            let _ = self.sample().await;
+            tokio::select! {
+                _ = self.sampling_changed.notified() => {},
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            }
+        }
+    }
     /// Sample process resources into the per-minute buffer. Never touches
     /// ClickHouse: a parked engine has no pid and is simply not sampled.
-    async fn sample(&self, c: &TelemetryConfig) -> Result<()> {
-        let due = self.last_sample.lock().unwrap().is_none_or(|last| {
-            last.elapsed() >= Duration::from_secs(c.sample_interval_secs.into())
-        });
-        if !due {
-            return Ok(());
-        }
-        *self.last_sample.lock().unwrap() = Some(Instant::now());
+    async fn sample(&self) -> Result<()> {
+        let (c, revision) = {
+            let _launch = self.profile_launch.lock().unwrap();
+            let c = self.config();
+            if !self.enabled() || !c.enabled {
+                return Ok(());
+            }
+            let mut last = self.last_sample.lock().unwrap();
+            if last.is_some_and(|last| {
+                last.elapsed() < Duration::from_secs(c.sample_interval_secs.into())
+            }) {
+                return Ok(());
+            }
+            *last = Some(Instant::now());
+            (c, self.revision.load(Ordering::SeqCst))
+        };
         let mut processes = vec![("daemon".into(), std::process::id())];
         if let Some(pid) = self.usage.clickhouse().and_then(|ch| ch.server_pid()) {
             processes.push(("clickhouse".into(), pid));
         }
+        let collector = *self.collector_process.lock().unwrap();
         let sampler = self.sampler.clone();
-        let points =
-            tokio::task::spawn_blocking(move || sampler.lock().unwrap().sample(&processes)).await?;
-        if !self.enabled() {
+        let points = tokio::task::spawn_blocking(move || {
+            sampler.lock().unwrap().sample(&processes, collector)
+        })
+        .await?;
+        #[cfg(test)]
+        {
+            let hook = self.sample_publish_hook.lock().unwrap().take();
+            if let Some((entered, release)) = hook {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        // Serialize publication with consent/config updates. A sample already
+        // running when consent is revoked cannot refill the cleared buffers,
+        // even if collection has since been enabled again.
+        let _launch = self.profile_launch.lock().unwrap();
+        if !self.enabled() || revision != self.revision.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let current_collector = self.collector_process.lock().unwrap();
         for point in &points {
+            if point.process == "collector" && *current_collector != collector {
+                continue;
+            }
             self.buffer_point(point);
-            if self.spikes.lock().unwrap().observe(point, c) {
+            if self.spikes.lock().unwrap().observe(point, &c) {
                 self.push_log(otlp::spike(point));
             }
         }
@@ -889,8 +954,14 @@ impl TelemetryService {
         let revision = self.revision.load(Ordering::SeqCst);
         self.ensure_private_dir().await?;
         let recover = !self.orphans_recovered.load(Ordering::Relaxed);
-        let mut collector =
-            collector::Collector::start(&self.dir, &lease.endpoint, c, recover).await?;
+        let mut collector = collector::Collector::start(
+            &self.dir,
+            &lease.endpoint,
+            c,
+            recover,
+            self.collector_process.clone(),
+        )
+        .await?;
         self.orphans_recovered.store(true, Ordering::Relaxed);
         let fresh = self
             .runtime

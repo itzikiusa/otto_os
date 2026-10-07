@@ -939,13 +939,13 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
     // in the socket buffer (review S1-08).
     let superseded = Arc::new(AtomicBool::new(false));
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<InputAck>();
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<(u64, Vec<u8>)>();
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<InputRequest>();
     let input_task = tokio::spawn(input_loop(Arc::clone(&sh.handle), in_rx, ack_tx));
     let (eof_tx, mut eof_rx) = oneshot::channel::<()>();
     let mut reader_task = tokio::spawn(client_reader(
         rd,
         Arc::clone(&sh),
-        in_tx,
+        in_tx.clone(),
         eof_tx,
         Arc::clone(&superseded),
     ));
@@ -999,11 +999,22 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
                             }
                         }
                         code = wait_exit(&mut exit_rx), if !exit_sent => {
+                            // The child can exit after consuming input but before
+                            // input_loop resumes to enqueue its ACK. A queue barrier
+                            // covers all input already accepted by client_reader;
+                            // draining only ready ACKs can report a delivered write
+                            // as lost. Share the existing final-drain deadline: a
+                            // stuck writer must not hold up EXITED indefinitely.
+                            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+                            let (settled, settlement) = oneshot::channel();
+                            if in_tx.send(InputRequest::Barrier(settled)).is_ok() {
+                                let _ = tokio::time::timeout_at(deadline, settlement).await;
+                            }
                             // Final output first: wait (bounded — a grandchild may keep
                             // the tty open) for the reader to drain, then forward what
                             // the receiver still holds, then the exit itself.
                             let mut done = sh.handle.output_closed();
-                            let _ = tokio::time::timeout(Duration::from_secs(1), done.wait_for(|d| *d)).await;
+                            let _ = tokio::time::timeout_at(deadline, done.wait_for(|d| *d)).await;
                             let mut failed = false;
                             loop {
                                 match out.try_recv() {
@@ -1063,7 +1074,7 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
 async fn client_reader(
     mut rd: tokio::net::unix::OwnedReadHalf,
     sh: Arc<Shared>,
-    in_tx: mpsc::UnboundedSender<(u64, Vec<u8>)>,
+    in_tx: mpsc::UnboundedSender<InputRequest>,
     eof_tx: oneshot::Sender<()>,
     superseded: Arc<AtomicBool>,
 ) {
@@ -1085,7 +1096,10 @@ async fn client_reader(
                 let mut seq = [0u8; 8];
                 seq.copy_from_slice(&payload[..8]);
                 if in_tx
-                    .send((u64::from_be_bytes(seq), payload[8..].to_vec()))
+                    .send(InputRequest::Write(
+                        u64::from_be_bytes(seq),
+                        payload[8..].to_vec(),
+                    ))
                     .is_err()
                 {
                     break;
@@ -1129,15 +1143,27 @@ async fn frozen_only(mut rd: tokio::net::unix::OwnedReadHalf, sh: &Shared) {
     }
 }
 
+enum InputRequest {
+    Write(u64, Vec<u8>),
+    Barrier(oneshot::Sender<()>),
+}
+
 /// Write the client's input to the PTY in order, acknowledging each job once
 /// it reached the tty (the daemon-side writer thread waits for that, keeping
 /// the old "delivered" semantics of a local write).
 async fn input_loop(
     handle: Arc<PtyHandle>,
-    mut rx: mpsc::UnboundedReceiver<(u64, Vec<u8>)>,
+    mut rx: mpsc::UnboundedReceiver<InputRequest>,
     acks: mpsc::UnboundedSender<InputAck>,
 ) {
-    while let Some((seq, data)) = rx.recv().await {
+    while let Some(request) = rx.recv().await {
+        let (seq, data) = match request {
+            InputRequest::Write(seq, data) => (seq, data),
+            InputRequest::Barrier(settled) => {
+                let _ = settled.send(());
+                continue;
+            }
+        };
         let res = handle
             .write_async(&data, Duration::from_secs(24 * 60 * 60))
             .await;
@@ -1155,6 +1181,203 @@ async fn input_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deliver to a real PTY, but hold the writer's completion until the test
+    /// releases it. This forces the child-exit / input-ack scheduling race.
+    struct DelayedCompletion {
+        input: std::sync::mpsc::SyncSender<crate::WriteJob>,
+        release: std::sync::mpsc::Receiver<()>,
+        fail: bool,
+    }
+
+    impl Write for DelayedCompletion {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            self.input
+                .send(crate::WriteJob {
+                    data: data.to_vec(),
+                    authorization: None,
+                    done: crate::WriteDone::Blocking(tx),
+                })
+                .unwrap();
+            let result = rx.recv().unwrap();
+            let _ = self.release.recv();
+            if self.fail {
+                return Err(std::io::Error::other("controlled tty write failure"));
+            }
+            result.map(|()| data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn exiting_client(
+        fail: bool,
+    ) -> (
+        tokio::net::UnixStream,
+        Arc<Shared>,
+        std::sync::mpsc::SyncSender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut handle = PtyHandle::spawn(&CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "read line; exit 0".into()],
+            cwd: Some("/tmp".into()),
+            env: vec![],
+        })
+        .unwrap();
+        let (release, gate) = std::sync::mpsc::sync_channel(1);
+        handle.input_tx = crate::spawn_writer(
+            Box::new(DelayedCompletion {
+                input: handle.input_tx.clone(),
+                release: gate,
+                fail,
+            }),
+            Arc::clone(&handle.mirror.echo),
+        );
+        let sh = Arc::new(Shared {
+            handle: Arc::new(handle),
+            socket: PathBuf::new(),
+            holder_pid: std::process::id(),
+            started_at_ms: 0,
+            meta: serde_json::Value::Null,
+            released: AtomicBool::new(false),
+            gen: AtomicU64::new(0),
+            kick: watch::channel(0).0,
+            active: Mutex::new(None),
+            last_client: Mutex::new(Instant::now()),
+            exited_at: Mutex::new(None),
+            wake: Notify::new(),
+            orphan_ttl: DEFAULT_ORPHAN_TTL,
+            exit_linger: DEFAULT_EXIT_LINGER,
+        });
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        let task = tokio::spawn(serve_client(server, Arc::clone(&sh)));
+        write_frame(
+            &mut client,
+            frame::HELLO,
+            &serde_json::to_vec(&Hello::ours()).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            frame::read_async(&mut client).await.unwrap().0,
+            frame::HELLO_ACK
+        );
+        assert_eq!(
+            frame::read_async(&mut client).await.unwrap().0,
+            frame::SNAPSHOT
+        );
+        let mut input = 7u64.to_be_bytes().to_vec();
+        input.extend_from_slice(b"exit\n");
+        write_frame(&mut client, frame::INPUT, &input)
+            .await
+            .unwrap();
+        // Actual child exit proves that the held write already reached the tty.
+        let mut exit = sh.handle.on_exit();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), wait_exit(&mut exit))
+                .await
+                .unwrap(),
+            0
+        );
+        (client, sh, release, task)
+    }
+
+    async fn next_non_output(client: &mut tokio::net::UnixStream) -> (u8, Vec<u8>) {
+        loop {
+            let message = frame::read_async(client).await.unwrap();
+            if message.0 != frame::OUTPUT {
+                return message;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delivered_input_is_acknowledged_before_child_exit() {
+        let (mut client, _sh, release, task) = exiting_client(false).await;
+        // The completion is deliberately withheld, not a slow real process.
+        // EXITED here would make the daemon fail successfully delivered input.
+        let (kind, payload) = {
+            let next = next_non_output(&mut client);
+            tokio::pin!(next);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut next)
+                    .await
+                    .is_err(),
+                "EXITED overtook the input completion"
+            );
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), next)
+                .await
+                .unwrap()
+        };
+        assert_eq!(kind, frame::INPUT_ACK);
+        let ack: InputAck = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(ack.seq, 7);
+        assert!(
+            ack.error.is_none(),
+            "delivered input failed: {:?}",
+            ack.error
+        );
+        assert_eq!(next_non_output(&mut client).await.0, frame::EXITED);
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_input_is_not_acknowledged_as_delivered_on_exit() {
+        let (mut client, _sh, release, task) = exiting_client(true).await;
+        release.send(()).unwrap();
+        let (kind, payload) =
+            tokio::time::timeout(Duration::from_secs(5), next_non_output(&mut client))
+                .await
+                .unwrap();
+        assert_eq!(kind, frame::INPUT_ACK);
+        let ack: InputAck = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(ack.seq, 7);
+        assert!(ack
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("controlled tty write failure"));
+        assert!(ack.closed);
+        assert_eq!(next_non_output(&mut client).await.0, frame::EXITED);
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stuck_input_does_not_block_exit_or_gain_a_success_ack() {
+        let (mut client, _sh, _release, task) = exiting_client(false).await;
+        let (kind, _) = tokio::time::timeout(Duration::from_secs(2), next_non_output(&mut client))
+            .await
+            .expect("input settlement exceeded the final-drain bound");
+        assert_eq!(kind, frame::EXITED, "unsettled input must not gain an ACK");
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnected_client_does_not_leave_exit_waiting_for_input() {
+        let (client, _sh, _release, task) = exiting_client(false).await;
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("disconnected holder waited indefinitely for input")
+            .unwrap();
+    }
 
     #[test]
     fn frame_round_trip_and_size_guard() {

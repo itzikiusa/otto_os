@@ -1,0 +1,54 @@
+{
+  "method": "Offline result inspection, no queries or resampling; checked exact20component/operation tuples and values for every run, statuses, fallback flags, and2Nreadrows.",
+  "source_schema_matches_current": true,
+  "results": [
+    {
+      "spans": 100000,
+      "repeat": 1,
+      "groups": 20,
+      "sum_self_ms": 5000000,
+      "expected_sum_self_ms": 5000000,
+      "elapsed_ms": 40.760750067420304,
+      "query_memory_bytes": 27309023,
+      "query_memory_mib": 26.04391384124756,
+      "sampled_process_peak_rss_mib": 405.296875,
+      "resource_sample_count": 1
+    },
+    {
+      "spans": 100000,
+      "repeat": 2,
+      "groups": 20,
+      "sum_self_ms": 5000000,
+      "expected_sum_self_ms": 5000000,
+      "elapsed_ms": 32.88979199714959,
+      "query_memory_bytes": 25055961,
+      "query_memory_mib": 23.89522647857666,
+      "sampled_process_peak_rss_mib": 408.75,
+      "resource_sample_count": 1
+    },
+    {
+      "spans": 1000000,
+      "repeat": 1,
+      "groups": 20,
+      "sum_self_ms": 50000000,
+      "expected_sum_self_ms": 50000000,
+      "elapsed_ms": 457.8008339740336,
+      "query_memory_bytes": 154016908,
+      "query_memory_mib": 146.8819694519043,
+      "sampled_process_peak_rss_mib": 531.0625,
+      "resource_sample_count": 5
+    },
+    {
+      "spans": 1000000,
+      "repeat": 2,
+      "groups": 20,
+      "sum_self_ms": 50000000,
+      "expected_sum_self_ms": 50000000,
+      "elapsed_ms": 467.23100007511675,
+      "query_memory_bytes": 155378038,
+      "query_memory_mib": 148.18004417419434,
+      "sampled_process_peak_rss_mib": 534.9375,
+      "resource_sample_count": 5
+    }
+  ]
+}

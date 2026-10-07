@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
-import { budgetMs, isDesktopProject, isWebkitProject, percentile, scrollFrameWork } from './perf';
+import { budgetMs, gridScrollCosts, isDesktopProject, isWebkitProject, percentile, scrollFrameWork } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer at scale — the perf guards the results-grid spec doesn't cover
@@ -130,58 +130,6 @@ function perfLine(line: string): void {
   test.info().annotations.push({ type: 'perf', description: line });
 }
 
-/** Vertical step to the end of style + layout (no paint): the metric the
- *  100k × 30 grid gates at 12 ms (desktop-db-results-perf `scrollSteps`). */
-async function layoutSteps(page: Page, selector: string, dy: number, steps: number): Promise<number[]> {
-  return page.evaluate(
-    async ({ selector, dy, steps }) => {
-      const el = document.querySelector(selector) as HTMLElement;
-      const out: number[] = [];
-      for (let i = 0; i < steps; i++) {
-        const t0 = performance.now();
-        el.scrollTop += dy;
-        el.dispatchEvent(new Event('scroll'));
-        await new Promise<void>((r) => queueMicrotask(r)); // Svelte's flush ran first
-        await Promise.resolve();
-        void (document.body as HTMLElement).offsetHeight; // force style + layout
-        out.push(performance.now() - t0);
-        await new Promise((r) => requestAnimationFrame(() => r(null)));
-      }
-      return out;
-    },
-    { selector, dy, steps },
-  );
-}
-
-/** Horizontal twin of scrollFrameWork: scrollLeft += dx per frame, to paint. */
-async function hScrollFrameWork(page: Page, selector: string, dx: number, steps: number): Promise<number[]> {
-  return page.evaluate(
-    async ({ selector, dx, steps }) => {
-      const el = document.querySelector(selector) as HTMLElement;
-      const out: number[] = [];
-      for (let i = 0; i < steps; i++) {
-        out.push(
-          await new Promise<number>((resolve) =>
-            requestAnimationFrame(() => {
-              const t0 = performance.now();
-              el.scrollLeft += dx;
-              el.dispatchEvent(new Event('scroll'));
-              const ch = new MessageChannel();
-              ch.port1.onmessage = () => {
-                ch.port1.close();
-                resolve(performance.now() - t0);
-              };
-              ch.port2.postMessage(null);
-            }),
-          ),
-        );
-      }
-      return out;
-    },
-    { selector, dx, steps },
-  );
-}
-
 /** Type `text` into `selector` and time key → next frame and key → `done()` true. */
 async function keyToFrame(page: Page, selector: string, text: string, doneExpr: string): Promise<{ frame: number; applied: number }> {
   return page.evaluate(
@@ -218,15 +166,16 @@ test('wide 20k × 300 result: only the columns in view are mounted', { tag: '@ci
   );
   expect(firstRowCells, `cells in one row ${firstRowCells}`).toBeLessThan(60);
   const nodes = await page.evaluate(() => document.querySelectorAll('.grid-scroll *').length);
-  await layoutSteps(page, '.grid-scroll', 300, 5); // warm-up
-  const vLayout = await layoutSteps(page, '.grid-scroll', 300, 30);
-  const v = await scrollFrameWork(page, '.grid-scroll', 300, 30);
-  const h = await hScrollFrameWork(page, '.grid-scroll', 400, 30);
+  await gridScrollCosts(page, 300, 5); // warm-up
+  const vLayout = await gridScrollCosts(page, 300, 30);
+  const v = await gridScrollCosts(page, 300, 30, { paint: true });
+  const h = await gridScrollCosts(page, 400, 30, { axis: 'x', paint: true });
   // Columns far to the right render (body AND header) after the horizontal scroll.
   const lastP = await page.evaluate(() => {
     const tds = document.querySelectorAll<HTMLElement>('.grid-scroll tbody tr:not(.spacer) td.cell');
     return Math.max(...[...tds].map((td) => Number(td.dataset.p)));
   });
+  expect(lastP, 'horizontal scroll must advance the mounted column window').toBeGreaterThan(headCells);
   await expect(page.locator('.grid-scroll thead tr:first-child th', { hasText: `c_${lastP}` }).first()).toBeAttached();
   // Cells kept across the horizontal steps stay in display order, one run of
   // positions per row, and show their own column's value (`w{(r + c) % 997}`).
@@ -274,7 +223,7 @@ test('wide 20k × 300 result in RTL: the column window follows a negative scroll
   await expect(page.locator('.grid-scroll tbody td.hpad').first()).toBeVisible({ timeout: 5_000 });
   expect(await page.locator('.grid-scroll thead tr:first-child th:not(.hpad)').count()).toBeLessThan(60);
   // Scroll toward the inline end (left in RTL: scrollLeft goes negative).
-  const h = await hScrollFrameWork(page, '.grid-scroll', -400, 20);
+  const h = await gridScrollCosts(page, -400, 20, { axis: 'x', paint: true });
   const res = await page.evaluate(() => {
     const el = document.querySelector('.grid-scroll') as HTMLElement;
     const tr = document.querySelector<HTMLTableRowElement>('.grid-scroll tbody tr:not(.spacer)')!;

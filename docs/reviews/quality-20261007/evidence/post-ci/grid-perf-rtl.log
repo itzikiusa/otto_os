@@ -1,0 +1,16 @@
+[WebServer] (node:6609) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-5AiZkU OTTO_PORT=7897
+2026-10-07T13:58:34.900744Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-5AiZkU/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 6625); root onboarded.
+
+Running 1 test using 1 worker
+
+(node:6718) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 4:58:39 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[perf] wide RTL: scrollLeft -8000; window p64–p79; h-step painted p95 15.0 ms
+  ✓  1 [desktop-webkit] › e2e/desktop-db-scale-perf.spec.ts:216:1 › wide 20k × 300 result in RTL: the column window follows a negative scrollLeft (4.9s)
+
+  1 passed (8.9s)

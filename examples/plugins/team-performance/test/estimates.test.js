@@ -286,3 +286,17 @@ test('runEstimation persistTo writes the cache atomically at job end', async () 
   assert.equal(saved['ABC-2'].days, 2); assert.equal(saved['ABC-3'].days, 2);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('quality: stopping feature estimates retains completed work and dispatches no next worker', async () => {
+  const controller = new AbortController();
+  const cache = {};
+  let calls = 0;
+  await assert.rejects(E.runFeatureEstimation({
+    epics: ['A', 'B'].map((key) => ({ epic: { key }, kids: [] })), cache, paceMs: 0,
+    signal: controller.signal,
+    agentRun: async () => { calls++; controller.abort(); return '{"days": 2}'; },
+  }), { name: 'AbortError' });
+  assert.equal(calls, 1);
+  assert.equal(cache.A.days, 2);
+  assert.equal(cache.B, undefined);
+});

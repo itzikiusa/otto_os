@@ -1,0 +1,627 @@
+{
+  "directory": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-quality-self-times-a_fi7hwh",
+  "query": "SELECT p.SpanAttributes['otto.component'] component,p.SpanName name,sum(greatest(toFloat64(p.Duration)-toFloat64(k.child),0))/1e6 self_ms FROM otto_telemetry.otel_traces p LEFT JOIN (SELECT TraceId,ParentSpanId,sum(Duration) child FROM otto_telemetry.otel_traces WHERE Timestamp>=now()-INTERVAL 24 HOUR AND ParentSpanId!='' GROUP BY TraceId,ParentSpanId) k ON k.TraceId=p.TraceId AND k.ParentSpanId=p.SpanId WHERE p.Timestamp>=now()-INTERVAL 24 HOUR GROUP BY component,name LIMIT 10000 SETTINGS max_execution_time=10,max_memory_usage=268435456,join_use_nulls=0",
+  "source_sha256": "00ec362db6b0005007121d0beaeb265951221da6d08a09e54b50246031aac2ea",
+  "controls": {
+    "max_threads": 2,
+    "background_pool_size": 2,
+    "server_memory_bytes": 1073741824,
+    "query_memory_bytes": 268435456,
+    "query_seconds": 10,
+    "seed_batch_spans": 100000
+  },
+  "fixture": "paired parent/child spans; 50% distinct traces/parents,20 static operation names,4 components; all timestamps in last24h",
+  "limitations": [
+    "Controlled 2-query-thread ceiling, not all server threads.",
+    "RSS is whole ClickHouse process; 100ms samples may miss short peaks.",
+    "Capacity error means production analyze would use inclusive-time fallback; fallback execution itself is not simulated."
+  ],
+  "runs": [
+    {
+      "spans": 100000,
+      "repeat": 1,
+      "elapsed_seconds": 0.040760750067420304,
+      "status": 200,
+      "fallback_expected": false,
+      "peak_rss_mb": 405.296875,
+      "samples": [
+        {
+          "at": 1791365404.67221,
+          "cpu": 38.4,
+          "rss_mb": 405.296875
+        }
+      ],
+      "summary": "{\"read_rows\":\"200000\",\"read_bytes\":\"14258268\",\"written_rows\":\"0\",\"written_bytes\":\"0\",\"total_rows_to_read\":\"200000\",\"result_rows\":\"20\",\"result_bytes\":\"4540\",\"elapsed_ns\":\"38881833\",\"memory_usage\":\"27309023\"}",
+      "data": {
+        "meta": [
+          {
+            "name": "component",
+            "type": "String"
+          },
+          {
+            "name": "name",
+            "type": "LowCardinality(String)"
+          },
+          {
+            "name": "self_ms",
+            "type": "Float64"
+          }
+        ],
+        "data": [
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.9",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.17",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.15",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.12",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.10",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.2",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.0",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.7",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.5",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.19",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.18",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.6",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.4",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.3",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.1",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.13",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.11",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.16",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.14",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.8",
+            "self_ms": 375000
+          }
+        ],
+        "rows": 20,
+        "rows_before_limit_at_least": 20,
+        "statistics": {
+          "elapsed": 0.038507,
+          "rows_read": 200000,
+          "bytes_read": 14258268
+        }
+      }
+    },
+    {
+      "spans": 100000,
+      "repeat": 2,
+      "elapsed_seconds": 0.03288979199714959,
+      "status": 200,
+      "fallback_expected": false,
+      "peak_rss_mb": 408.75,
+      "samples": [
+        {
+          "at": 1791365404.713401,
+          "cpu": 38.4,
+          "rss_mb": 408.75
+        }
+      ],
+      "summary": "{\"read_rows\":\"200000\",\"read_bytes\":\"14258268\",\"written_rows\":\"0\",\"written_bytes\":\"0\",\"total_rows_to_read\":\"200000\",\"result_rows\":\"20\",\"result_bytes\":\"4540\",\"elapsed_ns\":\"30946666\",\"memory_usage\":\"25055961\"}",
+      "data": {
+        "meta": [
+          {
+            "name": "component",
+            "type": "String"
+          },
+          {
+            "name": "name",
+            "type": "LowCardinality(String)"
+          },
+          {
+            "name": "self_ms",
+            "type": "Float64"
+          }
+        ],
+        "data": [
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.9",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.17",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.15",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.12",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.10",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.2",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.0",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.7",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.5",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.19",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.18",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.6",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.4",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.3",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.1",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.13",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.11",
+            "self_ms": 125000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.16",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.14",
+            "self_ms": 375000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.8",
+            "self_ms": 375000
+          }
+        ],
+        "rows": 20,
+        "rows_before_limit_at_least": 20,
+        "statistics": {
+          "elapsed": 0.030578,
+          "rows_read": 200000,
+          "bytes_read": 14258268
+        }
+      }
+    },
+    {
+      "spans": 1000000,
+      "repeat": 1,
+      "elapsed_seconds": 0.4578008339740336,
+      "status": 200,
+      "fallback_expected": false,
+      "peak_rss_mb": 531.0625,
+      "samples": [
+        {
+          "at": 1791365406.599693,
+          "cpu": 161.7,
+          "rss_mb": 436.734375
+        },
+        {
+          "at": 1791365406.70852,
+          "cpu": 159.8,
+          "rss_mb": 524.71875
+        },
+        {
+          "at": 1791365406.812332,
+          "cpu": 135.6,
+          "rss_mb": 531.0
+        },
+        {
+          "at": 1791365406.916188,
+          "cpu": 121.4,
+          "rss_mb": 531.0625
+        },
+        {
+          "at": 1791365407.0204139,
+          "cpu": 121.4,
+          "rss_mb": 531.015625
+        }
+      ],
+      "summary": "{\"read_rows\":\"2000000\",\"read_bytes\":\"142582680\",\"written_rows\":\"0\",\"written_bytes\":\"0\",\"total_rows_to_read\":\"2000000\",\"result_rows\":\"20\",\"result_bytes\":\"66900\",\"elapsed_ns\":\"456785833\",\"memory_usage\":\"154016908\"}",
+      "data": {
+        "meta": [
+          {
+            "name": "component",
+            "type": "String"
+          },
+          {
+            "name": "name",
+            "type": "LowCardinality(String)"
+          },
+          {
+            "name": "self_ms",
+            "type": "Float64"
+          }
+        ],
+        "data": [
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.1",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.18",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.7",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.11",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.8",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.17",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.5",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.3",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.15",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.13",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.10",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.9",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.16",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.0",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.19",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.6",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.14",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.12",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.4",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.2",
+            "self_ms": 3750000
+          }
+        ],
+        "rows": 20,
+        "rows_before_limit_at_least": 20,
+        "statistics": {
+          "elapsed": 0.456211,
+          "rows_read": 2000000,
+          "bytes_read": 142582680
+        }
+      }
+    },
+    {
+      "spans": 1000000,
+      "repeat": 2,
+      "elapsed_seconds": 0.46723100007511675,
+      "status": 200,
+      "fallback_expected": false,
+      "peak_rss_mb": 534.9375,
+      "samples": [
+        {
+          "at": 1791365407.0595431,
+          "cpu": 113.1,
+          "rss_mb": 434.28125
+        },
+        {
+          "at": 1791365407.170233,
+          "cpu": 107.6,
+          "rss_mb": 527.25
+        },
+        {
+          "at": 1791365407.283433,
+          "cpu": 107.6,
+          "rss_mb": 532.453125
+        },
+        {
+          "at": 1791365407.387051,
+          "cpu": 103.1,
+          "rss_mb": 534.9375
+        },
+        {
+          "at": 1791365407.4965172,
+          "cpu": 101.4,
+          "rss_mb": 533.1875
+        }
+      ],
+      "summary": "{\"read_rows\":\"2000000\",\"read_bytes\":\"131435878\",\"written_rows\":\"0\",\"written_bytes\":\"0\",\"total_rows_to_read\":\"2000000\",\"result_rows\":\"20\",\"result_bytes\":\"66900\",\"elapsed_ns\":\"465229791\",\"memory_usage\":\"155378038\"}",
+      "data": {
+        "meta": [
+          {
+            "name": "component",
+            "type": "String"
+          },
+          {
+            "name": "name",
+            "type": "LowCardinality(String)"
+          },
+          {
+            "name": "self_ms",
+            "type": "Float64"
+          }
+        ],
+        "data": [
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.1",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.18",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.7",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.11",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.8",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.17",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.5",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.3",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.15",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.13",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.10",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.1",
+            "name": "fixture.op.9",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.16",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.0",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.3",
+            "name": "fixture.op.19",
+            "self_ms": 1250000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.6",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.14",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.12",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.0",
+            "name": "fixture.op.4",
+            "self_ms": 3750000
+          },
+          {
+            "component": "fixture.2",
+            "name": "fixture.op.2",
+            "self_ms": 3750000
+          }
+        ],
+        "rows": 20,
+        "rows_before_limit_at_least": 20,
+        "statistics": {
+          "elapsed": 0.464851,
+          "rows_read": 2000000,
+          "bytes_read": 131435878
+        }
+      }
+    }
+  ],
+  "version": "26.7.1.237",
+  "raw_ddl": "CREATE TABLE otto_telemetry.otel_traces\\n(\\n    `Timestamp` DateTime64(9) CODEC(Delta(8), ZSTD(1)),\\n    `TraceId` String CODEC(ZSTD(1)),\\n    `SpanId` String CODEC(ZSTD(1)),\\n    `ParentSpanId` String CODEC(ZSTD(1)),\\n    `TraceState` String CODEC(ZSTD(1)),\\n    `SpanName` LowCardinality(String) CODEC(ZSTD(1)),\\n    `SpanKind` LowCardinality(String) CODEC(ZSTD(1)),\\n    `ServiceName` LowCardinality(String) CODEC(ZSTD(1)),\\n    `ResourceAttributes` Map(LowCardinality(String), String) CODEC(ZSTD(1)),\\n    `ScopeName` String CODEC(ZSTD(1)),\\n    `ScopeVersion` String CODEC(ZSTD(1)),\\n    `SpanAttributes` Map(LowCardinality(String), String) CODEC(ZSTD(1)),\\n    `Duration` UInt64 CODEC(ZSTD(1)),\\n    `StatusCode` LowCardinality(String) CODEC(ZSTD(1)),\\n    `StatusMessage` String CODEC(ZSTD(1)),\\n    `Events.Timestamp` Array(DateTime64(9)) CODEC(ZSTD(1)),\\n    `Events.Name` Array(LowCardinality(String)) CODEC(ZSTD(1)),\\n    `Events.Attributes` Array(Map(LowCardinality(String), String)) CODEC(ZSTD(1)),\\n    `Links.TraceId` Array(String) CODEC(ZSTD(1)),\\n    `Links.SpanId` Array(String) CODEC(ZSTD(1)),\\n    `Links.TraceState` Array(String) CODEC(ZSTD(1)),\\n    `Links.Attributes` Array(Map(LowCardinality(String), String)) CODEC(ZSTD(1)),\\n    INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,\\n    INDEX idx_res_attr_key mapKeys(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,\\n    INDEX idx_res_attr_value mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,\\n    INDEX idx_span_attr_key mapKeys(SpanAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,\\n    INDEX idx_span_attr_value mapValues(SpanAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,\\n    INDEX idx_duration Duration TYPE minmax GRANULARITY 1\\n)\\nENGINE = MergeTree\\nPARTITION BY toDate(Timestamp)\\nORDER BY (ServiceName, SpanName, toDateTime(Timestamp))\\nTTL toDateTime(Timestamp) + toIntervalDay(1)\\nSETTINGS index_granularity = 8192, ttl_only_drop_parts = 1\n"
+}

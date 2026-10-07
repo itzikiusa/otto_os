@@ -3,10 +3,9 @@ import { apiCtx, seedShellSession, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
 // Home → Classrooms (Otto School) widget: workspaces as classrooms, sessions
-// as kids, archived sessions on the detention bench. The 3D canvas needs WebGL (headless Chromium may
-// or may not have it), so every assertion goes through the accessible
-// companion list, which exists in both modes: a visible list in List view /
-// without WebGL, a keyboard-reachable one in 3D view. Kick-out = delete via
+// as kids, archived sessions on the detention bench. These journeys start in
+// List view; desktop-home-classrooms-3d.spec.ts covers the real canvas and
+// switching between 3D and List views. Kick-out = delete via
 // the app's delete path, behind a danger confirm.
 
 test.describe.configure({ mode: 'serial' });
@@ -31,7 +30,7 @@ async function boot(page: Page): Promise<void> {
     // One space holding just the Classrooms widget.
     localStorage.setItem(
       'otto_home_views',
-      JSON.stringify([{ id: 'v1', name: 'Campus', boxes: [{ id: 'cr1', kind: 'classrooms', w: 12, h: 6, config: {} }] }]),
+      JSON.stringify([{ id: 'v1', name: 'Campus', boxes: [{ id: 'cr1', kind: 'classrooms', w: 12, h: 6, config: { view: 'list' } }] }]),
     );
   }, wsId);
   await page.goto('/#/home');
@@ -44,24 +43,10 @@ const list = (page: Page) => box(page).getByRole('region', { name: 'School list'
  *  same titles ("E2E Shell") in their own workspaces. */
 const ours = (page: Page) => list(page).getByRole('region', { name: `Classroom ${WS_NAME}`, exact: true });
 
-/** Show the visible list (List view) — a no-op without WebGL (already a list). */
+/** Verify the configured list is rendered before exercising its controls. */
 async function listView(page: Page): Promise<void> {
-  const toggle = box(page).getByRole('button', { name: 'List', exact: true });
-  // Decide only once the box has SETTLED (3D stage or a real list): an
-  // instant `toggle.count()` before the box mounts read 0, skipped the
-  // switch, and the hover then hit the 3D overlay (S12-304, classrooms:100).
-  await expect(box(page).locator('.stage, .list:not(.sr-only)').first()).toBeVisible({ timeout: 30_000 });
-  if (await toggle.count()) {
-    // Wait for the switch to TAKE: the 3D view keeps the same list as an
-    // sr-only companion (still "visible" to Playwright) under the box's bar,
-    // so a click lost to the first paint would leave every row unhoverable.
-    await expect(async () => {
-      if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
-      await expect(toggle).toHaveAttribute('aria-pressed', 'true', { timeout: 3_000 });
-      await expect(list(page)).not.toHaveClass(/sr-only/, { timeout: 1_000 });
-    }).toPass({ timeout: 30_000 }); // a busy shared daemon lists many classrooms
-  }
   await expect(list(page)).toBeVisible();
+  await expect(list(page)).not.toHaveClass(/sr-only/);
 }
 
 test.beforeAll(async () => {

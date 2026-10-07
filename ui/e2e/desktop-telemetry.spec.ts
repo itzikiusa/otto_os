@@ -76,7 +76,7 @@ test('authenticated configuration, bounded ingestion and opt-out reject unsafe i
 });
 
 test('actual browser → server → collector → ClickHouse trace and opt-out', async ({ page }, info) => {
-  test.setTimeout(180_000);
+  test.setTimeout(300_000);
   const { ctx, base } = await apiCtx();
   const saved = await ctx.put(`${base}/api/v1/telemetry/config`, { data: { ...original, enabled: true } });
   expect(saved.ok()).toBeTruthy();
@@ -86,6 +86,27 @@ test('actual browser → server → collector → ClickHouse trace and opt-out',
     const module = await import(/* @vite-ignore */ String('/src/lib/telemetry.ts'));
     return module.telemetryState().enabled;
   })).toBe(true);
+  // Check the real producer's HTTP result independently of delayed storage.
+  // Retain only counts/status here, never request headers or response content.
+  const ingestions: { status: number; submitted: number; accepted: number }[] = [];
+  const pendingIngestions: Promise<void>[] = [];
+  page.on('response', (response) => {
+    if (!response.url().endsWith('/api/v1/telemetry/ingest')) return;
+    const submitted = response.request().postDataJSON().spans.length as number;
+    pendingIngestions.push(response.json().then((body: { accepted?: number }) => {
+      ingestions.push({ status: response.status(), submitted, accepted: body.accepted ?? -1 });
+    }).catch(() => {
+      ingestions.push({ status: response.status(), submitted, accepted: -1 });
+    }));
+  });
+  const assertAccepted = async () => {
+    await Promise.all(pendingIngestions);
+    expect(ingestions.length).toBeGreaterThan(0);
+    for (const batch of ingestions) {
+      expect(batch.status, 'browser telemetry HTTP status').toBe(200);
+      expect(batch.accepted, 'whole browser batch accepted').toBe(batch.submitted);
+    }
+  };
   const traceIds = new Set<string>();
   page.on('request', (request) => {
     const header = request.headers()['traceparent'];
@@ -96,6 +117,11 @@ test('actual browser → server → collector → ClickHouse trace and opt-out',
     router.go('git');
   });
   await expect.poll(() => page.evaluate(async () => (await import(/* @vite-ignore */ String('/src/lib/router.svelte.ts'))).router.module)).toBe('git');
+  await page.evaluate(async () => (await import(/* @vite-ignore */ String('/src/lib/telemetry.ts'))).flushTelemetry());
+  await expect.poll(() => ingestions.length).toBeGreaterThan(0);
+  await assertAccepted();
+  // Startup already completed an export above. Trace reads preserve the
+  // production 120 s refresh throttle; allow that plus startup/drain time.
   await expect.poll(async () => {
     await page.evaluate(async () => (await import(/* @vite-ignore */ String('/src/lib/telemetry.ts'))).flushTelemetry());
     for (const id of traceIds) {
@@ -107,7 +133,9 @@ test('actual browser → server → collector → ClickHouse trace and opt-out',
       if (navigation && render?.parent_span_id === navigation.span_id && client && server) return true;
     }
     return false;
-  }, { timeout: 30_000 }).toBe(true);
+  }, { timeout: 160_000, intervals: [1000, 3000, 5000] }).toBe(true);
+  await assertAccepted();
+  await info.attach('browser-ingestion', { body: JSON.stringify(ingestions), contentType: 'application/json' });
   await page.goto('/#/usage');
   await page.getByRole('tab', { name: 'Otto usage', exact: true }).click();
   await expect(page.getByText('Collecting locally', { exact: true })).toBeVisible();
@@ -134,3 +162,51 @@ test('actual browser → server → collector → ClickHouse trace and opt-out',
   await expect.poll(async () => (await (await ctx.get(`${base}/api/v1/telemetry/status`)).json()).collector_ready).toBe(false);
   await ctx.dispose();
 });
+
+for (const scenario of ['empty', 'retry', 'close-pending'] as const) {
+  test(`trace detail ${scenario} state`, async ({ page }, info) => {
+    const traceId = 'a'.repeat(32);
+    await page.route('**/api/v1/telemetry/overview?*', (route) => route.fulfill({ json: {
+      operations: [{ component: 'git', name: 'http.server', count: 2, p50_ms: 1, p95_ms: 3, max_ms: 4, errors: 0, trace_id: traceId }], resources: [],
+    } }));
+    let calls = 0;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(`**/api/v1/telemetry/traces/${traceId}`, async (route) => {
+      calls++;
+      if (scenario === 'empty') return route.fulfill({ json: [] });
+      if (calls === 1) return route.fulfill({ status: 503, json: { message: 'Fixture trace unavailable' } });
+      if (scenario === 'close-pending') await pending;
+      await route.fulfill({ json: [{ trace_id: traceId, span_id: 'b'.repeat(16), parent_span_id: null, name: 'http.server', component: 'git', duration_ms: 3, status: 'ok' }] });
+    });
+    await page.goto('/#/usage');
+    await page.getByRole('tab', { name: 'Otto usage', exact: true }).click();
+    await page.getByRole('button', { name: 'Trace', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Trace detail', exact: true });
+    if (scenario === 'empty') {
+      await expect(dialog).toContainText('This trace has expired or has not reached local storage yet.');
+      for (const scheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.screenshot({ path: info.outputPath(`trace-empty-${scheme}.png`), animations: 'disabled' });
+      }
+      return;
+    }
+    await expect(dialog).toContainText('Fixture trace unavailable');
+    await dialog.getByRole('button', { name: 'Retry', exact: true }).click();
+    if (scenario === 'retry') {
+      await expect(dialog.locator('.trace-list')).toContainText('http.server');
+    } else {
+      await expect.poll(() => calls).toBe(2);
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      const response = page.waitForResponse((response) => response.url().endsWith(`/telemetry/traces/${traceId}`) && response.status() === 200);
+      release();
+      await (await response).finished();
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await expect(dialog).toHaveCount(0);
+      await page.getByRole('button', { name: 'Trace', exact: true }).click();
+      await expect(dialog.locator('.trace-list')).toContainText('http.server');
+    }
+    expect(calls).toBe(scenario === 'retry' ? 2 : 3);
+  });
+}

@@ -22,11 +22,33 @@
       .join('');
   }
 
+  // In-memory account-owned drafts outlive the rendered view. Nothing is stored
+  // in browser persistence; switching projects preserves each status map too.
+  const drafts = new Map();
+  let captureActive = () => {};
   TP.views.settings = {
+    capture() { captureActive(); captureActive = () => {}; },
     render(host, { app }) {
       const first = app.selected[0] || '';
+      const account = app.account;
+      const draft = drafts.get(account) || { controls: {}, timeOff: {}, workers: null, revision: 0, saving: false };
+      // app.render captures the outgoing form synchronously before this call.
+      // Retire a saved baseline only here: post-save people/metrics refreshes
+      // await I/O while the old form is still editable. Keep the same object
+      // so the save's finally block still owns its saving flag.
+      if (draft.acknowledgedRevision === draft.revision) {
+        draft.controls = {};
+        draft.timeOff = {};
+        draft.workers = null;
+        delete draft.acknowledgedRevision;
+      }
+      drafts.set(account, draft);
       let config, peopleResp, repos, statuses;
       let people = {};
+      const workerRow = (w) => `<div class="form-grid wk-row">
+              <label class="field"><span>Provider</span><select class="wk-provider">${app.providers.map((p) => `<option ${w.provider === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
+              <label class="field"><span>Model (optional)</span><input type="text" class="wk-model" value="${esc(w.model || '')}"></label>
+              <span><button type="button" class="compact wk-del" aria-label="Remove worker" title="Remove worker">${icon('x')}Remove</button></span></div>`;
       section(host, {
         title: 'Settings',
         sub: 'Status-map, workweek, timezone and people edits recompute instantly from stored data — no rescan needed.',
@@ -34,11 +56,12 @@
         load: async () => {
           [config, peopleResp, repos, statuses] = await Promise.all([
             api('/config'),
-            api(`/people?account=${encodeURIComponent(app.account)}`),
+            api(`/people?account=${encodeURIComponent(account)}`),
             api('/repos').catch(() => []),
-            first ? api(`/statuses?account=${encodeURIComponent(app.account)}&project=${encodeURIComponent(first)}`).catch(() => []) : Promise.resolve([]),
+            first ? api(`/statuses?account=${encodeURIComponent(account)}&project=${encodeURIComponent(first)}`).catch(() => []) : Promise.resolve([]),
           ]);
           people = JSON.parse(JSON.stringify(peopleResp.people || {}));
+          for (const [id, list] of Object.entries(draft.timeOff)) if (people[id]) people[id].time_off = JSON.parse(JSON.stringify(list));
           const patterns = config.deploy_tag_patterns || (config.deploy_tag_pattern ? [config.deploy_tag_pattern] : ['deployed', 'hf', 'hotfix']);
           const tz = config.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
           const roleOpts = (sel) => ['', ...(config.roles || [])].map((r) => `<option value="${esc(r)}" ${r === sel ? 'selected' : ''}>${r ? esc(r) : 'No role'}</option>`).join('');
@@ -61,10 +84,6 @@
           const unmatched = (peopleResp.unmatched_authors || []).slice(0, 15).map((u) => TP.badge('warning', `${u.who} ×${u.commits}`)).join(' ');
           const featSet = new Set(config.feature_repos || []);
           const map = (config.status_map || {})[first] || {};
-          const workerRow = (w) => `<div class="form-grid wk-row">
-              <label class="field"><span>Provider</span><select class="wk-provider">${app.providers.map((p) => `<option ${w.provider === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
-              <label class="field"><span>Model (optional)</span><input type="text" class="wk-model" value="${esc(w.model || '')}"></label>
-              <span><button type="button" class="compact wk-del" aria-label="Remove worker" title="Remove worker">${icon('x')}Remove</button></span></div>`;
           const tzs = timeZones();
           return `
             <fieldset><legend>Deployments and time</legend><div class="form-grid">
@@ -130,6 +149,32 @@
             <div class="form-actions"><button type="button" class="primary" id="save-config">Save settings</button></div>`;
         },
         after(body, rerun) {
+          if (!body.isConnected || app.account !== account) return;
+          const key = (el) => el.classList.contains('st-map') ? `status:${first}:${el.dataset.status}`
+            : el.classList.contains('fr-cb') ? `repo:${el.value}` : el.id;
+          if (draft.workers) body.querySelector('#workers').innerHTML = draft.workers.map(workerRow).join('');
+          for (const el of body.querySelectorAll('input, select, textarea')) {
+            const k = key(el);
+            if (!k || !Object.hasOwn(draft.controls, k)) continue;
+            if (el.type === 'checkbox') el.checked = draft.controls[k];
+            else el.value = draft.controls[k];
+          }
+          const capture = () => {
+            if (drafts.get(account) !== draft || !body.isConnected || !body.querySelector('#save-config')) return;
+            const before = JSON.stringify([draft.controls, draft.timeOff, draft.workers]);
+            for (const el of body.querySelectorAll('input, select, textarea')) {
+              const k = key(el);
+              if (k) draft.controls[k] = el.type === 'checkbox' ? el.checked : el.value;
+            }
+            draft.timeOff = Object.fromEntries(Object.entries(people).map(([id, p]) => [id, JSON.parse(JSON.stringify(p.time_off || []))]));
+            draft.workers = [...body.querySelectorAll('.wk-row')].map((r) => ({ provider: r.querySelector('.wk-provider').value, model: r.querySelector('.wk-model').value }));
+            if (before !== JSON.stringify([draft.controls, draft.timeOff, draft.workers])) draft.revision++;
+          };
+          captureActive = capture;
+          body.oninput = capture;
+          body.onchange = capture;
+          body.querySelector('#save-config').disabled = draft.saving;
+          body.querySelector('#sum-wrap').hidden = body.querySelector('#cfg-est-mode').value !== 'consensus';
           // Deep link from another view (e.g. DORA "not available" → deploy tags).
           if (app.settingsFocus) {
             const target = body.querySelector('#' + app.settingsFocus);
@@ -159,26 +204,31 @@
               row.querySelector('.off-from').value = '';
               row.querySelector('.off-to').value = '';
               paintChips(pid);
+              capture();
             } else if (del) {
               const [pid, i] = del.dataset.offDel.split(':');
               people[pid].time_off.splice(+i, 1);
               paintChips(pid);
+              capture();
             }
           });
           body._offWired = true;
           q('#cfg-est-mode').onchange = (e) => (q('#sum-wrap').hidden = e.target.value !== 'consensus');
-          const wireDel = () => body.querySelectorAll('.wk-del').forEach((b) => (b.onclick = () => b.closest('.wk-row').remove()));
+          const wireDel = () => body.querySelectorAll('.wk-del').forEach((b) => (b.onclick = () => { b.closest('.wk-row').remove(); capture(); }));
           wireDel();
           q('#wk-add').onclick = () => {
             q('#workers').insertAdjacentHTML('beforeend', `<div class="form-grid wk-row"><label class="field"><span>Provider</span><select class="wk-provider">${app.providers.map((p) => `<option>${esc(p)}</option>`).join('')}</select></label><label class="field"><span>Model (optional)</span><input type="text" class="wk-model"></label><span><button type="button" class="compact wk-del" aria-label="Remove worker" title="Remove worker">${icon('x')}Remove</button></span></div>`);
             wireDel();
+            capture();
           };
           const seed = q('#pp-seed');
           if (seed)
             seed.onclick = async () => {
               try {
-                const r = await post('/people/seed', { account: app.account, project: first });
+                const r = await post('/people/seed', { account, project: first });
                 toast(`${r.added} people added from Jira.`, 'success');
+                capture();
+                if (app.account !== account || !body.isConnected) return;
                 await app.refreshPeople();
                 rerun();
               } catch (e) {
@@ -186,6 +236,9 @@
               }
             };
           q('#save-config').onclick = async () => {
+            if (draft.saving) return;
+            capture();
+            const submittedRevision = draft.revision;
             const pp = {};
             body.querySelectorAll('tr[data-pid]').forEach((tr) => {
               const id = tr.dataset.pid;
@@ -194,7 +247,7 @@
                 role: tr.querySelector('.pp-role').value,
                 aliases: tr.querySelector('.pp-alias').value.split(',').map((x) => x.trim()).filter(Boolean),
                 merged_into: tr.querySelector('.pp-merge').value || null,
-                time_off: people[id].time_off || [],
+                time_off: JSON.parse(JSON.stringify(people[id].time_off || [])),
               };
             });
             const merges = Object.entries(pp).filter(([id, p]) => p.merged_into && p.merged_into !== (peopleResp.people[id] || {}).merged_into);
@@ -204,9 +257,13 @@
                 message: `${merges.length} account${merges.length > 1 ? 's' : ''} will be folded into another person: their history is credited to that person everywhere. You can undo it later by choosing “Separate person”.`,
                 confirmLabel: 'Merge and save',
               });
-              if (!ok) return;
+              if (!ok || app.account !== account || !body.isConnected) return;
             }
-            const status_map = { ...(config.status_map || {}) };
+            const status_map = JSON.parse(JSON.stringify(config.status_map || {}));
+            for (const [key, value] of Object.entries(draft.controls)) {
+              const match = /^status:([^:]+):(.*)$/.exec(key);
+              if (match) (status_map[match[1]] ||= {})[match[2]] = value;
+            }
             const pm = {};
             body.querySelectorAll('.st-map').forEach((s) => (pm[s.dataset.status] = s.value));
             if (first && Object.keys(pm).length) status_map[first] = pm;
@@ -245,19 +302,30 @@
               status_map,
             };
             const btn = q('#save-config');
+            draft.saving = true;
             btn.disabled = true;
             try {
-              if (Object.keys(pp).length) await put('/people', { account: app.account, people: pp });
+              if (Object.keys(pp).length) await put('/people', { account, people: pp });
               const saved = await put('/config', cfg);
+              // A completion only acknowledges the submitted revision. Newer
+              // edits, even in a remounted form, remain this account's draft.
+              capture();
+              draft.acknowledgedRevision = submittedRevision;
+              if (app.account !== account) return;
               app.config = saved;
               if (saved.hours_per_day) TP.state.hpd = saved.hours_per_day;
               toast('Settings saved — metrics recomputed.', 'success');
               await app.refreshPeople();
-              await app.refresh();
+              if (app.account === account) await app.refresh();
             } catch (e) {
               toast(`Couldn’t save settings: ${e.message}`, 'danger');
             } finally {
+              draft.saving = false;
               btn.disabled = false;
+              if (app.account === account) {
+                const visibleSave = document.querySelector('#save-config');
+                if (visibleSave) visibleSave.disabled = false;
+              }
             }
           };
         },

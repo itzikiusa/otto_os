@@ -36,7 +36,6 @@
     "src/lib/leaveGuard.ts": 1,
     "src/lib/stores/workspace.svelte.ts": 1,
     "src/modules/agents/WorkQueue.svelte": 1,
-    "src/modules/api/EnvironmentsView.svelte": 1,
     "src/modules/assistant/cards/TaskCard.svelte": 1,
     "src/modules/aws/AwsPage.svelte": 1,
     "src/modules/aws/LogsView.svelte": 1,

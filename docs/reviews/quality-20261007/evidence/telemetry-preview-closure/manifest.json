@@ -1,0 +1,47 @@
+[
+  {
+    "file": "telemetry-active-dark.png",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window/desktop-telemetry-actual-b-13257-lickHouse-trace-and-opt-out-desktop-browser/telemetry-active-dark.png",
+    "sha256": "f4e6e01a6bc95d29a46e70b68f645b0dd08ef8fa703e5f90a1469e1e3b9d85af"
+  },
+  {
+    "file": "telemetry-active-light.png",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window/desktop-telemetry-actual-b-13257-lickHouse-trace-and-opt-out-desktop-browser/telemetry-active-light.png",
+    "sha256": "fdcb12985ee1d70c8ea1483fdab9ed5c5322e98ac27c71348fa32e9dc1c9601c"
+  },
+  {
+    "file": "telemetry-dark.png",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window/desktop-telemetry-opt-in-s-4ae2b-responsive-light-dark-views-desktop-browser/telemetry-dark.png",
+    "sha256": "3ba100a8ee365794dc1cfbfaca5ff517e7b9fa21cc8bb0b08b16316f9f27f1e0"
+  },
+  {
+    "file": "telemetry-light.png",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window/desktop-telemetry-opt-in-s-4ae2b-responsive-light-dark-views-desktop-browser/telemetry-light.png",
+    "sha256": "644015209f5048fa46c02f3c1e41019703867e2861221303e1cd2ea673ce01a0"
+  },
+  {
+    "file": "telemetry-phone.png",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window/desktop-telemetry-opt-in-s-4ae2b-responsive-light-dark-views-desktop-browser/telemetry-phone.png",
+    "sha256": "4875d5735e85e7e14eb661c921eb886af12b06b80b03a13e548f154bec9a6d97"
+  },
+  {
+    "file": "trace-empty-dark.png",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window/desktop-telemetry-trace-detail-empty-state-desktop-browser/trace-empty-dark.png",
+    "sha256": "357aa5b0f12141db07369d7f9e751fd2ca9430e7f0d4fe7991ff973d626964ad"
+  },
+  {
+    "file": "trace-empty-light.png",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window/desktop-telemetry-trace-detail-empty-state-desktop-browser/trace-empty-light.png",
+    "sha256": "0af95babb1402a53df038e22d30f5fec7d57c3f784994dd170f20a3af469bedc"
+  },
+  {
+    "file": "design-hall-saved-preview-warm-dark.png",
+    "source": "/tmp/otto-ux-r4-content-design-warm-dark-desktop-browser.png",
+    "sha256": "1c2f1b1050b90fc60e1ab1a35eeb84b60834a018f3cf39e60d0f52b1cd77a4f5"
+  },
+  {
+    "file": "otto-quality-20261007-telemetry-export-window.log",
+    "source": "/tmp/otto-quality-20261007-telemetry-export-window.log",
+    "sha256": "feaba901f50c30673c4b7403bb95f0e3e61242a467396a92af74c7a53ccadae6"
+  }
+]

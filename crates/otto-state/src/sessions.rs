@@ -8,6 +8,10 @@ use sqlx::Row;
 
 use crate::convert::{dberr, fmt, json, ts};
 
+const AUTO_ARCHIVE_CANDIDATES_SQL: &str =
+    "SELECT id FROM sessions WHERE archived=0 AND kind='agent' AND id>? \
+     AND last_active_at<? ORDER BY id LIMIT ?";
+
 #[derive(Clone)]
 pub struct SessionsRepo {
     pool: DbPool,
@@ -479,6 +483,25 @@ impl SessionsRepo {
             .await
             .map_err(dberr("all sessions"))?;
         rows.iter().map(row_to_session).collect()
+    }
+
+    /// Bounded IDs-only sweep of unarchived, old agent sessions across workspaces.
+    /// ID keysets remain valid when archiving updates a row's last-active time.
+    /// Pinned/live/attached eligibility must still be checked under the manager's
+    /// resume lock; advance the cursor even when a candidate is skipped.
+    pub async fn auto_archive_candidate_ids(
+        &self,
+        cutoff: chrono::DateTime<Utc>,
+        after_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Id>> {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(AUTO_ARCHIVE_CANDIDATES_SQL))
+            .bind(after_id)
+            .bind(fmt(cutoff))
+            .bind(limit.clamp(1, 256) as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("auto-archive candidate ids"))
     }
 
     /// Sessions that should be revived or marked reconnectable on daemon boot.
@@ -1097,6 +1120,89 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    #[tokio::test]
+    async fn quality_auto_archive_pages_are_bounded_complete_and_covering() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let cutoff = "2026-10-01T00:00:00Z".parse().unwrap();
+        let mut expected = Vec::new();
+        for i in 0..280 {
+            let archived = i < 260;
+            let recent = i == 279;
+            let id = insert_session(
+                &pool,
+                &ws,
+                &user,
+                if recent {
+                    "2026-10-02T00:00:00Z"
+                } else {
+                    "2000-01-01T00:00:00Z"
+                },
+                if archived {
+                    "{\"large_history\":\"irrelevant\"}"
+                } else {
+                    "{}"
+                },
+                archived as i64,
+            )
+            .await;
+            if i == 278 {
+                sqlx::query("UPDATE sessions SET kind='connection' WHERE id=?")
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            } else if !archived && !recent {
+                expected.push(id);
+            }
+        }
+        expected.sort();
+        let mut actual = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let page = repo
+                .auto_archive_candidate_ids(cutoff, &cursor, 3)
+                .await
+                .unwrap();
+            assert!(page.len() <= 3);
+            let Some(last) = page.last() else {
+                break;
+            };
+            cursor.clone_from(last);
+            // Simulate archival mutating rows between pages: ID keysets must
+            // neither skip eligible rows nor repeat rows that were not archived.
+            repo.set_archived(&page[0], true).await.unwrap();
+            actual.extend(page);
+        }
+        assert_eq!(actual, expected);
+        let sql = format!("EXPLAIN QUERY PLAN {AUTO_ARCHIVE_CANDIDATES_SQL}");
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind("")
+            .bind(fmt(cutoff))
+            .bind(128i64)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let plan = rows
+            .iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        assert!(
+            plan.contains("COVERING INDEX idx_sessions_auto_archive"),
+            "{plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        assert_eq!(
+            repo.auto_archive_candidate_ids(cutoff, "", 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// S4-304: only non-archived sessions under the prefix (as a directory,

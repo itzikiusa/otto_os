@@ -1,0 +1,48 @@
+{
+  "purpose": "Read-only attribution proof during interrupted rendered WebKit run; not capacity evidence",
+  "date": "2026-10-07",
+  "method": "ps pid/ppid/lstart/rss/comm plus libproc proc_pidinfo flavor 20, five uint64 buffer, resource coalition index 0",
+  "owned_browser_root_pid": 43215,
+  "driver_pid": 43209,
+  "engine_distribution": "ms-playwright/webkit-2359",
+  "rows": [
+    {
+      "pid": 43215,
+      "parent": 43209,
+      "start": "Wed Oct 7 12:50:36 2026",
+      "executable": "Playwright.app/Contents/MacOS/Playwright",
+      "rss_kib": 121744,
+      "resource_coalition": 431541
+    },
+    {
+      "pid": 43231,
+      "parent": 1,
+      "start": "Wed Oct 7 12:50:36 2026",
+      "executable": "com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking.Development",
+      "rss_kib": 52272,
+      "resource_coalition": 431541
+    },
+    {
+      "pid": 43232,
+      "parent": 1,
+      "start": "Wed Oct 7 12:50:36 2026",
+      "executable": "com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU.Development",
+      "rss_kib": 87264,
+      "resource_coalition": 431541
+    },
+    {
+      "pid": 43235,
+      "parent": 1,
+      "start": "Wed Oct 7 12:50:37 2026",
+      "executable": "com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent.Development",
+      "rss_kib": 213728,
+      "resource_coalition": 431541
+    }
+  ],
+  "ancestry_omitted_rss_mib": 344.984375,
+  "limitations": [
+    "Single process snapshot; no CPU or duration inference.",
+    "Interrupted run excluded from capacity scoring.",
+    "Parent collected process paths/RSS; reviewer directly verified matching coalition IDs while processes were alive."
+  ]
+}

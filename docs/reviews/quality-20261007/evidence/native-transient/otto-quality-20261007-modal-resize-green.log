@@ -1,0 +1,14 @@
+[WebServer] (node:33005) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-BvQ0gK OTTO_PORT=7897
+2026-10-07T10:54:14.935223Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-BvQ0gK/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 33009); root onboarded.
+
+Running 1 test using 1 worker
+
+(node:33083) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts (2.1s)
+
+  1 passed (3.7s)

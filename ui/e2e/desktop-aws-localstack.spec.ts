@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -353,10 +353,18 @@ test('account card shows the LocalStack identity, the endpoint, and green S3/SQS
   // `sts get-caller-identity` against LocalStack → the fixed dev account.
   await expect(card).toContainText('000000000000', { timeout: 20_000 });
   const chip = (label: string) => card.locator('a.chip', { hasText: new RegExp(`^\\s*${label}\\s*$`) });
-  for (const s of ['S3', 'SQS', 'EC2']) await expect(chip(s)).toHaveClass(/\ballowed\b/, { timeout: 30_000 });
+  for (const s of ['S3', 'SQS', 'EC2']) {
+    await expect(chip(s)).toHaveClass(/\bok\b/, { timeout: 30_000 });
+    await expect(chip(s)).toHaveAttribute('aria-disabled', 'false');
+    await expect(chip(s)).toHaveAttribute('href', `#/aws/${env.accountId}/${s.toLowerCase()}`);
+    await expect(chip(s)).toHaveAttribute('title', s);
+  }
   // Athena / EKS are not in SERVICES — LocalStack answers with a non-IAM
   // error, so they must NOT be green (denied or unknown are both fine).
-  for (const s of ['Athena', 'EKS']) await expect(chip(s)).not.toHaveClass(/\ballowed\b/);
+  for (const s of ['Athena', 'EKS']) {
+    await expect(chip(s)).not.toHaveClass(/\bok\b/);
+    await expect(chip(s)).toHaveClass(/\bperm-(denied|unknown)\b/);
+  }
   expect(realErrors(errors), `console errors: ${errors.join('\n')}`).toEqual([]);
 });
 
@@ -395,15 +403,18 @@ test('S3: bucket → folder first → JSON preview → download matches the seed
   expect(dlJson.suggestedFilename()).toBe('config.json');
   expect(statSync((await dlJson.path()) as string).size).toBe(Buffer.byteLength(JSON_BODY));
 
-  // And the binary object: preview says binary, download is byte-exact.
+  // Binary objects show their unsupported media type; the preview's fallback
+  // download remains usable and preserves every byte.
   const binRow = page.locator('tr.trow', { hasText: 'blob.bin' });
   await binRow.click();
-  await expect(drawer).toContainText(/Binary content/, { timeout: 20_000 });
+  const binaryPreview = drawer.locator('.pv-note');
+  await expect(binaryPreview).toContainText('No preview for this type (application/octet-stream).', { timeout: 20_000 });
   const [dlBin] = await Promise.all([
     page.waitForEvent('download', { timeout: 30_000 }),
-    drawer.getByRole('button', { name: /Download/ }).click(),
+    binaryPreview.getByRole('button', { name: 'Download', exact: true }).click(),
   ]);
-  expect(statSync((await dlBin.path()) as string).size).toBe(BIN_BODY.length);
+  expect(dlBin.suggestedFilename()).toBe('blob.bin');
+  expect(readFileSync((await dlBin.path()) as string)).toEqual(BIN_BODY);
   expect(realErrors(errors), `console errors: ${errors.join('\n')}`).toEqual([]);
 });
 
@@ -428,6 +439,10 @@ test('SQS: count 3 → peek 3 bodies → send → 4 → purge (typed) → 0', as
   await page.getByRole('tab', { name: 'Send' }).click();
   await page.locator('.form textarea').fill(JSON.stringify({ n: 4, kind: 'ui' }));
   await page.getByRole('button', { name: 'Send message' }).click();
+  const sendDialog = page.getByRole('dialog', { name: 'Send message?', exact: true });
+  await expect(sendDialog).toContainText(QUEUE);
+  await expect(sendDialog).toContainText(JSON.stringify({ n: 4, kind: 'ui' }));
+  await sendDialog.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.getByText('Message sent')).toBeVisible({ timeout: 15_000 });
   await pollWithRefresh(page, 'Refresh', () => counts.innerText(), /^4 avail/);
 

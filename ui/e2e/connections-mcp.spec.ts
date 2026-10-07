@@ -16,7 +16,7 @@
 import { test, expect } from '@playwright/test';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as readline from 'node:readline';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedRedis } from './seed';
@@ -137,20 +137,38 @@ test('Connections MCP: real otto MCP server queries a live DB read-only', async 
   expect(sessRes.ok(), `create session → ${sessRes.status()} ${await sessRes.text()}`).toBeTruthy();
 
   // ---- (1) the otto server is attached to the session ----------------------
-  // The .mcp.json is written synchronously during session create.
+  // Shared configuration is identity-neutral; the PTY inherits its own credentials.
   const mcpDoc = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf8')) as {
     mcpServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
   };
   const otto = mcpDoc.mcpServers?.otto;
   expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
   expect(otto!.args).toEqual(['mcp-tools']);
-  expect(otto!.env?.OTTO_MCP_TOKEN, 'otto env must carry a per-session token').toBeTruthy();
-  expect(otto!.env?.OTTO_WORKSPACE_ID).toBe(wsId);
+  expect(otto!.env, 'shared workspace config must never persist session credentials').toBeUndefined();
+  const sessionId = (await sessRes.json()).id as string;
+  const tokenFile = join(root, '.fixture-session-token');
+  let token = '';
+  try {
+    const capture = await ctx.post(`${base}/api/v1/sessions/${sessionId}/input`, {
+      data: { text: `umask 077; printf '%s' "$OTTO_MCP_TOKEN" > '${tokenFile}'`, submit: true },
+    });
+    expect(capture.ok()).toBeTruthy();
+    await expect.poll(() => existsSync(tokenFile) && readFileSync(tokenFile, 'utf8').length > 0).toBeTruthy();
+    token = readFileSync(tokenFile, 'utf8');
+  } finally {
+    if (existsSync(tokenFile)) unlinkSync(tokenFile);
+  }
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('OTTO_')));
 
   // ---- (2)+(3) drive the REAL mcp-tools server over stdio ------------------
   const mcp = new McpStdio(otto!.command, otto!.args, {
-    ...process.env,
-    ...otto!.env,
+    ...inherited,
+    OTTO_MCP_TOKEN: token,
+    OTTO_MCP_BASE: base,
+    OTTO_SESSION_ID: sessionId,
+    OTTO_WORKSPACE_ID: wsId,
+    OTTO_SECRETS: 'file',
+    OTTO_SECRETS_ALLOW_PLAINTEXT: '1',
     // Point audit at the test DB, never the user's real data dir.
     OTTO_DATA_DIR: dataDir,
   });

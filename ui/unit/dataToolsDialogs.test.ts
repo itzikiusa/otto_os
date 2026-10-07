@@ -18,10 +18,13 @@ function component(path: string, state: Record<string, any>) {
     // Prop/rune state stays controlled by the fixture; no mocked alive flag.
     if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)) return node.expression.expression.getText(file) === 'onDestroy';
     return ts.isVariableStatement(node) && node.declarationList.declarations.every(d =>
-      d.initializer && [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NumericLiteral].includes(d.initializer.kind),
+      d.initializer && ([ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NumericLiteral].includes(d.initializer.kind)
+        // Keep explicitly controlled fields (such as the import cancel handle)
+        // on the fixture; initialize private pending-operation state for real.
+        || (d.initializer.kind === ts.SyntaxKind.NullKeyword && !Object.hasOwn(state, d.name.getText(file)))),
     );
   }).map(node => node.getText(file)).join('\n');
-  const context: Record<string, any> = { plural, pluralNoun, toastError: (message: string, cause: unknown) => { state.toasts?.error(message, cause); }, Error, DOMException, AbortController, onDestroy: (callback: () => void) => lifecycle.push(callback), destroy: () => { for (const callback of lifecycle) callback(); }, ws: { currentId: 'workspace-A' }, lsGet: () => null, lsSet: () => {}, LS_FORMAT: 'fmt', LS_DIR: 'dir', $state: { snapshot: (v: unknown) => structuredClone(v) }, ...state };
+  const context: Record<string, any> = { exports: {}, plural, pluralNoun, toastError: (message: string, cause: unknown) => { state.toasts?.error(message, cause); }, Error, DOMException, AbortController, onDestroy: (callback: () => void) => lifecycle.push(callback), destroy: () => { for (const callback of lifecycle) callback(); }, ws: { currentId: 'workspace-A' }, lsGet: () => null, lsSet: () => {}, LS_FORMAT: 'fmt', LS_DIR: 'dir', $state: { snapshot: (v: unknown) => structuredClone(v) }, ...state };
   runInNewContext(ts.transpileModule(functions, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return context;
 }
@@ -112,7 +115,7 @@ function environmentEditor(saveEnvironment: (...args: any[]) => Promise<any>) {
   const env = { id: 'A', name: 'A', variables: { base_url: 'before' }, secret_keys: [] };
   const c = component('../src/modules/api/EnvironmentsView.svelte', {
     selected: env, selectedId: 'A', loadedFor: null, rows: [], dirty: false, saving: false, canEdit: true,
-    apiClient: { saveEnvironment }, ws: { currentId: 'workspace-A' }, confirmer: { ask: async () => true },
+    apiClient: { saveEnvironment }, ws: { currentId: 'workspace-A' }, confirmer: { ask: async () => true, choose: async () => ({ value: 'discard' }) },
   });
   c.seed(env);
   return c;
@@ -349,9 +352,11 @@ test('database dialogs + page reach storage only through the guarded helpers (S1
   // A throwing accessor (blocked storage) broke the Database page at mount and
   // turned a finished import/export into "Couldn’t …" (skipping ondone/onclose).
   for (const f of ['ImportDialog.svelte', 'ExportDialog.svelte', 'DatabasePage.svelte']) {
+    // Whitespace preserves token boundaries; removing comments outright can
+    // accidentally construct tokens that were never in the source.
     const code = readFileSync(new URL(`../src/modules/database/${f}`, import.meta.url), 'utf8')
-      .replace(/\/\/[^\n]*/g, '')
-      .replace(/<!--[\s\S]*?-->/g, '');
+      .replace(/\/\/[^\n]*/g, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ');
     assert.doesNotMatch(code, /\blocalStorage\s*\./, f);
   }
 });

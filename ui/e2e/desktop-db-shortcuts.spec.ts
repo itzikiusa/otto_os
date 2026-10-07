@@ -1,4 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
+import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -11,6 +13,45 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 let workspaceId = '';
 let mysqlConn: string | null = null;
+const MYSQL_CONTAINER = process.env.OTTO_E2E_MYSQL_CONTAINER ?? 'otto-dbv-mysql';
+const MYSQL_ARGS = ['exec', '-i', MYSQL_CONTAINER, 'mysql', '-uotto', '-pottopw',
+  '--batch', '--skip-column-names', '--unbuffered', 'shopdb'];
+
+function mysql(sql: string): string {
+  return execFileSync('docker', MYSQL_ARGS, { input: sql, encoding: 'utf8', timeout: 10_000,
+    stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+}
+
+/** A private table lock makes an ordinary SELECT stay in flight under the
+ * current enforced policy, which deliberately refuses the SLEEP function. */
+async function withLockedTable(run: (table: string) => Promise<void>): Promise<void> {
+  const table = `e2e_cancel_${randomUUID().replaceAll('-', '')}`;
+  const locker = spawn('docker', MYSQL_ARGS, { stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = '';
+  let errors = '';
+  locker.stdout.on('data', (chunk) => { output += String(chunk); });
+  locker.stderr.on('data', (chunk) => { errors += String(chunk); });
+  const exited = new Promise<number | null>((resolve, reject) => {
+    locker.once('error', reject);
+    locker.once('close', resolve);
+  });
+  // Bound a lock even if the worker is interrupted. Only this fixture's unique
+  // table is locked; other specs' MySQL tables remain available.
+  locker.stdin.write(`SET SESSION wait_timeout = 30; CREATE TABLE ${table} (id INT); ` +
+    `LOCK TABLES ${table} WRITE; SELECT 'locked';\n`);
+  try {
+    await expect.poll(() => output, { message: 'Fixture acquired its private table lock' }).toContain('locked');
+    await run(table);
+  } finally {
+    locker.stdin.end(`UNLOCK TABLES; DROP TABLE IF EXISTS ${table};\n`);
+    const timer = setTimeout(() => locker.kill('SIGKILL'), 10_000);
+    try {
+      expect(await exited, errors).toBe(0);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
 
 test.beforeAll(async () => {
   test.setTimeout(120_000);
@@ -35,9 +76,9 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openMysql(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-mysql' });
-  await expect(conn.first()).toBeVisible({ timeout: 30_000 });
-  await conn.first().click();
+  const conn = page.locator(`.conn-row[data-connection-id="${mysqlConn}"] .conn-name`);
+  await expect(conn).toBeVisible({ timeout: 30_000 });
+  await conn.click();
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.query-editor')).toBeVisible({ timeout: 15_000 });
 }
@@ -98,23 +139,48 @@ test('⌥⌘→ / ⌥⌘← switch query tabs', async ({ page }) => {
   await expect(tabs.nth(1)).toHaveClass(/active/, { timeout: 5_000 });
 });
 
-test('running overlay shows during a slow query; Esc cancels it', async ({ page }) => {
+test('running status shows during a slow query; Esc cancels it', async ({ page }) => {
   test.skip(!mysqlConn, 'mysql docker not reachable');
   await openMysql(page);
-  await typeStatement(page, 'SELECT SLEEP(5)');
-  // Kick the run — the Run button flips to Stop while in flight.
-  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  // Delay delivery, not the daemon's outcome: Stop must retain the running
+  // request's server-side registration until native cancellation arrives.
+  await page.route(`**/connections/${mysqlConn}/db/cancel`, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.continue();
+  });
+  await withLockedTable(async (table) => {
+    const sql = `SELECT COUNT(*) FROM shopdb.${table}`;
+    await typeStatement(page, sql);
+    const queryRequest = page.waitForRequest((request) =>
+      request.url().endsWith(`/connections/${mysqlConn}/db/query`) && request.method() === 'POST');
+    await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+    const queryId = (await queryRequest).postDataJSON().query_id;
 
-  // The running overlay (dimmed grid + elapsed counter + Cancel) is visible.
-  await expect(page.locator('.rg-overlay')).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator('.rg-overlay-text')).toContainText(/Running…/);
+    // Observe the actual engine waiting on our lock before cancelling: a brief
+    // loading flash followed by a rejected query must not satisfy this test.
+    const waitingQueries = () => mysql(`SELECT COUNT(*) FROM information_schema.processlist ` +
+      `WHERE INFO LIKE '${sql}%' AND STATE LIKE '%lock%';`);
+    await expect.poll(waitingQueries, { timeout: 10_000 }).toBe('1');
+    const running = page.getByRole('status', { name: 'Running query', exact: true });
+    await expect(running).toBeVisible();
+    await expect(page.locator('.rg-overlay-text')).toContainText(/Running…/);
 
-  // Esc cancels the in-flight query (engine KILL + client abort) well before the
-  // 5s SLEEP would finish — the overlay clears and the Run button returns.
-  await page.locator('.qe-edit .cm-content').click();
-  await page.keyboard.press('Escape');
-  await expect(page.locator('.rg-overlay')).toHaveCount(0, { timeout: 8_000 });
-  await expect(page.locator('.btn.small.primary', { hasText: 'Run' }).first()).toBeVisible({
-    timeout: 8_000,
+    // The lock remains held until all assertions finish, so only cancellation
+    // can end this run. Check the server's native cancellation outcome too.
+    const cancelled = page.waitForResponse((response) =>
+      response.url().endsWith(`/connections/${mysqlConn}/db/cancel`) &&
+      response.request().method() === 'POST');
+    await page.locator('.qe-edit .cm-content').click();
+    await page.keyboard.press('Escape');
+    await expect(running).toHaveCount(0, { timeout: 8_000 });
+    const response = await cancelled;
+    expect(response.request().postDataJSON()).toMatchObject({ query_id: queryId });
+    expect(response.ok()).toBeTruthy();
+    expect(await response.json()).toMatchObject({ status: 'cancelled' });
+    await expect(running).toHaveCount(0, { timeout: 8_000 });
+    await expect.poll(waitingQueries).toBe('0');
+    await expect(page.locator('.btn.small.primary', { hasText: 'Run' }).first()).toBeVisible({
+      timeout: 8_000,
+    });
   });
 });

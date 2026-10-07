@@ -67,7 +67,7 @@ async function openConn(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-clickhouse' });
+  const conn = page.locator(`.conn-row[data-connection-id="${connId}"] .conn-name`);
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
@@ -107,7 +107,10 @@ async function runSql(page: Page, sql: string): Promise<void> {
   await expect(editor).toBeVisible({ timeout: 15_000 });
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    await editor.click();
+    // The autocomplete popup can cover the editor's centre on a phone. Focus
+    // the textbox directly, then dismiss it before replacing the statement.
+    await editor.focus();
+    await page.keyboard.press('Escape');
     await page.keyboard.press(await editorSelectAll(page));
     await page.keyboard.press('Backspace');
     // Dismiss any open autocomplete popup that could swallow keys.
@@ -119,7 +122,23 @@ async function runSql(page: Page, sql: string): Promise<void> {
   }
   // Close the autocomplete popup so it can't intercept the Run shortcut/click.
   await page.keyboard.press('Escape');
-  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  await expect(editor).toHaveText(sql, { useInnerText: true });
+  const completed = page.waitForResponse(response => {
+    const request = response.request();
+    return new URL(response.url()).pathname.endsWith(`/connections/${connId}/db/query`)
+      && request.method() === 'POST'
+      && request.postDataJSON()?.statement?.trim() === sql.trim();
+  });
+  const run = page.locator('.btn.small.primary', { hasText: 'Run' }).first();
+  await run.click();
+  const response = await completed;
+  expect(response.ok(), `query response for ${sql}`).toBeTruthy();
+  expect(await response.finished()).toBeNull();
+  // Existing rows remain mounted under the running overlay. Wait for THIS
+  // response and the Run control to replace Stop before inspecting those rows.
+  await expect(run).toBeVisible();
+  await expect(page.locator('.qe-stop')).toHaveCount(0);
+  await expect(page.locator('.rg-overlay')).toHaveCount(0);
 }
 
 // Wait until the grid shows ≥1 data row (a row-returning query landed).
@@ -196,10 +215,12 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
       'seedDockerConnection(clickhouse) returned null — the ClickHouse driver/daemon could not reach the seeded Docker ClickHouse (investigate the HTTP/TLS handling)',
     ).not.toBeNull();
     await openConn(page);
-    // The engine chip in the status row confirms the engine wired up.
-    await expect(page.locator('.cap-chip', { hasText: 'clickhouse' })).toBeVisible({
-      timeout: 15_000,
-    });
+    // Capabilities populate the chip even where compact CSS hides it. The
+    // selected connection tab supplies the visible, accessible identity.
+    await expect(page.locator('.cap-chip')).toHaveText('clickhouse', { timeout: 15_000 });
+    const active = page.getByRole('tablist', { name: 'Open connections' }).getByRole('tab', { name: 'e2e-clickhouse', exact: true });
+    await expect(active).toBeVisible();
+    await expect(active).toHaveAttribute('aria-selected', 'true');
   });
 
   // ── 2/3. READ: a narrow SELECT and a WIDE many-column SELECT ────────────────
@@ -233,6 +254,15 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
   }, testInfo) => {
     expect(connId, 'connection must be seeded').not.toBeNull();
     await openConn(page);
+
+    // A completion popup can cover the editor's centre on a phone. Keep one
+    // open to exercise replacing a statement without clicking through it.
+    await ensureEditorOpen(page);
+    const editor = page.locator('.qe-edit .cm-content');
+    await editor.focus();
+    await page.keyboard.type('SELECT * FROM analytics.', { delay: 4 });
+    await page.keyboard.press('Control+Space');
+    await expect(page.locator('.cm-tooltip-autocomplete')).toBeVisible();
 
     const tbl = `analytics.e2e_scratch_${scratchSuffix(testInfo.project.name)}`;
 
@@ -322,14 +352,21 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
       dims.clientH + 10,
     );
 
-    // Prove it actually scrolls (not just that it's overflowing).
-    await scroll.evaluate((el) => {
+    await scroll.evaluate(async el => {
       el.scrollLeft = el.scrollWidth;
       el.scrollTop = el.scrollHeight;
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
     });
-    const after = await scroll.evaluate((el) => ({ left: el.scrollLeft, top: el.scrollTop }));
+    const after = await scroll.evaluate(el => ({ left: el.scrollLeft, top: el.scrollTop }));
     expect(after.left, 'grid scrolled horizontally').toBeGreaterThan(0);
     expect(after.top, 'grid scrolled vertically').toBeGreaterThan(0);
+    // The final data row must survive the virtual window update, not merely
+    // flash into the DOM before the browser resets the scroll position.
+    const finalRow = scroll.locator('tbody .rownum-n').filter({ hasText: /^80$/ });
+    await expect(finalRow).toBeVisible();
+    await expect(finalRow).toBeInViewport({ ratio: 0.5 });
+    await expect.poll(() => scroll.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
   });
 
   // ── 7. schema tree usable in this orientation ───────────────────────────────

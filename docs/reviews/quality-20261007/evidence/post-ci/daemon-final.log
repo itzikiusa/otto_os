@@ -1,0 +1,9 @@
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-dbviewer)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-server)
+   Compiling ottod v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/ottod)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ottod` (bin "ottod") generated 1 warning
+    Finished `dev` profile [unoptimized] target(s) in 1m 53s

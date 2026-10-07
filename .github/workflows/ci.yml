@@ -141,8 +141,7 @@ jobs:
         # for cmake/libcurl, so drop the extras first.
         run: |
           sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
-          sudo apt-get install -y cmake libcurl4-openssl-dev
+          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
 
       # Blocking: the tree was formatted repo-wide once; keep it that way.
       - name: cargo fmt --check
@@ -244,6 +243,10 @@ jobs:
         working-directory: .
         run: python3 -B -m unittest discover -s scripts -p 'test_loc_ratchet.py'
 
+      - name: Test bounded CI dependency installation
+        working-directory: .
+        run: python3 -B -m unittest discover -s scripts -p 'test_ci_apt_install.py'
+
       - name: Install Node
         uses: actions/setup-node@v7.0.0
         with:
@@ -261,6 +264,15 @@ jobs:
       # Pure-module unit tests (node:test on Node 22's built-in type stripping; no extra dependency).
       - name: npm run test:unit
         run: npm run test:unit
+
+      - name: Install Chromium for the Team Performance plugin gate
+        run: npx playwright install --with-deps chromium
+
+      - name: Team Performance unit, server and browser regressions
+        working-directory: examples/plugins/team-performance
+        env:
+          OTTO_TP_REQUIRE_BROWSER: '1'
+        run: node --test --test-concurrency=1 test/*.test.js
 
       # Catches build-only breakage that type-checking alone misses.
       - name: npm run build
@@ -294,8 +306,7 @@ jobs:
       - name: Install librdkafka build deps
         run: |
           sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
-          sudo apt-get install -y cmake libcurl4-openssl-dev
+          sudo python3 scripts/ci-apt-install.py cmake libcurl4-openssl-dev
 
       - name: Build the test daemon
         run: cargo build -p ottod
@@ -415,13 +426,28 @@ jobs:
           docker compose -f dev/dbviewer/docker-compose.yml up -d
           docker compose -f dev/brokers/docker-compose.yml up -d
 
+      # The AWS spec reuses this container instead of creating/removing a
+      # Docker interface while another worker loads the UI. That churn caused
+      # Chromium ERR_NETWORK_CHANGED and failed app-module imports on Linux.
+      - name: Start LocalStack before browser workers
+        run: |
+          container=$(docker run -d --rm \
+            --name "otto-e2e-localstack-${OTTO_E2E_SLOT:-0}" \
+            -p 127.0.0.1:4566:4566 \
+            -e SERVICES=s3,sqs,sts,iam,ec2,logs \
+            -e SQS_ENDPOINT_STRATEGY=path \
+            -e LOCALSTACK_HOST=127.0.0.1:4566 \
+            --health-cmd "python3 -c 'import json,urllib.request; s=json.load(urllib.request.urlopen(\"http://127.0.0.1:4566/_localstack/health\", timeout=2))[\"services\"]; assert all(s.get(k) in (\"available\", \"running\") for k in (\"s3\", \"sqs\", \"sts\", \"iam\", \"ec2\", \"logs\"))'" \
+            --health-interval=5s --health-timeout=3s --health-retries=12 \
+            localstack/localstack:4.14.0)
+          echo "OTTO_CI_LOCALSTACK_ID=$container" >> "$GITHUB_ENV"
+
       # redis-server: the Connections/DB/ops specs spawn their own throwaway
       # Redis. ffmpeg: generates the synthetic tour film below.
       - name: Install redis-server + ffmpeg
         run: |
           sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
-          sudo apt-get install -y --no-install-recommends redis-server ffmpeg
+          sudo python3 scripts/ci-apt-install.py --no-install-recommends redis-server ffmpeg
           # The specs start their own instances; the distro service would
           # only hold :6379.
           sudo systemctl disable --now redis-server || true
@@ -499,8 +525,15 @@ jobs:
             sleep 5
           done
           docker ps --format '{{.Names}}  {{.Status}}'
+          # `docker ps` omits exited/auto-removed containers. Require the exact
+          # fixture we created, or the AWS spec could start a new one mid-run.
+          localstack_health=$(docker inspect --format '{{if .State.Running}}{{.State.Health.Status}}{{else}}stopped{{end}}' "$OTTO_CI_LOCALSTACK_ID")
+          if [ "$localstack_health" != "healthy" ]; then
+            echo "::error::The job-owned LocalStack fixture is not healthy"
+            exit 1
+          fi
           if [ "$unhealthy" != "0" ]; then
-            echo "::error::DB/Kafka stack never became healthy"
+            echo "::error::DB/Kafka/LocalStack services never became healthy"
             docker compose -f dev/dbviewer/docker-compose.yml logs --tail 80
             docker compose -f dev/brokers/docker-compose.yml logs --tail 80
             exit 1
@@ -550,6 +583,16 @@ jobs:
         run: |
           docker compose -f dev/dbviewer/docker-compose.yml logs --tail 200
           docker compose -f dev/brokers/docker-compose.yml logs --tail 200
+          if [ -n "${OTTO_CI_LOCALSTACK_ID:-}" ]; then
+            docker logs --tail 200 "$OTTO_CI_LOCALSTACK_ID"
+          fi
+
+      - name: Stop the job-owned LocalStack after browser workers
+        if: always()
+        run: |
+          if [ -n "${OTTO_CI_LOCALSTACK_ID:-}" ]; then
+            docker rm -f "$OTTO_CI_LOCALSTACK_ID"
+          fi
 
   # The advisory suite's RED COUNT ratchet (S12-304): sums the four shards'
   # failed tests and fails when it rises above ui/e2e/advisory-red-baseline.json

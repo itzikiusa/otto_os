@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'no
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import type { TelemetryConfig, TelemetryStatus } from '../src/lib/api/types';
-import globalTeardown from './global-teardown';
+import globalTeardown from './global-teardown.ts';
 
 // Stand up an ISOLATED ottod for the whole E2E run:
 //   - fresh temp data dir  -> fresh SQLite, no real sessions/DBs touched

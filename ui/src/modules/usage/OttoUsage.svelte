@@ -24,6 +24,7 @@
   let trace = $state<TelemetrySpan[] | null>(null);
   let traceBusy = $state(false);
   let traceError = $state('');
+  let traceId = $state<string | null>(null);
   let profile = $state<TelemetryProfile | null>(null);
   let hours = $state(24);
   let operationPage = $state(0);
@@ -116,10 +117,10 @@
   }
   async function openTrace(id: string): Promise<void> {
     const seq = ++detailSeq;
-    trace = []; traceBusy = true; traceError = '';
+    traceId = id; trace = []; traceBusy = true; traceError = '';
     try { const spans = await api.get<TelemetrySpan[]>(`/telemetry/traces/${encodeURIComponent(id)}`, controller.signal); if (!disposed && seq === detailSeq) trace = spans; }
-    catch (e) { if (seq === detailSeq) traceError = e instanceof Error ? e.message : 'Could not load trace'; }
-    finally { if (seq === detailSeq) traceBusy = false; }
+    catch (e) { if (!disposed && seq === detailSeq) traceError = e instanceof Error ? e.message : 'Could not load trace'; }
+    finally { if (!disposed && seq === detailSeq) traceBusy = false; }
   }
   async function capture(): Promise<void> {
     busy = true; error = '';
@@ -209,9 +210,10 @@
 </section>
 
 {#if trace !== null}
-  <Modal title="Trace detail" width={900} onclose={() => { detailSeq++; trace = null; }}>
-    <LoadState what="trace" loading={traceBusy} empty={!trace.length} error={traceError}>
-      {#if trace.length}<ol class="trace-list">{#each trace as span (span.span_id)}<li><code>{span.name}</code><span>{span.component} · {formatSeconds(span.duration_ms / 1000)} · {span.status}</span><small>Span {span.span_id}{span.parent_span_id ? ` · parent ${span.parent_span_id}` : ' · root'}</small></li>{/each}</ol>{:else}<p>This trace has expired or has not reached local storage yet.</p>{/if}
+  <Modal title="Trace detail" width={900} onclose={() => { detailSeq++; traceId = null; trace = null; }}>
+    <LoadState what="trace" loading={traceBusy} empty={!trace.length} error={traceError} onretry={() => { if (traceId) void openTrace(traceId); }}>
+      {#snippet emptyView()}<p>This trace has expired or has not reached local storage yet.</p>{/snippet}
+      <ol class="trace-list">{#each trace as span (span.span_id)}<li><code>{span.name}</code><span>{span.component} · {formatSeconds(span.duration_ms / 1000)} · {span.status}</span><small>Span {span.span_id}{span.parent_span_id ? ` · parent ${span.parent_span_id}` : ' · root'}</small></li>{/each}</ol>
     </LoadState>
   </Modal>
 {/if}

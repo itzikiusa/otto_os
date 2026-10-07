@@ -46,6 +46,10 @@ pub async fn events_ws(
     let Some(token) = token_from_subprotocol(&headers) else {
         return ApiError(Error::Unauthorized).into_response();
     };
+    // Capture before authentication: logout can finish after the lookup but
+    // before the upgrade task starts. Capturing inside that task would adopt
+    // the revoke as its baseline and delay rejection until the 60 s recheck.
+    let authenticated_generation = otto_rbac::tokens::revocation_generation();
     match ctx.authenticator.authenticate(&token).await {
         Ok(auth) => {
             // Scoped (share-link) tokens get ZERO event-stream access: `/ws/events`
@@ -81,7 +85,16 @@ pub async fn events_ws(
                 .max_frame_size(crate::ui_bridge::MAX_CLIENT_FRAME);
             // Echo `otto-bearer` so the browser completes the handshake.
             ws.protocols([BEARER_SUBPROTOCOL])
-                .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable, token))
+                .on_upgrade(move |socket| {
+                    handle_events(
+                        socket,
+                        ctx,
+                        user,
+                        ui_capable,
+                        token,
+                        authenticated_generation,
+                    )
+                })
         }
         Err(_) => ApiError(Error::Unauthorized).into_response(),
     }
@@ -129,11 +142,12 @@ pub(crate) const CLOSE_AUTH_REVOKED: u16 = 4401;
 /// Whether the token that opened this socket still verifies AS THE SAME user.
 /// A transient store error keeps the socket (retry next tick): only a definite
 /// verdict — revoked, expired, disabled, or now another identity — closes it.
-async fn still_authorized(ctx: &ServerCtx, token: &str, user: &User) -> bool {
+/// `None` leaves the pending generation / periodic deadline unacknowledged.
+async fn still_authorized(ctx: &ServerCtx, token: &str, user: &User) -> Option<bool> {
     match ctx.authenticator.authenticate(token).await {
-        Ok(auth) => auth.effective_user.id == user.id && !scope_denied(&auth),
-        Err(Error::Internal(_)) => true,
-        Err(_) => false,
+        Ok(auth) => Some(auth.effective_user.id == user.id && !scope_denied(&auth)),
+        Err(Error::Internal(_)) => None,
+        Err(_) => Some(false),
     }
 }
 
@@ -143,6 +157,7 @@ async fn handle_events(
     user: User,
     ui_capable: bool,
     token: String,
+    authenticated_generation: u64,
 ) {
     // Shared serialize-once fan-out (ws_fanout.rs): a recv is an Arc clone and
     // the JSON text is built at most once per event across every socket.
@@ -178,7 +193,7 @@ async fn handle_events(
     let mut beat = tokio::time::interval(REVOCATION_POLL);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     beat.tick().await; // the upgrade just authenticated
-    let mut seen_generation = otto_rbac::tokens::revocation_generation();
+    let mut seen_generation = authenticated_generation;
     let mut last_check = std::time::Instant::now();
 
     loop {
@@ -188,9 +203,14 @@ async fn handle_events(
                 if generation == seen_generation && last_check.elapsed() < EVENTS_REAUTH_INTERVAL {
                     continue;
                 }
+                let Some(authorized) = still_authorized(&ctx, &token, &user).await else {
+                    // A failed lookup cannot acknowledge this revocation (or
+                    // periodic deadline); retry it on the next short beat.
+                    continue;
+                };
                 seen_generation = generation;
                 last_check = std::time::Instant::now();
-                if !still_authorized(&ctx, &token, &user).await {
+                if !authorized {
                     let _ = sink
                         .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                             code: CLOSE_AUTH_REVOKED,

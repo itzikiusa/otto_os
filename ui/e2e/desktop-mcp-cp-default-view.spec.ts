@@ -121,17 +121,26 @@ test('pending badge uses the count route and the audit log pages', async ({ page
   const offsets: number[] = [];
   await page.route('**/api/v1/mcp/approvals/count?*', (route) => route.fulfill({ json: { count: 4 } }));
   await page.route('**/api/v1/mcp/audit?*', (route) => {
-    const offset = Number(new URL(route.request().url()).searchParams.get('offset') ?? '0');
+    const params = new URL(route.request().url()).searchParams;
+    expect(params.get('paged')).toBe('true');
+    expect(params.get('limit')).toBe('200');
+    const offset = Number(params.get('offset') ?? '0');
     offsets.push(offset);
     const n = offset === 0 ? 200 : 3;
-    return route.fulfill({ json: Array.from({ length: n }, (_, i) => row(offset + i)) });
+    return route.fulfill({ json: {
+      rows: Array.from({ length: n }, (_, i) => row(offset + i)),
+      next_offset: offset + 200, has_more: offset === 0,
+    } });
   });
   await page.goto('/#/mcp/activity');
   await expect(page.locator('[data-testid="mcp-pending-badge"]')).toHaveText('4', { timeout: 30_000 });
   const audit = page.locator('[data-testid="mcp-audit"]');
   await expect(audit.locator('.count')).toHaveText('200+ rows');
+  await expect(audit.locator('.arow')).toHaveCount(200);
   await audit.locator('[data-testid="mcp-audit-more"]').click();
   await expect(audit.locator('.count')).toHaveText('203 rows');
+  await expect(audit.locator('.arow')).toHaveCount(203);
+  await expect(audit.locator('.arow').last()).toContainText('otto.tool_202');
   await expect(audit.locator('[data-testid="mcp-audit-more"]')).toHaveCount(0);
   expect(offsets).toContain(200);
 });

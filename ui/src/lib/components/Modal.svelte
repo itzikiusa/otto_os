@@ -95,9 +95,12 @@
   // when the modal closes. An explicit `data-autofocus` / `autofocus` control
   // wins (the default button of a confirm, a prompt's field), else the first
   // body control, else the close button.
-  $effect(() => {
+  // Focusing dispatches synchronous focusin handlers in other components.
+  // Keep their reactive reads out of this mount-only lifecycle, or a shell
+  // breakpoint can rerun it and queue the old trigger restoration mid-edit.
+  $effect(() => untrack(() => {
     const restoreFocus = dialogFocusReturn();
-    const els = untrack(focusables);
+    const els = focusables();
     (
       els.find((el) => el.hasAttribute('data-autofocus') || el.hasAttribute('autofocus')) ??
       els.find((el) => !el.closest('header') && !el.classList.contains('sheet-body')) ??
@@ -107,13 +110,13 @@
     // detached) or dropped on <body>. A sheet whose action moved focus on
     // purpose — New Session's launched terminal takes the keyboard on mount —
     // must not have it yanked back to the trigger as the sheet unmounts.
-    const sheet = untrack(() => sheetEl);
+    const sheet = sheetEl;
     return () =>
       queueMicrotask(() => {
         const active = document.activeElement;
         if (!active || active === document.body || sheet?.contains(active)) restoreFocus();
       });
-  });
+  }));
 
   function onKeydown(e: KeyboardEvent) {
     // A key something inside already handled — CodeMirror closing its

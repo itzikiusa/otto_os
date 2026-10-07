@@ -277,6 +277,10 @@ async function engineOverride(page: Page, seen: SeenQuery[]): Promise<void> {
 test.beforeAll(async () => {
   test.setTimeout(120_000);
   const { ctx, base } = await apiCtx();
+  const catalogResponse = await ctx.get(`${base}/api/v1/mcp/otto-server/enabled`);
+  expect(catalogResponse.ok(), 'UI-control fixture must read the shared MCP catalog').toBeTruthy();
+  const catalog = await catalogResponse.json() as { enabled: string[] };
+  expect(catalog.enabled, 'another fixture must not disable otto.ui_state on the shared daemon').toContain('otto.ui_state');
   root = mkdtempSync(join(tmpdir(), 'otto-uictl-'));
   const workspace = await postJson<{ id: string }>(ctx, `${base}/api/v1/workspaces`, {
     name: 'UI control E2E',
@@ -585,7 +589,7 @@ test('Deny keeps the agent out: pending_grant, no grant stored, the prompt goes 
     expect(meta.ui_control?.enabled ?? false).toBe(false);
     const again = await mcp.call('otto_ui_db_list_connections', {});
     expect(again.isError).toBe(true);
-    expect(again.text).toContain('pending_grant');
+    expect(again.text, `Deny must retain the grant contract; MCP stderr: ${mcp.stderr}`).toContain('pending_grant');
     await expect(page.getByTestId('side-pane')).toHaveCount(0);
     // A Deny is remembered on this device: no second prompt.
     await page.waitForTimeout(1_500);

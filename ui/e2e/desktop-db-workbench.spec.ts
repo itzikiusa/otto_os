@@ -43,7 +43,8 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function openConnFromList(page: Page, name: string): Promise<void> {
   const connTab = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' });
   if (await connTab.first().isVisible().catch(() => false)) await connTab.first().click();
-  const c = page.locator('.conn-list .conn-name', { hasText: name });
+  const id = name === 'e2e-mysql' ? conn.mysql : conn.redis;
+  const c = page.locator(`.conn-row[data-connection-id="${id}"] .conn-name`, { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });

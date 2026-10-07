@@ -68,11 +68,14 @@
   let phonePane = $state<'list' | 'main'>('main');
 
   let automationEditor: { approveLeave: () => Promise<boolean> } | undefined = $state();
+  let environmentEditor: { approveLeave: () => Promise<boolean>; create: () => Promise<void> } | undefined = $state();
   let viewTransition = 0;
   async function changeView(next: View): Promise<boolean> {
     if (view.kind === 'automation' && next.kind === 'automation' && view.id === next.id) return true;
+    if (view.kind === 'environments' && next.kind === 'environments' && (next.envId === null || view.envId === next.envId)) return true;
     const generation = ++viewTransition;
     if (view.kind === 'automation' && automationEditor && !(await automationEditor.approveLeave())) return false;
+    if (view.kind === 'environments' && environmentEditor && !(await environmentEditor.approveLeave())) return false;
     if (generation !== viewTransition) return false;
     view = next;
     phonePane = 'main';
@@ -230,6 +233,7 @@
 
   // ── environment switcher (header) ─────────────────────────────────────────
   async function newEnvironment(): Promise<void> {
+    if (view.kind === 'environments' && environmentEditor) return environmentEditor.create();
     const name = await confirmer.promptText('Name', { title: 'New environment', confirmLabel: 'Create', initial: '' });
     if (!name) return;
     const saved = await apiClient.saveEnvironment({ name }, undefined);
@@ -406,7 +410,9 @@
             </div>
 
             {#if view.kind === 'environments'}
-              <EnvironmentsView initialId={view.envId} />
+              {#key view.envId}
+                <EnvironmentsView bind:this={environmentEditor} initialId={view.envId} />
+              {/key}
             {:else if view.kind === 'automation'}
               {#key view.id}
                 <AutomationEditor bind:this={automationEditor} automationId={view.id} ondeleted={showRequest} />

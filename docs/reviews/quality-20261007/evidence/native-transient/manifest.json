@@ -1,0 +1,161 @@
+[
+  {
+    "file": "report-1280-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-1280-dark.png",
+    "sha256": "6744e30da9e01d6a954bc5cbc3133160f4a9dea97d137922cf74210e53fb0175"
+  },
+  {
+    "file": "report-1280-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-1280-light.png",
+    "sha256": "75f6e89d20a5f9c35e847e052bb4cb0ceb882c9c323950a92d7c12117c5d17bf"
+  },
+  {
+    "file": "report-390-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-390-dark.png",
+    "sha256": "0a53c24339c085f2ce1d053a976784691a6de4c5adcc2776166f2b1c5ac05c96"
+  },
+  {
+    "file": "report-390-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-390-light.png",
+    "sha256": "f3b00d4b7838c1ffcb307236d4e5fadd883cad749b90a41b293a21ba3d14e6ad"
+  },
+  {
+    "file": "report-download-1280-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-download-1280-dark.png",
+    "sha256": "7541eff0f51dc40b6b1b4b074630cedc59d38d04ccf5ebf21288c75dad717ea4"
+  },
+  {
+    "file": "report-download-1280-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-download-1280-light.png",
+    "sha256": "86002256312e601f3a94b2697091ff76cd97835a66b04f16833e1115d9314c10"
+  },
+  {
+    "file": "report-download-390-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-download-390-dark.png",
+    "sha256": "25b5fe8b577da34a2f8a4e50bf94d70f94633af5422ea5f22acf9c3ee4f74ef0"
+  },
+  {
+    "file": "report-download-390-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/report-download-390-light.png",
+    "sha256": "a94745cfa180bb7426a6f7bd0d0c7ea97666a0d9e2b959ecccc072c44f189ce3"
+  },
+  {
+    "file": "scan-stale-1280-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stale-1280-dark.png",
+    "sha256": "2fe3697516a4acc37554967c9c24c475cc89b49558a292c47496659497b23b71"
+  },
+  {
+    "file": "scan-stale-1280-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stale-1280-light.png",
+    "sha256": "bd0e0eae1e1dc36cda67cf47cb564f17709c2edbc1da57ef106d1981af3e40f5"
+  },
+  {
+    "file": "scan-stale-390-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stale-390-dark.png",
+    "sha256": "90b0b5cc9abf76ee5fc70148bffcf0ca117e524675fd2880664a0736a91ea718"
+  },
+  {
+    "file": "scan-stale-390-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stale-390-light.png",
+    "sha256": "1a6c04aac42540b9b50325dd33d3e5f95bd6de2badbfc5d885b3ca114f049ae2"
+  },
+  {
+    "file": "scan-stopped-1280-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopped-1280-dark.png",
+    "sha256": "98a6ff4bd302b38f22303eda28daa1a6bdcada697f5a5e0743d17c541a594e3b"
+  },
+  {
+    "file": "scan-stopped-1280-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopped-1280-light.png",
+    "sha256": "90635391f131ee140dc83d01e2be104cea8071949341a843f5dfd43047af396c"
+  },
+  {
+    "file": "scan-stopped-390-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopped-390-dark.png",
+    "sha256": "a2d6def999cc5d678362f57e7e7edaa2c3648dd9c3dfa8c0f8d6d8623b4db78b"
+  },
+  {
+    "file": "scan-stopped-390-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopped-390-light.png",
+    "sha256": "72b2adfd25d2d18b7b5207dd9dac2478f8552f6fb56573e0b903ba9d8beedb2f"
+  },
+  {
+    "file": "scan-stopping-1280-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopping-1280-dark.png",
+    "sha256": "e6d6d859ddf744e65fe85f668af3b7ed9517adf04fad386f15b75571a811cf79"
+  },
+  {
+    "file": "scan-stopping-1280-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopping-1280-light.png",
+    "sha256": "7a2e127f2efc41ad1e81fb51958dc78d7e307b1d25ad2042934b4a731ab1da79"
+  },
+  {
+    "file": "scan-stopping-390-dark.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopping-390-dark.png",
+    "sha256": "db2509d4ecf6300464db15218ac0327bd58c787361020a6d37a02d89259e969d"
+  },
+  {
+    "file": "scan-stopping-390-light.png",
+    "source": "/tmp/otto-quality-20261007-plugin-transients-final/scan-stopping-390-light.png",
+    "sha256": "f42e8cb9d8beaa4a050475a2de4a597f88ee0414550a63a36c8233b1e558dc56"
+  },
+  {
+    "file": "otto-quality-20261007-plugin-focus-green.log",
+    "source": "/tmp/otto-quality-20261007-plugin-focus-green.log",
+    "sha256": "63051bc9f9e0c778e062283fd5c874b7be5f00d2d2844bf7cf44096f0301b12f"
+  },
+  {
+    "file": "otto-quality-20261007-report-focus-red.log",
+    "source": "/tmp/otto-quality-20261007-report-focus-red.log",
+    "sha256": "33f843318aac79987a2998dd1cb99ccf133df5463c284f508cd4b1b78e08053e",
+    "source_sha256": "6e2afd33fcc63a1451b3282219b9fae4f2d8ad05650fc3ee797008e1983fea55",
+    "normalization": "Trailing whitespace and excess final blank lines removed; result text unchanged."
+  },
+  {
+    "file": "otto-quality-20261007-native-lifecycle.log",
+    "source": "/tmp/otto-quality-20261007-native-lifecycle.log",
+    "sha256": "eb4614fa82a6aef41ef89737623ed09530d2c6ee6e1f8bcaaaccf2c3dc7a6dc7"
+  },
+  {
+    "file": "otto-quality-20261007-native-focus-trace.log",
+    "source": "/tmp/otto-quality-20261007-native-focus-trace.log",
+    "sha256": "d5d91abb520a550dbdc1282a89550ae2f50cde84cbaf82814d52bb6d2620058e"
+  },
+  {
+    "file": "otto-quality-20261007-modal-resize-red.log",
+    "source": "/tmp/otto-quality-20261007-modal-resize-red.log",
+    "sha256": "ebe817b285fa27913431fe84d5f0b40b623052aa8ad495822cda0013dd6ac288",
+    "source_sha256": "42b4c943ff3937554ba0046bfa9e959404dd371afdf82e894663c425b8d9406d",
+    "normalization": "Trailing whitespace and excess final blank lines removed; result text unchanged."
+  },
+  {
+    "file": "otto-quality-20261007-modal-resize-green.log",
+    "source": "/tmp/otto-quality-20261007-modal-resize-green.log",
+    "sha256": "874a2fdf17861d4ecfb6eb8a0c18d27d9361aa986b9a050914930d7a7bdde6d3"
+  },
+  {
+    "file": "otto-quality-20261007-native-foreground.log",
+    "source": "/tmp/otto-quality-20261007-native-foreground.log",
+    "sha256": "280fdfa2277a42e2e2675f26c585cc5463b0c4af55828d9edaea16eed3152cfc"
+  },
+  {
+    "file": "otto-quality-20261007-native-spa-final.log",
+    "source": "/tmp/otto-quality-20261007-native-spa-final.log",
+    "sha256": "c0e8b7339bf26d8ca6c95e882a45ceb1d42a0f63da0c4b06268f2ad259da0c32"
+  },
+  {
+    "file": "otto-quality-20261007-plugin-native-final.log",
+    "source": "/tmp/otto-quality-20261007-plugin-native-final.log",
+    "sha256": "0a10b3d989a6b69827b9eca28d11593a50e5bcc93f5f09c255fe83bdb09cb4f2"
+  },
+  {
+    "file": "otto-quality-20261007-modal-nested-final.log",
+    "source": "/tmp/otto-quality-20261007-modal-nested-final.log",
+    "sha256": "92a36d6b8c67b01485d441181918749973deda274a8038d78840925c6a1970d0"
+  },
+  {
+    "file": "otto-quality-20261007-native-clippy-final.log",
+    "source": "/tmp/otto-quality-20261007-native-clippy-final.log",
+    "sha256": "14eacb9550148fb797049770349504191ad0ced48d872522ee5cfed54272c9bd"
+  }
+]

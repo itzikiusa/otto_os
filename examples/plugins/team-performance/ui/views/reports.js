@@ -111,7 +111,14 @@
           <form><label class="field"><span>Add a comment</span><textarea rows="3" maxlength="4000"></textarea></label>
             <div class="form-actions"><button type="submit" class="compact">Post comment</button></div></form>
         </aside>`;
-      content.querySelector('iframe').srcdoc = r.html;
+      // srcdoc otherwise inherits the plugin page's base URL: a report's
+      // #section links would load index.html inside the viewer. Bind only the
+      // embedded copy to its own document; downloads retain the original HTML.
+      // Insert into the renderer's head as text, without parsing report
+      // resources in the parent document. Older fragment reports may lack head.
+      const head = /<head\b[^>]*>/i.exec(r.html) || /^\s*<!doctype[^>]*>/i.exec(r.html);
+      const insertAt = head ? head.index + head[0].length : 0;
+      content.querySelector('iframe').srcdoc = `${r.html.slice(0, insertAt)}<base href="about:srcdoc">${r.html.slice(insertAt)}`;
       mountComments(app, id, content.querySelector('aside'));
     };
     m.el.querySelector('#rv-dl').onclick = async () => {

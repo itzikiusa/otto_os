@@ -71,20 +71,48 @@ test('agent form: losing workspace preserves typed fields and explains how to sa
   await expect(dialog.getByRole('alert')).toContainText('workspace');
 });
 
-test('goal definition: losing workspace gives actionable recovery and retains goal', async ({ page }) => {
-  await workspace(page);
+test('goal definition: workspace switching asks before discarding the complete draft', async ({ page }) => {
+  const originalId = await workspace(page);
+  const { ctx, base } = await apiCtx();
+  const nextId = await seedWorkspace(ctx, base, 'Goal draft destination');
+  await ctx.dispose();
+  let writes = 0;
+  await page.route('**/api/v1/**/goal-loops**', route => {
+    if (route.request().method() !== 'GET') {
+      writes++;
+      return route.fulfill({ status: 503, json: { message: 'Unexpected goal mutation' } });
+    }
+    return route.continue();
+  });
   await page.goto('/#/loops');
   await page.getByRole('button', { name: 'New goal loop', exact: true }).click();
   await page.locator('#gl-seed').fill('Compare approaches and retain this draft');
   await page.locator('#gl-mode').selectOption('research');
-  await page.evaluate(async () => {
+  const switchWorkspace = () => page.evaluate(async (id) => {
     const path = '/src/lib/stores/workspace.svelte.ts';
     const { ws } = await import(/* @vite-ignore */ path);
-    ws.currentId = null;
+    // Exercise the same guarded public operation used by the workspace picker.
+    void ws.select(id);
+  }, nextId);
+  const currentWorkspace = () => page.evaluate(async () => {
+    const path = '/src/lib/stores/workspace.svelte.ts';
+    return (await import(/* @vite-ignore */ path)).ws.currentId;
   });
-  await expect(page.getByRole('button', { name: 'Define with AI', exact: true })).toBeDisabled();
-  await expect(page.getByText('Add a workspace to define and launch this goal. Your draft stays here.')).toBeVisible();
+  await switchWorkspace();
+  const discard = page.getByRole('dialog', { name: 'Discard goal loop', exact: true });
+  await expect(discard).toContainText('The draft and your edits are lost');
+  await discard.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(discard).toHaveCount(0);
+  expect(await currentWorkspace()).toBe(originalId);
   await expect(page.locator('#gl-seed')).toHaveValue('Compare approaches and retain this draft');
+  await expect(page.locator('#gl-mode')).toHaveValue('research');
+  await expect(page.getByRole('button', { name: 'Define with AI', exact: true })).toBeEnabled();
+  expect(writes).toBe(0);
+  await switchWorkspace();
+  await discard.getByRole('button', { name: 'Discard', exact: true }).click();
+  await expect.poll(currentWorkspace).toBe(nextId);
+  await expect(page.locator('#gl-seed')).toHaveCount(0);
+  expect(writes).toBe(0);
 });
 
 test('rooms: failed messages never claim an empty conversation and Retry recovers', async ({ page }) => {
@@ -100,11 +128,14 @@ test('rooms: failed messages never claim an empty conversation and Retry recover
     ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Messages temporarily unavailable' } })
     : r.continue());
   await page.goto('/#/personal-agents/rooms');
-  await expect(page.getByText("Couldn’t load room messages")).toBeVisible();
+  const messages = page.getByRole('log', { name: 'Channel messages', exact: true });
+  await expect(messages.getByRole('alert')).toContainText('Couldn’t load channel messages');
+  await expect(messages.getByRole('alert')).toContainText('Messages temporarily unavailable');
   await expect(page.getByText(/No messages yet/)).toHaveCount(0);
   fail = false;
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(page.getByText('Keep this conversation visible', { exact: true })).toBeVisible();
+  await messages.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(messages.getByRole('alert')).toHaveCount(0);
+  await expect(messages.getByText('Keep this conversation visible', { exact: true })).toBeVisible();
 });
 
 const variants = [

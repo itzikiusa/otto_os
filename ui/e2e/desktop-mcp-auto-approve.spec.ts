@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedGitRepo, seedWorkspace } from './seed';
+import { enableMcpFixtureCatalog } from './mcp-catalog-fixture';
 
 // MCP → Otto server → Auto-approve: the opt-in rules that let a mutating
 // otto.* tool (create_pr) run without a per-call approval. Pins the catalog
@@ -27,12 +28,7 @@ test.beforeAll(async () => {
   const seeded = await apiCtx();
   base = seeded.base;
   workspaceId = await seedWorkspace(seeded.ctx, base);
-  const r = await seeded.ctx.patch(`${base}/api/v1/mcp/otto-server`, {
-    // `enabled`: the always-allow test invokes a tool, and the outward
-    // server's master switch defaults off on a fresh daemon.
-    data: { enabled: true, tools: ['create_pr', 'comment_pr', 'merge_pr', 'list_repos'] },
-  });
-  expect(r.ok(), `enable tools → ${r.status()} ${await r.text()}`).toBeTruthy();
+  await enableMcpFixtureCatalog(seeded.ctx, base);
   await clearRules(seeded.ctx);
   await seeded.ctx.dispose();
 });

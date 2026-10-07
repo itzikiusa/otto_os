@@ -1,0 +1,13 @@
+✔ quality visual closure @390px light: report, nested Download and scan recovery (5173.161083ms)
+✔ quality visual closure @390px dark: report, nested Download and scan recovery (2753.5345ms)
+✔ quality visual closure @1280px light: report, nested Download and scan recovery (2843.864167ms)
+✔ quality visual closure @1280px dark: report, nested Download and scan recovery (2898.86425ms)
+✔ quality: report opening owns focus while its HTML is still loading (173.566334ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 14039.372417

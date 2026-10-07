@@ -229,3 +229,54 @@ test('monitor switch keeps confirmed state when persistence fails', async ({ pag
   await expect(toggle).toBeChecked();
   await expect(toggle).toBeEnabled();
 });
+
+test('cluster metadata refresh preserves an unsaved monitor draft for the same cluster', async ({ page }) => {
+  const response = await ctx.get(`${base}/api/v1/k8s/clusters/${clusterId}/monitor`);
+  expect(response.ok()).toBeTruthy();
+  const payload = await response.json();
+  payload.config.interval_secs = 60;
+  await page.route(`**/api/v1/k8s/clusters/${clusterId}/monitor`, route => route.fulfill({ json: payload }));
+  await boot(page, `kubernetes/monitor/${clusterId}/settings`);
+  const interval = page.getByTestId('k8s-monitor-interval');
+  await expect(interval).toHaveValue('60');
+  await interval.fill('120');
+
+  // A real metadata update broadcasts k8s_cluster_updated, replacing the store's
+  // cluster objects. The picker must reconcile its name without reloading this
+  // cluster's unrelated monitor form and discarding the user's unsaved draft.
+  const cluster = await ctx.get(`${base}/api/v1/k8s/clusters/${clusterId}`);
+  expect(cluster.ok()).toBeTruthy();
+  const original = await cluster.json();
+  const originalName = original.name as string;
+  const refreshedName = `${originalName} refreshed`;
+  let otherId = '';
+  try {
+    const update = await ctx.patch(`${base}/api/v1/k8s/clusters/${clusterId}`, { data: { name: refreshedName } });
+    expect(update.ok(), await update.text()).toBeTruthy();
+    await expect(page.getByTestId('k8s-monitor-cluster-pick')).toContainText(refreshedName);
+    await expect(interval).toHaveValue('120');
+
+    // A genuinely different owner must load its own settings. Change the hash
+    // without reloading the document so this also covers the live SPA switch.
+    const other = await ctx.post(`${base}/api/v1/k8s/clusters`, { data: {
+      name: 'Other monitor owner', source: 'kubeconfig', kubeconfig_path: original.kubeconfig_path,
+      context_name: original.context_name, default_namespace: 'shop', environment: 'dev',
+    } });
+    expect(other.ok(), await other.text()).toBeTruthy();
+    otherId = (await other.json()).id;
+    const save = await ctx.put(`${base}/api/v1/k8s/clusters/${otherId}/monitor`, {
+      data: { ...payload.config, enabled: false, interval_secs: 90 },
+    });
+    expect(save.ok(), await save.text()).toBeTruthy();
+    await page.evaluate(id => { location.hash = `#/kubernetes/monitor/${id}/settings`; }, otherId);
+    await expect(page.getByTestId('k8s-monitor-cluster-pick')).toContainText('Other monitor owner');
+    await expect(interval).toHaveValue('90');
+  } finally {
+    if (otherId) {
+      const remove = await ctx.delete(`${base}/api/v1/k8s/clusters/${otherId}`);
+      expect(remove.ok(), await remove.text()).toBeTruthy();
+    }
+    const restore = await ctx.patch(`${base}/api/v1/k8s/clusters/${clusterId}`, { data: { name: originalName } });
+    expect(restore.ok(), await restore.text()).toBeTruthy();
+  }
+});

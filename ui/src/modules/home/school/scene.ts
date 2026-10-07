@@ -19,7 +19,7 @@
 
 import type * as THREE_NS from 'three';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { assetBase, loadSchoolAssets, type SchoolAssets } from './assets.ts';
+import { disposeActor, assetBase, loadSchoolAssets, type SchoolAssets } from './assets.ts';
 import { KIT_NODES, furnishCorridor, furnishRoom, type KitNode, type Placement } from './furnish.ts';
 import { HEAD_CLIPS, Life, ONCE_CLIPS, SIT_MS, STAND_MS, NOD_MS, SCOLD_MS, type ActorView } from './life.ts';
 import { CORRIDOR_HALF, ROOM_BACK_Z, roomSummary, toWorld, type Kid, type Room, type School } from './model.ts';
@@ -172,7 +172,8 @@ function build(
 ): SchoolHandle {
   const reduced = opts.reducedMotion;
   const renderer = new T.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  const displayScale = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+  renderer.setPixelRatio(Math.min(2, displayScale));
   renderer.outputColorSpace = T.SRGBColorSpace;
   renderer.toneMapping = T.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -186,7 +187,7 @@ function build(
     const name = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
     if (/swiftshader|llvmpipe|softpipe|software/i.test(name)) {
       renderer.shadowMap.enabled = false;
-      renderer.setPixelRatio(1);
+      renderer.setPixelRatio(Math.min(1, displayScale));
     }
   } catch {
     /* keep the defaults */
@@ -652,8 +653,7 @@ function build(
     const want = new Map<string, Kid>([...r.kids, ...r.bench].map((k) => [k.id, k]));
     for (const [id, c] of characters) {
       if (want.has(id) || kicks.has(id)) continue;
-      roomGroup.remove(c.obj);
-      c.mixer.stopAllAction();
+      disposeActor(c);
       characters.delete(id);
     }
     for (const [id, k] of want) {
@@ -666,13 +666,11 @@ function build(
 
   function dropCharacters(): void {
     for (const c of characters.values()) {
-      c.mixer.stopAllAction();
-      roomGroup.remove(c.obj);
+      disposeActor(c);
     }
     characters.clear();
     if (head) {
-      head.mixer.stopAllAction();
-      roomGroup.remove(head.obj);
+      disposeActor(head);
       head = null;
     }
     for (const k of kicks.values()) k.resolve();
@@ -941,6 +939,10 @@ function build(
         if ((o.userData.pick as SchoolPick | undefined)?.kind === 'door') targets.push(o);
       });
     }
+    // Data updates can rebuild hit meshes between rendered frames. Raycaster
+    // reads matrixWorld without refreshing it, so sync only the pick targets
+    // (and their parents), rather than waiting for the next GPU render.
+    for (const target of targets) target.updateWorldMatrix(true, false);
     const hit = ray.intersectObjects(targets, false)[0];
     if (!hit) return null;
     const desk = hit.object.userData.desk as string | undefined;

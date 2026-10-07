@@ -88,7 +88,7 @@ async function openConnection(page: Page): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
   // CHECK 7 (part 1): the connection list is visible + usable in this orientation.
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-redis-docker' });
+  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .conn-name`);
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
@@ -277,10 +277,10 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
 
       // Review: the statement is the HSET the driver will run (value quoted).
       await pendingBar.locator('.btn.primary', { hasText: 'Review & apply' }).click();
-      const modal = page.locator('.review-modal');
+      const modal = page.getByRole('dialog').filter({ has: page.locator('.review-modal') });
       await expect(modal).toBeVisible();
       expect(await modal.locator('.review-sql').inputValue()).toContain(`HSET ${key} f1 "v2"`);
-      await modal.locator('.tb-btn.primary', { hasText: 'Run' }).click();
+      await modal.getByRole('button', { name: 'Run', exact: true }).click();
       await expect(modal).toBeHidden({ timeout: 20_000 });
 
       // The grid re-runs the HGETALL after the write → the new value renders,
@@ -407,22 +407,17 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
         VSCROLL_COUNT,
       );
 
-      await page.locator('.grid-scroll').scrollIntoViewIfNeeded();
-      const info = await page.locator('.grid-scroll').evaluate((el) => ({
-        clientH: el.clientHeight,
-        scrollH: el.scrollHeight,
-      }));
-      // CHECK 6 (vertical): the grid's scroll container caps below its content.
-      expect(info.scrollH, 'grid scrollHeight > clientHeight (vertical scroll)').toBeGreaterThan(
-        info.clientH + 20,
-      );
-      // Prove it actually scrolls (not just that it's bounded). Virtualization
-      // re-renders the window on scroll, so confirm a non-zero scrollTop lands.
-      await page.locator('.grid-scroll').evaluate((el) => {
-        el.scrollTop = el.scrollHeight;
-      });
-      const scrolledTop = await page.locator('.grid-scroll').evaluate((el) => el.scrollTop);
-      expect(scrolledTop, 'grid scrolled down').toBeGreaterThan(0);
+      const grid = page.locator('.grid-scroll');
+      await grid.scrollIntoViewIfNeeded();
+      const before = await grid.evaluate(el => ({ clientH: el.clientHeight, scrollH: el.scrollHeight }));
+      expect(before.scrollH, 'grid scrollHeight > clientHeight (vertical scroll)').toBeGreaterThan(before.clientH + 20);
+      // A single scroll must advance the virtual window and retain its position.
+      await grid.evaluate(el => { el.scrollTop = el.scrollHeight; });
+      const finalRow = grid.locator('tbody .rownum-n').filter({ hasText: new RegExp(`^${VSCROLL_COUNT}$`) });
+      await expect(finalRow).toBeVisible();
+      await expect(finalRow).toBeInViewport({ ratio: 0.5 });
+      await expect.poll(() => grid.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+      await expect.poll(async () => Number(await grid.locator('tbody .rownum-n').first().textContent())).toBeGreaterThan(1);
     } finally {
       try {
         const keys = redisCli(['KEYS', `${ns}:k*`])

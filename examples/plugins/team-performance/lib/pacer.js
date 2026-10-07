@@ -7,7 +7,7 @@
 // run on a fake clock.
 'use strict';
 
-const defaultSleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+const { check, wait, abortable } = require('./cancellation.js');
 
 function headerOf(res, name) {
   const h = res && res.headers;
@@ -32,7 +32,7 @@ function createPacer(opts = {}) {
   const max5xxRetries = Math.min(opts.max5xxRetries ?? 2, maxRetries);
   const baseBackoffMs = opts.baseBackoffMs ?? 2000;
   const capMs = opts.capMs ?? 60000;
-  const sleep = opts.sleep || defaultSleep;
+  const sleep = opts.sleep;
   const now = opts.now || Date.now;
   const onWait = opts.onWait || (() => {});
 
@@ -42,11 +42,13 @@ function createPacer(opts = {}) {
 
   const backoff = (n) => Math.min(capMs, baseBackoffMs * 2 ** n);
 
-  async function spaced() {
+  async function spaced(signal) {
+    check(signal);
     if (lastStart != null) {
       const wait = lastStart + minIntervalMs - now();
-      if (wait > 0) await sleep(wait);
+      if (wait > 0) await pause(wait, signal);
     }
+    check(signal);
     lastStart = now();
     stats.calls++;
   }
@@ -56,11 +58,13 @@ function createPacer(opts = {}) {
     return lastStart == null ? 0 : Math.max(0, lastStart + minIntervalMs - now());
   }
 
-  async function runTask(task) {
+  const pause = (ms, signal) => wait(ms, signal, sleep);
+
+  async function runTask(task, signal) {
     let n429 = 0;
     let n5xx = 0;
     for (;;) {
-      await spaced();
+      await spaced(signal);
       let res;
       let err = null;
       try {
@@ -68,6 +72,7 @@ function createPacer(opts = {}) {
       } catch (e) {
         err = e;
       }
+      check(signal);
       const status = err ? 0 : Number(res && res.status) || 0;
       if (status === 429) {
         stats.throttled++;
@@ -78,7 +83,7 @@ function createPacer(opts = {}) {
         stats.retries++;
         stats.last_backoff_ms = wait;
         onWait({ reason: 'throttled', backoff_ms: wait, attempt: n429 });
-        await sleep(wait);
+        await pause(wait, signal);
         continue;
       }
       if (err || status >= 500) {
@@ -91,7 +96,7 @@ function createPacer(opts = {}) {
         stats.retries++;
         stats.last_backoff_ms = wait;
         onWait({ reason: err ? 'network' : 'server', backoff_ms: wait, attempt: n5xx });
-        await sleep(wait);
+        await pause(wait, signal);
         continue;
       }
       return res;
@@ -99,10 +104,10 @@ function createPacer(opts = {}) {
   }
 
   /** Enqueue `task` (→ Promise<Response-like>); resolves with its final response. */
-  function schedule(task) {
-    const p = tail.then(() => runTask(task));
+  function schedule(task, { signal } = {}) {
+    const p = tail.then(() => runTask(task, signal));
     tail = p.catch(() => {});
-    return p;
+    return abortable(p, signal);
   }
 
   return { schedule, nextCallEtaMs, stats };

@@ -141,9 +141,13 @@ Task instructions:\n{user_prompt}"
 }
 
 /// Relative path for a run's report, using **server-generated** segments (the task
-/// id + a server UTC timestamp) — never the user-supplied name (path-safety).
-pub fn report_rel(task_id: &str, now: DateTime<Utc>) -> String {
-    format!("{task_id}/reports/{}.md", now.format("%Y%m%dT%H%M%SZ"))
+/// and run ids + a server UTC timestamp) — never a user-supplied name.
+/// The run id keeps rapid successes and failures from overwriting each other.
+pub fn report_rel(task_id: &str, run_id: &str, now: DateTime<Utc>) -> String {
+    format!(
+        "{task_id}/reports/{}-{run_id}.md",
+        now.format("%Y%m%dT%H%M%SZ")
+    )
 }
 
 /// Whether a no-owner task may use the claude-only headless fallback. Only claude
@@ -329,7 +333,7 @@ async fn complete_run_with(
     match result {
         Ok(out) => {
             let now = Utc::now();
-            let rel = report_rel(&task.id, now);
+            let rel = report_rel(&task.id, &run_id, now);
             let abs = ctx.data_dir().join("scheduled").join(&rel);
             let (report_path, report_rel_opt) = match write_report(&abs, &out.report).await {
                 Ok(()) => (Some(abs.to_string_lossy().to_string()), Some(rel.clone())),
@@ -412,7 +416,7 @@ async fn complete_run_with(
             // workflow report) so the run's report view shows why it failed.
             let (report_path, report_rel_opt, summary) = match fail.report.as_deref() {
                 Some(report) => {
-                    let rel = report_rel(&task.id, Utc::now());
+                    let rel = report_rel(&task.id, &run_id, Utc::now());
                     let abs = ctx.data_dir().join("scheduled").join(&rel);
                     match write_report(&abs, report).await {
                         Ok(()) => (
@@ -1174,7 +1178,7 @@ pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) 
     let ctx = ctx.clone();
     tokio::spawn(async move {
         let repo = ctx.scheduled_tasks();
-        let task = match repo.get(&run.task_id).await {
+        let task = match repo.get_run_task_snapshot(&run.id).await {
             Ok(t) => t,
             Err(e) => {
                 record_finish(
@@ -1182,7 +1186,7 @@ pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) 
                     &run.id,
                     FinishRun {
                         status: "error".into(),
-                        error: Some(format!("interrupted by daemon restart: {e}")),
+                        error: Some(format!("interrupted by daemon restart: {e}; delivery and schedule settlement skipped")),
                         workflow_run_id: Some(wf_run_id),
                         ..Default::default()
                     },
@@ -1815,7 +1819,80 @@ mod tests {
     #[test]
     fn report_rel_uses_task_id_and_stamp() {
         let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 6, 26, 4, 9, 49).unwrap();
-        assert_eq!(report_rel("T1", now), "T1/reports/20260626T040949Z.md");
+        assert_eq!(
+            report_rel("T1", "R1", now),
+            "T1/reports/20260626T040949Z-R1.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_reports_at_same_instant_keep_distinct_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES('reports-ws','ws','/tmp','2026-10-05T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let repo = otto_state::ScheduledTasksRepo::new(pool.clone());
+        let task = repo
+            .create(otto_state::NewScheduledTask::defaults(
+                "reports-ws".into(),
+                "Reports".into(),
+            ))
+            .await
+            .unwrap();
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 6, 26, 4, 9, 49).unwrap();
+        let mut paths = Vec::new();
+        for (day, report) in [(1, "first run"), (2, "second run")] {
+            let run = repo
+                .create_run(NewScheduledRun {
+                    task_id: task.id.clone(),
+                    workspace_id: task.workspace_id.clone(),
+                    trigger: "manual".into(),
+                })
+                .await
+                .unwrap();
+            // Completion timestamps are identical; identity comes from run ID.
+            let rel = report_rel(&task.id, &run.id, now);
+            let path = dir.path().join(&rel);
+            write_report(&path, report).await.unwrap();
+            repo.finish_run(
+                &run.id,
+                FinishRun {
+                    status: "ok".into(),
+                    report_path: Some(path.to_string_lossy().into_owned()),
+                    report_rel: Some(rel),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE scheduled_task_runs SET started_at=? WHERE id=?")
+                .bind(format!("2026-10-0{day}T00:00:00Z"))
+                .bind(&run.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            paths.push(path);
+        }
+        assert_eq!(
+            tokio::fs::read_to_string(&paths[0]).await.unwrap(),
+            "first run"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&paths[1]).await.unwrap(),
+            "second run"
+        );
+        assert_ne!(paths[0], paths[1]);
+        let pruned = repo.prune_runs(&task.id, 1).await.unwrap();
+        assert_eq!(pruned, vec![paths[0].to_string_lossy().into_owned()]);
+        for path in pruned {
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+        assert!(!paths[0].exists());
+        assert_eq!(
+            tokio::fs::read_to_string(&paths[1]).await.unwrap(),
+            "second run"
+        );
+        assert_eq!(repo.list_runs(&task.id, 10).await.unwrap().len(), 1);
     }
 
     #[test]

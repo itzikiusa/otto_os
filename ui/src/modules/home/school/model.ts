@@ -106,6 +106,8 @@ export interface Room {
   scratch: boolean;
   /** Seated kids: front rows then the engine back row. */
   kids: Kid[];
+  /** All actionable sessions, independent of the geometry cap. */
+  members: Kid[];
   /** Archived sessions on the detention bench (≤ BENCH_SLOTS). */
   bench: Kid[];
   overflow: number;
@@ -409,10 +411,10 @@ export function buildSchool(input: SchoolInput): School {
     };
     const doorX = DOOR0_X + i * DOOR_PITCH;
     const geo = { width, depth };
-    const benchKids = [...(bench.get(r.id) ?? [])]
+    const archivedKids = [...(bench.get(r.id) ?? [])]
       .sort((a, z) => z.at - a.at)
-      .slice(0, BENCH_SLOTS)
       .map((d, k): Kid => ({ ...strip(d), row: -1, col: k, seat: benchSlot(geo, k) }));
+    const benchKids = archivedKids.slice(0, BENCH_SLOTS);
     const kids = [...seatedF.map((d, k) => place(d, k, 0)), ...seatedB.map((d, k) => place(d, k, rows))];
     const all = [...f, ...b];
     return {
@@ -421,6 +423,8 @@ export function buildSchool(input: SchoolInput): School {
       current: r.current,
       scratch: r.scratch,
       kids,
+      // Only kids + bench supply positions to scene/life; membership is uncapped.
+      members: [...f.map((d, k) => place(d, k, 0)), ...b.map((d, k) => place(d, k, rows)), ...archivedKids],
       bench: benchKids,
       overflow: f.length - seatedF.length + (b.length - seatedB.length),
       cols,
@@ -442,7 +446,7 @@ export function buildSchool(input: SchoolInput): School {
     };
   });
 
-  const kids = rooms.flatMap((r) => [...r.kids, ...r.bench]);
+  const kids = rooms.flatMap((r) => r.members);
   return {
     rooms,
     kids,

@@ -1,0 +1,54 @@
+{
+  "purpose": "Owned corrected WebKit load process attribution snapshot",
+  "at": 1791368208885,
+  "driver_pid": 80442,
+  "owned_roots": [
+    {
+      "pid": 80464,
+      "parent": 80458,
+      "start": "Wed Oct 7 13:14:24 2026",
+      "cpu_percent": 5.9,
+      "rss_mib": 119.359375,
+      "executable": "/Users/itziklavon/Library/Caches/ms-playwright/webkit-2359/Playwright.app/Contents/MacOS/Playwright",
+      "resource_coalition": 431541
+    }
+  ],
+  "browser_processes": [
+    {
+      "pid": 80464,
+      "parent": 80458,
+      "start": "Wed Oct 7 13:14:24 2026",
+      "cpu_percent": 5.9,
+      "rss_mib": 119.359375,
+      "executable": "/Users/itziklavon/Library/Caches/ms-playwright/webkit-2359/Playwright.app/Contents/MacOS/Playwright",
+      "resource_coalition": 431541
+    },
+    {
+      "pid": 80469,
+      "parent": 1,
+      "start": "Wed Oct 7 13:14:25 2026",
+      "cpu_percent": 0.0,
+      "rss_mib": 53.125,
+      "executable": "/Users/itziklavon/Library/Caches/ms-playwright/webkit-2359/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking.Development",
+      "resource_coalition": 431541
+    },
+    {
+      "pid": 80470,
+      "parent": 1,
+      "start": "Wed Oct 7 13:14:25 2026",
+      "cpu_percent": 0.7,
+      "rss_mib": 98.015625,
+      "executable": "/Users/itziklavon/Library/Caches/ms-playwright/webkit-2359/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU.Development",
+      "resource_coalition": 431541
+    },
+    {
+      "pid": 80488,
+      "parent": 1,
+      "start": "Wed Oct 7 13:14:26 2026",
+      "cpu_percent": 6.9,
+      "rss_mib": 234.625,
+      "executable": "/Users/itziklavon/Library/Caches/ms-playwright/webkit-2359/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent.Development",
+      "resource_coalition": 431541
+    }
+  ]
+}

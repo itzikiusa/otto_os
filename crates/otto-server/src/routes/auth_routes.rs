@@ -350,3 +350,254 @@ pub async fn revoke_token(
         Err(Error::NotFound("api token".into()).into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::login_throttle::{CLIENT_FAILURE_THRESHOLD, FAILURE_THRESHOLD};
+    use crate::routes::browser::tests::{mem_pool, test_ctx};
+    use axum::{body::Body, http::Request, routing::post, Router};
+    use tower::ServiceExt;
+
+    async fn fixture() -> (tempfile::TempDir, ServerCtx, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = mem_pool().await;
+        let username = format!("quality-login-{}", otto_core::new_id());
+        let password = otto_core::new_id();
+        let hash = otto_rbac::hash_password(&password).unwrap();
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES(?,?,?,'Login fixture',0,?)")
+            .bind(otto_core::new_id()).bind(&username).bind(hash)
+            .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        (tmp, ctx, username, password)
+    }
+
+    fn credentials(username: &str, password: &str, correct: bool) -> LoginReq {
+        LoginReq {
+            username: username.into(),
+            password: if correct {
+                password.to_owned()
+            } else {
+                otto_core::new_id()
+            },
+        }
+    }
+
+    async fn assert_locked(response: Response) {
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry: u64 = response.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=login_throttle::LOCKOUT_DURATION.as_secs()).contains(&retry));
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "too_many_requests");
+    }
+
+    #[tokio::test]
+    async fn quality_login_handler_rotating_peers_lock_username_but_desktop_can_recover() {
+        let (_tmp, ctx, username, password) = fixture().await;
+        let attempts = AttemptStore::default();
+        for i in 0..FAILURE_THRESHOLD {
+            let peer = IpAddr::from([203, 0, 113, i as u8 + 1]);
+            let response = handle_login(
+                &ctx,
+                &attempts,
+                Some(peer),
+                false,
+                credentials(&username, &password, false),
+            )
+            .await;
+            if i + 1 == FAILURE_THRESHOLD {
+                assert_locked(response).await;
+            } else {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
+        // A fresh client with the correct password is gated before verification.
+        assert_locked(
+            handle_login(
+                &ctx,
+                &attempts,
+                Some(IpAddr::from([198, 51, 100, 99])),
+                false,
+                credentials(&username, &password, true),
+            )
+            .await,
+        )
+        .await;
+        // A tunnel's loopback socket alone is insufficient for the exemption.
+        let local = Some(IpAddr::from([127, 0, 0, 1]));
+        assert_locked(
+            handle_login(
+                &ctx,
+                &attempts,
+                local,
+                false,
+                credentials(&username, &password, true),
+            )
+            .await,
+        )
+        .await;
+        let response = handle_login(
+            &ctx,
+            &attempts,
+            local,
+            true,
+            credentials(&username, &password, true),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        let login: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let authenticated = AuthRepo::new(ctx.pool.clone())
+            .authenticate(login["token"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(authenticated.effective_user.username, username);
+        assert!(attempts
+            .check_locked(&login_throttle::username_key(&username))
+            .is_none());
+        // Desktop still has its own IP+username budget.
+        for i in 0..FAILURE_THRESHOLD {
+            let response = handle_login(
+                &ctx,
+                &attempts,
+                local,
+                true,
+                credentials(&username, &password, false),
+            )
+            .await;
+            if i + 1 == FAILURE_THRESHOLD {
+                assert_locked(response).await;
+            } else {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn quality_login_handler_client_bucket_stops_username_spraying() {
+        let (_tmp, ctx, username, password) = fixture().await;
+        let attempts = AttemptStore::default();
+        let peer = Some(IpAddr::from([198, 51, 100, 98]));
+        for i in 0..CLIENT_FAILURE_THRESHOLD {
+            let response = handle_login(
+                &ctx,
+                &attempts,
+                peer,
+                false,
+                credentials(&format!("{username}-{i}"), &password, false),
+            )
+            .await;
+            if i + 1 == CLIENT_FAILURE_THRESHOLD {
+                assert_locked(response).await;
+            } else {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
+        assert_locked(
+            handle_login(
+                &ctx,
+                &attempts,
+                peer,
+                false,
+                credentials(&username, &password, true),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            handle_login(
+                &ctx,
+                &attempts,
+                Some(IpAddr::from([198, 51, 100, 97])),
+                false,
+                credentials(&username, &password, true)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_login_router_ignores_spoofed_forwarding_headers_and_scopes_local_exemption() {
+        let (_tmp, ctx, username, password) = fixture().await;
+        otto_state::SettingsRepo::new(ctx.pool.clone())
+            .put(
+                "share_base_url",
+                &serde_json::json!("https://quality-login.invalid"),
+            )
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/auth/login", post(login))
+            .with_state(ctx.clone())
+            .layer(axum::middleware::from_fn_with_state(
+                crate::host_guard::HostGuardState::new(ctx.pool.clone()),
+                crate::host_guard::host_guard_with_settings,
+            ));
+        let peer = IpAddr::from([198, 51, 100, 237]);
+        let request = |peer: IpAddr, host: &str, spoof: &str, correct: bool| {
+            let mut req = Request::builder().method("POST").uri("/auth/login")
+                .header("host", host).header("content-type", "application/json")
+                .header("x-forwarded-for", spoof).header("x-real-ip", spoof)
+                .body(Body::from(serde_json::json!({"username":username,"password":if correct {password.clone()} else {otto_core::new_id()}}).to_string())).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(peer, 12345)));
+            req
+        };
+        for i in 0..FAILURE_THRESHOLD {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    peer,
+                    "quality-login.invalid",
+                    &format!("203.0.113.{}", i + 1),
+                    false,
+                ))
+                .await
+                .unwrap();
+            if i + 1 == FAILURE_THRESHOLD {
+                assert_locked(response).await;
+            } else {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
+        // This checks actual extraction/bookkeeping, so a global username lock
+        // cannot mask a regression that starts trusting either spoofed header.
+        assert!(login_throttle::global()
+            .check_locked(&login_throttle::ip_key(Some(peer), &username))
+            .is_some());
+        let loopback = IpAddr::from([127, 0, 0, 1]);
+        assert_locked(
+            app.clone()
+                .oneshot(request(
+                    loopback,
+                    "quality-login.invalid",
+                    "127.0.0.1",
+                    true,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            app.oneshot(request(loopback, "localhost", "198.51.100.237", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        login_throttle::global().clear(&login_throttle::ip_key(Some(peer), &username));
+        login_throttle::global().clear(&login_throttle::client_key(peer));
+        login_throttle::global().clear(&login_throttle::username_key(&username));
+    }
+}

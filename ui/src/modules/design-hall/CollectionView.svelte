@@ -8,7 +8,7 @@
   // A filtered slice of the library as a page: one project, one studio, or the
   // designs that implement one product story. Artifacts are grouped by studio;
   // the header's primary action starts a new design already filed here.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -103,6 +103,9 @@
     void scope.kind;
     void scope.id;
     untrack(() => {
+      clearTimeout(patchTimer);
+      patchTimer = undefined;
+      patchIds.clear();
       hits = [];
       sLoaded = false;
       void loadScoped();
@@ -160,7 +163,12 @@
         }, 350);
       }
     });
-    return () => clearTimeout(patchTimer);
+  });
+  // Effect cleanup also runs before every new event batch. Cancelling there
+  // stranded patchIds behind a truthy timer handle and froze live cards.
+  onDestroy(() => {
+    clearTimeout(patchTimer);
+    ++sSeq; // an in-flight detail request no longer owns this collection
   });
   async function patchCards(): Promise<void> {
     const ids = [...patchIds];

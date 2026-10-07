@@ -179,34 +179,62 @@ export function pollScreens(deps: ScreenPollDeps, every = POLL_MS): { stop(): vo
   let timer: ReturnType<typeof setTimeout> | null = null;
   let ctrl: AbortController | null = null;
   let busy = false;
+  let resume = false;
+  const doc = typeof document === 'undefined' ? null : document;
+  const visible = () => !doc?.hidden;
+  const cancelTimer = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
+  const schedule = (delay: number) => {
+    cancelTimer();
+    if (!stopped && visible()) timer = setTimeout(() => void tick(), delay);
+  };
   const tick = async () => {
-    if (stopped || busy) return;
+    if (stopped || busy || !visible()) return;
+    cancelTimer();
     busy = true;
-    ctrl = new AbortController();
+    resume = false;
+    const batch = new AbortController();
+    ctrl = batch;
     const ids = deps.wanted().slice(0, MAX_LIVE);
     await Promise.all(
       ids.map(async (id) => {
         try {
-          const f = await deps.fetch(id, ctrl!.signal);
-          if (!stopped) deps.onFeed(id, f);
+          const f = await deps.fetch(id, batch.signal);
+          if (!stopped && !batch.signal.aborted && visible()) deps.onFeed(id, f);
         } catch {
           /* a failed read keeps the last frame; the next tick retries */
         }
       }),
     );
     busy = false;
-    if (!stopped) timer = setTimeout(tick, every);
+    ctrl = null;
+    schedule(resume ? 0 : every);
   };
-  timer = setTimeout(tick, 0);
+  const visibilityChanged = () => {
+    if (stopped) return;
+    cancelTimer();
+    if (!visible()) {
+      resume = false;
+      ctrl?.abort();
+    } else if (busy) {
+      // An abort-insensitive transport must settle before a fresh batch.
+      resume = true;
+    } else schedule(0);
+  };
+  doc?.addEventListener('visibilitychange', visibilityChanged);
+  schedule(0);
   return {
     stop() {
       stopped = true;
-      if (timer) clearTimeout(timer);
+      cancelTimer();
       ctrl?.abort();
+      doc?.removeEventListener('visibilitychange', visibilityChanged);
     },
     now() {
-      if (stopped || busy) return;
-      if (timer) clearTimeout(timer);
+      if (stopped || busy || !visible()) return;
+      cancelTimer();
       void tick();
     },
   };

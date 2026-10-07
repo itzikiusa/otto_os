@@ -14,8 +14,8 @@ export interface UiSpan {
 
 export interface Measurement {
   traceparent: string;
-  /** `name` optionally refines the span name at finish (e.g. the daemon's
-   *  route template); it is ignored unless it is a safe, bounded name. */
+  /** `name` optionally refines the operation at finish; callers must use
+   * the fixed browser ingestion operations, never a URL or identifier. */
   finish(status?: string, attributes?: Record<string, string | number>, name?: string): void;
 }
 type Sender = (spans: UiSpan[], signal: AbortSignal) => Promise<void>;
@@ -41,13 +41,9 @@ export function beginNavigation(module: string): (status?: string) => void { ret
 export function finishNavigationPaint(component: string, done: (status?: string) => void): void { if (runtime) runtime.finishNavigationPaint(component, done); else done('canceled'); }
 export async function flushTelemetry(): Promise<void> { await runtime?.flushTelemetry(); }
 
-/** Route TEMPLATE the daemon echoes in `x-otto-route` (`/api/v1/repos/{id}/fetch`):
- *  only static segments and `{param}` placeholders, never a concrete id. */
-const ROUTE_TEMPLATE = /^\/[A-Za-z0-9_\-{}:*/]{1,190}$/;
-/** `http.client.<method>.<route>` — the same shape as the daemon's server
- *  span names, so the per-minute rollup ranks client latency per endpoint. */
-export function clientSpanName(method: string, route: string | null): string {
-  if (!route || !ROUTE_TEMPLATE.test(route)) return 'http.client';
-  const tail = route.replace(/^\/api\/v1\//, '').replace(/[^A-Za-z0-9-]/g, '.').toLowerCase();
-  return `http.client.${method.toLowerCase().replace(/[^a-z]/g, '')}.${tail}`.slice(0, 96);
+/** Browser ingest accepts fixed operation names only. Route headers can contain
+ * identifiers from an older or mismatched daemon, so endpoint attribution stays
+ * in the server spans. Keep the arguments for the API wrapper's finish hook. */
+export function clientSpanName(_method: string, _route: string | null): string {
+  return 'http.client';
 }

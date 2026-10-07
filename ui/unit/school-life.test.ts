@@ -134,6 +134,20 @@ test('archived sessions sit on the detention bench (newest first, max 3)', () =>
   assert.equal(r.counts.detention, 3);
 });
 
+test('complete membership keeps overflow sessions actionable while geometry stays capped', () => {
+  const front = Array.from({ length: 38 }, (_, i) => sess({ workspace_id: 'w1', id: `front-${i}` }));
+  const back = Array.from({ length: 8 }, (_, i) => sess({ workspace_id: 'w1', id: `engine-${i}`, meta: { source: 'workflow' } }));
+  const archived = Array.from({ length: 5 }, (_, i) => sess({ workspace_id: 'w1', id: `archived-${i}`, archived: true }));
+  const s = school([...front, ...back], { archived, needs: ['engine-7'] });
+  const r = s.rooms[0];
+  assert.equal(r.kids.length, 42);
+  assert.equal(r.bench.length, 3);
+  assert.equal(r.kids.length + r.bench.length + 1, 46, 'includes the headmaster');
+  assert.equal(r.overflow, 4);
+  assert.equal(s.kids.length, 51, 'the accessible membership includes every session, including archives');
+  assert.equal(s.kids.find((k) => k.id === 'engine-7')?.pose, 'needs-you');
+});
+
 test('roomSummary reads like a door sign', () => {
   const s = school([sess({ workspace_id: 'w1', id: 'q' }), sess({ workspace_id: 'w1', id: 'w' })], { needs: ['q'], status: { w: 'working' } });
   assert.match(roomSummary(s.rooms[0]), /1 needs you/);

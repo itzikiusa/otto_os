@@ -283,7 +283,7 @@ mod handoff_tests {
     use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
     use otto_automation::AutomationCtx;
     use otto_core::workflows::{RunStatus, WorkflowGraph};
-    use otto_state::{NewScheduledRun, NewScheduledTask, WorkflowsRepo};
+    use otto_state::{NewScheduledTask, WorkflowsRepo};
     use serde_json::json;
 
     /// S3-303: a daemon restart while a workflow-kind scheduled run waits on
@@ -328,14 +328,9 @@ mod handoff_tests {
             })
             .await
             .unwrap();
-        let run = repo
-            .create_run(NewScheduledRun {
-                task_id: task.id.clone(),
-                workspace_id: "ho-ws".into(),
-                trigger: "manual".into(),
-            })
-            .await
-            .unwrap();
+        // Production admission persists the definition needed for safe recovery.
+        // Legacy rows without that snapshot are covered by the recovery tests.
+        let run = repo.admit_run(&task, "manual").await.unwrap();
         repo.set_run_workflow_run(&run.id, &wf_run.id)
             .await
             .unwrap();

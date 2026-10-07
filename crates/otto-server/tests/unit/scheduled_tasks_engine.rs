@@ -386,3 +386,193 @@ async fn workflow_task_overlap_is_recorded_skipped_not_error() {
         Some("skipped")
     );
 }
+
+/// Recovery uses only durable run state: the original context is discarded
+/// before the waiter starts. Distinct unknown destinations exercise the real
+/// delivery dispatcher without making any network request.
+async fn recovered_handoff(legacy: bool, malformed: bool, workflow_status: &str) {
+    use crate::routes::browser::tests::test_ctx;
+    use crate::scheduled_tasks_engine::resume_workflow_handoff;
+    let (tmp, ctx, initial) = admission_fixture().await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('recovery-u','recovery-u','x','U',0,?)")
+        .bind(Utc::now().to_rfc3339()).execute(&ctx.pool).await.unwrap();
+    let wfs = otto_state::WorkflowsRepo::new(ctx.pool.clone());
+    let wf = wfs
+        .create(
+            &initial.workspace_id,
+            "Recovered workflow",
+            "",
+            "",
+            &otto_core::workflows::WorkflowGraph::default(),
+            &"recovery-u".into(),
+        )
+        .await
+        .unwrap();
+    let task = ctx
+        .scheduled_tasks
+        .update(
+            &initial.id,
+            otto_state::ScheduledTaskPatch {
+                workflow_id: Some(Some(wf.id.clone())),
+                destination: Some(json!({"type":"admitted-destination-A"})),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let run = if legacy {
+        ctx.scheduled_tasks
+            .create_run(NewScheduledRun {
+                task_id: task.id.clone(),
+                workspace_id: task.workspace_id.clone(),
+                trigger: "schedule".into(),
+            })
+            .await
+            .unwrap()
+    } else {
+        open_run(&ctx, &task, "schedule").await.unwrap()
+    };
+    if malformed {
+        sqlx::query("UPDATE scheduled_task_runs SET admitted_task_json='{' WHERE id=?")
+            .bind(&run.id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+    }
+    let workflow_run = wfs
+        .create_run(&wf.id, &task.workspace_id, &json!({}), None)
+        .await
+        .unwrap();
+    ctx.scheduled_tasks
+        .set_run_workflow_run(&run.id, &workflow_run.id)
+        .await
+        .unwrap();
+    let edited = ctx
+        .scheduled_tasks
+        .update(
+            &task.id,
+            otto_state::ScheduledTaskPatch {
+                schedule: Some(json!({"cadence":"once","run_at":"2000-01-01T11:00:00Z"})),
+                destination: Some(json!({"type":"edited-destination-B"})),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pool = ctx.pool.clone();
+    drop(ctx);
+    let fresh = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    let pending = fresh
+        .scheduled_tasks
+        .list_running_workflow_handoffs()
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    let mut events = fresh.events.subscribe();
+    resume_workflow_handoff(&fresh, pending[0].clone());
+    sqlx::query("UPDATE workflow_runs SET status=?, finished_at=? WHERE id=?")
+        .bind(workflow_status)
+        .bind(Utc::now().to_rfc3339())
+        .bind(&workflow_run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The terminal event follows both the run write and schedule settlement.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let row = fresh.scheduled_tasks.get_run(&run.id).await.unwrap();
+            if row.status != "running" {
+                if legacy || malformed {
+                    break;
+                }
+                if let Ok(otto_core::event::Event::ScheduledTaskRunUpdated { .. }) =
+                    events.try_recv()
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("recovered run did not settle");
+    let after = fresh.scheduled_tasks.get(&task.id).await.unwrap();
+    assert_eq!(after.schedule_generation, edited.schedule_generation);
+    assert!(
+        after.last_run_at.is_none(),
+        "old completion consumed the retimed occurrence"
+    );
+    assert!(cadence::is_due_since(
+        &after.schedule,
+        None,
+        None,
+        Utc::now(),
+        chrono_tz::UTC
+    ));
+    let done = fresh.scheduled_tasks.get_run(&run.id).await.unwrap();
+    assert!(!done.delivered);
+    if legacy || malformed {
+        assert_eq!(done.status, "error");
+        assert!(done
+            .error
+            .unwrap_or_default()
+            .contains("admission snapshot"));
+        assert!(done.delivery_error.is_none());
+        assert!(done.report_path.is_none());
+    } else {
+        assert_eq!(
+            done.status,
+            if workflow_status == "success" {
+                "ok"
+            } else {
+                "error"
+            }
+        );
+        if workflow_status == "success" {
+            assert_eq!(
+                done.delivery_error.as_deref(),
+                Some("unknown destination type 'admitted-destination-A'")
+            );
+        } else {
+            assert!(done.delivery_error.is_none());
+        }
+        let path = done.report_path.unwrap();
+        assert!(
+            path.contains(&run.id),
+            "success and failure reports must belong to their run"
+        );
+        assert!(tokio::fs::read_to_string(path)
+            .await
+            .unwrap()
+            .contains("Recovered workflow"));
+    }
+    assert_eq!(
+        fresh
+            .scheduled_tasks
+            .list_runs(&task.id, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn quality_recovered_handoff_preserves_admitted_generation_and_destination() {
+    recovered_handoff(false, false, "success").await;
+}
+
+#[tokio::test]
+async fn quality_legacy_handoff_does_not_consume_or_deliver_edited_task() {
+    recovered_handoff(true, false, "success").await;
+}
+
+#[tokio::test]
+async fn quality_malformed_handoff_does_not_consume_or_deliver_edited_task() {
+    recovered_handoff(false, true, "success").await;
+}
+
+#[tokio::test]
+async fn quality_recovered_failed_handoff_report_is_owned_by_its_run() {
+    recovered_handoff(false, false, "error").await;
+}

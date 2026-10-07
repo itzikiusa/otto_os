@@ -1,0 +1,833 @@
+{
+  "method": "6 read-only ps samples at 2-second intervals, executable basename only; CPU estimate, not interval CPU. Other agents/builds active. No ownership asserted for unrelated provider processes.",
+  "samples": [
+    {
+      "at": 1791359081.007976,
+      "processes": [
+        {
+          "pid": 3272,
+          "parent": 1910,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 43.65625
+        },
+        {
+          "pid": 14265,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.1,
+          "rss_mb": 9.859375
+        },
+        {
+          "pid": 30934,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.609375
+        },
+        {
+          "pid": 32180,
+          "parent": 1,
+          "name": "otto-desktop",
+          "cpu": 2.8,
+          "rss_mb": 132.859375
+        },
+        {
+          "pid": 32397,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.1,
+          "rss_mb": 132.625
+        },
+        {
+          "pid": 40849,
+          "parent": 40804,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.296875
+        },
+        {
+          "pid": 40900,
+          "parent": 40886,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.359375
+        },
+        {
+          "pid": 40902,
+          "parent": 40896,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 59.90625
+        },
+        {
+          "pid": 52222,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 6.953125
+        },
+        {
+          "pid": 92907,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 7.484375
+        },
+        {
+          "pid": 99188,
+          "parent": 32397,
+          "name": "clickhouse",
+          "cpu": 0.0,
+          "rss_mb": 341.109375
+        },
+        {
+          "pid": 92908,
+          "parent": 92907,
+          "name": "claude",
+          "cpu": 0.0,
+          "rss_mb": 361.953125
+        },
+        {
+          "pid": 92975,
+          "parent": 92908,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.421875
+        },
+        {
+          "pid": 30935,
+          "parent": 30934,
+          "name": "claude",
+          "cpu": 0.5,
+          "rss_mb": 612.375
+        },
+        {
+          "pid": 30985,
+          "parent": 30935,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.984375
+        },
+        {
+          "pid": 52223,
+          "parent": 52222,
+          "name": "claude",
+          "cpu": 1.5,
+          "rss_mb": 344.90625
+        },
+        {
+          "pid": 52300,
+          "parent": 52223,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 8.984375
+        },
+        {
+          "pid": 14266,
+          "parent": 14265,
+          "name": "codex",
+          "cpu": 2.9,
+          "rss_mb": 291.140625
+        },
+        {
+          "pid": 14328,
+          "parent": 14266,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 12.765625
+        }
+      ]
+    },
+    {
+      "at": 1791359083.052941,
+      "processes": [
+        {
+          "pid": 3272,
+          "parent": 1910,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 43.65625
+        },
+        {
+          "pid": 14265,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.859375
+        },
+        {
+          "pid": 30934,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.609375
+        },
+        {
+          "pid": 32180,
+          "parent": 1,
+          "name": "otto-desktop",
+          "cpu": 2.9,
+          "rss_mb": 132.859375
+        },
+        {
+          "pid": 32397,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.2,
+          "rss_mb": 132.640625
+        },
+        {
+          "pid": 40849,
+          "parent": 40804,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.296875
+        },
+        {
+          "pid": 40900,
+          "parent": 40886,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.359375
+        },
+        {
+          "pid": 40902,
+          "parent": 40896,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 59.90625
+        },
+        {
+          "pid": 52222,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 6.953125
+        },
+        {
+          "pid": 92907,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 7.484375
+        },
+        {
+          "pid": 99188,
+          "parent": 32397,
+          "name": "clickhouse",
+          "cpu": 0.0,
+          "rss_mb": 342.125
+        },
+        {
+          "pid": 92908,
+          "parent": 92907,
+          "name": "claude",
+          "cpu": 0.0,
+          "rss_mb": 361.953125
+        },
+        {
+          "pid": 92975,
+          "parent": 92908,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.421875
+        },
+        {
+          "pid": 30935,
+          "parent": 30934,
+          "name": "claude",
+          "cpu": 0.3,
+          "rss_mb": 612.375
+        },
+        {
+          "pid": 30985,
+          "parent": 30935,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.984375
+        },
+        {
+          "pid": 52223,
+          "parent": 52222,
+          "name": "claude",
+          "cpu": 0.1,
+          "rss_mb": 345.078125
+        },
+        {
+          "pid": 52300,
+          "parent": 52223,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 8.984375
+        },
+        {
+          "pid": 14266,
+          "parent": 14265,
+          "name": "codex",
+          "cpu": 1.7,
+          "rss_mb": 291.1875
+        },
+        {
+          "pid": 14328,
+          "parent": 14266,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 12.765625
+        }
+      ]
+    },
+    {
+      "at": 1791359085.094916,
+      "processes": [
+        {
+          "pid": 3272,
+          "parent": 1910,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 43.65625
+        },
+        {
+          "pid": 14265,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.1,
+          "rss_mb": 9.859375
+        },
+        {
+          "pid": 30934,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.609375
+        },
+        {
+          "pid": 32180,
+          "parent": 1,
+          "name": "otto-desktop",
+          "cpu": 2.8,
+          "rss_mb": 132.859375
+        },
+        {
+          "pid": 32397,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.1,
+          "rss_mb": 132.640625
+        },
+        {
+          "pid": 40849,
+          "parent": 40804,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.296875
+        },
+        {
+          "pid": 40900,
+          "parent": 40886,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.359375
+        },
+        {
+          "pid": 40902,
+          "parent": 40896,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 59.90625
+        },
+        {
+          "pid": 52222,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 6.953125
+        },
+        {
+          "pid": 92907,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 7.484375
+        },
+        {
+          "pid": 99188,
+          "parent": 32397,
+          "name": "clickhouse",
+          "cpu": 0.0,
+          "rss_mb": 342.125
+        },
+        {
+          "pid": 92908,
+          "parent": 92907,
+          "name": "claude",
+          "cpu": 0.0,
+          "rss_mb": 361.953125
+        },
+        {
+          "pid": 92975,
+          "parent": 92908,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.421875
+        },
+        {
+          "pid": 30935,
+          "parent": 30934,
+          "name": "claude",
+          "cpu": 0.4,
+          "rss_mb": 612.375
+        },
+        {
+          "pid": 30985,
+          "parent": 30935,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.984375
+        },
+        {
+          "pid": 52223,
+          "parent": 52222,
+          "name": "claude",
+          "cpu": 0.1,
+          "rss_mb": 345.078125
+        },
+        {
+          "pid": 52300,
+          "parent": 52223,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 8.984375
+        },
+        {
+          "pid": 14266,
+          "parent": 14265,
+          "name": "codex",
+          "cpu": 1.6,
+          "rss_mb": 291.1875
+        },
+        {
+          "pid": 14328,
+          "parent": 14266,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 12.765625
+        }
+      ]
+    },
+    {
+      "at": 1791359087.1357281,
+      "processes": [
+        {
+          "pid": 3272,
+          "parent": 1910,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 43.65625
+        },
+        {
+          "pid": 14265,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.859375
+        },
+        {
+          "pid": 30934,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.609375
+        },
+        {
+          "pid": 32180,
+          "parent": 1,
+          "name": "otto-desktop",
+          "cpu": 3.1,
+          "rss_mb": 132.859375
+        },
+        {
+          "pid": 32397,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.1,
+          "rss_mb": 132.640625
+        },
+        {
+          "pid": 40849,
+          "parent": 40804,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.296875
+        },
+        {
+          "pid": 40900,
+          "parent": 40886,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.359375
+        },
+        {
+          "pid": 40902,
+          "parent": 40896,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 59.90625
+        },
+        {
+          "pid": 52222,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 6.953125
+        },
+        {
+          "pid": 92907,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 7.484375
+        },
+        {
+          "pid": 99188,
+          "parent": 32397,
+          "name": "clickhouse",
+          "cpu": 0.0,
+          "rss_mb": 342.125
+        },
+        {
+          "pid": 92908,
+          "parent": 92907,
+          "name": "claude",
+          "cpu": 0.0,
+          "rss_mb": 361.953125
+        },
+        {
+          "pid": 92975,
+          "parent": 92908,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.421875
+        },
+        {
+          "pid": 30935,
+          "parent": 30934,
+          "name": "claude",
+          "cpu": 3.1,
+          "rss_mb": 612.328125
+        },
+        {
+          "pid": 30985,
+          "parent": 30935,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.984375
+        },
+        {
+          "pid": 52223,
+          "parent": 52222,
+          "name": "claude",
+          "cpu": 0.1,
+          "rss_mb": 345.078125
+        },
+        {
+          "pid": 52300,
+          "parent": 52223,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 8.984375
+        },
+        {
+          "pid": 14266,
+          "parent": 14265,
+          "name": "codex",
+          "cpu": 1.6,
+          "rss_mb": 291.171875
+        },
+        {
+          "pid": 14328,
+          "parent": 14266,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 12.765625
+        }
+      ]
+    },
+    {
+      "at": 1791359089.17864,
+      "processes": [
+        {
+          "pid": 3272,
+          "parent": 1910,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 43.65625
+        },
+        {
+          "pid": 14265,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.859375
+        },
+        {
+          "pid": 30934,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.609375
+        },
+        {
+          "pid": 32180,
+          "parent": 1,
+          "name": "otto-desktop",
+          "cpu": 2.8,
+          "rss_mb": 132.859375
+        },
+        {
+          "pid": 32397,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.1,
+          "rss_mb": 132.640625
+        },
+        {
+          "pid": 40849,
+          "parent": 40804,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.296875
+        },
+        {
+          "pid": 40900,
+          "parent": 40886,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.359375
+        },
+        {
+          "pid": 40902,
+          "parent": 40896,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 59.90625
+        },
+        {
+          "pid": 52222,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 6.953125
+        },
+        {
+          "pid": 92907,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 7.484375
+        },
+        {
+          "pid": 99188,
+          "parent": 32397,
+          "name": "clickhouse",
+          "cpu": 0.0,
+          "rss_mb": 342.125
+        },
+        {
+          "pid": 92908,
+          "parent": 92907,
+          "name": "claude",
+          "cpu": 0.0,
+          "rss_mb": 361.953125
+        },
+        {
+          "pid": 92975,
+          "parent": 92908,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.421875
+        },
+        {
+          "pid": 30935,
+          "parent": 30934,
+          "name": "claude",
+          "cpu": 0.4,
+          "rss_mb": 612.328125
+        },
+        {
+          "pid": 30985,
+          "parent": 30935,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.984375
+        },
+        {
+          "pid": 52223,
+          "parent": 52222,
+          "name": "claude",
+          "cpu": 0.1,
+          "rss_mb": 345.078125
+        },
+        {
+          "pid": 52300,
+          "parent": 52223,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 8.984375
+        },
+        {
+          "pid": 14266,
+          "parent": 14265,
+          "name": "codex",
+          "cpu": 2.3,
+          "rss_mb": 291.203125
+        },
+        {
+          "pid": 14328,
+          "parent": 14266,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 12.765625
+        }
+      ]
+    },
+    {
+      "at": 1791359091.2181919,
+      "processes": [
+        {
+          "pid": 3272,
+          "parent": 1910,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 43.65625
+        },
+        {
+          "pid": 14265,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.1,
+          "rss_mb": 9.859375
+        },
+        {
+          "pid": 30934,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 9.609375
+        },
+        {
+          "pid": 32180,
+          "parent": 1,
+          "name": "otto-desktop",
+          "cpu": 2.8,
+          "rss_mb": 132.859375
+        },
+        {
+          "pid": 32397,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 132.640625
+        },
+        {
+          "pid": 40849,
+          "parent": 40804,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.296875
+        },
+        {
+          "pid": 40900,
+          "parent": 40886,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 60.359375
+        },
+        {
+          "pid": 40902,
+          "parent": 40896,
+          "name": "codex",
+          "cpu": 0.0,
+          "rss_mb": 59.90625
+        },
+        {
+          "pid": 52222,
+          "parent": 1,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 6.953125
+        },
+        {
+          "pid": 92907,
+          "parent": 32397,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 7.484375
+        },
+        {
+          "pid": 99188,
+          "parent": 32397,
+          "name": "clickhouse",
+          "cpu": 0.0,
+          "rss_mb": 342.125
+        },
+        {
+          "pid": 92908,
+          "parent": 92907,
+          "name": "claude",
+          "cpu": 0.0,
+          "rss_mb": 362.046875
+        },
+        {
+          "pid": 92975,
+          "parent": 92908,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.421875
+        },
+        {
+          "pid": 30935,
+          "parent": 30934,
+          "name": "claude",
+          "cpu": 0.4,
+          "rss_mb": 612.328125
+        },
+        {
+          "pid": 30985,
+          "parent": 30935,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 11.984375
+        },
+        {
+          "pid": 52223,
+          "parent": 52222,
+          "name": "claude",
+          "cpu": 0.1,
+          "rss_mb": 345.171875
+        },
+        {
+          "pid": 52300,
+          "parent": 52223,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 8.984375
+        },
+        {
+          "pid": 14266,
+          "parent": 14265,
+          "name": "codex",
+          "cpu": 1.6,
+          "rss_mb": 291.203125
+        },
+        {
+          "pid": 14328,
+          "parent": 14266,
+          "name": "ottod",
+          "cpu": 0.0,
+          "rss_mb": 12.765625
+        }
+      ]
+    }
+  ]
+}

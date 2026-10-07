@@ -24,6 +24,9 @@
 'use strict';
 
 const { execFileSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
+const { TagRangeCache } = require('./tag-range-cache.js');
+const digest = (value) => createHash('sha256').update(value).digest('hex');
 
 const KEY_RE = /\b[A-Z][A-Z0-9]+-\d+\b/g;
 // Catch-all keys devs use for unscoped fixes / prod issues (ABC-0000, ABC-000 …)
@@ -178,37 +181,27 @@ function deployTags(repoPath, patterns) {
   return tags;
 }
 
-// Tag-contains cache: "<repo>␟<tagName>␟<tagSha>␟<sha of every earlier tag>" →
-// raw `sha␟subject` log lines. Tag SHAs are immutable, so a long-lived worker
-// re-scanning reuses every range for free; a re-pointed or newly inserted
-// earlier tag changes the key and recomputes just the affected tags.
-const tagRangeCache = new Map();
-function tagContainsLog(repoPath, tag, earlier) {
-  const earlierShas = [...new Set(earlier.map((t) => t.sha))].filter((s) => s !== tag.sha);
-  const key = `${repoPath}${US}${tag.name}${US}${tag.sha}${US}${earlierShas.join(',')}`;
-  if (tagRangeCache.has(key)) return tagRangeCache.get(key);
-  // An earlier tag on the SAME commit means this tag deploys nothing new.
-  if (earlier.some((t) => t.sha === tag.sha)) {
-    tagRangeCache.set(key, '');
+// Fixed-size prefix digests avoid retaining quadratic cache keys. The complete
+// earlier SHA set is still excluded on cold misses, including divergent release
+// branches; subtracting only the previous tag would change first-deploy dates.
+const tagRangeCache = new TagRangeCache();
+function tagContainsLog(repoPath, tag, earlierShas, prefix, cache) {
+  const key = digest(JSON.stringify([repoPath, tag.name, tag.sha, prefix]));
+  const cached = cache.get(key);
+  if (cached !== undefined) return cached;
+  if (earlierShas.has(tag.sha)) {
+    cache.set(key, '');
     return '';
   }
-  // `log tag --not <every earlier tag>` (first-parent merges included — merges
-  // are commits too). Earlier tags go through --stdin so long histories never
-  // hit the argv limit.
   let out = null;
   try {
     out = execFileSync('git', ['-C', repoPath, 'log', tag.sha, `--pretty=%H${US}%s`, '--stdin'], {
       encoding: 'utf8',
       maxBuffer: 256 * 1024 * 1024,
-      input: earlierShas.map((s) => `^${s}`).join('\n') + (earlierShas.length ? '\n' : ''),
+      input: [...earlierShas].map((sha) => `^${sha}`).join('\n') + (earlierShas.size ? '\n' : ''),
     });
-  } catch {
-    out = null;
-  }
-  if (out !== null) {
-    if (tagRangeCache.size > 5000) tagRangeCache.clear();
-    tagRangeCache.set(key, out);
-  }
+  } catch { /* failed ranges are never cached */ }
+  if (out !== null) cache.set(key, out);
   return out;
 }
 
@@ -343,7 +336,7 @@ function featureIndex(repoName, repoPath, target, depth) {
  *    features: [...], target_used: {repo: branch}, fetched: {repo: bool},
  *    hasRepos}
  */
-function buildIndex(repos, config = {}) {
+function buildIndex(repos, config = {}, ranges = tagRangeCache) {
   const targets = config.target_branches || ['develop', 'main', 'master'];
   const depth = depthArgs(config.git_depth);
   const byKey = new Map();
@@ -554,9 +547,13 @@ function buildIndex(repos, config = {}) {
     const tags = deployTags(r.path, config);
     targetAge[r.name] = targetRefAgeDays(r.path, target);
     const matched = [];
+    const earlierShas = new Set();
+    let prefix = digest('deploy-ranges-v1');
     for (let i = 0; i < tags.length; i++) {
       const tag = tags[i];
-      const out = tagContainsLog(r.path, tag, tags.slice(0, i));
+      const out = tagContainsLog(r.path, tag, earlierShas, prefix, ranges);
+      earlierShas.add(tag.sha);
+      prefix = digest(JSON.stringify([prefix, tag.name, tag.sha]));
       const contains = [];
       if (out !== null) {
         for (const line of out.split('\n')) {
@@ -708,12 +705,14 @@ if (require.main === module) {
   process.stdin.on('data', (c) => (buf += c));
   process.stdin.on('end', async () => {
     try {
-      const { repos, config } = JSON.parse(buf || '{}');
+      const { repos, config, tag_cache_path } = JSON.parse(buf || '{}');
       const cfg = { ...(config || {}) };
       let fetched = {};
       if (cfg.git_fetch !== false) fetched = await prefetch(repos || []);
       cfg.git_fetch = false;
-      const idx = buildIndex(repos || [], cfg);
+      const ranges = new TagRangeCache(tag_cache_path);
+      const idx = buildIndex(repos || [], cfg, ranges);
+      ranges.save();
       idx.fetched = fetched;
       process.stdout.write(
         JSON.stringify({

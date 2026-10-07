@@ -92,7 +92,13 @@ export default defineConfig({
   // dist/.vite/manifest.json feeds scripts/bundle-budget.mjs (the CI byte
   // budget walks each entry's static-import closure from it).
   build: { manifest: true },
-  optimizeDeps: { exclude: ['@terrastruct/d2'] },
+  optimizeDeps: {
+    // Scan lazy pages/widgets before serving the first page. Discovering their
+    // dependencies later changes shared chunk hashes and can load two Svelte
+    // runtimes in one document (new widgets then crash in get_first_child).
+    entries: ['index.html', 'src/**/*.{ts,svelte}'],
+    exclude: ['@terrastruct/d2'],
+  },
   // The LSP client's nested open-rpc transport uses EventEmitter. Resolve its
   // Node-style import to the browser implementation in dev and production.
   resolve: { alias: [{ find: /^events$/, replacement: 'events/' }] },

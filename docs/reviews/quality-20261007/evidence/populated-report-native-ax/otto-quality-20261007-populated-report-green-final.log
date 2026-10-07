@@ -1,0 +1,16 @@
+✔ quality visual closure @390px light: report, nested Download and scan recovery (5202.39375ms)
+✔ quality visual closure @390px dark: report, nested Download and scan recovery (2845.976083ms)
+✔ quality visual closure @1280px light: report, nested Download and scan recovery (2909.133584ms)
+✔ quality visual closure @1280px dark: report, nested Download and scan recovery (2900.160208ms)
+✔ quality populated report @390px light: hierarchy, accessible data and keyboard navigation (498.964541ms)
+✔ quality populated report @390px dark: hierarchy, accessible data and keyboard navigation (440.027833ms)
+✔ quality populated report @1280px light: hierarchy, accessible data and keyboard navigation (486.3705ms)
+✔ quality populated report @1280px dark: hierarchy, accessible data and keyboard navigation (439.50275ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15935.742917

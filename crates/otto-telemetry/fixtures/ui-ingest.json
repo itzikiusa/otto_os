@@ -1,0 +1,8 @@
+{
+  "requests": [
+    {"method":"GET","route":"/api/v1/repos","component":"git","name":"http.client"},
+    {"method":"POST","route":"/api/v1/repos/{id}/fetch","component":"git","name":"http.client"},
+    {"method":"GET","route":"/api/v1/sessions/private-session","component":"agents","name":"http.client"}
+  ],
+  "rejected_names": ["private-project-name", "http.client.get.repos.private-project", "http.client.get.https://private.example", "http.client.get./api/v1/repos/private", "http.client.get.repos?token=secret"]
+}

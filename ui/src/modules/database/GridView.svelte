@@ -14,7 +14,7 @@
   // row-number column reserves the selection-checkbox slot whether or not the
   // result turns out editable, so the grid never shifts sideways when the
   // probe lands (the "table jumps when I open it" bug).
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import type { Attachment } from 'svelte/attachments';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -149,7 +149,7 @@
     if (scrollEl) scrollEl.scrollTop = 0;
     colWidths = {};
     dragName = null;
-    order = result.columns.map((_c, i) => i);
+    order = untrack(() => result.columns.map((_c, i) => i));
   });
 
   // ── Column order (drag a header onto another to move it) ─────────────────────
@@ -207,11 +207,23 @@
   const padTop = $derived(startIdx * ROW_H);
   const padBottom = $derived(Math.max(0, (total - endIdx) * ROW_H));
 
+  // Patch the virtual window in the rendering phase, not in a scroll-event
+  // microtask. WebKit can reset the native offset while committing that row /
+  // spacer swap during scroll dispatch. One queued frame also coalesces bursts
+  // without forcing a synchronous layout read after every DOM patch.
+  let scrollFrame: number | undefined;
   function onScroll(): void {
-    if (!scrollEl) return;
-    scrollTop = scrollEl.scrollTop;
-    if (hvirt) scrollLeft = scrollEl.scrollLeft;
+    if (!scrollEl || scrollFrame !== undefined) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = undefined;
+      if (!scrollEl) return;
+      scrollTop = scrollEl.scrollTop;
+      if (hvirt) scrollLeft = scrollEl.scrollLeft;
+    });
   }
+  onDestroy(() => {
+    if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
+  });
 
   const hvirt = $derived(virtualize && result.columns.length > HVIRT_MIN);
   /** Horizontal scroll offset from the inline start (RTL scrolls negative). */
@@ -717,6 +729,9 @@
   }
 
   function onGridKeydown(e: KeyboardEvent): void {
+    // Inline editors consume Enter/Escape before the event reaches the grid.
+    // Committing clears flow.editing synchronously; don't reopen that cell.
+    if (e.defaultPrevented) return;
     if (mini || !result || flow.editing || flow.reviewSql || flow.viewer || flow.docEditor) return;
     // Typing in the filter row must not move the cell cursor.
     if ((e.target as HTMLElement | null)?.closest('.filter-row')) return;

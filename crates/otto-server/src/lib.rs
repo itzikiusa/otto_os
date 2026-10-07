@@ -83,6 +83,7 @@ pub mod run_workspace;
 pub use otto_automation::scheduled_tasks_engine;
 pub use otto_automation::scheduled_tasks_scheduler;
 #[cfg(test)]
+#[path = "../tests/unit/scheduled_tasks_engine.rs"]
 mod scheduled_tasks_engine_tests;
 mod self_call;
 pub mod shutdown;
@@ -103,6 +104,7 @@ pub mod ui_bridge;
 pub use otto_mcp::outward::ui_commands;
 pub mod vault_docs_agent;
 pub mod workflow_engine;
+mod workflow_node_driver;
 pub mod workflow_trigger_scheduler;
 // Pure workflow pieces live in `otto-workflows`; aliased so `crate::workflow_*` paths resolve.
 pub use otto_workflows::chat as workflow_chat;

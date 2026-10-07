@@ -177,6 +177,19 @@ after(async () => {
 
 // ---- tests (serial by declaration order) -------------------------------------
 
+test('all-time view window: empty stored scope has zero bounded capacity window', async () => {
+  const file = path.join(dataDir, 'data', 'empty-account__EMPTY.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, account: 'empty-account', project: 'EMPTY', issues: {} }));
+  try {
+    const { status, json: o } = await api('GET', '/overview?account=empty-account&projects=EMPTY');
+    assert.equal(status, 200);
+    assert.equal(o.window.since, o.window.until);
+    assert.equal(o.capacity.capacity_days, 0);
+    assert.equal(o.estimate_accuracy.n, 0);
+  } finally { fs.unlinkSync(file); }
+});
+
 test('accounts + projects come from host API and Jira', async () => {
   const accts = await api('GET', '/accounts');
   assert.equal(accts.json[0].id, 'acc1');
@@ -954,4 +967,60 @@ test('PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardr
     fs.rmSync(dataDir2, { recursive: true, force: true });
     fs.rmSync(repo2, { recursive: true, force: true });
   }
+});
+
+test('quality: Stop preserves completed issues, stops dispatch and permits restart', async () => {
+  const original = (await api('GET', '/config')).json;
+  try {
+    await api('PUT', '/config', { pace_ms: 150, estimate_enabled: false, git_fetch: false, auto_scan_minutes: 0 });
+    assert.equal((await api('POST', '/scan', { account: 'acc1', projects: ['TP'], full: true })).status, 200);
+    let status;
+    const deadline = Date.now() + 10000;
+    do {
+      status = (await api('GET', '/scan/status?account=acc1')).json;
+      if (status.step === 'changelogs' && status.fetched > 0) break;
+      await new Promise((r) => setTimeout(r, 25));
+    } while (Date.now() < deadline);
+    assert.equal(status.step, 'changelogs');
+    assert.equal((await api('POST', '/scan/stop', { account: 'acc1' })).status, 200);
+    const until = Date.now() + 3000;
+    do {
+      status = (await api('GET', '/scan/status?account=acc1')).json;
+      if (status.state === 'stopped') break;
+      await new Promise((r) => setTimeout(r, 25));
+    } while (Date.now() < until);
+    assert.equal(status.state, 'stopped');
+    const corpus = JSON.parse(fs.readFileSync(path.join(dataDir, 'data', 'acc1__TP.json'), 'utf8'));
+    assert.ok(Object.keys(corpus.issues).length > 0, 'completed issues are retained');
+    const fetched = status.fetched;
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal((await api('GET', '/scan/status?account=acc1')).json.fetched, fetched);
+    await api('PUT', '/config', { pace_ms: 0 });
+    assert.equal((await api('POST', '/scan', { account: 'acc1', projects: ['TP'] })).status, 200);
+    assert.equal((await waitScanDone()).state, 'done');
+  } finally { await api('PUT', '/config', original); }
+});
+
+
+test('all-time view window: old tickets reach accuracy and flow with matching person denominators', async () => {
+  const original = (await api('GET', '/config')).json;
+  try {
+    await api('PUT', '/config', { estimate_enabled: true, estimate_window_months: 0, estimate_since: '', pace_ms: 0, git_fetch: false, auto_scan_minutes: 0 });
+    assert.equal((await api('POST', '/scan', { account: 'acc1', projects: ['TP'] })).status, 200);
+    await waitScanDone();
+    const { json: team } = await api('GET', '/overview?account=acc1&projects=TP');
+    assert.ok(team.completed > 0);
+    assert.ok(team.estimate_accuracy.n > 0, 'old completed estimates belong to All time');
+    assert.ok(team.flow.throughputPerWeek.value.count > 0, 'old deliveries belong to All time');
+    assert.ok(team.window.since <= Date.parse('2026-06-01T00:00:00Z'));
+    assert.ok(team.window.since >= Date.parse('2026-01-01T00:00:00Z'), 'no epoch capacity walk');
+    const { json: person } = await api('GET', '/assignee?account=acc1&projects=TP&assignee=u-alice');
+    assert.deepEqual(person.capacity.window, team.window, 'the same whole-scope window applies to team and person');
+    assert.equal(person.capacity.business_days, team.capacity.people['u-alice'].business_days);
+    const cutoff = Date.parse('2026-07-01T12:34:00Z');
+    const { json: recent } = await api('GET', `/overview?account=acc1&projects=TP&since=${cutoff}`);
+    assert.equal(recent.window.since, cutoff, 'an explicit cutoff is never day-rounded');
+    assert.equal(recent.flow.throughputPerWeek.value.count, 0);
+    assert.equal(recent.estimate_accuracy.n, 0);
+  } finally { await api('PUT', '/config', original); }
 });

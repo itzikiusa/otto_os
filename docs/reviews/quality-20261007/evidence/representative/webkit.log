@@ -1,0 +1,14 @@
+[WebServer] (node:36806) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-5aGpge OTTO_PORT=7897
+2026-10-07T09:43:12.830368Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-5aGpge/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 36808); root onboarded.
+
+Running 1 test using 1 worker
+
+(node:36897) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [iphone-portrait] › e2e/rtl.spec.ts:19:3 › rtl — home: applies dir=rtl, no overflow, accessible (2.7s)
+
+  1 passed (6.6s)

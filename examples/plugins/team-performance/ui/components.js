@@ -151,10 +151,11 @@
     const { el, anchor, onClose } = openPop;
     openPop = null;
     el.remove();
+    syncOverlays();
     if (anchor) {
       anchor.setAttribute('aria-expanded', 'false');
       if (anchor.getAttribute('aria-describedby') === el.id) anchor.removeAttribute('aria-describedby');
-      if (restoreFocus) anchor.focus();
+      if (restoreFocus && anchor.isConnected && !anchor.closest('[inert]')) anchor.focus();
     }
     if (onClose) onClose();
   }
@@ -189,6 +190,7 @@
     placeClamped(el, anchor);
     anchor.setAttribute('aria-expanded', 'true');
     openPop = { el, anchor, onClose };
+    syncOverlays();
     if (onOpen) onOpen(el);
     // Read-only popovers (describe) take focus themselves so a screen reader
     // reads them; the anchor is described by them while open.
@@ -215,8 +217,13 @@
     return el;
   }
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && openPop) {
+    if (!e.defaultPrevented && e.key === 'Tab' && openPop && modals.length) {
+      trapTab(e, openPop.el);
       e.stopPropagation();
+    }
+    if (!e.defaultPrevented && e.key === 'Escape' && openPop) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
       closePopover();
     }
   }, true);
@@ -246,7 +253,17 @@
    */
   // While any modal is open the page behind it (toolbar + main) is inert, so
   // neither pointer, Tab nor a screen reader's virtual cursor can reach it.
-  let modalDepth = 0;
+  const modals = [];
+  // A popover is appended above its parent dialog; only the visible top layer
+  // owns keyboard input. Covered dialog trees are also hidden from AT.
+  function syncOverlays() {
+    const top = modals[modals.length - 1];
+    for (const layer of modals) {
+      if (layer !== top || openPop) layer.back.setAttribute('inert', '');
+      else layer.back.removeAttribute('inert');
+    }
+    setPageInert(modals.length > 0);
+  }
   const INERT_SEL = ['main', '.toolbar'];
   function setPageInert(on) {
     for (const sel of INERT_SEL) {
@@ -256,7 +273,19 @@
       else el.removeAttribute('inert');
     }
   }
+  function trapTab(e, dlg) {
+    const f = [...dlg.querySelectorAll('button, input, select, textarea, a[href], iframe, [tabindex]:not([tabindex="-1"])')].filter((x) => !x.disabled && !x.closest('[hidden], [inert]') && x.getClientRects().length);
+    if (!f.length) { e.preventDefault(); dlg.focus(); return; }
+    if (e.shiftKey && (document.activeElement === f[0] || !dlg.contains(document.activeElement))) {
+      e.preventDefault();
+      f[f.length - 1].focus();
+    } else if (!e.shiftKey && (document.activeElement === f[f.length - 1] || !dlg.contains(document.activeElement))) {
+      e.preventDefault();
+      f[0].focus();
+    }
+  }
   function modal({ title, body, actions = [], wide = false, drawer = false, onOpen, labelledBy } = {}) {
+    closePopover();
     const prev = document.activeElement;
     const back = document.createElement('div');
     back.className = 'modal-backdrop' + (drawer ? ' drawer-backdrop' : '');
@@ -267,7 +296,9 @@
       ${actions.length ? `<footer>${actions.map((a, i) => `<button type="button" data-act="${i}" class="${a.primary ? 'primary' : a.danger ? 'danger' : ''}">${esc(a.label)}</button>`).join('')}</footer>` : ''}
     </div>`;
     document.body.appendChild(back);
-    if (modalDepth++ === 0) setPageInert(true);
+    const layer = { back };
+    modals.push(layer);
+    syncOverlays();
     const dlg = back.firstElementChild;
     let resolve;
     let closed = false;
@@ -277,32 +308,36 @@
       closed = true;
       document.removeEventListener('keydown', onKey, true);
       back.remove();
-      if (--modalDepth === 0) setPageInert(false);
-      if (prev && prev.focus) prev.focus();
+      const wasTop = modals[modals.length - 1] === layer;
+      modals.splice(modals.indexOf(layer), 1);
+      if (openPop && back.contains(openPop.anchor)) closePopover(false);
+      syncOverlays();
+      if (wasTop && prev && prev.isConnected && !prev.closest('[inert]') && prev.focus) prev.focus();
+      else if (wasTop && modals.length) modals[modals.length - 1].back.firstElementChild.focus();
       resolve(value);
     };
     const onKey = (e) => {
+      if (e.defaultPrevented || openPop || modals[modals.length - 1] !== layer) return;
       if (e.key === 'Escape') {
-        e.stopPropagation();
+        e.preventDefault();
+        e.stopImmediatePropagation();
         close(undefined);
       } else if (e.key === 'Tab') {
-        const f = [...dlg.querySelectorAll('button, input, select, textarea, a[href], iframe, [tabindex]:not([tabindex="-1"])')].filter((x) => !x.disabled);
-        if (!f.length) return;
-        if (e.shiftKey && document.activeElement === f[0]) {
-          e.preventDefault();
-          f[f.length - 1].focus();
-        } else if (!e.shiftKey && document.activeElement === f[f.length - 1]) {
-          e.preventDefault();
-          f[0].focus();
-        }
+        trapTab(e, dlg);
       }
     };
     document.addEventListener('keydown', onKey, true);
-    back.addEventListener('mousedown', (e) => e.target === back && close(undefined));
+    back.addEventListener('mousedown', (e) => e.target === back && modals[modals.length - 1] === layer && !openPop && close(undefined));
     dlg.querySelectorAll('[data-act]').forEach((b) => (b.onclick = () => close(actions[+b.dataset.act].value)));
     if (onOpen) onOpen(dlg, close);
-    const first = dlg.querySelector('input, select, textarea') || dlg.querySelector('footer .primary, footer button, button');
+    // Async viewers may start with a disabled action before their close button.
+    // Give focus to a usable control now, while the content is still loading.
+    const usable = (el) => !el.disabled && el.tabIndex >= 0 && !el.closest('[hidden], [inert]') && el.getClientRects().length;
+    const first = [...dlg.querySelectorAll('input, select, textarea')].find(usable)
+      || [...dlg.querySelectorAll('footer .primary, footer button, button')].find(usable);
+    dlg.tabIndex = -1;
     if (first) first.focus();
+    else dlg.focus();
     return { el: dlg, close, done };
   }
   const confirmer = {
@@ -701,8 +736,8 @@
   });
 
   /**
-   * The one metric tile. guard 'bad' → hatched + dimmed with the reason
-   * inline; a value with `drill` tickets is a button that opens the drawer.
+   * The one metric tile. Weak inputs stay visibly labeled, with complete
+   * reasons in a disclosure; a `drill` value opens the contributing tickets.
    * {title, valueHtml, context, capCtx, guard, def, band, series, drill}
    */
   function tile({ title, valueHtml, context = '', capCtx = '', guard = null, def = null, band = '', series = null, drill = null, quality = null }) {
@@ -716,7 +751,7 @@
       ${band || guard ? `<div class="row">${band ? bandBadge(band) : ''}${guardBadge(guard)}</div>` : ''}
       ${context ? `<div class="context">${context}</div>` : ''}
       ${capCtx ? `<div class="context cap">${esc(capCtx)}</div>` : ''}
-      ${guardReason(guard)}
+      ${bad && guard.msg ? `<details class="guard-details"><summary>Input limitations</summary>${guardReason(guard)}</details>` : ''}
     </div>`;
   }
 

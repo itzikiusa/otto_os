@@ -11,12 +11,13 @@ import { apiCtx, seedWorkspace } from './seed';
 // self-skips on the mobile/tablet device projects like the other desktop specs.
 
 let workspaceId = '';
+const WORKSPACE_NAME = 'CLI shortcut workspace';
 
 test.beforeEach(async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
   if (!workspaceId) {
     const { ctx, base } = await apiCtx();
-    workspaceId = await seedWorkspace(ctx, base);
+    workspaceId = await seedWorkspace(ctx, base, WORKSPACE_NAME);
     await ctx.dispose();
   }
   await page.addInitScript((w) => {
@@ -25,17 +26,13 @@ test.beforeEach(async ({ page }, info) => {
   await page.route('**/providers/update', (route) =>
     route.fulfill({ status: 503, contentType: 'text/plain', body: 'e2e-intercepted' }),
   );
-  // updateAllCLIs bails ("No workspace selected") until ws.currentId is set.
-  // select() assigns currentId BEFORE fetching the workspace's sessions, so
-  // the sessions request is a race-free "workspace resolved" signal. Arm the
-  // wait before goto so an early fetch can't slip past it.
-  const workspaceResolved = page.waitForRequest(
-    (r) => r.url().includes(`/workspaces/${workspaceId}/sessions`),
-    { timeout: 30_000 },
-  );
   await page.goto('/#/agents');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  await workspaceResolved;
+  // Boot prefetches sessions before the workspace list resolves. Only the
+  // rendered current-workspace chip proves selection has reached the UI.
+  await expect(page.getByTestId('agents-current-ws')).toHaveAccessibleName(
+    `Current workspace: ${WORKSPACE_NAME}. Switch workspace`,
+  );
 });
 
 for (const [chord, name] of [
@@ -43,15 +40,15 @@ for (const [chord, name] of [
   ['Meta+Shift+KeyU', 'Cmd+Shift+U'],
 ] as const) {
   test(`${name} fires the update-CLIs request`, async ({ page }) => {
-    const fired = page.waitForRequest(
-      (r) => r.method() === 'POST' && r.url().includes('/providers/update'),
-      { timeout: 10_000 },
-    );
     await page.keyboard.press(chord);
     // Updating every agent CLI on the host asks first; nothing is sent until
     // the person confirms.
     const confirm = page.getByRole('dialog', { name: 'Update all agent CLIs?' });
     await expect(confirm).toBeVisible();
+    const fired = page.waitForRequest(
+      (r) => r.method() === 'POST' && new URL(r.url()).pathname === `/api/v1/workspaces/${workspaceId}/providers/update`,
+      { timeout: 10_000 },
+    );
     await confirm.getByRole('button', { name: 'Update', exact: true }).click();
     await fired; // resolves only if the chord dispatched updateCLIs
   });

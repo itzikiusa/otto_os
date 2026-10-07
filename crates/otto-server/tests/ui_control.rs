@@ -98,6 +98,7 @@ struct Daemon {
     bob: String,
     sid: Id,
     http: reqwest::Client,
+    handshake_auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     _tmp: tempfile::TempDir,
 }
 
@@ -110,6 +111,55 @@ async fn boot() -> Daemon {
 
 /// [`boot`], optionally with the daemon's cached authenticator (S8-302).
 async fn boot_with(cached_auth: bool) -> Daemon {
+    boot_with_revoke_during_auth(cached_auth, false, false).await
+}
+
+/// Return a valid authentication result after revoking its token, reproducing
+/// logout racing the handshake without relying on task scheduling or sleeps.
+struct RevokeAfterAuthentication {
+    inner: std::sync::Arc<dyn otto_core::auth::TokenAuthenticator>,
+    repo: AuthRepo,
+    token: String,
+    fail_first_recheck: bool,
+    transient_pending: std::sync::atomic::AtomicBool,
+    attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl otto_core::auth::TokenAuthenticator for RevokeAfterAuthentication {
+    fn authenticate<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, otto_core::Result<otto_core::auth::AuthContext>> {
+        Box::pin(async move {
+            if token == self.token {
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if token == self.token
+                && self
+                    .transient_pending
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(otto_core::Error::Internal(
+                    "one transient store failure during revocation recheck".into(),
+                ));
+            }
+            let auth = self.inner.authenticate(token).await?;
+            if token == self.token {
+                self.repo.revoke(token).await?;
+                self.transient_pending
+                    .store(self.fail_first_recheck, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(auth)
+        })
+    }
+}
+
+async fn boot_with_revoke_during_auth(
+    cached_auth: bool,
+    revoke_during_auth: bool,
+    fail_first_recheck: bool,
+) -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
     let pool = file_pool(tmp.path()).await;
     seed_user(&pool, "alice", true).await;
@@ -150,6 +200,20 @@ async fn boot_with(cached_auth: bool) -> Daemon {
     if cached_auth {
         ctx = ctx.with_cached_auth(&pool);
     }
+    let handshake_auth_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    if revoke_during_auth {
+        // Prime the real cache, then interpose only at its successful lookup
+        // boundary. The production router, upgrade and socket loop stay real.
+        ctx.authenticator.authenticate(&bob).await.unwrap();
+        ctx.authenticator = std::sync::Arc::new(RevokeAfterAuthentication {
+            inner: ctx.authenticator.clone(),
+            repo: AuthRepo::new(pool.clone()),
+            token: bob.clone(),
+            fail_first_recheck,
+            transient_pending: std::sync::atomic::AtomicBool::new(false),
+            attempts: handshake_auth_attempts.clone(),
+        });
+    }
     otto_server::ui_bridge::spawn_session_watch(ctx.clone());
     // The production module composition (sessions, connections, dbviewer, …).
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
@@ -159,6 +223,7 @@ async fn boot_with(cached_auth: bool) -> Daemon {
     });
     Daemon {
         ws_base: format!("ws://{addr}"),
+        handshake_auth_attempts,
         base,
         human,
         agent,
@@ -685,6 +750,80 @@ async fn events_socket_closes_on_revoke_with_the_auth_cache_on() {
     .await
     .expect("the revoked socket must close within ~2 s with the cache on");
     assert_eq!(closed, Some(4401));
+}
+
+/// A revoke can complete after authentication succeeds but before the upgrade
+/// task initializes its timers. That generation must not become its baseline.
+#[tokio::test]
+async fn events_socket_closes_when_revoked_during_handshake_authentication() {
+    let d = boot_with_revoke_during_auth(true, true, false).await;
+    let mut ws = d.ws(&d.bob).await;
+    assert_eq!(
+        d.http
+            .get(format!("{}/api/v1/auth/me", d.base))
+            .bearer_auth(&d.bob)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401,
+        "the deterministic handshake race revoked the real cached token"
+    );
+    let closed = tokio::time::timeout(Duration::from_millis(2500), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(frame)) => return frame.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .expect("a handshake-time revoke must not wait for the 60 s periodic recheck");
+    assert_eq!(closed, Some(4401));
+}
+
+/// A transient store failure cannot acknowledge a pending revocation. The
+/// following beat must retry it, even without a second revocation signal.
+#[tokio::test]
+async fn events_socket_retries_revocation_after_one_transient_auth_failure() {
+    let d = boot_with_revoke_during_auth(true, true, true).await;
+    let mut ws = d.ws(&d.bob).await;
+    // No REST request here: the socket itself must consume the one-shot store
+    // error at the first beat, then obtain the real revoked verdict next beat.
+    let closed = tokio::time::timeout(Duration::from_millis(2500), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(frame)) => return frame.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .expect("a transient failure must retry the pending revocation on the next beat");
+    assert_eq!(closed, Some(4401));
+    assert_eq!(
+        d.handshake_auth_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "handshake, transient recheck, then definite revocation; the transient alone must not close"
+    );
+    assert_eq!(
+        d.http
+            .get(format!("{}/api/v1/auth/me", d.base))
+            .bearer_auth(&d.bob)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401,
+        "the socket closed for a real revocation, not merely the transient error"
+    );
 }
 
 /// S8-03: an open `/ws/events` socket is re-validated — revoking its token

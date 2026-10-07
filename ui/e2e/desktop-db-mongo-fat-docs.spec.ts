@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,7 +26,9 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 // Desktop-browser project only. Skips cleanly when the Mongo container is down.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const COLL = 'fatdocs';
+// beforeAll runs independently in each Playwright worker. Never drop a shared
+// collection while another worker is sampling its schema or reading its rows.
+const COLL = `fatdocs_${randomUUID().replaceAll('-', '')}`;
 /** Ceiling for total DOM nodes with a fat result on screen. Normal app chrome is
  *  ~2k; the pre-fix eager render was six figures, so this catches a regression
  *  without being brittle about exact markup. */
@@ -144,7 +147,7 @@ test('Structure tab lists EMBEDDED field paths for a collection', async ({ page 
   await expect(fields.locator('td.cn', { hasText: 'meta.whenUpdated' })).toBeVisible();
   // …and they're marked as embedded rather than looking like top-level fields.
   await expect(
-    fields.locator('tr', { has: page.locator('td.cn', { hasText: 'meta.brand_id' }) }).locator('.nested-tag'),
+    fields.locator('tr', { has: page.locator('td.cn', { hasText: 'meta.brand_id' }) }).getByTitle('Embedded field path'),
   ).toBeVisible();
 });
 

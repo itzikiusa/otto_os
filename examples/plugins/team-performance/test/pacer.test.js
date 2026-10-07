@@ -139,3 +139,36 @@ test('updated_on newer than the cursor refetches detail; an unchanged second run
   assert.equal(r3.fetched, 0);
   assert.deepEqual(detailCalls(s.daemon.calls), []);
 });
+
+test('quality: abort interrupts backoff and prevents queued dispatch', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  let waiting;
+  const ready = new Promise((r) => { waiting = r; });
+  const pacer = createPacer({ minIntervalMs: 0, onWait: waiting, sleep: () => new Promise(() => {}) });
+  const first = pacer.schedule(async () => { calls++; return { status: 429, headers: { 'retry-after': '30' } }; }, { signal: controller.signal });
+  const second = pacer.schedule(async () => { calls++; return { status: 200 }; }, { signal: controller.signal });
+  const outcomes = Promise.allSettled([first, second]);
+  await ready;
+  controller.abort();
+  const result = await Promise.race([outcomes, new Promise((r) => setTimeout(() => r(null), 300))]);
+  assert.ok(result, 'Stop must interrupt the rate-limit wait');
+  assert.equal(calls, 1);
+  assert.ok(result.every((r) => r.status === 'rejected' && r.reason.name === 'AbortError'));
+});
+
+test('quality edge: cancelled account exits a shared queue behind another active account', async () => {
+  let release;
+  const active = new Promise((r) => { release = r; });
+  const pacer = createPacer({ minIntervalMs: 0 });
+  const first = pacer.schedule(() => active);
+  const controller = new AbortController();
+  let dispatched = false;
+  const queued = pacer.schedule(() => { dispatched = true; return ok; }, { signal: controller.signal });
+  const outcome = queued.then(() => 'resolved', (e) => e.name);
+  try {
+    controller.abort();
+    assert.equal(await Promise.race([outcome, new Promise((r) => setTimeout(() => r('hung'), 100))]), 'AbortError');
+    assert.equal(dispatched, false);
+  } finally { release(ok); await first; await outcome; }
+});

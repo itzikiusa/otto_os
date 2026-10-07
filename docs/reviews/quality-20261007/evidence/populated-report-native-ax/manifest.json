@@ -1,0 +1,110 @@
+{
+  "baseline": "196048df plus quality repair diff",
+  "scope": "12 inspected production-renderer report images; focused browser RED/GREEN; public AX own-application and strict native zoom evidence; no VoiceOver speech assessment",
+  "files": [
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-people-1280-dark.png",
+      "file": "populated-people-1280-dark.png",
+      "bytes": 157503,
+      "sha256": "76d48a89573fe149b4aa46fc75c7aad62f93e5186a2b1f222575da0407e17456"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-people-1280-light.png",
+      "file": "populated-people-1280-light.png",
+      "bytes": 158710,
+      "sha256": "5ba7cb07605fad56e461c01a4fc59dbcf6a4d53dbaf978daac279eef3e53ca6e"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-people-390-dark.png",
+      "file": "populated-people-390-dark.png",
+      "bytes": 52896,
+      "sha256": "a0e267c5caf59102dfc4ab27b75028d5319646abd0495fde32fb63739b5711c6"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-people-390-light.png",
+      "file": "populated-people-390-light.png",
+      "bytes": 53387,
+      "sha256": "5d3aea06dc9c6efcdf2dc63422c553f25a7c54bba2309a694b2871f36756318e"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-phases-1280-dark.png",
+      "file": "populated-phases-1280-dark.png",
+      "bytes": 148580,
+      "sha256": "657d6b815d80a2369e219ce7b5419645827f86c4a02a0fd41380cd7771f66124"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-phases-1280-light.png",
+      "file": "populated-phases-1280-light.png",
+      "bytes": 150207,
+      "sha256": "8e8516d940505229e30e271538721a1c167842c74238d320a989411d4580f621"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-phases-390-dark.png",
+      "file": "populated-phases-390-dark.png",
+      "bytes": 53814,
+      "sha256": "aa89905321d93ba5b003db1f6abed3b41e90efaadd5dbee448d4a33d8f0ea713"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-phases-390-light.png",
+      "file": "populated-phases-390-light.png",
+      "bytes": 54729,
+      "sha256": "987a639dd50e0c5885ebb5ca3f5a0a3f6304811ce936fcc590a52a5c25e20cf8"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-top-1280-dark.png",
+      "file": "populated-top-1280-dark.png",
+      "bytes": 122113,
+      "sha256": "882547409b03c013881f32d6fbf81269b93e7f36db04cab37e0c000f33838a11"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-top-1280-light.png",
+      "file": "populated-top-1280-light.png",
+      "bytes": 122801,
+      "sha256": "54889c1e47ae9da453215ee6c0113b1aa8bfb65660512f2ca3f059dbc77d896c"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-top-390-dark.png",
+      "file": "populated-top-390-dark.png",
+      "bytes": 60755,
+      "sha256": "5af52b12d8776f7a135f35ae54aeefe5d6148d6d27ae5aca0f605fc2067731cd"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final/populated-top-390-light.png",
+      "file": "populated-top-390-light.png",
+      "bytes": 61496,
+      "sha256": "7d8c0bc5a770d664339fdd3a3bc33807647e34ae0f72b16468dd483ec01d8e59"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-report-fragment-red.log",
+      "file": "otto-quality-20261007-report-fragment-red.log",
+      "bytes": 1326,
+      "sha256": "482fdfbed95b1ae6f0f09d42f590cb70fca74cd165a4d180d06c4a4a513fa670",
+      "source_sha256": "00ae47780a6d146e87053ae8eb1e44438ce10f40af8d76e9b09175087fc5572c",
+      "normalization": "Trailing whitespace and excess final blank lines removed; result text unchanged."
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-populated-report-green-final.log",
+      "file": "otto-quality-20261007-populated-report-green-final.log",
+      "bytes": 945,
+      "sha256": "c3a944c780761633c76ee8029daa42430920c223022e33d01b4e7d772678b34b"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-native-ax-client.log",
+      "file": "otto-quality-20261007-native-ax-client.log",
+      "bytes": 5509,
+      "sha256": "2515665406c177e93b280b20b2f189cef5875855d739f9a1ddacdf3f5724ebe2"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-plugin-populated-final.log",
+      "file": "otto-quality-20261007-plugin-populated-final.log",
+      "bytes": 41518,
+      "sha256": "6720d4bf078d8ffe1d3818dff7ecc597235de9bdd5ea36a39eaf375a7ddc7b2d"
+    },
+    {
+      "source": "/tmp/otto-quality-20261007-native-ax-clippy-final.log",
+      "file": "otto-quality-20261007-native-ax-clippy-final.log",
+      "bytes": 164,
+      "sha256": "016e14071ea3afe0247e1a2f6d639c6fe6d7638e987408d8222d162738bb06d7"
+    }
+  ]
+}

@@ -25,6 +25,7 @@ const rawInput = (page: Page) => bar(page).locator('input.input-main');
 
 // Generous: parallel slots share one machine and a cold Vite compile.
 test.setTimeout(180_000);
+test.use({ serviceWorkers: 'block' }); // Keep the delayed page-module fixture interceptable.
 
 test.beforeEach(async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
@@ -86,32 +87,51 @@ test('⌘K focuses the bar and a command runs with Enter', async ({ page }) => {
 });
 
 test('free text defaults to Ask Otto and the answer lands in the thread', async ({ page }) => {
-  await page.keyboard.press('Meta+k');
-  await page.keyboard.type('what is on my plate today');
-  const first = options(page).first();
-  await expect(first).toContainText('Ask Otto');
-  await expect(first).toContainText('what is on my plate today');
-  await page.keyboard.press('Enter');
-
-  const turn = bar(page).locator('.turn').last();
-  await expect(turn.locator('.q')).toHaveText('what is on my plate today');
-  // AI fallback is off → the engine says so honestly (no fake answer).
-  await expect(turn.locator('.a')).toContainText('couldn’t turn that into an action', { timeout: 15_000 });
-  await expect(turn.locator('.src')).toContainText('Ask Otto');
-  await expect(input(page)).toHaveValue('');
-
-  // A deterministic request runs; the main window foregrounds the new
-  // session (like ⌘I), and the thread keeps the result with an Open link.
-  await page.keyboard.type('open 1 shell session');
-  await page.keyboard.press('Meta+Enter'); // ⌘↵ asks whatever is selected
-  await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 20_000 }).toMatch(/^#\/agents\/.+/);
-  if (!(await rawInput(page).evaluate((el) => el === document.activeElement))) {
+  // Keep destination readiness separate from the URL change, as on a cold
+  // navigation. Reload after installing the route so idle prefetch cannot win.
+  let release!: () => void;
+  const destinationReady = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(/\/src\/modules\/agents\/AgentsPage\.svelte(\?|$)/, async (route) => {
+    await destinationReady;
+    await route.continue();
+  });
+  try {
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(bar(page)).toHaveAttribute('data-presence', 'dock');
     await page.keyboard.press('Meta+k');
+    await page.keyboard.type('what is on my plate today');
+    const first = options(page).first();
+    await expect(first).toContainText('Ask Otto');
+    await expect(first).toContainText('what is on my plate today');
+    await page.keyboard.press('Enter');
+
+    const turn = bar(page).locator('.turn').last();
+    await expect(turn.locator('.q')).toHaveText('what is on my plate today');
+    // AI fallback is off → the engine says so honestly (no fake answer).
+    await expect(turn.locator('.a')).toContainText('couldn’t turn that into an action', { timeout: 15_000 });
+    await expect(turn.locator('.src')).toContainText('Ask Otto');
+    await expect(input(page)).toHaveValue('');
+
+    // A deterministic request runs; the main window foregrounds the new
+    // session (like ⌘I), and the thread keeps the result with an Open link.
+    await page.keyboard.type('open 1 shell session');
+    await page.keyboard.press('Meta+Enter'); // ⌘↵ asks whatever is selected
+    await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 20_000 }).toMatch(/^#\/agents\/.+/);
+    await expect(input(page)).toBeFocused(); // URL changed; the destination is still held.
+    const openedId = await page.evaluate(() => window.location.hash.split('/').at(-1));
+    release();
+    // Session mount intentionally gives its terminal focus and docks the bar.
+    // A focus check immediately after the URL change can still see the old page.
+    await expect(page.locator(`[data-session="${openedId}"] .xterm-helper-textarea`).first()).toBeFocused();
+    await page.keyboard.press('Meta+k');
+    await expect(input(page)).toBeFocused();
+    const done = bar(page).locator('.turn').last();
+    await expect(done.locator('.q')).toHaveText('open 1 shell session');
+    await expect(done.locator('.a')).toContainText('Done');
+    await expect(done.getByRole('button', { name: /Open/ })).toBeVisible();
+  } finally {
+    release();
   }
-  const done = bar(page).locator('.turn').last();
-  await expect(done.locator('.q')).toHaveText('open 1 shell session');
-  await expect(done.locator('.a')).toContainText('Done');
-  await expect(done.getByRole('button', { name: /Open/ })).toBeVisible();
 });
 
 test('Esc clears the query first, then closes the bar', async ({ page }) => {

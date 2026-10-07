@@ -107,9 +107,14 @@ for (const [theme, scheme, width, height, rtl] of [
       localStorage.setItem('otto_theme', theme);
       localStorage.setItem('otto_scheme', scheme);
     }, { theme, scheme });
-    for (const route of ['workflows', 'proof', 'run-with-otto']) {
+    for (const [route, title] of [
+      ['workflows', 'Workflows'], ['proof', 'Proof packs'], ['run-with-otto', 'Run with Otto'],
+    ]) {
       await page.goto(`/#/${route}`);
       if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');
+      // Hash navigation retains the outgoing page while the next chunk loads.
+      // All three pages share the empty-state copy, so first identify the destination.
+      await expect(page.getByRole('heading', { name: title, exact: true, level: 1 })).toBeVisible();
       await expect(page.getByRole('heading', { name: 'Add a workspace to get started' })).toBeVisible();
       await expectFullyInViewport(page, page.getByTestId('page-empty').getByRole('button', { name: 'Add workspace', exact: true }));
       await expectNoHorizontalOverflow(page);

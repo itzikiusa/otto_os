@@ -270,23 +270,45 @@ function unplannedShare(records, window) {
   return envelope(pool.length ? round(keys.length / pool.length) : null, pool.length, pool.length, { unplanned: keys.length, by_reason, keys, tickets });
 }
 
-/** actual/estimate ratio histogram over done items with both numbers. */
+/** actual/estimate ratio distribution and actionable misses over the SAME
+ * eligible done population. Preserve the histogram keys for report consumers;
+ * bins/within_25/n are the overview UI's display contract. */
 function estimateAccuracy(records, window) {
   const done = records.filter((r) => counted(r) && doneAt(r) != null && (!window || inWin(doneAt(r), window)));
-  const ratios = [];
+  const pairs = [];
   for (const r of done) {
     const e = Number(r.estimate_days);
     const a = Number(r.actual_days);
-    if (e > 0 && Number.isFinite(a) && a >= 0 && r.actual_days != null) ratios.push(a / e);
+    const ratio = a / e;
+    if (Number.isFinite(e) && e > 0 && Number.isFinite(a) && a >= 0 && r.actual_days != null && Number.isFinite(ratio)) {
+      pairs.push({ r, e, a, ratio });
+    }
   }
+  const ratios = pairs.map((p) => p.ratio);
   const histogram = Object.fromEntries(BUCKETS.map((b) => [b.id, 0]));
   for (const x of ratios) histogram[BUCKETS.find((b) => x >= b.lo && x < b.hi).id]++;
   const within = ratios.filter((x) => x >= 0.75 && x <= 1.25).length;
+  const pctWithin = ratios.length ? round(within / ratios.length) : null;
+  // Misses outside the inclusive ±25% band rank by proportional error in
+  // either direction. Zero actual is observed data, with maximal log error;
+  // only its finite ratio (0), never the internal Infinity, crosses the API.
+  const worst = pairs.filter((p) => p.r.key && (p.ratio < 0.75 || p.ratio > 1.25))
+    .sort((a, b) => Math.abs(Math.log(b.ratio)) - Math.abs(Math.log(a.ratio)) || String(a.r.key).localeCompare(String(b.r.key)))
+    .slice(0, 30)
+    .map(({ r, e, a, ratio }) => ({
+      key: r.key, project: r.project || String(r.key).split('-')[0], summary: r.summary ?? null,
+      assignee_id: r.assignee_id ?? null, assignee_name: r.assignee_name ?? null,
+      est_days: e, actual_days: a, ratio: round(ratio),
+    }));
   const reasons = done.length && ratios.length / done.length < 0.7 ? ['low_estimate_coverage'] : [];
   // A distribution of < 10 ratios is anecdote, not a shape.
   if (ratios.length < ACCURACY_MIN_N) reasons.push('low_sample');
   return envelope(
-    { histogram, pct_within_25: ratios.length ? round(within / ratios.length) : null, median_ratio: round(median(ratios)) },
+    {
+      histogram, pct_within_25: pctWithin, median_ratio: round(median(ratios)),
+      bins: BUCKETS.map((b) => ({ label: b.id, n: histogram[b.id] })),
+      within_25: pctWithin, n: ratios.length, worst,
+    },
     ratios.length, done.length, {}, reasons,
   );
 }

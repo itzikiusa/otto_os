@@ -329,6 +329,8 @@ impl<T> Cached<T> {
 pub struct CompletionCache {
     /// Lifetime of a successful snapshot ([`COMPLETION_TTL`] by default).
     ttl: Duration,
+    /// Optional snapshot/field-map entry ceiling for the enforced service cache.
+    capacity: Option<usize>,
     snapshots: Mutex<HashMap<SnapKey, Cached<SchemaSnapshot>>>,
     /// Mongo only: a collection's sampled field paths, cached independently of
     /// the (cheap) collection list so we sample only what's actually in context.
@@ -364,12 +366,19 @@ impl CompletionCache {
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
             ttl,
+            capacity: None,
             snapshots: Mutex::default(),
             fields: Mutex::default(),
             building: Mutex::default(),
             fields_building: Mutex::default(),
             first_db: Mutex::default(),
         }
+    }
+
+    pub(crate) fn with_ttl_and_capacity(ttl: Duration, capacity: usize) -> Self {
+        let mut cache = Self::with_ttl(ttl);
+        cache.capacity = Some(capacity.max(1));
+        cache
     }
 
     /// A fresh-enough cached snapshot, or `None` (the caller builds + `put`s).
@@ -443,10 +452,10 @@ impl CompletionCache {
         ttl: Duration,
     ) -> Arc<SchemaSnapshot> {
         let value = Arc::new(snap);
-        self.snapshots.lock().unwrap().insert(
-            (cache_key.to_string(), db.to_string()),
-            Cached::new(value.clone(), ttl),
-        );
+        let key = (cache_key.to_string(), db.to_string());
+        let mut snapshots = self.snapshots.lock().unwrap();
+        prune_for_insert(&mut snapshots, &key, self.capacity);
+        snapshots.insert(key, Cached::new(value.clone(), ttl));
         value
     }
 
@@ -492,10 +501,10 @@ impl CompletionCache {
         fields: Vec<FieldSnap>,
     ) -> Arc<Vec<FieldSnap>> {
         let value = Arc::new(fields);
-        self.fields.lock().unwrap().insert(
-            (cache_key.to_string(), db.to_string(), object.to_string()),
-            Cached::new(value.clone(), COMPLETION_TTL),
-        );
+        let key = (cache_key.to_string(), db.to_string(), object.to_string());
+        let mut fields = self.fields.lock().unwrap();
+        prune_for_insert(&mut fields, &key, self.capacity);
+        fields.insert(key, Cached::new(value.clone(), self.ttl));
         value
     }
 
@@ -534,13 +543,14 @@ impl CompletionCache {
         let ttl = if fields.is_empty() {
             COMPLETION_NEGATIVE_TTL
         } else {
-            COMPLETION_TTL
+            self.ttl
         };
         let value = Arc::new(fields);
-        self.fields
-            .lock()
-            .unwrap()
-            .insert(key.clone(), Cached::new(value.clone(), ttl));
+        {
+            let mut fields = self.fields.lock().unwrap();
+            prune_for_insert(&mut fields, &key, self.capacity);
+            fields.insert(key.clone(), Cached::new(value.clone(), ttl));
+        }
         drop(guard);
         self.fields_building.lock().unwrap().remove(&key);
         value
@@ -591,6 +601,28 @@ impl CompletionCache {
     /// Total cached snapshot entries — for the refresh endpoint's warm summary.
     pub fn snapshot_count(&self) -> usize {
         self.snapshots.lock().unwrap().len()
+    }
+}
+
+fn prune_for_insert<K: Eq + std::hash::Hash + Clone, V>(
+    entries: &mut HashMap<K, Cached<V>>,
+    key: &K,
+    capacity: Option<usize>,
+) {
+    let Some(capacity) = capacity else { return };
+    entries.retain(|_, value| value.fresh());
+    if !entries.contains_key(key) {
+        while entries.len() >= capacity {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, value)| value.built_at)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 }
 
@@ -710,6 +742,52 @@ mod tests {
         c.invalidate("ck");
         assert!(c.get_snapshot("ck", "db").is_none());
         assert_eq!(c.snapshot_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_cache_evicts_oldest_without_crossing_field_scopes() {
+        let c = CompletionCache::with_ttl_and_capacity(Duration::from_secs(60), 2);
+        c.put_snapshot("conn", "old", snap());
+        c.snapshots
+            .lock()
+            .unwrap()
+            .get_mut(&("conn".into(), "old".into()))
+            .unwrap()
+            .built_at = Instant::now() - Duration::from_secs(1);
+        c.put_snapshot("conn", "new", snap());
+        c.put_snapshot("conn", "newest", snap());
+        assert_eq!(c.snapshot_count(), 2);
+        assert!(c.get_snapshot("conn", "old").is_none());
+        assert!(c.get_snapshot("conn", "newest").is_some());
+
+        let field = || vec![FieldSnap::new("visible", None, Rank::Plain)];
+        c.put_fields("conn", "user-a/policy-1", "profiles", field());
+        assert!(c
+            .get_fields("conn", "user-b/policy-1", "profiles")
+            .is_none());
+        assert!(c
+            .get_fields("conn", "user-a/policy-2", "profiles")
+            .is_none());
+        c.fields
+            .lock()
+            .unwrap()
+            .get_mut(&("conn".into(), "user-a/policy-1".into(), "profiles".into()))
+            .unwrap()
+            .built_at = Instant::now() - Duration::from_secs(1);
+        c.fields_or_build("conn", "user-b/policy-1", "profiles", || async { field() })
+            .await;
+        c.fields_or_build("conn", "user-a/policy-2", "profiles", || async { field() })
+            .await;
+        assert_eq!(c.fields.lock().unwrap().len(), 2);
+        assert!(c
+            .get_fields("conn", "user-a/policy-1", "profiles")
+            .is_none());
+        assert!(c
+            .get_fields("conn", "user-a/policy-2", "profiles")
+            .is_some());
+        c.invalidate("conn");
+        assert_eq!(c.snapshot_count(), 0);
+        assert!(c.fields.lock().unwrap().is_empty());
     }
 
     /// DB2-07: the reaper's sweep drops expired entries of every map (a `get`

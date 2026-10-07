@@ -136,6 +136,11 @@ CI), `--check` (fmt check, no rewrite), `--no-clippy`, `--no-test`, `--no-ui`,
 `--dry-run` (print the plan). `CARGO=<wrapper>` routes builds through a
 throttle wrapper.
 
+Changes under `examples/plugins/team-performance/` also run that plugin's
+unit, server and browser suites serially. Install `ui/` dependencies and
+`cd ui && npx playwright install chromium` first; the gate fails if the browser
+is unavailable. CI runs this suite in the UI job. `--no-test` skips it.
+
 For a tighter edit/check loop, select the affected package and test target:
 
 ```bash

@@ -6,15 +6,15 @@ import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 
 // E2E for the two Git features:
-//   1. Auto-fetch — a quiet background `git fetch` for the OPEN repo tabs every
-//      few seconds. Verifies the loop actually fires a fetch, that the visible
+//   1. Auto-fetch — a quiet background `git fetch` when a repo opens, then on
+//      the active/background cadence. Verifies the loop fires a fetch, that the visible
 //      ahead/behind chip updates when the upstream advances, that the toggle
 //      persists, and that pausing it stops the fetches.
 //   2. De-dup — registering the same repository path twice returns the SAME repo
 //      (no duplicate row) so the Git page never opens a second identical tab.
 //
-// The auto-fetch interval is forced to 2s via the persisted `otto_git_auto_fetch`
-// localStorage key so the loop fires quickly under test.
+// Opening the repo schedules the initial fetch immediately. The active repo's
+// next fetch is due after 60s; intervalSec configures the background cadence.
 
 let workspaceId = '';
 // A repo whose origin/<branch> is AHEAD of the local clone, so a `git fetch`
@@ -83,7 +83,7 @@ test.beforeAll(async () => {
   upstreamRepoId = await seedUpstreamAheadRepo();
 });
 
-/** Seed localStorage BEFORE the app boots: workspace + a fast (2s) auto-fetch
+/** Seed localStorage BEFORE the app boots: workspace + the default auto-fetch
  *  config (enabled unless `paused`). */
 async function boot(page: Page, opts: { paused?: boolean } = {}): Promise<void> {
   await page.addInitScript(
@@ -92,7 +92,7 @@ async function boot(page: Page, opts: { paused?: boolean } = {}): Promise<void> 
       localStorage.setItem('otto_rail_expanded', '0');
       localStorage.setItem('otto_git_auto_fetch', cfg as string);
     },
-    [workspaceId, JSON.stringify({ enabled: !opts.paused, intervalSec: 2 })] as const,
+    [workspaceId, JSON.stringify({ enabled: !opts.paused, intervalSec: 120 })] as const,
   );
 }
 
@@ -104,14 +104,17 @@ const isFetch = (url: string) => /\/repos\/[^/]+\/fetch$/.test(url);
 
 test('auto-fetch: fires a background git fetch for the open repo', async ({ page }) => {
   await boot(page);
-  await page.goto(`/#/git/${upstreamRepoId}/graph`);
-  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  // The loop (2s interval) issues a POST …/repos/{id}/fetch on its own.
-  const req = await page.waitForRequest(
-    (r) => r.method() === 'POST' && isFetch(r.url()),
+  // Observe before navigation: the initial fetch can complete before the Git
+  // page becomes visible, and the next active-repo fetch is not due for 60s.
+  const fetched = page.waitForResponse(
+    (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/v1/repos/${upstreamRepoId}/fetch`,
     { timeout: 20_000 },
   );
-  expect(isFetch(req.url())).toBe(true);
+  await page.goto(`/#/git/${upstreamRepoId}/graph`);
+  await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
+  const response = await fetched;
+  expect(response.ok(), await response.text()).toBe(true);
+  expect(await response.json()).toMatchObject({ behind: 1 });
 });
 
 test('auto-fetch: updates the behind chip after the upstream advances', async ({ page }) => {
@@ -119,8 +122,7 @@ test('auto-fetch: updates the behind chip after the upstream advances', async ({
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   // The seeded upstream is 1 commit ahead → once the auto-fetch runs, the
-  // toolbar branch chip shows a "behind" marker (↓). Poll generously: a couple
-  // of 2s rounds + git fetch latency.
+  // toolbar branch chip shows a "behind" marker (↓) after the initial fetch.
   await expect(page.locator('.branch-chip .ab.down')).toBeVisible({ timeout: 25_000 });
   await expect(page.locator('.branch-chip .ab.down')).toHaveText(/↓\s*1/);
 });
@@ -153,7 +155,8 @@ test('auto-fetch: paused → no background fetch is issued', async ({ page }) =>
   await page.goto(`/#/git/${upstreamRepoId}/graph`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.git-autofetch')).not.toHaveClass(/\bon\b/);
-  // Wait well past two 2s rounds; the paused loop must never POST a fetch.
+  // Observe startup and the five-second loop tick; a paused loop must never
+  // issue even the initial fetch (which is immediately due on a fresh page).
   await page.waitForTimeout(6_000);
   expect(fetches, 'paused auto-fetch must not issue any fetch').toBe(0);
 });

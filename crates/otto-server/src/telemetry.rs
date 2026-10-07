@@ -188,8 +188,8 @@ pub async fn middleware(
     if let Ok(value) = traceparent.parse() {
         response.headers_mut().insert("traceparent", value);
     }
-    // The static route template (never a concrete URL) lets the UI name its
-    // client span per endpoint instead of one opaque `http.client` bucket.
+    // Keep the static route template for compatible diagnostics clients.
+    // Browser spans use fixed names; linked server spans carry endpoint identity.
     if let Ok(value) = route.parse() {
         response.headers_mut().insert(ROUTE_HEADER, value);
     }

@@ -1,0 +1,205 @@
+{
+  "note": "Functional Chromium SwiftShader fixture with ThreadCount=2; not native product performance. Only descendants of owned Playwright worker7465.",
+  "samples": [
+    {
+      "at": 1791362584.366334,
+      "processes": [
+        {
+          "pid": 7465,
+          "ppid": 7352,
+          "cpu": 0.0,
+          "rss_kib": 310432,
+          "comm": "/opt/homebrew/Cellar/node/26.10.0_1/bin/node"
+        },
+        {
+          "pid": 7573,
+          "ppid": 7465,
+          "cpu": 15.3,
+          "rss_kib": 134896,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7646,
+          "ppid": 7573,
+          "cpu": 194.7,
+          "rss_kib": 700032,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7652,
+          "ppid": 7573,
+          "cpu": 0.0,
+          "rss_kib": 92976,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 8718,
+          "ppid": 7573,
+          "cpu": 2.9,
+          "rss_kib": 516800,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        }
+      ]
+    },
+    {
+      "at": 1791362586.429237,
+      "processes": [
+        {
+          "pid": 7465,
+          "ppid": 7352,
+          "cpu": 4.8,
+          "rss_kib": 303040,
+          "comm": "/opt/homebrew/Cellar/node/26.10.0_1/bin/node"
+        },
+        {
+          "pid": 7573,
+          "ppid": 7465,
+          "cpu": 6.8,
+          "rss_kib": 131856,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7646,
+          "ppid": 7573,
+          "cpu": 198.5,
+          "rss_kib": 515520,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7652,
+          "ppid": 7573,
+          "cpu": 1.9,
+          "rss_kib": 80992,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 9103,
+          "ppid": 7573,
+          "cpu": 9.2,
+          "rss_kib": 197328,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        }
+      ]
+    },
+    {
+      "at": 1791362588.485706,
+      "processes": [
+        {
+          "pid": 7465,
+          "ppid": 7352,
+          "cpu": 0.3,
+          "rss_kib": 324032,
+          "comm": "/opt/homebrew/Cellar/node/26.10.0_1/bin/node"
+        },
+        {
+          "pid": 7573,
+          "ppid": 7465,
+          "cpu": 0.5,
+          "rss_kib": 131856,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7646,
+          "ppid": 7573,
+          "cpu": 200.4,
+          "rss_kib": 551456,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7652,
+          "ppid": 7573,
+          "cpu": 0.1,
+          "rss_kib": 93664,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 9103,
+          "ppid": 7573,
+          "cpu": 0.9,
+          "rss_kib": 439856,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        }
+      ]
+    },
+    {
+      "at": 1791362590.541318,
+      "processes": [
+        {
+          "pid": 7465,
+          "ppid": 7352,
+          "cpu": 40.2,
+          "rss_kib": 312976,
+          "comm": "/opt/homebrew/Cellar/node/26.10.0_1/bin/node"
+        },
+        {
+          "pid": 7573,
+          "ppid": 7465,
+          "cpu": 56.8,
+          "rss_kib": 132704,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7646,
+          "ppid": 7573,
+          "cpu": 85.5,
+          "rss_kib": 520768,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7652,
+          "ppid": 7573,
+          "cpu": 15.3,
+          "rss_kib": 81456,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 9308,
+          "ppid": 7573,
+          "cpu": 111.9,
+          "rss_kib": 197216,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        }
+      ]
+    },
+    {
+      "at": 1791362592.597327,
+      "processes": [
+        {
+          "pid": 7465,
+          "ppid": 7352,
+          "cpu": 1.7,
+          "rss_kib": 320176,
+          "comm": "/opt/homebrew/Cellar/node/26.10.0_1/bin/node"
+        },
+        {
+          "pid": 7573,
+          "ppid": 7465,
+          "cpu": 2.0,
+          "rss_kib": 132992,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7646,
+          "ppid": 7573,
+          "cpu": 191.5,
+          "rss_kib": 552320,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 7652,
+          "ppid": 7573,
+          "cpu": 0.1,
+          "rss_kib": 92896,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        },
+        {
+          "pid": 9308,
+          "ppid": 7573,
+          "cpu": 4.1,
+          "rss_kib": 373392,
+          "comm": "/Users/itziklavon/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        }
+      ]
+    }
+  ]
+}

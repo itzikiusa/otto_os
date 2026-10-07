@@ -1,0 +1,55 @@
+[WebServer] (node:31181) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-K285mE OTTO_PORT=7897
+2026-10-07T10:52:26.242083Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-K285mE/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 31183); root onboarded.
+
+Running 1 test using 1 worker
+
+(node:31272) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts (11.9s)
+
+
+  1) [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts
+
+    Error: expect(locator).toBeFocused() failed
+
+    Locator:  getByRole('dialog', { name: 'Add Workspace', exact: true }).getByRole('textbox', { name: 'Name', exact: true })
+    Expected: focused
+    Received: inactive
+    Timeout:  10000ms
+
+    Call log:
+      - Expect "toBeFocused" getByRole('dialog', { name: 'Add Workspace', exact: true }).getByRole('textbox', { name: 'Name', exact: true }) with timeout 10000ms
+      - waiting for getByRole('dialog', { name: 'Add Workspace', exact: true }).getByRole('textbox', { name: 'Name', exact: true })
+        24 × locator resolved to <input dir="auto" id="nw-name" autocorrect="off" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="My Project" class="input svelte-7r0je"/>
+           - unexpected value "inactive"
+
+
+      30 |   for (const width of [1000, 750, 1500]) {
+      31 |     await page.setViewportSize({ width, height: 900 });
+    > 32 |     await expect(name).toBeFocused();
+         |                        ^
+      33 |     await expect(name).toHaveValue('Unsubmitted resize draft');
+      34 |     await expectFullyInViewport(page, sheet);
+      35 |     await expectNoHorizontalOverflow(page);
+        at /Users/itziklavon/claude_ade-quality-20261007/ui/e2e/desktop-modal-focus-resize.spec.ts:32:24
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../tmp/otto-quality-20261007-modal-resize-red/desktop-modal-focus-resize-337cf-sktop-floating-bar-unmounts-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../tmp/otto-quality-20261007-modal-resize-red/desktop-modal-focus-resize-337cf-sktop-floating-bar-unmounts-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../tmp/otto-quality-20261007-modal-resize-red/desktop-modal-focus-resize-337cf-sktop-floating-bar-unmounts-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../tmp/otto-quality-20261007-modal-resize-red/desktop-modal-focus-resize-337cf-sktop-floating-bar-unmounts-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts

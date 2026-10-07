@@ -26,6 +26,7 @@ const LOG_LIMIT: u64 = 1024 * 1024;
 const GOMEMLIMIT: &str = "160MiB";
 pub(crate) struct Collector {
     child: Child,
+    sampled: Option<crate::resource::CollectorRegistration>,
     _owner_lock: Option<Arc<std::fs::File>>,
     pub endpoint: String,
     pub health: String,
@@ -82,7 +83,11 @@ pub(crate) fn parse_exporter_stats(text: &str) -> Option<ExporterStats> {
 }
 impl Collector {
     pub fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        let alive = matches!(self.child.try_wait(), Ok(None));
+        if !alive {
+            self.sampled.take();
+        }
+        alive
     }
     /// `None` when the metrics endpoint is unreachable or exposes no exporter
     /// series yet (they appear after the first export attempt).
@@ -121,6 +126,7 @@ impl Collector {
         }
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
+        self.sampled.take();
         self._owner_lock.take();
     }
     /// `recover`: run the orphan/live-owner process scans (4 whole-machine
@@ -133,6 +139,7 @@ impl Collector {
         clickhouse: &str,
         config: &TelemetryConfig,
         recover: bool,
+        sampled_process: crate::resource::CollectorProcess,
     ) -> Result<Self> {
         // A previous daemon may have died without running Child::drop. Never
         // rewrite a live owner's config or start a second exporter beside it.
@@ -201,8 +208,10 @@ impl Collector {
             .kill_on_drop(true)
             .spawn()
             .context("start telemetry collector")?;
+        let sampled = crate::resource::CollectorRegistration::new(sampled_process, child.id());
         let mut collector = Self {
             child,
+            sampled: Some(sampled),
             _owner_lock: Some(owner_lock),
             endpoint,
             health: format!("http://127.0.0.1:{health_port}"),

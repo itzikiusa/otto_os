@@ -2525,6 +2525,27 @@
     .tb-label {
       display: none;
     }
+    /* Keep paging controls and edit guidance reachable in narrow panes.
+       The desktop status line remains fixed; compact panes can use two rows. */
+    .grid-foot {
+      height: auto;
+      min-height: 24px;
+      flex-wrap: wrap;
+      overflow: visible;
+    }
+    .grid-foot > * {
+      max-inline-size: 100%;
+    }
+    .grid-foot .grow {
+      display: none;
+    }
+    .grid-foot .pager {
+      flex-wrap: wrap;
+      flex-shrink: 1;
+    }
+    .grid-foot .gt-edit-hint {
+      white-space: normal;
+    }
   }
 
   @media (max-width: 640px) {

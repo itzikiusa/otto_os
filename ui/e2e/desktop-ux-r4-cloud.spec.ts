@@ -290,7 +290,13 @@ test('SQS queue drafts stay with their queue during a pending send', async ({ pa
   await page.route('**/sqs/queues/attributes?*', r => { refreshed.push(new URL(r.request().url()).searchParams.get('url') || ''); return r.fulfill({ json: { attributes: {}, approx_messages: 1, approx_not_visible: 0, approx_delayed: 0 } }); });
   await openPage(page, 'aws/ux-account/sqs'); await page.getByRole('cell', { name: 'review-other', exact: true }).click();
   await page.getByRole('tab', { name: 'Send', exact: true }).click(); await page.getByLabel('Body', { exact: true }).fill('other-queue draft');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await expect.poll(() => sent).toBeTruthy();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  const confirmation = page.getByRole('dialog', { name: 'Send message?', exact: true });
+  await expect(confirmation).toContainText('SQS queue review-other');
+  await expect(confirmation).toContainText('other-queue draft');
+  expect(sent).toBeUndefined();
+  await confirmation.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => sent).toMatchObject({ url: queueUrl + '-other', body: 'other-queue draft' });
   await page.getByRole('cell', { name: 'review-orders.fifo FIFO', exact: true }).click();
   await expect(page.getByLabel('Body', { exact: true })).toHaveValue('');
   await page.getByLabel('Body', { exact: true }).fill('orders draft'); refreshed.length = 0;

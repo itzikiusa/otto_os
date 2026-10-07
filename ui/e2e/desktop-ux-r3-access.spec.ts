@@ -85,7 +85,7 @@ for(const v of [{theme:'native',scheme:'light',width:375},{theme:'native',scheme
   await expectFullyInViewport(page,page.locator('.login-card'));
 });
 
-test('first account keeps failed workspace setup recoverable without recreating root',async({page},info)=>{
+test('first account finishes after optional workspace failure and explains recovery',async({page},info)=>{
   await guest(page);await page.setViewportSize({width:375,height:667});
   await page.route('**/api/v1/meta',r=>r.fulfill({json:{...meta,needs_onboarding:true}}));
   let roots=0;let workspaces=0;
@@ -98,9 +98,14 @@ test('first account keeps failed workspace setup recoverable without recreating 
   // The account exists from the password step on; the workspace step says so.
   await expect(page.getByRole('status').filter({hasText:'Root account created.'})).toBeVisible();expect(roots).toBe(1);
   await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Continue',exact:true}).click();
-  await page.getByRole('button',{name:'Finish setup'}).click();await expect(page.getByText('Workspace unavailable; retry setup')).toBeVisible();
+  await page.getByRole('button',{name:'Finish setup'}).click();
+  await expect(page.locator('.shell')).toBeVisible();
+  await expect(page.getByText('Setup finished, but the workspace wasn’t created',{exact:true})).toBeVisible();
+  await expect(page.getByText(/Workspace unavailable; retry setup.*create it from the Agents page/)).toBeVisible();
   await page.screenshot({path:info.outputPath('first-account-error.png')});
-  await page.getByRole('button',{name:'Finish setup'}).click();await expect(page.locator('.shell')).toBeVisible();expect(roots).toBe(1);expect(workspaces).toBe(2);
+  await expect(page.getByRole('button',{name:'Finish setup'})).toHaveCount(0);
+  expect(roots).toBe(1);expect(workspaces).toBe(1);
+  expect(await page.evaluate(()=>sessionStorage.getItem('otto_onboarding_step'))).toBeNull();
 });
 
 for(const v of [{theme:'native',scheme:'light',width:375,height:667},{theme:'native',scheme:'dark',width:1000,height:600},{theme:'warm',scheme:'light',width:375,height:480},{theme:'warm',scheme:'dark',width:834,height:768},{theme:'pro-dark',scheme:'dark',width:1024,height:768}]) test(`guest OTP recovery ${v.theme}-${v.scheme}`,async({page},info)=>{

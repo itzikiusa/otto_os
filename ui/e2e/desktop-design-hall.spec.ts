@@ -196,17 +196,27 @@ test('references search finds designs in the team library', async ({ page }) => 
 });
 
 test('a project page loads its own designs from the server (not the lobby library)', async ({ page }) => {
+  const updates: string[] = [];
+  page.on('websocket', (socket) => {
+    if (!socket.url().includes('/ws/events')) return;
+    socket.on('framereceived', ({ payload }) => {
+      const event = JSON.parse(String(payload));
+      if (event.type === 'design_artifact_updated' && event.change === 'meta') updates.push(event.artifact_id);
+    });
+  });
   const { ctx, base } = await apiCtx();
   const project = await postJson(ctx, `${base}${V1}/design/projects`, { workspace_id: wsId, name: `Scoped page ${stamp}` });
   const titles = [`Scoped A ${stamp}`, `Scoped B ${stamp}`];
+  const artifactIds: string[] = [];
   for (const title of titles) {
-    await postJson(ctx, `${base}${V1}/design/artifacts`, {
+    const created = await postJson(ctx, `${base}${V1}/design/artifacts`, {
       workspace_id: wsId,
       project_id: project.id,
       format: 'd2',
       title,
       content: 'a -> b\n',
     });
+    artifactIds.push(created.artifact.id);
   }
   await ctx.dispose();
 
@@ -228,10 +238,20 @@ test('a project page loads its own designs from the server (not the lobby librar
     if (r.url().includes('/design/search') && r.url().includes(`project_id=${project.id}`)) searches++;
   });
   const { ctx: ctx2, base: base2 } = await apiCtx();
-  const first = await ctx2.get(`${base2}${V1}/design/artifacts?project_id=${project.id}`).then((r) => r.json());
-  const renamed = `Scoped renamed ${stamp}`;
-  await ctx2.patch(`${base2}${V1}/design/artifacts/${first[0].id}`, { data: { title: renamed } });
+  // Hold the browser's debounce clock while two REAL backend events arrive in
+  // separate turns. The second event must not cancel the first card's timer.
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  const renamed = [`Scoped renamed A ${stamp}`, `Scoped renamed B ${stamp}`];
+  for (const [i, id] of artifactIds.entries()) {
+    const response = await ctx2.patch(`${base2}${V1}/design/artifacts/${id}`, { data: { title: renamed[i] } });
+    expect(response.ok(), await response.text()).toBeTruthy();
+    expect(await response.json()).toMatchObject({ id, workspace_id: wsId, project_id: project.id, title: renamed[i] });
+    await expect.poll(() => updates.includes(id), { message: `live rename event for ${id}` }).toBe(true);
+    await page.clock.runFor(0); // flush the event's reactive turn without expiring its debounce
+  }
   await ctx2.dispose();
-  await expect(page.getByText(renamed, { exact: true })).toBeVisible();
+  await page.clock.runFor(350);
+  for (const title of renamed) await expect(page.getByText(title, { exact: true })).toBeVisible();
   expect(searches, 'a meta update patches the card, no slice reload').toBe(0);
 });

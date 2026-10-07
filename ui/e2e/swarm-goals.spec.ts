@@ -177,9 +177,11 @@ test('settings: standing goals tab + the Triggers tab show seeded data', async (
   const modal = page.locator('[role="dialog"]', { hasText: 'Swarm settings' }).first();
   await expect(modal).toBeVisible({ timeout: 15_000 });
   // The default "Standing goals" tab is present.
-  await expect(modal.locator('.tab', { hasText: 'Standing goals' })).toBeVisible();
+  await expect(modal.getByRole('tab', { name: 'Standing goals', exact: true })).toBeVisible();
+  await expect(modal.getByRole('tab', { name: 'Standing goals', exact: true })).toHaveAttribute('aria-selected', 'true');
   // Switch to the Triggers tab → the seeded slack trigger (keyword @team) shows.
-  await modal.locator('.tab', { hasText: 'Triggers' }).click();
+  await modal.getByRole('tab', { name: 'Triggers', exact: true }).click();
+  await expect(modal.getByRole('tab', { name: 'Triggers', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(modal.getByText('@team', { exact: false }).first()).toBeVisible({ timeout: 10_000 });
 });
 

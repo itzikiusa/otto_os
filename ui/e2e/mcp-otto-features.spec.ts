@@ -21,6 +21,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { enableMcpFixtureCatalog } from './mcp-catalog-fixture';
 
 const SLOT = process.env.OTTO_E2E_SLOT ?? '0';
 
@@ -130,11 +131,7 @@ test('governed outward: a feature read executes, a feature write needs approval'
   })).json()) as { id: string };
   expect(wf.id, 'workflow created').toBeTruthy();
 
-  // Enable the outward server with exactly two tools: one read, one dangerous write.
-  const patch = await ctx.patch(`${base}/api/v1/mcp/otto-server`, {
-    data: { enabled: true, tools: ['otto.list_workflows', 'otto.run_workflow'] },
-  });
-  expect(patch.ok(), `enable otto-server → ${patch.status()} ${await patch.text()}`).toBeTruthy();
+  await enableMcpFixtureCatalog(ctx, base);
 
   // Status reflects the new tools + their feature category.
   const status = (await (await ctx.get(`${base}/api/v1/mcp/otto-server`)).json()) as {

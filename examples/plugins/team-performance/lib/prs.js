@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const { writeJsonAtomicAsync } = require('./store.js');
+const { check } = require('./cancellation.js');
 
 const SCHEMA = 1;
 const KEY_RE = /[A-Z][A-Z0-9]+-\d+/g;
@@ -430,7 +431,7 @@ class DaemonError extends Error {
   }
 }
 
-function createPrClient({ baseUrl, token, fetchImpl, pacer, dataDir, onProgress, onWarn, withDiffstat = true } = {}) {
+function createPrClient({ baseUrl, token, fetchImpl, pacer, dataDir, onProgress, onWarn, withDiffstat = true, signal } = {}) {
   if (!baseUrl) throw new Error('createPrClient: baseUrl required');
   if (!pacer) throw new Error('createPrClient: pacer required');
   if (!dataDir) throw new Error('createPrClient: dataDir required');
@@ -440,9 +441,11 @@ function createPrClient({ baseUrl, token, fetchImpl, pacer, dataDir, onProgress,
   const warn = onWarn || ((w) => console.warn(`[team-performance] PR cache for ${w.repo} unreadable, starting fresh: ${w.error}`));
 
   async function getJson(route) {
+    check(signal);
     const url = `${base}${route}`;
     const res = await pacer.schedule(() =>
-      doFetch(url, { headers: { accept: 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) } }),
+      doFetch(url, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000), headers: { accept: 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) } }),
+      { signal },
     );
     if (!res || res.status < 200 || res.status >= 300) {
       let body = '';
@@ -476,9 +479,9 @@ function createPrClient({ baseUrl, token, fetchImpl, pacer, dataDir, onProgress,
     const enc = encodeURIComponent(repoId);
     const detail = await getJson(`/repos/${enc}/prs/${n}`);
     const partial = {};
-    const commits = await getJson(`/repos/${enc}/prs/${n}/commits`).catch(() => { partial.commits = true; return []; });
+    const commits = await getJson(`/repos/${enc}/prs/${n}/commits`).catch(() => { check(signal); partial.commits = true; return []; });
     let diff = null;
-    if (withDiffstat) diff = await getJson(`/repos/${enc}/prs/${n}/diff?summary=true`).catch(() => { partial.diff = true; return null; });
+    if (withDiffstat) diff = await getJson(`/repos/${enc}/prs/${n}/diff?summary=true`).catch(() => { check(signal); partial.diff = true; return null; });
     const pr = normalizePr(summary, detail, Array.isArray(commits) ? commits : commits.items || [], diff);
     if (Object.keys(partial).length) pr.partial = partial;
     return pr;

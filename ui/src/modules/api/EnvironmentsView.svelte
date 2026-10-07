@@ -13,6 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { router } from '../../lib/router.svelte';
   import type { ApiEnvironment, Id } from '../../lib/api/types';
 
   interface Props {
@@ -42,6 +43,26 @@
   let dirty = $state(false);
   let loadedFor = $state<string | null>(null);
 
+  let leavePending: Promise<boolean> | null = null;
+  export function approveLeave(): Promise<boolean> {
+    if (!dirty) return Promise.resolve(true);
+    if (leavePending) return leavePending;
+    leavePending = (async () => {
+      const { value } = await confirmer.choose(`“${selected?.name ?? 'This environment'}” has unsaved changes.`, {
+        title: 'Save environment changes?',
+        options: [{ label: 'Save', value: 'save', kind: 'primary' }, { label: 'Discard', value: 'discard', kind: 'danger' }],
+      });
+      if (value === 'save') return save();
+      if (value !== 'discard') return false;
+      dirty = false;
+      return true;
+    })().finally(() => { leavePending = null; });
+    return leavePending;
+  }
+  // The router asks these same guards before module and workspace changes.
+  // Secret drafts stay only in this mounted editor, never browser storage.
+  $effect(() => router.guard(() => approveLeave()));
+
   // Selection/reseed ownership is distinct from edits within the same draft.
   let editorGeneration = 0;
   function seed(env: ApiEnvironment | null): void {
@@ -66,7 +87,7 @@
 
   async function pick(env: ApiEnvironment): Promise<void> {
     if (env.id === selected?.id) return;
-    if (dirty && !(await confirmer.ask(`Discard your unsaved changes to “${selected?.name}”?`, { title: 'Discard changes', confirmLabel: 'Discard' }))) return;
+    if (!(await approveLeave())) return;
     selectedId = env.id;
     seed(env);
   }
@@ -100,9 +121,16 @@
   }
 
   let saving = $state(false);
-  async function save(): Promise<void> {
+  let savePending: Promise<boolean> | null = null;
+  function save(): Promise<boolean> {
+    // A leave decision made during a normal Save waits for that same write.
+    if (savePending) return savePending;
+    savePending = saveDraft().finally(() => { savePending = null; saving = false; });
+    return savePending;
+  }
+  async function saveDraft(): Promise<boolean> {
     const env = selected;
-    if (!env || saving) return;
+    if (!env) return false;
     const submittedRows = rows;
     const submittedGeneration = editorGeneration;
     const workspaceId = ws.currentId;
@@ -125,8 +153,7 @@
     }
     saving = true;
     const saved = await apiClient.saveEnvironment({ name: env.name, variables, secret_keys, secret_values, secret_renames }, env.id);
-    saving = false;
-    if (!saved || selected?.id !== env.id || loadedFor !== env.id || ws.currentId !== workspaceId) return;
+    if (!saved || selected?.id !== env.id || loadedFor !== env.id || ws.currentId !== workspaceId) return false;
     if (rows === submittedRows || (editorGeneration !== submittedGeneration && !dirty)) {
       seed(saved);
     } else {
@@ -143,13 +170,21 @@
           : { ...row, storedKey };
       });
     }
+    // A successful write only approves leaving when it saved the whole
+    // current draft; edits made while awaiting it still belong to the user.
+    return !dirty;
   }
 
-  async function create(): Promise<void> {
+  export async function create(): Promise<void> {
+    if (!(await approveLeave())) return;
+    const generation = editorGeneration;
+    const workspaceId = ws.currentId;
     const name = await confirmer.promptText('Name', { title: 'New environment', confirmLabel: 'Create', initial: '' });
-    if (!name) return;
+    if (!name || ws.currentId !== workspaceId) return;
     const saved = await apiClient.saveEnvironment({ name }, undefined);
-    if (saved) {
+    // Creating another environment must not overwrite edits or a selection
+    // made while its request was in flight.
+    if (saved && !dirty && editorGeneration === generation && ws.currentId === workspaceId) {
       selectedId = saved.id;
       seed(saved);
     }

@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
+import { enableMcpFixtureCatalog } from './mcp-catalog-fixture';
 
 test.beforeEach(({}, testInfo) => {
   test.skip(testInfo.project.name !== 'iphone-portrait', 'mcp-http-tokens runs once');
@@ -78,12 +79,7 @@ test('HTTP transport enforces each token scope; bad token is 401', async () => {
   })).json()) as { id: string };
   expect(wf.id, 'workflow created').toBeTruthy();
 
-  // Enable the outward server with a read tool, a mutating tool, and a second
-  // read tool we will deliberately leave OUT of the restricted token's scope.
-  const patch = await ctx.patch(`${base}/api/v1/mcp/otto-server`, {
-    data: { enabled: true, tools: ['otto.list_workflows', 'otto.run_workflow', 'otto.list_repos'] },
-  });
-  expect(patch.ok(), `enable otto-server → ${patch.status()} ${await patch.text()}`).toBeTruthy();
+  await enableMcpFixtureCatalog(ctx, base);
 
   // --- mint two scoped tokens for root -------------------------------------
   // A: read-only, restricted to exactly list_workflows.

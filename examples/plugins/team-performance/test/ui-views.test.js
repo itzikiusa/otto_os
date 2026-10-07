@@ -479,6 +479,8 @@ test('(10) a modal makes main + toolbar inert and restores them on close', () =>
   const mk = (n) => ({ setAttribute: (k) => (inert[n] = k === 'inert'), removeAttribute: () => (inert[n] = false) });
   const els = { main: mk('main'), '.toolbar': mk('toolbar') };
   const dlg = new El('div');
+  let dialogFocused = false;
+  dlg.focus = () => { dialogFocused = true; };
   dlg.querySelectorAll = () => [];
   dlg.querySelector = () => null;
   const back = new El('div');
@@ -492,6 +494,7 @@ test('(10) a modal makes main + toolbar inert and restores them on close', () =>
   document.removeEventListener = () => {};
   try {
     const m = TP.modal({ title: 'x', body: 'y' });
+    assert.equal(dialogFocused, true, 'an actionless dialog receives keyboard focus');
     assert.deepStrictEqual(inert, { main: true, toolbar: true });
     m.close();
     assert.deepStrictEqual(inert, { main: false, toolbar: false });
@@ -520,4 +523,13 @@ test('(9) layout: no inline layout styles in reports/settings; rv-* and form-act
   const css = P8_SRC('app.css');
   for (const c of ['.rv-head', '.rv-layout', '.rv-frame', '.form-actions']) assert.ok(css.includes(c + ' {') || css.includes(c + ',') || css.includes(c + ' '), c);
   assert.match(css, /@media \(max-width: 600px\) \{\s*\.rv-layout \{\s*grid-template-columns: minmax\(0, 1fr\)/);
+});
+
+test('quality review: weak tiles keep full reasons in a collapsed native disclosure', () => {
+  const reason = 'A long shared input limitation. '.repeat(12);
+  const html = TP.tile({ title: 'Lead time', valueHtml: '11d', guard: { level: 'bad', msg: reason } });
+  assert.match(html, /<details class="guard-details"><summary>Input limitations<\/summary>/);
+  assert.doesNotMatch(html, /<details[^>]*\sopen(?:\s|>)/);
+  assert.ok(html.includes(reason), 'all explanatory text remains reachable');
+  assert.match(html, /weak inputs/, 'the warning remains visible while reasons are collapsed');
 });

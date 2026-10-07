@@ -55,7 +55,9 @@ test('Phone schema selection exposes one keyboard reachable selected tab', async
   const toggle = page.getByRole('button',{name:'Schema & saved',exact:true});
   if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
   const sidebar = page.getByRole('tablist',{name:'Sidebar view'});
-  await expect(sidebar.getByRole('tab',{name:'Schema',exact:true})).toHaveClass(/active/);
+  await expect(sidebar.getByRole('tab',{name:'Schema',exact:true})).toBeVisible();
+  await expect(sidebar.getByRole('tab',{name:'Schema',exact:true})).toHaveAttribute('tabindex','0');
+  await expect(sidebar.getByRole('tab', { selected: true })).toHaveCount(1);
   await expect(sidebar.getByRole('tab',{name:'Schema',exact:true})).toHaveAttribute('aria-selected','true');
   await expect(sidebar.locator('[tabindex="0"]')).toHaveCount(1);
 });
@@ -142,8 +144,10 @@ test('Completed offset reset cannot replace another selected group', async ({pag
   await expect(page.locator('.detail .gid.big')).toHaveText('alpha');
   await page.getByRole('button',{name:'Reset',exact:true}).click();
   const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('Consumer group alpha');
+  expect(started).toBe(false);
   await dialog.getByRole('textbox').fill('alpha');
-  await dialog.getByRole('button',{name:'Reset',exact:true}).click();
+  await dialog.getByRole('button',{name:'Reset offsets',exact:true}).click();
   await expect.poll(()=>started).toBe(true);
   await page.locator('.grow-row',{hasText:'beta'}).click();
   await expect(page.locator('.detail .gid.big')).toHaveText('beta');

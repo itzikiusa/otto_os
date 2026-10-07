@@ -22,42 +22,94 @@ async function skill(page: Page) {
 
 test('bulk role failures never report that every workspace was updated', async ({ page }) => {
   const { ctx, base } = await apiCtx();
-  await seedWorkspace(ctx, base);
-  await seedWorkspace(ctx, base);
-  expect((await ctx.post(`${base}/api/v1/users`, { data: { username: `r2-${Date.now()}`, display_name: 'Synthetic reviewer', password: 'test-password-123' } })).ok()).toBeTruthy();
-  let requests = 0;
-  let failAll = true;
-  let failPath = '';
-  const writtenPaths: string[] = [];
-  await page.route('**/api/v1/workspaces/*/members', async route => {
-    if (route.request().method() !== 'PUT') return route.continue();
-    requests++;
-    writtenPaths.push(route.request().url());
-    if (!failAll && route.request().url() !== failPath) return route.continue();
-    await route.fulfill({ status: 503, json: { code: 'upstream', message: 'Role write unavailable' } });
-  });
-  await page.goto('/#/settings/users');
-  await page.getByRole('button', { name: 'By user', exact: true }).click();
-  const bulk = page.getByRole('group', { name: 'Set the role in every workspace' });
-  await bulk.getByRole('button', { name: 'Viewer', exact: true }).click();
-  await expect(page.getByText(/Couldn’t change the workspace role/).first()).toBeVisible();
-  await expect(bulk.getByRole('button', { name: 'Viewer', exact: true })).toBeEnabled();
-  expect(requests).toBeGreaterThanOrEqual(2);
-  expect(await page.getByText('Set to viewer in all workspaces', { exact: true }).count()).toBe(0);
-  await expect(page.getByRole('group', { name: /^Role in / }).first().getByRole('button', { name: 'None', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  const total = requests;
-  failAll = false;
-  failPath = writtenPaths[0];
-  await bulk.getByRole('button', { name: 'Viewer', exact: true }).click();
-  await expect(page.getByRole('group', { name: /^Role in / }).getByRole('button', { name: 'Viewer', exact: true }).and(page.locator('[aria-pressed="true"]'))).toHaveCount(total - 1);
-  await expect(bulk.getByRole('button', { name: 'Viewer', exact: true })).toBeEnabled();
-  expect(await page.getByText('Set to viewer in all workspaces', { exact: true }).count()).toBe(0);
-  const beforeRetry = requests;
-  failPath = '';
-  await bulk.getByRole('button', { name: 'Viewer', exact: true }).click();
-  await expect(page.getByText('Set to viewer in all workspaces', { exact: true })).toBeVisible();
-  expect(requests - beforeRetry).toBe(1);
-  await ctx.dispose();
+  try {
+    const stamp = Date.now();
+    const ownedIds = [await seedWorkspace(ctx, base, `Bulk roles A ${stamp}`), await seedWorkspace(ctx, base, `Bulk roles B ${stamp}`)];
+    // Keep unrelated fixtures present: this case must work in a populated daemon
+    // without changing another test's user or workspace memberships.
+    const unrelatedId = await seedWorkspace(ctx, base, `Unrelated bulk roles ${stamp}`);
+    expect((await ctx.post(`${base}/api/v1/users`, { data: { username: `r2-unrelated-${stamp}`, display_name: 'Unrelated reviewer', password: 'test-password-123' } })).ok()).toBeTruthy();
+    const created = await ctx.post(`${base}/api/v1/users`, { data: { username: `r2-${stamp}`, display_name: 'Synthetic reviewer', password: 'test-password-123' } });
+    expect(created.ok()).toBeTruthy();
+    const userId = (await created.json()).id as string;
+    const initialMembers = new Map<string, { user_id: string; role: string }[]>();
+    for (const id of [...ownedIds, unrelatedId]) {
+      const response = await ctx.get(`${base}/api/v1/workspaces/${id}/members`);
+      expect(response.ok()).toBeTruthy();
+      initialMembers.set(id, await response.json());
+    }
+    // Scope only discovery. Reads of memberships and successful writes still
+    // reach the daemon; the bulk action covers every workspace in this fixture.
+    await page.route('**/api/v1/workspaces', async route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const response = await route.fetch();
+      expect(response.ok()).toBeTruthy();
+      const workspaces = (await response.json() as { id: string }[]).filter(w => ownedIds.includes(w.id));
+      expect(workspaces.map(w => w.id).sort()).toEqual([...ownedIds].sort());
+      await route.fulfill({ response, json: workspaces });
+    });
+    let requests = 0;
+    let failAll = true;
+    let failPath = '';
+    const writtenPaths: string[] = [];
+    await page.route('**/api/v1/workspaces/*/members', async route => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      const id = new URL(route.request().url()).pathname.split('/')[4];
+      expect(ownedIds).toContain(id);
+      expect(route.request().postDataJSON().members).toEqual([
+        ...initialMembers.get(id)!.map(({ user_id, role }) => ({ user_id, role })),
+        { user_id: userId, role: 'viewer' },
+      ]);
+      requests++;
+      writtenPaths.push(route.request().url());
+      if (!failAll && route.request().url() !== failPath) return route.continue();
+      await route.fulfill({ status: 503, json: { code: 'upstream', message: 'Role write unavailable' } });
+    });
+    await page.goto('/#/settings/users');
+    await page.getByRole('button', { name: 'By user', exact: true }).click();
+    await page.getByRole('combobox', { name: 'User', exact: true }).selectOption(userId);
+    const roleRows = page.getByRole('group', { name: /^Role in / });
+    await expect(roleRows).toHaveCount(ownedIds.length);
+    await expect(page.getByRole('combobox', { name: 'User', exact: true })).toHaveValue(userId);
+    const selectedRoles = (role: string) => roleRows.getByRole('button', { name: role, exact: true }).and(page.locator('[aria-pressed="true"]'));
+    const bulk = page.getByRole('group', { name: 'Set the role in every workspace' });
+    await bulk.getByRole('button', { name: 'Viewer', exact: true }).click();
+    await expect(page.getByText(/Couldn’t change the workspace role/).first()).toBeVisible();
+    await expect(bulk.getByRole('button', { name: 'Viewer', exact: true })).toBeEnabled();
+    expect(requests).toBe(2);
+    expect(await page.getByText('Set to viewer in all workspaces', { exact: true }).count()).toBe(0);
+    await expect(selectedRoles('None')).toHaveCount(2);
+    failAll = false;
+    failPath = writtenPaths[0];
+    await bulk.getByRole('button', { name: 'Viewer', exact: true }).click();
+    await expect(selectedRoles('Viewer')).toHaveCount(1);
+    await expect(selectedRoles('None')).toHaveCount(1);
+    await expect(bulk.getByRole('button', { name: 'Viewer', exact: true })).toBeEnabled();
+    expect(requests).toBe(4);
+    expect(await page.getByText('Set to viewer in all workspaces', { exact: true }).count()).toBe(0);
+    const beforeRetry = requests;
+    const remainingPath = failPath;
+    failPath = '';
+    await bulk.getByRole('button', { name: 'Viewer', exact: true }).click();
+    await expect(page.getByText('Set to viewer in all workspaces', { exact: true })).toBeVisible();
+    await expect(selectedRoles('Viewer')).toHaveCount(2);
+    expect(requests - beforeRetry).toBe(1);
+    expect(writtenPaths.at(-1)).toBe(remainingPath);
+    for (const id of ownedIds) {
+      const members = await ctx.get(`${base}/api/v1/workspaces/${id}/members`);
+      expect(members.ok()).toBeTruthy();
+      const saved = await members.json();
+      expect(saved).toHaveLength(initialMembers.get(id)!.length + 1);
+      expect(saved).toEqual(expect.arrayContaining([
+        ...initialMembers.get(id)!, expect.objectContaining({ user_id: userId, role: 'viewer' }),
+      ]));
+    }
+    const unrelated = await ctx.get(`${base}/api/v1/workspaces/${unrelatedId}/members`);
+    expect(unrelated.ok()).toBeTruthy();
+    expect(await unrelated.json()).toEqual(initialMembers.get(unrelatedId));
+  } finally {
+    await ctx.dispose();
+  }
 });
 
 test('Skills latest file selection wins over a delayed earlier file load', async ({ page }) => {
@@ -127,6 +179,8 @@ test('long plugin metadata leaves its name and actions usable on phone', async (
   await page.screenshot({ path: '/tmp/otto-ux-r2-settings-plugins-phone.png' });
   let mutations = 0;
   await page.route('**/api/v1/plugin-admin/**', route => {
+    expect(route.request().method()).toBe('POST');
+    expect(new URL(route.request().url()).pathname).toBe('/api/v1/plugin-admin/synthetic-plugin/enable');
     mutations++;
     return route.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic plugin unavailable' } });
   });
@@ -136,7 +190,12 @@ test('long plugin metadata leaves its name and actions usable on phone', async (
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(mutations).toBe(0);
   await page.getByRole('button', { name: 'Enable', exact: true }).click();
+  const confirmation = page.getByRole('dialog', { name: 'Enable plugin?' });
+  await expect(confirmation).toContainText('runs with your permissions');
+  expect(mutations).toBe(0);
+  await confirmation.getByRole('button', { name: 'Enable plugin', exact: true }).click();
   await expect(page.getByText(/Couldn’t enable Synthetic/)).toBeVisible();
+  expect(mutations).toBe(1);
   await expect(page.getByRole('button', { name: 'Enable', exact: true })).toBeEnabled();
   await expect(page.locator('.plist')).toContainText('Disabled');
 });

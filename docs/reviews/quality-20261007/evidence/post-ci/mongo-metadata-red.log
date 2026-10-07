@@ -1,0 +1,124 @@
+   Compiling tracing-core v0.1.36
+   Compiling icu_normalizer v2.3.0
+   Compiling tracing v0.1.44
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling rustls v0.23.45
+   Compiling url v2.5.8
+   Compiling time v0.3.55
+   Compiling zerocopy-derive v0.8.59
+   Compiling zerocopy v0.8.59
+   Compiling tokio-stream v0.1.19
+   Compiling num-integer v0.1.47
+   Compiling sqlx-core v0.9.0
+   Compiling num-bigint v0.4.8
+   Compiling tokio-rustls v0.26.6
+   Compiling hyper v1.11.1
+   Compiling bigdecimal v0.4.11
+   Compiling ppv-lite86 v0.2.21
+   Compiling hyper-util v0.1.21
+   Compiling rand_chacha v0.9.0
+   Compiling tokio-util v0.7.19
+   Compiling zstd-sys v2.1.0+zstd.1.5.7
+   Compiling derive-syn-parse v0.2.0
+   Compiling macro_magic_core_macros v0.5.1
+   Compiling macro_magic_core v0.5.1
+   Compiling sqlx-postgres v0.9.0
+   Compiling sqlx-mysql v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling rand v0.9.5
+   Compiling tower v0.5.3
+   Compiling objc2-core-foundation v0.3.2
+   Compiling publicsuffix v2.3.0
+   Compiling regex-automata v0.4.18
+   Compiling sqlx-macros-core v0.9.0
+   Compiling cookie v0.18.2
+   Compiling macro_magic_macros v0.5.1
+   Compiling hyper-rustls v0.27.10
+   Compiling objc2-foundation v0.3.2
+   Compiling crc32fast v1.5.2
+   Compiling zstd-safe v7.3.0
+   Compiling sqlx-macros v0.9.0
+   Compiling hickory-proto v0.26.3
+   Compiling objc2-open-directory v0.3.2
+   Compiling cookie_store v0.22.1
+   Compiling regex v1.13.1
+   Compiling objc2-io-kit v0.3.2
+   Compiling tower-http v0.6.11
+   Compiling rustls-platform-verifier v0.7.1
+   Compiling simd-adler32 v0.3.10
+   Compiling miniz_oxide v0.9.1
+   Compiling derive_more-impl v2.1.1
+   Compiling tungstenite v0.29.0
+   Compiling reqwest v0.13.5
+   Compiling sysinfo v0.39.6
+   Compiling sqlx v0.9.0
+   Compiling hickory-net v0.26.3
+   Compiling ahash v0.8.12
+   Compiling rustix v1.1.5
+   Compiling otto-transcript v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-transcript)
+   Compiling macro_magic v0.5.1
+   Compiling half v2.7.1
+   Compiling recursive-proc-macro-impl v0.1.1
+   Compiling typed-builder-macro v0.22.0
+   Compiling serde_derive_internals v0.29.1
+   Compiling hickory-resolver v0.26.3
+   Compiling typed-builder v0.22.0
+   Compiling bson v2.15.0
+   Compiling clickhouse-macros v0.3.0
+   Compiling recursive v0.1.1
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-usage)
+   Compiling mongodb-internal-macros v3.9.1
+   Compiling flate2 v1.1.10
+   Compiling tempfile v3.27.0
+   Compiling otto-state v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-state)
+   Compiling zstd v0.13.3
+   Compiling tokio-tungstenite v0.29.0
+   Compiling fast-socks5 v0.10.0
+   Compiling derive_more v2.1.1
+   Compiling compiler-tools-derive v0.2.0
+   Compiling compiler-tools v0.2.0
+   Compiling axum-core v0.5.6
+   Compiling combine v4.6.8
+   Compiling bstr v1.13.1
+   Compiling klickhouse_derive v0.15.0
+   Compiling redis v1.7.1
+   Compiling klickhouse v0.15.3
+   Compiling mongodb v3.9.1
+   Compiling clickhouse v0.15.2
+   Compiling axum v0.8.9
+   Compiling sqlparser v0.63.0
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-rbac)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-telemetry)
+   Compiling otto-ssh v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-ssh)
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/claude_ade-quality-20261007/crates/otto-dbviewer)
+    Finished `test` profile [unoptimized] target(s) in 2m 51s
+     Running unittests src/lib.rs (target/debug/deps/otto_dbviewer-05018fbdc5a9614d)
+
+running 2 tests
+test service::scoped_metadata_tests::enforced_mongo_completion_contains_nested_fields_only_from_authorized_schema ... FAILED
+test service::scoped_metadata_tests::enforced_mongo_detail_keeps_schema_metadata_but_not_sampled_values ... FAILED
+
+failures:
+
+---- service::scoped_metadata_tests::enforced_mongo_completion_contains_nested_fields_only_from_authorized_schema stdout ----
+
+thread 'service::scoped_metadata_tests::enforced_mongo_completion_contains_nested_fields_only_from_authorized_schema' (56052528) panicked at crates/otto-dbviewer/src/service/scoped_metadata_tests.rs:194:10:
+authorized Mongo nested path must complete
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- service::scoped_metadata_tests::enforced_mongo_detail_keeps_schema_metadata_but_not_sampled_values stdout ----
+
+thread 'service::scoped_metadata_tests::enforced_mongo_detail_keeps_schema_metadata_but_not_sampled_values' (56052529) panicked at crates/otto-dbviewer/src/service/scoped_metadata_tests.rs:161:5:
+assertion `left == right` failed
+  left: Null
+ right: Object {"sampled_fields": Object {"_id": String("objectId"), "address": String("object")}, "sampled_paths": Array [String("_id"), String("address"), String("address.city")], "sampled_path_types": Object {"_id": String("objectId"), "address": String("object"), "address.city": String("string")}}
+
+
+failures:
+    service::scoped_metadata_tests::enforced_mongo_completion_contains_nested_fields_only_from_authorized_schema
+    service::scoped_metadata_tests::enforced_mongo_detail_keeps_schema_metadata_but_not_sampled_values
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 457 filtered out; finished in 0.59s
+
+error: test failed, to rerun pass `-p otto-dbviewer --lib`

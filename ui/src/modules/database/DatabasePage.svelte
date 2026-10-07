@@ -1405,6 +1405,7 @@
     role="group"
     aria-label={c.name}
     class="conn-row"
+    data-connection-id={c.id}
     class:active={database.selectedConnId === c.id}
     class:open={database.openConnIds.includes(c.id)}
     class:dragging={draggedConnId === c.id}

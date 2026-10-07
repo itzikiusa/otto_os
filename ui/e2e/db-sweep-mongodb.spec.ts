@@ -81,8 +81,12 @@ async function openConn(page: Page): Promise<void> {
 
   // The main tab strip appears once a connection is open.
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
-  // Engine chip confirms the driver loaded its capabilities (query_language=mongo).
-  await expect(page.locator('.cap-chip', { hasText: 'mongodb' })).toBeVisible({ timeout: 20_000 });
+  // The compact layout hides the redundant engine chip; its content still
+  // proves capabilities loaded, while the selected connection remains accessible.
+  await expect(page.locator('.cap-chip')).toHaveText('mongodb', { timeout: 20_000 });
+  const active = page.getByRole('tablist', { name: 'Open connections' }).getByRole('tab', { name: 'e2e-mongodb', exact: true });
+  await expect(active).toBeVisible();
+  await expect(active).toHaveAttribute('aria-selected', 'true');
 }
 
 // On a phone the Editor block is an accordion — make sure it's expanded so the
