@@ -172,7 +172,8 @@ function build(
 ): SchoolHandle {
   const reduced = opts.reducedMotion;
   const renderer = new T.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  const displayScale = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+  renderer.setPixelRatio(Math.min(2, displayScale));
   renderer.outputColorSpace = T.SRGBColorSpace;
   renderer.toneMapping = T.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -186,7 +187,7 @@ function build(
     const name = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
     if (/swiftshader|llvmpipe|softpipe|software/i.test(name)) {
       renderer.shadowMap.enabled = false;
-      renderer.setPixelRatio(1);
+      renderer.setPixelRatio(Math.min(1, displayScale));
     }
   } catch {
     /* keep the defaults */

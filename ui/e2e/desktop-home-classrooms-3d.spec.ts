@@ -263,10 +263,40 @@ test.describe('School regressions', () => {
   test.describe.configure({ mode: 'default', timeout: 90_000 });
   // Functional ownership/restoration checks need real WebGL, not animation load.
   // Original journeys above retain their full-resolution animated coverage.
-  // Keep the CSS viewport unchanged but capture screenshots with one quarter
-  // as many pixels; CI spent 29 s capturing the card. This reduces capture cost,
-  // not WebGL render resolution: scene.ts pins SwiftShader's pixel ratio to 1.
+  // Keep the CSS viewport unchanged while rendering and capturing one quarter
+  // as many pixels. The software-renderer cap must preserve this lower scale.
   test.use({ reducedMotion: 'reduce', viewport: { width: 1100, height: 800 }, deviceScaleFactor: 0.5 });
+test('software rendering respects display scales below one', async ({ page }) => {
+  await boot(page, { view: 'list' });
+  const dimensions = await page.evaluate(async () => {
+    const scenePath = '/src/modules/home/school/scene.ts';
+    const { mountSchool } = await import(/* @vite-ignore */ scenePath) as typeof import('../src/modules/home/school/scene');
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;inset:0;width:320px;height:240px;z-index:10000';
+    document.body.append(host);
+    let scene: Awaited<ReturnType<typeof mountSchool>> | undefined;
+    try {
+      scene = await mountSchool(host, { reducedMotion: true, dark: true, label: 'Drawing buffer regression' });
+      await new Promise<void>((resolve) => scene!.onFrame(resolve));
+      const canvas = host.querySelector('canvas')!;
+      const gl = canvas.getContext('webgl2')!;
+      const info = gl.getExtension('WEBGL_debug_renderer_info')!;
+      return {
+        renderer: String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)),
+        scale: window.devicePixelRatio,
+        css: [canvas.clientWidth, canvas.clientHeight],
+        buffer: [gl.drawingBufferWidth, gl.drawingBufferHeight],
+      };
+    } finally {
+      scene?.destroy();
+      host.remove();
+    }
+  });
+  expect(dimensions.renderer).toMatch(/swiftshader|llvmpipe|softpipe|software/i);
+  expect(dimensions.scale).toBe(0.5);
+  expect(dimensions.css).toEqual([320, 240]);
+  expect(dimensions.buffer).toEqual([160, 120]);
+});
 test('new corridor doors can be picked before their first rendered frame', async ({ page }) => {
   await boot(page, { view: 'list' });
   const result = await page.evaluate(async () => {
