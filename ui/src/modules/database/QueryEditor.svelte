@@ -695,7 +695,8 @@
   let lastHadResult = false;
   $effect(() => {
     const id = tab?.id ?? -1;
-    const hasResult = !!(tab?.result || tab?.running || tab?.error);
+    // Explain also needs the output pane before this tab has run a query.
+    const hasResult = !!(tab?.result || tab?.running || tab?.error || database.planOpen);
     if (id !== lastTabId) {
       lastTabId = id;
       lastHadResult = hasResult;
@@ -852,6 +853,9 @@
   let editorOpen = $state(true);
   let resultsOpen = $state(true);
   const hasResult = $derived(!!tab.result || !!tab.error);
+  // A first Explain is itself the output. The idle grid's empty-state sizing
+  // must not compete with it; real rows/errors/loading still share the pane.
+  const planOnly = $derived(database.planOpen && !!database.queryPlan && !tab.result && !tab.error && !tab.running);
 
   // ── Keyboard shortcuts (active only while the DB query view owns focus) ───────
   // Registered on window but gated to fire only when focus is inside this editor
@@ -1511,7 +1515,7 @@
   {/if}
   <div class="qe-results" class:qe-collapsed={viewport.isPhone && !resultsOpen}>
     {#if database.planOpen && database.queryPlan}
-      <div class="qe-plan">
+      <div class="qe-plan" class:standalone={planOnly}>
         <PlanView plan={database.queryPlan} onclose={() => database.closePlan()} />
       </div>
     {/if}
@@ -1519,21 +1523,23 @@
          (ran_statement) or the error (err_statement) — never the live buffer:
          the grid, ErrorPanel's caret and "Ask AI to fix" describe what RAN, and
          the live buffer re-ran the grid's effects on every keystroke. -->
-    <ResultsGrid
-      result={tab.result}
-      error={tab.error}
-      statement={(tab.error ? tab.err_statement : tab.ran_statement) ?? undefined}
-      connectionId={database.selectedConnId}
-      ranNode={tab.ran_node}
-      running={tab.running}
-      startedAt={tab.pending?.startedAt ?? null}
-      tabKey={tab.uid}
-      offset={tab.offset}
-      {viewMode}
-      {viewReason}
-      tabPick={tab.viewMode ?? null}
-      onviewmode={(m) => database.setViewMode(m)}
-    />
+    {#if !planOnly}
+      <ResultsGrid
+        result={tab.result}
+        error={tab.error}
+        statement={(tab.error ? tab.err_statement : tab.ran_statement) ?? undefined}
+        connectionId={database.selectedConnId}
+        ranNode={tab.ran_node}
+        running={tab.running}
+        startedAt={tab.pending?.startedAt ?? null}
+        tabKey={tab.uid}
+        offset={tab.offset}
+        {viewMode}
+        {viewReason}
+        tabPick={tab.viewMode ?? null}
+        onviewmode={(m) => database.setViewMode(m)}
+      />
+    {/if}
   </div>
 </div>
 
@@ -2040,6 +2046,10 @@
     max-height: 45%;
     display: flex;
     margin-bottom: 8px;
+  }
+  .qe-plan.standalone {
+    flex: 1;
+    max-height: none;
   }
   .grow {
     flex: 1;
