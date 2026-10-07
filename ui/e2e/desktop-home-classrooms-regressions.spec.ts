@@ -27,10 +27,17 @@ async function boot(page: Page) {
 }
 
 test('initial School loading and failed data use truthful load states and Retry', async ({ page }) => {
+  // This fixture tests manual recovery. Other workers' session events trigger
+  // School's live refresh and can recover the API before Retry is clicked.
+  // Keep the event connection open but quiet; HTTP loading and Retry still use
+  // the production component and request path against the fixture below.
+  await page.routeWebSocket('**/ws/events*', () => {});
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let failed = true;
+  let requests = 0;
   await page.route('**/api/v1/sessions?archived=false&limit=1000', async (route) => {
+    requests++;
     await gate;
     await route.fulfill({ status: failed ? 503 : 200, contentType: 'application/json', body: failed ? JSON.stringify({ error: 'School fixture unavailable' }) : '[]' });
   });
@@ -38,8 +45,10 @@ test('initial School loading and failed data use truthful load states and Retry'
   try { await expect(box(page).getByRole('status', { name: 'Loading the school' })).toBeVisible(); } finally { release(); }
   await expect(box(page).getByRole('alert')).toContainText('Couldn’t load the school');
   await expect(box(page)).not.toContainText('last good load');
+  const beforeRetry = requests;
   failed = false;
   await box(page).getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect.poll(() => requests).toBeGreaterThan(beforeRetry);
   await expect(box(page).getByRole('alert')).toHaveCount(0);
   await expect(box(page).getByRole('region', { name: 'School list', exact: true })).toBeVisible();
 });
@@ -110,15 +119,21 @@ test('complete classroom list pages over one hundred rows and clamps after refre
 });
 
 test('failed School refresh retains the loaded list and exposes Retry until recovery', async ({ page }) => {
+  // As above, recover through Retry rather than another worker's live event.
+  await page.routeWebSocket('**/ws/events*', () => {});
   let failed = false;
   let title = 'Retained student';
-  await page.route('**/api/v1/sessions?archived=false&limit=1000', (route) => route.fulfill(failed ? {
-    status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'School refresh unavailable' }),
-  } : {
-    json: [{ id: 'school-refresh-kid', workspace_id: wsId, kind: 'agent', provider: 'shell', title,
-      status: 'running', cwd: '/tmp', archived: false, meta: {},
-      created_at: '2026-01-01T00:00:00Z', last_active_at: '2026-01-01T00:00:00Z' }],
-  }));
+  let requests = 0;
+  await page.route('**/api/v1/sessions?archived=false&limit=1000', (route) => {
+    requests++;
+    return route.fulfill(failed ? {
+      status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'School refresh unavailable' }),
+    } : {
+      json: [{ id: 'school-refresh-kid', workspace_id: wsId, kind: 'agent', provider: 'shell', title,
+        status: 'running', cwd: '/tmp', archived: false, meta: {},
+        created_at: '2026-01-01T00:00:00Z', last_active_at: '2026-01-01T00:00:00Z' }],
+    });
+  });
   await boot(page);
   const school = box(page).getByRole('region', { name: 'School list', exact: true });
   await expect(school).toBeVisible();
@@ -132,9 +147,11 @@ test('failed School refresh retains the loaded list and exposes Retry until reco
   await expect(retained).toBeVisible();
   await expect(list.locator('.lrow')).toHaveCount(1);
   await expect(box(page).getByTestId('load-error')).toHaveCount(0);
+  const beforeRetry = requests;
   failed = false;
   title = 'Recovered student';
   await stale.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect.poll(() => requests).toBeGreaterThan(beforeRetry);
   await expect(stale).toHaveCount(0);
   await expect(list.getByRole('button', { name: /^Open Recovered student,/ })).toBeVisible();
   await expect(retained).toHaveCount(0);
