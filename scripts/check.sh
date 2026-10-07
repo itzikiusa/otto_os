@@ -7,6 +7,8 @@
 #     break a dependent), found via `cargo metadata`;
 #   * UI: `npm run check` + `npm run test:unit` + `npm run build` + the bundle
 #     budget (scripts/bundle-budget.mjs), only when ui/ changed;
+#   * Team Performance: serial unit/server/browser tests when its plugin files
+#     changed; requires ui dependencies and Playwright Chromium (also in CI).
 #   * guard inputs: docs/contracts/** and the sidebar/sidePane/uiCommands UI
 #     files also select the Rust crates whose tests read or mirror them.
 # A change to a root build file (Cargo.toml, Cargo.lock, .cargo/, .config/,
@@ -113,6 +115,8 @@ RUST_CHANGED=$(printf '%s\n' "$SCOPE" | sed -n 's/^changed: *//p')
 RUST_TESTED=$(printf '%s\n' "$SCOPE" | sed -n 's/^tested: *//p')
 UI_CHANGED=0
 if [ "$ALL" = 1 ] || printf '%s\n' "$CHANGED" | grep -q '^ui/'; then UI_CHANGED=1; fi
+PLUGIN_CHANGED=0
+if [ "$ALL" = 1 ] || printf '%s\n' "$CHANGED" | grep -q '^examples/plugins/team-performance/'; then PLUGIN_CHANGED=1; fi
 
 pkg_args() { # "a b" → -p a -p b ; "all" → --workspace
   if [ "$1" = all ]; then echo --workspace; else for p in $1; do printf -- '-p %s ' "$p"; done; fi
@@ -122,6 +126,7 @@ if [ "$ALL" = 1 ]; then echo "base:          (all)"; else echo "base:          $
 echo "rust changed:  ${RUST_CHANGED:-none}"
 echo "rust tested:   ${RUST_TESTED:-none}"
 echo "ui changed:    $( [ "$UI_CHANGED" = 1 ] && echo yes || echo no)"
+echo "plugin changed: $( [ "$PLUGIN_CHANGED" = 1 ] && echo yes || echo no)"
 
 # ── Rust ──────────────────────────────────────────────────────────────────────
 if [ -n "$RUST_CHANGED" ] || [ -n "$RUST_TESTED" ]; then
@@ -197,7 +202,15 @@ if [ "$UI" = 1 ] && [ "$UI_CHANGED" = 1 ]; then
   run node ui/scripts/bundle-budget.mjs
 fi
 
-if [ -z "$RUST_CHANGED" ] && [ "$UI_CHANGED" = 0 ]; then
+if [ "$TEST" = 1 ] && [ "$PLUGIN_CHANGED" = 1 ]; then
+  step "Team Performance: serial unit, server and required-browser regressions"
+  (
+    cd examples/plugins/team-performance
+    run env OTTO_TP_REQUIRE_BROWSER=1 node --test --test-concurrency=1 test/*.test.js
+  )
+fi
+
+if [ -z "$RUST_CHANGED" ] && [ "$UI_CHANGED" = 0 ] && [ "$PLUGIN_CHANGED" = 0 ]; then
   echo "nothing to check (no Rust or UI changes vs $BASE)"
 fi
 step "done"

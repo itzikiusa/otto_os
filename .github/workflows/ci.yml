@@ -262,6 +262,15 @@ jobs:
       - name: npm run test:unit
         run: npm run test:unit
 
+      - name: Install Chromium for the Team Performance plugin gate
+        run: npx playwright install --with-deps chromium
+
+      - name: Team Performance unit, server and browser regressions
+        working-directory: examples/plugins/team-performance
+        env:
+          OTTO_TP_REQUIRE_BROWSER: '1'
+        run: node --test --test-concurrency=1 test/*.test.js
+
       # Catches build-only breakage that type-checking alone misses.
       - name: npm run build
         run: npm run build
