@@ -262,7 +262,10 @@ test.describe('School regressions', () => {
   test.describe.configure({ mode: 'default', timeout: 90_000 });
   // Functional ownership/restoration checks need real WebGL, not animation load.
   // Original journeys above retain their full-resolution animated coverage.
-  test.use({ reducedMotion: 'reduce', viewport: { width: 1100, height: 800 } });
+  // Keep the CSS viewport unchanged but capture screenshots with one quarter
+  // as many pixels; CI spent 29 s capturing the card. This reduces capture cost,
+  // not WebGL render resolution: scene.ts pins SwiftShader's pixel ratio to 1.
+  test.use({ reducedMotion: 'reduce', viewport: { width: 1100, height: 800 }, deviceScaleFactor: 0.5 });
 for (const key of ['Enter', 'Space']) {
   test(`native card controls retain ${key} activation inside the stage`, async ({ page }) => {
     // Check on deliberately does not animate in reduced-motion mode.

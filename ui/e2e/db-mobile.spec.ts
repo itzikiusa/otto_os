@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import type { ChildProcess } from 'node:child_process';
+import { createServer } from 'node:net';
 import { apiCtx, seedWorkspace, seedRedis } from './seed';
 
 // Database page — PHONE usability.
@@ -18,7 +19,8 @@ import { apiCtx, seedWorkspace, seedRedis } from './seed';
 //   • the section accordions collapse/expand,
 //   • the results block scrolls internally when its rows overflow.
 //
-// Run with --workers=1 (single shared redis on a fixed port).
+// Each worker owns a Redis process/port and selects its connection by ID: the
+// connection list is global, including profiles left by other specs.
 
 let workspaceId = '';
 let redisConnId: string | null = null;
@@ -28,7 +30,15 @@ test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
   try {
-    const r = await seedRedis(ctx, base, workspaceId);
+    const reservation = createServer();
+    await new Promise<void>((resolve, reject) => {
+      reservation.once('error', reject);
+      reservation.listen(0, '127.0.0.1', resolve);
+    });
+    const address = reservation.address();
+    if (!address || typeof address === 'string') throw new Error('No Redis fixture port');
+    await new Promise<void>((resolve, reject) => reservation.close((e) => e ? reject(e) : resolve()));
+    const r = await seedRedis(ctx, base, workspaceId, address.port);
     if (r) {
       redisProc = r.proc;
       redisConnId = r.connId;
@@ -62,9 +72,9 @@ async function openAndQuery(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-redis' });
-  await expect(conn.first()).toBeVisible({ timeout: 30_000 });
-  await conn.first().click();
+  const conn = page.locator(`.conn-row[data-connection-id="${redisConnId}"] .conn-name`);
+  await expect(conn).toBeVisible({ timeout: 30_000 });
+  await conn.click();
 
   await expect(page.locator('.main-tabs')).toBeVisible({ timeout: 20_000 });
 

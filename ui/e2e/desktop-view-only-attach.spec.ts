@@ -44,12 +44,13 @@ async function status(id: string): Promise<string> {
 }
 
 /** No live process: `reconnectable` (idle sweep, daemon restart) or `exited`
- *  (the app-quit kill used here) — both resume on a classic attach. */
+ *  (the session kill used here) — both resume on a classic attach. */
 const DORMANT = ['reconnectable', 'exited'];
 const dormant = async (id: string) => DORMANT.includes(await status(id));
 
-async function suspendAll(id: string): Promise<void> {
-  expect((await ctx.post(`${base}/api/v1/app/kill-sessions`)).ok()).toBeTruthy();
+async function stopSession(id: string): Promise<void> {
+  // The daemon is shared with other specs; stop only this fixture's PTY.
+  expect((await ctx.post(`${base}/api/v1/sessions/${id}/kill`)).ok()).toBeTruthy();
   await expect.poll(() => dormant(id), { timeout: 15_000 }).toBe(true);
 }
 
@@ -75,7 +76,7 @@ test('a view-only attach never resumes the CLI; the first real keystroke does', 
   await expect
     .poll(async () => ((await (await ctx.get(`${base}/api/v1/sessions/${id}`)).json()) as { provider_session_id: string | null }).provider_session_id, { timeout: 15_000 })
     .not.toBeNull();
-  await suspendAll(id);
+  await stopSession(id);
 
   // 1. View-only: attach, wait well past the attach path — nothing spawned.
   const view = await attach(id, true);
@@ -97,7 +98,7 @@ test('a view-only attach never resumes the CLI; the first real keystroke does', 
   view.close();
 
   // 4. Control: a classic attach still resumes on open.
-  await suspendAll(id);
+  await stopSession(id);
   const classic = await attach(id, false);
   await expect.poll(() => dormant(id), { timeout: 15_000 }).toBe(false);
   classic.close();

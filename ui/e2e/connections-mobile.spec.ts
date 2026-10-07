@@ -1,5 +1,6 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { seedMockDbConnection } from './db-mock';
 
 // Unified Connections hub — PHONE/responsive usability guard. Runs on every
 // device project (phones + tablets).
@@ -14,6 +15,7 @@ import { apiCtx, seedWorkspace } from './seed';
 
 let workspaceId = '';
 let prodSectionId = '';
+const globalDbName = `mobile-global-db-${Math.random().toString(36).slice(2, 8)}`;
 
 async function seedSection(ctx: APIRequestContext, base: string, wsId: string, name: string): Promise<string> {
   const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/connection-sections`, { data: { name } });
@@ -66,6 +68,10 @@ test.beforeAll(async () => {
   await seedSsh(ctx, base, workspaceId, 'prod-web-bastion', prodSectionId, 'prod');
   await seedSsh(ctx, base, workspaceId, 'ungrouped-host', null, 'staging');
   await seedCustom(ctx, base, workspaceId, prodSectionId);
+  // DB profiles are global: a connection created in another workspace must
+  // still contribute a type chip and participate in this workspace's filters.
+  const otherWorkspace = await seedWorkspace(ctx, base);
+  await seedMockDbConnection(ctx, base, otherWorkspace, globalDbName, 'mysql');
   await ctx.dispose();
 });
 
@@ -141,19 +147,27 @@ test.describe('connections hub — responsive', () => {
     // drop target) under every type filter.
     await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
 
-    // Only kinds that exist get a chip (no MySQL connection here → no chip).
-    await expect(page.locator('[data-testid="connhub-filter-mysql"]')).toHaveCount(0);
+    // DB connections are global, including those seeded in another workspace.
+    // Their chips stay available while a different type is selected.
+    const mysql = page.getByTestId('connhub-filter-mysql');
+    await expect(mysql).toBeVisible();
+    await expect(page.locator('.conn-name', { hasText: globalDbName })).toHaveCount(0);
+    await mysql.click();
+    await expect(page.locator('.conn-name', { hasText: globalDbName }).first()).toBeVisible();
+    await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' })).toHaveCount(0);
+    await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' })).toHaveCount(0);
+    await expect(page.locator('.sec-name', { hasText: /Production servers/i })).toHaveCount(0);
 
-    // (A folder whose contents are all another kind disappearing is covered by
-    // desktop-connections-hub, which seeds a second DB kind.)
     await page.locator('[data-testid="connhub-filter-custom"]').click();
     await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();
     await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' })).toHaveCount(0);
+    await expect(page.locator('.conn-name', { hasText: globalDbName })).toHaveCount(0);
     await expect(page.locator('.sec-name', { hasText: /Empty staging folder/i }).first()).toBeVisible();
 
     await page.locator('[data-testid="connhub-filter-all"]').click();
     await expect(page.locator('.conn-name', { hasText: 'prod-web-bastion' }).first()).toBeVisible();
     await expect(page.locator('.conn-name', { hasText: 'my-custom-cli' }).first()).toBeVisible();
+    await expect(page.locator('.conn-name', { hasText: globalDbName }).first()).toBeVisible();
     await assertFitsWidth(page);
   });
 

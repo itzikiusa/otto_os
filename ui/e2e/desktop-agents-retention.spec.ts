@@ -54,11 +54,15 @@ test.afterEach(async () => {
 });
 
 test('sessions persist under Agents after exit + reload; only archive/delete remove them', async ({ page }) => {
-  // 1. Kill every live PTY (the app-quit hook, root-only) — the sessions
-  //    become exited/reconnectable, exactly like a long-idle survivor of a
-  //    daemon restart.
-  const kill = await ctx.post(`${base}/api/v1/app/kill-sessions`);
-  expect(kill.ok()).toBeTruthy();
+  // 1. Exit this fixture's PTYs. Other specs share the daemon and may be
+  //    driving live sessions through their per-session MCP credentials.
+  //    App-wide shutdown is covered by the session manager's isolated tests.
+  for (const id of Object.values(idByTitle)) {
+    const kill = await ctx.post(`${base}/api/v1/sessions/${id}/kill`);
+    expect(kill.ok(), await kill.text()).toBeTruthy();
+    await expect.poll(async () => (await (await ctx.get(`${base}/api/v1/sessions/${id}`)).json()).status)
+      .toBe('exited');
+  }
 
   // 2. Reload: both sessions MUST still be listed under Agents — an exited
   //    session never falls out of the sidebar on its own.
