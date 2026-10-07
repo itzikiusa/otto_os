@@ -1,0 +1,15 @@
+{"spans": 100000, "repeat": 1, "elapsed_seconds": 0.04032037500292063, "status": 200, "fallback_expected": false, "peak_rss_mb": 404.546875, "summary": "{\"read_rows\":\"200000\",\"read_bytes\":\"14258268\",\"written_rows\":\"0\",\"written_bytes\":\"0\",\"total_rows_to_read\":\"200000\",\"result_rows\":\"20\",\"result_bytes\":\"4540\",\"elapsed_ns\":\"39349166\",\"memory_usage\":\"27308799\"}"}
+{"spans": 100000, "repeat": 2, "elapsed_seconds": 0.036801750073209405, "status": 200, "fallback_expected": false, "peak_rss_mb": 408.859375, "summary": "{\"read_rows\":\"200000\",\"read_bytes\":\"14258268\",\"written_rows\":\"0\",\"written_bytes\":\"0\",\"total_rows_to_read\":\"200000\",\"result_rows\":\"20\",\"result_bytes\":\"4540\",\"elapsed_ns\":\"35880083\",\"memory_usage\":\"25055961\"}"}
+Artifacts retained: /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-quality-self-times-pv0e883j
+Traceback (most recent call last):
+  File "/Users/itziklavon/claude_ade-quality-20261007/docs/reviews/quality-20261007/benchmarks/self-times.py", line 128, in <module>
+    if __name__=='__main__': main()
+                             ~~~~^^
+  File "/Users/itziklavon/claude_ade-quality-20261007/docs/reviews/quality-20261007/benchmarks/self-times.py", line 94, in main
+    sql(seed); previous=total
+    ~~~^^^^^^
+  File "/Users/itziklavon/claude_ade-quality-20261007/docs/reviews/quality-20261007/benchmarks/self-times.py", line 55, in sql
+    if status!=200: raise RuntimeError(body[:2000])
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Code: 241. DB::Exception: Query memory limit exceeded: would use 259.86 MiB (attempt to allocate chunk of 4.16 MiB), maximum: 256.00 MiB. (MEMORY_LIMIT_EXCEEDED) (version 26.7.1.237 (official build))
+

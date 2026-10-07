@@ -1,0 +1,35 @@
+[WebServer] (node:35614) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wCXt5C OTTO_PORT=7897
+2026-10-07T09:41:56.583253Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wCXt5C/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 35621); root onboarded.
+
+Running 14 tests using 1 worker
+
+(node:35695) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [desktop-browser] › e2e/desktop-database-changes.spec.ts:7:1 › database change draft binds validation to selected executor before submission (2.2s)
+  ✓   2 [desktop-browser] › e2e/desktop-goal-draft-ownership.spec.ts:25:1 › goal draft Keep stays in A; workspace Discard closes the persistent form and does not resurrect (2.4s)
+[WebServer] 12:42:02 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   3 [desktop-browser] › e2e/desktop-review5-scheduled-draft.spec.ts:5:1 › scheduled task deep link and save retry preserve newer edits and the leave decision (843ms)
+  ✓   4 [desktop-browser] › e2e/desktop-shell.spec.ts:38:1 › shell applies NO CSS zoom in a browser, even with otto_zoom set (3.7s)
+[WebServer] 12:42:06 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   5 [desktop-browser] › e2e/desktop-ux-r4-access.spec.ts:146:225 › loaded shared sheet and setup contrast warm-light (1.0s)
+[WebServer] 12:42:07 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   6 [desktop-browser] › e2e/desktop-ux-r4-access.spec.ts:146:225 › loaded shared sheet and setup contrast warm-dark (1.0s)
+[WebServer] 12:42:08 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   7 [desktop-browser] › e2e/desktop-ux-r4-access.spec.ts:185:258 › custom accent keeps actual Markdown links and focus visible warm-light (864ms)
+[WebServer] 12:42:09 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   8 [desktop-browser] › e2e/desktop-ux-r4-access.spec.ts:185:258 › custom accent keeps actual Markdown links and focus visible warm-dark (867ms)
+[WebServer] 12:42:10 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   9 [desktop-browser] › e2e/desktop-ux-r4-content.spec.ts:71:3 › Design Hall responsive editing warm dark (1.3s)
+[WebServer] 12:42:11 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  10 [desktop-browser] › e2e/desktop-ux-r4-data.spec.ts:129:1 › Kafka consume validates selectors before reading and produce preserves failed drafts (2.4s)
+[WebServer] 12:42:14 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  11 [desktop-browser] › e2e/desktop-ux-r4-data.spec.ts:254:50 › redis result editing stages the native command for review without external writes (2.0s)
+  ✓  12 [desktop-browser] › e2e/desktop-vault-recovery.spec.ts:25:1 › trash restores a file and edit history compares recoverable versions (2.6s)
+  ✓  13 [desktop-browser] › e2e/desktop-vault-recovery.spec.ts:47:1 › properties edit preserves note body and the local graph is reachable (1.8s)
+  ✓  14 [desktop-browser] › e2e/desktop-workflow-recovery.spec.ts:4:1 › workflow preflight identifies a broken step and cron editing preserves disabled state (1.5s)
+
+  14 passed (26.7s)

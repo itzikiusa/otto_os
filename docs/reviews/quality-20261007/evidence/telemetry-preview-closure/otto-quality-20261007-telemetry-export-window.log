@@ -1,0 +1,26 @@
+[WebServer] (node:40457) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/claude_ade-quality-20261007/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-Waiqr6 OTTO_PORT=7897
+2026-10-07T09:47:00.512212Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-Waiqr6/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+[e2e] test daemon ready (pid 40458); root onboarded.
+
+Running 7 tests using 1 worker
+
+(node:40533) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 12:47:01 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  1 [desktop-browser] › e2e/desktop-telemetry.spec.ts:30:1 › opt-in settings, defaults, error recovery and responsive light/dark views (1.8s)
+  ✓  2 [desktop-browser] › e2e/desktop-telemetry.spec.ts:64:1 › authenticated configuration, bounded ingestion and opt-out reject unsafe input (107ms)
+[WebServer] 12:47:27 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  3 [desktop-browser] › e2e/desktop-telemetry.spec.ts:78:1 › actual browser → server → collector → ClickHouse trace and opt-out (2.7m)
+[WebServer] 12:49:43 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  4 [desktop-browser] › e2e/desktop-telemetry.spec.ts:167:3 › trace detail empty state (626ms)
+[WebServer] 12:49:44 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  5 [desktop-browser] › e2e/desktop-telemetry.spec.ts:167:3 › trace detail retry state (749ms)
+[WebServer] 12:49:45 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  6 [desktop-browser] › e2e/desktop-telemetry.spec.ts:167:3 › trace detail close-pending state (901ms)
+[WebServer] 12:49:46 PM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  7 [desktop-browser] › e2e/desktop-ux-r4-content.spec.ts:71:3 › Design Hall responsive editing warm dark (2.2s)
+
+  7 passed (2.8m)
