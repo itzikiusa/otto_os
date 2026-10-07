@@ -467,4 +467,3 @@ test types::tests::write_guard_parity_never_drops_a_write_outside_literals_and_c
 test service::perf_budget_tests::schema_root_reads_do_not_scale_with_database_count ... ok
 
 test result: ok. 456 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 7.70s
-

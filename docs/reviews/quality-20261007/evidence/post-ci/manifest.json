@@ -31,8 +31,8 @@
     "source": "/tmp/otto-pr94-dbviewer-final.log",
     "artifact": "dbviewer-final.log",
     "source_sha256": "210b32144526202cf6623565c885620639d087d01826f67603cede235fe2f419",
-    "artifact_sha256": "210b32144526202cf6623565c885620639d087d01826f67603cede235fe2f419",
-    "bytes": 33884
+    "artifact_sha256": "061a9180d4d737efde27ebbdfc8375d18bb08c2b20a9bfaa0cf1f6dc75a44ce5",
+    "bytes": 33883
   },
   {
     "source": "/tmp/otto-pr94-daemon-final.log",
@@ -256,8 +256,8 @@
     "source": "/tmp/otto-pr94-ui-grid-final.log",
     "artifact": "ui-grid-final.log",
     "source_sha256": "9175e2d320d30d650c9a24e578ad5cdef32b06cc007d6297428a59be52924d35",
-    "artifact_sha256": "2b9fbc99824e6c904d90dc5677c93e3e8ccfc82cc8f0f0e445896f393e7991ad",
-    "bytes": 221272
+    "artifact_sha256": "695ec4b78852e7a34e9dea74e59069d714df73789401af2021a4c6ad4fcc2515",
+    "bytes": 221271
   },
   {
     "source": "/tmp/otto-pr94-grid-perf-final.log",
