@@ -95,6 +95,9 @@ for (const [theme, scheme, width, rtl] of [
     await page.getByTestId('design-save').click();
     await expect(page.getByTestId('design-version-chip')).toHaveCount(2);
     await page.getByTestId('design-source-toggle').click();
+    // Version creation can finish before the debounced iframe preview settles.
+    await expect(page.frameLocator('iframe[title="R4 synthetic release checklist"]')
+      .getByRole('heading', { name: 'R4 saved responsive draft', exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: `/tmp/otto-ux-r4-content-design-${theme}-${scheme}-${testInfo.project.name}.png` });
   });

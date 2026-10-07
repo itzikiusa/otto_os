@@ -6,6 +6,8 @@
 #[path = "../src/throttle.rs"]
 mod throttle;
 use throttle::NO_THROTTLE;
+#[path = "probe_support/accessibility.rs"]
+mod accessibility;
 #[path = "../src/panes.rs"]
 mod panes;
 #[path = "../src/panes_policy.rs"]
@@ -95,6 +97,99 @@ fn assert_native_content_filled(view: &Webview) {
         "native content {expected:?}, child {actual:?}"
     );
 }
+fn zoom_draft_state(view: &Webview) -> serde_json::Value {
+    evaluate(
+        view,
+        r#"(() => {
+        const field = document.getElementById('nw-name');
+        const sheet = field?.closest('[role=dialog]');
+        const rect = sheet?.getBoundingClientRect();
+        const focus = field?.getBoundingClientRect();
+        return {
+            width: innerWidth, height: innerHeight,
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+            focused: document.hasFocus() && document.activeElement === field,
+            documentFocused: document.hasFocus(),
+            activeId: document.activeElement?.id, activeTag: document.activeElement?.tagName,
+            activeLabel: document.activeElement?.getAttribute('aria-label'),
+            activeText: document.activeElement?.textContent?.trim().slice(0,100),
+            activeDialog: document.activeElement?.closest('[role=dialog]')?.getAttribute('aria-label'),
+            focusCalls: window.probeFocusCalls || [],
+            fieldConnected: !!field?.isConnected,
+            focusEvents: window.probeFocusEvents || [],
+            draft: field?.value,
+            sheetVisible: !!rect && rect.left >= -1 && rect.top >= -1 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
+            fieldVisible: !!focus && focus.width > 0 && focus.height > 0 && focus.left >= 0 && focus.right <= innerWidth && focus.top >= 0 && focus.bottom <= innerHeight
+        };
+    })()"#,
+    )
+}
+fn application_activation(view: &Webview) -> serde_json::Value {
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.window().run_on_main_thread(move || unsafe {
+        let application: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let own_active: bool = objc2::msg_send![application, isActive];
+        let workspace: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(NSWorkspace), sharedWorkspace];
+        let front: *mut objc2::runtime::AnyObject = objc2::msg_send![workspace, frontmostApplication];
+        let result = if front.is_null() {
+            serde_json::json!({"probe_active": own_active, "foreground": null})
+        } else {
+            let pid: i32 = objc2::msg_send![front, processIdentifier];
+            let identifier: *mut objc2_foundation::NSString = objc2::msg_send![front, bundleIdentifier];
+            let bundle = identifier.as_ref().map(|value| value.to_string());
+            serde_json::json!({"probe_active": own_active, "foreground_is_probe": pid == std::process::id() as i32, "foreground_bundle": bundle})
+        };
+        let _ = tx.send(result);
+    }).unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .expect("native activation diagnostic")
+}
+fn assert_zoom_draft_visible(view: &Webview, child: &Webview) {
+    // Observe up to two seconds of native/layout settling without restoring
+    // focus or changing the draft; a persistent loss must remain a failure.
+    let mut state = zoom_draft_state(view);
+    for _ in 0..20 {
+        if state["focused"] == true {
+            break;
+        }
+        println!("NATIVE_ZOOM_SETTLING {state}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        state = zoom_draft_state(view);
+    }
+    let child_focus = evaluate(child, "({documentFocused:document.hasFocus(),activeId:document.activeElement?.id,activeTag:document.activeElement?.tagName})");
+    println!(
+        "NATIVE_ZOOM_DIAGNOSTIC host_window_focused={} child={child_focus} host={state}",
+        view.window().is_focused().unwrap_or(false)
+    );
+    if state["focused"] != true {
+        // Inspect foreground ownership only; never activate/refocus to turn a
+        // failed assertion into a pass or capture other apps' window content.
+        println!(
+            "NATIVE_ACTIVATION_DIAGNOSTIC {}",
+            application_activation(view)
+        );
+    }
+    assert!(
+        state["overflow"].as_f64().unwrap() <= 1.0,
+        "native zoom page overflow: {state}"
+    );
+    assert_eq!(
+        state["focused"], true,
+        "native zoom preserves production field focus: {state}"
+    );
+    assert_eq!(state["draft"], "Unsubmitted native zoom draft");
+    assert_eq!(
+        state["sheetVisible"], true,
+        "native zoom sheet bounds: {state}"
+    );
+    assert_eq!(
+        state["fieldVisible"], true,
+        "native zoom focused field bounds: {state}"
+    );
+    println!("NATIVE_ZOOM_STATE {state}");
+}
 static PROBE_RESULT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(2);
 #[cfg(debug_assertions)]
 fn main() {
@@ -146,11 +241,42 @@ fn main() {
                         assert_eq!(evaluate(&child,"window.liveToken"),child_token);assert!(app.get_window("otto-pane-window-main").is_none());
                         assert_host_fills_window(&host);
                     }
+                    // Remove only the synthetic draft nodes used above: their default
+                    // body positioning must not contaminate production overflow checks.
+                    for view in [&host,&child]{evaluate(view,"window.probeDraft.remove();true");}
+                    host.window().set_focus().unwrap();host.set_focus().unwrap();
+                    app.emit_to(tauri::EventTarget::webview("main"),"otto://menu","new-workspace").unwrap();
+                    wait(&host,"!!document.getElementById('nw-name')");
+                    evaluate(&host,"const field=document.getElementById('nw-name');field.value='Unsubmitted native zoom draft';field.dispatchEvent(new Event('input',{bubbles:true}));field.focus();true");
+                    wait(&host,"document.hasFocus()&&document.activeElement?.id==='nw-name'");
+                    evaluate(&host,"window.probeFocusCalls=[];const nativeFocus=HTMLElement.prototype.focus;HTMLElement.prototype.focus=function(...args){window.probeFocusCalls.push({id:this.id,tag:this.tagName,label:this.getAttribute('aria-label'),text:this.textContent?.trim().slice(0,100),width:innerWidth,stack:new Error().stack});return nativeFocus.apply(this,args);};window.probeFocusEvents=[];for(const type of ['focus','blur','focusin','focusout'])document.addEventListener(type,e=>window.probeFocusEvents.push({type,id:e.target.id||'',tag:e.target.tagName||'',width:innerWidth,documentFocused:document.hasFocus()}),true);true");
                     let before=evaluate(&host,"innerWidth").as_f64().unwrap();
-                    app.emit_to(tauri::EventTarget::webview("main"),"otto://menu","zoom-in").unwrap();
-                    wait(&host,&format!("innerWidth<{before}"));
+                    assert_zoom_draft_visible(&host,&child);
+                    if std::env::var("OTTO_NATIVE_AX_PROBE").as_deref() == Ok("1") {
+                        accessibility::assert_workspace_dialog(&host, "100%");
+                    }
+                    // Exercise the real menu listener → ui store → Tauri IPC →
+                    // WKWebView page zoom, including the supported 200% endpoint.
+                    for step in 1..=10 {
+                        let scale=1.0+f64::from(step)/10.0;
+                        app.emit_to(tauri::EventTarget::webview("main"),"otto://menu","zoom-in").unwrap();
+                        wait(&host,&format!("Math.abs(innerWidth-{})<3",before/scale));
+                    }
+                    assert_zoom_draft_visible(&host,&child);
+                    if std::env::var("OTTO_NATIVE_AX_PROBE").as_deref() == Ok("1") {
+                        accessibility::assert_workspace_dialog(&host, "200%");
+                    }
+                    app.emit_to(tauri::EventTarget::webview("main"),"otto://menu","zoom-out").unwrap();
+                    wait(&host,&format!("Math.abs(innerWidth-{})<3",before/1.9));
+                    assert_zoom_draft_visible(&host,&child);
+                    app.emit_to(tauri::EventTarget::webview("main"),"otto://menu","zoom-reset").unwrap();
+                    wait(&host,&format!("Math.abs(innerWidth-{before})<3"));
+                    assert_zoom_draft_visible(&host,&child);
+                    evaluate(&host,"Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent.trim()==='Cancel').click();true");
+                    wait(&host,"!document.getElementById('nw-name')");
+                    assert_eq!(evaluate(&host,"window.liveToken"),host_token);
                     assert_eq!(evaluate(&child,"window.liveToken"),child_token);
-                    println!("PASS full SPA: isolated nonpersistent stores; native child ready handshake; real toolbar detach both directions; child-toolbar Return; retained root/child DOM+drafts; native Webview menu listener");
+                    println!("PASS full SPA: isolated nonpersistent stores; native child ready handshake; real toolbar detach both directions; child-toolbar Return; retained root/child DOM+drafts; native menu zoom 100→200→190→100%; production unsaved workspace draft and focused field retained; sheet remains in bounds; no horizontal page clipping");
                 }));let code=if result.is_ok(){0}else{1};PROBE_RESULT.store(code,std::sync::atomic::Ordering::SeqCst);if code != 0 {std::process::exit(code)}app.exit(code);
             });Ok(())
         }).build(context).unwrap().run(|app,event|{
