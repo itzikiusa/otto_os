@@ -210,6 +210,66 @@ export async function scrollFrameWork(page: Page, selector: string, dy: number, 
   );
 }
 
+/** GridView queues its virtual-window update on rAF. Measure dispatch work
+ *  plus that rendering frame, excluding the idle wait between them. These
+ *  probes use unfiltered, unsorted fixture rows, whose data-r is their index. */
+export async function gridScrollCosts(
+  page: Page,
+  delta: number,
+  steps: number,
+  options: { axis?: 'x' | 'y'; paint?: boolean; absolute?: boolean } = {},
+): Promise<number[]> {
+  return page.evaluate(async ({ delta, steps, axis, paint, absolute }) => {
+    const el = document.querySelector<HTMLElement>('.grid-scroll')!;
+    const table = el.querySelector<HTMLTableElement>('table.grid')!;
+    const rowHeight = Number.parseFloat(table.style.getPropertyValue('--row-h'));
+    const rowCount = Number(table.getAttribute('aria-rowcount')) - 1;
+    if (!(rowHeight > 0 && rowCount > 0)) throw new Error('Expected a populated fixed-height grid');
+    // Drain a previously queued native scroll/update before establishing our
+    // marker order. No geometry reads or production scheduler overrides.
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const out: number[] = [];
+    for (let i = 0; i < steps; i++) {
+      const cost = await new Promise<number>(resolve => {
+        let frameStart = 0;
+        // Register BEFORE dispatch: production's callback must run between
+        // this start marker and the end marker in the same rendering frame.
+        requestAnimationFrame(() => { frameStart = performance.now(); });
+        const dispatchStart = performance.now();
+        if (axis === 'x') el.scrollLeft = absolute ? delta : el.scrollLeft + delta;
+        else el.scrollTop = absolute ? delta : el.scrollTop + delta;
+        el.dispatchEvent(new Event('scroll'));
+        const dispatchCost = performance.now() - dispatchStart;
+        requestAnimationFrame(() => {
+          queueMicrotask(() => {
+            if (paint) {
+              const ch = new MessageChannel();
+              ch.port1.onmessage = () => {
+                const elapsed = dispatchCost + performance.now() - frameStart;
+                ch.port1.close();
+                ch.port2.close();
+                resolve(elapsed);
+              };
+              ch.port2.postMessage(null);
+            } else {
+              void document.body.offsetHeight; // include style + layout, not paint
+              resolve(dispatchCost + performance.now() - frameStart);
+            }
+          });
+        });
+      });
+      out.push(cost);
+      // Outside the measured interval: reject samples taken before the
+      // virtual window caught up, including the large middle-of-grid jump.
+      const target = Math.min(rowCount - 1, Math.max(0, Math.floor(el.scrollTop / rowHeight)));
+      if (!el.querySelector(`tbody td.cell[data-r="${target}"]`)) {
+        throw new Error(`Grid scroll sample ${i} ended before target row ${target} was mounted`);
+      }
+    }
+    return out;
+  }, { delta, steps, axis: options.axis ?? 'y', paint: options.paint ?? false, absolute: options.absolute ?? false });
+}
+
 // ── DOM ───────────────────────────────────────────────────────────────────────
 
 /** Elements matching `sel` right now (a DOM-size budget). */

@@ -67,7 +67,7 @@ async function openConn(page: Page): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 
-  const conn = page.locator('.conn-list .conn-name', { hasText: 'e2e-clickhouse' });
+  const conn = page.locator(`.conn-row[data-connection-id="${connId}"] .conn-name`);
   await expect(conn.first()).toBeVisible({ timeout: 30_000 });
   await conn.first().click();
 
@@ -119,7 +119,23 @@ async function runSql(page: Page, sql: string): Promise<void> {
   }
   // Close the autocomplete popup so it can't intercept the Run shortcut/click.
   await page.keyboard.press('Escape');
-  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  await expect(editor).toHaveText(sql, { useInnerText: true });
+  const completed = page.waitForResponse(response => {
+    const request = response.request();
+    return new URL(response.url()).pathname.endsWith(`/connections/${connId}/db/query`)
+      && request.method() === 'POST'
+      && request.postDataJSON()?.statement?.trim() === sql.trim();
+  });
+  const run = page.locator('.btn.small.primary', { hasText: 'Run' }).first();
+  await run.click();
+  const response = await completed;
+  expect(response.ok(), `query response for ${sql}`).toBeTruthy();
+  expect(await response.finished()).toBeNull();
+  // Existing rows remain mounted under the running overlay. Wait for THIS
+  // response and the Run control to replace Stop before inspecting those rows.
+  await expect(run).toBeVisible();
+  await expect(page.locator('.qe-stop')).toHaveCount(0);
+  await expect(page.locator('.rg-overlay')).toHaveCount(0);
 }
 
 // Wait until the grid shows ≥1 data row (a row-returning query landed).
@@ -324,18 +340,21 @@ test.describe('Database Explorer — ClickHouse sweep (mobile + tablet)', () => 
       dims.clientH + 10,
     );
 
-    // Prove it actually scrolls (not just that it's overflowing).
-    await scroll.evaluate(async (el) => {
+    await scroll.evaluate(async el => {
       el.scrollLeft = el.scrollWidth;
       el.scrollTop = el.scrollHeight;
-      // WebKit commits the virtual rows/spacers across rendering frames.
-      // Observe the settled position without issuing a second scroll.
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
     });
-    const after = await scroll.evaluate((el) => ({ left: el.scrollLeft, top: el.scrollTop }));
+    const after = await scroll.evaluate(el => ({ left: el.scrollLeft, top: el.scrollTop }));
     expect(after.left, 'grid scrolled horizontally').toBeGreaterThan(0);
     expect(after.top, 'grid scrolled vertically').toBeGreaterThan(0);
+    // The final data row must survive the virtual window update, not merely
+    // flash into the DOM before the browser resets the scroll position.
+    const finalRow = scroll.locator('tbody .rownum-n').filter({ hasText: /^80$/ });
+    await expect(finalRow).toBeVisible();
+    await expect(finalRow).toBeInViewport({ ratio: 0.5 });
+    await expect.poll(() => scroll.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
   });
 
   // ── 7. schema tree usable in this orientation ───────────────────────────────

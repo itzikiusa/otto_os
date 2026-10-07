@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { mockDbRoutes, seedMockDbConnection } from './db-mock';
-import { budgetMs, isWebkitProject, scrollFrameWork } from './perf';
+import { budgetMs, gridScrollCosts, isWebkitProject } from './perf';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — results grid at scale (perf regression gate, GAPS §3 / I1).
@@ -126,31 +126,9 @@ async function openAndRun(page: Page, statement: string): Promise<void> {
   await expect(page.locator('.grid-scroll tbody td.cell').first()).toBeVisible({ timeout: 60_000 });
 }
 
-/** Time one programmatic scroll: script + style + layout, no vsync wait.
- *  The sample ends on a microtask, not a MessageChannel task: each step
- *  starts in a rAF callback, so a posted task always ran after that frame's
- *  whole style/layout/PAINT and every sample counted a paint. */
+/** Script + the grid's queued frame through layout, excluding vsync wait. */
 async function scrollSteps(page: Page, dy: number, steps: number): Promise<number[]> {
-  return page.evaluate(
-    async ({ dy, steps }) => {
-      const el = document.querySelector('.grid-scroll') as HTMLElement;
-      // The scroll handler queued Svelte's flush microtask first, so it (and
-      // every effect it runs) has finished when this one resolves.
-      const flushed = () => new Promise<void>((r) => queueMicrotask(r));
-      const out: number[] = [];
-      for (let i = 0; i < steps; i++) {
-        const t0 = performance.now();
-        el.scrollTop += dy;
-        el.dispatchEvent(new Event('scroll'));
-        await flushed();
-        void (document.body as HTMLElement).offsetHeight; // force style + layout
-        out.push(performance.now() - t0);
-        await new Promise((r) => requestAnimationFrame(() => r(null)));
-      }
-      return out;
-    },
-    { dy, steps },
-  );
+  return gridScrollCosts(page, dy, steps);
 }
 
 const pct = (xs: number[], p: number): number => {
@@ -171,23 +149,16 @@ test('100k × 30 result: bounded DOM, fast scroll / jump / sort / search', async
   const steps = await scrollSteps(page, 300, 40);
   const stepP95 = pct(steps, 0.95);
   // The same steps timed to the end of the frame's PAINT (r3-10-02): the
-  // microtask sample above stops before paint, most of WebKit's cost.
-  const painted = await scrollFrameWork(page, '.grid-scroll', 300, 40);
+  // layout sample above stops before paint, most of WebKit's cost.
+  const painted = await gridScrollCosts(page, 300, 40, { paint: true });
   const paintedP95 = pct(painted, 0.95);
 
   // 3) Jump to the middle.
-  const jump = await page.evaluate(async () => {
-    const el = document.querySelector('.grid-scroll') as HTMLElement;
-    const t0 = performance.now();
-    el.scrollTop = el.scrollHeight / 2;
-    el.dispatchEvent(new Event('scroll'));
-    await new Promise<void>((r) => queueMicrotask(r)); // Svelte's flush ran first
-    void (document.body as HTMLElement).offsetHeight;
-    return performance.now() - t0;
-  });
+  const midpoint = await page.locator('.grid-scroll').evaluate(el => el.scrollHeight / 2);
+  const [jump] = await gridScrollCosts(page, midpoint, 1, { absolute: true });
 
   // 4) Sort click → the first row shows the other end of the order.
-  await page.evaluate(() => ((document.querySelector('.grid-scroll') as HTMLElement).scrollTop = 0));
+  await gridScrollCosts(page, 0, 1, { absolute: true });
   const sortMs = await page.evaluate(async () => {
     const th = document.querySelectorAll('.grid-scroll thead .th-sort')[0] as HTMLElement;
     const firstCell = () => document.querySelector('.grid-scroll tbody tr:not(.spacer) td.cell')?.textContent ?? '';
