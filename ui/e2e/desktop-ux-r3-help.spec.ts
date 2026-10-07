@@ -145,6 +145,10 @@ test('coach workspace and first-agent flow retries safely and sends the starter 
   const session = { id: '01ARZ3NDEKTSV4RRFFQ69G5FAW', workspace_id: workspace.id, kind: 'agent', provider: 'claude', title: 'First session', status: 'exited', cwd: workspace.root_path, provider_session_id: null, connection_id: null, created_by: 'synthetic-root', created_at: now, last_active_at: now, archived: false, meta: { source: 'onboarding' } };
   const launches: Record<string, unknown>[] = [];
   const inputs: Record<string, unknown>[] = [];
+  await page.route('**/api/v1/fs/stat?*', r => {
+    expect(new URL(r.request().url()).searchParams.get('path')).toBe('/synthetic/project');
+    return r.fulfill({ json: { path: '/synthetic/project', is_dir: true, is_git_repo: false } });
+  });
   await page.route('**/api/v1/workspaces', (r) => {
     if (r.request().method() !== 'POST') return r.fulfill({ json: created ? [workspace] : [] });
     expect(r.request().postDataJSON()).toEqual({ name: 'Synthetic project', root_path: '/synthetic/project' });

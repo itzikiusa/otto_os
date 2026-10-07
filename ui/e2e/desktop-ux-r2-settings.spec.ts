@@ -127,6 +127,8 @@ test('long plugin metadata leaves its name and actions usable on phone', async (
   await page.screenshot({ path: '/tmp/otto-ux-r2-settings-plugins-phone.png' });
   let mutations = 0;
   await page.route('**/api/v1/plugin-admin/**', route => {
+    expect(route.request().method()).toBe('POST');
+    expect(new URL(route.request().url()).pathname).toBe('/api/v1/plugin-admin/synthetic-plugin/enable');
     mutations++;
     return route.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic plugin unavailable' } });
   });
@@ -136,7 +138,12 @@ test('long plugin metadata leaves its name and actions usable on phone', async (
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(mutations).toBe(0);
   await page.getByRole('button', { name: 'Enable', exact: true }).click();
+  const confirmation = page.getByRole('dialog', { name: 'Enable plugin?' });
+  await expect(confirmation).toContainText('runs with your permissions');
+  expect(mutations).toBe(0);
+  await confirmation.getByRole('button', { name: 'Enable plugin', exact: true }).click();
   await expect(page.getByText(/Couldn’t enable Synthetic/)).toBeVisible();
+  expect(mutations).toBe(1);
   await expect(page.getByRole('button', { name: 'Enable', exact: true })).toBeEnabled();
   await expect(page.locator('.plist')).toContainText('Disabled');
 });

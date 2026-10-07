@@ -22,18 +22,20 @@ async function setup(page:Page,root:(r:Route)=>unknown=r=>r.fulfill({json:{token
 }
 async function finishSteps(page:Page) {await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Finish setup'}).click();}
 
-test('first account Back then Skip honors the skipped workspace after failure',async({page})=>{
+test('first account Back then Skip does not submit the previously entered workspace',async({page})=>{
   let roots=0;let writes=0;
   await page.route('**/api/v1/workspaces',r=>{if(r.request().method()==='GET')return r.fulfill({json:[]});writes++;return r.fulfill({status:503,json:{code:'upstream',message:'Synthetic workspace unavailable'}});});
   await setup(page,r=>{roots++;return r.fulfill({json:{token:'fixture-root',user}});});
   // Created at the password step, so there is no way back to re-enter it.
   await expect(page.getByRole('heading',{name:'Create your first workspace'})).toBeFocused();expect(roots).toBe(1);
   await expect(page.getByRole('button',{name:'Back',exact:true})).toHaveCount(0);
-  await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();await finishSteps(page);
-  await expect(page.getByRole('alert')).toContainText('Synthetic workspace unavailable');
+  await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByRole('button',{name:'Back',exact:true}).click();await page.getByRole('button',{name:'Back',exact:true}).click();
+  await expect(page.getByLabel('Name',{exact:true})).toHaveValue('Fixture');
+  await expect(page.getByLabel('Directory',{exact:true})).toHaveValue('/tmp/fixture');
   await page.getByRole('button',{name:'Skip',exact:true}).click();await finishSteps(page);
-  await expect(page.locator('.shell')).toBeVisible();expect(roots).toBe(1);expect(writes).toBe(1);
+  await expect(page.locator('.shell')).toBeVisible();expect(roots).toBe(1);expect(writes).toBe(0);
 });
 
 test('first account recovers a lost root response with entered credentials',async({page})=>{

@@ -191,24 +191,32 @@ test('History changing scope ignores a delayed first page', async ({ page }) => 
 });
 
 test('Insights report timeout releases generation and retry detects the new result', async ({ page }) => {
-  let polls = 0, ready = false;
+  let polls = 0, activeChecks = 0, runs = 0, ready = false;
+  // A run that remains alive is distinct from one that disappeared/failed.
+  await page.route('**/api/v1/insights/runs/active', r => {
+    activeChecks++;
+    return r.fulfill({ json: runs > 0 && !ready ? [{ run_id: 'synthetic-run', report_key: 'daily:20260924_20260924', report_revision: 'old', started_at: new Date().toISOString() }] : [] });
+  });
   await page.route('**/api/v1/insights/reports', r => { return r.fulfill({ json: [{ ...report, ...(ready ? { summary: '# Ready after retry', created_at: '2026-09-26T09:00:00Z' } : {}) }] }); });
   await page.route('**/api/v1/insights/report-status?*', r => { polls++; return r.fulfill({ json: { report: { ...report, summary: new URL(r.request().url()).searchParams.get('summary') === 'true' ? (ready ? '# Ready after retry' : report.summary) : '', html_path: ready ? '/tmp/synthetic-report.html' : null }, html_revision: ready ? 'new' : 'old' } }); });
-  await page.route('**/api/v1/insights/run', r => r.fulfill({ json: { started: true, run_id: 'synthetic-run', report_revision: 'old', report_key: 'daily:20260924_20260924' } }));
+  await page.route('**/api/v1/insights/run', r => { runs++; return r.fulfill({ json: { started: true, run_id: 'synthetic-run', report_revision: 'old', report_key: 'daily:20260924_20260924' } }); });
   await page.goto('/#/insights');
   await expect(page.getByTestId('insight-report')).toContainText('Original report');
   await page.clock.install();
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Running…', exact: true })).toBeDisabled();
   for (let i = 0; i < 100; i++) {
-    const before = polls; await page.clock.runFor(3100);
+    const before = polls, checksBefore = activeChecks; await page.clock.runFor(3100);
     await expect.poll(() => polls).toBeGreaterThan(before);
+    await expect.poll(() => activeChecks).toBeGreaterThan(checksBefore);
     // Flush the fulfilled response before advancing the next recursive timer.
     await page.waitForTimeout(20);
   }
   await expect(page.getByText('Still generating the insights report', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
+  expect(runs).toBe(1);
   await page.getByRole('button', { name: 'Run now', exact: true }).click(); ready = true;
+  await expect.poll(() => runs).toBe(2);
   await expect(page.getByRole('button', { name: 'Running…', exact: true })).toBeDisabled();
   await page.clock.runFor(3100);
   await expect(page.getByTestId('insight-report')).toContainText('Ready after retry');

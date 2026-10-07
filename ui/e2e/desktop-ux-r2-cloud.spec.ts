@@ -264,8 +264,14 @@ test('SQS send validates delay and labels dynamic message attributes', async ({ 
   let sent: unknown;
   await page.route('**/sqs/queues/send', async r => { sent = r.request().postDataJSON(); await r.fulfill({ json: { message_id: 'sent-synthetic' } }); });
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  const confirmation = page.getByRole('dialog', { name: 'Send message?', exact: true });
+  await expect(confirmation).toContainText('SQS queue review-other');
+  await expect(confirmation).toContainText('synthetic-message');
+  await expect(confirmation).toContainText('Attributes: review');
+  expect(sent).toBeUndefined();
+  await confirmation.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.getByText('Message sent', { exact: true })).toBeVisible();
-  expect(sent).toMatchObject({ body: 'synthetic-message', message_attributes: { review: { DataType: 'String', StringValue: 'synthetic' } } });
+  expect(sent).toMatchObject({ url: queueUrl + '-other', body: 'synthetic-message', message_attributes: { review: { DataType: 'String', StringValue: 'synthetic' } } });
 });
 
 test('monitor settings reject empty numeric fields before sending', async ({ page }) => {
