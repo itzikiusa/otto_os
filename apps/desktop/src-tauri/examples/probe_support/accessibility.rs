@@ -14,8 +14,15 @@ use tauri::Webview;
 
 const MAX_NODES: usize = 1024;
 const MAX_DEPTH: usize = 32;
+const MAX_TEXT_UNITS: usize = 65_536;
 
 type CfObject = *const std::ffi::c_void;
+
+#[repr(C)]
+struct CfRange {
+    location: isize,
+    length: isize,
+}
 
 // Public client-side APIs, scoped to this disposable process. In particular,
 // no WithOptions(prompt=true), system-
@@ -43,6 +50,8 @@ extern "C" {
     fn CFArrayGetCount(array: CfObject) -> isize;
     fn CFArrayGetValueAtIndex(array: CfObject, index: isize) -> CfObject;
     fn CFStringGetTypeID() -> usize;
+    fn CFStringGetLength(value: CfObject) -> isize;
+    fn CFStringGetCharacters(value: CfObject, range: CfRange, buffer: *mut u16);
     fn CFBooleanGetTypeID() -> usize;
     fn CFBooleanGetValue(value: CfObject) -> u8;
 }
@@ -117,8 +126,30 @@ impl ClientWalk {
         if unsafe { CFGetTypeID(value.0) } != unsafe { CFStringGetTypeID() } {
             return String::new();
         }
-        // Public CFString/NSString toll-free bridge only, never an AX element.
-        unsafe { (&*(value.0 as *const NSString)).to_string() }
+        // Read the CF value through its public API without constructing an
+        // Objective-C reference from an erased pointer. AX labels are bounded;
+        // oversized attributes cannot satisfy the fixture's exact-name checks.
+        let length = unsafe { CFStringGetLength(value.0) };
+        let Ok(units) = usize::try_from(length) else {
+            return String::new();
+        };
+        if units > MAX_TEXT_UNITS {
+            return String::new();
+        }
+        let mut buffer = vec![0_u16; units];
+        if units != 0 {
+            unsafe {
+                CFStringGetCharacters(
+                    value.0,
+                    CfRange {
+                        location: 0,
+                        length,
+                    },
+                    buffer.as_mut_ptr(),
+                );
+            }
+        }
+        String::from_utf16_lossy(&buffer)
     }
 
     fn enabled(&mut self, element: CfObject) -> Option<bool> {
