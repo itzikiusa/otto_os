@@ -1,0 +1,478 @@
+{
+  "config": {
+    "argv": [
+      "/opt/homebrew/Cellar/node/26.10.0_2/bin/node",
+      "/Users/itziklavon/otto_os/ui/node_modules/.bin/playwright",
+      "test",
+      "desktop-quality-round2-session-ux.spec.ts",
+      "--project=desktop-browser",
+      "--workers=1"
+    ],
+    "configFile": "/Users/itziklavon/otto_os/ui/playwright.config.ts",
+    "rootDir": "/Users/itziklavon/otto_os/ui/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": "/Users/itziklavon/otto_os/ui/e2e/global-setup.ts",
+    "globalTeardown": "/Users/itziklavon/otto_os/ui/e2e/global-teardown.ts",
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-portrait",
+        "name": "iphone-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-landscape",
+        "name": "iphone-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-portrait",
+        "name": "ipad-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-landscape",
+        "name": "ipad-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-se",
+        "name": "iphone-se",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-browser",
+        "name": "desktop-browser",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-webkit",
+        "name": "desktop-webkit",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-(?:.*perf.*|terminal-park-redraw)\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "html",
+        {
+          "open": "never",
+          "outputFolder": "e2e/.report-round2-ux"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "e2e/.results-round2-ux.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 1,
+    "webServer": {
+      "command": "npm run dev -- --port 5207 --strictPort",
+      "url": "http://localhost:5207",
+      "reuseExistingServer": true,
+      "timeout": 90000
+    }
+  },
+  "suites": [
+    {
+      "title": "desktop-quality-round2-session-ux.spec.ts",
+      "file": "desktop-quality-round2-session-ux.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "late send success preserves conversation search focus and newer draft",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1983,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:42:57.707Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-e429212e365b6dc69281",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 41,
+          "column": 3
+        },
+        {
+          "title": "late send failure preserves conversation search focus and newer draft",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1130,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:42:59.782Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-a95e1c762bd7dd92a845",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 41,
+          "column": 3
+        },
+        {
+          "title": "conversation load Retry and keyboard navigation preserve unsent draft light",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2367,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:43:00.920Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-19d04725f349c9431c6b",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 76,
+          "column": 3
+        },
+        {
+          "title": "conversation load Retry and keyboard navigation preserve unsent draft dark",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2043,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:43:03.292Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-8eec006caa2dcda8cae4",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 76,
+          "column": 3
+        },
+        {
+          "title": "late attachment upload preserves search focus and keeps the attachment with its draft",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1148,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:43:05.339Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-6786feda24090955bb0d",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 118,
+          "column": 1
+        },
+        {
+          "title": "successful send returns keyboard focus when the composer still owns it",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1014,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:43:06.492Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-e7a3d866bf651b280048",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 152,
+          "column": 1
+        },
+        {
+          "title": "conversation search releases ownership when focus moves to the sidebar",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1118,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:43:07.511Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-75d2d05b60c41616062d",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 162,
+          "column": 1
+        },
+        {
+          "title": "macOS Control F remains text movement in the message composer",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 772,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:43:08.633Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "137d9f9df1a0ca20e2dd-e656f76fb817ea17764f",
+          "file": "desktop-quality-round2-session-ux.spec.ts",
+          "line": 179,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-08T07:42:55.827Z",
+    "duration": 13698.478,
+    "expected": 8,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

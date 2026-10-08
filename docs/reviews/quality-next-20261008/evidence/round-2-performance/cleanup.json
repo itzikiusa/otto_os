@@ -1,0 +1,22 @@
+[
+  {
+    "run": "functional.log",
+    "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpFOPdqO",
+    "still_exists": false
+  },
+  {
+    "run": "diagnostic.log",
+    "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpglivxm",
+    "still_exists": false
+  },
+  {
+    "run": "functional-corrected.log",
+    "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpSPCtpg",
+    "still_exists": false
+  },
+  {
+    "run": "chromium-run.log",
+    "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpHn9AX9",
+    "still_exists": false
+  }
+]

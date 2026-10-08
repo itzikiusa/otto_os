@@ -1,0 +1,21 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.47s
+     Running unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)
+
+running 1 test
+CHROME_START {"browser_fetch":true,"profile":"/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpglivxm","test_pid":56990,"version":"149.0.7827.55"}
+NETWORK_FAILURE {"blockedReason":"inspector","canceled":false,"errorText":"net::ERR_BLOCKED_BY_CLIENT.Inspector","requestId":"57095.2","timestamp":59047.184914,"type":"Fetch"}
+
+thread 'live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live' (7036363) panicked at crates/otto-browser/src/live/session_chromium_tests.rs:169:10:
+all requests must fail specifically through the guard: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live ... FAILED
+
+failures:
+
+failures:
+    live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 127 filtered out; finished in 5.55s
+
+error: test failed, to rerun pass `-p otto-browser --lib`

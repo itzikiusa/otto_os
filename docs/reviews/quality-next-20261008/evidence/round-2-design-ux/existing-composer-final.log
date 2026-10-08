@@ -1,0 +1,55 @@
+[WebServer] (node:68898) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-2ivIMh OTTO_PORT=17834
+2026-10-08T07:38:52.546913Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-2ivIMh)
+2026-10-08T07:38:52.802997Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-2ivIMh/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T07:38:52.808723Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-2ivIMh/clickhouse, port 58357)
+2026-10-08T07:38:52.814313Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T07:38:52.814939Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T07:38:52.814984Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T07:38:52.815004Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T07:38:52.815125Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T07:38:52.815157Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T07:38:52.815247Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T07:38:52.815262Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T07:38:52.815869Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T07:38:52.820227Z  INFO otto_server::boot::recovery: boot: post-listen work done in 5 ms (plugins=0)
+2026-10-08T07:38:52.887421Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T07:38:52.887485Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T07:38:52.887502Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T07:38:52.887522Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T07:38:52.887542Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T07:38:52.891130Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T07:38:52.891157Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T07:38:52.891178Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T07:38:52.891198Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T07:38:52.891217Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T07:38:52.891248Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T07:38:52.891358Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T07:38:52.901848Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T07:38:52.905518Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T07:38:52.945442Z  INFO ottod: listening on http://127.0.0.1:17834
+2026-10-08T07:38:52.945569Z  INFO ottod: alt loopback lane on http://localhost:17834 ([::1] + 127.0.0.1 both held)
+2026-10-08T07:38:52.945622Z  INFO otto_server::boot: boot: ready in 398 ms (db_compact=0 db_open=251 maintenance=2 modules=10 restore=2 recovery=131)
+[e2e] test daemon ready (pid 68926); root onboarded.
+
+Running 6 tests using 1 worker
+
+2026-10-08T07:38:53.204013Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-2ivIMh/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T07:38:53.205743Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T07:38:53.212103Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+(node:69022) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T07:38:53.301335Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T07:38:53.301891Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T07:38:53.301937Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+2026-10-08T07:38:55.770504Z  INFO otto_sessions::manager: pty resize 80x24 -> 123x45 session=01M4D76T5R3DPYFRRQVWD7K9E1
+  ✓  1 [desktop-browser] › e2e/desktop-conversation-chat.spec.ts:82:1 › pending image upload still blocks Send and Enter after composer remount (2.7s)
+  ✓  2 [desktop-browser] › e2e/desktop-conversation-chat.spec.ts:267:1 › code blocks are IDE-like: language, file, numbered lines, Wrap, Copy, Open (6.8s)
+  ✓  3 [desktop-browser] › e2e/desktop-conversation-chat.spec.ts:373:1 › a narrow pane shows the panel over the chat (6.7s)
+  ✓  4 [desktop-browser] › e2e/desktop-conversation-chat.spec.ts:388:1 › your messages: ⌥↑ jumps to the previous one; Edit & resend fills the composer (6.8s)
+  ✓  5 [desktop-browser] › e2e/desktop-conversation-chat.spec.ts:453:1 › composer: ⏎ sends, ⇧⏎ adds a line; Stop interrupts a working agent (1.4s)
+  ✓  6 [desktop-browser] › e2e/desktop-conversation-chat.spec.ts:510:1 › six tiled panes: every chat fits its narrow pane (2.3s)
+
+  6 passed (28.7s)

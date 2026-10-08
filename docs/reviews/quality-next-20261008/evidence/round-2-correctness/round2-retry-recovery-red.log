@@ -1,0 +1,19 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.54s
+     Running unittests src/lib.rs (target/debug/deps/otto_state-b408ed1d6f830c13)
+
+running 1 test
+
+thread 'skill_evals::tests::interrupted_validation_retry_preserves_original_command_signals' (7071439) panicked at crates/otto-state/src/skill_evals.rs:942:14:
+retry admission lost persisted command evidence
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test skill_evals::tests::interrupted_validation_retry_preserves_original_command_signals ... FAILED
+
+failures:
+
+failures:
+    skill_evals::tests::interrupted_validation_retry_preserves_original_command_signals
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 429 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p otto-state --lib`

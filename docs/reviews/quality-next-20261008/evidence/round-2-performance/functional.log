@@ -1,0 +1,16 @@
+
+running 1 test
+CHROME_START {"browser_fetch":true,"profile":"/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpFOPdqO","test_pid":56039,"version":"149.0.7827.55"}
+
+thread 'live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live' (7033151) panicked at crates/otto-browser/src/live/session_chromium_tests.rs:166:10:
+all requests must fail specifically through the guard: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live ... FAILED
+
+failures:
+
+failures:
+    live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 127 filtered out; finished in 6.68s
+

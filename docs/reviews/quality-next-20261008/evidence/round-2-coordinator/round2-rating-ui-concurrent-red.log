@@ -1,0 +1,56 @@
+✔ failed rating refreshes the durable pending state before allowing retry (33.513833ms)
+✔ rating response after disposal cannot publish or refresh the old view (10.460625ms)
+✔ a poll started before a rating response cannot restore its stale score (4.549708ms)
+✖ a current successful rating reloads the latest report rather than its response snapshot (6.447458ms)
+✖ out-of-order rating replies still reload after the final write completes (3.601833ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 3
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 322.109166
+
+✖ failing tests:
+
+test at unit/evalRatingPublication.test.ts:61:1
+✖ a current successful rating reloads the latest report rather than its response snapshot (6.447458ms)
+  AssertionError [ERR_ASSERTION]: Expected "actual" to be reference-equal to "expected":
+  + actual - expected
+  
+    {
+  +   human: 'response snapshot',
+  -   human: 'new',
+      id: 'run'
+    }
+  
+      at TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/evalRatingPublication.test.ts:69:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { id: 'run', human: 'response snapshot' },
+    expected: { id: 'run', human: 'new' },
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at unit/evalRatingPublication.test.ts:73:1
+✖ out-of-order rating replies still reload after the final write completes (3.601833ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'earlier response snapshot'
+  - 'both complete'
+  
+      at TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/evalRatingPublication.test.ts:82:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'earlier response snapshot',
+    expected: 'both complete',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

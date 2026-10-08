@@ -1,0 +1,16 @@
+{
+  "apps/desktop/src-tauri/examples/probe_support/school.rs": "feee9aba0c0a782da1cda06e153470aade7415d8a8a13025a1b8e4aaa57f3b0a",
+  "crates/otto-browser/src/live/session.rs": "737abd9af612905c9b95db101e49944226d18bf8b5ccc93df6fe07557a4270f6",
+  "crates/otto-browser/src/live/session_chromium_tests.rs": "ac4d5c07e2d48744b44218796d9a362d43eb2143e23cd1369124e5e70b28b02e",
+  "crates/otto-server/src/eval_score.rs": "52f1996ba681e1fe7718ac0c401110ada30dc04b63e31be875f80a02ceb0869d",
+  "crates/otto-server/src/skill_eval.rs": "b94b8d30d8425dd737e19ce7a49109cd1e128b75703c75e8c23e2802335a49ba",
+  "crates/otto-server/src/skill_eval_output_tests.rs": "2dfede0aecbe3913fa4355dbaf26ee479a01d4019ef9a3ea06899322ba9d719c",
+  "crates/otto-state/src/skill_evals.rs": "788b8db9d4e165e8849f2003a9b471452fd1503e3620f83bc9c1f47de8e9720d",
+  "ui/e2e/desktop-quality-round2-session-ux.spec.ts": "a0ed3d0f9f9e5accf6e4eb8d5c26c35d97e0291b6fb05d2e47b556448c4f417d",
+  "ui/src/lib/api/types.ts": "fa257eaf8057074bf1efc2e0fc59f35d235cdabb581ed31a454224dc7e16491d",
+  "ui/src/modules/agents/conversation/Composer.svelte": "f168919f56113d77cb23f979e525da672fbba5b37f457a300082172ce0351ee3",
+  "ui/src/modules/agents/conversation/ConversationView.svelte": "eeb043aa52edd6da4c7dde0c59960377d413bddd47e8aa5074ddc7ecd066030d",
+  "ui/src/modules/skills-eval/RunDetail.svelte": "ba55982608d1ec36cf1ba94b0a80b6a45b084dc577e2dd5cb86005ffcbc9dede",
+  "ui/unit/composerSendOwnership.test.ts": "efa291fda800fd27875622aaaf26552f0aeb594889805224cfeaf7196da9d05f",
+  "ui/unit/evalRatingPublication.test.ts": "20e38dba6294ce5a9b009fdba2de29b764f68bf8171b85816004c0ea6cc1928c"
+}

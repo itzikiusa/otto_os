@@ -1,0 +1,69 @@
+✖ failed rating refreshes the durable pending state before allowing retry (33.455416ms)
+✖ rating response after disposal cannot publish or refresh the old view (5.830875ms)
+✖ a poll started before a rating response cannot restore its stale score (4.202667ms)
+✔ a current successful rating publishes the returned report (4.607667ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 1
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 324.462666
+
+✖ failing tests:
+
+test at unit/evalRatingPublication.test.ts:16:1
+✖ failed rating refreshes the durable pending state before allowing retry (33.455416ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + []
+  - [
+  -   'run'
+  - ]
+  
+      at TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/evalRatingPublication.test.ts:25:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [],
+    expected: [ 'run' ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at unit/evalRatingPublication.test.ts:30:1
+✖ rating response after disposal cannot publish or refresh the old view (5.830875ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  1 !== 0
+  
+      at TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/evalRatingPublication.test.ts:43:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at unit/evalRatingPublication.test.ts:47:1
+✖ a poll started before a rating response cannot restore its stale score (4.202667ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  'old' !== 'new'
+  
+      at TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/evalRatingPublication.test.ts:57:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'old',
+    expected: 'new',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
