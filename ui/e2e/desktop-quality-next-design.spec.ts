@@ -20,6 +20,11 @@ for (const appearance of [
   }, appearance);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/#/api');
+  // Open a request before resizing: the empty-state load removes the header's
+  // New action asynchronously, and Linux fonts can then fit every action.
+  // A populated editor gives this overflow test a stable, genuinely full row.
+  await page.getByRole('button', { name: 'New request', exact: true }).click();
+  await expect(page.getByLabel('Request URL', { exact: true })).toBeFocused();
   const header = page.getByTestId('page-header');
   const sync = header.getByRole('button', { name: 'Sync with Git…', exact: true });
   await expect(sync).toBeVisible();

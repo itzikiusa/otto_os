@@ -404,14 +404,14 @@
   let rating = $state<Set<string>>(new Set());
   let savingReg = $state<Set<string>>(new Set());
 
-  async function rate(it: EvalIteration, n: number): Promise<void> {
+  async function rate(it: EvalIteration, n: number, note = ''): Promise<void> {
     if (!run || rating.has(it.id)) return;
     const id = run.id;
     const current = () => !disposed && id === evalId;
     scoreRevision++;
     rating = new Set(rating).add(it.id);
     try {
-      await skillsEvalApi.rate(id, it.id, { rating: n, note: '' });
+      await skillsEvalApi.rate(id, it.id, { rating: n, note });
       if (!current()) return;
       scoreRevision++;
       // Ratings on different iterations can finish out of order. A fresh read
@@ -487,10 +487,14 @@
         {#if run.impl_cli}<span class="chip" title="Implementation agent">{run.impl_cli}</span>{/if}
         <span class="chip">{plural(run.target_iterations, 'iteration')}</span>
         {#each run.iterations as it (it.id)}
-          <Badge tone={scoreTone(it.score)} label={`Iteration ${it.iter}: ${it.score.toFixed(0)}`} />
+          {#if it.scoring?.proof_status === 'pending'}
+            <Badge label={`Iteration ${it.iter}: score pending`} />
+          {:else}
+            <Badge tone={scoreTone(it.score)} label={`Iteration ${it.iter}: ${it.score.toFixed(0)}`} />
+          {/if}
         {/each}
       </div>
-      {#if run.summary}<p class="rd-summary">{run.summary}</p>{/if}
+      {#if run.summary && !run.iterations.some(it => it.scoring?.proof_status === 'pending')}<p class="rd-summary">{run.summary}</p>{/if}
       {#if run.error}<p class="rd-error" role="alert"><Icon name="warning" size={12} /> {run.error}</p>{/if}
     </header>
 
@@ -507,7 +511,9 @@
             </span>
           {/if}
           <span class="grow"></span>
-          {#if it.status === 'done'}
+          {#if it.scoring?.proof_status === 'pending'}
+            <Badge label="Score update pending" />
+          {:else if it.status === 'done'}
             <Badge tone={scoreTone(it.score)} label={it.score.toFixed(0)} title="Iteration score" />
           {/if}
           <StatusBadge status={evalStatus(it.status)} />
@@ -609,6 +615,14 @@
         <!-- Multi-signal scorecard (tests / lint / diff / review / human → proof) -->
         {#if it.scoring}
           <Scorecard score={it.scoring} evalId={run.id} iterId={it.id} />
+        {/if}
+
+        {#if it.scoring?.proof_status === 'pending' && (it.status === 'done' || it.status === 'error') && it.human_rating != null}
+          <div class="score-pending">
+            <LoadState what="the updated score" loading={rating.has(it.id)} empty={true} variant="compact"
+              error="Your rating is saved. Retry to finish updating the score before promoting this skill."
+              onretry={() => rate(it, it.human_rating!, it.human_note)} />
+          </div>
         {/if}
 
         <!-- Human rating + regression capture -->

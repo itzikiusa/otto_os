@@ -3,8 +3,9 @@
   // signals that feed it) and, on demand, the assembled proof pack. Read-only —
   // it never mutates the eval; rating happens elsewhere.
   import type { EvalScore } from '../../lib/api/types';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
-  import { toastError } from '../../lib/toastError';
+  import { untrack } from 'svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { kindLabel } from '../../lib/labels';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import Icon from '../../lib/components/Icon.svelte';
@@ -29,7 +30,8 @@
 
   let expanded = $state(false);
   let loading = $state(false);
-  let loaded = $state(false);
+  let proofError: string | null = $state(null);
+  let proofRetry = $state(0);
   let artifacts = $state<Artifact[]>([]);
 
   // Proof-status pill palette: soft tone tint + text-safe tone, per the
@@ -78,25 +80,31 @@
     return s.length > 400 ? s.slice(0, 400) : s;
   }
 
-  async function toggleProof(): Promise<void> {
-    if (expanded) {
-      expanded = false;
-      return;
-    }
-    expanded = true;
-    if (loaded || !evalId || !iterId) return;
-    loading = true;
-    try {
-      const pack = await skillsEvalApi.iterProofPack(evalId, iterId);
-      artifacts = pack.artifacts ?? [];
-      loaded = true;
-    } catch (e) {
-      toastError('Couldn’t load the proof pack', e);
-      expanded = false;
-    } finally {
-      loading = false;
-    }
-  }
+  // Evidence changes when a rating or validator result is published. Keep an
+  // open pack current, and discard a response for an older score or iteration.
+  $effect(() => {
+    const opened = expanded;
+    const evaluation = evalId;
+    const iteration = iterId;
+    JSON.stringify(score);
+    proofRetry;
+    if (!opened || !evaluation || !iteration) return;
+    let current = true;
+    untrack(() => {
+      loading = true;
+      proofError = null;
+      artifacts = [];
+      void skillsEvalApi.iterProofPack(evaluation, iteration).then(pack => {
+        if (current) artifacts = pack.artifacts ?? [];
+      }).catch(error => {
+        if (current) proofError = loadErrorText(error);
+      }).finally(() => {
+        if (current) loading = false;
+      });
+    });
+    return () => { current = false; };
+  });
+
 </script>
 
 {#if score}
@@ -104,7 +112,7 @@
     <div class="head">
       <div class="composite">
         <span class="num" data-testid="scorecard-composite">{score.composite.toFixed(0)}</span>
-        <span class="lbl">Composite</span>
+        <span class="lbl">{score.proof_status === 'pending' ? 'Provisional composite' : 'Composite'}</span>
       </div>
       <div class="meta">
         <span
@@ -138,15 +146,15 @@
     </div>
 
     {#if !compact}
-      <button class="btn small ghost proofpack-btn" data-testid="scorecard-proofpack-btn" aria-expanded={expanded} onclick={toggleProof}>
+      <button class="btn small ghost proofpack-btn" data-testid="scorecard-proofpack-btn" aria-expanded={expanded} onclick={() => (expanded = !expanded)}>
         <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
         {expanded ? 'Hide proof pack' : 'View proof pack'}
       </button>
 
       {#if expanded}
         <div class="pack">
-          {#if loading}
-            <Skeleton rows={2} height={24} label="the proof pack" />
+          {#if loading || proofError}
+            <LoadState what="the proof pack" {loading} error={proofError} empty={true} variant="compact" onretry={() => proofRetry++} />
           {:else if artifacts.length === 0}
             <div class="pmsg">No proof artifacts were captured for this iteration.</div>
           {:else}
