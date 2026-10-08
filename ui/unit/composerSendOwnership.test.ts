@@ -32,14 +32,16 @@ test('production send keeps a remounted draft and allows only one pending reques
   });
   const source = readFileSync(new URL('../src/modules/agents/conversation/Composer.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
   const parsed = ts.createSourceFile('composer.ts', source, ts.ScriptTarget.Latest, true);
-  const method = parsed.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'send')!;
+  const methods = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && ['send', 'restoreComposerFocus'].includes(node.name?.text ?? ''));
+  const productionMethods = methods.map((node) => source.slice(node.getStart(parsed), node.end)).join('\n');
   const pending = deferred<void>();
   let calls = 0;
   function mount() {
     const compiled = ts.transpileModule(`
       const ownerId = 'A', text = transcript.draft(ownerId), attachments = [];
+      const document = { activeElement: null, body: {} }, composerEl = null;
       let sending = false; const ta = null; let uploading = 0;
-      ${source.slice(method.getStart(parsed), method.end)}
+      ${productionMethods}
       return send;
     `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
     return new Function('transcript', 'submitPrompt', 'queueMicrotask', 'autosize', 'toasts', compiled)(
@@ -66,12 +68,14 @@ test('send is refused while an image upload is still pending', async () => {
   });
   const source = readFileSync(new URL('../src/modules/agents/conversation/Composer.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
   const parsed = ts.createSourceFile('composer.ts', source, ts.ScriptTarget.Latest, true);
-  const method = parsed.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'send')!;
+  const methods = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && ['send', 'restoreComposerFocus'].includes(node.name?.text ?? ''));
+  const productionMethods = methods.map((node) => source.slice(node.getStart(parsed), node.end)).join('\n');
   let calls = 0;
   const compiled = ts.transpileModule(`
     const ownerId = 'A', text = transcript.draft(ownerId), attachments = [];
+      const document = { activeElement: null, body: {} }, composerEl = null;
     let sending = false; const ta = null; let uploading = 1;
-    ${source.slice(method.getStart(parsed), method.end)}
+    ${productionMethods}
     return send;
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   transcript.setDraft('A', 'with a screenshot');

@@ -76,6 +76,16 @@
   const uploading = $derived(pendingUploads.get(ownerId) ?? 0);
   let ta = $state<HTMLTextAreaElement | null>(null);
 
+  // A pending send/upload must not take the caret back from search, another
+  // editor or a dialog opened in the meantime. The body case covers a composer
+  // button losing focus when it becomes disabled during its request.
+  function restoreComposerFocus(): void {
+    const focused = document.activeElement;
+    if (ta?.isConnected && (focused === document.body || composerEl?.contains(focused))) {
+      ta.focus();
+    }
+  }
+
   interface Attachment {
     path: string;
     name: string;
@@ -166,7 +176,7 @@
       toastError('Couldn’t interrupt the agent', e);
     } finally {
       stopping = false;
-      ta?.focus();
+      restoreComposerFocus();
     }
   }
   let fileEl = $state<HTMLInputElement | null>(null);
@@ -263,7 +273,7 @@
       toastError('Couldn’t send the message', e);
     } finally {
       transcript.finishSend(ownerId);
-      ta?.focus();
+      restoreComposerFocus();
     }
   }
 
@@ -326,7 +336,7 @@
         addPending(ownerId, -1);
       }
     }
-    ta?.focus();
+    restoreComposerFocus();
   }
 
   function removeAttachment(a: Attachment): void {
