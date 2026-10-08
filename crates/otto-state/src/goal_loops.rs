@@ -414,6 +414,29 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
+    /// Persist one validated settings patch atomically, including on a storage
+    /// error. Missing fields retain their current values.
+    pub async fn update_settings(
+        &self,
+        id: &Id,
+        name: Option<&str>,
+        limits: Option<&GoalLoopLimits>,
+        config: Option<&GoalLoopConfig>,
+    ) -> Result<()> {
+        let limits = limits
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| Error::Internal(format!("serialize limits: {e}")))?;
+        let config = config
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| Error::Internal(format!("serialize config: {e}")))?;
+        sqlx::query("UPDATE goal_loops SET name = COALESCE(?, name), limits_json = COALESCE(?, limits_json), config_json = COALESCE(?, config_json), updated_at = ? WHERE id = ?")
+            .bind(name).bind(limits).bind(config).bind(self.touch()).bind(id)
+            .execute(&self.pool).await.map_err(dberr("update goal-loop settings"))?;
+        Ok(())
+    }
+
     pub async fn set_name(&self, id: &Id, name: &str) -> Result<()> {
         sqlx::query("UPDATE goal_loops SET name = ?, updated_at = ? WHERE id = ?")
             .bind(name)
