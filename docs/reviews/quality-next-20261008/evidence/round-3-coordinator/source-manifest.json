@@ -1,0 +1,17 @@
+{
+  "crates/otto-browser/src/lib.rs": "aec4fe53f9eec57e35c9dde86e5511f6a1966a33e55358cca3c2e13e893671ab",
+  "crates/otto-browser/src/live/proxy.rs": "f4e3e7432b81d161fe9149c6a04282ec5ce35c163b6595d74218ea986f7ab8e6",
+  "crates/otto-browser/src/live/session.rs": "e68d357adc8370d61cab202f73131f7e96504126559fc2e1e870a3b7389db3c4",
+  "crates/otto-browser/src/live/session_chromium_tests.rs": "0d08a01f6c28452611692e880c81d6e2c7d271126f91048d642cf205fada3680",
+  "crates/otto-browser/src/live/session_http_chromium_tests.rs": "4fd0cac123ca6497f2c85f485b5344337d3f5077b0608c0255380e5e1620568c",
+  "crates/otto-server/src/eval_lab_routes.rs": "7d1ad19e9ef612e4cb6e34d4cc85e6b220059438a5f8077cf551a2dbc781e8f5",
+  "crates/otto-server/src/skill_eval.rs": "9cd47ac7f8f9bdb2df56747478119b6f951c7670718f196464274a7056a2ec3f",
+  "crates/otto-server/src/skill_eval_recovery_tests.rs": "931c24e0455d5ca3f57d815c77da185ac780aa7b95fdd005e5a74b34dc1484d4",
+  "crates/otto-server/src/vault_docs_agent.rs": "676c81f1b2984db9582c5c2bf12fe6e9c3e50a45dccbc9fbb89a5e307ce4a176",
+  "ui/e2e/desktop-quality-next-design.spec.ts": "53a35921bc186aa2a7c82a2cd2067fb3c0e6831cd3248d480bcc62958bca6356",
+  "ui/e2e/desktop-quality-round3-eval-ux.spec.ts": "4e011db1df30ce0bf3113f176cbc21d0943b77831e6b7861575e405bde1f42cc",
+  "ui/e2e/desktop-vault-agents.spec.ts": "5a09106d972c3ef80f52c061e68a36801cd5fb424748f0e02eb89c6aee71d4ee",
+  "ui/src/modules/proof/ProofPage.svelte": "40345467e2bd34e0cb7fefb6d01abf7e65cb97e96d50064b154fe618456d6338",
+  "ui/src/modules/skills-eval/RunDetail.svelte": "4f2babb2c7d265c32a2a6e2a9653d0dd928e77a411adfa1eef43109384569eef",
+  "ui/src/modules/skills-eval/Scorecard.svelte": "4a1f60eadced31b9ad3a27ab479147e86fc8a9b6bee2de89c88e41a40044e508"
+}

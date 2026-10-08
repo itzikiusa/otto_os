@@ -1,0 +1,13 @@
+✔ failed rating refreshes the durable pending state before allowing retry (36.852875ms)
+✔ rating response after disposal cannot publish or refresh the old view (10.265083ms)
+✔ a poll started before a rating response cannot restore its stale score (4.566375ms)
+✔ a current successful rating reloads the latest report rather than its response snapshot (4.808875ms)
+✔ out-of-order rating replies still reload after the final write completes (3.637542ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 331.897583

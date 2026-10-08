@@ -1,0 +1,153 @@
+[WebServer] (node:27163) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-HMD4Ld OTTO_PORT=17844
+2026-10-08T07:50:25.646793Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-HMD4Ld)
+2026-10-08T07:50:25.903997Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-HMD4Ld/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T07:50:25.950170Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-HMD4Ld/clickhouse, port 60110)
+2026-10-08T07:50:25.986275Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T07:50:25.994169Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T07:50:25.995855Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T07:50:25.996134Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T07:50:26.001240Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T07:50:26.001813Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T07:50:26.001818Z  INFO otto_server::boot::recovery: boot: post-listen work done in 12 ms (plugins=0)
+2026-10-08T07:50:26.003975Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T07:50:26.003995Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T07:50:26.085122Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T07:50:26.093076Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T07:50:26.093621Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T07:50:26.093654Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T07:50:26.093962Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T07:50:26.094000Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T07:50:26.180024Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T07:50:26.180076Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T07:50:26.180121Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T07:50:26.180144Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T07:50:26.180198Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T07:50:26.180242Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T07:50:26.181105Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T07:50:26.181132Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T07:50:26.199847Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T07:50:26.271354Z  INFO ottod: listening on http://127.0.0.1:17844
+2026-10-08T07:50:26.271570Z  INFO ottod: alt loopback lane on http://localhost:17844 ([::1] + 127.0.0.1 both held)
+2026-10-08T07:50:26.272346Z  INFO otto_server::boot: boot: ready in 621 ms (db_compact=4 db_open=239 maintenance=6 modules=77 restore=8 recovery=284)
+2026-10-08T07:50:26.354416Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-HMD4Ld/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T07:50:26.356971Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+[e2e] test daemon ready (pid 27172); root onboarded.
+2026-10-08T07:50:26.363660Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T07:50:26.383576Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T07:50:26.385619Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T07:50:26.385685Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+
+Running 2 tests using 1 worker
+
+(node:27259) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T07:50:27.295870Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-Ocmgzz args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:50:27.355380Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D7VZQBXCNFDZMQMJVZP946
+[WebServer] 10:50:27 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:50:28.678939Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-Ocmgzz
+2026-10-08T07:50:28.698688Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-Ocmgzz args=["remote", "get-url", "origin"] code=2
+  ✘  1 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone light (12.3s)
+(node:28058) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T07:50:40.035835Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-Roslso args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:50:40.081098Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D7WC59KWJMVTBPHNMY92F7
+[WebServer] 10:50:40 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:50:40.519270Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-Roslso
+2026-10-08T07:50:40.533212Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-Roslso args=["remote", "get-url", "origin"] code=2
+  ✘  2 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone dark (11.1s)
+
+
+  1) [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone light 
+
+    Error: expect(locator).toContainText(expected) failed
+
+    Locator: locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+    Timeout: 10000ms
+    - Expected substring  - 1
+    + Received string     + 2
+
+    - rating: 1/5
+    +  Approval · Human rating · Passed rating: 5/5
+    + Initial rating
+
+    Call log:
+      - Expect "toContainText" locator('.scorecard .artifact').filter({ hasText: 'Human rating' }) with timeout 10000ms
+      - waiting for locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+        24 × locator resolved to <div class="artifact svelte-ksr89p">…</div>
+           - unexpected value " Approval · Human rating · Passed rating: 5/5
+    Initial rating"
+
+
+      49 |     await page.getByRole('button', { name: 'Rate 1 of 5', exact: true }).click();
+      50 |     await expect(page.locator('.rated')).toHaveText('1/5');
+    > 51 |     await expect(approval).toContainText('rating: 1/5');
+         |                            ^
+      52 |     await expect(approval).not.toContainText('rating: 5/5');
+      53 |     await page.screenshot({ path: info.outputPath(`rating-desktop-${scheme}.png`) });
+      54 |     await page.setViewportSize({ width: 390, height: 844 });
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts:51:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ui/test-results/desktop-quality-round3-eva-a2c0c-mains-usable-on-phone-light-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ui/test-results/desktop-quality-round3-eva-a2c0c-mains-usable-on-phone-light-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ui/test-results/desktop-quality-round3-eva-a2c0c-mains-usable-on-phone-light-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ui/test-results/desktop-quality-round3-eva-a2c0c-mains-usable-on-phone-light-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone dark 
+
+    Error: expect(locator).toContainText(expected) failed
+
+    Locator: locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+    Timeout: 10000ms
+    - Expected substring  - 1
+    + Received string     + 2
+
+    - rating: 1/5
+    +  Approval · Human rating · Passed rating: 5/5
+    + Initial rating
+
+    Call log:
+      - Expect "toContainText" locator('.scorecard .artifact').filter({ hasText: 'Human rating' }) with timeout 10000ms
+      - waiting for locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+        24 × locator resolved to <div class="artifact svelte-ksr89p">…</div>
+           - unexpected value " Approval · Human rating · Passed rating: 5/5
+    Initial rating"
+
+
+      49 |     await page.getByRole('button', { name: 'Rate 1 of 5', exact: true }).click();
+      50 |     await expect(page.locator('.rated')).toHaveText('1/5');
+    > 51 |     await expect(approval).toContainText('rating: 1/5');
+         |                            ^
+      52 |     await expect(approval).not.toContainText('rating: 5/5');
+      53 |     await page.screenshot({ path: info.outputPath(`rating-desktop-${scheme}.png`) });
+      54 |     await page.setViewportSize({ width: 390, height: 844 });
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts:51:28
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ui/test-results/desktop-quality-round3-eva-4d697-emains-usable-on-phone-dark-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ui/test-results/desktop-quality-round3-eva-4d697-emains-usable-on-phone-dark-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ui/test-results/desktop-quality-round3-eva-4d697-emains-usable-on-phone-dark-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ui/test-results/desktop-quality-round3-eva-4d697-emains-usable-on-phone-dark-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2 failed
+    [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone light 
+    [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone dark 

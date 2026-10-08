@@ -1,0 +1,143 @@
+[WebServer] (node:39986) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-gcUbKm OTTO_PORT=17844
+2026-10-08T07:53:26.117110Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-gcUbKm)
+2026-10-08T07:53:26.350241Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-gcUbKm/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T07:53:26.355798Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-gcUbKm/clickhouse, port 60629)
+2026-10-08T07:53:26.357399Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T07:53:26.358101Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T07:53:26.358145Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T07:53:26.358159Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T07:53:26.358288Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T07:53:26.358319Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T07:53:26.358408Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T07:53:26.358421Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T07:53:26.360318Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T07:53:26.362000Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T07:53:26.362051Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T07:53:26.362079Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T07:53:26.362095Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T07:53:26.362118Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T07:53:26.407502Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T07:53:26.407547Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T07:53:26.407566Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T07:53:26.407583Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T07:53:26.407602Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T07:53:26.407641Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T07:53:26.407750Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T07:53:26.465091Z  INFO ottod: listening on http://127.0.0.1:17844
+2026-10-08T07:53:26.509281Z  INFO ottod: alt loopback lane on http://localhost:17844 ([::1] + 127.0.0.1 both held)
+2026-10-08T07:53:26.509363Z  INFO otto_server::boot: boot: ready in 392 ms (db_compact=0 db_open=228 maintenance=2 modules=8 restore=0 recovery=151)
+2026-10-08T07:53:26.511189Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T07:53:26.511395Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T07:53:26.527915Z  INFO otto_server::boot::recovery: boot: post-listen work done in 170 ms (plugins=163)
+[e2e] test daemon ready (pid 40038); root onboarded.
+
+Running 17 tests using 1 worker
+
+2026-10-08T07:53:26.747645Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-gcUbKm/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T07:53:26.749088Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T07:53:26.755356Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T07:53:26.814997Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T07:53:26.815536Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T07:53:26.815593Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:40124) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-light (2.4s)
+  ✘   2 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark (10.6s)
+(node:40716) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   3 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes warm-dark (1.6s)
+  ✓   4 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:63:1 › workspace boot failure is reported inline and Retry restores the saved workspace (774ms)
+  ✓   5 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:95:1 › a failed older workspace load cannot publish into a newer identity (554ms)
+[WebServer] 10:53:43 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   6 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:41:3 › late send success preserves conversation search focus and newer draft (825ms)
+[WebServer] 10:53:44 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   7 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:41:3 › late send failure preserves conversation search focus and newer draft (1.0s)
+[WebServer] 10:53:45 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:53:46.683432Z  INFO otto_sessions::manager: pty resize 80x24 -> 143x52 session=01M4D8215MV8ZWDAGDQ9VXNMXZ
+[WebServer] 10:53:47 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   8 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:76:3 › conversation load Retry and keyboard navigation preserve unsent draft light (2.4s)
+[WebServer] 10:53:47 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:53:49.087661Z  INFO otto_sessions::manager: pty resize 80x24 -> 143x52 session=01M4D823G831P4Q0D88MJ49A8C
+2026-10-08T07:53:49.271094Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: not a git repository (or any of the parent directories): .git repo=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-chat-e2e-zEYU2T/repo args=["rev-parse", "--show-toplevel"] code=128
+2026-10-08T07:53:49.271219Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 502 Bad Gateway latency=7 ms
+[WebServer] 10:53:49 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   9 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:76:3 › conversation load Retry and keyboard navigation preserve unsent draft dark (2.1s)
+[WebServer] 10:53:50 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  10 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:118:1 › late attachment upload preserves search focus and keeps the attachment with its draft (1.2s)
+[WebServer] 10:53:51 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  11 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:152:1 › successful send returns keyboard focus when the composer still owns it (791ms)
+[WebServer] 10:53:51 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  12 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:162:1 › conversation search releases ownership when focus moves to the sidebar (1.0s)
+[WebServer] 10:53:53 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  13 [desktop-browser] › ui/e2e/desktop-quality-round2-session-ux.spec.ts:179:1 › macOS Control F remains text movement in the message composer (991ms)
+2026-10-08T07:53:53.969093Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-tBhjyg args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:53:54.018119Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D829HN4XW4EZRN3XC8P031
+[WebServer] 10:53:54 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:53:54.658631Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-tBhjyg
+2026-10-08T07:53:54.685845Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-tBhjyg args=["remote", "get-url", "origin"] code=2
+  ✓  14 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone light (1.7s)
+2026-10-08T07:53:55.667791Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-sxiZtq args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:53:55.714021Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D82B6QJM3HQ9X478DM6QKN
+[WebServer] 10:53:55 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:53:56.126552Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-sxiZtq
+2026-10-08T07:53:56.140230Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-sxiZtq args=["remote", "get-url", "origin"] code=2
+  ✓  15 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone dark (1.2s)
+2026-10-08T07:53:56.831492Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-vIm2jJ args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:53:56.878767Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D82CB3MG51R0G6SM7B5SXS
+[WebServer] 10:53:57 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:53:57.331257Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-vIm2jJ
+2026-10-08T07:53:57.352883Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-vIm2jJ args=["remote", "get-url", "origin"] code=2
+  ✓  16 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:62:1 › rating publication failure explains the pending state and offers in-place recovery (1.0s)
+2026-10-08T07:53:57.892523Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-njEe6H args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:53:57.937280Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D82DC7D5RQWEV7KDVCY9V4
+[WebServer] 10:53:58 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:53:58.377582Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-njEe6H
+2026-10-08T07:53:58.400072Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-njEe6H args=["remote", "get-url", "origin"] code=2
+  ✓  17 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:94:1 › proof load failure stays inline and keyboard Retry restores its evidence (935ms)
+
+
+  1) [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark 
+
+    Error: expect(locator).toBeFocused() failed
+
+    Locator:  getByTestId('page-header').getByRole('button', { name: 'More actions', exact: true })
+    Expected: focused
+    Received: inactive
+    Timeout:  10000ms
+
+    Call log:
+      - Expect "toBeFocused" getByTestId('page-header').getByRole('button', { name: 'More actions', exact: true }) with timeout 10000ms
+      - waiting for getByTestId('page-header').getByRole('button', { name: 'More actions', exact: true })
+        24 × locator resolved to <button title="More actions" aria-haspopup="menu" aria-label="More actions" class="icon-btn ph-more svelte-162svzm">…</button>
+           - unexpected value "inactive"
+
+
+      33 |   await expect(sync).toBeHidden();
+      34 |   const more = header.getByRole('button', { name: 'More actions', exact: true });
+    > 35 |   await expect(more).toBeFocused();
+         |                      ^
+      36 |   await more.press('Enter');
+      37 |   const menu = page.getByRole('menu', { name: 'Context menu' });
+      38 |   await expectFullyInViewport(page, menu);
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-next-design.spec.ts:35:22
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ui/test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ui/test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ui/test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace ui/test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark 
+  16 passed (33.8s)

@@ -1,0 +1,21 @@
+{
+  "round": 3,
+  "reviewer": 15,
+  "baseline": "d4b8626d9e4ce3af818c8d6e498fd4299f263dd2",
+  "files": {
+    "ui/src/modules/skills-eval/RunDetail.svelte": "4f2babb2c7d265c32a2a6e2a9653d0dd928e77a411adfa1eef43109384569eef",
+    "ui/src/modules/skills-eval/Scorecard.svelte": "4a1f60eadced31b9ad3a27ab479147e86fc8a9b6bee2de89c88e41a40044e508",
+    "ui/src/modules/proof/ProofPage.svelte": "40345467e2bd34e0cb7fefb6d01abf7e65cb97e96d50064b154fe618456d6338",
+    "ui/e2e/desktop-quality-round3-eval-ux.spec.ts": "4e011db1df30ce0bf3113f176cbc21d0943b77831e6b7861575e405bde1f42cc",
+    "ui/e2e/desktop-quality-next-design.spec.ts": "53a35921bc186aa2a7c82a2cd2067fb3c0e6831cd3248d480bcc62958bca6356"
+  },
+  "final_proof_only_daemon_sha256": "bd1e244b32d6895a7738a6dc8b4f0db79c19de0ef9482f90f609a27f2f795d34",
+  "earlier_score_runs_daemon": "Round 1 ef5b208 baseline; root separately reruns complete evaluator spec on current daemon",
+  "slot": "round3-ux",
+  "ports": [
+    17844,
+    5217
+  ],
+  "node": "v26.10.0",
+  "no_performance_claims": true
+}

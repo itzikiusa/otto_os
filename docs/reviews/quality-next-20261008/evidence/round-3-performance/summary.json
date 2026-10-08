@@ -1,0 +1,57 @@
+{
+  "acceptance": {
+    "bodies": 384,
+    "closed": true,
+    "frames": 23,
+    "network_failures": 0,
+    "observations": [
+      {
+        "bodies": 128,
+        "elapsed_ms": 76.36045800000001,
+        "frames_total": 5,
+        "round": 0
+      },
+      {
+        "bodies": 128,
+        "elapsed_ms": 63.776417,
+        "frames_total": 10,
+        "round": 1
+      },
+      {
+        "bodies": 128,
+        "elapsed_ms": 63.803875,
+        "frames_total": 16,
+        "round": 2
+      }
+    ],
+    "profile_removed": true,
+    "screenshot_bytes": 9401
+  },
+  "elapsed_sampler_seconds": 8.279970584000694,
+  "owned_pids": [
+    64438,
+    64440,
+    64448,
+    64449,
+    64450,
+    64452,
+    64454,
+    64455,
+    64456,
+    64457,
+    64458,
+    64460,
+    64461,
+    64507
+  ],
+  "remaining_pids": [],
+  "samples": 13,
+  "summed_rss_mib_max": 1572.609375,
+  "test_host_rss_mib_max": 13.40625,
+  "summed_cpu_ps_mean": 27.384615384615383,
+  "summed_cpu_ps_max": 139.0,
+  "burst_ms_mean": 67.98025,
+  "burst_ms_population_sd": 5.92571250725115,
+  "burst_ms_min": 63.776417,
+  "burst_ms_max": 76.36045800000001
+}

@@ -1,0 +1,9 @@
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.64s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 1 test
+test eval_lab_routes::cancellation_tests::matrix_cancel_does_not_hide_cell_read_or_cancellation_failure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 987 filtered out; finished in 0.22s
+

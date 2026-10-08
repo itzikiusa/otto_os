@@ -1,0 +1,12 @@
+{
+  "baseline": "d4b8626d9e4ce3af818c8d6e498fd4299f263dd2",
+  "source_sha256": {
+    "crates/otto-server/src/skill_eval.rs": "9cd47ac7f8f9bdb2df56747478119b6f951c7670718f196464274a7056a2ec3f",
+    "crates/otto-server/src/skill_eval_recovery_tests.rs": "931c24e0455d5ca3f57d815c77da185ac780aa7b95fdd005e5a74b34dc1484d4",
+    "crates/otto-server/src/eval_lab_routes.rs": "7d1ad19e9ef612e4cb6e34d4cc85e6b220059438a5f8077cf551a2dbc781e8f5",
+    "docs/contracts/api.md": "d97c2f7b696bd82fe9e2caed44898eda597197d6870fbdff17e4cca7b225ab1e",
+    "crates/otto-server/src/eval_score.rs": "52f1996ba681e1fe7718ac0c401110ada30dc04b63e31be875f80a02ceb0869d",
+    "crates/otto-state/src/skill_evals.rs": "788b8db9d4e165e8849f2003a9b471452fd1503e3620f83bc9c1f47de8e9720d"
+  },
+  "daemon_sha256": "bd1e244b32d6895a7738a6dc8b4f0db79c19de0ef9482f90f609a27f2f795d34"
+}

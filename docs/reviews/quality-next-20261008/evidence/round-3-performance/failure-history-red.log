@@ -1,0 +1,26 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.64s
+     Running unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)
+
+running 2 tests
+
+thread 'tests::failure_history_prunes_expired_hosts_but_rearms_the_probed_host' (7276551) panicked at crates/otto-browser/src/lib.rs:1366:9:
+new failure must prune expired unrelated history
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::failure_history_prunes_expired_hosts_but_rearms_the_probed_host ... FAILED
+
+thread 'tests::failure_history_is_bounded_without_resetting_recent_cooldowns' (7276550) panicked at crates/otto-browser/src/lib.rs:1335:9:
+assertion `left == right` failed: historical failed hosts must not grow without bound
+  left: 1025
+ right: 1024
+test tests::failure_history_is_bounded_without_resetting_recent_cooldowns ... FAILED
+
+failures:
+
+failures:
+    tests::failure_history_is_bounded_without_resetting_recent_cooldowns
+    tests::failure_history_prunes_expired_hosts_but_rearms_the_probed_host
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p otto-browser --lib`

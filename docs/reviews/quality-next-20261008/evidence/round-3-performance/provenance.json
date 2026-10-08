@@ -1,0 +1,19 @@
+{
+  "head": "d4b8626d9e4ce3af818c8d6e498fd4299f263dd2",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "node": "v26.10.0",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "Mac15,9",
+  "files": {
+    "crates/otto-browser/src/lib.rs": "aec4fe53f9eec57e35c9dde86e5511f6a1966a33e55358cca3c2e13e893671ab",
+    "crates/otto-browser/src/live/conn.rs": "bb2644e1a838d165b9eaeff082d02626919cd5a756005d78a712b5af5c8c2016",
+    "crates/otto-browser/src/live/process.rs": "99fe50fa03bc38370bfad7531faa0264a7de004e0c2cd7fdb550483b7f5b4629",
+    "crates/otto-browser/src/live/proxy.rs": "f4e3e7432b81d161fe9149c6a04282ec5ce35c163b6595d74218ea986f7ab8e6",
+    "crates/otto-browser/src/live/session.rs": "e68d357adc8370d61cab202f73131f7e96504126559fc2e1e870a3b7389db3c4",
+    "crates/otto-browser/src/live/session_chromium_tests.rs": "0d08a01f6c28452611692e880c81d6e2c7d271126f91048d642cf205fada3680",
+    "crates/otto-browser/src/live/session_http_chromium_tests.rs": "4fd0cac123ca6497f2c85f485b5344337d3f5077b0608c0255380e5e1620568c",
+    "target/debug/deps/otto_browser-1194e6b985037524": "eaba3a1561531ead6b3823758121da6ac89e5a3b6641dc1ce178b774bb4e968c",
+    "/Users/itziklavon/Library/Caches/ms-playwright/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing": "b1b9e2dd063115031f08eadc10ed381ca0fa05b2284baff8f721d87f5f0f61b7"
+  },
+  "note": "No Node process or full daemon participates. Actual production Rust browser protocol components; cfg(test) socket mapping after normal policy vetting."
+}

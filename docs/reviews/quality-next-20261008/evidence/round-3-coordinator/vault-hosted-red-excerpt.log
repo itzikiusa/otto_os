@@ -1,0 +1,33 @@
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9866146Z   1) [desktop-browser] › e2e/desktop-vault-agents.spec.ts:67:1 › api: single-agent run skips the summarizer; refine registers a session 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9867257Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9867742Z     Error: expect(received).toBe(expected) // Object.is equality
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9868229Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9868544Z     Expected: "01M4D7G1CCWCEJ34JG4Y310CE7"
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9869067Z     Received: null
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9869385Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9869914Z       91 |     await ctx.get(`${v1}/docs-agents/refine-session?path=runbooks%2Fdeploy.md`)
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9870597Z       92 |   ).json();
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9871666Z     > 93 |   expect(reg.session_id).toBe(refine.session_id);
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9872254Z          |                          ^
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9872736Z       94 |
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9873420Z       95 |   // Reset detaches the binding (tombstone: no rehydration resurrects it) —
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9874228Z       96 |   // the next refine starts a FRESH session instead of resuming the old one.
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9875013Z         at /home/runner/work/otto_os/otto_os/ui/e2e/desktop-vault-agents.spec.ts:93:26
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9875516Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9876235Z     attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9877315Z     test-results/desktop-vault-agents-api-s-fc3ce--refine-registers-a-session-desktop-browser/test-failed-1.png
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9878452Z     ────────────────────────────────────────────────────────────────────────────────────────────────
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9879244Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9880407Z     Error Context: test-results/desktop-vault-agents-api-s-fc3ce--refine-registers-a-session-desktop-browser/error-context.md
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9881613Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9882337Z     attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9883728Z     test-results/desktop-vault-agents-api-s-fc3ce--refine-registers-a-session-desktop-browser/trace.zip
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9884591Z     Usage:
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9884866Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9885668Z         npx playwright show-trace test-results/desktop-vault-agents-api-s-fc3ce--refine-registers-a-session-desktop-browser/trace.zip
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9886506Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9887124Z     ────────────────────────────────────────────────────────────────────────────────────────────────
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9887623Z 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9887966Z   1 failed
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9888970Z     [desktop-browser] › e2e/desktop-vault-agents.spec.ts:67:1 › api: single-agent run skips the summarizer; refine registers a session 
+E2E functional (shard 4/4, advisory)	UNKNOWN STEP	2026-10-08T07:46:14.9889878Z   3 did not run

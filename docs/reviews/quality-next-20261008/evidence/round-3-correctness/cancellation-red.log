@@ -1,0 +1,73 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+warning: unused `axum::Json` that must be used
+  --> crates/otto-server/src/skill_eval_recovery_tests.rs:64:5
+   |
+64 | /     rate_iteration(
+65 | |         AxPath((eval.id.clone(), iter.id.clone())),
+66 | |         State(ctx.clone()),
+67 | |         CurrentUser(user.clone()),
+...  |
+73 | |     .await
+74 | |     .unwrap();
+   | |_____________^
+   |
+   = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+   |
+64 |     let _ = rate_iteration(
+   |     +++++++
+
+warning: unused `axum::Json` that must be used
+   --> crates/otto-server/src/skill_eval_recovery_tests.rs:156:5
+    |
+156 | /     rate_iteration(
+157 | |         AxPath((eval.id.clone(), iter.id.clone())),
+158 | |         State(ctx.clone()),
+159 | |         CurrentUser(user),
+...   |
+165 | |     .await
+166 | |     .unwrap();
+    | |_____________^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+156 |     let _ = rate_iteration(
+    |     +++++++
+
+warning: unused `axum::Json` that must be used
+   --> crates/otto-server/src/skill_eval_recovery_tests.rs:223:5
+    |
+223 | /     cancel_eval(
+224 | |         AxPath(eval.id.clone()),
+225 | |         State(ctx.clone()),
+226 | |         CurrentUser(user),
+227 | |     )
+228 | |     .await
+229 | |     .unwrap();
+    | |_____________^
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+223 |     let _ = cancel_eval(
+    |     +++++++
+
+warning: `otto-server` (lib test) generated 3 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 04s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 1 test
+
+thread 'skill_eval::recovery_tests::cancellation_storage_failure_is_reported_without_signalling_worker' (7222801) panicked at crates/otto-server/src/skill_eval_recovery_tests.rs:203:5:
+cancel returned success although durable cancellation failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test skill_eval::recovery_tests::cancellation_storage_failure_is_reported_without_signalling_worker ... FAILED
+
+failures:
+
+failures:
+    skill_eval::recovery_tests::cancellation_storage_failure_is_reported_without_signalling_worker
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 985 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p otto-server --lib`
