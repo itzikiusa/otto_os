@@ -65,7 +65,12 @@ Otto spawns your `exec` from the plugin dir with these env vars:
 
 Otto reverse-proxies `GET/POST/… /api/v1/plugins/<slug>/<rest>` → your server's
 `/<rest>`. Implement at least `GET /health` (Otto health-checks it on spawn). The
-caller's identity is forwarded as `X-Otto-User` / `X-Otto-User-Name`.
+caller's identity is forwarded as `X-Otto-User` / `X-Otto-User-Name`. Proxied
+response bodies are buffered up to 64 MiB; a declared or streamed body exceeding
+that bound returns 502. The normal upstream status/content type and request
+deadline are preserved. This API response limit does not apply to Otto's separate
+static iframe asset route. Paginate large reports instead of returning unlimited
+JSON from a sidecar.
 
 ## 4. The host API (capabilities)
 

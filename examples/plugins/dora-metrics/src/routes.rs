@@ -68,7 +68,7 @@ fn gather_commits(needle: &str, cfg: &Config) -> Result<Option<(String, Vec<Comm
     if needle == "all" {
         let mut commits = vec![];
         for (_, name, path) in &repos {
-            commits.extend(metrics::load_commits(path, name, cfg.scan_depth));
+            commits.extend(metrics::load_commits(path, name, cfg.scan_depth)?);
         }
         return Ok(Some(("All repos".into(), commits)));
     }
@@ -76,7 +76,7 @@ fn gather_commits(needle: &str, cfg: &Config) -> Result<Option<(String, Vec<Comm
         if id == needle || name == needle || path == needle {
             return Ok(Some((
                 name.clone(),
-                metrics::load_commits(path, name, cfg.scan_depth),
+                metrics::load_commits(path, name, cfg.scan_depth)?,
             )));
         }
     }
@@ -114,8 +114,11 @@ fn urldecode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(n) = u8::from_str_radix(&b[i + 1..i + 3], 16) {
-                out.push(n);
+            if let (Some(high), Some(low)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((high * 16 + low) as u8);
                 i += 3;
                 continue;
             }
@@ -214,5 +217,16 @@ pub fn handle(method: &str, path: &str, query: &str, body: &str) -> (u16, Value)
             }
         }
         _ => (404, json!({ "error": "not found" })),
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+    #[test]
+    fn malformed_percent_sequences_with_unicode_never_panic() {
+        assert_eq!(urldecode("%€"), "%€");
+        assert_eq!(urldecode("a%20b+%E2%82%AC"), "a b €");
+        assert_eq!(urldecode("%z1%"), "%z1%");
     }
 }

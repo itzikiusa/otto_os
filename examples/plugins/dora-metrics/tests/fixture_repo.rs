@@ -112,7 +112,7 @@ fn fixture_repo_end_to_end() {
 
     // -- engine level ------------------------------------------------------
     let cfg = Config::default();
-    let commits = metrics::load_commits(repo.to_str().unwrap(), "fix", cfg.scan_depth);
+    let commits = metrics::load_commits(repo.to_str().unwrap(), "fix", cfg.scan_depth).unwrap();
     assert!(
         commits.len() >= 7,
         "expected scripted commits, got {}",
@@ -216,6 +216,33 @@ fn fixture_repo_end_to_end() {
 
     let (code, _) = routes::handle("GET", "/nope", "", "");
     assert_eq!(code, 404);
+
+    // A disappearing registered repository is an error, never a zero-activity
+    // report. Aggregation also fails closed instead of omitting the bad repo.
+    let moved = base.join("moved-repo");
+    std::fs::rename(&repo, &moved).unwrap();
+    assert!(metrics::load_commits(repo.to_str().unwrap(), "fix", 100)
+        .err()
+        .unwrap()
+        .contains("Cannot read repository"));
+    for needle in ["r1", "all"] {
+        let (code, body) = routes::handle("GET", "/metrics", &format!("repo={needle}&days=28"), "");
+        assert_eq!(code, 500, "{body}");
+        assert_eq!(body["error"], "internal error");
+        assert!(body.get("df_per_week").is_none());
+    }
+    std::fs::rename(&moved, &repo).unwrap();
+    assert_eq!(
+        routes::handle("GET", "/metrics", "repo=r1&days=28", "").0,
+        200
+    );
+
+    let empty = base.join("empty-repo");
+    std::fs::create_dir(&empty).unwrap();
+    git(&empty, &["init", "-q", "-b", "main"], now);
+    assert!(metrics::load_commits(empty.to_str().unwrap(), "empty", 100)
+        .unwrap()
+        .is_empty());
 
     let _ = std::fs::remove_dir_all(&base);
 }
