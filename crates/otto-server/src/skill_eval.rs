@@ -2507,20 +2507,22 @@ async fn remove_eval_worktrees(repo_root: &str, eval: &SkillEval) {
 
 /// Signal-cancel a run, kill its live sessions, and mark it cancelled (idempotent;
 /// the background task also finalizes). Used by `cancel_eval` and matrix cancel.
-pub(crate) async fn cancel_run(ctx: &ServerCtx, eval_id: &Id) {
-    // Admission checks persisted status after registering its cancellation flag.
-    let _ = ctx
-        .skill_evals_store
+pub(crate) async fn cancel_run(ctx: &ServerCtx, eval_id: &Id) -> Result<()> {
+    // Serialize with rating/retry publication and promotion. Persist first: a
+    // worker must not stop while its durable row still claims it is running.
+    let _guard = crate::eval_score::update_guard(eval_id).await;
+    ctx.skill_evals_store
         .set_status(
             eval_id,
             SkillEvalStatus::Cancelled,
             Some("Cancelled by user"),
         )
-        .await;
+        .await?;
     signal_cancel(&ctx.skill_eval_cancels, eval_id);
     if let Ok(eval) = ctx.skill_evals_store.get_eval(eval_id).await {
         archive_eval_sessions(&ctx.manager, &eval).await;
     }
+    Ok(())
 }
 
 async fn cancel_eval(
@@ -2535,7 +2537,7 @@ async fn cancel_eval(
         .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
 
-    cancel_run(&ctx, &eval_id).await;
+    cancel_run(&ctx, &eval_id).await.map_err(ApiError)?;
     let eval = ctx
         .skill_evals_store
         .get_eval(&eval_id)
@@ -2557,7 +2559,7 @@ async fn delete_eval(
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
 
     // Stop any in-flight work, kill sessions, remove worktrees, then delete rows.
-    cancel_run(&ctx, &eval_id).await;
+    cancel_run(&ctx, &eval_id).await.map_err(ApiError)?;
     let stopped = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let active = ctx
@@ -2678,6 +2680,9 @@ async fn promote_skill(
 ) -> ApiResult<Json<LibrarySkill>> {
     require_root(&user)?; // writes to the shared Otto library (like PUT /library/skills)
     crate::auth::require_human(&auth.0)?;
+    // Eligibility and the library write must use one publication snapshot.
+    // A rating or retry may invalidate the score while Proof is recomputed.
+    let _score_guard = crate::eval_score::update_guard(&eval_id).await;
     let eval = ctx
         .skill_evals_store
         .get_eval(&eval_id)
@@ -2864,6 +2869,8 @@ async fn rate_iteration(
         .begin_human_rating(&eval_id, &iter_id, &pending)
         .await
         .map_err(ApiError)?;
+    #[cfg(test)]
+    recovery_tests::after_rating_pending(&iter_id).await;
     // The pending snapshot durably preserves non-human signals for recovery.
     // Until Proof and the headline publish, promotion must reject this snapshot.
     let (score, pack_id) =
@@ -3587,3 +3594,7 @@ mod tests {
 #[cfg(test)]
 #[path = "skill_eval_output_tests.rs"]
 mod output_tests;
+
+#[cfg(test)]
+#[path = "skill_eval_recovery_tests.rs"]
+mod recovery_tests;

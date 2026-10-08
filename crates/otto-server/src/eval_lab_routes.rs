@@ -408,10 +408,12 @@ async fn cancel_matrix(
         .skill_evals_store
         .list_for_matrix(&id)
         .await
-        .unwrap_or_default();
+        .map_err(ApiError)?;
     for ev in &cells {
         if ev.status == otto_core::domain::SkillEvalStatus::Running {
-            crate::skill_eval::cancel_run(&ctx, &ev.id).await;
+            crate::skill_eval::cancel_run(&ctx, &ev.id)
+                .await
+                .map_err(ApiError)?;
         }
     }
     ctx.eval_matrices_store
@@ -464,5 +466,124 @@ mod tests {
         let mut req = request(1);
         req.prompts.push(req.prompts[0].clone());
         assert!(validate_matrix_shape(&req).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn matrix_cancel_does_not_hide_cell_read_or_cancellation_failure() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+        let ws = ctx
+            .workspaces
+            .create("fixture", dir.path().to_str().unwrap(), &"editor".into())
+            .await
+            .unwrap();
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .get(&"editor".into())
+            .await
+            .unwrap();
+        let matrix = ctx
+            .eval_matrices_store
+            .create(
+                &ws.id,
+                "fixture",
+                "generate",
+                "repo",
+                &[],
+                &[],
+                &[],
+                "editor",
+            )
+            .await
+            .unwrap();
+        let eval = ctx
+            .skill_evals_store
+            .create_eval_ex(
+                &ws.id,
+                "skill",
+                "task",
+                "fixture",
+                1,
+                &serde_json::json!({}),
+                "generate",
+                None,
+                Some(&matrix.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let lease =
+            crate::skill_eval::RetryLease::claim(&ctx.skill_eval_cancels, &eval.id, "validation")
+                .unwrap();
+        // A row decoding failure must not become an empty successful cell list.
+        sqlx::query("UPDATE skill_evals SET created_at = 'invalid timestamp' WHERE id = ?")
+            .bind(&eval.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(cancel_matrix(
+            AxPath(matrix.id.clone()),
+            State(ctx.clone()),
+            CurrentUser(user.clone())
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            ctx.eval_matrices_store
+                .get(&matrix.id)
+                .await
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert!(!lease.flag.load(std::sync::atomic::Ordering::SeqCst));
+        sqlx::query("UPDATE skill_evals SET created_at = '2026-10-08T00:00:00Z' WHERE id = ?")
+            .bind(&eval.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_cancel BEFORE UPDATE OF status ON skill_evals WHEN NEW.status = 'cancelled' BEGIN SELECT RAISE(ABORT, 'cancel unavailable'); END").execute(&pool).await.unwrap();
+        assert!(cancel_matrix(
+            AxPath(matrix.id.clone()),
+            State(ctx.clone()),
+            CurrentUser(user.clone())
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            ctx.eval_matrices_store
+                .get(&matrix.id)
+                .await
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert!(!lease.flag.load(std::sync::atomic::Ordering::SeqCst));
+        sqlx::query("DROP TRIGGER reject_cancel")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _ = cancel_matrix(
+            AxPath(matrix.id.clone()),
+            State(ctx.clone()),
+            CurrentUser(user),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ctx.eval_matrices_store
+                .get(&matrix.id)
+                .await
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+        assert!(lease.flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

@@ -1970,7 +1970,7 @@ and a `human_rating`.
 | GET /workspaces/{id}/skill-sources | ws viewer | — | available evaluation sources |
 | GET /skill-evaluations/{id} | ws viewer | — | SkillEval (with iterations) |
 | DELETE /skill-evaluations/{id} | ws editor | — | 204 |
-| POST /skill-evaluations/{id}/cancel | ws editor | — | cancel a running evaluation |
+| POST /skill-evaluations/{id}/cancel | ws editor | — | cancel a running evaluation; storage failure returns an error before signalling workers |
 | POST /skill-evaluations/{id}/promote | root | PromoteSkillReq (`force?`) | promote winning skill; 409 if the score+proof gate is unmet and not forced |
 | GET /skill-evaluations/{id}/promote-gate | ws viewer | `?iteration_id` | PromoteGate (allowed + reasons) |
 | GET /skill-evaluations/{id}/iterations/{iter_id}/diff | ws viewer | — | iteration impl diff |
@@ -2029,7 +2029,7 @@ with `truncated=true` when the capture budget is reached.
 | GET /workspaces/{id}/eval-matrices | ws viewer | — | `EvalMatrix[]` |
 | POST /workspaces/{id}/eval-matrices | ws editor | StartMatrixReq | EvalMatrix (cells fan out as eval runs) |
 | GET /eval-matrices/{id} | ws viewer | — | EvalMatrix (with live cell composites/proof) |
-| POST /eval-matrices/{id}/cancel | ws editor | — | cancel all still-running cells |
+| POST /eval-matrices/{id}/cancel | ws editor | — | cancel all still-running cells; read/cancellation failures return an error without marking the matrix cancelled (already cancelled cells remain cancelled) |
 
 Matrix admission validates every cell before persistence or session creation.
 Dimensions require non-empty unique provider names, skill references and prompt
