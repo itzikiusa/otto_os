@@ -12049,3 +12049,6 @@ export interface TelemetrySpan {
 export interface TelemetryProfile {
   captured_at: number; duration_seconds: number; format: string; frames: string[];
 }
+
+// Ephemeral two-player game relay contracts.
+export type * from "./game-room-types";

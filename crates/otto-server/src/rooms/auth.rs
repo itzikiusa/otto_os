@@ -1,6 +1,6 @@
 use axum::http::HeaderMap;
 use otto_core::{auth::AuthContext, domain::Session, Result};
-pub(super) fn owner_auth(auth: &AuthContext) -> Result<()> {
+pub(crate) fn owner_auth(auth: &AuthContext) -> Result<()> {
     if auth.scope.is_some()
         || auth.mcp_only
         || auth.mcp_scope.is_some()

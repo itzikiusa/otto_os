@@ -5,6 +5,9 @@ All DTO names refer to types in `crates/otto-core/src/api.rs` (Rust) mirrored in
 Auth: `Authorization: Bearer <token>` unless marked public. Errors: HTTP status per
 `otto_core::Error` variant + body `Problem{code,message}`.
 
+**Games:** [Game rooms](./game-rooms.md) defines `POST /game-rooms`, public
+`POST /game-room-join`, capability-only two-player relay, lifecycle and limits.
+
 **Session collaboration:** [Session rooms](./rooms.md) defines owner management,
 invitation admission, room-only credentials, chat/media/annotation actions and
 separate room terminal sockets. Ownership for creating a room is mandatory even

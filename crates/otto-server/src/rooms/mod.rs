@@ -8,6 +8,8 @@ mod annotations;
 mod auth;
 mod http;
 mod ice;
+pub(crate) use auth::owner_auth;
+pub(crate) use ice::valid_origin;
 mod presentation;
 mod socket;
 mod terminal;

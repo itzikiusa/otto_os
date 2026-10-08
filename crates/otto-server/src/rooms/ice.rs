@@ -21,7 +21,7 @@ fn urls(value: Option<&serde_json::Value>) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-pub(super) fn valid_origin(origin: &str) -> Result<String> {
+pub(crate) fn valid_origin(origin: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(origin)
         .map_err(|_| Error::Invalid("Enter a valid room origin".into()))?;
     let local = matches!(

@@ -78,7 +78,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //    it precedes the feature families below).
     // ----------------------------------------------------------------------
 
-    if p == "/room-join" {
+    if p == "/room-join" || p == "/game-room-join" {
         return Exempt;
     }
     // perf2/10-mcp R7: an agent session's stdio bridge appends its OWN tool-call
@@ -98,7 +98,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/room-settings" {
         return Require(Settings, Admin);
     }
-    if p == "/rooms"
+    if p == "/game-rooms"
+        || p == "/rooms"
         || p == "/rooms/{id}"
         || p == "/rooms/{id}/invites"
         || p == "/sessions/{id}/room"

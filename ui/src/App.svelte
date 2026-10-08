@@ -20,6 +20,7 @@
   let shellChunk: Promise<typeof import('./shell/App.svelte')> | null = null;
   let onboardingChunk: Promise<typeof import('./modules/settings/Onboarding.svelte')> | null = null;
   let loginChunk: Promise<typeof import('./modules/settings/Login.svelte')> | null = null;
+  let gameGuestChunk: Promise<typeof import('./modules/rooms/games/GameGuest.svelte')> | null = null;
   let roomChunk: Promise<typeof import('./modules/rooms/RoomGuest.svelte')> | null = null;
   let hostRoomChunk: Promise<typeof import('./modules/rooms/RoomHost.svelte')> | null = null;
   let shareChunk: Promise<typeof import('./modules/share/SharePage.svelte')> | null = null;
@@ -31,23 +32,24 @@
     (shellChunk ??= Promise.all([import('./shell/App.svelte'), preloadRoute(untrack(() => router.parts))]).then(([m]) => m));
   const onboarding = () => (onboardingChunk ??= import('./modules/settings/Onboarding.svelte'));
   const login = () => (loginChunk ??= import('./modules/settings/Login.svelte'));
+  const gameGuest = () => (gameGuestChunk ??= import('./modules/rooms/games/GameGuest.svelte'));
   const room = () => (roomChunk ??= import('./modules/rooms/RoomGuest.svelte'));
   const hostRoom = () => (hostRoomChunk ??= import('./modules/rooms/RoomHost.svelte'));
   const share = () => (shareChunk ??= import('./modules/share/SharePage.svelte'));
   // The main window fetches the shell chunk while /meta is still in flight.
-  if (!['bar', 'tray', 's', 'room', 'room-host'].includes(router.module)) void shell().catch(() => {});
+  if (!['bar', 'tray', 's', 'room', 'room-host', 'game-room'].includes(router.module)) void shell().catch(() => {});
 
   // Boot once per entry into an authenticated route, not per navigation:
   // reading `router.module` inside the effect re-ran boot() on every sidebar
   // switch, which reset the phase to 'loading' and remounted the whole shell.
-  const needsAuth = $derived(router.module !== 'room');
+  const needsAuth = $derived(router.module !== 'room' && router.module !== 'game-room');
   $effect(() => {
     if (needsAuth) untrack(() => void auth.boot());
   });
 
   // Device telemetry is administrator opt-in. Capture no guest/member activity.
   $effect(() => {
-    if (auth.phase !== 'ready' || !auth.isRoot) return;
+    if (router.module === 'game-room' || auth.phase !== 'ready' || !auth.isRoot) return;
     let disposed = false;
     let stop: (() => void) | undefined;
     const module = untrack(() => router.module);
@@ -60,7 +62,7 @@
   // First launch installs + starts the daemon in the background; poll until
   // it answers instead of parking on a manual Retry button.
   $effect(() => {
-    if (router.module === 'room' || auth.phase !== 'offline') return;
+    if (router.module === 'room' || router.module === 'game-room' || auth.phase !== 'offline') return;
     const timer = setInterval(() => void auth.boot(true), 2000);
     return () => clearInterval(timer);
   });
@@ -92,7 +94,9 @@
   }
 </script>
 
-{#if router.module === 'room'}
+{#if router.module === 'game-room'}
+  {#await gameGuest()}{@render chunkWait()}{:then m}{#key router.parts[1]}<m.default roomId={router.parts[1] ?? ''} />{/key}{:catch}{@render chunkError()}{/await}
+{:else if router.module === 'room'}
   {#await room()}{@render chunkWait()}{:then m}{#key router.parts[1]}<m.default roomId={router.parts[1] ?? ''} />{/key}{:catch}{@render chunkError()}{/await}
 {:else if router.module === 's'}
   <!-- Guest share view: a scoped share-link recipient has no account, so this

@@ -5,6 +5,8 @@ completes; invalid token → HTTP 401, no upgrade.
 
 Session rooms have separate capability-authenticated [room sockets](./rooms.md);
 room credentials are never accepted by ordinary terminal/event sockets.
+Standalone [game-room sockets](./game-rooms.md) at `/ws/game-rooms/{id}` use
+`otto-game` capabilities and never authorize terminals or ordinary APIs.
 
 - The event stream (`/ws/events`) accepts the token via the
   `Sec-WebSocket-Protocol` request header — the client offers

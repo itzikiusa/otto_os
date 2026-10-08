@@ -977,6 +977,11 @@ mod root_route_tests {
                 "otto-sessions/src/ws.rs",
                 "agent_attach_rule(&auth",
             ),
+            (
+                "/ws/game-rooms/{id}",
+                "otto-server/src/game_rooms/socket.rs",
+                "ctx.game_rooms.authenticate(",
+            ),
             // Room sockets authenticate a ROOM token, never an Otto bearer
             // token; agent credentials are refused when a room is joined.
             (

@@ -1,0 +1,40 @@
+{
+  "map": {
+    "kind": "shooter",
+    "id": "dunes",
+    "name": "Sunken Dunes"
+  },
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+  "fps": 60.08230452674897,
+  "frames": 388,
+  "drawCalls": 217,
+  "triangles": 54460,
+  "frameMs": 0.953134386692236,
+  "errors": [],
+  "assets": [
+    {
+      "path": "/room-games/arena-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/environment-kit.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/fighter-azure.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/fighter-ember.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/rifle.glb",
+      "status": 200
+    }
+  ]
+}

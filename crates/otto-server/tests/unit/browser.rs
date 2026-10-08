@@ -147,6 +147,7 @@ pub(crate) async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
         db_assist: crate::db_assist::new_registry(),
         transcript_cache: Default::default(),
         rooms: Default::default(),
+        game_rooms: Default::default(),
         brokers,
         mcp,
         spawner: Arc::new(NoopSpawner),
