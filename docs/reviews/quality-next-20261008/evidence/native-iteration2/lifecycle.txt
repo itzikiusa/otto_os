@@ -1,0 +1,16 @@
+ZOOM before: logical_width=1000 css_width=1000
+ZOOM after_1.5: logical_width=1000 css_width=666
+LOCAL_URL Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+FOCUS side: host=false child=true
+DISPLAY_COUNT 3
+MOVE_GEOMETRY id=0 scale=2 area=PhysicalRect { position: PhysicalPosition { x: 0, y: 66 }, size: PhysicalSize { width: 3456, height: 2024 } } actual=PhysicalPosition { x: 0, y: 66 } size=PhysicalSize { width: 1800, height: 1360 }
+MOVED_DISPLAY 0 work_area_fits=true
+MOVE_GEOMETRY id=1 scale=1 area=PhysicalRect { position: PhysicalPosition { x: 4288, y: 30 }, size: PhysicalSize { width: 2560, height: 1410 } } actual=PhysicalPosition { x: 4288, y: 30 } size=PhysicalSize { width: 900, height: 680 }
+MOVED_DISPLAY 1 work_area_fits=true
+MOVE_GEOMETRY id=2 scale=1 area=PhysicalRect { position: PhysicalPosition { x: 1728, y: 30 }, size: PhysicalSize { width: 2560, height: 1410 } } actual=PhysicalPosition { x: 1728, y: 30 } size=PhysicalSize { width: 900, height: 680 }
+MOVED_DISPLAY 2 work_area_fits=true
+FOCUS primary: host=false child=true
+PRIMARY_RESTORED display=0 position_and_size=true
+PRIMARY_RESTORED display=1 position_and_size=true
+PRIMARY_RESTORED display=2 position_and_size=true
+PASS production IPC: authenticated owner isolation, targeted JS event, hidden visibility, side+primary detach/idempotence, native focus, close-to-return, live draft+UUID+scroll, child cleanup

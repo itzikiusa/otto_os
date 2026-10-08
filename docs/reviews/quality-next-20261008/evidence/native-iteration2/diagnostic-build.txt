@@ -1,0 +1,2 @@
+   Compiling otto-desktop v0.2.0 (/Users/itziklavon/otto_os/apps/desktop/src-tauri)
+    Finished `dev` profile [unoptimized] target(s) in 6.34s

@@ -1993,7 +1993,12 @@ under an active scorer. Working-directory/path score targets are never deleted.
 Validation retries are serialized per evaluation. Admission clears cached scores
 and marks the run running; completion refreshes review proof and composite from
 persisted signals without rerunning test/lint commands. Failed validators cannot
-produce passing review evidence. Promotion requires a completed iteration and
+produce passing review evidence: every requested pass must return a valid findings
+verdict, including an explicit empty array for a clean pass. Partial pass sets are
+errors and retain any findings already collected. Initial scoring and retry
+publication preserve ratings saved while commands or agents run; rating changes
+reselect the best iteration and refresh its headline. Retried iteration badges
+include failed validators as zero in the validator mean. Promotion requires a completed iteration and
 fresh proof for that iteration/workspace. The diff endpoint is read-only (including
 the Git index), includes tracked and untracked changes, and caps output at 200 KiB
 with `truncated=true` when the capture budget is reached.
@@ -3606,7 +3611,7 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 | 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; starts when `autostart`) |
 | 94 | GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations}`). `summary=true` (additive): `plan`, `context_in` and `context_out` are `""` on every iteration except the newest — read one via row 94a |
 | 94a | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration — one iteration in full (`idx` is 1-based) |
-| 95 | PATCH /api/v1/goal-loops/{id} | ws editor | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only) |
+| 95 | PATCH /api/v1/goal-loops/{id} | ws editor | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
 | 96 | POST /api/v1/goal-loops/{id}/start | ws editor | — | GoalLoop |
 | 97 | POST /api/v1/goal-loops/{id}/pause | ws editor | — | GoalLoop |
 | 98 | POST /api/v1/goal-loops/{id}/resume | ws editor | — | GoalLoop |
@@ -5150,6 +5155,19 @@ Chromium processes; a session with no viewer and no activity for
 60 s; a crashed process is restarted on next use (its sessions report
 `state:"crashed"`).
 
+**Transport resource limits.** Each Chromium connection admits at most 256
+unanswered commands, 256 queued commands, and 256 events per event route.
+Queued commands and retained events have separate 32 MiB conservative byte
+budgets (the event budget is shared by browser and page routes, including guard
+workers). A full pending-call table rejects additional calls with a retryable
+capacity error. Event/output queue overload closes the CDP connection, fails
+pending calls, and reports its sessions crashed; critical guard events are never
+silently dropped. Up to 64 request-guard workers run per process, admitted before
+spawning; excess requests fail with `BlockedByClient`, and DNS vetting times out
+after 15 seconds. The shared SOCKS proxy admits at most 128 accepted connections;
+excess sockets close immediately. Proxy shutdown cancels its accepted socket tasks.
+These are accounting/admission limits, not an RSS guarantee.
+
 **SSRF guard for the whole session.** Every request the page makes — each
 navigation, redirect hop, subresource, XHR/fetch, WebSocket and service-worker
 fetch — is paused with CDP `Fetch` interception and vetted through
@@ -5157,9 +5175,10 @@ fetch — is paused with CDP `Fetch` interception and vetted through
 only, no loopback/private/link-local/metadata; `data:`/`blob:`/`about:` pass)
 for as long as the session lives, not just until `load`. A refused document
 request surfaces as a WS `blocked` frame; a refused subresource simply fails.
-Residual: Chromium resolves names itself, so a request is vetted on the
-daemon's resolution of the host (DNS-rebinding window documented, as for
-Lightpanda).
+Every Chromium TCP connection also goes through the shared SOCKS proxy, which
+resolves and vets the host once and pins the dial to an allowed address. This
+covers WebSocket/preconnect paths and closes the interception-time DNS-rebinding
+window.
 
 **Outward actions.** While the **agent** drives (see control below), a
 state-changing document request (a form submit / any non-GET navigation) is held

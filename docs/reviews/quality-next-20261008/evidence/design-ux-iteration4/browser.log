@@ -1,0 +1,105 @@
+[WebServer] (node:17013) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wWuHUG OTTO_PORT=17828
+2026-10-08T06:58:28.943389Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wWuHUG)
+2026-10-08T06:58:29.174090Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wWuHUG/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T06:58:29.179367Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wWuHUG/clickhouse, port 64350)
+2026-10-08T06:58:29.183252Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T06:58:29.183731Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T06:58:29.183770Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T06:58:29.183785Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T06:58:29.183891Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T06:58:29.183926Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T06:58:29.184026Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T06:58:29.184039Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T06:58:29.185358Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T06:58:29.260367Z  INFO otto_server::boot::recovery: boot: post-listen work done in 76 ms (plugins=70)
+2026-10-08T06:58:29.265077Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T06:58:29.265144Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T06:58:29.265162Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T06:58:29.265187Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T06:58:29.265223Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T06:58:29.295652Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T06:58:29.295693Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T06:58:29.295711Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T06:58:29.295727Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T06:58:29.295745Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T06:58:29.295788Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T06:58:29.295914Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T06:58:29.297101Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T06:58:29.299011Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T06:58:29.352078Z  INFO ottod: listening on http://127.0.0.1:17828
+2026-10-08T06:58:29.352231Z  INFO ottod: alt loopback lane on http://localhost:17828 ([::1] + 127.0.0.1 both held)
+2026-10-08T06:58:29.352277Z  INFO otto_server::boot: boot: ready in 408 ms (db_compact=0 db_open=226 maintenance=2 modules=10 restore=0 recovery=168)
+[e2e] test daemon ready (pid 17014); root onboarded.
+
+Running 28 tests using 1 worker
+
+2026-10-08T06:58:29.573670Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wWuHUG/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T06:58:29.575501Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T06:58:29.582066Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T06:58:29.601570Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T06:58:29.601955Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T06:58:29.602009Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:17110) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [desktop-browser] › e2e/desktop-api-tabs-persist.spec.ts:51:1 › open tabs + active index survive a reload (5.5s)
+  ✓   2 [desktop-browser] › e2e/desktop-api-tabs-persist.spec.ts:86:1 › a closed tab stays closed after reload (3.9s)
+  ✓   3 [desktop-browser] › e2e/desktop-api-tabs-persist.spec.ts:112:1 › tab sets are per-workspace (6.4s)
+  ✓   4 [desktop-browser] › e2e/desktop-api-tabs-persist.spec.ts:134:1 › corrupt persisted payload is discarded gracefully (3.3s)
+  ✓   5 [desktop-browser] › e2e/desktop-db-error-panel.spec.ts:71:1 › MySQL unknown column: headline, code chip, did-you-mean chip edits the editor, raw behind a toggle (2.2s)
+  ✓   6 [desktop-browser] › e2e/desktop-db-error-panel.spec.ts:99:1 › Postgres position becomes a caret excerpt under the reported column (1.1s)
+[WebServer] 9:58:52 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   7 [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:9:1 › Enter commits a cell draft once and Escape cancels a later edit (1.2s)
+[WebServer] 9:58:54 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   8 [desktop-browser] › e2e/desktop-db-grid-keyboard.spec.ts:59:1 › rerunning the same result columns preserves the grid scroll position (971ms)
+2026-10-08T06:58:54.992413Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-conflict-vvQ2Yg args=["remote", "get-url", "origin"] code=2
+2026-10-08T06:58:56.935361Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-conflict-vvQ2Yg
+2026-10-08T06:58:56.957434Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-conflict-vvQ2Yg args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:58:56.985998Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-conflict-vvQ2Yg args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:59:01.972663Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-conflict-vvQ2Yg args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+  ✓   9 [desktop-browser] › e2e/desktop-git-conflict-resolver.spec.ts:68:1 › pick parts of A and B, preview the output, complete the merge (7.0s)
+2026-10-08T06:59:02.197050Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-jGzijD args=["remote", "get-url", "origin"] code=2
+2026-10-08T06:59:03.628882Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-jGzijD
+2026-10-08T06:59:03.652165Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-jGzijD args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:59:03.680851Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-jGzijD args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:59:04.182961Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-jGzijD args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:59:04.206492Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-jGzijD args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+  ✓  10 [desktop-browser] › e2e/desktop-git-hunk-staging.spec.ts:89:1 › stage one of two hunks → commit → the other hunk stays in WIP (2.2s)
+2026-10-08T06:59:04.447819Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Ol3Nri args=["remote", "get-url", "origin"] code=2
+2026-10-08T06:59:05.865449Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Ol3Nri
+2026-10-08T06:59:05.890756Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Ol3Nri args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:59:05.922153Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Ol3Nri args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+  ✓  11 [desktop-browser] › e2e/desktop-git-hunk-staging.spec.ts:120:1 › discard one hunk restores only that hunk and keeps a backup stash (2.4s)
+2026-10-08T06:59:06.864637Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-U0s1Vw args=["remote", "get-url", "origin"] code=2
+2026-10-08T06:59:08.296378Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-U0s1Vw
+2026-10-08T06:59:08.320389Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-U0s1Vw args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:59:08.349511Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-U0s1Vw args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+  ✓  12 [desktop-browser] › e2e/desktop-git-hunk-staging.spec.ts:154:1 › a CRLF file staged by hunk leaves no follow-up worktree diff (2.1s)
+2026-10-08T06:59:09.005797Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Sz7CmQ args=["remote", "get-url", "origin"] code=2
+2026-10-08T06:59:10.438195Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Sz7CmQ
+2026-10-08T06:59:10.461795Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Sz7CmQ args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T06:59:10.489691Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hunk-Sz7CmQ args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+  ✓  13 [desktop-browser] › e2e/desktop-git-hunk-staging.spec.ts:185:1 › same-coordinate edit after rendering rejects the stale hunk token (2.1s)
+  ✓  14 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:97:1 › every top-level page renders exactly one PageHeader at one height (7.8s)
+  ✓  15 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:125:1 › the Agents page keeps its session TabBar instead of a PageHeader (485ms)
+  ✓  16 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:131:1 › header actions overflow into a ⋯ menu that stays inside the viewport (803ms)
+  ✓  17 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:172:1 › a list/detail page opens on its first item and restores the last one (724ms)
+  ✓  18 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:197:1 › a Proof deep link waits for delayed workspace startup and then opens its named pack (470ms)
+  ✓  19 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:219:1 › ambient backdrop shows through chrome only; reduce transparency goes opaque (780ms)
+  ✓  20 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-light (1.3s)
+  ✓  21 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark (1.4s)
+  ✓  22 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes warm-dark (1.3s)
+  ✓  23 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:58:1 › workspace boot failure is reported inline and Retry restores the saved workspace (819ms)
+  ✓  24 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:90:1 › a failed older workspace load cannot publish into a newer identity (544ms)
+[WebServer] 9:59:27 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  25 [desktop-browser] › e2e/desktop-quality-next-populated.spec.ts:11:3 › populated database keeps the reviewed edit through narrow layout and Cancel light (1.3s)
+[WebServer] 9:59:28 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  26 [desktop-browser] › e2e/desktop-quality-next-populated.spec.ts:59:3 › populated API draft survives responsive unsaved-close cancellation light (1.9s)
+[WebServer] 9:59:30 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  27 [desktop-browser] › e2e/desktop-quality-next-populated.spec.ts:11:3 › populated database keeps the reviewed edit through narrow layout and Cancel dark (1.3s)
+[WebServer] 9:59:32 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  28 [desktop-browser] › e2e/desktop-quality-next-populated.spec.ts:59:3 › populated API draft survives responsive unsaved-close cancellation dark (1.9s)
+
+  28 passed (1.1m)

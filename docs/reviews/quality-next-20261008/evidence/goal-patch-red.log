@@ -1,0 +1,30 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.14s
+     Running tests/it.rs (target/debug/deps/it-cc2b63cc237a93ed)
+
+running 1 test
+test foundation_integrity::rejected_goal_patch_preserves_all_previous_settings ... FAILED
+
+failures:
+
+---- foundation_integrity::rejected_goal_patch_preserves_all_previous_settings stdout ----
+
+thread 'foundation_integrity::rejected_goal_patch_preserves_all_previous_settings' (6480264) panicked at crates/otto-server/tests/foundation_integrity.rs:41:9:
+assertion `left == right` failed: a rejected PATCH changed the name
+  left: "Must not persist"
+ right: "Original"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    foundation_integrity::rejected_goal_patch_preserves_all_previous_settings
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 187 filtered out; finished in 0.27s
+
+error: test failed, to rerun pass `-p otto-server --test it`

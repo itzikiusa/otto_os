@@ -1,0 +1,21 @@
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.17s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 1 test
+
+thread 'skill_eval::output_tests::malformed_validation_cannot_publish_passed_review_evidence' (6679392) panicked at crates/otto-server/src/skill_eval_output_tests.rs:228:9:
+assertion `left == right` failed: iteration badge must include the failed validator in its denominator
+  left: 100.0
+ right: 50.0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test skill_eval::output_tests::malformed_validation_cannot_publish_passed_review_evidence ... FAILED
+
+failures:
+
+failures:
+    skill_eval::output_tests::malformed_validation_cannot_publish_passed_review_evidence
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 980 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p otto-server --lib`

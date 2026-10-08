@@ -1,0 +1,51 @@
+{
+  "base": "7cff9e538deccdd0e346af7c6285e11863285c00",
+  "scope": "Shared uncommitted review worktree, baseline daemon; functional browser tests only",
+  "files": [
+    {
+      "path": "ui/src/lib/components/PageHeader.svelte",
+      "sha256": "76b0733fd58ab9e7c02a494852d299cf1ab69d64ff0093b53f4d0245a7cb0c98",
+      "bytes": 25656
+    },
+    {
+      "path": "ui/src/modules/proof/ProofPage.svelte",
+      "sha256": "efc243afc7a298f80c254dea8d9839c93df05a3513a0d6a71d9b0a468abeedea",
+      "bytes": 61528
+    },
+    {
+      "path": "ui/src/shell/App.svelte",
+      "sha256": "1b17c773fd986a29cdabba217b55112f7579e0217060bb38f1287a77cc0f1d0d",
+      "bytes": 69768
+    },
+    {
+      "path": "ui/src/shell/SidePane.svelte",
+      "sha256": "f001eb915ad19e7e0d0557faf87635b9b6c1f2d12e4034a7971f0778c61edda1",
+      "bytes": 8125
+    },
+    {
+      "path": "ui/src/lib/components/Modal.svelte",
+      "sha256": "657d53687e9096689d1bff708b6678d044bf7d2656820353baab434652b23b1d",
+      "bytes": 9832
+    },
+    {
+      "path": "ui/src/lib/nativePane.ts",
+      "sha256": "4ba9a9041600aa3f2835b5e767a5392653ed407489862f88ccf0ef1fa875feaa",
+      "bytes": 4514
+    },
+    {
+      "path": "ui/src/lib/nativePanePolicy.ts",
+      "sha256": "31a937ec74c1e077868c7b73589a128e110c2bb6347504544419e46582212809",
+      "bytes": 3104
+    },
+    {
+      "path": "ui/e2e/desktop-quality-next-populated.spec.ts",
+      "sha256": "cfd4e734e6c922282fd4267d315a902e69cab9b91f8447f341c8f794a461c40d",
+      "bytes": 5244
+    },
+    {
+      "path": "target/debug/ottod",
+      "sha256": "d7e61497d0aa8318793985c67aded624797547689fc5e235f44a479c4786bb0f",
+      "bytes": 502535400
+    }
+  ]
+}

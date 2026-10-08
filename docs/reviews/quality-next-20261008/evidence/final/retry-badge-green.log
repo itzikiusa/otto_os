@@ -1,0 +1,15 @@
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 40.50s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 7 tests
+test skill_eval::output_tests::partial_validator_file_is_preserved_until_a_complete_verdict ... ok
+test skill_eval::output_tests::valid_clean_transcript_is_a_verdict_and_invalid_passes_do_not_score ... ok
+test skill_eval::output_tests::completion_order_preserves_validator_dimension_in_improver_prompt ... ok
+test skill_eval::output_tests::rating_reselects_best_iteration_from_current_scores ... ok
+test skill_eval::output_tests::malformed_validation_cannot_publish_passed_review_evidence ... ok
+test skill_eval::output_tests::rating_waits_for_retry_publication_and_keeps_the_final_score_consistent ... ok
+test skill_eval::output_tests::initial_scoring_publishes_rating_saved_while_commands_run ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 974 filtered out; finished in 2.43s
+

@@ -1,0 +1,5 @@
+76b0733fd58ab9e7c02a494852d299cf1ab69d64ff0093b53f4d0245a7cb0c98  ui/src/lib/components/PageHeader.svelte
+1b17c773fd986a29cdabba217b55112f7579e0217060bb38f1287a77cc0f1d0d  ui/src/shell/App.svelte
+efc243afc7a298f80c254dea8d9839c93df05a3513a0d6a71d9b0a468abeedea  ui/src/modules/proof/ProofPage.svelte
+7fb6d09bc3be3fd211aac2591546ce1d408cde546fdb8b7738ef0edd59bcb72c  ui/e2e/desktop-quality-next-design.spec.ts
+d73ab2c6bb1ab408f97afb335f6cc065d3358b3848aa0ee1c0410682dc9d2bcf  ui/e2e/desktop-page-chrome.spec.ts

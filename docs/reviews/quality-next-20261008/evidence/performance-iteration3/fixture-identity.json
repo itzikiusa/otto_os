@@ -1,0 +1,8 @@
+{
+  "pid": 96735,
+  "dataDir": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-uzvlgu",
+  "port": "7897",
+  "telemetry": true,
+  "command": "/Users/itziklavon/otto_os/target/debug/ottod",
+  "startedAt": "Thu Oct  8 09:51:18 2026"
+}

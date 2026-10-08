@@ -1,0 +1,17 @@
+✔ native embedded context requires Tauri and an injected host, never query flags (0.862792ms)
+✔ native pane geometry rejects hidden or invalid rectangles and clips to viewport (0.110208ms)
+✔ native presence excludes hidden pane even while WebKit reports visible and focused (0.06825ms)
+✔ layout coalesces during IPC and final hide cannot be overtaken by stale geometry (0.15525ms)
+✔ layout continues with newest state after rejected native IPC (0.100416ms)
+✔ detached surfaces remain addressable when the host split is narrow (0.118125ms)
+✔ native layout scales CSS geometry by page zoom in window logical points (0.085459ms)
+✔ overlay focus restoration is cancelled when detach or a new overlay wins the race (0.098916ms)
+✔ native menus honor primary window focus after macOS window cycling leaves a stale side flag (1.878042ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 156.641125

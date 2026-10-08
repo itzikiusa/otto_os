@@ -1,0 +1,208 @@
+[WebServer] (node:24346) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-q3eGJN OTTO_PORT=17826
+2026-10-08T06:28:46.394555Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-q3eGJN)
+2026-10-08T06:28:46.639236Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-q3eGJN/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T06:28:46.645724Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-q3eGJN/clickhouse, port 58467)
+2026-10-08T06:28:46.649174Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T06:28:46.651495Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T06:28:46.651542Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T06:28:46.651553Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T06:28:46.651642Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T06:28:46.651673Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T06:28:46.651776Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T06:28:46.651792Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T06:28:46.652843Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T06:28:46.657447Z  INFO otto_server::boot::recovery: boot: post-listen work done in 6 ms (plugins=0)
+2026-10-08T06:28:46.808634Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T06:28:46.808737Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T06:28:46.808779Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T06:28:46.808802Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T06:28:46.808841Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T06:28:46.838981Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T06:28:46.839093Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T06:28:46.839117Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T06:28:46.839136Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T06:28:46.839181Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T06:28:46.839208Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T06:28:46.839262Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T06:28:46.839384Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T06:28:46.839813Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T06:28:46.897476Z  INFO ottod: listening on http://127.0.0.1:17826
+2026-10-08T06:28:46.897693Z  INFO ottod: alt loopback lane on http://localhost:17826 ([::1] + 127.0.0.1 both held)
+2026-10-08T06:28:46.897784Z  INFO otto_server::boot: boot: ready in 503 ms (db_compact=0 db_open=239 maintenance=2 modules=11 restore=0 recovery=248)
+[e2e] test daemon ready (pid 24389); root onboarded.
+2026-10-08T06:28:47.049821Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-q3eGJN/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T06:28:47.051412Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+
+Running 10 tests using 1 worker
+
+2026-10-08T06:28:47.062206Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T06:28:47.148345Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T06:28:47.149496Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T06:28:47.149756Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:24443) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts (2.7s)
+  ✓   2 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:97:1 › every top-level page renders exactly one PageHeader at one height (9.7s)
+  ✓   3 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:125:1 › the Agents page keeps its session TabBar instead of a PageHeader (477ms)
+  ✓   4 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:131:1 › header actions overflow into a ⋯ menu that stays inside the viewport (777ms)
+  ✘   5 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:172:1 › a list/detail page opens on its first item and restores the last one (20.7s)
+(node:25486) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   6 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:200:1 › ambient backdrop shows through chrome only; reduce transparency goes opaque (804ms)
+  ✘   7 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-light (45.1s)
+(node:26652) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T06:30:16.655700Z  INFO otto_server::proof: proof media store maintenance moved=0 removed=0 files=0 bytes=0
+  ✘   8 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark (45.1s)
+(node:28029) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   9 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes warm-dark (45.1s)
+(node:29373) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  10 [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:57:1 › workspace boot failure is reported inline and Retry restores the saved workspace (717ms)
+
+
+  1) [desktop-browser] › e2e/desktop-page-chrome.spec.ts:172:1 › a list/detail page opens on its first item and restores the last one 
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator:  locator('[data-testid="page-header"] h1')
+    Expected: "Chrome proof A"
+    Received: " Proof packs"
+    Timeout:  20000ms
+
+    Call log:
+      - Expect "toHaveText" locator('[data-testid="page-header"] h1') with timeout 20000ms
+      - waiting for locator('[data-testid="page-header"] h1')
+        44 × locator resolved to <h1 title="Proof packs" class="ph-title svelte-162svzm">…</h1>
+           - unexpected value " Proof packs"
+
+
+      191 |   await page.reload();
+      192 |   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
+    > 193 |   await expect(title).toHaveText(other, { timeout: 20_000 });
+          |                       ^
+      194 |   expect([packA, packB]).toContain(await page.evaluate(() => localStorage.getItem('otto.lastSelection.proof')));
+      195 | });
+      196 |
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-page-chrome.spec.ts:193:23
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-page-chrome-a-list-0de73-m-and-restores-the-last-one-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-page-chrome-a-list-0de73-m-and-restores-the-last-one-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-page-chrome-a-list-0de73-m-and-restores-the-last-one-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-page-chrome-a-list-0de73-m-and-restores-the-last-one-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-light 
+
+    Test timeout of 45000ms exceeded.
+
+    Error: locator.fill: Test timeout of 45000ms exceeded.
+    Call log:
+      - waiting for getByLabel('Request URL', { exact: true })
+
+
+      44 |   // An unrelated editor retains its focus when toolbar actions collapse.
+      45 |   const url = page.getByLabel('Request URL', { exact: true });
+    > 46 |   await url.fill('https://fixture.invalid/unsaved');
+         |             ^
+      47 |   await page.setViewportSize({ width: 390, height: 844 });
+      48 |   await expect(url).toBeFocused();
+      49 |   await expect(url).toHaveValue('https://fixture.invalid/unsaved');
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-next-design.spec.ts:46:13
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-quality-next-desig-86755-ewport-changes-native-light-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-quality-next-desig-86755-ewport-changes-native-light-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-quality-next-desig-86755-ewport-changes-native-light-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-quality-next-desig-86755-ewport-changes-native-light-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3) [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark 
+
+    Test timeout of 45000ms exceeded.
+
+    Error: locator.fill: Test timeout of 45000ms exceeded.
+    Call log:
+      - waiting for getByLabel('Request URL', { exact: true })
+
+
+      44 |   // An unrelated editor retains its focus when toolbar actions collapse.
+      45 |   const url = page.getByLabel('Request URL', { exact: true });
+    > 46 |   await url.fill('https://fixture.invalid/unsaved');
+         |             ^
+      47 |   await page.setViewportSize({ width: 390, height: 844 });
+      48 |   await expect(url).toBeFocused();
+      49 |   await expect(url).toHaveValue('https://fixture.invalid/unsaved');
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-next-design.spec.ts:46:13
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-quality-next-desig-96405-iewport-changes-native-dark-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  4) [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes warm-dark 
+
+    Test timeout of 45000ms exceeded.
+
+    Error: locator.fill: Test timeout of 45000ms exceeded.
+    Call log:
+      - waiting for getByLabel('Request URL', { exact: true })
+
+
+      44 |   // An unrelated editor retains its focus when toolbar actions collapse.
+      45 |   await page.getByRole('button', { name: 'New request', exact: true }).click();
+    > 46 |   const url = page.getByLabel('Request URL', { exact: true });
+         |             ^
+      47 |   await url.fill('https://fixture.invalid/unsaved');
+      48 |   await page.setViewportSize({ width: 390, height: 844 });
+      49 |   await expect(url).toBeFocused();
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-next-design.spec.ts:46:13
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-quality-next-desig-06c5a--viewport-changes-warm-dark-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-quality-next-desig-06c5a--viewport-changes-warm-dark-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-quality-next-desig-06c5a--viewport-changes-warm-dark-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-quality-next-desig-06c5a--viewport-changes-warm-dark-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  4 failed
+    [desktop-browser] › e2e/desktop-page-chrome.spec.ts:172:1 › a list/detail page opens on its first item and restores the last one 
+    [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-light 
+    [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark 
+    [desktop-browser] › e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes warm-dark 
+  6 passed (2.9m)

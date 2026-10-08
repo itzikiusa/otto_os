@@ -1,0 +1,25 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.74s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 1 test
+test skill_eval::tests::invalid_validator_output_is_distinct_from_a_clean_verdict ... FAILED
+
+failures:
+
+---- skill_eval::tests::invalid_validator_output_is_distinct_from_a_clean_verdict stdout ----
+
+thread 'skill_eval::tests::invalid_validator_output_is_distinct_from_a_clean_verdict' (6424863) panicked at crates/otto-server/src/skill_eval.rs:3513:13:
+assertion `left != right` failed: invalid output became a clean verdict: ""
+  left: "[]"
+ right: "[]"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    skill_eval::tests::invalid_validator_output_is_distinct_from_a_clean_verdict
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 972 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p otto-server --lib`

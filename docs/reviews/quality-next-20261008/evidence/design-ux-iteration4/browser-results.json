@@ -1,0 +1,1221 @@
+{
+  "config": {
+    "argv": [
+      "/opt/homebrew/Cellar/node/26.10.0_2/bin/node",
+      "/Users/itziklavon/otto_os/ui/node_modules/.bin/playwright",
+      "test",
+      "desktop-quality-next-populated.spec.ts",
+      "desktop-quality-next-design.spec.ts",
+      "desktop-page-chrome.spec.ts",
+      "desktop-db-grid-keyboard.spec.ts",
+      "desktop-db-error-panel.spec.ts",
+      "desktop-api-tabs-persist.spec.ts",
+      "desktop-git-hunk-staging.spec.ts",
+      "desktop-git-conflict-resolver.spec.ts",
+      "--project=desktop-browser",
+      "--workers=1"
+    ],
+    "configFile": "/Users/itziklavon/otto_os/ui/playwright.config.ts",
+    "rootDir": "/Users/itziklavon/otto_os/ui/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": "/Users/itziklavon/otto_os/ui/e2e/global-setup.ts",
+    "globalTeardown": "/Users/itziklavon/otto_os/ui/e2e/global-teardown.ts",
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-portrait",
+        "name": "iphone-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-landscape",
+        "name": "iphone-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-portrait",
+        "name": "ipad-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-landscape",
+        "name": "ipad-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-se",
+        "name": "iphone-se",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-browser",
+        "name": "desktop-browser",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-webkit",
+        "name": "desktop-webkit",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-(?:.*perf.*|terminal-park-redraw)\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "html",
+        {
+          "open": "never",
+          "outputFolder": "e2e/.report-next-design4"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "e2e/.results-next-design4.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 1,
+    "webServer": {
+      "command": "npm run dev -- --port 5198 --strictPort",
+      "url": "http://localhost:5198",
+      "reuseExistingServer": true,
+      "timeout": 90000
+    }
+  },
+  "suites": [
+    {
+      "title": "desktop-api-tabs-persist.spec.ts",
+      "file": "desktop-api-tabs-persist.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "open tabs + active index survive a reload",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 5521,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:29.853Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0e997b04d07af05e8371-985b108154e7c1e18d61",
+          "file": "desktop-api-tabs-persist.spec.ts",
+          "line": 51,
+          "column": 1
+        },
+        {
+          "title": "a closed tab stays closed after reload",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 3902,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:35.693Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0e997b04d07af05e8371-b9536438cba6f116e72e",
+          "file": "desktop-api-tabs-persist.spec.ts",
+          "line": 86,
+          "column": 1
+        },
+        {
+          "title": "tab sets are per-workspace",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6402,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:39.601Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0e997b04d07af05e8371-aa936b3fdca29f0f0e41",
+          "file": "desktop-api-tabs-persist.spec.ts",
+          "line": 112,
+          "column": 1
+        },
+        {
+          "title": "corrupt persisted payload is discarded gracefully",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 3321,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:46.008Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0e997b04d07af05e8371-c311e0f1507941fe4b1d",
+          "file": "desktop-api-tabs-persist.spec.ts",
+          "line": 134,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "desktop-db-error-panel.spec.ts",
+      "file": "desktop-db-error-panel.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "MySQL unknown column: headline, code chip, did-you-mean chip edits the editor, raw behind a toggle",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2214,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:49.340Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f01c57aafa896649e619-1c2915e531b0e146a45b",
+          "file": "desktop-db-error-panel.spec.ts",
+          "line": 71,
+          "column": 1
+        },
+        {
+          "title": "Postgres position becomes a caret excerpt under the reported column",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1063,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:51.590Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f01c57aafa896649e619-b697c278482fcfcce387",
+          "file": "desktop-db-error-panel.spec.ts",
+          "line": 99,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "desktop-db-grid-keyboard.spec.ts",
+      "file": "desktop-db-grid-keyboard.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "Enter commits a cell draft once and Escape cancels a later edit",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1216,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:52.661Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f3cfb7ad66d245119208-3378d86427bc721c35c9",
+          "file": "desktop-db-grid-keyboard.spec.ts",
+          "line": 9,
+          "column": 1
+        },
+        {
+          "title": "rerunning the same result columns preserves the grid scroll position",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 971,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:53.881Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "f3cfb7ad66d245119208-505648fb41df8dc6d699",
+          "file": "desktop-db-grid-keyboard.spec.ts",
+          "line": 59,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "desktop-git-conflict-resolver.spec.ts",
+      "file": "desktop-git-conflict-resolver.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "pick parts of A and B, preview the output, complete the merge",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 7044,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:58:54.859Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "0c5c94a99b3b791de591-61b62eb5eb6fc1ec2a50",
+          "file": "desktop-git-conflict-resolver.spec.ts",
+          "line": 68,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "desktop-git-hunk-staging.spec.ts",
+      "file": "desktop-git-hunk-staging.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "stage one of two hunks → commit → the other hunk stays in WIP",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2241,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:02.049Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "afbeb6c9f3b5e6451bbe-1b178ba06a093512086d",
+          "file": "desktop-git-hunk-staging.spec.ts",
+          "line": 89,
+          "column": 1
+        },
+        {
+          "title": "discard one hunk restores only that hunk and keeps a backup stash",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2414,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:04.295Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "afbeb6c9f3b5e6451bbe-a10f974b7558e7604c9f",
+          "file": "desktop-git-hunk-staging.spec.ts",
+          "line": 120,
+          "column": 1
+        },
+        {
+          "title": "a CRLF file staged by hunk leaves no follow-up worktree diff",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2139,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:06.712Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "afbeb6c9f3b5e6451bbe-68477d1aa85a53440bc3",
+          "file": "desktop-git-hunk-staging.spec.ts",
+          "line": 154,
+          "column": 1
+        },
+        {
+          "title": "same-coordinate edit after rendering rejects the stale hunk token",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2064,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:08.856Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "afbeb6c9f3b5e6451bbe-8f9eb0b30cb182371cdf",
+          "file": "desktop-git-hunk-staging.spec.ts",
+          "line": 185,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "desktop-page-chrome.spec.ts",
+      "file": "desktop-page-chrome.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "every top-level page renders exactly one PageHeader at one height",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 300000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 7783,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:10.928Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "66302f1c94af38f3fcf6-c71d9cb0af87bb81a371",
+          "file": "desktop-page-chrome.spec.ts",
+          "line": 97,
+          "column": 1
+        },
+        {
+          "title": "the Agents page keeps its session TabBar instead of a PageHeader",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 485,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:18.739Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "66302f1c94af38f3fcf6-94cbd7b78b1a0db07c4c",
+          "file": "desktop-page-chrome.spec.ts",
+          "line": 125,
+          "column": 1
+        },
+        {
+          "title": "header actions overflow into a ⋯ menu that stays inside the viewport",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 803,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:19.228Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "66302f1c94af38f3fcf6-43d4f92823acc0702b71",
+          "file": "desktop-page-chrome.spec.ts",
+          "line": 131,
+          "column": 1
+        },
+        {
+          "title": "a list/detail page opens on its first item and restores the last one",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 724,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:20.035Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "66302f1c94af38f3fcf6-589cb21eb75b9e9a6b4b",
+          "file": "desktop-page-chrome.spec.ts",
+          "line": 172,
+          "column": 1
+        },
+        {
+          "title": "a Proof deep link waits for delayed workspace startup and then opens its named pack",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 470,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:20.763Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "66302f1c94af38f3fcf6-9dd917175a2882905562",
+          "file": "desktop-page-chrome.spec.ts",
+          "line": 197,
+          "column": 1
+        },
+        {
+          "title": "ambient backdrop shows through chrome only; reduce transparency goes opaque",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 780,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:21.237Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "66302f1c94af38f3fcf6-cd71f7101bc77adeee53",
+          "file": "desktop-page-chrome.spec.ts",
+          "line": 219,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "desktop-quality-next-design.spec.ts",
+      "file": "desktop-quality-next-design.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "header overflow preserves keyboard focus and action across viewport changes native-light",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1342,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:22.027Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "daa54ccdead8d9f5839a-ceccb17127448b3d0d0a",
+          "file": "desktop-quality-next-design.spec.ts",
+          "line": 9,
+          "column": 4
+        },
+        {
+          "title": "header overflow preserves keyboard focus and action across viewport changes native-dark",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1359,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:23.373Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "daa54ccdead8d9f5839a-439c98242d436bb4afcc",
+          "file": "desktop-quality-next-design.spec.ts",
+          "line": 9,
+          "column": 4
+        },
+        {
+          "title": "header overflow preserves keyboard focus and action across viewport changes warm-dark",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1267,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:24.736Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "daa54ccdead8d9f5839a-4d1c9540e711c0dbcc84",
+          "file": "desktop-quality-next-design.spec.ts",
+          "line": 9,
+          "column": 4
+        },
+        {
+          "title": "workspace boot failure is reported inline and Retry restores the saved workspace",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 819,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:26.007Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "daa54ccdead8d9f5839a-c259fa303f8ab5fdab28",
+          "file": "desktop-quality-next-design.spec.ts",
+          "line": 58,
+          "column": 1
+        },
+        {
+          "title": "a failed older workspace load cannot publish into a newer identity",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 544,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:26.831Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "daa54ccdead8d9f5839a-1510491a09ae46a67259",
+          "file": "desktop-quality-next-design.spec.ts",
+          "line": 90,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "desktop-quality-next-populated.spec.ts",
+      "file": "desktop-quality-next-populated.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "populated database keeps the reviewed edit through narrow layout and Cancel light",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1324,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:27.382Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "c0b90ff0fe53f481d14f-75b8145505306666cc76",
+          "file": "desktop-quality-next-populated.spec.ts",
+          "line": 11,
+          "column": 3
+        },
+        {
+          "title": "populated API draft survives responsive unsaved-close cancellation light",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1944,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:28.710Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "c0b90ff0fe53f481d14f-14872e3435467cf5f721",
+          "file": "desktop-quality-next-populated.spec.ts",
+          "line": 59,
+          "column": 3
+        },
+        {
+          "title": "populated database keeps the reviewed edit through narrow layout and Cancel dark",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1296,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:30.659Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "c0b90ff0fe53f481d14f-e9fdcaa901a088cd0d4c",
+          "file": "desktop-quality-next-populated.spec.ts",
+          "line": 11,
+          "column": 3
+        },
+        {
+          "title": "populated API draft survives responsive unsaved-close cancellation dark",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1914,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:59:31.958Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "c0b90ff0fe53f481d14f-b6bc1faadf574e5ecb31",
+          "file": "desktop-quality-next-populated.spec.ts",
+          "line": 59,
+          "column": 3
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-08T06:58:27.861Z",
+    "duration": 66186.224,
+    "expected": 28,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

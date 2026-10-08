@@ -1,0 +1,149 @@
+{
+  "head": "7cff9e538deccdd0e346af7c6285e11863285c00",
+  "scope": "Mutable review worktree; current file hashes and final native binary; existing fixture daemon not current server repair build",
+  "files": [
+    {
+      "file": "ui/dist/index.html",
+      "bytes": 3623,
+      "sha256": "34c2e1639ee08c16840f29c47001ba3a5384fee1da001fa11d1837a1e6ba89c0"
+    },
+    {
+      "file": "ui/src/shell/App.svelte",
+      "bytes": 69768,
+      "sha256": "1b17c773fd986a29cdabba217b55112f7579e0217060bb38f1287a77cc0f1d0d"
+    },
+    {
+      "file": "ui/src/lib/components/Modal.svelte",
+      "bytes": 9832,
+      "sha256": "657d53687e9096689d1bff708b6678d044bf7d2656820353baab434652b23b1d"
+    },
+    {
+      "file": "ui/src/lib/nativePane.ts",
+      "bytes": 4514,
+      "sha256": "4ba9a9041600aa3f2835b5e767a5392653ed407489862f88ccf0ef1fa875feaa"
+    },
+    {
+      "file": "ui/src/shell/SidePane.svelte",
+      "bytes": 8125,
+      "sha256": "f001eb915ad19e7e0d0557faf87635b9b6c1f2d12e4034a7971f0778c61edda1"
+    },
+    {
+      "file": "ui/src/modules/home/boxes/ClassroomsBox.svelte",
+      "bytes": 40544,
+      "sha256": "7b4c5c801cb4a815e8eafd09be798507b0d5a59ba3c98374b83fc273bb4863ba"
+    },
+    {
+      "file": "ui/src/modules/home/school/scene.ts",
+      "bytes": 50454,
+      "sha256": "2bbee881bdd08f437075a273769dedd2f4af44341774ee6804bd80e8a9c89442"
+    },
+    {
+      "file": "apps/desktop/src-tauri/src/panes.rs",
+      "bytes": 28831,
+      "sha256": "0c1f129cbcb0cf63e2697c71ad42ad5b7a772557452f8c44117e322bf5414265"
+    },
+    {
+      "file": "apps/desktop/src-tauri/examples/pane_spa_probe.rs",
+      "bytes": 18672,
+      "sha256": "265411dba28e85b9d23ef11058517940a02048e6abd1a74496236d159c159191"
+    },
+    {
+      "file": "apps/desktop/src-tauri/examples/probe_support/school.rs",
+      "bytes": 6639,
+      "sha256": "dbdac7e3d702c2593c8ff36b2ab7e25b32e7123da236662cee17b7508409681c"
+    },
+    {
+      "file": "apps/desktop/src-tauri/examples/probe_support/accessibility.rs",
+      "bytes": 23270,
+      "sha256": "9c4b4d7aec90c05f07e4dcbd25a98450d5ca3142a5ca85cf5b93788ce0a56fdc"
+    },
+    {
+      "file": "apps/desktop/src-tauri/target/debug/examples/pane_spa_probe",
+      "bytes": 47079952,
+      "sha256": "91c143641f8ab30700b58adbd2e694d7e46efaa712e35fe530084113f1e51747"
+    },
+    {
+      "file": "target/debug/ottod",
+      "bytes": 502535400,
+      "sha256": "d7e61497d0aa8318793985c67aded624797547689fc5e235f44a479c4786bb0f"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/visibility.txt",
+      "bytes": 775,
+      "sha256": "67b0cc66f863d8179182cced5cb322ccd868e5c21063d5f432783fed970e64c0"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/school-diagnostic.txt",
+      "bytes": 10617,
+      "sha256": "13c18e745a79bac9e095adf18e42f25b964345b0f077b8188a2ff21422865c48"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/school.txt",
+      "bytes": 10282,
+      "sha256": "c20857a480fbdbced374b20560ff0027a8826af8fc354514a67a82498e1f8ddb"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/build.txt",
+      "bytes": 9382,
+      "sha256": "607e36df36915158a5c5123291965636ff541c9ea9c3435cca171d2464b4b2c2"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/ui-build.txt",
+      "bytes": 79968,
+      "sha256": "3ece4ed6fb8af4ec812934d662b31756ec565ad4509dab367e8a1723c117c994"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/diagnostic-build.txt",
+      "bytes": 144,
+      "sha256": "43f9a357e9e7cc0e9cb41f8496e3917ef55d27eb40d8b5c40bb3b8640cd356e9"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/school-modal-first.txt",
+      "bytes": 9239,
+      "sha256": "b8e6a31508ce4637fb392d2bf1af9ab1211a3641aa8f6b3fc8f83f5c939add73"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/lifecycle.txt",
+      "bytes": 1508,
+      "sha256": "14202b16c8ad7a7878c5f2918c6e28eea1955cabc01dd24bc2d5c158bac14af4"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/spa.txt",
+      "bytes": 8239,
+      "sha256": "aa32f84c15f409878468d3e682212818bc50d326a793f4b30bf2d81f3fbb0465"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/rebuild.txt",
+      "bytes": 144,
+      "sha256": "85eddebe3d9aa191eb24421edd0f1702c7f645613856133031ee45c845e87d07"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/school-before-diagnostic.rs.txt",
+      "bytes": 6107,
+      "sha256": "249c96f013e08302ff4ea6bdca02b15ec7de20fb7ae9598bd6e6a6010e6627ff"
+    },
+    {
+      "file": "docs/reviews/quality-next-20261008/evidence/native-iteration2/school-final.rs.txt",
+      "bytes": 6639,
+      "sha256": "dbdac7e3d702c2593c8ff36b2ab7e25b32e7123da236662cee17b7508409681c"
+    }
+  ],
+  "modal_attempts": [
+    {
+      "log": "quality-next-native-school-final.log",
+      "first_daemon_timestamp_utc": "2026-10-08T06:44:27.410238Z",
+      "log_last_modified_utc": "2026-10-08T06:44:49.925838+00:00",
+      "helper_sha256": "249c96f013e08302ff4ea6bdca02b15ec7de20fb7ae9598bd6e6a6010e6627ff",
+      "source_provenance": "failed resume; source reconstructed by removing the exact diagnostic-only edit, not a contemporaneous source hash",
+      "production_change_between_attempts": false
+    },
+    {
+      "log": "quality-next-native-school-diagnostic.log",
+      "first_daemon_timestamp_utc": "2026-10-08T06:47:05.870068Z",
+      "log_last_modified_utc": "2026-10-08T06:47:14.881121+00:00",
+      "helper_sha256": "dbdac7e3d702c2593c8ff36b2ab7e25b32e7123da236662cee17b7508409681c",
+      "source_provenance": "passed three cycles; final on-disk source",
+      "production_change_between_attempts": false
+    }
+  ]
+}
