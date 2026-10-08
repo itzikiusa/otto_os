@@ -1270,6 +1270,7 @@ export interface CreateGoalLoopReq {
   autostart: boolean;
 }
 
+/** Validated and applied atomically; a rejected patch leaves all fields unchanged. */
 export interface UpdateGoalLoopReq {
   name?: string;
   limits?: GoalLoopLimits;
@@ -5381,7 +5382,9 @@ export interface EvalFinding {
   location?: string | null;
 }
 
-/** Live state of one validation agent (validation × provider) in an iteration. */
+/** Live state of one validation agent (validation × provider) in an iteration.
+ * Every requested pass must produce a valid verdict; incomplete passes are error/0.
+ */
 export interface EvalValidationState {
   validation: string;
   name: string;
@@ -5461,6 +5464,7 @@ export interface EvalIteration {
   worktree_path?: string | null;
   status: EvalIterStatus;
   note: string;
+  /** Validator mean for generated iterations, including failed validators as zero. */
   score: number;
   agents: EvalValidationState[];
   improvement_summary: string;
