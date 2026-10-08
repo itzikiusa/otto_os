@@ -53,3 +53,21 @@ test('silence deadline resets per server frame rather than rounding to the heart
   context.mock.timers.tick(1); assert.equal(socket.closed, true);
   client.dispose();
 });
+
+test('a stalled WebSocket handshake reaches disconnected and retries without waiting for open', context => {
+  const original = globalThis.WebSocket;
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  context.after(() => { globalThis.WebSocket = original; });
+  context.mock.timers.enable({apis: ['setInterval', 'setTimeout']});
+  const states: string[] = [];
+  const client = new RoomClient('https://host.test', {room_id: 'room', member_id: 'guest', token: 'private'}, () => {}, state => states.push(state));
+  context.after(() => client.dispose());
+  client.connect();
+  const socket = Socket.instances.at(-1)!;
+  context.mock.timers.tick(10000);
+  assert.equal(states.at(-1), 'disconnected');
+  assert.equal(socket.closed, true);
+  const count = Socket.instances.length;
+  context.mock.timers.tick(1000);
+  assert.equal(Socket.instances.length, count + 1);
+});

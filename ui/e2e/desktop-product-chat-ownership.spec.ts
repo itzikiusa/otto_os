@@ -1,0 +1,51 @@
+import { test, expect } from '@playwright/test';
+import { apiCtx, seedWorkspace } from './seed';
+import { openPage, expectNoHorizontalOverflow } from './helpers';
+
+test.use({ serviceWorkers: 'block' });
+test('Discovery chat keeps drafts and late failed replies with their conversation', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  const ws = await seedWorkspace(ctx, base);
+  const title = `Chat ownership ${Date.now()}`;
+  const draft = await ctx.post(`${base}/api/v1/workspaces/${ws}/product/drafts`, { data: { title } });
+  expect(draft.ok()).toBeTruthy(); const sid = (await draft.json()).story.id;
+  const chat = (id: string) => ({ id, story_id: sid, workspace_id: ws, title: `Conversation ${id}`, status: 'active', model: null, created_at: '2026-10-08T00:00:00Z', updated_at: '2026-10-08T00:00:00Z' });
+  const msg = (id: string) => ({ id: `${id}-welcome`, chat_id: id, role: 'agent', body: `Welcome ${id}`, actions_json: null, meta_json: null, created_at: '2026-10-08T00:00:00Z' });
+  await page.addInitScript((ws) => localStorage.setItem('otto_workspace', ws), ws);
+  await page.context().route(`**/product/stories/${sid}/discovery-chats`, r => r.fulfill({ json: ['A', 'B'].map(chat) }));
+  let failInitialLoad = true;
+  await page.context().route('**/product/discovery-chats/*', r => {
+    if (failInitialLoad) { failInitialLoad = false; return r.fulfill({ status: 503, json: { code: 'upstream', message: 'Fixture chat unavailable' } }); }
+    const id = r.request().url().split('/').at(-1)!;
+    return r.fulfill({ json: { chat: chat(id), messages: [msg(id)] } });
+  });
+  let release!: () => void; let requested!: () => void;
+  const held = new Promise<void>(r => release = r), started = new Promise<void>(r => requested = r);
+  await page.context().route('**/product/discovery-chats/A/messages', async r => { requested(); await held; await r.fulfill({ status: 503, json: { code: 'upstream', message: 'Fixture send failed' } }); });
+  await openPage(page, 'product');
+  await page.locator('.story-row', { hasText: title }).click();
+  await page.getByRole('tab', { name: 'Discover', exact: true }).click();
+  await page.locator('.sub-tab-strip .st', { hasText: 'Chat' }).click();
+  await expect(page.locator('.discovery-chat')).toContainText('Fixture chat unavailable');
+  await page.locator('.discovery-chat').getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.locator('.discovery-chat')).toContainText('Welcome A');
+  const input = page.locator('.discovery-chat textarea');
+  await input.fill('Unsent A');
+  await page.getByRole('button', { name: /Conversation B/ }).click();
+  await expect(input).toHaveValue('');
+  await input.fill('Draft B');
+  await page.getByRole('button', { name: /Conversation A/ }).click();
+  await expect(input).toHaveValue('Unsent A');
+  await page.locator('.discovery-chat').getByRole('button', { name: 'Send', exact: true }).click();
+  await started;
+  await page.getByRole('button', { name: /Conversation B/ }).click();
+  await expect(input).toHaveValue('Draft B');
+  const delivered = page.waitForResponse('**/product/discovery-chats/A/messages');
+  release(); await (await delivered).finished();
+  await expect(page.locator('.discovery-chat')).toContainText('Welcome B');
+  await expect(input).toHaveValue('Draft B');
+  await page.getByRole('button', { name: /Conversation A/ }).click();
+  await expect(input).toHaveValue('Unsent A');
+  await expectNoHorizontalOverflow(page);
+  await ctx.dispose();
+});

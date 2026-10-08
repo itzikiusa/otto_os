@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spliceHistory} from '../src/modules/git/graph-splice.ts';
+import { componentFunctions } from './componentFunctions.ts';
 
 const c=(sha:string)=>({sha} as never as {sha:string});
 const list=(...s:string[])=>s.map(c) as never[];
@@ -27,4 +28,35 @@ test('a page commit already in the old tail (reorder) → full reload',()=>{
 
 test('nothing to splice when the page covers everything held',()=>{
   assert.equal(spliceHistory(list('b','a'),list('c','b','a')),null);
+});
+
+test('rewinding a same-name ref outside the fresh prefix invalidates the retained tail', () => {
+  const graph = componentFunctions(new URL('../src/modules/git/GraphView.svelte', import.meta.url), ['lostRef'], {
+    commits: list('recent-1', 'recent-2', 'old-tip', 'base'), FIRST_PAGE: 2,
+    movedRefTips: new Set<string>(),
+  });
+  const refs = (sha: string) => ({ local: [{ name: 'old-branch', sha }], remote: [], tags: [] });
+  assert.equal(graph.lostRef(refs('old-tip'), refs('base')), true);
+  assert.equal(graph.lostRef(refs('old-tip'), refs('old-tip')), false);
+  // Fast growth whose old tip is inside the checked prefix keeps the splice path.
+  assert.equal(graph.lostRef(refs('recent-1'), refs('new-tip')), false);
+  assert.equal(graph.lostRef({ local: [], remote: [], tags: [{ name: 'v1', sha: 'old-tip' }] },
+    { local: [], remote: [], tags: [{ name: 'v1', sha: 'base' }] }), true);
+});
+
+test('a moved tip displaced from the fresh page also invalidates a spliced tail', () => {
+  const reloads: boolean[] = [];
+  const graph = componentFunctions(new URL('../src/modules/git/GraphView.svelte', import.meta.url), ['setRefs', 'lostRef', 'applyGraph'], {
+    refs: { local: [{ name: 'side', sha: 'old-tip' }], remote: [], tags: [] }, refsKey: '',
+    commits: list('recent', 'old-tip', 'base'), FIRST_PAGE: 2,
+    refRemoved: false, movedRefTips: new Set<string>(), loadGen: 1,
+    reloadGraph: (full: boolean) => { reloads.push(full); },
+    setCommits() {}, setHasMore() {}, setStashes() {}, setWorktrees() {},
+    graphCache: { set() {} },
+    commitsError: null, skipCursor: 3, hasMore: false, refreshFailures: 0, refreshError: null,
+  });
+  graph.setRefs({ local: [{ name: 'side', sha: 'base' }], remote: [], tags: [] });
+  // New unrelated main commits displaced the old tip below the fresh boundary.
+  graph.applyGraph({ gen: 1, more: false, commits: list('new', 'recent', 'old-tip', 'base'), want: 2 });
+  assert.deepEqual(reloads, [true]);
 });

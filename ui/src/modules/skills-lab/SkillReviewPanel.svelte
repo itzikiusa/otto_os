@@ -121,19 +121,27 @@
     skillOpts = [...keep, ...opts];
   }
 
+  let listGeneration = 0;
+  let disposed = false;
+  onDestroy(() => { disposed = true; listGeneration++; detailGeneration++; });
+
   async function loadList(): Promise<void> {
+    const workspace = wsId;
+    const generation = ++listGeneration;
     if (!wsId) {
       listLoading = false;
       return;
     }
     listLoading = true;
     try {
-      reviews = await skillReviewApi.list(wsId);
+      const next = await skillReviewApi.list(workspace);
+      if (disposed || generation !== listGeneration || workspace !== wsId) return;
+      reviews = next;
       listError = null;
     } catch (e) {
-      listError = loadErrorText(e);
+      if (!disposed && generation === listGeneration && workspace === wsId) listError = loadErrorText(e);
     } finally {
-      listLoading = false;
+      if (!disposed && generation === listGeneration && workspace === wsId) listLoading = false;
     }
   }
 
@@ -170,15 +178,18 @@
       providers.push(...fProviders);
       if (providers.length === 0) providers.push(defaultAgentProvider());
     }
+    const workspace = wsId;
+    const generation = detailGeneration;
     starting = true;
     try {
-      const rev = await skillReviewApi.start(wsId, {
+      const rev = await skillReviewApi.start(workspace, {
         skill_name: opt.name,
         skill_source: opt.source,
         providers,
         agent_mode: fMode,
         instructions: fInstructions.trim(),
       });
+      if (disposed || workspace !== wsId || generation !== detailGeneration) return;
       selected = rev;
       await loadList();
     } catch (e) {
@@ -190,12 +201,17 @@
 
   async function applyFixes(): Promise<void> {
     if (!selected || applying) return;
+    const id = selected.id;
+    const workspace = wsId;
+    const generation = detailGeneration;
     applying = true;
     try {
-      selected = await skillReviewApi.apply(selected.id, {
+      const updated = await skillReviewApi.apply(id, {
         provider: fixProvider,
         instructions: fixInstructions.trim(),
       });
+      if (disposed || workspace !== wsId || generation !== detailGeneration || selected?.id !== id) return;
+      selected = updated;
       fixTermOpen = true;
       toasts.info('Fixer agent starting…');
     } catch (e) {
@@ -207,6 +223,8 @@
 
   async function cancelReview(): Promise<void> {
     if (!selected) return;
+    const id = selected.id;
+    const workspace = wsId;
     if (
       !(await confirmer.ask(`Stop the review of “${selected.skill_name}”? Agents still running are stopped and their partial findings are not summarized.`, {
         title: 'Stop review',
@@ -215,7 +233,7 @@
       }))
     )
       return;
-    const id = selected.id;
+    if (disposed || workspace !== wsId || selected?.id !== id) return;
     try {
       const updated = await skillReviewApi.cancel(id);
       // Another review may have been opened while the stop was in flight.

@@ -25,10 +25,12 @@ test.beforeAll(async () => {
   ws = await seedWorkspace(ctx, base);
   ({ vaultId: id, dir } = await seedVaultDir(ctx, base, ws, { notes: NOTES }));
   test.setTimeout(240_000);
-  // Cold index of the whole vault (rescan is synchronous).
+  // The seed already waits for initial indexing: this measures an unchanged rescan, not a cold index.
   const [ms, res] = await timed(() => ctx.post(`${v()}/rescan`, { data: {}, timeout: 200_000 }));
   expect(res.ok()).toBeTruthy();
-  console.log(`[vault-scale] cold index of ${NOTES} notes: ${ms.toFixed(0)} ms`);
+  const status = await (await ctx.get(`${v()}/status`)).json();
+  expect(status.notes).toBeGreaterThanOrEqual(NOTES);
+  console.log(`[vault-scale] unchanged rescan of ${NOTES} notes: ${ms.toFixed(0)} ms`);
 });
 
 test.afterAll(async () => { await ctx?.dispose(); });
@@ -40,12 +42,15 @@ test('switcher, search and note open stay under p95 budgets at 10k notes', async
     const n = (i * 331) % NOTES;
     const [a, r1] = await timed(() => ctx.get(`${v()}/switcher?q=${encodeURIComponent(`Note ${n}`)}`));
     expect(r1.ok()).toBeTruthy();
+    expect(await r1.json()).toEqual(expect.arrayContaining([expect.objectContaining({path: `bulk/note-${n}.md`})]));
     sw.push(a);
     const [b, r2] = await timed(() => ctx.post(`${v()}/search`, { data: { query: `Synthetic ${n}`, limit: 20 } }));
     expect(r2.ok()).toBeTruthy();
+    expect((await r2.json()).length).toBeGreaterThan(0);
     search.push(b);
     const [c, r3] = await timed(() => ctx.get(`${v()}/note?path=${encodeURIComponent(`bulk/note-${n}.md`)}`));
     expect(r3.ok()).toBeTruthy();
+    expect((await r3.json()).raw).toContain(`Synthetic note ${n}`);
     open.push(c);
   }
   console.log(`[vault-scale] p95 switcher=${percentile(sw, 95).toFixed(1)} search=${percentile(search, 95).toFixed(1)} open=${percentile(open, 95).toFixed(1)} ms`);

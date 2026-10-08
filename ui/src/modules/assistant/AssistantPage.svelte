@@ -54,14 +54,16 @@
   const selectedId = $derived.by(() => {
     if (routeThread) return routeThread;
     if (viewport.isPhone && tab === 'chat') return null;
-    return latestThreadId(threads, recallSelection('assistant'));
+    return recallSelection('assistant') ?? latestThreadId(threads, null);
   });
   const thread = $derived(assistant.thread(selectedId));
   $effect(() => {
     if (thread) rememberSelection('assistant', thread.id);
   });
-  // A thread id in the URL that isn't in the (loaded) list: say so, don't spin.
-  const missing = $derived(!!routeThread && listState === 'ready' && !thread);
+  $effect(() => {
+    if (selectedId) void assistant.loadSelectedThread(selectedId);
+  });
+  const selectedError = $derived(!!selectedId && assistant.selectedThreadId === selectedId && assistant.selectedThread.state === 'error' ? assistant.selectedThread.error : '');
 
   function open(id: string): void {
     router.go(`assistant/${id}`);
@@ -203,8 +205,9 @@
         {#if showMain}
           <section class="main" aria-label={tab === 'chat' ? 'Conversation' : TABS.find((t) => t.id === tab)?.label}>
             {#if tab === 'chat'}
-              {#if missing}
-                <EmptyState icon="assistant" title="This thread is gone" body="It may have been deleted, or it expired (incognito threads last 24 hours)." actionLabel="Open the latest thread" onaction={() => router.go('assistant')} />
+              {#if selectedError && !thread}
+                <LoadState variant="page" what="this thread" error={selectedError} empty onretry={() => { if (selectedId) void assistant.loadSelectedThread(selectedId); }} />
+                <button class="btn small" onclick={() => { const latest = latestThreadId(threads, null); if (latest) open(latest); }}>Open the latest thread</button>
               {:else if thread}
                 {#key thread.id}
                   <ChatView {thread} onopentasks={() => go('tasks')} onopenmemory={() => go('memory')} />

@@ -50,6 +50,7 @@
     if (selectorType === 'offset_range') {
       if (![partition, fromOffset, toOffset].every((n) => validInteger(n, 0))) return 'Partition and offsets must be non-negative whole numbers';
       if (toOffset < fromOffset) return '"To offset" must be at or after "From offset"';
+      if (toOffset - fromOffset >= 5000) return 'Select at most 5000 offsets per replay';
     }
     return null;
   });
@@ -73,15 +74,6 @@
       if (blockReason) toasts.error('Can’t replay yet', blockReason);
       return;
     }
-    const ok = await confirmProd({
-      env: cluster.environment,
-      verb: 'Replay',
-      title: cluster.environment === 'prod' ? 'Replay on production?' : 'Replay messages?',
-      where: `${cluster.name} · ${sourceTopic.trim()} → ${targetTopic.trim()}${cluster.read_only ? ' (read-only cluster)' : ''}`,
-      what: 'Produces the selected messages to the target topic.',
-      danger: guarded,
-    });
-    if (!ok) return;
 
     const body: Record<string, unknown> = {
       source_topic: sourceTopic.trim(),
@@ -97,14 +89,28 @@
       body['transform'] = transform;
     }
 
+    const clusterId = cluster.id;
+    const prior = result;
     running = true;
-    result = null;
     try {
-      result = await api.post<ReplayResp>(`/brokers/clusters/${cluster.id}/replay`, body);
-      toasts.success(
-        `Replay complete`,
-        `${plural(result.count, 'message')} replayed to "${result.target_topic}"`,
-      );
+      const ok = await confirmProd({
+        env: cluster.environment,
+        verb: 'Replay',
+        title: cluster.environment === 'prod' ? 'Replay on production?' : 'Replay messages?',
+        where: `${cluster.name} · ${body.source_topic} → ${body.target_topic}${cluster.read_only ? ' (read-only cluster)' : ''}`,
+        what: prior?.error
+          ? `${plural(prior.count, 'message')} already acknowledged in the previous replay. Retrying can duplicate messages, including a failed send whose outcome is unknown.`
+          : 'Produces the selected messages to the target topic.',
+        danger: guarded || !!prior?.error,
+      });
+      if (!ok) return;
+
+      result = await api.post<ReplayResp>(`/brokers/clusters/${clusterId}/replay`, body);
+      if (result.error) {
+        toasts.warn('Replay stopped', result.error);
+      } else {
+        toasts.success('Replay complete', `${plural(result.count, 'message')} replayed to "${result.target_topic}"`);
+      }
     } catch (e) {
       toastError('Couldn’t replay messages', e);
     } finally {
@@ -117,7 +123,7 @@
   <h5>DLQ / Replay</h5>
   <p class="muted small">
     Re-publish messages from a source topic (e.g. a dead-letter queue) to a target topic.
-    An evidence record is saved for auditing.
+    Select up to 5000 messages or offsets and 16 MiB per replay. An evidence record is saved for auditing.
   </p>
 
   <div class="form">
@@ -208,7 +214,8 @@
   <!-- Evidence table -->
   {#if result}
     <div class="evidence">
-      <h5>Evidence — replay {result.replay_id.slice(0, 8)}…</h5>
+      {#if result.error}<p role="alert" class="field-err">{result.error}</p>{/if}
+      <h5>{result.evidence_saved === false ? 'Unsaved evidence' : 'Evidence'} — replay {result.replay_id.slice(0, 8)}…</h5>
       <p class="muted small">
         {plural(result.count, 'message')} replayed
         from <code>{result.source_topic}</code> → <code>{result.target_topic}</code>

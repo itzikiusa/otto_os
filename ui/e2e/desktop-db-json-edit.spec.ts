@@ -10,7 +10,7 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 //   1. Grid: click a JSON cell → viewer → Edit → change → Save… → review shows
 //      updateOne → Run → re-query shows the new value.
 //   2. JSON view: per-document Edit → change a field → Save… → review shows
-//      replaceOne → Run → re-query shows the new value.
+//      updateOne → Run → re-query shows the new value.
 //   3. Vertical view: nested fields are rows — double-click `items.0.qty` →
 //      typed editor → pending → review shows the path diff + a dotted-path
 //      `$set` → Run → re-query shows the new value; the field menu's Delete
@@ -122,7 +122,8 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await runStatement(page, `db.${COLL}.find({})`);
   await expect(page.locator('.cell.json').first()).toContainText('"qty":5', { timeout: 20_000 });
 
-  // ── 2. JSON view: whole-document edit → replaceOne ──
+  // ── 2. Projected JSON edit must preserve undisplayed fields. ──
+  await runStatement(page, `db.${COLL}.find({}, {status: 1})`);
   await page.locator('.vs', { hasText: 'JSON' }).click();
   const rec = page.locator('.jrec').first();
   await expect(rec).toBeVisible();
@@ -132,14 +133,17 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await expect(docEd).toBeVisible();
   const draft = JSON.parse(await docEd.innerText()) as Record<string, unknown>;
   expect(draft.status).toBe('pending');
+  expect(draft).not.toHaveProperty('items');
   draft.status = 'paid';
   await docEd.fill(JSON.stringify(draft, null, 2));
   await page.locator('.cell-viewer .btn.primary', { hasText: 'Save' }).click();
-  await runReviewModal(page, ['replaceOne', '"status":"paid"']);
+  await runReviewModal(page, ['updateOne', '"status":"paid"']);
 
   await runStatement(page, `db.${COLL}.find({})`);
   await page.locator('.vs', { hasText: 'JSON' }).click();
   await expect(page.locator('.alt-json').first()).toContainText('paid', { timeout: 20_000 });
+  await expect(page.locator('.alt-json').first()).toContainText('items');
+  await expect(page.locator('.alt-json').first()).toContainText('qty');
 
   // Bad JSON is rejected inline (no review modal, error shown).
   await page.locator('.jrec').first().locator('[aria-label="Edit document"]').click();
@@ -153,6 +157,13 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await expect(discard).toContainText('Discard your changes to this document?');
   await discard.getByRole('button', { name: 'Discard', exact: true }).click();
   await expect(docEd).toHaveCount(0);
+
+  // A computed _id is not a document identity: never offer write actions.
+  await runStatement(page, `db.${COLL}.find({}, {_id: {$literal: "other-document"}, status: 1})`);
+  await expect(page.locator('.alt-json').first()).toContainText('other-document', { timeout: 20_000 });
+  await expect(page.locator('.edit-note')).toContainText('direct fields');
+  await expect(page.locator('[aria-label="Edit document"]')).toHaveCount(0);
+  await page.screenshot({path: 'e2e/.artifacts/r04-mongo-computed-identity-light.png'});
 
   // Cleanup the scratch collection.
   await runStatement(page, `db.${COLL}.deleteMany({})`);
@@ -279,4 +290,55 @@ test('Vertical: record menu → Insert document… reviews an insertOne', async 
   await expect(page.locator('.vrec')).toHaveCount(2, { timeout: 20_000 });
 
   await runStatement(page, `db.${COLL}.deleteMany({})`);
+});
+
+test('oversized nested Mongo values are explicitly read-only and safe projection restores editing', async ({ page }) => {
+  test.setTimeout(120_000);
+  expect(mongoConnId).not.toBeNull();
+  await page.addInitScript(() => {
+    localStorage.setItem('otto_theme', 'native');
+    localStorage.setItem('otto_scheme', 'dark');
+  });
+  const { ctx, base } = await apiCtx();
+  const collection = `${COLL}_capped`;
+  const query = async (statement: string) => {
+    const response = await ctx.post(`${base}/api/v1/connections/${mongoConnId}/db/query`, {data:{statement, node:'shopdb', mask:false}});
+    expect(response.ok(), await response.text()).toBeTruthy();
+    return response.json();
+  };
+  try {
+    await query(`db.${collection}.insertOne(${JSON.stringify({_id:'large', profile:{bio:'x'.repeat(1_048_576 + 7), name:'unchanged'}})})`);
+    const wire = await query(`db.${collection}.find({})`);
+    expect(wire.cells_truncated).toBe(true);
+    await openConn(page);
+    await runStatement(page, `db.${collection}.find({})`);
+    await expect(page.locator('.edit-note')).toContainText('shortened for display');
+    await page.locator('.view-seg .vs', {hasText:'Grid'}).click();
+    await page.locator('.cell.json').first().click();
+    const viewer = page.getByRole('dialog', {name:'Cell value'});
+    await expect(viewer).toBeVisible();
+    await expect(viewer.getByRole('button', {name:'Edit', exact:true})).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(viewer).toBeHidden();
+    await page.screenshot({path:'e2e/.artifacts/r04-mongo-truncated-dark.png'});
+    await page.locator('.view-seg .vs', {hasText:'JSON'}).click();
+    await expect(page.locator('[aria-label="Edit document"]')).toHaveCount(0);
+    // A complete, short projected field is still safe to edit.
+    await query(`db.${collection}.updateOne({_id:"large"}, {$set:{status:"before"}})`);
+    await runStatement(page, `db.${collection}.find({}, {status:1})`);
+    await expect(page.locator('[aria-label="Edit document"]')).toBeVisible();
+    await page.locator('[aria-label="Edit document"]').click();
+    const editor = page.locator('.cell-viewer .cv-edit .cm-content');
+    await expect(editor).toBeVisible();
+    await editor.fill('{"_id":"large", "status":"after"}');
+    await page.locator('.cell-viewer .btn.primary', {hasText:'Save'}).click();
+    await runReviewModal(page, ['updateOne', '"status":"after"']);
+    const verified = await query(`db.${collection}.aggregate([{$project:{_id:0, length:{$strLenCP:"$profile.bio"}, name:"$profile.name", status:1}}])`);
+    expect(verified.rows[0]).toContain(1_048_576 + 7);
+    expect(verified.rows[0]).toContain('unchanged');
+    expect(verified.rows[0]).toContain('after');
+  } finally {
+    await query(`db.${collection}.deleteMany({})`);
+    await ctx.dispose();
+  }
 });

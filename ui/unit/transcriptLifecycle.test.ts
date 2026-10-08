@@ -29,7 +29,7 @@ function setup(get?: (url: string, signal?: AbortSignal) => Promise<any>) {
 }
 test('reconnect resyncs leased views only, never a cached closed session or workspace', async () => {
   const h = setup(), closeA = h.acquire('a'), closeB = h.acquire('b'); await settle(); closeB(); h.gets.length = 0; h.posts.length = 0;
-  h.resync(); await settle(); assert.deepEqual(h.gets, ['/sessions/a/transcript?limit=60']); assert.deepEqual(h.posts, ['/sessions/a/transcript/touch']); closeA();
+  h.resync(); await settle(); assert.deepEqual(h.gets, ['/sessions/a/transcript?limit=60']); assert.deepEqual(h.posts, ['/sessions/a/transcript/touch?view=true']); closeA();
 });
 test('closing a pending GET prevents late touch and state publication', async () => {
   let finish!: (v: any) => void; const h = setup(() => new Promise(resolve => {finish = resolve;}));
@@ -343,4 +343,19 @@ test('a late collapsed read cannot publish over or release its reopened child re
     freshClose(); others.forEach(release => release()); ninthClose(); parent();
     pending.forEach(resolve => resolve(page())); await Promise.all([oldRead, freshRead, ...otherReads]);
   }
+});
+
+test('keepalive and recovery stay passive after an explicit active-view touch', async () => {
+  const h = setup(), close = h.acquire('a'); await settle();
+  assert.deepEqual(h.posts, ['/sessions/a/transcript/touch?view=true']);
+  h.posts.length = 0;
+  await h.store.peek('a').touch({view: false});
+  await h.store.peek('a').touch();
+  h.resync(); await settle();
+  assert.deepEqual(h.posts, [
+    '/sessions/a/transcript/touch?view=false',
+    '/sessions/a/transcript/touch?view=true',
+    '/sessions/a/transcript/touch?view=true',
+  ]);
+  close();
 });

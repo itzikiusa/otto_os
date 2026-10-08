@@ -27,10 +27,12 @@
   $effect(() => {
     // Re-run whenever the selected story changes.
     product.selectedId;
+    creating = false;
     void loadChats();
   });
 
   async function loadChats(): Promise<void> {
+    const current = product.captureSelection();
     // No story selected → nothing to load (avoid a "No story selected" error from
     // the store's story-scoped call).
     if (!product.selectedId) {
@@ -45,6 +47,7 @@
     activeCid = null;
     try {
       const list = await product.listDiscoveryChats();
+      if (!current()) return;
       // Newest first.
       chats = [...list].sort((a, b) => b.created_at.localeCompare(a.created_at));
       // Auto-select the first active chat if any.
@@ -53,33 +56,39 @@
         activeCid = first.id;
       }
     } catch (e) {
+      if (!current()) return;
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
   }
 
   // ── Create new chat ─────────────────────────────────────────────────────────
 
   async function createChat(): Promise<void> {
+    const current = product.captureSelection();
     if (creating) return;
     creating = true;
     try {
       const newChat = await product.createDiscoveryChat({});
+      if (!current()) return;
       chats = [newChat, ...chats];
       activeCid = newChat.id;
     } catch (e) {
+      if (!current()) return;
       toastError('Couldn’t create chat', e);
     } finally {
-      creating = false;
+      if (current()) creating = false;
     }
   }
 
   // ── Archive ──────────────────────────────────────────────────────────────────
 
   async function archiveChat(cid: string): Promise<void> {
+    const current = product.captureSelection();
     try {
       const updated = await product.archiveDiscoveryChat(cid);
+      if (!current()) return;
       chats = chats.map((c) => (c.id === cid ? updated : c));
       if (activeCid === cid) {
         // Switch away from an archived chat.
@@ -87,6 +96,7 @@
         activeCid = next?.id ?? null;
       }
     } catch (e) {
+      if (!current()) return;
       toastError('Couldn’t archive chat', e);
     }
   }

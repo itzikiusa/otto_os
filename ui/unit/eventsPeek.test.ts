@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { latestOnly } from '../src/lib/latest.ts';
 
 const SRC = new URL('../src/lib/', import.meta.url);
 
@@ -150,7 +151,8 @@ test('runWithOtto: a tick for a run the store holds nothing for, with no list lo
     events: async (id: string) => (gets.push(`events ${id}`), []),
   };
   const require = (p: string): unknown =>
-    p.endsWith('/api/runWithOtto') ? { runWithOttoApi }
+    p.endsWith('/latest') ? { latestOnly }
+      : p.endsWith('/api/runWithOtto') ? { runWithOttoApi }
       : p.endsWith('/loadError') ? { loadErrorText: String }
         : p.endsWith('/lazyModule') ? { announceModule() {} } : {};
   const $state = Object.assign((v: unknown) => v, { raw: (v: unknown) => v });

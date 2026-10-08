@@ -40,32 +40,43 @@
     untrack(() => {
       threads = [];
       activeTid = null;
+      creating = false;
+      selectedRunId = '';
+      discoveryRuns = [];
     });
     void loadThreads();
     void loadDiscoveryRuns();
   });
 
   async function loadThreads(): Promise<void> {
+    const current = product.captureSelection();
     loading = true;
     loadError = null;
     try {
-      threads = await product.listRefinementThreads();
+      const loaded = await product.listRefinementThreads();
+      if (!current()) return;
+      threads = loaded;
       // Auto-select the first active thread if nothing is selected yet.
       if (!activeTid && threads.length > 0) {
         const first = threads.find((t) => t.status === 'active') ?? threads[0];
         activeTid = first.id;
       }
     } catch (e) {
+      if (!current()) return;
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
   }
 
   async function loadDiscoveryRuns(): Promise<void> {
+    const current = product.captureSelection();
     try {
-      discoveryRuns = await product.listDiscoveryRuns();
+      const loaded = await product.listDiscoveryRuns();
+      if (!current()) return;
+      discoveryRuns = loaded;
     } catch {
+      if (!current()) return;
       // Discovery runs are optional context — ignore errors here.
       discoveryRuns = [];
     }
@@ -74,39 +85,47 @@
   // ── Create new thread ──────────────────────────────────────────────────────
 
   async function createThread(): Promise<void> {
+    const current = product.captureSelection();
     if (creating) return;
     creating = true;
     try {
       const newThread = await product.createRefinementThread({});
+      if (!current()) return;
       threads = [newThread, ...threads];
       activeTid = newThread.id;
     } catch (e) {
+      if (!current()) return;
       toastError('Couldn’t create thread', e);
     } finally {
-      creating = false;
+      if (current()) creating = false;
     }
   }
 
   async function createFromRun(): Promise<void> {
+    const current = product.captureSelection();
     if (!selectedRunId || creating) return;
     creating = true;
     try {
       const newThread = await product.createRefinementThread({ discovery_run_id: selectedRunId });
+      if (!current()) return;
       threads = [newThread, ...threads];
       activeTid = newThread.id;
       selectedRunId = '';
     } catch (e) {
+      if (!current()) return;
       toastError('Couldn’t create thread', e);
     } finally {
-      creating = false;
+      if (current()) creating = false;
     }
   }
 
   // ── Archive ────────────────────────────────────────────────────────────────
 
   async function archiveThread(tid: string): Promise<void> {
+    const current = product.captureSelection();
     try {
       const updated = await product.archiveRefinementThread(tid);
+      if (!current()) return;
       threads = threads.map((t) => (t.id === tid ? updated : t));
       if (activeTid === tid) {
         // Switch away from an archived thread.
@@ -114,6 +133,7 @@
         activeTid = next?.id ?? null;
       }
     } catch (e) {
+      if (!current()) return;
       toastError('Couldn’t archive thread', e);
     }
   }

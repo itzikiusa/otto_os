@@ -308,9 +308,13 @@ class VaultStore {
     this.backlinksLoading = false;
     this.backlinksError = '';
     this.loadingBacklinkContexts = false;
+    this.searchSeq++;
     this.searchHits = [];
     this.searchedQuery = '';
+    this.searching = false;
+    this.searchError = null;
     this.okfReport = null;
+    this.okfBusy = false;
     this.roots = [];
     this.docsRun = null;
     this.docsRuns = [];
@@ -411,6 +415,12 @@ class VaultStore {
     }
   }
 
+  /** A mutation may finish after the user has left and revisited this vault. */
+  private selectionOwner(): () => boolean {
+    const id = this.current?.id, workspace = this.wsId, generation = this.lookupGeneration;
+    return () => this.current?.id === id && this.wsId === workspace && this.lookupGeneration === generation;
+  }
+
   // -- vault management --------------------------------------------------------
 
   async create(name: string, rootPath: string | undefined, okf: boolean): Promise<void> {
@@ -436,11 +446,12 @@ class VaultStore {
 
   async toggleOkf(): Promise<void> {
     if (!this.current) return;
+    const current = this.selectionOwner();
     const on = !this.current.okf;
     try {
       const v = await patchVault(this.wsId, this.current.id, { okf: on });
       this.vaults = this.vaults.map((x) => (x.id === v.id ? v : x));
-      this.current = v;
+      if (current()) this.current = v;
     } catch (e) {
       toasts.error(on ? 'Couldn’t turn OKF mode on' : 'Couldn’t turn OKF mode off', msg(e));
     }
@@ -457,8 +468,11 @@ class VaultStore {
 
   async rescan(): Promise<void> {
     if (!this.current) return;
+    const current = this.selectionOwner();
     try {
-      this.status = await rescanVault(this.wsId, this.current.id);
+      const status = await rescanVault(this.wsId, this.current.id);
+      if (!current()) return;
+      this.status = status;
       await this.refreshTree();
       toasts.success('Vault rescanned');
     } catch (e) {
@@ -1015,6 +1029,7 @@ class VaultStore {
    *  rejection with no feedback. */
   async createNote(path: string, content: string): Promise<boolean> {
     if (!this.current) return false;
+    const current = this.selectionOwner();
     try {
       await writeVaultNote(this.wsId, this.current.id, { path, content, if_hash: '' });
     } catch (e) {
@@ -1024,20 +1039,23 @@ class VaultStore {
       );
       return false;
     }
+    if (!current()) return true;
     await this.refreshTree();
-    await this.open(path, { edit: true });
+    if (current()) await this.open(path, { edit: true });
     return true;
   }
 
   async createFolder(path: string): Promise<void> {
     if (!this.current) return;
+    const current = this.selectionOwner();
     await createVaultFolder(this.wsId, this.current.id, path);
-    await this.refreshTree();
+    if (current()) await this.refreshTree();
   }
 
   async rename(from: string, to: string): Promise<void> {
     if (!this.current) return;
-    if (!(await this.canLeaveNote())) return;
+    const current = this.selectionOwner();
+    if (!(await this.canLeaveNote()) || !current()) return;
     try {
       const r = await renameVaultPath(this.wsId, this.current.id, from, to);
       toasts.success(r.links_updated === 1 ? '1 link updated' : `${r.links_updated} links updated`);
@@ -1049,6 +1067,7 @@ class VaultStore {
           shown,
         );
       }
+      if (!current()) return;
       // Keep open tabs pointing at the moved path (file or whole folder).
       this.tabs = this.tabs.map((t) =>
         t.path === from
@@ -1071,9 +1090,11 @@ class VaultStore {
 
   async trash(path: string): Promise<void> {
     if (!this.current) return;
-    if (!(await this.canLeaveNote())) return;
+    const current = this.selectionOwner();
+    if (!(await this.canLeaveNote()) || !current()) return;
     try {
       await deleteVaultNote(this.wsId, this.current.id, path);
+      if (!current()) return;
       // Reversible (Trash and restore), so no confirm up front — the toast
       // says where it went and leads straight there.
       toasts.push('success', 'Moved to trash', path, 6000, {
@@ -1218,6 +1239,9 @@ class VaultStore {
     if (!this.current) return;
     const q = this.searchQuery.trim();
     if (!q) {
+      this.searchSeq++;
+      this.searching = false;
+      this.searchError = null;
       this.searchHits = [];
       this.searchedQuery = '';
       return;
@@ -1273,28 +1297,32 @@ class VaultStore {
 
   async validateOkf(): Promise<void> {
     if (!this.current) return;
+    const current = this.selectionOwner();
     this.okfBusy = true;
     try {
-      this.okfReport = await okfValidate(this.wsId, this.current.id);
+      const report = await okfValidate(this.wsId, this.current.id);
+      if (current()) this.okfReport = report;
     } catch (e) {
-      toasts.error('Couldn’t validate OKF', msg(e));
+      if (current()) toasts.error('Couldn’t validate OKF', msg(e));
     } finally {
-      this.okfBusy = false;
+      if (current()) this.okfBusy = false;
     }
   }
 
   async generateIndexes(): Promise<void> {
     if (!this.current) return;
+    const current = this.selectionOwner();
     this.okfBusy = true;
     try {
       const r = await okfIndexes(this.wsId, this.current.id);
       toasts.success(`${r.written} index.md files written`);
+      if (!current()) return;
       await this.refreshTree();
-      await this.validateOkf();
+      if (current()) await this.validateOkf();
     } catch (e) {
-      toasts.error('Couldn’t generate OKF indexes', msg(e));
+      if (current()) toasts.error('Couldn’t generate OKF indexes', msg(e));
     } finally {
-      this.okfBusy = false;
+      if (current()) this.okfBusy = false;
     }
   }
 }

@@ -13,6 +13,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import { invalidatePr } from './pr-cache';
 
   interface Props {
     repoId: string;
@@ -55,6 +56,7 @@
     error = null;
     try {
       remotes = await api.post<RemoteInfo[]>(`/repos/${repoId}/remotes`, req);
+      if (req.name === 'origin') invalidatePr(repoId);
       loadFailed = false;
       toasts.success(label, req.name);
     } catch (e) {

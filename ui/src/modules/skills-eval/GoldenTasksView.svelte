@@ -28,6 +28,7 @@
   let showForm = $state(false);
   let editingId: string | null = $state(null);
   let saving = $state(false);
+  let formGeneration = 0;
   let fName = $state('');
   let fPrompt = $state('');
   let fSkill = $state('');
@@ -49,15 +50,19 @@
     }
   });
 
+  let listGeneration = 0;
   async function load(wsId: string): Promise<void> {
+    const generation = ++listGeneration;
     loading = true;
     loadError = null;
     try {
-      tasks = await skillsEvalApi.listGolden(wsId);
+      const next = await skillsEvalApi.listGolden(wsId);
+      if (ws.currentId !== wsId || generation !== listGeneration) return;
+      tasks = next;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (ws.currentId === wsId && generation === listGeneration) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (ws.currentId === wsId && generation === listGeneration) loading = false;
     }
   }
 
@@ -83,6 +88,7 @@
   }
 
   function resetFields(): void {
+    formGeneration++;
     fName = '';
     fPrompt = '';
     fSkill = '';
@@ -102,6 +108,7 @@
   }
 
   function openEdit(t: GoldenTask): void {
+    formGeneration++;
     editingId = t.id;
     fName = t.name;
     fPrompt = t.prompt;
@@ -123,6 +130,8 @@
     if (!wsId || saving) return;
     // Save stays disabled until both are filled (see canSave).
     if (!fName.trim() || !fPrompt.trim()) return;
+    const id = editingId;
+    const generation = formGeneration;
     saving = true;
     const body: GoldenTaskReq = {
       name: fName.trim(),
@@ -133,16 +142,18 @@
       rubric: fRubric.trim() || undefined,
     };
     try {
-      if (editingId) {
-        const updated = await skillsEvalApi.updateGolden(editingId, body);
+      if (id) {
+        const updated = await skillsEvalApi.updateGolden(id, body);
+        if (ws.currentId !== wsId) return;
         tasks = tasks.map((t) => (t.id === updated.id ? updated : t));
         toasts.success('Golden task updated', updated.name);
       } else {
         const created = await skillsEvalApi.createGolden(wsId, body);
+        if (ws.currentId !== wsId) return;
         tasks = [created, ...tasks];
         toasts.success('Golden task added', created.name);
       }
-      closeForm();
+      if (generation === formGeneration) closeForm();
     } catch (e) {
       toastError('Couldn’t save the golden task', e);
     } finally {
@@ -152,12 +163,14 @@
 
   async function run(t: GoldenTask): Promise<void> {
     if (runningId) return;
+    const workspace = ws.currentId;
     runningId = t.id;
     try {
       const result = await skillsEvalApi.runGolden(t.id, {
         mode: 'score_only',
         target: { kind: 'working' },
       });
+      if (ws.currentId !== workspace) return;
       onopenrun?.(result);
       toasts.success('Evaluation started', `Scoring “${t.name}” against the working tree.`);
     } catch (e) {

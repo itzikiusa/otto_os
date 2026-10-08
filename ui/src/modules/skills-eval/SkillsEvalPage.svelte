@@ -170,11 +170,14 @@
     }
   });
 
+  let listGeneration = 0;
   async function loadList(wsId: string): Promise<void> {
+    const generation = ++listGeneration;
     loading = true;
     loadError = null;
     try {
       const page = await skillsEvalApi.listSummaries(wsId, { limit: PAGE });
+      if (generation !== listGeneration || ws.currentId !== wsId) return;
       runs = page.items;
       nextCursor = page.next_cursor;
       // Default to the newest run's detail if one exists; else the start form.
@@ -183,9 +186,9 @@
         mode = 'detail';
       }
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (generation === listGeneration && ws.currentId === wsId) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (generation === listGeneration && ws.currentId === wsId) loading = false;
     }
   }
 
@@ -224,6 +227,7 @@
     starting = true;
     try {
       const created = await skillsEvalApi.start(wsId, req);
+      if (ws.currentId !== wsId) return;
       runs = [toSummary(created), ...runs];
       formSkill = null;
       selectedId = created.id;

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { toastError } from '../../lib/toastError';
   // One "Import" sheet for every way in: paste a curl command (opens it as a
   // request tab), a Postman / OpenAPI / HAR file (becomes a collection), or a
   // whole Postman account (every collection + environment via the Postman API).
@@ -8,8 +7,6 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { toasts } from '../../lib/toast.svelte';
-  import { detectAndParse } from '../../lib/api/importers';
 
   type Mode = 'curl' | 'file' | 'postman';
   interface Props {
@@ -53,11 +50,7 @@
     // Close right away — folders + requests are created one by one and the
     // result is reported with a toast.
     onclose();
-    try {
-      await apiClient.importParsed(detectAndParse(await file.text(), file.name));
-    } catch (e) {
-      toastError('Couldn’t import the file', e);
-    }
+    await apiClient.importFile(file);
   }
 
   async function syncPostman(): Promise<void> {

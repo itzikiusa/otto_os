@@ -19,6 +19,7 @@ import type {
   AssistantTask,
   AssistantTaskAction,
   AssistantThread,
+  AssistantThreadQuery,
   AssistantTurn,
   CreateAssistantThreadReq,
   UpdateAssistantThreadReq,
@@ -27,7 +28,10 @@ import type {
 const enc = encodeURIComponent;
 
 export const assistantApi = {
-  threads: () => api.get<AssistantThread[]>('/assistant/threads'),
+  threads: (offset = 0, limit = 100) => {
+    const query: AssistantThreadQuery = { offset, limit };
+    return api.get<AssistantThread[]>(`/assistant/threads?offset=${query.offset}&limit=${query.limit}`);
+  },
   thread: (id: string) => api.get<AssistantThread>(`/assistant/threads/${enc(id)}`),
   createThread: (body: CreateAssistantThreadReq) => api.post<AssistantThread>('/assistant/threads', body),
   updateThread: (id: string, body: UpdateAssistantThreadReq) => api.patch<AssistantThread>(`/assistant/threads/${enc(id)}`, body),

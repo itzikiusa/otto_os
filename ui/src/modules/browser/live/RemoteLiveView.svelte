@@ -167,7 +167,10 @@
     try {
       const vp = currentViewport();
       // Opens the session, or re-attaches to this user's existing one.
-      const s = await liveApi.openLive(t.id, { viewport: vp, url: t.url || undefined });
+      // The daemon uses the saved tab URL for a NEW session. Sending an
+      // explicit URL while re-attaching navigates the existing session and
+      // discards the page's form/scroll state after every socket reconnect.
+      const s = await liveApi.openLive(t.id, { viewport: vp });
       if (mine !== gen) return;
       lastViewport = vp;
       session = s;

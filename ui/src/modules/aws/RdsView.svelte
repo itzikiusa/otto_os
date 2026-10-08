@@ -98,7 +98,7 @@
   const drawerInst = $derived.by(() => {
     const d = detail;
     if (!d) return null;
-    return instances?.find((i) => i.identifier === d.inst.identifier) ?? d.inst;
+    return instances?.find((i) => i.identifier === d.inst.identifier && rowRegion(i) === d.inst.region) ?? d.inst;
   });
 
   function statusTone(status: string): BadgeTone {
@@ -108,15 +108,18 @@
     return 'warn';
   }
 
+  let detailRequest = 0;
   async function openDetail(i: RdsInstance): Promise<void> {
-    if (detail?.inst.identifier !== i.identifier) drawerTab = 'overview';
-    detail = { inst: i, full: null, error: '' };
+    const request = ++detailRequest;
+    const inst = { ...i, region: rowRegion(i) };
+    if (detail?.inst.identifier !== inst.identifier || detail.inst.region !== inst.region) drawerTab = 'overview';
+    detail = { inst, full: null, error: '' };
     try {
-      const d = await awsApi.rdsInstance(account.id, i.identifier, rowRegion(i));
-      if (detail?.inst.identifier === i.identifier) detail = { inst: i, full: d, error: '' };
+      const full = await awsApi.rdsInstance(account.id, inst.identifier, inst.region);
+      if (request === detailRequest && detail) detail = { inst, full, error: '' };
     } catch (e) {
-      if (detail?.inst.identifier === i.identifier)
-        detail = { inst: i, full: null, error: e instanceof Error ? e.message : String(e) };
+      if (request === detailRequest && detail)
+        detail = { inst, full: null, error: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -185,7 +188,7 @@
         {#each shown as i (`${i.region ?? ''}/${i.identifier}`)}
           <tr use:rowMenu
             class="trow"
-            class:sel={detail?.inst.identifier === i.identifier}
+            class:sel={detail?.inst.identifier === i.identifier && detail.inst.region === rowRegion(i)}
             tabindex="0"
             onclick={() => void openDetail(i)}
             onkeydown={(e) => { if (e.key === 'Enter') void openDetail(i); }}

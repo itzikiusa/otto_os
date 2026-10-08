@@ -18,6 +18,21 @@ test('late callbacks from a replaced socket cannot mutate current stream',()=>{
   sockets[1].onopen();assert.match(sockets[1].url,/workspace_id=B/);
   assert.equal(JSON.parse(sockets[1].sent[0]).request.url,req.url);
 });
+test('switching request tabs closes the previous relay and clears its console',()=>{
+  const {v,sockets}=setup();
+  v.connect('A','websocket',{url:'https://a.test',method:'GET',headers:[]},'tab-a');
+  sockets[0].onopen();
+  sockets[0].onmessage({data:JSON.stringify({type:'open',detail:'A'})});
+  sockets[0].onmessage({data:JSON.stringify({type:'message',data:'only A'})});
+  v.retainOwner('A','tab-b');
+  assert.equal(v.active,false);
+  assert.equal(v.items.length,0);
+  const before=sockets[0].sent.length;
+  v.send('must not reach A');
+  assert.equal(sockets[0].sent.length,before);
+  sockets[0].onmessage({data:JSON.stringify({type:'message',data:'late A'})});
+  assert.equal(v.items.length,0);
+});
 test('stream console retains a bounded tail and counts discarded messages',()=>{
  const {v,sockets}=setup();v.connect('A','sse',{url:'https://example.test',method:'GET',headers:[]});
  for(let n=0;n<2100;n++) sockets[0].onmessage({data:JSON.stringify({type:'event',data:String(n)})});

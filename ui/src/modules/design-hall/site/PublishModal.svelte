@@ -124,7 +124,7 @@
     if (!local) return;
     try {
       await navigator.clipboard.writeText(local.url);
-      toasts.success('Preview address copied', 'It needs your Otto sign-in and only works on this Mac.');
+      toasts.success('Preview address copied', onNetwork ? 'It needs your Otto sign-in and design access; devices on your network can reach it.' : 'It needs your Otto sign-in and only works on this Mac.');
     } catch {
       toasts.warn('Couldn’t copy the address', local.url);
     }

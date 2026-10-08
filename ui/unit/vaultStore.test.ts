@@ -310,3 +310,55 @@ test('S18-22: agent-staged text is never written as a recovery draft', async () 
   assert.ok(!stored.some(([, val]) => val.includes('agent proposal')), JSON.stringify(stored));
   v.holdAutosave = false;
 });
+
+test('completed OKF toggle never selects its old vault over the current one', async () => {
+  const pending = deferred<unknown>();
+  const v = setup({patchVault: () => pending.promise});
+  v.vaults = [{id: 1, okf: false}, {id: 2, okf: false}];
+  const toggling = v.toggleOkf();
+  v.current = v.vaults[1];
+  pending.resolve({id: 1, okf: true});
+  await toggling;
+  assert.equal(v.current.id, 2);
+  assert.equal(v.vaults[0].okf, true, 'the global library still reflects the completed mutation');
+});
+
+test('rename response cannot rename another vault tabs at the same path', async () => {
+  const pending = deferred<unknown>();
+  const started = deferred<void>();
+  const v = setup({renameVaultPath: () => { started.resolve(); return pending.promise; }});
+  v.dirty = false;
+  const renaming = v.rename('a.md', 'renamed.md');
+  await started.promise;
+  v.current = {id: 2};
+  pending.resolve({links_updated: 0});
+  await renaming;
+  assert.equal(v.tabs[0].path, 'a.md');
+  assert.equal(v.notePath, 'a.md');
+});
+
+test('create note response cannot navigate the newly selected vault', async () => {
+  const pending = deferred<unknown>();
+  const v = setup({writeVaultNote: () => pending.promise});
+  v.dirty = false;
+  const creating = v.createNote('new.md', 'new text');
+  v.current = {id: 2};
+  pending.resolve(note('new.md').meta);
+  await creating;
+  assert.equal(v.notePath, 'a.md');
+  assert.equal(v.tabs[0].path, 'a.md');
+});
+
+test('clearing search invalidates an earlier pending response and busy state', async () => {
+  const pending = deferred<unknown>();
+  const v = setup({vaultSearch: () => pending.promise});
+  v.searchQuery = 'old';
+  const searching = v.runSearch();
+  v.searchQuery = '';
+  await v.runSearch();
+  pending.resolve([{path: 'old.md'}]);
+  await searching;
+  assert.equal(v.searchHits.length, 0);
+  assert.equal(v.searchedQuery, '');
+  assert.equal(v.searching, false);
+});

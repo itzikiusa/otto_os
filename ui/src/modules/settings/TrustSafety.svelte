@@ -264,6 +264,9 @@
           <div class="card-note">
             {posture.network_listener ? 'Reachable from your network' : 'Only this Mac can connect'} ·
             <button class="link-btn" onclick={() => router.go('settings/daemon')}>Daemon settings</button>
+            {#if posture.network_listener_restart_required}
+              <div>Saved settings differ. Restart the daemon to apply them; if this persists, check daemon logs.</div>
+            {/if}
           </div>
         </div>
         <div class="card">

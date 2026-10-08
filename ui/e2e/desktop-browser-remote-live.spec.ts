@@ -398,12 +398,21 @@ test('approval: an agent’s held request shows where / what / who and records t
 });
 
 test('reconnects after a dropped socket; a closed session offers Reconnect', async ({ page }) => {
+  const attachBodies: Record<string, unknown>[] = [];
+  page.on('request', (req) => {
+    if (req.method() === 'POST' && req.url().endsWith(`/browser/tabs/${tabId}/live`)) attachBodies.push(req.postDataJSON());
+  });
   const live = await mockLive(page, tabId, wsId);
   await openLive(page);
   await live.socket()!.close({ code: 1011, reason: 'boom' });
   await expect(page.getByTestId('remote-live')).toHaveAttribute('data-status', /reconnecting|connecting|live/);
   await expect.poll(() => live.opens(), { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
   await expect(page.getByTestId('remote-live')).toHaveAttribute('data-status', 'live', { timeout: 10_000 });
+  expect(attachBodies.length).toBeGreaterThanOrEqual(2);
+  for (const body of attachBodies) {
+    expect(body).not.toHaveProperty('url'); // explicit URL forces a page navigation on re-attach
+    expect(body).toHaveProperty('viewport');
+  }
 
   live.push({ type: 'closed', reason: 'idle' });
   const ended = page.getByTestId('live-ended');

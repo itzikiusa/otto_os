@@ -278,10 +278,15 @@
   async function pickFile(i: number, input: HTMLInputElement): Promise<void> {
     const file = input.files?.[0];
     if (!file) return;
+    const owner = apiClient.draft;
+    const wid = ws.currentId;
+    const row = formRows[i];
+    const current = () => ws.currentId === wid && apiClient.draft === owner && formRows[i] === row;
     try {
-      updateFormRow(i, { value: await fileToBase64(file), filename: file.name });
+      const value = await fileToBase64(file);
+      if (current()) updateFormRow(i, { value, filename: file.name });
     } catch {
-      toasts.error('Couldn’t read the file', file.name);
+      if (current()) toasts.error('Couldn’t read the file', file.name);
     }
   }
   function fileToBase64(file: File): Promise<string> {
@@ -478,27 +483,35 @@
   async function onProtoFile(input: HTMLInputElement): Promise<void> {
     const f = input.files?.[0];
     if (!f) return;
-    const text = await f.text();
-    apiClient.draft = { ...apiClient.draft, proto: text, grpc_method: '' };
-    grpcServices = [];
-    await parseProto();
+    const owner = apiClient.draft;
+    const wid = ws.currentId;
+    const current = () => ws.currentId === wid && apiClient.draft === owner;
+    try {
+      const text = await f.text();
+      if (!current()) return;
+      apiClient.draft = { ...owner, proto: text, grpc_method: '' };
+      grpcServices = [];
+      await parseProto();
+    } catch {
+      if (current()) toasts.error('Couldn’t read the file', f.name);
+    }
   }
   async function parseProto(): Promise<void> {
     const wid = ws.currentId;
     if (!wid) return;
     if (!draft.proto?.trim()) { toasts.error('No .proto file', 'Upload a .proto file first.'); return; }
-    const tabId = draft.tabId;
-    const proto = draft.proto;
+    const owner = apiClient.draft;
+    const current = () => ws.currentId === wid && apiClient.draft === owner;
     grpcParsing = true;
     try {
       const res = await api.post<{ services: GrpcService[] }>(`/workspaces/${wid}/api-client/grpc/describe`, { proto: draft.proto });
-      if (ws.currentId !== wid || apiClient.draft.tabId !== tabId || apiClient.draft.proto !== proto) return;
+      if (!current()) return;
       grpcServices = res.services;
       const first = res.services.find((s) => s.methods.length);
       if (first && !draft.grpc_method) selectGrpcMethod(first.methods[0]);
       toasts.success('Read the .proto file', `${res.services.length} service(s)`);
     } catch (e) {
-      toastError('Couldn’t read the .proto file', e);
+      if (current()) toastError('Couldn’t read the .proto file', e);
     } finally {
       grpcParsing = false;
     }
@@ -508,19 +521,20 @@
     const wid = ws.currentId;
     if (!wid) return;
     if (!draft.url.trim()) { toasts.error('Enter the server URL first', 'Reflection asks the gRPC server for its services.'); return; }
-    const tabId = draft.tabId;
+    // Clear the uploaded schema before capturing the draft that owns this load.
+    apiClient.draft = { ...apiClient.draft, proto: '' };
+    const owner = apiClient.draft;
+    const current = () => ws.currentId === wid && apiClient.draft === owner;
     grpcReflecting = true;
     try {
-      // Reflection-based: clear any uploaded proto so invoke uses reflection too.
-      apiClient.draft = { ...apiClient.draft, proto: '' };
       const res = await api.post<{ services: GrpcService[] }>(`/workspaces/${wid}/api-client/grpc/reflect`, { url: draft.url, headers: draft.headers.filter((h) => h.enabled !== false && h.key.trim() !== '') });
-      if (ws.currentId !== wid || apiClient.draft.tabId !== tabId) return;
+      if (!current()) return;
       grpcServices = res.services;
       const first = res.services.find((s) => s.methods.length);
       if (first) selectGrpcMethod(first.methods[0]);
       toasts.success('Loaded services from the server', `${res.services.length} service(s)`);
     } catch (e) {
-      toastError('Couldn’t read server reflection', e);
+      if (current()) toastError('Couldn’t read server reflection', e);
     } finally {
       grpcReflecting = false;
     }
@@ -555,9 +569,7 @@
   }
 
   $effect(() => {
-    if (apiStream.workspaceId && apiStream.workspaceId !== ws.currentId) {
-      apiStream.disconnect(); apiStream.clear();
-    }
+    apiStream.retainOwner(ws.currentId, draft.tabId);
   });
 
   // ── actions ────────────────────────────────────────────────────────────────
@@ -576,7 +588,7 @@
           follow_redirects: draft.settings?.follow_redirects ?? true,
           verify_ssl: draft.settings?.verify_ssl ?? true,
           ssh_connection_id: draft.ssh_connection_id ?? null,
-        });
+        }, draft.tabId);
         break;
     }
   }

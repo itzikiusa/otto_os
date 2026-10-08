@@ -15,6 +15,7 @@ import type {
   OttoRun,
   RunEvent,
 } from '../api/types';
+import { latestOnly } from '../latest';
 import { announceModule } from '../lazyModule';
 
 class RunWithOttoStore {
@@ -32,6 +33,12 @@ class RunWithOttoStore {
   /** The run id whose detail panel is open, or null. */
   openId: string | null = $state(null);
   private wsId = '';
+  private workspaceGeneration = 0;
+  private listSeq = latestOnly();
+  private requestSeq = 0;
+  private runRequests = new Map<string, number>();
+  private eventRequests = new Map<string, number>();
+  private mutations = new Map<string, number>();
 
   /** The open run's record, if any (the detail panel reads this). */
   get openRun(): OttoRun | null {
@@ -40,29 +47,45 @@ class RunWithOttoStore {
 
   async loadList(workspaceId: string): Promise<void> {
     // Another workspace's runs are not "stale data" for this one.
-    if (this.wsId !== workspaceId) this.list = [];
+    if (this.wsId !== workspaceId) {
+      this.workspaceGeneration++;
+      this.list = [];
+      this.byId = {};
+      this.eventsByRun = {};
+      this.eventsError = {};
+      this.openId = null;
+      this.runRequests.clear();
+      this.eventRequests.clear();
+      this.mutations.clear();
+    }
+    const ticket = this.listSeq.begin();
+    const started = this.requestSeq;
     this.wsId = workspaceId;
     this.loadingList = true;
     try {
       const runs = await runWithOttoApi.list(workspaceId);
       // A slower load for a workspace we've since left must not land here.
-      if (this.wsId !== workspaceId) return;
-      this.list = runs;
+      if (!ticket.current) return;
+      this.list = runs.map((run) => (this.runRequests.get(run.id) ?? 0) > started && this.byId[run.id] ? this.byId[run.id] : run);
       const next = { ...this.byId };
-      for (const r of runs) next[r.id] = r;
+      for (const r of this.list) next[r.id] = r;
       this.byId = next;
       this.listError = null;
     } catch (e) {
-      if (this.wsId === workspaceId) this.listError = loadErrorText(e);
+      if (ticket.current) this.listError = loadErrorText(e);
     } finally {
-      if (this.wsId === workspaceId) this.loadingList = false;
+      if (ticket.current) this.loadingList = false;
     }
   }
 
   /** Re-fetch a single run into the cache + patch it in the list in place. */
   async refreshRun(id: string): Promise<void> {
+    const generation = this.workspaceGeneration;
+    const request = ++this.requestSeq;
+    this.runRequests.set(id, request);
     try {
       const run = await runWithOttoApi.get(id);
+      if (generation !== this.workspaceGeneration || this.runRequests.get(id) !== request) return;
       this.byId = { ...this.byId, [id]: run };
       this.list = this.list.map((r) => (r.id === id ? run : r));
     } catch {
@@ -81,31 +104,46 @@ class RunWithOttoStore {
   }
 
   async loadEvents(id: string): Promise<void> {
+    const generation = this.workspaceGeneration;
+    const request = ++this.requestSeq;
+    this.eventRequests.set(id, request);
+    const current = () => generation === this.workspaceGeneration && this.eventRequests.get(id) === request;
     try {
-      this.eventsByRun = { ...this.eventsByRun, [id]: await runWithOttoApi.events(id) };
+      const events = await runWithOttoApi.events(id);
+      if (!current()) return;
+      this.eventsByRun = { ...this.eventsByRun, [id]: events };
       const { [id]: _drop, ...rest } = this.eventsError;
       this.eventsError = rest;
     } catch (e) {
-      this.eventsError = { ...this.eventsError, [id]: loadErrorText(e) };
+      if (current()) this.eventsError = { ...this.eventsError, [id]: loadErrorText(e) };
     }
   }
 
   async launch(workspaceId: string, body: LaunchRunReq): Promise<OttoRun> {
+    const generation = this.workspaceGeneration;
     const run = await runWithOttoApi.launch(workspaceId, body);
+    if (generation !== this.workspaceGeneration || workspaceId !== this.wsId) return run;
     this.byId = { ...this.byId, [run.id]: run };
     await this.loadList(workspaceId);
     return run;
   }
 
   async approve(id: string, body: ApproveRunReq): Promise<void> {
-    const run = await runWithOttoApi.approve(id, body);
-    this.byId = { ...this.byId, [id]: run };
-    this.list = this.list.map((r) => (r.id === id ? run : r));
-    void this.loadEvents(id);
+    await this.mutate(id, () => runWithOttoApi.approve(id, body));
   }
 
   async cancel(id: string): Promise<void> {
-    const run = await runWithOttoApi.cancel(id);
+    await this.mutate(id, () => runWithOttoApi.cancel(id));
+  }
+
+  private async mutate(id: string, action: () => Promise<OttoRun>): Promise<void> {
+    const generation = this.workspaceGeneration;
+    const request = ++this.requestSeq;
+    this.mutations.set(id, request);
+    const run = await action();
+    if (generation !== this.workspaceGeneration || this.mutations.get(id) !== request) return;
+    // Reads started before the confirmed action cannot restore its old status.
+    this.runRequests.set(id, ++this.requestSeq);
     this.byId = { ...this.byId, [id]: run };
     this.list = this.list.map((r) => (r.id === id ? run : r));
     void this.loadEvents(id);
@@ -113,7 +151,9 @@ class RunWithOttoStore {
 
   /** Open the drafted PR for a run, then re-fetch it so `pr_url` shows. */
   async openPr(id: string): Promise<void> {
+    const generation = this.workspaceGeneration;
     await runWithOttoApi.openPr(id);
+    if (generation !== this.workspaceGeneration) return;
     await this.refreshRun(id);
     void this.loadEvents(id);
   }

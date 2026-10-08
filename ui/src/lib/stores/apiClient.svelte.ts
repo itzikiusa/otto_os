@@ -1040,6 +1040,17 @@ class ApiClientStore {
   /** Create a collection (+ nested folders + requests) from an imported doc.
    *  A Postman ENVIRONMENT export routes to {@link importEnvironment} instead.
    *  `quiet` suppresses the per-item success toast (bulk account sync). */
+  /** File reads outlive the import sheet; keep their destination workspace. */
+  async importFile(file: Pick<File, 'name' | 'text'>): Promise<void> {
+    const current = this.workspaceOwner();
+    try {
+      const text = await file.text();
+      if (current()) await this.importParsed(detectAndParse(text, file.name));
+    } catch (error) {
+      if (current()) toasts.error('Couldn’t import the file', errMsg(error));
+    }
+  }
+
   async importParsed(parsed: ImportedDoc, quiet = false): Promise<void> {
     if (ws.myRole === 'viewer') {
       toasts.error('Read-only', 'You have viewer access to this workspace');
@@ -1513,8 +1524,18 @@ class ApiClientStore {
   }
 
   /** Introspected GraphQL schema (types + fields), or null. */
-  graphqlSchema: { name: string; kind: string; fields: string[] }[] | null = $state(null);
+  private graphqlLoaded: {
+    wid: Id | null; tabId?: string; url: string; auth: ApiAuth; environmentId: Id | null;
+    types: { name: string; kind: string; fields: string[] }[];
+  } | null = $state.raw(null);
+  get graphqlSchema(): { name: string; kind: string; fields: string[] }[] | null {
+    const loaded = this.graphqlLoaded;
+    return loaded && loaded.wid === this.wsId() && loaded.tabId === this.draft.tabId
+      && loaded.url === this.draft.url && loaded.auth === this.draft.auth
+      && loaded.environmentId === (this.activeEnv?.id ?? null) ? loaded.types : null;
+  }
   graphqlIntrospecting = $state(false);
+  private graphqlGeneration = 0;
 
   /** Run a GraphQL introspection query against the draft URL. */
   async graphqlIntrospect(): Promise<void> {
@@ -1523,25 +1544,32 @@ class ApiClientStore {
       toasts.error('No URL', 'Enter the GraphQL endpoint URL first.');
       return;
     }
+    const ownsWorkspace = this.workspaceOwner();
+    const draft = this.draft;
+    const environmentId = this.activeEnv?.id ?? null;
+    const generation = ++this.graphqlGeneration;
+    const current = () => ownsWorkspace() && this.draft === draft
+      && (this.activeEnv?.id ?? null) === environmentId && this.graphqlGeneration === generation;
     const q = `query{__schema{queryType{name}mutationType{name}types{name kind fields{name}}}}`;
     this.graphqlIntrospecting = true;
     try {
       const resp = await api.long.post<ApiResponse>(`${base}/execute`, {
-        method: 'POST', url: this.draft.url,
+        method: 'POST', url: draft.url,
         headers: [{ key: 'Content-Type', value: 'application/json', enabled: true }],
         query: [], body_mode: 'json', body: JSON.stringify({ query: q }),
-        auth: this.draft.auth, environment_id: this.activeEnv?.id ?? null,
+        auth: draft.auth, environment_id: environmentId,
       });
+      if (!current()) return;
       const data = JSON.parse(resp.body) as { data?: { __schema?: { types?: { name: string; kind: string; fields?: { name: string }[] }[] } } };
       const types = (data.data?.__schema?.types ?? [])
         .filter((t) => !t.name.startsWith('__') && (t.kind === 'OBJECT' || t.kind === 'INPUT_OBJECT' || t.kind === 'ENUM' || t.kind === 'INTERFACE'))
         .map((t) => ({ name: t.name, kind: t.kind, fields: (t.fields ?? []).map((f) => f.name) }));
-      this.graphqlSchema = types;
+      this.graphqlLoaded = {wid: this.wsId(), tabId: draft.tabId, url: draft.url, auth: draft.auth, environmentId, types};
       toasts.success('Schema introspected', `${types.length} types`);
     } catch (e) {
-      toasts.error('Couldn’t introspect the schema', errMsg(e));
+      if (current()) toasts.error('Couldn’t introspect the schema', errMsg(e));
     } finally {
-      this.graphqlIntrospecting = false;
+      if (this.graphqlGeneration === generation) this.graphqlIntrospecting = false;
     }
   }
 
@@ -1550,9 +1578,11 @@ class ApiClientStore {
   /** Parse a curl command (daemon) and fill the draft with the result. */
   async importCurl(curl: string): Promise<boolean> {
     if (!curl.trim()) return false;
+    const current = this.workspaceOwner();
     const req: ImportCurlReq = { curl };
     try {
       const p = await api.post<ParsedCurl>('/api-client/import-curl', req);
+      if (!current()) return false;
       // Fills the current tab only while it holds nothing unsaved; otherwise
       // the import opens in a new tab (placeDraft).
       this.placeDraft({
@@ -1573,6 +1603,7 @@ class ApiClientStore {
       toasts.success('Imported curl', `${p.method} ${p.url}`);
       return true;
     } catch (e) {
+      if (!current()) return false;
       toasts.error('Couldn’t import curl', errMsg(e));
       return false;
     }
@@ -1723,6 +1754,7 @@ class ApiClientStore {
 
   /** The in-flight `runAutomation` loop's wake-up, armed while it waits. */
   private runWake: { runId: Id; wake: (final: boolean) => void } | null = null;
+  private runGeneration = 0;
 
   /** Progress that arrived while no waiter was armed (the delta GET was in
    *  flight) — latched so the loop doesn't sleep through it (perf2 N3). */
@@ -1793,21 +1825,27 @@ class ApiClientStore {
   }
   async runAutomation(id: Id, options: StartApiAutomationRunReq = {}): Promise<ApiRunResult | null> {
     const base = this.base(); if (!base) return null;
+    const ownsWorkspace = this.workspaceOwner();
+    const generation = ++this.runGeneration;
+    const current = () => ownsWorkspace() && this.runGeneration === generation;
+    this.runWake?.wake(true);
     this.running = true;
     try {
       let run = await api.post<ApiAutomationRun>(`${base}/automations/${id}/runs`,options);
+      if (!current()) return null;
       this.currentRun = run; this.lastRun = run.report;
       this.runPending = null;
       let lastFetch = 0;
-      while (base === this.base()) {
+      while (current()) {
         if (run.status !== 'running') {void this.loadAutomationRuns(id); return run.report;}
         await this.waitRunProgress(run.id, lastFetch);
-        if (base !== this.base()) break;
+        if (!current()) break;
         // Delta poll: only the steps after the ones we have (+ status); the
         // snapshot is not re-sent. Nothing new → no reassignment, no re-render.
         const have = run.report.steps.length;
         lastFetch = performance.now();
         const delta = await api.get<ApiAutomationRun>(`${base}/automation-runs/${run.id}?after=${have}`);
+        if (!current()) return null;
         if (delta.report.steps.length === 0 && delta.status === run.status && delta.error === run.error) continue;
         // Append in place: the arrays are this loop's own (raw state, so the
         // reassignment below is what re-renders) — O(delta), not O(run).
@@ -1819,8 +1857,8 @@ class ApiClientStore {
         this.currentRun = run; this.lastRun = run.report;
       }
       return null;
-    } catch (e) {toasts.error('Couldn’t run automation',errMsg(e)); return null;}
-    finally {if (base === this.base()) this.running = false;}
+    } catch (e) {if (current()) toasts.error('Couldn’t run automation',errMsg(e)); return null;}
+    finally {if (current()) this.running = false;}
   }
 
   // ── Draft helpers ─────────────────────────────────────────────────────────

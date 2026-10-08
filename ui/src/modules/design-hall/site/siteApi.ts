@@ -90,11 +90,13 @@ export interface BrandResolution {
 export async function resolveBrand(opts: { projectKitId: string | null; docBrand: string | undefined; artifactId: string }): Promise<BrandResolution> {
   let kitId = opts.projectKitId;
   let pinned: number | null = null;
+  let latest = false;
   if (!kitId && opts.docBrand) {
     const r = parseRef(opts.docBrand);
     if (r) {
       kitId = r.id;
       if (typeof r.sel === 'number') pinned = r.sel;
+      latest = r.sel === 'latest';
     }
   }
   if (!kitId) {
@@ -108,15 +110,18 @@ export async function resolveBrand(opts: { projectKitId: string | null; docBrand
   if (!kitId) return { theme: buildTheme(null), kit: null, seq: null, note: 'No brand kit linked — using the default palette.' };
   try {
     const head = await design.getArtifact(kitId);
-    const version = pinned != null ? `v${pinned}` : (head.artifact.approved_version_id ?? head.artifact.head_version_id ?? undefined);
+    const version = pinned != null ? `v${pinned}` : ((latest ? head.artifact.head_version_id : head.artifact.approved_version_id ?? head.artifact.head_version_id) ?? undefined);
     const d = await design.getArtifact(kitId, { content: true, version });
     let parsed: unknown = null;
     try {
-      parsed = d.content ? JSON.parse(d.content) : null;
+      const text = d.content == null || d.content_truncated
+        ? (await design.fetchContent(kitId, { asText: true, version })).text
+        : d.content;
+      parsed = text ? JSON.parse(text) : null;
     } catch {
       parsed = null;
     }
-    const seq = pinned ?? (head.approved?.seq ?? head.head?.seq ?? null);
+    const seq = pinned ?? ((latest ? head.head?.seq : head.approved?.seq ?? head.head?.seq) ?? null);
     return { theme: buildTheme(parsed, d.artifact.title), kit: d.artifact, seq, note: parsed ? null : 'The brand kit isn’t valid JSON — using the default palette.' };
   } catch (e) {
     return { theme: buildTheme(null), kit: null, seq: null, note: `Couldn’t load the brand kit (${e instanceof Error ? e.message : String(e)}).` };

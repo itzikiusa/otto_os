@@ -92,6 +92,7 @@
   $effect(() => {
     product.selectedId;
     selectedIds = new Set();
+    postingIds = false;
   });
 
   // ── Inline edit state ──────────────────────────────────────────────────────
@@ -260,6 +261,7 @@
   const postTarget = $derived(isJira ? (story?.source_key ?? 'Jira') : 'Confluence');
 
   async function postSelected(): Promise<void> {
+    const current = product.captureSelection();
     const ids = [...selectedIds];
     if (ids.length === 0) return;
     const texts = product.questions.filter((q) => selectedIds.has(q.id)).map((q) => `• ${q.text}`);
@@ -273,16 +275,17 @@
       what: texts.join('\n'),
       who: 'Everyone who can see it; Jira/Confluence notify its watchers.',
     });
-    if (!ok) return;
+    if (!ok || !current()) return;
     postingIds = true;
     try {
       await product.postQuestions({ ids });
+      if (!current()) return;
       selectedIds = new Set();
       toasts.success(`Posted ${plural(ids.length, 'question')}`);
     } catch (e) {
-      toastError('Couldn’t post the questions', e);
+      if (current()) toastError('Couldn’t post the questions', e);
     } finally {
-      postingIds = false;
+      if (current()) postingIds = false;
     }
   }
 

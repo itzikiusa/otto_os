@@ -1,6 +1,6 @@
 <script lang="ts">
   // Whole-document editor (JSON / Vertical views): the full row as one JSON
-  // object; Save builds a Mongo replaceOne (or a per-changed-column SQL UPDATE)
+  // object; Save builds a Mongo updateOne (or a per-changed-column SQL UPDATE)
   // and opens the normal review modal. With `rowIdx === -1` it is the INSERT
   // editor (insertOne / INSERT from the typed JSON). Mounted by ResultsGrid
   // while `flow.docEditor` is set, inside the shared Modal. The draft lives in
@@ -65,7 +65,7 @@
           {#if inserting}
             {flow.engine === 'mongodb' ? 'insertOne' : 'INSERT'} is reviewed before it runs.
           {:else}
-            The row is replaced/updated after review.
+            Changes to the displayed fields are applied after review.
           {/if}
         </p>
         <span class="grow"></span>

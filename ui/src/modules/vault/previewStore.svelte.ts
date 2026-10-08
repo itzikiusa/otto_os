@@ -26,11 +26,11 @@ export interface PreviewState {
 
 function load(path: string): Promise<VaultNote> {
   const v = vault.current!;
-  const key = `${vault.wsId}:${v.id}:${path}`;
+  const key = `${vault.wsId}:${v.id}:${vault.status?.generation ?? vault.status?.last_scan_at ?? ""}:${path}`;
   let p = cache.get(key);
   if (!p) {
     p = vaultNote(vault.wsId, v.id, path);
-    p.catch(() => cache.delete(key));
+    p.catch(() => { if (cache.get(key) === p) cache.delete(key); });
     cache.set(key, p);
     while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!);
   }
@@ -40,29 +40,36 @@ function load(path: string): Promise<VaultNote> {
 class LinkPreview {
   current = $state<PreviewState | null>(null);
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #generation = 0;
 
   show(anchor: Element, path: string | null | undefined): void {
     clearTimeout(this.#timer);
+    const request = ++this.#generation;
+    this.current = null;
     if (!path || !/\.md$/i.test(path) || !vault.current || path === vault.notePath) return;
+    const workspace = vault.wsId, id = vault.current.id;
+    const current = () => request === this.#generation && vault.wsId === workspace && vault.current?.id === id;
     const r = anchor.getBoundingClientRect();
     this.#timer = setTimeout(() => {
+      if (!current()) return;
       this.current = {
         path, x: r.left, y: r.bottom + 6, top: r.top,
         title: path.split('/').pop()!.replace(/\.md$/i, ''), type: null, text: '', state: 'loading',
       };
       load(path).then(
         (n) => {
-          if (this.current?.path !== path) return;
+          if (!current() || this.current?.path !== path) return;
           this.current = { ...this.current, title: n.meta.title, type: n.meta.okf_type, text: n.meta.description || previewText(n.raw), state: 'ok' };
         },
         () => {
-          if (this.current?.path === path) this.current = { ...this.current, state: 'error' };
+          if (current() && this.current?.path === path) this.current = { ...this.current, state: 'error' };
         },
       );
     }, DELAY_MS);
   }
 
   hide(): void {
+    this.#generation++;
     clearTimeout(this.#timer);
     this.current = null;
   }

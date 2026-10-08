@@ -382,18 +382,23 @@
     refs = next;
   }
 
-  /** A ref (branch/tag) disappeared since the history was last read in full:
-   *  commits only it reached may sit deep in the held tail, so the next reload
-   *  must not splice (graph-splice.ts) — it re-reads everything instead. */
+  /** A removed ref, or a moved ref outside the prefix checked by the splice,
+   *  can orphan commits in the retained tail. Re-read that history in full. */
   let refRemoved = false;
+  const movedRefTips = new Set<string>();
   function lostRef(prev: RefsResp, next: RefsResp): boolean {
-    const keys = (r: RefsResp) => [
-      ...r.local.map((b) => `l:${b.name}`),
-      ...r.remote.map((b) => `r:${b.name}`),
-      ...r.tags.map((t) => `t:${t.name}`),
+    const entries = (r: RefsResp): [string, string | undefined][] => [
+      ...r.local.map((b): [string, string | undefined] => [`l:${b.name}`, b.sha]),
+      ...r.remote.map((b): [string, string | undefined] => [`r:${b.name}`, b.sha]),
+      ...r.tags.map((t): [string, string | undefined] => [`t:${t.name}`, t.sha]),
     ];
-    const have = new Set(keys(next));
-    return keys(prev).some((k) => !have.has(k));
+    const have = new Map(entries(next));
+    for (const [key, sha] of entries(prev)) {
+      if (sha && have.has(key) && have.get(key) !== sha) movedRefTips.add(sha);
+    }
+    const checked = new Set(commits.slice(0, FIRST_PAGE).map((c) => c.sha));
+    return entries(prev).some(([key, sha]) => !have.has(key) ||
+      (have.get(key) !== sha && (!sha || !checked.has(sha))));
   }
 
   /** Retry a failed first page (the inline error's Retry). */
@@ -1056,13 +1061,15 @@
 
   function applyGraph(g: GraphFetch): void {
     if (g.gen !== loadGen) return; // a newer reload / repo switch owns the state
-    if (g.more !== null && refRemoved) {
+    const freshPrefix = new Set(g.commits?.slice(0, FIRST_PAGE).map((c) => c.sha));
+    if (g.more !== null && (refRemoved || [...movedRefTips].some((sha) => !freshPrefix.has(sha)))) {
       // Spliced, but a ref vanished meanwhile (refs land beside the log in
       // refreshAfter): the held tail may hold commits nothing reaches now.
       void reloadGraph(true);
       return;
     }
     if (g.commits) {
+      movedRefTips.clear();
       setCommits(g.commits);
       commitsError = null;
       skipCursor = g.commits.length;

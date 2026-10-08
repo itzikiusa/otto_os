@@ -10,7 +10,7 @@ import { api } from '../api/client';
 import { winKey } from '../win';
 import { TranscriptLifecycle } from './transcriptLifecycle';
 import { parseSessionView, type SessionViewMode } from '../paneHeader';
-import type { Transcript, Turn, Artifact, OttoEvent } from '../api/types';
+import type { Transcript, TranscriptTouchQuery, Turn, Artifact, OttoEvent } from '../api/types';
 
 // ---------------------------------------------------------------------------
 // Reading
@@ -388,12 +388,13 @@ export class Conversation {
   }
 
   /** Keep the server-side tail armed while this conversation is on screen
-   *  (it stops on its own a few minutes after the last touch). Cheap: no fold. */
-  async touch(): Promise<void> {
+   *  (it stops on its own a few minutes after the last touch). Passive by default;
+   *  only an active-view mount opts into resume. Cheap: no fold. */
+  async touch({view = true}: TranscriptTouchQuery = {}): Promise<void> {
     const sid = this.sessionId;
     if (!sid || !this.isActive()) return;
     try {
-      await api.bg.post<void>(`/sessions/${encodeURIComponent(sid)}/transcript/touch`, {});
+      await api.bg.post<void>(`/sessions/${encodeURIComponent(sid)}/transcript/touch?view=${view}`, {});
     } catch {
       /* 409 = no transcript yet (the view is retrying the GET); anything else is transient */
     }

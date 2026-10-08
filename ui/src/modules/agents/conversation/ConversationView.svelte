@@ -7,6 +7,8 @@
     transcriptPath?: string;
     workspaceId: string;
     readonly?: boolean;
+    /** Active panes resume on mount; passive tiles only read/keep alive. */
+    resumeOnOpen?: boolean;
   }
   // Workspace repos (for `#123` → the GitHub PR / issue URL), fetched once per
   // workspace per app run — a light GET, never the git store's heavier load.
@@ -52,7 +54,7 @@
   import type { RenderItem } from './format';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
 
-  let { sessionId, transcriptPath, workspaceId, readonly = false }: ConversationViewProps = $props();
+  let { sessionId, transcriptPath, workspaceId, readonly = false, resumeOnOpen = true }: ConversationViewProps = $props();
 
   const src = $derived<TranscriptSource>(
     sessionId ? { sessionId } : { workspaceId, transcriptPath: transcriptPath ?? '' },
@@ -98,8 +100,13 @@
   // The lease owns initial/reconnect reads and releases them on source change.
   $effect(() => {
     const source = src;
-    void conv; // Reacquire after daemon/user identity invalidates the conversation.
-    return untrack(() => transcript.acquireView(source));
+    const c = conv; // Reacquire after daemon/user identity invalidates the conversation.
+    const activeOpen = resumeOnOpen;
+    return untrack(() => {
+      const release = transcript.acquireView(source);
+      if (activeOpen) void c.touch({view: false});
+      return release;
+    });
   });
   // Board-task nudges for the composer status line.
   $effect(() => {

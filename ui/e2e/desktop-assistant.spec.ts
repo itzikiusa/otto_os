@@ -262,3 +262,35 @@ test('accessibility: no critical axe violations and no serious contrast issues',
   const v = await expectAccessible(page);
   expect(v.filter((x) => x.id === 'color-contrast' && x.impact === 'serious').map((x) => x.nodes.map((n) => n.target))).toEqual([]);
 });
+
+test('older selected thread stays open while bounded history pages fail and recover', async ({ page }) => {
+  const s = assistantState();
+  const template = s.threads[0];
+  s.threads = Array.from({ length: 105 }, (_, i) => ({ ...template, id: `history-${i}`, title: `History ${i}`, space_slot: null, session_id: null }));
+  s.tasks = [];
+  await mockAssistant(page, s);
+  let failMore = true;
+  const offsets: number[] = [];
+  await page.route(/\/api\/v1\/assistant\/threads\?/, async (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const offset = Number(params.get('offset')); offsets.push(offset);
+    if (offset > 0 && failMore) return route.fulfill({ status: 503, json: { message: 'History temporarily unavailable' } });
+    return route.fulfill({ json: s.threads.slice(offset, offset + Number(params.get('limit'))) });
+  });
+  await page.goto('/#/assistant/history-104');
+  const header = page.locator('[data-testid="page-header"] h1');
+  await expect(header).toHaveText('History 104');
+  const list = page.getByRole('navigation', { name: 'Assistant threads' });
+  await expect(list.locator('button.th-row')).toHaveCount(104); // 100 recent + four space slots
+  await list.getByRole('button', { name: 'Load more threads' }).click();
+  await expect(list.getByText('History temporarily unavailable', { exact: false })).toBeVisible();
+  await expect(header).toHaveText('History 104');
+  failMore = false;
+  await list.getByRole('button', { name: 'Retry' }).click();
+  await expect(list.getByRole('button', { name: 'History 104', exact: false })).toHaveAttribute('aria-current', 'page');
+  await expect(list.getByRole('button', { name: 'Load more threads' })).toHaveCount(0);
+  expect(offsets).toEqual([0, 100, 100]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(header).toHaveText('History 104');
+  await expectNoHorizontalOverflow(page);
+});

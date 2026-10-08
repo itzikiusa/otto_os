@@ -62,17 +62,21 @@
     }
   });
 
+  let listGeneration = 0;
   async function loadList(wsId: string): Promise<void> {
+    const generation = ++listGeneration;
     loading = true;
     loadError = null;
     try {
-      matrices = await skillsEvalApi.listMatrices(wsId);
+      const next = await skillsEvalApi.listMatrices(wsId);
+      if (ws.currentId !== wsId || generation !== listGeneration) return;
+      matrices = next;
       // Open on the newest matrix rather than an empty "pick one" pane.
       if (!showForm && selectedId === null && matrices.length > 0) void selectMatrix(matrices[0].id);
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (ws.currentId === wsId && generation === listGeneration) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (ws.currentId === wsId && generation === listGeneration) loading = false;
     }
   }
 
@@ -130,6 +134,8 @@
 
   async function cancel(): Promise<void> {
     if (!selected) return;
+    const id = selected.id;
+    const workspace = ws.currentId;
     if (
       !(await confirmer.ask(`Stop the matrix “${selected.name}”? Cells still running are abandoned; scored cells are kept.`, {
         title: 'Stop matrix',
@@ -139,8 +145,10 @@
     )
       return;
     try {
-      const m = await skillsEvalApi.cancelMatrix(selected.id);
-      selected = m;
+      if (workspace !== ws.currentId || selected?.id !== id) return;
+      const m = await skillsEvalApi.cancelMatrix(id);
+      if (workspace !== ws.currentId) return;
+      if (selected?.id === id) selected = m;
       syncListEntry(m);
     } catch (e) {
       toastError('Couldn’t stop the matrix', e);
@@ -212,6 +220,7 @@
     creating = true;
     try {
       const m = await skillsEvalApi.createMatrix(wsId, body);
+      if (ws.currentId !== wsId) return;
       matrices = [m, ...matrices];
       await selectMatrix(m.id);
       toasts.success('Matrix created', 'Cells score the working tree in the background.');

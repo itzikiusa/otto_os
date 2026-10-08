@@ -28,13 +28,7 @@ export interface ReplayEvidence {
   target_offset: number;
 }
 
-export interface ReplayResp {
-  replay_id: string;
-  source_topic: string;
-  target_topic: string;
-  count: number;
-  evidence: ReplayEvidence[];
-}
+export type { BrokerReplayResp as ReplayResp } from '../../lib/api/types';
 
 // ---- Offset-reset dry-run preview -------------------------------------------
 

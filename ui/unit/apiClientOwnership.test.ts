@@ -137,6 +137,72 @@ test('environment stays with the execution snapshot while pre-script is pending'
 const savedReq = (id: string, url: string, auth: unknown = {type:'none'}) =>
   ({id,name:id,method:'GET',url,headers:[],query:[],body_mode:'none',body:'',auth,extras:null});
 
+test('curl import cannot land in a different workspace after parsing', async () => {
+  const parsed = deferred<any>();
+  const {v, ws} = setup({post: () => parsed.promise});
+  v.restoreTabs('A');
+  const pending = v.importCurl('curl https://a.test');
+  ws.currentId = 'B'; v.restoreTabs('B');
+  const tabId = v.draft.tabId;
+  parsed.resolve(savedReq('unused', 'https://a.test'));
+  assert.equal(await pending, false);
+  assert.equal(v.draft.tabId, tabId);
+  assert.equal(v.draft.url, '');
+});
+
+test('file import retains its workspace while the file is being read', async () => {
+  const content = deferred<string>();
+  const {v, ws} = setup();
+  v.restoreTabs('A');
+  let imports = 0;
+  v.importParsed = async () => { imports++; };
+  const pending = v.importFile({name: 'collection.json', text: () => content.promise});
+  ws.currentId = 'B'; v.restoreTabs('B');
+  content.resolve('{}');
+  await pending;
+  assert.equal(imports, 0);
+});
+
+test('an automation start response cannot publish into the next workspace', async () => {
+  const started = deferred<any>();
+  const {v, ws} = setup({post: () => started.promise});
+  v.restoreTabs('A');
+  const pending = v.runAutomation('auto-a');
+  ws.currentId = 'B'; v.restoreTabs('B');
+  started.resolve({id:'run-a',status:'passed',report:{steps:[],passed:true}});
+  await pending;
+  assert.equal(v.currentRun, null);
+  assert.equal(v.lastRun, null);
+});
+
+test('GraphQL introspection cannot publish another tab or edited endpoint schema', async () => {
+  for (const switchTab of [true, false]) {
+    const reply = deferred<any>();
+    const {v} = setup({post: () => reply.promise});
+    v.draft = {...v.draft, url: 'https://a.test/graphql'};
+    const pending = v.graphqlIntrospect();
+    if (switchTab) v.newDraft();
+    v.draft = {...v.draft, url: 'https://b.test/graphql'};
+    reply.resolve({body: JSON.stringify({data: {__schema: {types: [{name: 'OnlyA',kind: 'OBJECT'}]}}})});
+    await pending;
+    assert.equal(v.graphqlSchema, null);
+    assert.equal(v.graphqlIntrospecting, false);
+  }
+});
+
+test('a loaded GraphQL schema is visible only for the request that owns it', async () => {
+  const {v} = setup({post: async () => ({body: JSON.stringify({data:{__schema:{types:[{name:'OnlyA',kind:'OBJECT'}]}}})})});
+  v.draft = {...v.draft, url:'https://a.test/graphql'};
+  await v.graphqlIntrospect();
+  assert.equal(v.graphqlSchema[0].name, 'OnlyA');
+  v.newDraft();
+  assert.equal(v.graphqlSchema, null);
+  v.switchTab(0);
+  assert.equal(v.graphqlSchema[0].name, 'OnlyA');
+  v.draft = {...v.draft,url:'https://b.test/graphql'};
+  assert.equal(v.graphqlSchema, null);
+});
+
 test('opening a saved request never replaces unsaved edits in the active tab', () => {
   const {v} = setup();
   v.draft = {...v.draft, url: 'https://edit.test/x', body: 'typed'};

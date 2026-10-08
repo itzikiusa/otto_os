@@ -83,7 +83,7 @@
      *  defaults to the 2k embed depth). The tiled grid passes the smaller
      *  depth — 15 live tiles × 10k lines was 150–360 MB of xterm buffers (SA-05). */
     scrollback?: number;
-    /** Opening the pane resumes a suspended session (Terminal `resumeOnOpen`).
+    /** Opening the pane resumes a suspended session in Terminal or Chat.
      *  The tiled grid passes false: a tile shows a session, it does not ask
      *  for its CLI back — typing into it or Resume does. Default true. */
     resumeOnOpen?: boolean;
@@ -978,7 +978,7 @@
   <div class="pane-body" data-view={view}>
     {#if view === 'chat'}
       <div class="pane-chat">
-        <ConversationView {sessionId} workspaceId={session?.workspace_id ?? ws.currentId ?? ''} readonly={readOnly} />
+        <ConversationView {sessionId} workspaceId={session?.workspace_id ?? ws.currentId ?? ''} readonly={readOnly} {resumeOnOpen} />
       </div>
     {:else}
       <div class="pane-term">

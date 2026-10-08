@@ -16,6 +16,8 @@
   // buttons (List view, no-WebGL, and screen readers / keyboard in 3D view),
   // and the selected kid's card carries every action as a button.
   import { onDestroy, untrack } from 'svelte';
+  import { isNativePane } from '../../../lib/desktop';
+  import { observeNativePane } from '../../../lib/nativePane';
   import { rowMenu } from '../../../lib/rowMenu';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -50,7 +52,15 @@
     tick: number;
     active?: boolean;
   }
-  let { box, viewId, zoomed, tick, active: onScreen = true }: Props = $props();
+  let { box, viewId, zoomed, tick, active: spaceActive = true }: Props = $props();
+  // A hidden native child can still report document.hidden=false. Its owner
+  // publishes visibility explicitly; pause both rendering and live screen IO.
+  let nativeVisible = $state(true);
+  $effect(() => {
+    if (!isNativePane) return;
+    return observeNativePane((state) => { nativeVisible = state?.visible !== false; });
+  });
+  const onScreen = $derived(spaceActive && nativeVisible);
 
   const reducedMotion = (): boolean =>
     typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;

@@ -2046,10 +2046,20 @@
       e.preventDefault();
       e.stopPropagation();
       if (!readOnly) {
+        const targetTerminal = term;
+        const targetSession = sessionId;
+        const targetSocket = sock;
+        const targetTransform = transformFrame;
         navigator.clipboard
           ?.readText?.()
           .then((t) => {
-            if (t) term?.paste(t); // xterm brackets it when the app asked for it
+            // Clipboard permission can outlive navigation or a reconnect.
+            // Send only to the terminal that requested this clipboard read.
+            if (t && !readOnly && term === targetTerminal && sessionId === targetSession &&
+                sock === targetSocket && targetSocket?.readyState === WebSocket.OPEN &&
+                transformFrame === targetTransform) {
+              targetTerminal?.paste(t); // Preserve xterm's bracketed-paste handling.
+            }
           })
           .catch(() => {/* no permission — ⌘V still works */});
       }

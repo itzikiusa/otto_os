@@ -6,7 +6,7 @@
 // pick, and it is always the lease form, which the daemon refuses when the
 // remote moved since it was last fetched and integrated.
 import { api, ApiError } from '../../lib/api/client';
-import type { PushReq, RepoStatusResp } from '../../lib/api/types';
+import type { PushReq, PushTarget, RepoStatusResp } from '../../lib/api/types';
 import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
 import { runPull } from './pullFlow';
@@ -17,18 +17,20 @@ export type RejectedChoice = 'pull' | 'force' | null;
 
 /** Ask what to do about a rejected push. Copy names the branch and the
  *  upstream so a force push says exactly what it overwrites. */
-export async function askRejectedPush(branch: string, upstream: string | null): Promise<RejectedChoice> {
+export async function askRejectedPush(branch: string, upstream: string | null, allowForce = true, sourceSha?: string): Promise<RejectedChoice> {
   const target = upstream ?? `origin/${branch}`;
   const { value } = await confirmer.choose(
     `${target} has commits that ${branch} doesn’t. Pull them in first, then push again.\n\n` +
-      `If you rewrote ${branch} on purpose (amend, rebase, squash), force push with lease ` +
+      (allowForce ? `If you rewrote ${branch} on purpose (amend, rebase, squash), force push with lease ` +
       `replaces ${target} with your local branch — commits only on the remote are dropped ` +
-      `from it. The lease refuses if someone pushed since you last fetched.`,
+      `from it. The lease refuses if someone pushed since you last fetched.` +
+      (sourceSha ? `\n\nSource commit: ${sourceSha.slice(0, 12)}. If the source or destination changed, refresh and confirm again.` : '') :
+      'The force-push target could not be verified. Refresh the repository or review its push configuration before retrying a rewrite.'),
     {
       title: 'Push rejected',
       options: [
         { label: 'Pull', value: 'pull', kind: 'primary' },
-        { label: 'Force push with lease', value: 'force', kind: 'danger' },
+        ...(allowForce ? [{ label: 'Force push with lease', value: 'force', kind: 'danger' as const }] : []),
       ],
     },
   );
@@ -41,10 +43,16 @@ export async function runPush(
   repoId: string,
   status: Pick<RepoStatusResp, 'branch' | 'upstream'>,
   onstatus: (s: RepoStatusResp) => void,
-  opts?: { forceWithLease?: boolean },
+  opts?: { forceWithLease?: boolean; target?: PushTarget },
 ): Promise<boolean> {
   const body: PushReq = {};
-  if (opts?.forceWithLease) body.force_with_lease = true;
+  if (opts?.forceWithLease) {
+    body.force_with_lease = true;
+    body.expected_target = opts.target;
+  }
+  // Capture before the first request. An unsupported multi-ref configuration
+  // can still do a normal push, but cannot offer an unbound force retry.
+  const target = opts?.target ?? await api.get<PushTarget>(`/repos/${repoId}/push-target`).catch(() => null);
   try {
     const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`, body);
     onstatus(s);
@@ -64,12 +72,14 @@ export async function runPush(
       return false;
     }
     if (refusal === 'rejected' && !opts?.forceWithLease) {
-      const choice = await askRejectedPush(status.branch, status.upstream);
+      const canForce = target !== null && target.branch === status.branch;
+      const destination = target ? `${target.remote}/${target.destination_ref.replace(/^refs\/heads\//, '')}` : status.upstream;
+      const choice = await askRejectedPush(status.branch, destination, canForce, target?.source_sha);
       if (choice === 'pull') {
         await runPull(repoId, onstatus);
         return false;
       }
-      if (choice === 'force') return runPush(repoId, status, onstatus, { forceWithLease: true });
+      if (choice === 'force' && canForce) return runPush(repoId, status, onstatus, { forceWithLease: true, target });
       return false;
     }
     toasts.error('Couldn’t push', msg);

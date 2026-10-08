@@ -1,6 +1,7 @@
 <script lang="ts">
   // The thread list: the four pinned Spaces (01–04) and Recent threads, each
   // with its needs-you count. ↑/↓ move between rows, Enter opens.
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { assistant } from '../../lib/stores/assistant.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -80,6 +81,11 @@
     </ul>
   {:else}
     <p class="none">No other threads yet.</p>
+  {/if}
+  {#if assistant.threadsMoreError}
+    <LoadState variant="compact" what="older threads" error={assistant.threadsMoreError} empty onretry={() => void assistant.loadMoreThreads()} />
+  {:else if assistant.threadsHasMore}
+    <button class="btn small" disabled={assistant.threadsMoreLoading} onclick={() => void assistant.loadMoreThreads()}>{assistant.threadsMoreLoading ? 'Loading threads…' : 'Load more threads'}</button>
   {/if}
 </nav>
 

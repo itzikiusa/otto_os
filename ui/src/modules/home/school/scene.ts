@@ -1012,7 +1012,7 @@ function build(
 
   function frame(now: number): void {
     raf = 0;
-    if (!active) return;
+    if (!active || document.hidden) return;
     const raw = Math.max(0, now - last);
     const dt = Math.min(1000, raw);
     last = now;
@@ -1087,10 +1087,25 @@ function build(
   }
 
   function kick(): void {
-    if (raf || !active) return;
+    if (raf || !active || document.hidden) return;
     last = performance.now();
     raf = requestAnimationFrame(frame);
   }
+
+  // Native WebKit deliberately disables background throttling for terminals.
+  // The School must pause explicitly; losing focus alone is not a reason to
+  // stop a still-visible window. Preserve the room and camera while hidden.
+  function visibilityChanged(): void {
+    if (document.hidden) {
+      keys.clear();
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    } else {
+      dirty = true;
+      kick();
+    }
+  }
+  document.addEventListener('visibilitychange', visibilityChanged);
 
   // ── Size / context / theme ───────────────────────────────────────────────
   const ro = new ResizeObserver(() => {
@@ -1287,6 +1302,7 @@ function build(
       };
     },
     destroy() {
+      document.removeEventListener('visibilitychange', visibilityChanged);
       active = false;
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect();

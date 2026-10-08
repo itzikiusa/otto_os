@@ -45,6 +45,12 @@ test('Replay rejects blank timestamps and out of range numeric selectors', async
   await page.getByRole('combobox', {name:'Selector',exact:true}).selectOption('offset_range');
   await page.getByLabel('Partition', {exact:true}).fill('-1');
   await expect(replay).toBeDisabled();
+  await page.getByLabel('Partition', {exact:true}).fill('0');
+  await page.getByLabel('To offset', {exact:true}).fill('5000');
+  await expect(replay).toBeDisabled();
+  await expect(page.locator('.field-err')).toContainText('at most 5000');
+  await page.getByLabel('To offset', {exact:true}).fill('4999');
+  await expect(replay).toBeEnabled();
 });
 
 test('Groups ignores delayed details after choosing another group', async ({page}) => {
@@ -281,4 +287,43 @@ test('Replay confirms the exact valid selector and displays fixture evidence', a
   await dialog.getByRole('button',{name:'Replay',exact:true}).click();
   await expect(page.locator('.evidence')).toContainText('order-1');
   expect(selector).toEqual({type:'latest',count:1});
+});
+
+test('Partial replay retains acknowledged evidence and warns before retry', async ({page}) => {
+  let requests = 0;
+  await page.route('**/brokers/clusters/*/replay', r => {
+    requests++;
+    return r.fulfill({json:{replay_id:'partial-replay',source_topic:'orders-dlq',target_topic:'orders',count:1,evidence_saved:true,error:'Replay stopped after 1 acknowledged messages. Retrying can duplicate messages.',evidence:[{partition:0,offset:10,key_preview:'acknowledged-order',target_partition:0,target_offset:22}]}});
+  });
+  await setup(page,'broker');
+  await page.locator('.tabs button',{hasText:'Replay'}).click();
+  await page.getByLabel('Source topic').fill('orders-dlq');
+  await page.getByLabel('Target topic').fill('orders');
+  await page.getByLabel('Count',{exact:true}).fill('3');
+  await page.getByRole('button',{name:'Replay',exact:true}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Replay',exact:true}).click();
+  await expect(page.locator('.evidence')).toContainText('acknowledged-order');
+  await expect(page.locator('.replay')).toContainText('Replay stopped after 1 acknowledged messages');
+  await expect(page.getByText('Replay complete',{exact:true})).toHaveCount(0);
+  const evidenceDir = process.env['OTTO_REVIEW_ARTIFACT_DIR'];
+  if (evidenceDir) {
+    mkdirSync(evidenceDir, {recursive:true});
+    for (const [scheme, width] of [['light',1440],['dark',1440],['dark',390]] as const) {
+      await page.setViewportSize({width,height:900});
+      await page.evaluate(async ([modulePath, selected]) => {
+        const {ui} = await import(modulePath);
+        ui.setTheme('native');
+        ui.setScheme(selected);
+      }, ['/src/lib/stores/ui.svelte.ts',scheme]);
+      await expect(page.locator('html')).toHaveAttribute('data-scheme',scheme);
+      await expectNoHorizontalOverflow(page);
+      await page.screenshot({path:`${evidenceDir}/replay-partial-${width}-${scheme}.png`,animations:'disabled'});
+    }
+    await page.setViewportSize({width:1440,height:900});
+  }
+
+  await page.getByRole('button',{name:'Replay',exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('1 message already acknowledged');
+  await expect(page.getByRole('dialog')).toContainText('Retrying can duplicate messages');
+  expect(requests).toBe(1);
 });

@@ -4,7 +4,7 @@
   // same editor as Settings → Context library). Library copies are editable in
   // place (type, then Save / ⌘S; Revert drops the draft); bundled and provider
   // copies are read-only, with the way to make them editable spelled out.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   import type { SkillFileEntry } from '../../lib/api/types';
@@ -48,6 +48,8 @@
   let saving = $state(false);
   let loading = $state(false);
   let loadGeneration = 0;
+  let disposed = false;
+  onDestroy(() => { disposed = true; loadGeneration++; });
   let loadError = $state<string | null>(null);
   // Bumped whenever the text is replaced from outside (another file, Revert,
   // a reload) so the uncontrolled CodeEditor remounts on the new document.
@@ -61,7 +63,9 @@
   $effect(() => guardUnsaved(() => dirty, { what: currentFile }));
 
   async function open(path: string): Promise<void> {
+    const owner = `${source}:${name}`;
     if (dirty && !(await confirmer.ask(`You have unsaved changes to ${currentFile}. Opening another file discards them.`, { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
+    if (disposed || owner !== `${source}:${name}`) return;
     const generation = ++loadGeneration;
     currentFile = path;
     loadError = null;
@@ -99,12 +103,22 @@
 
   // (Re)open when the skill or copy changes.
   let openedFor = '';
+  let openedOwner = '';
   $effect(() => {
-    const key = `${source}:${name}:${initialFile}`;
+    const owner = `${source}:${name}`;
+    const key = `${owner}:${initialFile}`;
     if (key === openedFor) return;
     openedFor = key;
+    // The parent already confirmed leaving the previous skill. Its draft
+    // belongs to that owner and must not trigger another file-open prompt
+    // under the replacement skill's heading.
+    if (owner !== openedOwner) {
+      openedOwner = owner;
+      content = original = '';
+      loadGeneration++;
+    }
     currentFile = files.some((f) => f.path === initialFile) ? initialFile : 'SKILL.md';
-    void open(currentFile);
+    untrack(() => void open(currentFile));
   });
   // Keep SKILL.md in step when the parent reloads it (never over a draft).
   $effect(() => {
@@ -121,14 +135,17 @@
 
   async function save(): Promise<void> {
     if (!editable || saving || loading || loadError || binary || !dirty) return;
+    const owner = `${source}:${name}`;
+    const target = name;
     const path = currentFile;
     const submitted = content;
     const generation = loadGeneration;
     saving = true;
     try {
-      const next = await skillLabApi.putFile(name, { path, content: submitted });
+      const next = await skillLabApi.putFile(target, { path, content: submitted });
       // A save acknowledges only the submitted snapshot, never later typing.
-      if (generation === loadGeneration) original = submitted;
+      if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
+      original = submitted;
       onsaved(next, path === 'SKILL.md' ? submitted : null);
       toasts.success('Saved', path);
     } catch (e) {
@@ -139,12 +156,15 @@
   }
 
   async function addFile(): Promise<void> {
+    const target = name;
+    const owner = `${source}:${name}`;
+    const generation = loadGeneration;
     const path = await confirmer.promptText('Path inside the skill, for example references/notes.md', {
       title: 'New file',
       confirmLabel: 'Create',
       placeholder: 'references/notes.md',
     });
-    if (!path) return;
+    if (!path || disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
     // An existing path opens that file — "New file" must never empty it (the
     // server also refuses with 409 via `create_only`, for a file the tree
     // doesn't list yet).
@@ -155,7 +175,8 @@
       return;
     }
     try {
-      const next = await skillLabApi.putFile(name, { path: wanted, content: '', create_only: true });
+      const next = await skillLabApi.putFile(target, { path: wanted, content: '', create_only: true });
+      if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
       onsaved(next, null);
       await open(wanted);
     } catch (e) {
@@ -164,10 +185,15 @@
   }
 
   async function deleteFile(path: string): Promise<void> {
+    const target = name;
+    const owner = `${source}:${name}`;
+    const generation = loadGeneration;
     if (!(await confirmer.ask(`Delete ${path} from ${name}? The file is removed from the library copy.`, { title: 'Delete file' }))) return;
     try {
-      await skillLabApi.deleteFile(name, path);
-      const next = await skillLabApi.listFiles(name);
+      if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
+      await skillLabApi.deleteFile(target, path);
+      const next = await skillLabApi.listFiles(target);
+      if (disposed || owner !== `${source}:${name}` || generation !== loadGeneration) return;
       onsaved(next, null);
       if (currentFile === path) await open('SKILL.md');
     } catch (e) {

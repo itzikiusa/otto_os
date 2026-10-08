@@ -48,8 +48,30 @@ class ProofStore {
     return this.summaryByWorkItem[`${kind}:${workItemId}`] ?? null;
   }
 
+  private scopeGeneration = 0;
+  private setWorkspace(wsId: string): void {
+    if (this.wsId === wsId) return;
+    this.wsId = wsId;
+    ++this.scopeGeneration;
+    ++this.listSeq;
+    ++this.moreSeq;
+    this.closeDetail();
+    this.packs = [];
+    this.nextCursor = null;
+    this.listLoading = false;
+    this.loadingMore = false;
+    this.error = null;
+    this.summaryLoaded = false;
+    this.askedKeys = new Set();
+    this.summaryByWorkItem = {};
+    this.pendingDetail.clear();
+    this.needList = false;
+    this.needSummary = false;
+  }
+
   /** Load the workspace's packs (optionally filtered) into `packs`. */
   async loadPacks(wsId: string, filter?: ProofPackFilter): Promise<void> {
+    this.setWorkspace(wsId);
     const seq = ++this.listSeq;
     ++this.moreSeq;
     if (this.wsId !== wsId || JSON.stringify(this.lastFilter) !== JSON.stringify(filter)) this.packs = [];
@@ -104,16 +126,12 @@ class ProofStore {
    *  gains one session costs one tiny request, an unchanged one costs none.
    *  Without, the whole workspace (legacy full read). */
   async loadSummary(wsId: string, workItems?: string[]): Promise<void> {
-    if (this.wsId !== wsId) {
-      this.summaryLoaded = false;
-      this.askedKeys = new Set();
-      this.summaryByWorkItem = {};
-    }
-    this.wsId = wsId;
+    this.setWorkspace(wsId);
+    const generation = this.scopeGeneration;
     try {
       if (!workItems) {
         const resp = await proofSummary(wsId);
-        if (this.wsId !== wsId) return;
+        if (this.wsId !== wsId || generation !== this.scopeGeneration) return;
         const next: Record<string, ProofSummaryRow> = {};
         for (const r of resp.rows) next[`${r.work_item_kind}:${r.work_item_id}`] = r;
         this.summaryByWorkItem = next;
@@ -130,12 +148,14 @@ class ProofStore {
       try {
         for (let i = 0; i < fresh.length; i += PROOF_SUMMARY_CHUNK) {
           const resp = await proofSummary(wsId, fresh.slice(i, i + PROOF_SUMMARY_CHUNK));
-          if (this.wsId !== wsId) return;
+          if (this.wsId !== wsId || generation !== this.scopeGeneration) return;
           rows.push(...resp.rows);
         }
       } catch (e) {
         // Not answered: ask again next time.
-        for (const k of fresh) this.askedKeys.delete(k);
+        if (generation === this.scopeGeneration) {
+          for (const k of fresh) this.askedKeys.delete(k);
+        }
         throw e;
       }
       const next = { ...this.summaryByWorkItem };
@@ -279,6 +299,7 @@ class ProofStore {
     const wsId = this.wsId;
     const keys = [...this.askedKeys];
     this.closeDetail();
+    ++this.scopeGeneration;
     ++this.listSeq;
     ++this.moreSeq;
     this.packs = [];

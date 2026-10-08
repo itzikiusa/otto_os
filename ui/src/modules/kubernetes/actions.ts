@@ -131,7 +131,7 @@ export async function runAction(
   // "Delete pod Pod “x”" read twice — drop the kind when the label already has it,
   // and say what a scale actually does when it's the destructive 0.
   const noun = verb.toLowerCase().includes(singular.toLowerCase()) ? '' : ` ${singular}`;
-  const what = def.id === 'scale' ? `Scale${noun} “${row.name}” to 0 replicas` : `${verb}${noun} “${row.name}”`;
+  const what = def.id === 'scale' ? `Scale${noun} “${row.name}” to ${Number(merged.replicas)} replicas` : `${verb}${noun} “${row.name}”`;
   if (destructive) {
     const ok = await confirmProd({ env: cl?.environment, where, verb, what, typed: row.name, danger: true });
     if (!ok) return null;

@@ -250,9 +250,11 @@
 
   async function start(): Promise<void> {
     if (!prompt.trim() || starting || !vault.current) return;
+    const workspace = vault.wsId, id = vault.current.id, generation = vault.lookupGeneration;
+    const current = () => vault.wsId === workspace && vault.current?.id === id && vault.lookupGeneration === generation;
     starting = true;
     try {
-      vault.docsRun = await runDocsAgents(vault.wsId, vault.current.id, {
+      const started = await runDocsAgents(workspace, id, {
         prompt: prompt.trim(),
         target_dir: targetDir.trim(),
         agents: agents.map((a) => ({ provider: a.provider, model: a.model.trim() || undefined })),
@@ -270,6 +272,8 @@
             }
           : undefined,
       });
+      if (!current()) return;
+      vault.docsRun = started;
       openTerminals = new Set();
       void vault.refreshDocsRuns();
       startPoll();
@@ -364,7 +368,9 @@
     if (!r || resolving) return;
     resolving = true;
     try {
-      vault.docsRun = await resolveDocsRun(r.id, outcome);
+      const resolved = await resolveDocsRun(r.id, outcome);
+      if (vault.docsRun?.id !== r.id) return;
+      vault.docsRun = resolved;
       void vault.refreshDocsRuns();
       toasts.success(
         'Review resolved',

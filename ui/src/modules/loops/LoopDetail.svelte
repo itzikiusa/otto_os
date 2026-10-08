@@ -94,21 +94,23 @@
   // Irreversible: confirm first, and only leave the page once the delete landed
   // (a failed delete keeps the user on the loop with the error toast).
   async function del(): Promise<void> {
+    const loopId = id;
     const name = loop?.name ?? 'this goal loop';
     if (!(await confirmer.ask(`Delete “${name}” and its iteration history? Retained work on disk is kept.`, { title: 'Delete goal loop' }))) return;
     try {
-      await loops.remove(id);
+      await loops.remove(loopId);
     } catch (e) {
       toasts.error('Couldn’t delete the goal loop', errText(e));
       return;
     }
     toasts.success('Goal loop deleted', name);
-    onback();
+    if (id === loopId) onback();
   }
   // Stop is terminal (a stopped loop can't be resumed), unlike Pause.
   async function stop(): Promise<void> {
+    const loopId = id;
     if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', danger: true, confirmLabel: 'Stop loop' }))) return;
-    await act(() => loops.stop(id), 'Couldn’t stop the goal loop');
+    await act(() => loops.stop(loopId), 'Couldn’t stop the goal loop');
   }
   /** ⋯ next to Pause/Resume: the destructive verbs stay one step away from the primary. */
   function moreMenu(e: MouseEvent): void {

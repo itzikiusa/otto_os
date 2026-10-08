@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { mapLimit } from '../../lib/poll';
   import { rowMenu } from '../../lib/rowMenu';
   // Personal Agents module. Routes: `#/personal-agents` (agent cards),
   // `#/personal-agents/rooms` (agent channels), `#/personal-agents/<agentId>[/<tab>]`
@@ -26,6 +27,7 @@
   import AgentAvatar from './AgentAvatar.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
   import AgentPage from './AgentPage.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import RoomsView from './RoomsView.svelte';
   import { loadErrorOf } from './loadError';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
@@ -51,18 +53,16 @@
   const agentIdsKey = $derived(personalAgents.agents.map((a) => a.id).join(','));
   $effect(() => {
     const ids = agentIdsKey ? agentIdsKey.split(',') : [];
-    void Promise.all(
-      ids.map((id) =>
-        personalAgentsApi
-          .autonomy(id)
-          .then((a) => [id, a] as const)
-          .catch(() => null),
-      ),
-    ).then((rows) => {
-      const next: Record<string, PersonalAgentAutonomy> = {};
-      for (const r of rows) if (r) next[r[0]] = r[1];
-      autonomyById = next;
+    let disposed = false;
+    autonomyById = {};
+    void mapLimit(ids, 2, async (id) => {
+      if (disposed) return;
+      try {
+        const autonomy = await personalAgentsApi.autonomy(id);
+        if (!disposed) autonomyById = { ...autonomyById, [id]: autonomy };
+      } catch { /* Badge details are best-effort. */ }
     });
+    return () => { disposed = true; };
   });
   // "Your agent" (primary) leads the list — the one entry point.
   const agents = $derived(
@@ -235,7 +235,13 @@
                 {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
                 <!-- A paused agent's schedules never fire — don't promise a next run. -->
                 {#if a.enabled}
-                  <span class="meta">Next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>
+                  {#if personalAgents.schedulesError[a.id]}
+                    <span class="meta" title={personalAgents.schedulesError[a.id]}>Schedule unavailable — open Schedules to retry</span>
+                  {:else if personalAgents.schedulesLoading[a.id] && !(a.id in personalAgents.schedulesByAgent)}
+                    <Skeleton rows={1} height={16} label="schedule" />
+                  {:else}
+                    <span class="meta">Next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>
+                  {/if}
                 {/if}
               </div>
               <div class="card-actions">
