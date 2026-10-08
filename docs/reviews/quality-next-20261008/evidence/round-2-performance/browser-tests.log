@@ -1,0 +1,157 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.29s
+     Running unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)
+
+running 128 tests
+test cdp::tests::engine_usability_latches_only_for_guarded_engines ... ok
+test cdp::tests::login_fill_errors_never_carry_page_exception_details ... ok
+test cdp::tests::fill_script_embeds_the_expected_site_before_any_field ... ok
+test cdp::tests::login_origin_binds_to_the_credential_site ... ok
+test lightpanda::tests::free_port_is_loopback ... ok
+test cdp::tests::request_vetting_blocks_internal_targets ... ok
+test lightpanda::tests::locate_rejects_missing_configured_path ... ok
+test lightpanda::tests::locate_accepts_a_real_file_as_configured ... ok
+test live::chrome::tests::window_size_follows_the_clamped_viewport ... ok
+test live::chrome::tests::pipe_transport_and_no_debugging_port ... ok
+test extract::tests::readability_drops_nav_and_footer ... ok
+test extract::tests::readability_output_still_converts_to_markdown ... ok
+test extract::tests::table_cells_stay_separated_and_blocks_break ... ok
+test extract::tests::markdown_keeps_list_items ... ok
+test extract::tests::markdown_strips_scripts_and_keeps_headings ... ok
+test live::chrome::tests::headless_mode_per_build ... ok
+test extract::tests::escaped_markup_in_page_text_survives_readability ... ok
+test live::conn::tests::command_frames_carry_the_flat_session_id ... ok
+test lightpanda::tests::start_errors_when_the_binary_does_not_exist ... ok
+test live::conn::tests::cancelled_live_call_removes_its_pending_reply ... ok
+test live::control::tests::a_departing_driver_releases_only_their_own_control ... ok
+test live::control::tests::agent_release_clears_the_wait ... ok
+test live::chrome::tests::launching_a_missing_binary_errors ... ok
+test live::conn::tests::replies_are_matched_by_id_and_events_routed_by_session ... ok
+test live::control::tests::first_human_input_claims_an_idle_session ... ok
+test live::conn::tests::protocol_errors_and_eof_fail_the_caller ... ok
+test live::control::tests::hand_back_without_a_waiting_agent_frees_the_session ... ok
+test live::control::tests::human_input_is_refused_while_the_agent_drives_until_take_over ... ok
+test live::flow::tests::a_viewer_that_never_acks_gets_nothing_more ... ok
+test live::flow::tests::acks_are_cumulative_and_measure_rtt ... ok
+test live::flow::tests::adaptive_steps_down_on_drops_and_saturates ... ok
+test live::flow::tests::adaptive_steps_down_on_latency_and_up_after_recovery ... ok
+test live::flow::tests::window_limits_in_flight_and_keeps_only_the_newest_held_frame ... ok
+test live::guard::tests::blocked_requests_fail_and_documents_are_flagged ... ok
+test live::guard::tests::only_agent_driven_outward_main_frame_documents_are_held ... ok
+test live::guard::tests::origins_and_hosts_never_leak_paths ... ok
+test live::guard::tests::parses_paused_events ... ok
+test live::guard::tests::verdict_cache_expires ... ok
+test live::conn::tests::event_flood_closes_connection_and_fails_pending_calls ... ok
+test live::hooks::tests::outward_titles_name_where_and_what ... ok
+test live::guard::tests::vetting_refuses_internal_targets_through_the_cache ... ok
+test live::input::tests::cursor_normalization ... ok
+test live::input::tests::enter_and_non_printing_keys ... ok
+test live::input::tests::mouse_events_map_to_cdp ... ok
+test live::input::tests::printable_keydown_carries_text ... ok
+test live::input::tests::shortcuts_become_editing_commands_without_text ... ok
+test live::input::tests::virtual_key_codes ... ok
+test live::install::tests::pins_cover_both_builds_with_exact_sizes ... ok
+test live::install::tests::sha_pin_falls_back_to_a_well_formed_env_override_only ... ok
+test cdp::tests::every_fetch_runs_in_its_own_disposed_browser_context ... ok
+test live::process::burst_tests::cached_fast_path_preserves_expiry_denial_and_outward_guarding ... ok
+test live::install::tests::a_checksum_mismatch_installs_nothing ... ok
+test live::install::tests::a_half_extracted_dir_is_not_installed ... ok
+test cdp::tests::reads_fall_back_but_login_refuses_without_context_isolation ... ok
+test live::process::tests::filenames_are_display_safe ... ok
+test live::input::tests::text_ime_and_paste_are_capped ... ok
+test live::process::tests::download_behavior_per_policy ... ok
+test live::process::tests::profile_keys_scope_jars_by_workspace_owner_and_name ... ok
+test live::process::tests::guard_overload_fails_request_without_queueing_a_waiter ... ok
+test live::protocol::tests::reads_jpeg_dimensions_from_the_sof_marker ... ok
+test live::protocol::tests::binary_frames_round_trip ... ok
+test live::protocol::tests::server_frames_are_tagged_snake_case ... ok
+test live::protocol::tests::parses_every_client_frame_kind ... ok
+test live::proxy::tests::refuses_bind_udp_and_auth_only_clients ... ok
+test live::proxy::tests::parses_domain_and_ip_connects ... ok
+test live::proxy::tests::dropping_proxy_cancels_accepted_handshakes ... ok
+test live::proxy::tests::the_proxy_refuses_a_loopback_connect_end_to_end ... ok
+test live::install::tests::installs_when_size_and_sha256_match ... ok
+test live::runtime::tests::cdp_errors_map_to_live_errors ... ok
+test live::runtime::tests::bad_profile_names_are_rejected ... ok
+test live::runtime::tests::install_is_refused_when_the_checksum_is_not_pinned ... ok
+test live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live ... ignored, requires OTTO_TEST_CHROME_BIN; isolated real Chromium resource workload
+test live::conn::tests::output_flood_closes_connection_instead_of_retaining_commands ... ok
+test live::session::tests::element_box_expression_escapes_the_selector ... ok
+test live::runtime::tests::opening_without_an_engine_is_refused_before_any_launch ... ok
+test live::session::tests::metrics_follow_the_viewport ... ok
+test live::session::tests::screenshot_params_per_mode ... ok
+test live::session::tests::navigation_targets_are_vetted ... ok
+test live::session::tests::screenshot_request_defaults ... ok
+test live::types::tests::build_names_round_trip_on_the_wire ... ok
+test live::types::tests::profile_names_and_segments ... ok
+test live::types::tests::settings_default_and_validation ... ok
+test live::types::tests::stored_settings_fall_back_to_defaults ... ok
+test live::runtime::tests::status_reports_both_builds_uninstalled_on_a_fresh_data_dir ... ok
+test live::types::tests::viewport_is_clamped ... ok
+test tests::cancelling_a_gate_waiter_keeps_the_active_render_gate ... ok
+test tests::default_login_is_unavailable ... ok
+test tests::cancelled_page_shared_releases_render_gate ... ok
+test tests::extract_title_collapses_embedded_newlines ... ok
+test tests::extract_title_collapses_whitespace_and_trims ... ok
+test live::install::tests::wrong_sizes_are_refused_before_and_during_the_download ... ok
+test live::proxy::tests::vetting_blocks_internal_targets ... ok
+test tests::fallback_does_not_follow_redirects_into_internal_addresses ... ok
+test tests::page_cache_is_bounded_by_entry_count ... ok
+test tests::page_content_types ... ok
+test tests::login_drops_redirected_pages_and_shared_cache_outlives_a_service ... ok
+test live::chrome::tests::fds_3_and_4_are_wired_to_the_pipe ... ok
+test live::process::burst_tests::cached_public_resource_burst_does_not_fail_before_workers_are_polled ... ok
+test tests::raw_html_aborts_when_response_exceeds_byte_cap ... ok
+test tests::raw_html_refuses_binary_content_types ... ok
+test tests::select_capped_char_boundary_safe_on_multibyte_content ... ok
+test tests::page_shared_renders_a_url_once_and_query_reuses_it ... ok
+test tests::select_capped_limits_match_count ... ok
+test live::conn::tests::unanswered_calls_have_bounded_admission_even_when_output_drains ... ok
+test tests::select_capped_truncates_large_outer_html ... ok
+test tests::selectors_are_checked_before_any_fetch ... ok
+test tests::select_capped_star_on_a_big_nested_page_stays_in_budget ... ok
+test tests::service_login_delegates_to_primary_engine_scripted_success ... ok
+test tests::service_login_propagates_scripted_failure_without_falling_back ... ok
+test tests::service_propagates_non_unavailable_errors ... ok
+test tests::select_capped_stops_once_total_bytes_exceeded ... ok
+test tests::service_query_propagates_non_unavailable_errors ... ok
+test live::conn::tests::event_byte_budget_closes_before_message_count_limit ... ok
+test cdp::pending_guard_tests::a_dropped_call_leaves_no_pending_entry ... ok
+test tests::page_cache_expires_and_login_invalidates_the_host ... ok
+test tests::concurrent_page_shared_calls_share_one_render ... ok
+test live::proxy::tests::repeated_connection_saturation_rejects_excess_and_reclaims_slots ... ok
+test live::conn::tests::sustained_event_drain_releases_budget_and_preserves_reply_routing ... ok
+test extract::tests::deeply_nested_html_does_not_blow_the_stack ... ok
+test tests::raw_html_budget_is_wall_clock_not_per_chunk ... ok
+test tests::service_falls_back_when_engine_unavailable ... ok
+test tests::service_query_falls_back_when_engine_unavailable ... ok
+test live::conn::tests::output_byte_budget_closes_before_message_count_limit ... ok
+test tests::autodetect_falls_back_to_plain_fetch_without_a_lightpanda_binary ... ok
+test tests::service_retries_once_before_falling_back ... ok
+test tests::host_is_denylisted_after_three_failures ... ok
+test tests::query_host_is_denylisted_after_three_failures ... ok
+test tests::denylisted_host_is_retried_after_the_window ... ok
+
+test result: ok. 127 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.68s
+
+     Running tests/lightpanda.rs (target/debug/deps/lightpanda-cd83a86b7be7da4e)
+
+running 1 test
+test sidecar_serves_a_page_over_cdp ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests/lightpanda_login.rs (target/debug/deps/lightpanda_login-e82de1b09d034702)
+
+running 2 tests
+test login_reports_failure_when_credentials_are_wrong ... ok
+test login_fills_submits_and_detects_success_over_real_cdp ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+   Doc-tests otto_browser
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

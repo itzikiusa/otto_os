@@ -1,0 +1,23 @@
+
+running 1 test
+CHROME_START {"browser_fetch":true,"fixture":"127.0.0.1:63462","profile":"/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmp3I6xPS","test_pid":61665,"version":"149.0.7827.55","vetted_literal":"8.8.8.8:80"}
+NETWORK_FAILURE {"canceled":false,"errorText":"net::ERR_TOO_MANY_REDIRECTS","requestId":"13FFE50F1C70EECFC051A06B569BB76F","timestamp":60720.567505,"type":"Document"}
+
+thread 'live::session::http_chromium_tests::real_chromium_positive_http_bursts_preserve_bodies_input_and_frames' (7286860) panicked at crates/otto-browser/src/live/session_http_chromium_tests.rs:148:10:
+called `Result::unwrap()` on an `Err` value: Engine("navigation failed: net::ERR_TOO_MANY_REDIRECTS")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'tokio-rt-worker' (7286861) panicked at crates/otto-browser/src/live/session_http_chromium_tests.rs:45:67:
+called `Result::unwrap()` on an `Err` value: Kind(UnexpectedEof)
+
+thread 'tokio-rt-worker' (7286861) panicked at crates/otto-browser/src/live/session_http_chromium_tests.rs:37:88:
+called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(22), "called `Result::unwrap()` on an `Err` value: Kind(UnexpectedEof)", ...)
+test live::session::http_chromium_tests::real_chromium_positive_http_bursts_preserve_bodies_input_and_frames ... FAILED
+
+failures:
+
+failures:
+    live::session::http_chromium_tests::real_chromium_positive_http_bursts_preserve_bodies_input_and_frames
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 131 filtered out; finished in 1.06s
+

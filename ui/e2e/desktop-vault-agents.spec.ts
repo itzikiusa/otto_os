@@ -91,6 +91,18 @@ test('api: single-agent run skips the summarizer; refine registers a session', a
     await ctx.get(`${v1}/docs-agents/refine-session?path=runbooks%2Fdeploy.md`)
   ).json();
   expect(reg.session_id).toBe(refine.session_id);
+  expect(reg.running).toBe(false);
+  // Finishing a turn releases the note for another request. The E2E agent
+  // stub emits IDs without session records, so it cannot prove real CLI resume.
+  const followupResponse = await ctx.post(`${v1}/docs-agents/refine`, {
+    data: { path: 'runbooks/deploy.md', prompt: 'Clarify the rollback trigger' },
+  });
+  expect(followupResponse.ok()).toBe(true);
+  const followup = await followupResponse.json();
+  expect(followup.session_id).toBeTruthy();
+  const afterFollowup = await (await ctx.get(`${v1}/docs-agents/refine-session?path=runbooks%2Fdeploy.md`)).json();
+  expect(afterFollowup.session_id).toBe(followup.session_id);
+  expect(afterFollowup.running).toBe(false);
 
   // Reset detaches the binding (tombstone: no rehydration resurrects it) —
   // the next refine starts a FRESH session instead of resuming the old one.
@@ -109,6 +121,7 @@ test('api: single-agent run skips the summarizer; refine registers a session', a
   ).json();
   expect(fresh.session_id).toBeTruthy();
   expect(fresh.session_id).not.toBe(refine.session_id);
+  expect(fresh.session_id).not.toBe(followup.session_id);
   await ctx.dispose();
 });
 

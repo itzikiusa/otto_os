@@ -1,0 +1,121 @@
+[WebServer] (node:50895) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-GcnIKw OTTO_PORT=17844
+2026-10-08T07:57:25.760877Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-GcnIKw)
+2026-10-08T07:57:25.996863Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-GcnIKw/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T07:57:26.001888Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-GcnIKw/clickhouse, port 61542)
+2026-10-08T07:57:26.004160Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T07:57:26.006659Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T07:57:26.006703Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T07:57:26.006719Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T07:57:26.006828Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T07:57:26.006858Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T07:57:26.006961Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T07:57:26.006978Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T07:57:26.008168Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T07:57:26.012939Z  INFO otto_server::boot::recovery: boot: post-listen work done in 6 ms (plugins=0)
+2026-10-08T07:57:26.111272Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T07:57:26.111340Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T07:57:26.111363Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T07:57:26.111386Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T07:57:26.111407Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T07:57:26.132342Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T07:57:26.133923Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T07:57:26.158234Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T07:57:26.158263Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T07:57:26.158279Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T07:57:26.158294Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T07:57:26.158309Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T07:57:26.158342Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T07:57:26.158454Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T07:57:26.214701Z  INFO ottod: listening on http://127.0.0.1:17844
+2026-10-08T07:57:26.214908Z  INFO ottod: alt loopback lane on http://localhost:17844 ([::1] + 127.0.0.1 both held)
+2026-10-08T07:57:26.214962Z  INFO otto_server::boot: boot: ready in 453 ms (db_compact=0 db_open=231 maintenance=2 modules=8 restore=0 recovery=210)
+[e2e] test daemon ready (pid 50975); root onboarded.
+
+Running 8 tests using 1 worker
+
+2026-10-08T07:57:26.397164Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-GcnIKw/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T07:57:26.398718Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T07:57:26.405514Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T07:57:26.466561Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T07:57:26.467087Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T07:57:26.467180Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:51031) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:172:1 › a list/detail page opens on its first item and restores the last one (1.3s)
+  ✓  2 [desktop-browser] › e2e/desktop-page-chrome.spec.ts:197:1 › a Proof deep link waits for delayed workspace startup and then opens its named pack (422ms)
+2026-10-08T07:57:28.719358Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-z49mDo args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:57:28.766952Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D88V8M2JSZ77ZRG8JKENGY
+[WebServer] 10:57:28 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:57:29.430489Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-z49mDo
+2026-10-08T07:57:29.452134Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-z49mDo args=["remote", "get-url", "origin"] code=2
+  ✓  3 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone light (1.6s)
+2026-10-08T07:57:30.352772Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-0VB0Ui args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:57:30.400459Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D88WVNXWHZKXBFPS2QCRN6
+[WebServer] 10:57:30 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:57:30.833541Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-0VB0Ui
+2026-10-08T07:57:30.857485Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-0VB0Ui args=["remote", "get-url", "origin"] code=2
+  ✓  4 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone dark (1.2s)
+2026-10-08T07:57:31.579219Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ZHt92r args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:57:31.625258Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D88Y1YESYRANH7Y7W5QYYW
+[WebServer] 10:57:31 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:57:32.071675Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ZHt92r
+2026-10-08T07:57:32.095100Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ZHt92r args=["remote", "get-url", "origin"] code=2
+  ✓  5 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:62:1 › rating publication failure explains the pending state and offers in-place recovery (1.0s)
+2026-10-08T07:57:32.633023Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ASWxTJ args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:57:32.678936Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D88Z2X15BDBY6C371GHT7W
+[WebServer] 10:57:32 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:57:33.129353Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ASWxTJ
+2026-10-08T07:57:33.142013Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ASWxTJ args=["remote", "get-url", "origin"] code=2
+  ✓  6 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:96:1 › proof load failure stays inline and keyboard Retry restores its evidence (951ms)
+2026-10-08T07:57:33.580960Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-9RG4ol args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:57:33.628460Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D8900HYXB3Z9R02931P1QM
+[WebServer] 10:57:33 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:57:34.091021Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-9RG4ol
+2026-10-08T07:57:34.102360Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-9RG4ol args=["remote", "get-url", "origin"] code=2
+  ✓  7 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:109:1 › a late proof response cannot restore evidence from before the rating change (1.0s)
+2026-10-08T07:57:34.607033Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-2b7zOA args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:57:34.654506Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D8910J1JR4R9ZZ2DHSHTPV
+[WebServer] 10:57:34 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:57:34.972147Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-2b7zOA
+2026-10-08T07:57:34.979581Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-2b7zOA args=["remote", "get-url", "origin"] code=2
+  ✘  8 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:139:1 › workspace switch replaces the open Proof pack with the new workspace contents (45.2s)
+
+
+  1) [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:139:1 › workspace switch replaces the open Proof pack with the new workspace contents 
+
+    Test timeout of 45000ms exceeded.
+
+    Error: locator.click: Test timeout of 45000ms exceeded.
+    Call log:
+      - waiting for getByRole('menuitem', { name: 'Round 3 second workspace', exact: true })
+
+
+      150 |   await expect(title).toHaveText('First workspace proof');
+      151 |   await page.getByTestId('agents-current-ws').click();
+    > 152 |   await page.getByRole('menuitem', { name: 'Round 3 second workspace', exact: true }).click();
+          |                                                                                       ^
+      153 |   await expect(page.getByTestId('agents-current-ws')).toContainText('Round 3 second workspace');
+      154 |   await expect(title).toHaveText('Second workspace proof');
+      155 |   await expect(page.getByText('First workspace proof', { exact: true })).toHaveCount(0);
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts:152:87
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-quality-round3-eva-f61b0--the-new-workspace-contents-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-quality-round3-eva-f61b0--the-new-workspace-contents-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-quality-round3-eva-f61b0--the-new-workspace-contents-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-quality-round3-eva-f61b0--the-new-workspace-contents-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:139:1 › workspace switch replaces the open Proof pack with the new workspace contents 
+  7 passed (55.3s)

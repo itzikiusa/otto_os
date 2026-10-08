@@ -1,0 +1,94 @@
+[WebServer] (node:24202) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-9o3pWv OTTO_PORT=17848
+2026-10-08T08:12:47.762016Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-9o3pWv)
+2026-10-08T08:12:48.005466Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-9o3pWv/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T08:12:48.036794Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-9o3pWv/clickhouse, port 51456)
+2026-10-08T08:12:48.043508Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T08:12:48.044080Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T08:12:48.044163Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T08:12:48.044178Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T08:12:48.044303Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T08:12:48.044340Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T08:12:48.044432Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T08:12:48.044447Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T08:12:48.049353Z  INFO otto_server::boot::recovery: boot: post-listen work done in 5 ms (plugins=0)
+2026-10-08T08:12:48.113306Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T08:12:48.113382Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T08:12:48.113404Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T08:12:48.113424Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T08:12:48.113447Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T08:12:48.116018Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T08:12:48.116061Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T08:12:48.116082Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T08:12:48.116095Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T08:12:48.116106Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T08:12:48.116138Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T08:12:48.116253Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T08:12:48.119691Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T08:12:48.120690Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T08:12:48.122077Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T08:12:48.171168Z  INFO ottod: listening on http://127.0.0.1:17848
+2026-10-08T08:12:48.171406Z  INFO ottod: alt loopback lane on http://localhost:17848 ([::1] + 127.0.0.1 both held)
+2026-10-08T08:12:48.171466Z  INFO otto_server::boot: boot: ready in 409 ms (db_compact=0 db_open=239 maintenance=2 modules=37 restore=2 recovery=127)
+[e2e] test daemon ready (pid 24283); root onboarded.
+
+Running 11 tests using 1 worker
+
+2026-10-08T08:12:48.431933Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-9o3pWv/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T08:12:48.433548Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T08:12:48.440022Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T08:12:48.524116Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T08:12:48.524553Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T08:12:48.524636Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:24337) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T08:12:48.860456Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-bfHid0 args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:12:48.909053Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D94XV2A6SK89C56DBKGK9V
+[WebServer] 11:12:49 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:12:50.254910Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-bfHid0
+2026-10-08T08:12:50.277653Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-bfHid0 args=["remote", "get-url", "origin"] code=2
+  ✓   1 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone light (2.2s)
+2026-10-08T08:12:51.024421Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-mJYs1j args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:12:51.070250Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D94ZYMPCAE5JAD7QT4YYYT
+[WebServer] 11:12:51 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:12:51.620109Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-mJYs1j
+2026-10-08T08:12:51.639247Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-mJYs1j args=["remote", "get-url", "origin"] code=2
+  ✓   2 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone dark (1.2s)
+2026-10-08T08:12:52.259503Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ncYLsF args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:12:52.310313Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D95159M1ZC6RQ4GJNYP5A7
+[WebServer] 11:12:52 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:12:52.932207Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ncYLsF
+2026-10-08T08:12:52.970929Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-ncYLsF args=["remote", "get-url", "origin"] code=2
+  ✓   3 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:62:1 › rating publication failure explains the pending state and offers in-place recovery (2.8s)
+2026-10-08T08:12:55.551605Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-pyV3jR args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:12:55.722960Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D954E5X8YN1Z0FVSYBMQF5
+[WebServer] 11:12:55 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:12:56.486808Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-pyV3jR
+2026-10-08T08:12:56.505566Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-pyV3jR args=["remote", "get-url", "origin"] code=2
+  ✓   4 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:101:1 › proof load failure stays inline and keyboard Retry restores its evidence (1.9s)
+2026-10-08T08:12:56.944529Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-rU7Imm args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:12:56.993693Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D955QMY47DA0B5QXJCAPE6
+[WebServer] 11:12:57 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:12:57.546019Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-rU7Imm
+2026-10-08T08:12:57.592859Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-rU7Imm args=["remote", "get-url", "origin"] code=2
+  ✓   5 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:114:1 › a late proof response cannot restore evidence from before the rating change (1.2s)
+2026-10-08T08:12:58.162052Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-147zt6 args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:12:58.208983Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D956XPX41E8NWPGZ9DZVVE
+[WebServer] 11:12:58 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:12:58.644044Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-147zt6
+2026-10-08T08:12:58.654708Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-147zt6 args=["remote", "get-url", "origin"] code=2
+  ✓   6 [desktop-browser] › e2e/desktop-quality-round3-eval-ux.spec.ts:144:1 › workspace switch replaces the open Proof pack with the new workspace contents (933ms)
+[WebServer] 11:12:59 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   7 [desktop-browser] › e2e/desktop-quality-round4-loop-ux.spec.ts:35:3 › loop navigation isolates answer and verification drafts light (1.3s)
+[WebServer] 11:13:00 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   8 [desktop-browser] › e2e/desktop-quality-round4-loop-ux.spec.ts:35:3 › loop navigation isolates answer and verification drafts dark (852ms)
+[WebServer] 11:13:01 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   9 [desktop-browser] › e2e/desktop-quality-round4-loop-ux.spec.ts:64:1 › direct loop navigation closes the previous budget dialog (839ms)
+[WebServer] 11:13:02 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  10 [desktop-browser] › e2e/desktop-quality-round4-loop-ux.spec.ts:79:1 › a failed goal detail offers inline keyboard recovery (705ms)
+[WebServer] 11:13:02 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  11 [desktop-browser] › e2e/desktop-quality-round4-loop-ux.spec.ts:94:1 › a late delete for the previous loop cannot close the current detail (888ms)
+
+  11 passed (17.0s)

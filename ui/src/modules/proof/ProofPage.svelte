@@ -104,16 +104,14 @@
   let autoPickedFor = $state<string | null>(null);
   $effect(() => {
     const wsId = ws.currentId;
-    if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
+    if (!wsId || proof.wsId !== wsId || autoPickedFor === wsId || viewport.isPhone) return;
     if (proof.detail) {
       autoPickedFor = wsId;
       return;
     }
-    // A deep link (`#/proof/<id>`) opens on its own (below).
-    if (untrack(() => routePackId())) {
-      autoPickedFor = wsId;
-      return;
-    }
+    // A deep link opens below. A workspace switch clears the previous link;
+    // observe that change and only mark selection complete once a pack opens.
+    if (routePackId()) return;
     if (proof.loading || proof.packs.length === 0) return;
     autoPickedFor = wsId;
     const id = initialSelection('proof', proof.packs, (p) => p.id);
@@ -149,7 +147,11 @@
   // pasted link) opens that pack.
   $effect(() => {
     const linked = routePackId();
-    if (!linked) return;
+    // On a cold deep link the route arrives before workspace bootstrap. Opening
+    // then would be invalidated by loadPacks' workspace reset, with no route
+    // change left to retry it. Follow workspace readiness as well as the URL.
+    const workspaceId = ws.currentId;
+    if (!linked || !workspaceId || proof.wsId !== workspaceId) return;
     untrack(() => {
       if (linked !== proof.detail?.pack.id && linked !== openingId) void open(linked);
     });

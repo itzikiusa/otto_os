@@ -219,12 +219,6 @@ async fn create(
             ))));
         }
     }
-    if req.config.executors.is_empty() {
-        return Err(ApiError(Error::Invalid(
-            "a goal loop needs at least one executor".into(),
-        )));
-    }
-
     let loop_ = ctx
         .goal_loops_repo
         .create(NewGoalLoop {
@@ -301,38 +295,26 @@ async fn patch(
     let _guard = operation.lock().await;
     let loop_ = loop_for(&ctx, &user, &id, WorkspaceRole::Editor).await?;
 
-    if let Some(name) = req.name {
-        if loop_.status.is_terminal() {
-            return Err(ApiError(Error::Invalid(
-                "cannot rename a finished loop".into(),
-            )));
-        }
-        ctx.goal_loops_repo
-            .set_name(&id, &name)
-            .await
-            .map_err(ApiError)?;
+    // Validate the entire candidate before writing any field: a failed PATCH
+    // must leave the previous configuration intact.
+    if req.name.is_some() && loop_.status.is_terminal() {
+        return Err(ApiError(Error::Invalid(
+            "cannot rename a finished loop".into(),
+        )));
     }
-    if let Some(limits) = req.limits {
-        validate_settings(&loop_.config, &limits)?;
-        // Limits may be raised while editable or paused/blocked/exhausted (to
-        // continue), but not while actively Running.
-        if loop_.status == GoalLoopStatus::Running {
-            return Err(ApiError(Error::Invalid(
-                "pause the loop before changing limits".into(),
-            )));
-        }
-        ctx.goal_loops_repo
-            .set_limits(&id, &limits)
-            .await
-            .map_err(ApiError)?;
+    // Limits may be raised while editable or paused/blocked/exhausted (to
+    // continue), but not while actively Running.
+    if req.limits.is_some() && loop_.status == GoalLoopStatus::Running {
+        return Err(ApiError(Error::Invalid(
+            "pause the loop before changing limits".into(),
+        )));
     }
-    if let Some(config) = req.config {
+    if let Some(config) = &req.config {
         if config.mode != loop_.config.mode {
             return Err(ApiError(Error::Invalid(
                 "mode cannot change after creation; create a new goal".into(),
             )));
         }
-        validate_settings(&config, &loop_.limits)?;
         // Reshaping the executor lineup mid-run would break live agent indices;
         // config is editable in Draft only.
         if loop_.status != GoalLoopStatus::Draft {
@@ -340,11 +322,22 @@ async fn patch(
                 "config can only be edited while the loop is a draft".into(),
             )));
         }
-        ctx.goal_loops_repo
-            .set_config(&id, &config)
-            .await
-            .map_err(ApiError)?;
     }
+    if req.limits.is_some() || req.config.is_some() {
+        validate_settings(
+            req.config.as_ref().unwrap_or(&loop_.config),
+            req.limits.as_ref().unwrap_or(&loop_.limits),
+        )?;
+    }
+    ctx.goal_loops_repo
+        .update_settings(
+            &id,
+            req.name.as_deref(),
+            req.limits.as_ref(),
+            req.config.as_ref(),
+        )
+        .await
+        .map_err(ApiError)?;
     Ok(Json(ctx.goal_loops_repo.get(&id).await.map_err(ApiError)?))
 }
 
@@ -485,6 +478,11 @@ async fn retry(
 }
 
 fn validate_settings(config: &GoalLoopConfig, limits: &GoalLoopLimits) -> ApiResult<()> {
+    if config.executors.is_empty() {
+        return Err(ApiError(Error::Invalid(
+            "a goal loop needs at least one executor".into(),
+        )));
+    }
     if !matches!(config.mode.as_str(), "build" | "research") {
         return Err(ApiError(Error::Invalid(
             "mode must be build or research".into(),

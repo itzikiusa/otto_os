@@ -1,0 +1,21 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.93s
+     Running unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)
+
+running 1 test
+
+thread 'live::process::burst_tests::cached_public_resource_burst_does_not_fail_before_workers_are_polled' (6522442) panicked at crates/otto-browser/src/live/process_burst_tests.rs:86:5:
+assertion `left == right` failed: cached public resources were rejected solely because guard workers had not run
+  left: (64, 64)
+ right: (128, 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test live::process::burst_tests::cached_public_resource_burst_does_not_fail_before_workers_are_polled ... FAILED
+
+failures:
+
+failures:
+    live::process::burst_tests::cached_public_resource_burst_does_not_fail_before_workers_are_polled
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 125 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p otto-browser --lib`

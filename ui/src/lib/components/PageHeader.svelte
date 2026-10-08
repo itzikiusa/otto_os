@@ -35,7 +35,7 @@
   // page's list is empty, the EmptyState owns the "New …" CTA and the header
   // omits it.
   import type { Snippet } from 'svelte';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Icon, { type IconName } from './Icon.svelte';
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
@@ -93,6 +93,10 @@
   let titleEl: HTMLElement | undefined = $state();
   let iconEl: HTMLElement | undefined = $state();
   let badgeEl: HTMLElement | undefined = $state();
+  let moreEl: HTMLButtonElement | undefined = $state();
+  // Remember the control whose focus moved into overflow, so expanding the
+  // toolbar returns the keyboard to the same action rather than the page body.
+  let overflowFocus: HTMLElement | null = null;
   /** The controls currently collapsed into the "⋯" menu (DOM order). */
   let collapsed: HTMLElement[] = $state([]);
 
@@ -245,6 +249,13 @@
           hidden.push(o.el);
         }
       }
+      const focused = document.activeElement;
+      const hidingFocus = focused instanceof HTMLElement && hidden.some((el) => el.contains(focused));
+      const removingFocusedMore = focused === moreEl && hidden.length === 0;
+      const expandedFocus = removingFocusedMore ? overflowFocus ?? collapsed
+        .flatMap((el) => el.matches('button, a, [role="button"]') ? [el] : Array.from(el.querySelectorAll<HTMLElement>('button, a, [role="button"]')))
+        .find((el) => !el.matches(':disabled') && el.getAttribute('aria-disabled') !== 'true') : null;
+      if (hidingFocus) overflowFocus = focused as HTMLElement;
       // Reconcile the collapsed set: touch only the attributes that change.
       for (const k of kids) {
         const hide = hidden.includes(k);
@@ -252,6 +263,17 @@
       }
       const next = kids.filter((k) => hidden.includes(k));
       if (next.length !== collapsed.length || next.some((k, i) => k !== collapsed[i])) collapsed = next;
+      if (hidingFocus || removingFocusedMore) {
+        void tick().then(() => {
+          // A user or another surface may have moved focus during this render.
+          if (document.activeElement !== focused && document.activeElement !== document.body) return;
+          const target = hidingFocus ? moreEl : expandedFocus;
+          if (target?.isConnected && target.getClientRects().length && !target.matches(':disabled')) {
+            target.focus({ preventScroll: true });
+          }
+          if (removingFocusedMore) overflowFocus = null;
+        });
+      }
     } finally {
       measuring = false;
     }
@@ -377,6 +399,7 @@
       </div>
       {#if collapsed.length}
         <button
+          bind:this={moreEl}
           class="icon-btn ph-more"
           onclick={openMore}
           title="More actions"

@@ -23,6 +23,73 @@ use serde_json::json;
 use crate::proof;
 use crate::state::ServerCtx;
 
+/// Serialize rating writes, retry admission and final score publication for one
+/// evaluation. The lock is never held while agents run. Weak entries are pruned
+/// so the registry retains only active publishers/waiters.
+pub(crate) async fn update_guard(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(id.into(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    lock.lock_owned().await
+}
+
+/// Publish a retried validator score under the same lock as human ratings. The
+/// fresh iteration read and both iteration/headline writes form one update.
+pub(crate) async fn publish_validation_retry(
+    ctx: &ServerCtx,
+    eval_id: &otto_core::Id,
+    iter_id: &otto_core::Id,
+    previous: Option<EvalScore>,
+) -> Result<()> {
+    let _guard = update_guard(eval_id).await;
+    let eval = ctx.skill_evals_store.get_eval(eval_id).await?;
+    let updated = ctx.skill_evals_store.get_iteration(iter_id).await?;
+    // The legacy iteration badge uses the same validator denominator as an
+    // initial run. Incomplete validators contribute zero, never disappear.
+    let mean = (!updated.agents.is_empty()).then(|| {
+        updated
+            .agents
+            .iter()
+            .map(|agent| {
+                if agent.status == "done" {
+                    agent.score
+                } else {
+                    0.0
+                }
+            })
+            .sum::<f64>()
+            / updated.agents.len() as f64
+    });
+    let (scoring, pack_id) = rescore_validation(ctx, &eval, &updated, previous).await?;
+    ctx.skill_evals_store
+        .publish_iter_scoring(
+            eval_id,
+            iter_id,
+            &scoring,
+            &pack_id,
+            mean,
+            "Validation retry complete",
+        )
+        .await?;
+    ctx.skill_evals_store
+        .set_iter_status(iter_id, "done", "validation retry complete")
+        .await
+}
+
 /// A short, human title for an eval iteration's proof pack.
 fn pack_title(eval: &SkillEval) -> String {
     let task: String = eval.task.chars().take(60).collect();
@@ -34,8 +101,8 @@ fn meta_u32(a: &ProofArtifact, key: &str) -> u32 {
 }
 
 /// Run the full scoring pipeline for one iteration and return its [`EvalScore`].
-/// Assembles (and persists) the iteration's Proof Pack along the way; the caller
-/// persists the returned score via `set_iter_scoring`.
+/// Assembles the iteration's Proof Pack, then publishes the score under the
+/// evaluation update lock using the latest rating. Commands run outside the lock.
 ///
 /// - `diff_base` is the git ref the diff is measured against: `None` ⇒ working tree
 ///   vs HEAD (uncommitted impl-agent changes / dirty target), `Some(ref)` ⇒
@@ -157,8 +224,13 @@ async fn score_iteration_inner(
     )
     .await?;
 
+    // Commands can take minutes. Re-read user edits only after they finish, and
+    // serialize proof/score publication with ratings and validation retries.
+    let _guard = update_guard(&eval.id).await;
+    let iter = ctx.skill_evals_store.get_iteration(&iter.id).await?;
+
     // 4. Review signal from the iteration's validator findings.
-    let review = review_signal(ctx, &pack, iter).await?;
+    let review = review_signal(ctx, &pack, &iter).await?;
 
     // 5. Human rating signal (Approval artifact when present).
     let human = human_score(iter.human_rating, &iter.human_note, &iter.human_rater);
@@ -169,7 +241,7 @@ async fn score_iteration_inner(
         } else {
             &iter.human_rater
         };
-        let _ = proof::upsert_content_artifact(
+        proof::upsert_content_artifact(
             ctx,
             &pack,
             ProofArtifactKind::Approval,
@@ -179,7 +251,7 @@ async fn score_iteration_inner(
             json!({ "rating": r }),
             by,
         )
-        .await;
+        .await?;
     }
 
     // 6. Let the proof engine derive the authoritative status + done score.
@@ -197,6 +269,16 @@ async fn score_iteration_inner(
         done_score: refreshed.done_score,
     };
     score.composite = compute_composite(&score);
+    ctx.skill_evals_store
+        .publish_iter_scoring(
+            &eval.id,
+            &iter.id,
+            &score,
+            &pack.id,
+            (eval.mode == "score_only").then_some(score.composite),
+            "Scoring complete",
+        )
+        .await?;
     Ok((score, pack.id))
 }
 
@@ -223,7 +305,7 @@ pub async fn rescore_with_human(
     .await?;
     let body = format!("rating: {rating}/5\n{note}");
     let by = if rater.is_empty() { "otto" } else { rater };
-    let _ = proof::upsert_content_artifact(
+    proof::upsert_content_artifact(
         ctx,
         &pack,
         ProofArtifactKind::Approval,
@@ -233,13 +315,12 @@ pub async fn rescore_with_human(
         json!({ "rating": rating }),
         by,
     )
-    .await;
+    .await?;
     let refreshed = proof::recompute_and_emit(ctx, &pack.id).await?;
 
+    // A recorded zero weight is intentional (e.g. lint-only scoring). Only an
+    // absent score needs defaults; EvalScore::default already supplies them.
     let mut score = iter.scoring.clone().unwrap_or_default();
-    if score.weights.tests == 0.0 && score.weights.review == 0.0 {
-        score.weights = ScoreWeights::default();
-    }
     score.human = human_score(Some(rating), note, rater);
     score.proof_status = refreshed.status.as_str().to_string();
     score.done_score = refreshed.done_score;
@@ -269,6 +350,26 @@ pub(crate) async fn rescore_validation(
     }
     let mut score = previous.unwrap_or_default();
     score.review = review_signal(ctx, &pack, iter).await?;
+    score.human = human_score(iter.human_rating, &iter.human_note, &iter.human_rater);
+    // A rating may have saved its pending snapshot but failed to write Proof.
+    // A subsequent validator retry must repair that Approval before publishing.
+    if let Some(rating) = iter.human_rating {
+        proof::upsert_content_artifact(
+            ctx,
+            &pack,
+            ProofArtifactKind::Approval,
+            "Human rating",
+            &format!("rating: {rating}/5\n{}", iter.human_note),
+            ProofArtifactStatus::Passed,
+            json!({ "rating": rating }),
+            if iter.human_rater.is_empty() {
+                "otto"
+            } else {
+                &iter.human_rater
+            },
+        )
+        .await?;
+    }
     let fresh = proof::recompute_and_emit(ctx, id).await?;
     score.proof_status = fresh.status.as_str().to_string();
     score.done_score = fresh.done_score;
@@ -418,6 +519,51 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         assert!(!dir.path().join("late").exists());
         assert!(!dir.path().join("lint").exists());
+    }
+
+    #[tokio::test]
+    async fn validation_retry_keeps_the_latest_persisted_human_rating() {
+        let (_dir, ctx, eval, mut iter) = fixture().await;
+        let pack = ctx
+            .proof_repo
+            .create_pack(
+                &eval.workspace_id,
+                WorkItemKind::Task,
+                &iter.id,
+                "fixture",
+                "editor",
+                None,
+            )
+            .await
+            .unwrap();
+        iter.proof_pack_id = Some(pack.id.clone());
+        let previous = EvalScore {
+            human: human_score(Some(5), "before retry", "editor"),
+            ..Default::default()
+        };
+        ctx.skill_evals_store
+            .set_iter_scoring(&iter.id, &previous, Some(&pack.id))
+            .await
+            .unwrap();
+        // The human rating is changed while the validators are still running.
+        ctx.skill_evals_store
+            .set_iter_human(&iter.id, 1, "latest rating", "editor")
+            .await
+            .unwrap();
+        let fresh = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
+        let (score, _) = rescore_validation(&ctx, &eval, &fresh, Some(previous))
+            .await
+            .unwrap();
+        ctx.skill_evals_store
+            .set_iter_scoring(&iter.id, &score, Some(&pack.id))
+            .await
+            .unwrap();
+        let stored = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
+        assert_eq!(stored.human_rating, Some(1));
+        let score = stored.scoring.unwrap();
+        assert_eq!(score.human.rating, Some(1));
+        assert_eq!(score.human.note, "latest rating");
+        assert_eq!(score.composite, 20.0);
     }
 
     #[tokio::test]

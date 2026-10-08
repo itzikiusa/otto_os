@@ -1,0 +1,59 @@
+{
+  "round_3": {
+    "matched": [
+      "crates/otto-browser/src/lib.rs",
+      "crates/otto-browser/src/live/conn.rs",
+      "crates/otto-browser/src/live/process.rs",
+      "crates/otto-browser/src/live/proxy.rs",
+      "crates/otto-browser/src/live/session.rs",
+      "crates/otto-browser/src/live/session_chromium_tests.rs",
+      "crates/otto-browser/src/live/session_http_chromium_tests.rs",
+      "target/debug/deps/otto_browser-1194e6b985037524",
+      "/Users/itziklavon/Library/Caches/ms-playwright/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+    ],
+    "changed_or_absent": [],
+    "recorded_head": "d4b8626d9e4ce3af818c8d6e498fd4299f263dd2"
+  },
+  "round_4": {
+    "matched": [
+      "target/debug/ottod",
+      "Cargo.lock",
+      "ui/package-lock.json",
+      "crates/otto-sessions/src/ws.rs",
+      "crates/otto-sessions/src/manager.rs",
+      "crates/otto-pty/src/lib.rs",
+      "crates/otto-pty/src/held.rs",
+      "crates/otto-pty/src/holder.rs",
+      "crates/otto-server/src/transcript_cache.rs",
+      "crates/otto-server/src/transcript_tail.rs",
+      "crates/otto-state/src/skill_evals.rs",
+      "ui/src/lib/components/Terminal.svelte",
+      "ui/src/lib/components/termFlow.ts",
+      "ui/src/lib/components/termCompactQueue.ts",
+      "ui/src/lib/components/termPark.ts",
+      "ui/src/lib/stores/transcript.svelte.ts",
+      "ui/src/lib/stores/transcriptLifecycle.ts",
+      "ui/e2e/desktop-terminal-rendered-load-perf.spec.ts",
+      "ui/e2e/process-resources.ts",
+      "ui/e2e/global-setup.ts",
+      "ui/e2e/global-teardown.ts",
+      "ui/playwright.config.ts"
+    ],
+    "changed_or_absent": [
+      "crates/otto-server/src/skill_eval.rs"
+    ],
+    "recorded_head": "2913a7d17c8b2b439d8ff8549768fbf64fc1808d"
+  },
+  "terminal_summary": {
+    "markers": 855,
+    "p95_ms": [
+      26,
+      34,
+      36
+    ],
+    "ack": 18,
+    "fatal": [],
+    "raw_recomputed": true
+  },
+  "review_head": "a911ce2bc614ae430bf9a16bcd9ee7614813d9d4"
+}

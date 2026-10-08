@@ -318,13 +318,62 @@ impl ChromeProcess {
 
     /// Answer one paused request (browser-level, or `via` a page session when
     /// the per-target fallback is in use).
-    pub async fn on_paused(self: Arc<Self>, params: Value, via: Option<String>) {
-        let Some(req) = Paused::parse(&params) else {
+    pub fn on_paused(self: &Arc<Self>, event: CdpEvent) {
+        let Some(req) = Paused::parse(&event.params) else {
             return;
         };
-        let permit = self.guard_slots.clone().acquire_owned().await.ok();
-        let allowed = guard::vet(&req.url, &self.verdicts).await;
-        drop(permit);
+        // Ordinary same-origin resource bursts need no DNS worker once their
+        // origin was vetted. Handle safe cached requests inline so scheduler
+        // timing cannot consume all guard slots before any worker is polled.
+        // Outward methods still take the approval-aware decision path below;
+        // the proxy independently re-vets every network connection.
+        if !guard::is_outward_method(&req.method)
+            && self
+                .verdicts
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&guard::origin_key(&req.url), Instant::now()))
+                == Some(true)
+        {
+            self.conn.send(
+                "Fetch.continueRequest",
+                json!({"requestId": req.request_id}),
+                event.session_id.as_deref(),
+            );
+            return;
+        }
+        let Ok(permit) = self.guard_slots.clone().try_acquire_owned() else {
+            // Admission is before spawning: a page cannot retain unbounded
+            // request bodies in tasks waiting behind slow DNS. Never continue
+            // a request whose guard could not run.
+            self.conn.send(
+                "Fetch.failRequest",
+                json!({"requestId": req.request_id, "errorReason": "BlockedByClient"}),
+                event.session_id.as_deref(),
+            );
+            return;
+        };
+        let me = self.clone();
+        tokio::spawn(async move {
+            // Keep the transport byte charge until this worker releases its
+            // event, including any screenshot/approval work.
+            let via = event.session_id.clone();
+            tokio::select! {
+                _ = me.conn.closed() => {},
+                _ = me.clone().resolve_paused(req, via) => {},
+            }
+            drop(event);
+            drop(permit);
+        });
+    }
+
+    async fn resolve_paused(self: Arc<Self>, req: Paused, via: Option<String>) {
+        let allowed = tokio::time::timeout(
+            Duration::from_secs(15),
+            guard::vet(&req.url, &self.verdicts),
+        )
+        .await
+        .unwrap_or(false);
         let session = req.frame_id.as_deref().and_then(|f| self.session(f));
         let agent_drives = session.as_ref().is_some_and(|s| s.agent_drives());
         match guard::decide(allowed, &req, session.is_some(), agent_drives) {
@@ -366,10 +415,7 @@ impl ChromeProcess {
         let p = &ev.params;
         match ev.method.as_str() {
             "Fetch.requestPaused" => {
-                let me = self.clone();
-                let params = ev.params.clone();
-                let via = ev.session_id.clone();
-                tokio::spawn(async move { me.on_paused(params, via).await });
+                self.on_paused(ev);
             }
             "Target.targetInfoChanged" => {
                 let info = &p["targetInfo"];
@@ -584,10 +630,7 @@ impl ChromeProcess {
     }
 }
 
-async fn event_loop(
-    proc: Weak<ChromeProcess>,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>,
-) {
+async fn event_loop(proc: Weak<ChromeProcess>, mut events: tokio::sync::mpsc::Receiver<CdpEvent>) {
     while let Some(ev) = events.recv().await {
         let Some(p) = proc.upgrade() else {
             return;
@@ -718,4 +761,56 @@ mod tests {
         assert_eq!(sanitize_filename("..."), "download");
         assert_eq!(sanitize_filename(""), "download");
     }
+    #[tokio::test]
+    async fn guard_overload_fails_request_without_queueing_a_waiter() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (ours, mut browser) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, mut events) = CdpConn::start(read, write);
+        let proc = Arc::new(ChromeProcess {
+            key: ProcessKey::Ephemeral,
+            build: ChromeBuild::Chrome,
+            version: "fixture".into(),
+            headed: false,
+            conn,
+            download_policy: DownloadPolicy::Block,
+            downloads_dir: PathBuf::new(),
+            browser_fetch: true,
+            child: AsyncMutex::new(None),
+            targets: StdMutex::new(HashMap::new()),
+            popups: StdMutex::new(HashMap::new()),
+            downloads: StdMutex::new(HashMap::new()),
+            verdicts: StdMutex::new(VerdictCache::default()),
+            guard_slots: Arc::new(Semaphore::new(GUARD_SLOTS)),
+            empty_since: StdMutex::new(None),
+            dead: AtomicBool::new(false),
+            loop_task: StdMutex::new(None),
+        });
+        let _busy = proc
+            .guard_slots
+            .clone()
+            .acquire_many_owned(GUARD_SLOTS as u32)
+            .await
+            .unwrap();
+        browser.write_all(b"{\"method\":\"Fetch.requestPaused\",\"params\":{\"requestId\":\"overflow\",\"request\":{\"url\":\"https://example.com/\"}}}\0").await.unwrap();
+        proc.on_browser_event(events.recv().await.unwrap());
+        let reply = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut bytes = vec![];
+            loop {
+                let b = browser.read_u8().await.unwrap();
+                if b == 0 {
+                    break;
+                }
+                bytes.push(b);
+            }
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        })
+        .await
+        .expect("guard overload must fail closed immediately, not queue behind DNS");
+        assert_eq!(reply["method"], "Fetch.failRequest");
+        assert_eq!(reply["params"]["requestId"], "overflow");
+    }
 }
+#[cfg(test)]
+#[path = "process_burst_tests.rs"]
+mod burst_tests;

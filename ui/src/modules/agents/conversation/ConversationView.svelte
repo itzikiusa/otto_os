@@ -50,6 +50,7 @@
   import { sessionState } from '../../../lib/status';
   import { groupTurns, stableGroupTurns, activeQueued, changedDiff, changedFiles, countUnread, dayKey, fmtCost, fmtDay, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
   import { registerFindProvider } from '../../../lib/findProviders';
+  import { appModifier, isMacPlatform, keyContext } from '../../../lib/keys';
   import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
   import type { RenderItem } from './format';
   import { CONV_CTX, type ConvContext, type PreviewReq } from './context';
@@ -520,13 +521,27 @@
       },
     }),
   );
+  let searchReturnFocus: HTMLElement | null = null;
+  // The app keymap handles Cmd+F in capture phase. Register the focused
+  // conversation there so it does not also open the global find overlay.
+  function claimFind(e: FocusEvent): void {
+    if (e.target instanceof Element && e.target.closest('.cm-editor, .xterm')) return;
+    keyContext.openFind = openSearch;
+  }
+  function releaseFind(e?: FocusEvent): void {
+    if (e?.relatedTarget instanceof Node && (e.currentTarget as HTMLElement).contains(e.relatedTarget)) return;
+    if (keyContext.openFind === openSearch) keyContext.openFind = null;
+  }
+  $effect(() => () => releaseFind());
   function openSearch(): void {
+    if (!searchOpen) searchReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     searchOpen = true;
     void tick().then(() => searchEl?.select());
   }
   function closeSearch(): void {
     searchOpen = false;
     query = '';
+    if (searchReturnFocus?.isConnected) searchReturnFocus.focus();
   }
   function onSearchKey(e: KeyboardEvent): void {
     if (e.key === 'Escape') {
@@ -544,7 +559,8 @@
     }
   }
   function onConvKey(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f' && !e.shiftKey && !e.altKey) {
+    if (e.defaultPrevented) return;
+    if (appModifier(e, false, isMacPlatform()) && e.key.toLowerCase() === 'f' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       e.stopPropagation();
       openSearch();
@@ -756,7 +772,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey}>
+<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey} onfocusin={claimFind} onfocusout={releaseFind}>
   <header class="conv-head" class:folded={narrowHead && searchOpen}>
     {#if t?.provider && hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={13} />{/if}
     <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading conversation…' : 'Conversation')}</span>

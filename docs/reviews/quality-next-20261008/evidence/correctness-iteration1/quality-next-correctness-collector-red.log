@@ -1,0 +1,65 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 20s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 17 tests
+test skill_eval::tests::sanitize_makes_safe_names ... ok
+test skill_eval::tests::score_subtracts_by_severity ... ok
+test skill_eval::tests::best_iter_prefers_high_score_then_latest ... ok
+test skill_eval::tests::parse_improvement_object ... ok
+test skill_eval::output_tests::partial_validator_file_is_preserved_until_a_complete_verdict ... ok
+test skill_eval::tests::parse_findings_tolerant ... ok
+test skill_eval::tests::diff_marks_changes ... ok
+test skill_eval::tests::invalid_validator_output_is_distinct_from_a_clean_verdict ... ok
+test skill_eval::output_tests::valid_clean_transcript_is_a_verdict_and_invalid_passes_do_not_score ... ok
+test skill_eval::tests::retry_admission_cancellation_and_cleanup_keep_attempt_identity ... ok
+test skill_eval::tests::validator_expansion_is_bounded_before_launch ... ok
+test skill_eval::tests::diff_trims_common_ends_and_caps_the_lcs ... ok
+test skill_eval::output_tests::completion_order_preserves_validator_dimension_in_improver_prompt ... FAILED
+test skill_eval::output_tests::malformed_validation_cannot_publish_passed_review_evidence ... ok
+test skill_eval::tests::golden_task_from_another_workspace_is_rejected_before_creating_eval ... ok
+test skill_eval::tests::promotion_ignores_cached_pass_when_live_proof_is_missing_or_foreign ... ok
+test skill_eval::tests::cleanup_preserves_score_only_user_paths_with_a_similar_temp_prefix ... ok
+
+failures:
+
+---- skill_eval::output_tests::completion_order_preserves_validator_dimension_in_improver_prompt stdout ----
+
+thread 'skill_eval::output_tests::completion_order_preserves_validator_dimension_in_improver_prompt' (6476590) panicked at crates/otto-server/src/skill_eval_output_tests.rs:44:5:
+You improve a coding-agent SKILL so that an agent following it produces better code for this kind of task. An agent used the skill to implement a task; validation agents then found the issues listed below. Edit the skill so a future run avoids these issues.
+
+TASK the skill was used for:
+task
+
+SKILL VERSIONS TRIED SO FAR (with their scores):
+VALIDATION FINDINGS (dimension, severity, issue → suggested fix):
+- [security] (warn) quadratic scan → fix: index the rows
+- [performance] (fail) missing permission check → fix: check ownership
+
+Skill authoring best practices to follow:
+- Keep valid YAML frontmatter with at least `name:` and a concise one-line `description:`.
+- Preserve the skill's original intent and structure; change only what the findings justify.
+- Prefer additive, surgical edits (tighten wording, add a missing rule, add a concrete example) over rewrites.
+- Be specific and actionable, and prefer stating the behaviour you WANT over listing what to avoid: describe the correct action, give the reason it matters in one clause, and where possible name the check that confirms it was done (a command to run, an output to look for). An agent that knows the goal and can verify it handles cases a prohibition never anticipated.
+- Reserve explicit prohibitions for two things: destructive or irreversible actions, and trigger scope (when this skill should NOT be used). Elsewhere, replace a `NEVER do X` line with the positive rule that makes X unnecessary — and do not restate a rule the skill already makes once.
+- Do not introduce contradictions or remove instructions that are still correct.
+- Do NOT game the validators: never add instructions that merely tell the agent to satisfy these specific checks, hardcode outputs, or name the validation dimensions — the edits must improve how the agent works IN GENERAL so the gains hold on unseen tasks.
+- Return the COMPLETE new SKILL.md content (frontmatter + body), not a fragment.
+
+Decide which prior iteration's SKILL.md is the best BASE to edit (usually the highest-scoring one — do NOT build on a version that scored worse). Then produce the improved skill.
+
+Output ONLY a JSON object (no prose, no markdown fence) written to this absolute file path, overwriting any existing content:
+
+/tmp/unused
+
+Shape: {"base_iter": <iteration number you based the edit on>, "skill": "<the COMPLETE new SKILL.md content>", "summary": "<2-4 sentences on what you changed and why>"}. Writing the file is the LAST thing you do.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    skill_eval::output_tests::completion_order_preserves_validator_dimension_in_improver_prompt
+
+test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 960 filtered out; finished in 2.50s
+
+error: test failed, to rerun pass `-p otto-server --lib`

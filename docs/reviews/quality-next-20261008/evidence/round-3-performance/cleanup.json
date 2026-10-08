@@ -1,0 +1,26 @@
+{
+  "profiles": [
+    {
+      "log": "chromium-functional-corrected.log",
+      "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpXk3ztS",
+      "exists": false
+    },
+    {
+      "log": "chromium-run.log",
+      "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpkrXmyw",
+      "exists": false
+    },
+    {
+      "log": "chromium-functional.log",
+      "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmp3I6xPS",
+      "exists": false
+    },
+    {
+      "log": "chromium-diagnostic.log",
+      "profile": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpm9nK07",
+      "exists": false
+    }
+  ],
+  "remaining_profile_processes": [],
+  "measured_remaining_pids": []
+}

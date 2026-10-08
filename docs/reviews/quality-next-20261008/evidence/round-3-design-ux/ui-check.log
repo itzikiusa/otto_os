@@ -1,0 +1,14 @@
+
+> ui@0.2.0 check
+> node scripts/ui-guards.mjs && svelte-check --tsconfig ./tsconfig.app.json --fail-on-warnings && node node_modules/typescript7/bin/tsc -p tsconfig.node.json && node node_modules/typescript7/bin/tsc -p tsconfig.e2e.json && node node_modules/typescript7/bin/tsc -p tsconfig.unit.json
+
+
+ui-guards: ratcheted rules got WORSE — fix the new occurrence(s) (all listed per file; the new one is among them):
+
+  [inline-retry] src/modules/skills-eval/RunDetail.svelte: 2 (baseline 1) — hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)
+        src/modules/skills-eval/RunDetail.svelte:580  Retry'}
+                </button>
+        src/modules/skills-eval/RunDetail.svelte:624  Retry score update'}
+            </button>
+
+See the header of ui/scripts/ui-guards.mjs for the rules.

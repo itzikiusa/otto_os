@@ -119,7 +119,11 @@
 
 <div class="loops">
   {#if selectedId}
-    <LoopDetail id={selectedId} onback={back} />
+    <!-- A direct link can switch ids without leaving this page. Draft answers,
+         verification evidence and open dialogs belong to exactly one loop. -->
+    {#key selectedId}
+      <LoopDetail id={selectedId} onback={back} />
+    {/key}
   {:else if creating}
     <GoalDefineForm oncancel={() => (creating = false)} oncreated={open} />
   {:else}

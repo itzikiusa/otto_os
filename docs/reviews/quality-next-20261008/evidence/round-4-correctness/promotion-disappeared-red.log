@@ -1,0 +1,19 @@
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.06s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 1 test
+
+thread 'skill_eval::recovery_tests::promotion_does_not_report_success_when_metadata_row_disappears' (7400886) panicked at crates/otto-server/src/skill_eval_recovery_tests.rs:643:5:
+promotion returned success when no metadata row was updated
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test skill_eval::recovery_tests::promotion_does_not_report_success_when_metadata_row_disappears ... FAILED
+
+failures:
+
+failures:
+    skill_eval::recovery_tests::promotion_does_not_report_success_when_metadata_row_disappears
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 991 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p otto-server --lib`

@@ -1270,6 +1270,7 @@ export interface CreateGoalLoopReq {
   autostart: boolean;
 }
 
+/** Validated and applied atomically; a rejected patch leaves all fields unchanged. */
 export interface UpdateGoalLoopReq {
   name?: string;
   limits?: GoalLoopLimits;
@@ -5381,7 +5382,9 @@ export interface EvalFinding {
   location?: string | null;
 }
 
-/** Live state of one validation agent (validation × provider) in an iteration. */
+/** Live state of one validation agent (validation × provider) in an iteration.
+ * Every requested pass must produce a valid verdict; incomplete passes are error/0.
+ */
 export interface EvalValidationState {
   validation: string;
   name: string;
@@ -5437,10 +5440,11 @@ export interface EvalScore {
   diff: DiffScore;
   review: SignalScore;
   human: HumanScore;
+  /** Original signal weights, including intentional zeros; ratings preserve them. */
   weights: ScoreWeights;
   /** Weighted mean over the signals that ran, 0–100. */
   composite: number;
-  /** Proof pack status: missing|partial|passed|failed|waived. */
+  /** Proof status: missing|partial|passed|failed|waived; pending while a saved rating awaits evidence publication (not promotable). */
   proof_status: string;
   /** Proof done-contract score 0–100. */
   done_score: number;
@@ -5461,6 +5465,7 @@ export interface EvalIteration {
   worktree_path?: string | null;
   status: EvalIterStatus;
   note: string;
+  /** Validator mean for generated iterations, including failed validators as zero. */
   score: number;
   agents: EvalValidationState[];
   improvement_summary: string;
@@ -5722,12 +5727,14 @@ export interface StartSkillEvalReq {
   weights?: ScoreWeights | null;
 }
 
+/** Promotion can fail after the library write: the error identifies the written
+ * skill and asks for a retry, or library inspection if the evaluation was deleted. */
 export interface PromoteSkillReq {
   iteration_id: Id;
   /** 'tested' = the skill that iteration ran with; 'improved' = its edited version. */
   source: 'tested' | 'improved';
   name: string;
-  /** Bypass the score+proof gate (root only; audited + waives proof). */
+  /** Bypass the score+proof gate (root human only; audited + waives proof before writing the library). */
   force?: boolean;
 }
 

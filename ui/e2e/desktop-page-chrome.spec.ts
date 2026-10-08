@@ -194,6 +194,25 @@ test('a list/detail page opens on its first item and restores the last one', asy
   expect([packA, packB]).toContain(await page.evaluate(() => localStorage.getItem('otto.lastSelection.proof')));
 });
 
+test('a Proof deep link waits for delayed workspace startup and then opens its named pack', async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let detailReads = 0;
+  await page.route('**/api/v1/workspaces', async route => { await gate; await route.continue(); });
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === `/api/v1/proof-packs/${packA}`) detailReads++;
+  });
+  await gotoRoute(page, `proof/${packA}`);
+  const title = page.locator('[data-testid="page-header"] h1');
+  await expect(title).toHaveText('Proof packs');
+  // No detail request belongs to a workspace until that workspace is known.
+  expect(detailReads).toBe(0);
+  release();
+  await expect(title).toHaveText('Chrome proof A');
+  expect(detailReads).toBe(1);
+  await expect(page).toHaveURL(new RegExp(`#/proof/${packA}$`));
+});
+
 // Ambient backdrop + glass (foundations.md §7): the backdrop shows through the
 // chrome only — the content column stays opaque — Settings → Appearance
 // switches it, and reduced transparency makes every glass surface opaque.

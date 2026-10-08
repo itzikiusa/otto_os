@@ -6,6 +6,113 @@ use otto_state::{DbPool, UsersRepo};
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn rejected_goal_patch_preserves_all_previous_settings() {
+    use otto_core::domain::{GoalLoopConfig, GoalLoopLimits};
+    use serde_json::json;
+    let pool = pool().await;
+    seed(&pool).await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+    let owner = UsersRepo::new(pool.clone())
+        .get(&"owner".into())
+        .await
+        .unwrap();
+    let goal = ctx
+        .goal_loops_repo
+        .create(otto_state::NewGoalLoop {
+            workspace_id: "ws".into(),
+            name: "Original".into(),
+            repo_path: dir.path().to_string_lossy().into_owned(),
+            definition: serde_json::from_value(
+                json!({"title":"Fixture", "acceptance_criteria":[]}),
+            )
+            .unwrap(),
+            limits: GoalLoopLimits::default(),
+            config: GoalLoopConfig::default(),
+            created_by: owner.id.clone(),
+        })
+        .await
+        .unwrap();
+    let app = otto_server::routes::goal_loops::routes()
+        .layer(Extension(AuthUser(owner)))
+        .with_state(ctx.clone());
+    let mut bad_limits = serde_json::to_value(&goal.limits).unwrap();
+    bad_limits["max_iterations"] = json!(0);
+    let mut bad_config = serde_json::to_value(&goal.config).unwrap();
+    bad_config["mode"] = json!("research");
+    let mut no_executors = serde_json::to_value(&goal.config).unwrap();
+    no_executors["executors"] = json!([]);
+    for body in [
+        json!({"name":"Must not persist", "limits":bad_limits}),
+        json!({"name":"Must not persist", "config":bad_config}),
+        json!({"name":"Must not persist", "config":no_executors}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/goal-loops/{}", goal.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "{body}"
+        );
+        let after = ctx.goal_loops_repo.get(&goal.id).await.unwrap();
+        assert_eq!(after.name, goal.name, "a rejected PATCH changed the name");
+        assert_eq!(
+            serde_json::to_value(after.limits).unwrap(),
+            serde_json::to_value(&goal.limits).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(after.config).unwrap(),
+            serde_json::to_value(&goal.config).unwrap()
+        );
+    }
+
+    // A database rejection of the last field must not persist earlier fields.
+    sqlx::query("CREATE TRIGGER reject_goal_config BEFORE UPDATE OF config_json ON goal_loops BEGIN SELECT RAISE(ABORT, 'fixture config failure'); END")
+        .execute(&pool).await.unwrap();
+    let mut limits = serde_json::to_value(&goal.limits).unwrap();
+    limits["max_iterations"] = json!(goal.limits.max_iterations + 1);
+    let body = json!({"name":"Updated", "limits":limits, "config":goal.config});
+    let request = || {
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/goal-loops/{}", goal.id))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let after = ctx.goal_loops_repo.get(&goal.id).await.unwrap();
+    assert_eq!(after.name, goal.name);
+    assert_eq!(
+        serde_json::to_value(after.limits).unwrap(),
+        serde_json::to_value(&goal.limits).unwrap()
+    );
+    sqlx::query("DROP TRIGGER reject_goal_config")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = app.oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let after = ctx.goal_loops_repo.get(&goal.id).await.unwrap();
+    assert_eq!(after.name, "Updated");
+    assert_eq!(after.limits.max_iterations, goal.limits.max_iterations + 1);
+}
+
+#[tokio::test]
 async fn safety_posture_distinguishes_saved_configuration_from_bound_listener() {
     let pool = pool().await;
     seed(&pool).await;

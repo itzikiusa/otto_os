@@ -14,6 +14,8 @@ mod panes;
 mod panes_policy;
 #[path = "../src/popout.rs"]
 mod popout;
+#[path = "probe_support/school.rs"]
+mod school;
 #[path = "../src/windows.rs"]
 mod windows;
 mod bar {
@@ -201,7 +203,10 @@ fn main() {
     assert_eq!(url.host_str(), Some("127.0.0.1"));
     assert_ne!(url.port(), Some(7700));
     let values = serde_json::json!({"otto_base":base,"otto_token":metadata["token"],"otto_workspace":metadata["workspace"],"otto_rail_expanded":"1","otto_firstrun_dismissed":"1","otto_client_id":"detachable-native-probe"});
-    let init=format!("window.__OTTO_PROBE_ISOLATED__=localStorage.length===0;for(const [key,value] of Object.entries({values}))localStorage.setItem(key,String(value));");
+    let mut init=format!("window.__OTTO_PROBE_ISOLATED__=localStorage.length===0;for(const [key,value] of Object.entries({values}))localStorage.setItem(key,String(value));");
+    if std::env::var("OTTO_NATIVE_SCHOOL_PROBE").as_deref() == Ok("1") {
+        init.push_str(school::INITIALIZE);
+    }
     let mut context = tauri::generate_context!();
     context.config_mut().app.windows.clear();
     context.config_mut().identifier = format!("com.otto.pane-spa-probe-{}", std::process::id());
@@ -277,6 +282,9 @@ fn main() {
                     assert_eq!(evaluate(&host,"window.liveToken"),host_token);
                     assert_eq!(evaluate(&child,"window.liveToken"),child_token);
                     println!("PASS full SPA: isolated nonpersistent stores; native child ready handshake; real toolbar detach both directions; child-toolbar Return; retained root/child DOM+drafts; native menu zoom 100→200→190→100%; production unsaved workspace draft and focused field retained; sheet remains in bounds; no horizontal page clipping");
+                    if std::env::var("OTTO_NATIVE_SCHOOL_PROBE").as_deref() == Ok("1") {
+                        school::assert_native_lifecycle(&host, &child);
+                    }
                 }));let code=if result.is_ok(){0}else{1};PROBE_RESULT.store(code,std::sync::atomic::Ordering::SeqCst);if code != 0 {std::process::exit(code)}app.exit(code);
             });Ok(())
         }).build(context).unwrap().run(|app,event|{

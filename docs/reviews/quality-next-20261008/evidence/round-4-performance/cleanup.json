@@ -1,0 +1,44 @@
+{
+  "fixture": {
+    "pid": 37174,
+    "dataDir": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-xjERTC",
+    "port": "7896",
+    "telemetry": true,
+    "command": "/Users/itziklavon/otto_os/target/debug/ottod",
+    "startedAt": "Thu Oct  8 11:19:29 2026"
+  },
+  "sampled_owned_pids": [
+    37174,
+    37209,
+    40493,
+    40494,
+    40495,
+    40498,
+    40500,
+    40501,
+    44506,
+    44507,
+    44508,
+    44509,
+    44510,
+    44511,
+    48446,
+    48447,
+    48448,
+    48449,
+    48450,
+    48451,
+    48452,
+    48453,
+    48454,
+    48455,
+    51609
+  ],
+  "remaining_sampled_processes": "",
+  "fixture_data_exists": false,
+  "listeners": {
+    "7896": "",
+    "5296": ""
+  },
+  "note": "Read-only check after fixture teardown; no process was killed by this audit. Raw process sampling excludes user applications and distinguishes WebKit by owned resource coalition."
+}

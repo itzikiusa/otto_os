@@ -1,0 +1,48 @@
+{
+  "utc": "2026-10-08T06:47:49.485513+00:00",
+  "head": "7cff9e538deccdd0e346af7c6285e11863285c00",
+  "host": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n",
+  "hardware": "Mac15,9\n51539607552\n16\n",
+  "node": "v22.22.3",
+  "files": {
+    "target/debug/ottod": {
+      "sha256": "d7e61497d0aa8318793985c67aded624797547689fc5e235f44a479c4786bb0f",
+      "bytes": 502535400,
+      "mtime": "2026-10-08T00:21:23.497366+00:00"
+    },
+    "ui/e2e/desktop-terminal-rendered-load-perf.spec.ts": {
+      "sha256": "68a5826e7a67930954b1f84a22d76d50373c343517d5ecd247f2de92e65f88e3",
+      "bytes": 11266,
+      "mtime": "2026-10-07T21:42:29.184170+00:00"
+    },
+    "ui/e2e/process-resources.ts": {
+      "sha256": "781e955db2a308783dcd30d35a3f2adac021f4c3b776ef3f44a82a73a45718d7",
+      "bytes": 6713,
+      "mtime": "2026-10-07T21:42:29.187570+00:00"
+    },
+    "ui/e2e/global-setup.ts": {
+      "sha256": "7c91a42e37b4f75a8b7dd68719d6634b5c4380f778aac45ab4824ee5ed61a8d0",
+      "bytes": 11992,
+      "mtime": "2026-10-07T21:42:29.187012+00:00"
+    },
+    "ui/e2e/global-teardown.ts": {
+      "sha256": "e3a11dd20fa57a4441f91c71191aca57310f615ab1e85181e8d568663c5a9421",
+      "bytes": 8572,
+      "mtime": "2026-10-05T14:26:38.765592+00:00"
+    },
+    "ui/src/lib/components/Terminal.svelte": {
+      "sha256": "858446d05f33e8ec16fd20fff9af57d71c5937bda2c961b33d1ec39c2fb3514c",
+      "bytes": 157148,
+      "mtime": "2026-10-07T21:58:32.363621+00:00"
+    }
+  },
+  "executing_playwright_worker": {
+    "pid": 97273,
+    "executable": "/Users/itziklavon/.hermes/node/bin/node",
+    "version": "v22.22.3"
+  },
+  "campaign_node": {
+    "executable": "/opt/homebrew/bin/node",
+    "version": "v26.10.0"
+  }
+}

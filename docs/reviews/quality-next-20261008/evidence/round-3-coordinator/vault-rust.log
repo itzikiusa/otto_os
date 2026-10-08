@@ -1,0 +1,12 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 19s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 3 tests
+test vault_docs_agent::refine_scope_tests::detached_refine_callbacks_cannot_resurrect_reset_or_replace_new_turn ... ok
+test vault_docs_agent::refine_scope_tests::refine_binding_and_detach_are_scoped_to_workspace_and_user ... ok
+test vault_docs_agent::refine_scope_tests::governance_requires_visibility_before_private_memory_mutation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 985 filtered out; finished in 0.60s
+

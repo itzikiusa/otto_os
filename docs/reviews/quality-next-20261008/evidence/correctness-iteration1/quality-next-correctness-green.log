@@ -1,0 +1,77 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-issues v0.2.0 (/Users/itziklavon/otto_os/crates/otto-issues)
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-workgraph v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workgraph)
+   Compiling otto-brokers v0.2.0 (/Users/itziklavon/otto_os/crates/otto-brokers)
+   Compiling otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+   Compiling otto-connections v0.2.0 (/Users/itziklavon/otto_os/crates/otto-connections)
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+   Compiling otto-k8s v0.2.0 (/Users/itziklavon/otto_os/crates/otto-k8s)
+   Compiling otto-aws v0.2.0 (/Users/itziklavon/otto_os/crates/otto-aws)
+   Compiling otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+   Compiling otto-assistant v0.2.0 (/Users/itziklavon/otto_os/crates/otto-assistant)
+   Compiling otto-review v0.2.0 (/Users/itziklavon/otto_os/crates/otto-review)
+   Compiling otto-insights v0.2.0 (/Users/itziklavon/otto_os/crates/otto-insights)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+   Compiling otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+   Compiling otto-automation v0.2.0 (/Users/itziklavon/otto_os/crates/otto-automation)
+   Compiling otto-workflows v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workflows)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+warning: unused `axum::Json` that must be used
+   --> crates/otto-server/src/skill_eval_output_tests.rs:336:5
+    |
+336 |     rating.await.unwrap();
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+336 |     let _ = rating.await.unwrap();
+    |     +++++++
+
+warning: `otto-server` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 13s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 26 tests
+test cli_update::tests::local_tz_path_is_evaluated ... ok
+test policy::tests::skill_eval_promote_is_admin ... ok
+test skill_eval::tests::best_iter_prefers_high_score_then_latest ... ok
+test skill_eval::output_tests::partial_validator_file_is_preserved_until_a_complete_verdict ... ok
+test skill_eval::tests::diff_marks_changes ... ok
+test skill_eval::tests::invalid_validator_output_is_distinct_from_a_clean_verdict ... ok
+test skill_eval::tests::parse_improvement_object ... ok
+test skill_eval::tests::parse_findings_tolerant ... ok
+test skill_eval::tests::score_subtracts_by_severity ... ok
+test skill_eval::output_tests::valid_clean_transcript_is_a_verdict_and_invalid_passes_do_not_score ... ok
+test skill_eval::tests::sanitize_makes_safe_names ... ok
+test skill_eval::tests::validator_expansion_is_bounded_before_launch ... ok
+test workflow_engine::tests::eval_outgoing_prunes_false_edges ... ok
+test skill_eval::tests::retry_admission_cancellation_and_cleanup_keep_attempt_identity ... ok
+test skill_eval::tests::diff_trims_common_ends_and_caps_the_lcs ... ok
+test eval_lab_routes::tests::matrix_shape_bounds_and_unique_labels ... ok
+test spa::tests::hashed_assets_are_immutable_and_the_document_revalidates ... ok
+test skill_eval::output_tests::completion_order_preserves_validator_dimension_in_improver_prompt ... ok
+test skill_eval::tests::promotion_ignores_cached_pass_when_live_proof_is_missing_or_foreign ... ok
+test skill_eval::tests::golden_task_from_another_workspace_is_rejected_before_creating_eval ... ok
+test skill_eval::tests::cleanup_preserves_score_only_user_paths_with_a_similar_temp_prefix ... ok
+test skill_eval::output_tests::malformed_validation_cannot_publish_passed_review_evidence ... ok
+test eval_score::tests::validation_retry_keeps_the_latest_persisted_human_rating ... ok
+test eval_score::tests::errored_or_failed_retry_replaces_previously_passed_review_evidence ... ok
+test skill_eval::output_tests::rating_waits_for_retry_publication_and_keeps_the_final_score_consistent ... ok
+test eval_score::tests::cancelled_scoring_kills_command_and_never_starts_lint ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 953 filtered out; finished in 5.86s
+

@@ -1,0 +1,65 @@
+[WebServer] (node:29532) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wT0wpu OTTO_PORT=17844
+2026-10-08T07:51:29.359241Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wT0wpu)
+2026-10-08T07:51:29.590906Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wT0wpu/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T07:51:29.596537Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wT0wpu/clickhouse, port 60249)
+2026-10-08T07:51:29.597956Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T07:51:29.598380Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T07:51:29.598412Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T07:51:29.598425Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T07:51:29.598535Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T07:51:29.598565Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T07:51:29.598645Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T07:51:29.598658Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T07:51:29.599990Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T07:51:29.655679Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T07:51:29.661370Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T07:51:29.661421Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T07:51:29.661439Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T07:51:29.661454Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T07:51:29.661481Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T07:51:29.664041Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T07:51:29.664091Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T07:51:29.664118Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T07:51:29.664135Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T07:51:29.664158Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T07:51:29.664204Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T07:51:29.664324Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T07:51:29.672531Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T07:51:29.684161Z  INFO otto_server::boot::recovery: boot: post-listen work done in 85 ms (plugins=79)
+2026-10-08T07:51:29.721039Z  INFO ottod: listening on http://127.0.0.1:17844
+2026-10-08T07:51:29.721239Z  INFO ottod: alt loopback lane on http://localhost:17844 ([::1] + 127.0.0.1 both held)
+2026-10-08T07:51:29.721296Z  INFO otto_server::boot: boot: ready in 361 ms (db_compact=0 db_open=227 maintenance=2 modules=8 restore=0 recovery=123)
+[e2e] test daemon ready (pid 29541); root onboarded.
+
+Running 7 tests using 1 worker
+
+2026-10-08T07:51:29.992140Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wT0wpu/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T07:51:29.993705Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T07:51:30.002155Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+(node:29676) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T07:51:30.072694Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T07:51:30.073048Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T07:51:30.073095Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+  ✓  1 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-light (2.4s)
+  ✓  2 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes native-dark (1.3s)
+  ✓  3 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:9:4 › header overflow preserves keyboard focus and action across viewport changes warm-dark (1.4s)
+  ✓  4 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:58:1 › workspace boot failure is reported inline and Retry restores the saved workspace (823ms)
+  ✓  5 [desktop-browser] › ui/e2e/desktop-quality-next-design.spec.ts:90:1 › a failed older workspace load cannot publish into a newer identity (546ms)
+2026-10-08T07:51:36.828748Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-LQE25J args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:51:36.873393Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D7Y3M0D1Y93Y2JWG9X87DS
+[WebServer] 10:51:37 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:51:37.524921Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-LQE25J
+2026-10-08T07:51:37.538154Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-LQE25J args=["remote", "get-url", "origin"] code=2
+  ✓  6 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone light (1.7s)
+2026-10-08T07:51:38.502580Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-yQgHeG args=["remote", "get-url", "origin"] code=2
+2026-10-08T07:51:38.547882Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4D7Y58AE7QQ4FYTQ4PA2WNZ
+[WebServer] 10:51:38 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T07:51:38.972808Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-yQgHeG
+2026-10-08T07:51:38.996845Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-yQgHeG args=["remote", "get-url", "origin"] code=2
+  ✓  7 [desktop-browser] › ui/e2e/desktop-quality-round3-eval-ux.spec.ts:42:3 › rating refreshes open proof evidence and remains usable on phone dark (1.1s)
+
+  7 passed (11.4s)

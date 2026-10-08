@@ -61,6 +61,8 @@
   /** JSON of the last run the poll applied (skip identical ticks). */
   let lastPolled = '';
   let pollCount = $state(0);
+  // A read started before a rating write must not replace its newer result.
+  let scoreRevision = 0;
 
   // Expansion / busy state (keyed by stable ids).
   let openTerminals = $state<Set<string>>(new Set());
@@ -162,7 +164,8 @@
     // A poll never supersedes a load; a load (or unmount) supersedes the poll.
     const gen = seq.gen;
     const id = evalId;
-    const stale = () => seq.gen !== gen || disposed || id !== evalId;
+    const revision = scoreRevision;
+    const stale = () => seq.gen !== gen || disposed || id !== evalId || revision !== scoreRevision;
     try {
       const r = await skillsEvalApi.get(id);
       if (stale()) return;
@@ -401,20 +404,31 @@
   let rating = $state<Set<string>>(new Set());
   let savingReg = $state<Set<string>>(new Set());
 
-  async function rate(it: EvalIteration, n: number): Promise<void> {
+  async function rate(it: EvalIteration, n: number, note = ''): Promise<void> {
     if (!run || rating.has(it.id)) return;
+    const id = run.id;
+    const current = () => !disposed && id === evalId;
+    scoreRevision++;
     rating = new Set(rating).add(it.id);
     try {
-      const r = await skillsEvalApi.rate(run.id, it.id, { rating: n, note: '' });
-      run = r;
-      lastPolled = '';
-      onupdate?.(r);
+      await skillsEvalApi.rate(id, it.id, { rating: n, note });
+      if (!current()) return;
+      scoreRevision++;
+      // Ratings on different iterations can finish out of order. A fresh read
+      // after each completed write keeps the report newer than response snapshots.
+      await load(id);
     } catch (e) {
-      toastError('Couldn’t save your rating', e);
+      if (!current()) return;
+      scoreRevision++;
+      toastError('Couldn’t finish updating your rating', e);
+      // The rating may be saved while score publication is pending. Refresh
+      // that durable state instead of leaving a stale successful score visible.
+      await load(id);
     } finally {
       const next = new Set(rating);
       next.delete(it.id);
       rating = next;
+      if (!disposed && id === evalId && run && isActive(run)) schedulePoll();
     }
   }
 
@@ -473,10 +487,14 @@
         {#if run.impl_cli}<span class="chip" title="Implementation agent">{run.impl_cli}</span>{/if}
         <span class="chip">{plural(run.target_iterations, 'iteration')}</span>
         {#each run.iterations as it (it.id)}
-          <Badge tone={scoreTone(it.score)} label={`Iteration ${it.iter}: ${it.score.toFixed(0)}`} />
+          {#if it.scoring?.proof_status === 'pending'}
+            <Badge label={`Iteration ${it.iter}: score pending`} />
+          {:else}
+            <Badge tone={scoreTone(it.score)} label={`Iteration ${it.iter}: ${it.score.toFixed(0)}`} />
+          {/if}
         {/each}
       </div>
-      {#if run.summary}<p class="rd-summary">{run.summary}</p>{/if}
+      {#if run.summary && !run.iterations.some(it => it.scoring?.proof_status === 'pending')}<p class="rd-summary">{run.summary}</p>{/if}
       {#if run.error}<p class="rd-error" role="alert"><Icon name="warning" size={12} /> {run.error}</p>{/if}
     </header>
 
@@ -493,7 +511,9 @@
             </span>
           {/if}
           <span class="grow"></span>
-          {#if it.status === 'done'}
+          {#if it.scoring?.proof_status === 'pending'}
+            <Badge label="Score update pending" />
+          {:else if it.status === 'done'}
             <Badge tone={scoreTone(it.score)} label={it.score.toFixed(0)} title="Iteration score" />
           {/if}
           <StatusBadge status={evalStatus(it.status)} />
@@ -595,6 +615,14 @@
         <!-- Multi-signal scorecard (tests / lint / diff / review / human → proof) -->
         {#if it.scoring}
           <Scorecard score={it.scoring} evalId={run.id} iterId={it.id} />
+        {/if}
+
+        {#if it.scoring?.proof_status === 'pending' && (it.status === 'done' || it.status === 'error') && it.human_rating != null}
+          <div class="score-pending">
+            <LoadState what="the updated score" loading={rating.has(it.id)} empty={true} variant="compact"
+              error="Your rating is saved. Retry to finish updating the score before promoting this skill."
+              onretry={() => rate(it, it.human_rating!, it.human_note)} />
+          </div>
         {/if}
 
         <!-- Human rating + regression capture -->

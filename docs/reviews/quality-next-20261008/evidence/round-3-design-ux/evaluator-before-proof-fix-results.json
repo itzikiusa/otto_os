@@ -1,0 +1,450 @@
+{
+  "config": {
+    "argv": [
+      "/opt/homebrew/Cellar/node/26.10.0_2/bin/node",
+      "/Users/itziklavon/otto_os/ui/node_modules/.bin/playwright",
+      "test",
+      "desktop-quality-round3-eval-ux.spec.ts",
+      "--project=desktop-browser",
+      "--workers=1"
+    ],
+    "configFile": "/Users/itziklavon/otto_os/ui/playwright.config.ts",
+    "rootDir": "/Users/itziklavon/otto_os/ui/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": "/Users/itziklavon/otto_os/ui/e2e/global-setup.ts",
+    "globalTeardown": "/Users/itziklavon/otto_os/ui/e2e/global-teardown.ts",
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-portrait",
+        "name": "iphone-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-landscape",
+        "name": "iphone-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-portrait",
+        "name": "ipad-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-landscape",
+        "name": "ipad-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-se",
+        "name": "iphone-se",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-browser",
+        "name": "desktop-browser",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-webkit",
+        "name": "desktop-webkit",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-(?:.*perf.*|terminal-park-redraw)\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "html",
+        {
+          "open": "never",
+          "outputFolder": "e2e/.report-round3-ux"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "e2e/.results-round3-ux.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 1,
+    "webServer": {
+      "command": "npm run dev -- --port 5217 --strictPort",
+      "url": "http://localhost:5217",
+      "reuseExistingServer": true,
+      "timeout": 90000
+    }
+  },
+  "suites": [
+    {
+      "title": "desktop-quality-round3-eval-ux.spec.ts",
+      "file": "desktop-quality-round3-eval-ux.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "rating refreshes open proof evidence and remains usable on phone light",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2096,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:59:12.903Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "36929e2a8bd4ff64dfb6-24ba67e62adf803aa424",
+          "file": "desktop-quality-round3-eval-ux.spec.ts",
+          "line": 42,
+          "column": 3
+        },
+        {
+          "title": "rating refreshes open proof evidence and remains usable on phone dark",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1082,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:59:15.098Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "36929e2a8bd4ff64dfb6-4cb1d3c4c66aa190648a",
+          "file": "desktop-quality-round3-eval-ux.spec.ts",
+          "line": 42,
+          "column": 3
+        },
+        {
+          "title": "rating publication failure explains the pending state and offers in-place recovery",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1209,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:59:16.185Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "36929e2a8bd4ff64dfb6-495109d7ea62d4149fed",
+          "file": "desktop-quality-round3-eval-ux.spec.ts",
+          "line": 62,
+          "column": 1
+        },
+        {
+          "title": "proof load failure stays inline and keyboard Retry restores its evidence",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 933,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:59:17.400Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "36929e2a8bd4ff64dfb6-e9b0662d25185da40713",
+          "file": "desktop-quality-round3-eval-ux.spec.ts",
+          "line": 101,
+          "column": 1
+        },
+        {
+          "title": "a late proof response cannot restore evidence from before the rating change",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1089,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:59:18.338Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "36929e2a8bd4ff64dfb6-0b68d83df5d343f65f89",
+          "file": "desktop-quality-round3-eval-ux.spec.ts",
+          "line": 114,
+          "column": 1
+        },
+        {
+          "title": "workspace switch replaces the open Proof pack with the new workspace contents",
+          "ok": false,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 45000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 10834,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  getByTestId('page-header').locator('h1')\nExpected: \u001b[32m\"Second workspace proof\"\u001b[39m\nReceived: \u001b[31m\" Proof packs\"\u001b[39m\nTimeout:  10000ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" getByTestId('page-header').locator('h1') with timeout 10000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('page-header').locator('h1')\u001b[22m\n\u001b[2m    24 × locator resolved to <h1 title=\"Proof packs\" class=\"ph-title svelte-162svzm\">…</h1>\u001b[22m\n\u001b[2m       - unexpected value \" Proof packs\"\u001b[22m\n",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  getByTestId('page-header').locator('h1')\nExpected: \u001b[32m\"Second workspace proof\"\u001b[39m\nReceived: \u001b[31m\" Proof packs\"\u001b[39m\nTimeout:  10000ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" getByTestId('page-header').locator('h1') with timeout 10000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('page-header').locator('h1')\u001b[22m\n\u001b[2m    24 × locator resolved to <h1 title=\"Proof packs\" class=\"ph-title svelte-162svzm\">…</h1>\u001b[22m\n\u001b[2m       - unexpected value \" Proof packs\"\u001b[22m\n\n    at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts:161:23",
+                    "location": {
+                      "file": "/Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts",
+                      "column": 23,
+                      "line": 161
+                    },
+                    "snippet": "  159 |   await page.getByRole('menuitemcheckbox', { name: 'Round 3 second workspace', exact: true }).click();\n  160 |   await expect(page.getByTestId('agents-current-ws')).toContainText('Round 3 second workspace');\n> 161 |   await expect(title).toHaveText('Second workspace proof');\n      |                       ^\n  162 |   await expect(page.getByText('First workspace proof', { exact: true })).toHaveCount(0);\n  163 |   await expect(page).not.toHaveURL(new RegExp(firstPack.id));\n  164 | });"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts",
+                        "column": 23,
+                        "line": 161
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  getByTestId('page-header').locator('h1')\nExpected: \u001b[32m\"Second workspace proof\"\u001b[39m\nReceived: \u001b[31m\" Proof packs\"\u001b[39m\nTimeout:  10000ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" getByTestId('page-header').locator('h1') with timeout 10000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('page-header').locator('h1')\u001b[22m\n\u001b[2m    24 × locator resolved to <h1 title=\"Proof packs\" class=\"ph-title svelte-162svzm\">…</h1>\u001b[22m\n\u001b[2m       - unexpected value \" Proof packs\"\u001b[22m\n\n\n  159 |   await page.getByRole('menuitemcheckbox', { name: 'Round 3 second workspace', exact: true }).click();\n  160 |   await expect(page.getByTestId('agents-current-ws')).toContainText('Round 3 second workspace');\n> 161 |   await expect(title).toHaveText('Second workspace proof');\n      |                       ^\n  162 |   await expect(page.getByText('First workspace proof', { exact: true })).toHaveCount(0);\n  163 |   await expect(page).not.toHaveURL(new RegExp(firstPack.id));\n  164 | });\n    at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts:161:23"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T07:59:19.432Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/Users/itziklavon/otto_os/ui/test-results/desktop-quality-round3-eva-f61b0--the-new-workspace-contents-desktop-browser/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/Users/itziklavon/otto_os/ui/test-results/desktop-quality-round3-eva-f61b0--the-new-workspace-contents-desktop-browser/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/Users/itziklavon/otto_os/ui/test-results/desktop-quality-round3-eva-f61b0--the-new-workspace-contents-desktop-browser/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/Users/itziklavon/otto_os/ui/e2e/desktop-quality-round3-eval-ux.spec.ts",
+                    "column": 23,
+                    "line": 161
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "36929e2a8bd4ff64dfb6-5ca7b6ed23ff883e1d64",
+          "file": "desktop-quality-round3-eval-ux.spec.ts",
+          "line": 144,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-08T07:59:10.988Z",
+    "duration": 19456.739999999998,
+    "expected": 5,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

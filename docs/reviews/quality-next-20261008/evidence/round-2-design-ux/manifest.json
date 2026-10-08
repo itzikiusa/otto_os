@@ -1,0 +1,30 @@
+{
+  "captured_at": "2026-10-08T07:45:06.690283+00:00",
+  "head": "195de62c82394a6751d892ec1acba36dd6599d62",
+  "scope": "Shared mutable worktree. Current UI and native helper; baseline daemon ef5b208 includes Round 1 fixes but not concurrent Round 2 evaluator changes. No evaluator/native interaction claimed.",
+  "browser": {
+    "slot": "round2-ux",
+    "daemon_port": 17834,
+    "vite_port": 5207,
+    "project": "desktop-browser",
+    "workers": 1,
+    "new_passed": 8,
+    "existing_passed": 6
+  },
+  "native": {
+    "daemon_port": 7821,
+    "cycles": 10,
+    "ax_enabled": false,
+    "result": "passed once, exit 0"
+  },
+  "sha256": {
+    "ui/src/modules/agents/conversation/Composer.svelte": "f168919f56113d77cb23f979e525da672fbba5b37f457a300082172ce0351ee3",
+    "ui/src/modules/agents/conversation/ConversationView.svelte": "eeb043aa52edd6da4c7dde0c59960377d413bddd47e8aa5074ddc7ecd066030d",
+    "ui/src/modules/skills-eval/RunDetail.svelte": "ba55982608d1ec36cf1ba94b0a80b6a45b084dc577e2dd5cb86005ffcbc9dede",
+    "ui/e2e/desktop-quality-round2-session-ux.spec.ts": "a0ed3d0f9f9e5accf6e4eb8d5c26c35d97e0291b6fb05d2e47b556448c4f417d",
+    "apps/desktop/src-tauri/examples/probe_support/school.rs": "feee9aba0c0a782da1cda06e153470aade7415d8a8a13025a1b8e4aaa57f3b0a",
+    "ui/dist/index.html": "52b5ddd899fbc91000cba4b51b351f8c8b64fc9eb17082dad4ccd6eda9749f46",
+    "target/debug/ottod": "ef5b20835f96449cb06f55ec757099b206fe63576df3cad6b37a90ec0441c187",
+    "apps/desktop/src-tauri/target/debug/examples/pane_spa_probe": "3f868c25f83d6c8b7ddb3ed9efdc15d5a96cc90a62a2b16fd7473188e1ecead3"
+  }
+}

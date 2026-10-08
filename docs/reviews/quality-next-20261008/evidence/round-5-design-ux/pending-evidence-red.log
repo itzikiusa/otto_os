@@ -1,0 +1,143 @@
+[WebServer] (node:68494) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-pUUtEx OTTO_PORT=17856
+2026-10-08T08:30:54.667333Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-pUUtEx)
+2026-10-08T08:30:54.901445Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-pUUtEx/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T08:30:54.906254Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-pUUtEx/clickhouse, port 53275)
+2026-10-08T08:30:54.908448Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T08:30:54.909019Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T08:30:54.909089Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T08:30:54.909112Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T08:30:54.909239Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T08:30:54.909281Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T08:30:54.909417Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T08:30:54.909441Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T08:30:54.910942Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T08:30:54.965846Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T08:30:54.971921Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T08:30:54.971972Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T08:30:54.971997Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T08:30:54.972032Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T08:30:54.972058Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T08:30:54.974983Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T08:30:54.975011Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T08:30:54.975029Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T08:30:54.975043Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T08:30:54.975058Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T08:30:54.975195Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T08:30:54.975309Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T08:30:54.983951Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T08:30:54.993970Z  INFO otto_server::boot::recovery: boot: post-listen work done in 85 ms (plugins=79)
+2026-10-08T08:30:55.033673Z  INFO ottod: listening on http://127.0.0.1:17856
+2026-10-08T08:30:55.033867Z  INFO ottod: alt loopback lane on http://localhost:17856 ([::1] + 127.0.0.1 both held)
+2026-10-08T08:30:55.033930Z  INFO otto_server::boot: boot: ready in 366 ms (db_compact=0 db_open=229 maintenance=2 modules=8 restore=0 recovery=125)
+[e2e] test daemon ready (pid 68495); root onboarded.
+
+Running 2 tests using 1 worker
+
+2026-10-08T08:30:55.299301Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-pUUtEx/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T08:30:55.300834Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T08:30:55.307537Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T08:30:55.385594Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T08:30:55.386077Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T08:30:55.386132Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:68549) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T08:30:55.723459Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-9Bh0GR args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:30:55.769889Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4DA637H8A08ZGM0SE0D0P0A
+[WebServer] 11:30:56 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:30:57.117164Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-9Bh0GR
+2026-10-08T08:30:57.138732Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-9Bh0GR args=["remote", "get-url", "origin"] code=2
+  ✘  1 [desktop-browser] › e2e/desktop-quality-round5-evidence-ux.spec.ts:8:3 › pending score never presents old Approval as current evidence light (12.2s)
+(node:69208) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-10-08T08:31:08.447341Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-01Ie9E args=["remote", "get-url", "origin"] code=2
+2026-10-08T08:31:08.493844Z  INFO otto_server::skill_eval: skill evaluation complete eval=01M4DA6FN48WBHKZD77R191CVN
+[WebServer] 11:31:08 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T08:31:09.049773Z  INFO otto_git::local: wrote commit-graph repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-01Ie9E
+2026-10-08T08:31:09.068899Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-dirty-01Ie9E args=["remote", "get-url", "origin"] code=2
+  ✘  2 [desktop-browser] › e2e/desktop-quality-round5-evidence-ux.spec.ts:8:3 › pending score never presents old Approval as current evidence dark (11.3s)
+
+
+  1) [desktop-browser] › e2e/desktop-quality-round5-evidence-ux.spec.ts:8:3 › pending score never presents old Approval as current evidence light 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+    Expected: 0
+    Received: 1
+    Timeout:  10000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.scorecard .artifact').filter({ hasText: 'Human rating' }) with timeout 10000ms
+      - waiting for locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+        24 × locator resolved to 1 element
+           - unexpected value "1"
+
+
+      59 |       await expect(page.locator('.rated')).toHaveText('1/5');
+      60 |       await expect(page.getByTestId('scorecard-proof')).toContainText('Pending');
+    > 61 |       await expect(approval).toHaveCount(0);
+         |                              ^
+      62 |       await expect(page.getByTestId('proof-pending-evidence')).toBeVisible();
+      63 |       await page.screenshot({ path: info.outputPath(`pending-evidence-desktop-${scheme}.png`) });
+      64 |       await page.setViewportSize({ width: 390, height: 844 });
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round5-evidence-ux.spec.ts:61:30
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-quality-round5-evi-13d74-l-as-current-evidence-light-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-quality-round5-evi-13d74-l-as-current-evidence-light-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-quality-round5-evi-13d74-l-as-current-evidence-light-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-quality-round5-evi-13d74-l-as-current-evidence-light-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [desktop-browser] › e2e/desktop-quality-round5-evidence-ux.spec.ts:8:3 › pending score never presents old Approval as current evidence dark 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+    Expected: 0
+    Received: 1
+    Timeout:  10000ms
+
+    Call log:
+      - Expect "toHaveCount" locator('.scorecard .artifact').filter({ hasText: 'Human rating' }) with timeout 10000ms
+      - waiting for locator('.scorecard .artifact').filter({ hasText: 'Human rating' })
+        24 × locator resolved to 1 element
+           - unexpected value "1"
+
+
+      59 |       await expect(page.locator('.rated')).toHaveText('1/5');
+      60 |       await expect(page.getByTestId('scorecard-proof')).toContainText('Pending');
+    > 61 |       await expect(approval).toHaveCount(0);
+         |                              ^
+      62 |       await expect(page.getByTestId('proof-pending-evidence')).toBeVisible();
+      63 |       await page.screenshot({ path: info.outputPath(`pending-evidence-desktop-${scheme}.png`) });
+      64 |       await page.setViewportSize({ width: 390, height: 844 });
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round5-evidence-ux.spec.ts:61:30
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-quality-round5-evi-e21f7-al-as-current-evidence-dark-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-quality-round5-evi-e21f7-al-as-current-evidence-dark-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-quality-round5-evi-e21f7-al-as-current-evidence-dark-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-quality-round5-evi-e21f7-al-as-current-evidence-dark-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2 failed
+    [desktop-browser] › e2e/desktop-quality-round5-evidence-ux.spec.ts:8:3 › pending score never presents old Approval as current evidence light 
+    [desktop-browser] › e2e/desktop-quality-round5-evidence-ux.spec.ts:8:3 › pending score never presents old Approval as current evidence dark 

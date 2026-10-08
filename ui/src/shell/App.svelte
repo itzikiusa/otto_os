@@ -27,6 +27,7 @@
   import MobileActionBar from './MobileActionBar.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import LoadState from '../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../lib/loadError';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
   import FloatingBar from '../lib/components/FloatingBar.svelte';
@@ -86,7 +87,7 @@
   import { registry, type Command } from '../lib/commands.svelte';
   import { activeNavId, availableModules, goToEntries, groupLabel, moduleLabel, resolveOrder, visibleOrder } from '../lib/sidebar';
   import { prefetchQueue, shouldPrefetch } from '../lib/prefetchPlan';
-  import { api, baseUrl } from '../lib/api/client';
+  import { api, baseUrl, getToken } from '../lib/api/client';
   $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
   import type { Connection, Session } from '../lib/api/types';
   import { toasts } from '../lib/toast.svelte';
@@ -334,8 +335,29 @@
 
   // Reload scoped data when impersonation changes the effective identity.
   // Keep this separate from the once-per-window event/native subscriptions.
+  let workspaceLoadError = $state<string | null>(null);
+  let workspaceLoading = $state(false);
+  let workspaceLoadGeneration = 0;
+  async function loadWorkspaces(): Promise<void> {
+    const generation = ++workspaceLoadGeneration;
+    const token = getToken();
+    const current = () => generation === workspaceLoadGeneration && token === getToken();
+    workspaceLoading = true;
+    try {
+      await ws.load();
+      if (current()) workspaceLoadError = null;
+    } catch (error) {
+      if (current()) workspaceLoadError = loadErrorText(error);
+    } finally {
+      if (current()) workspaceLoading = false;
+    }
+  }
   $effect(() => {
-    if (auth.me?.id) void untrack(() => ws.load());
+    if (auth.me?.id) untrack(() => {
+      workspaceLoadError = null;
+      void loadWorkspaces();
+    });
+    return () => { ++workspaceLoadGeneration; };
   });
 
   // ---- boot ----
@@ -1101,6 +1123,12 @@
   {/if}
   {#if moduleName === 'agents'}
     <TabBar />
+  {/if}
+  {#if workspaceLoadError}
+    <div data-testid="workspace-load-error">
+      <LoadState what="workspaces" variant="compact" error={workspaceLoadError}
+        loading={workspaceLoading} empty onretry={() => void loadWorkspaces()} />
+    </div>
   {/if}
   {#if !uiControl.barOwner}
     <!-- Pages without a PageHeader (Agents, Browser…): the agent-driving

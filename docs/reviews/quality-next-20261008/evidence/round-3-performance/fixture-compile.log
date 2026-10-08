@@ -1,0 +1,3 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.57s
+  Executable unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)

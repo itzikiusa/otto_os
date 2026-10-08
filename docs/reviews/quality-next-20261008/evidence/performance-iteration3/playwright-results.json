@@ -1,0 +1,246 @@
+{
+  "config": {
+    "argv": [
+      "/Users/itziklavon/.hermes/node/bin/node",
+      "/Users/itziklavon/otto_os/ui/node_modules/.bin/playwright",
+      "test",
+      "--project=desktop-webkit",
+      "--workers=1",
+      "e2e/desktop-terminal-rendered-load-perf.spec.ts"
+    ],
+    "configFile": "/Users/itziklavon/otto_os/ui/playwright.config.ts",
+    "rootDir": "/Users/itziklavon/otto_os/ui/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": "/Users/itziklavon/otto_os/ui/e2e/global-setup.ts",
+    "globalTeardown": "/Users/itziklavon/otto_os/ui/e2e/global-teardown.ts",
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-portrait",
+        "name": "iphone-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-landscape",
+        "name": "iphone-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-portrait",
+        "name": "ipad-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-landscape",
+        "name": "ipad-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-se",
+        "name": "iphone-se",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-browser",
+        "name": "desktop-browser",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-webkit",
+        "name": "desktop-webkit",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-(?:.*perf.*|terminal-park-redraw)\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "html",
+        {
+          "open": "never",
+          "outputFolder": "e2e/.report-qualityperf3"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "e2e/.results-qualityperf3.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 1,
+    "webServer": {
+      "command": "npm run dev -- --port 5297 --strictPort",
+      "url": "http://localhost:5297",
+      "reuseExistingServer": true,
+      "timeout": 90000
+    }
+  },
+  "suites": [
+    {
+      "title": "desktop-terminal-rendered-load-perf.spec.ts",
+      "file": "desktop-terminal-rendered-load-perf.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "1/3/5 rendered terminals: bounded input, resource curves and quiet recovery",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 540000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-webkit",
+              "projectName": "desktop-webkit",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 386869,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T06:51:37.447Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "rendered-terminal-load",
+                      "contentType": "application/json",
+                      "path": "/Users/itziklavon/otto_os/ui/test-results/desktop-terminal-rendered--2f7e7-e-curves-and-quiet-recovery-desktop-webkit/attachments/rendered-terminal-load-732de69e9642288481fe4ae0d71caf596ae8ae04.json"
+                    }
+                  ]
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "55dd21867bd160047b40-1caaad0d90ca19d5533c",
+          "file": "desktop-terminal-rendered-load-perf.spec.ts",
+          "line": 30,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-08T06:51:17.154Z",
+    "duration": 408002.445,
+    "expected": 1,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

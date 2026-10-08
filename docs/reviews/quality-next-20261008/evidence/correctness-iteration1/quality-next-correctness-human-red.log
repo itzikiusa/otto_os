@@ -1,0 +1,26 @@
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.48s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 3 tests
+test eval_score::tests::validation_retry_keeps_the_latest_persisted_human_rating ... FAILED
+test eval_score::tests::errored_or_failed_retry_replaces_previously_passed_review_evidence ... ok
+test eval_score::tests::cancelled_scoring_kills_command_and_never_starts_lint ... ok
+
+failures:
+
+---- eval_score::tests::validation_retry_keeps_the_latest_persisted_human_rating stdout ----
+
+thread 'eval_score::tests::validation_retry_keeps_the_latest_persisted_human_rating' (6483310) panicked at crates/otto-server/src/eval_score.rs:463:9:
+assertion `left == right` failed
+  left: Some(5)
+ right: Some(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    eval_score::tests::validation_retry_keeps_the_latest_persisted_human_rating
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 975 filtered out; finished in 2.73s
+
+error: test failed, to rerun pass `-p otto-server --lib`

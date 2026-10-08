@@ -278,8 +278,9 @@ impl SkillEvalsRepo {
     }
 
     /// Atomically admit a validation retry and invalidate publication scores.
-    /// The server owns a per-eval retry lease until completion; cancellation is
-    /// persisted before it signals that lease.
+    /// Command/diff signals stay in a pending snapshot so retrying after daemon
+    /// recovery does not forget them. The server owns a per-eval retry lease
+    /// until completion; cancellation is persisted before it signals that lease.
     pub async fn begin_validation_retry(
         &self,
         eval_id: &Id,
@@ -300,7 +301,7 @@ impl SkillEvalsRepo {
         if row.rows_affected() == 0 {
             return Ok(false);
         }
-        sqlx::query("UPDATE skill_eval_iterations SET agents_json = json_replace(agents_json, ?, json(?)), scoring_json = NULL, score = 0, status = 'validating' WHERE id = ? AND eval_id = ?")
+        sqlx::query("UPDATE skill_eval_iterations SET agents_json = json_replace(agents_json, ?, json(?)), scoring_json = json_set(scoring_json, '$.proof_status', 'pending', '$.done_score', 0), score = 0, status = 'validating' WHERE id = ? AND eval_id = ?")
             .bind(path).bind(elem).bind(iter_id).bind(eval_id).execute(&mut *tx).await.map_err(dberr("invalidate retried score"))?;
         tx.commit()
             .await
@@ -326,6 +327,21 @@ impl SkillEvalsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("set skill eval summary"))?;
+        Ok(())
+    }
+
+    /// Keep all headline fields coherent when finalizing the run summary.
+    pub async fn set_scored_summary(
+        &self,
+        id: &Id,
+        summary: &str,
+        best_iteration: u32,
+        best_score: f64,
+        composite: Option<f64>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE skill_evals SET summary = ?, best_iteration = ?, best_score = ?, composite_score = ? WHERE id = ?")
+            .bind(summary).bind(i64::from(best_iteration)).bind(best_score).bind(composite).bind(id)
+            .execute(&self.pool).await.map_err(dberr("set scored summary"))?;
         Ok(())
     }
 
@@ -508,6 +524,77 @@ impl SkillEvalsRepo {
         Ok(())
     }
 
+    /// Accept a rating and invalidate derived publication in one transaction.
+    /// Proof rebuilding may fail or the process may stop afterwards: a saved
+    /// rating must never coexist with its previous publishable score.
+    pub async fn begin_human_rating(
+        &self,
+        eval_id: &Id,
+        iter_id: &Id,
+        pending: &EvalScore,
+    ) -> Result<()> {
+        let json = serde_json::to_string(pending)
+            .map_err(|e| Error::Internal(format!("serialize pending rating: {e}")))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin human rating"))?;
+        let row = sqlx::query("UPDATE skill_eval_iterations SET human_rating = ?, human_note = ?, human_rater = ?, scoring_json = ? WHERE id = ? AND eval_id = ?")
+            .bind(pending.human.rating.map(i64::from)).bind(&pending.human.note).bind(&pending.human.rater).bind(json).bind(iter_id).bind(eval_id)
+            .execute(&mut *tx).await.map_err(dberr("save human rating"))?;
+        if row.rows_affected() != 1 {
+            return Err(Error::NotFound("iteration".into()));
+        }
+        sqlx::query("UPDATE skill_evals SET composite_score = NULL, best_score = NULL, best_iteration = NULL WHERE id = ?")
+            .bind(eval_id).execute(&mut *tx).await.map_err(dberr("invalidate rated score"))?;
+        tx.commit().await.map_err(dberr("commit human rating"))
+    }
+
+    /// Publish an iteration and its reselected run headline atomically. Proof
+    /// evidence has already been assembled; no external work occurs in this tx.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_iter_scoring(
+        &self,
+        eval_id: &Id,
+        iter_id: &Id,
+        scoring: &EvalScore,
+        proof_pack_id: &str,
+        badge_score: Option<f64>,
+        reason: &str,
+    ) -> Result<()> {
+        let json = serde_json::to_string(scoring)
+            .map_err(|e| Error::Internal(format!("serialize eval scoring: {e}")))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin score publication"))?;
+        let row = sqlx::query("UPDATE skill_eval_iterations SET scoring_json = ?, proof_pack_id = ?, score = COALESCE(?, score) WHERE id = ? AND eval_id = ?")
+            .bind(json).bind(proof_pack_id).bind(badge_score).bind(iter_id).bind(eval_id)
+            .execute(&mut *tx).await.map_err(dberr("publish iteration score"))?;
+        if row.rows_affected() != 1 {
+            return Err(Error::NotFound("iteration".into()));
+        }
+        let rows = sqlx::query("SELECT iter, scoring_json FROM skill_eval_iterations WHERE eval_id = ? AND scoring_json IS NOT NULL")
+            .bind(eval_id).fetch_all(&mut *tx).await.map_err(dberr("select published scores"))?;
+        let best = rows
+            .iter()
+            .filter_map(|row| {
+                let score: EvalScore =
+                    serde_json::from_str(&row.get::<String, _>("scoring_json")).ok()?;
+                (score.proof_status != "pending")
+                    .then(|| (row.get::<i64, _>("iter"), score.composite))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        let (iter, score) =
+            best.ok_or_else(|| Error::Internal("published score unavailable".into()))?;
+        sqlx::query("UPDATE skill_evals SET summary = ?, best_iteration = ?, best_score = ?, composite_score = ? WHERE id = ?")
+            .bind(format!("{reason} · best score {score:.0}")).bind(iter).bind(score).bind(score).bind(eval_id)
+            .execute(&mut *tx).await.map_err(dberr("publish score headline"))?;
+        tx.commit().await.map_err(dberr("commit score publication"))
+    }
+
     /// Record a human rating (0–5) for an iteration.
     pub async fn set_iter_human(
         &self,
@@ -543,7 +630,7 @@ impl SkillEvalsRepo {
     /// Mark a run as promoted to the library.
     pub async fn set_promoted(&self, eval_id: &Id, by: &str) -> Result<()> {
         let now = fmt(Utc::now());
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE skill_evals SET promoted = 1, promoted_at = ?, promoted_by = ? WHERE id = ?",
         )
         .bind(&now)
@@ -552,6 +639,9 @@ impl SkillEvalsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("set eval promoted"))?;
+        if updated.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("skill evaluation {eval_id}")));
+        }
         Ok(())
     }
 
@@ -729,6 +819,138 @@ mod tests {
     use otto_core::domain::EvalFinding;
 
     #[tokio::test]
+    async fn score_publication_and_rating_admission_roll_back_on_headline_failure() {
+        let pool = mem_pool().await;
+        let repo = SkillEvalsRepo::new(pool.clone());
+        let eval = repo
+            .create_eval(
+                &"ws".into(),
+                "skill",
+                "task",
+                "fixture",
+                1,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let iter = repo
+            .add_iteration(&eval.id, 1, None, "skill", "body", "fixture", &[])
+            .await
+            .unwrap();
+        let old = EvalScore {
+            composite: 100.0,
+            proof_status: "passed".into(),
+            human: otto_core::eval_score::human_score(Some(5), "old", "editor"),
+            ..Default::default()
+        };
+        repo.publish_iter_scoring(&eval.id, &iter.id, &old, "pack", Some(100.0), "original")
+            .await
+            .unwrap();
+        repo.set_iter_human(&iter.id, 5, "old", "editor")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_headline BEFORE UPDATE ON skill_evals BEGIN SELECT RAISE(ABORT, 'headline unavailable'); END").execute(&pool).await.unwrap();
+        let mut new = old.clone();
+        new.composite = 20.0;
+        new.human = otto_core::eval_score::human_score(Some(1), "new", "editor");
+        assert!(repo
+            .publish_iter_scoring(
+                &eval.id,
+                &iter.id,
+                &new,
+                "new-pack",
+                Some(20.0),
+                "replacement"
+            )
+            .await
+            .is_err());
+        let stored = repo.get_eval(&eval.id).await.unwrap();
+        assert_eq!(stored.composite_score, Some(100.0));
+        assert_eq!(stored.best_score, Some(100.0));
+        assert_eq!(stored.iterations[0].score, 100.0);
+        assert_eq!(stored.iterations[0].proof_pack_id.as_deref(), Some("pack"));
+        assert_eq!(
+            stored.iterations[0].scoring.as_ref().unwrap().composite,
+            100.0
+        );
+        new.proof_status = "pending".into();
+        assert!(repo
+            .begin_human_rating(&eval.id, &iter.id, &new)
+            .await
+            .is_err());
+        let stored = repo.get_eval(&eval.id).await.unwrap();
+        assert_eq!(stored.iterations[0].human_rating, Some(5));
+        assert_eq!(stored.iterations[0].human_note, "old");
+        assert_eq!(
+            stored.iterations[0].scoring.as_ref().unwrap().proof_status,
+            "passed"
+        );
+        assert_eq!(stored.best_score, Some(100.0));
+    }
+
+    #[tokio::test]
+    async fn interrupted_validation_retry_preserves_original_command_signals() {
+        let pool = mem_pool().await;
+        let repo = SkillEvalsRepo::new(pool.clone());
+        let eval = repo
+            .create_eval(
+                &"ws".into(),
+                "skill",
+                "task",
+                "fixture",
+                1,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let iter = repo
+            .add_iteration(
+                &eval.id,
+                1,
+                None,
+                "skill",
+                "body",
+                "fixture",
+                &[agent("validation", "done")],
+            )
+            .await
+            .unwrap();
+        let mut previous = EvalScore {
+            proof_status: "failed".into(),
+            ..Default::default()
+        };
+        previous.tests =
+            otto_core::eval_score::signal_from_cmd(true, false, "original failed test command");
+        repo.set_iter_scoring(&iter.id, &previous, Some("pack"))
+            .await
+            .unwrap();
+        repo.set_status(&eval.id, SkillEvalStatus::Done, None)
+            .await
+            .unwrap();
+        let pending = agent("validation", "pending");
+        assert!(repo
+            .begin_validation_retry(&eval.id, &iter.id, 0, &pending)
+            .await
+            .unwrap());
+        // Reconstruct the repository and apply the real startup recovery. No
+        // in-memory previous_scoring value survives this boundary.
+        let restarted = SkillEvalsRepo::new(pool);
+        restarted.fail_running("daemon restarted").await.unwrap();
+        assert!(restarted
+            .begin_validation_retry(&eval.id, &iter.id, 0, &pending)
+            .await
+            .unwrap());
+        let stored = restarted.get_iteration(&iter.id).await.unwrap();
+        let preserved = stored
+            .scoring
+            .expect("retry admission lost persisted command evidence");
+        assert!(preserved.tests.ran);
+        assert_eq!(preserved.tests.score, 0.0);
+        assert_eq!(preserved.tests.detail, "original failed test command");
+        assert_eq!(preserved.proof_status, "pending");
+    }
+
+    #[tokio::test]
     async fn retry_invalidates_scores_and_completion_cannot_overwrite_cancellation() {
         let pool = mem_pool().await;
         let repo = SkillEvalsRepo::new(pool);
@@ -779,7 +1001,10 @@ mod tests {
         let current = repo.get_eval(&eval.id).await.unwrap();
         assert!(current.composite_score.is_none());
         assert!(current.best_score.is_none());
-        assert!(current.iterations[0].scoring.is_none());
+        assert_eq!(
+            current.iterations[0].scoring.as_ref().unwrap().proof_status,
+            "pending"
+        );
         assert_eq!(current.status, SkillEvalStatus::Running);
         repo.set_status(&eval.id, SkillEvalStatus::Cancelled, None)
             .await

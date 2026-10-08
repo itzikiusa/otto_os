@@ -1,0 +1,159 @@
+{
+  "rounds": [
+    {
+      "resources": 1,
+      "samples": 4,
+      "elapsed_ms": {
+        "min": 72.260334,
+        "mean": 82.8159065,
+        "population_sd": 6.731818601269664,
+        "max": 90.868875
+      }
+    },
+    {
+      "resources": 32,
+      "samples": 4,
+      "elapsed_ms": {
+        "min": 74.061833,
+        "mean": 88.755354,
+        "population_sd": 11.923783908663836,
+        "max": 100.53045800000001
+      }
+    },
+    {
+      "resources": 128,
+      "samples": 4,
+      "elapsed_ms": {
+        "min": 83.228167,
+        "mean": 87.399771,
+        "population_sd": 3.892920920001519,
+        "max": 93.233792
+      }
+    }
+  ],
+  "sample_count": 46,
+  "resource_definition": "Sum of ps RSS may count shared pages multiple times; CPU is ps estimate,100%=one core. Rust test host is not full daemon.",
+  "total_rss_mib": {
+    "min": 4.765625,
+    "mean": 1506.7411684782608,
+    "population_sd": 230.10903144293752,
+    "max": 1561.9375
+  },
+  "total_cpu_percent": {
+    "min": 0.0,
+    "mean": 9.715217391304348,
+    "population_sd": 24.782821604729985,
+    "max": 158.39999999999998
+  },
+  "after_6s_total_rss_mib": {
+    "min": 1550.59375,
+    "mean": 1556.5540178571428,
+    "population_sd": 3.655468366651781,
+    "max": 1561.9375
+  },
+  "after_6s_total_cpu_percent": {
+    "min": 0.7,
+    "mean": 4.231428571428571,
+    "population_sd": 6.5258944183294645,
+    "max": 36.0
+  },
+  "test_host_rss_mib": {
+    "min": 4.765625,
+    "mean": 13.183423913043478,
+    "population_sd": 1.2833461229865808,
+    "max": 13.59375
+  },
+  "remaining_pids": [],
+  "result": {
+    "blocked": 644,
+    "closed": true,
+    "frames": 87,
+    "observations": [
+      {
+        "blocked_total": 1,
+        "elapsed_ms": 85.033542,
+        "frames_total": 1,
+        "resources": 1,
+        "round": 0
+      },
+      {
+        "blocked_total": 33,
+        "elapsed_ms": 74.061833,
+        "frames_total": 8,
+        "resources": 32,
+        "round": 1
+      },
+      {
+        "blocked_total": 161,
+        "elapsed_ms": 83.228167,
+        "frames_total": 16,
+        "resources": 128,
+        "round": 2
+      },
+      {
+        "blocked_total": 162,
+        "elapsed_ms": 72.260334,
+        "frames_total": 24,
+        "resources": 1,
+        "round": 3
+      },
+      {
+        "blocked_total": 194,
+        "elapsed_ms": 100.53045800000001,
+        "frames_total": 32,
+        "resources": 32,
+        "round": 4
+      },
+      {
+        "blocked_total": 322,
+        "elapsed_ms": 84.59379200000001,
+        "frames_total": 37,
+        "resources": 128,
+        "round": 5
+      },
+      {
+        "blocked_total": 323,
+        "elapsed_ms": 90.868875,
+        "frames_total": 46,
+        "resources": 1,
+        "round": 6
+      },
+      {
+        "blocked_total": 355,
+        "elapsed_ms": 100.458958,
+        "frames_total": 53,
+        "resources": 32,
+        "round": 7
+      },
+      {
+        "blocked_total": 483,
+        "elapsed_ms": 88.543333,
+        "frames_total": 58,
+        "resources": 128,
+        "round": 8
+      },
+      {
+        "blocked_total": 484,
+        "elapsed_ms": 83.100875,
+        "frames_total": 65,
+        "resources": 1,
+        "round": 9
+      },
+      {
+        "blocked_total": 516,
+        "elapsed_ms": 79.97016699999999,
+        "frames_total": 73,
+        "resources": 32,
+        "round": 10
+      },
+      {
+        "blocked_total": 644,
+        "elapsed_ms": 93.233792,
+        "frames_total": 82,
+        "resources": 128,
+        "round": 11
+      }
+    ],
+    "screenshot_bytes": 8070
+  }
+}

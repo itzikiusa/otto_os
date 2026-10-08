@@ -1,0 +1,10 @@
+{
+  "daemon_sha256": "bd1e244b32d6895a7738a6dc8b4f0db79c19de0ef9482f90f609a27f2f795d34",
+  "browser_cases": 16,
+  "browser_workers": 1,
+  "daemon_port": 17836,
+  "vite_port": 5211,
+  "slot": "round3-integrated",
+  "node": "26.10.0",
+  "suite": "named evaluator, header and Vault specs; no latency claims"
+}

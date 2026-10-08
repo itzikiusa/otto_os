@@ -1,0 +1,19 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.97s
+     Running unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)
+
+running 1 test
+
+thread 'live::conn::tests::unanswered_calls_have_bounded_admission_even_when_output_drains' (6444265) panicked at crates/otto-browser/src/live/conn.rs:571:9:
+a draining browser that never replies must not accumulate unbounded callers
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test live::conn::tests::unanswered_calls_have_bounded_admission_even_when_output_drains ... FAILED
+
+failures:
+
+failures:
+    live::conn::tests::unanswered_calls_have_bounded_admission_even_when_output_drains
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 120 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p otto-browser --lib`

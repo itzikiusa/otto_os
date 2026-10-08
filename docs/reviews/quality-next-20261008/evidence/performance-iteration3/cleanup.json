@@ -1,0 +1,41 @@
+{
+  "utc": "2026-10-08T06:59:18.762623+00:00",
+  "sampled_runtime_pids": [
+    3122,
+    3123,
+    3124,
+    3125,
+    3126,
+    3127,
+    11067,
+    11068,
+    11069,
+    11070,
+    11071,
+    11072,
+    11073,
+    11074,
+    11083,
+    11118,
+    12612,
+    96735,
+    96771,
+    97280,
+    97281,
+    97324,
+    97328,
+    97329,
+    97330
+  ],
+  "remaining_sampled_processes": "",
+  "daemon_data_dir_exists": false,
+  "workspaces": [
+    {
+      "path": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-ws-QMwuIP",
+      "exists_before": true,
+      "entries": [],
+      "empty_fixture_removed": true,
+      "exists_after": false
+    }
+  ]
+}

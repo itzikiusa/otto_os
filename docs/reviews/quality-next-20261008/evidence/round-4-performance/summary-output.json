@@ -1,0 +1,227 @@
+{
+  "engine": "desktop-webkit",
+  "protocol": {
+    "credit": 9,
+    "ack": 18,
+    "input": 855
+  },
+  "fatal": [],
+  "phases": [
+    {
+      "concurrency": 1,
+      "load_seconds": 90,
+      "recovery_seconds": 10,
+      "elapsed_seconds": 106.952,
+      "markers_sent": 95,
+      "markers_rendered": 95,
+      "missed_ticks": 0,
+      "input_bytes": 81795,
+      "renderers": [
+        "webgl"
+      ],
+      "latency_ms": {
+        "n": 95,
+        "min": 4,
+        "mean": 16.389473684210525,
+        "sd": 5.773432321905512,
+        "p50": 17,
+        "p95": 26,
+        "max": 29
+      },
+      "per_terminal_latency_ms": [
+        {
+          "n": 95,
+          "p50": 17,
+          "p95": 26,
+          "max": 29
+        }
+      ],
+      "frame_ms": {
+        "n": 5773,
+        "p50": 17,
+        "p95": 19,
+        "max": 26
+      },
+      "remaining": [
+        {
+          "id": "01M4D9HRNJ4H9QW9RF205GYC38",
+          "pending": 0,
+          "queued": 0
+        }
+      ],
+      "protocol": {
+        "credit": 1,
+        "ack": 2,
+        "input": 95
+      },
+      "peak_pending_bytes": 1273,
+      "peak_queued_bytes": 0
+    },
+    {
+      "concurrency": 3,
+      "load_seconds": 90,
+      "recovery_seconds": 10,
+      "elapsed_seconds": 106.955,
+      "markers_sent": 285,
+      "markers_rendered": 285,
+      "missed_ticks": 0,
+      "input_bytes": 245385,
+      "renderers": [
+        "webgl"
+      ],
+      "latency_ms": {
+        "n": 285,
+        "min": 5,
+        "mean": 22.157894736842106,
+        "sd": 6.657509870299119,
+        "p50": 22,
+        "p95": 34,
+        "max": 38
+      },
+      "per_terminal_latency_ms": [
+        {
+          "n": 95,
+          "p50": 22,
+          "p95": 34,
+          "max": 37
+        },
+        {
+          "n": 95,
+          "p50": 22,
+          "p95": 34,
+          "max": 38
+        },
+        {
+          "n": 95,
+          "p50": 22,
+          "p95": 34,
+          "max": 37
+        }
+      ],
+      "frame_ms": {
+        "n": 5774,
+        "p50": 17,
+        "p95": 19,
+        "max": 27
+      },
+      "remaining": [
+        {
+          "id": "01M4D9N1JVCPRSVVRP80RWKZ6F",
+          "pending": 0,
+          "queued": 0
+        },
+        {
+          "id": "01M4D9N1KT2BB4B9M6JGBSNYVF",
+          "pending": 0,
+          "queued": 0
+        },
+        {
+          "id": "01M4D9N1MMW714XQ4Y4QFNTHRB",
+          "pending": 0,
+          "queued": 0
+        }
+      ],
+      "protocol": {
+        "credit": 3,
+        "ack": 6,
+        "input": 285
+      },
+      "peak_pending_bytes": 1013,
+      "peak_queued_bytes": 0
+    },
+    {
+      "concurrency": 5,
+      "load_seconds": 90,
+      "recovery_seconds": 10,
+      "elapsed_seconds": 107.075,
+      "markers_sent": 475,
+      "markers_rendered": 475,
+      "missed_ticks": 0,
+      "input_bytes": 408975,
+      "renderers": [
+        "webgl"
+      ],
+      "latency_ms": {
+        "n": 475,
+        "min": 4,
+        "mean": 24.96421052631579,
+        "sd": 8.109045187345766,
+        "p50": 26,
+        "p95": 36,
+        "max": 40
+      },
+      "per_terminal_latency_ms": [
+        {
+          "n": 95,
+          "p50": 26,
+          "p95": 36,
+          "max": 40
+        },
+        {
+          "n": 95,
+          "p50": 26,
+          "p95": 37,
+          "max": 39
+        },
+        {
+          "n": 95,
+          "p50": 26,
+          "p95": 36,
+          "max": 39
+        },
+        {
+          "n": 95,
+          "p50": 26,
+          "p95": 37,
+          "max": 38
+        },
+        {
+          "n": 95,
+          "p50": 26,
+          "p95": 38,
+          "max": 38
+        }
+      ],
+      "frame_ms": {
+        "n": 5781,
+        "p50": 17,
+        "p95": 19,
+        "max": 26
+      },
+      "remaining": [
+        {
+          "id": "01M4D9RABPKZ57H1GNJQZ8R556",
+          "pending": 0,
+          "queued": 0
+        },
+        {
+          "id": "01M4D9RACMVFEAP5ZQGM5YJ5Q4",
+          "pending": 0,
+          "queued": 0
+        },
+        {
+          "id": "01M4D9RADF49QCYWTSFY74HRQ4",
+          "pending": 0,
+          "queued": 0
+        },
+        {
+          "id": "01M4D9RAE9EWG3VA2FEXXMCJQW",
+          "pending": 0,
+          "queued": 0
+        },
+        {
+          "id": "01M4D9RAF4W4PTXV8WM81K9DBG",
+          "pending": 0,
+          "queued": 0
+        }
+      ],
+      "protocol": {
+        "credit": 5,
+        "ack": 10,
+        "input": 475
+      },
+      "peak_pending_bytes": 1023,
+      "peak_queued_bytes": 0
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "head": "2913a7d17c8b2b439d8ff8549768fbf64fc1808d",
+  "daemon_sha256": "bd1e244b32d6895a7738a6dc8b4f0db79c19de0ef9482f90f609a27f2f795d34",
+  "node": "26.10.0",
+  "slot": "round4-ux",
+  "daemon_port": 17848,
+  "vite_port": 5221,
+  "workers": 1,
+  "retries": 0,
+  "source_sha256": {
+    "ui/src/modules/loops/LoopsPage.svelte": "ab578b54fa3089802ff91418ed80869cbb460e6129d29b79d06f79ace731bb6f",
+    "ui/src/modules/loops/LoopDetail.svelte": "ead8ccf2126c3f428901286f772e9e37b6dd91b5e99e113db37d4a52f78f6887",
+    "ui/e2e/desktop-quality-round4-loop-ux.spec.ts": "1ab870e9bfbc9d59ce24b7b3eaf78a8f96eb9fccb7157a348735a52a34e3faab",
+    "ui/e2e/desktop-quality-round3-eval-ux.spec.ts": "4e011db1df30ce0bf3113f176cbc21d0943b77831e6b7861575e405bde1f42cc",
+    "ui/src/modules/skills-eval/RunDetail.svelte": "4f2babb2c7d265c32a2a6e2a9653d0dd928e77a411adfa1eef43109384569eef",
+    "ui/src/modules/skills-eval/Scorecard.svelte": "4a1f60eadced31b9ad3a27ab479147e86fc8a9b6bee2de89c88e41a40044e508",
+    "ui/src/modules/proof/ProofPage.svelte": "40345467e2bd34e0cb7fefb6d01abf7e65cb97e96d50064b154fe618456d6338"
+  }
+}

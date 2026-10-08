@@ -1,0 +1,12 @@
+{
+  "utc": "2026-10-08T06:34:21.867222+00:00",
+  "review_base": "7cff9e538",
+  "files": {
+    "crates/otto-browser/src/live/conn.rs": "bb2644e1a838d165b9eaeff082d02626919cd5a756005d78a712b5af5c8c2016",
+    "crates/otto-browser/src/live/process.rs": "73c7b7ca42498d30ac1589440289a4c13f491df53be5ac652e1909db2380ed0f",
+    "crates/otto-browser/src/live/session.rs": "e9452924b2fc4190e590d7309d6360c41f8174a26ea5816ffc3f6b3fa115a469",
+    "crates/otto-browser/src/live/proxy.rs": "42488ebae16a03b0cb0f3046345675257ff83517c532c1bb40ee7e73269a0b07",
+    "crates/otto-browser/src/live/chrome.rs": "42278781d30b4a3f13a2e15fd925e293f4dd97c6fd5e24ebc680840ccf7a701d"
+  },
+  "note": "Hashes after full crate tests and clippy; only proxy doc comment changed after checks. Concurrent non-owned changes excluded."
+}

@@ -1,0 +1,17 @@
+✔ park: take returns the parked value once and cancels its TTL (0.745333ms)
+✔ park: LRU cap evicts (and disposes) the oldest parked engine (0.130791ms)
+✔ park: TTL disposes an engine nobody came back for (0.073208ms)
+✔ park: re-parking a session disposes the older engine; a stale close cannot evict the newer one (0.076791ms)
+✔ park: bounds are the documented ones (0.239792ms)
+✔ park → adopt keeps the credit stream: acks continue on the same tag through re-pointed sinks (0.236708ms)
+✔ snapshotApplies: attach/resync rebuild; a held optional compact is skipped (0.073334ms)
+✔ park: a byte budget evicts the oldest engines past it, keeping the newest (perf 01 N2) (0.09525ms)
+✔ park: the default budget holds ~5 worst-case (4000 × 200) engines, all PARK_CAP typical ones (0.123625ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 141.734417

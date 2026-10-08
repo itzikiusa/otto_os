@@ -1,0 +1,91 @@
+[WebServer] (node:63321) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wjMXP1 OTTO_PORT=17834
+2026-10-08T07:36:36.441784Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wjMXP1)
+2026-10-08T07:36:36.688257Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wjMXP1/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T07:36:36.696602Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wjMXP1/clickhouse, port 57961)
+2026-10-08T07:36:36.710758Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T07:36:36.712712Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T07:36:36.712763Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T07:36:36.712780Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T07:36:36.712877Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T07:36:36.712898Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T07:36:36.712971Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T07:36:36.712981Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T07:36:36.713481Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T07:36:36.725181Z  INFO otto_server::boot::recovery: boot: post-listen work done in 12 ms (plugins=0)
+2026-10-08T07:36:36.818346Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T07:36:36.818424Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T07:36:36.818452Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T07:36:36.818475Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T07:36:36.818523Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T07:36:36.845383Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T07:36:36.845433Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T07:36:36.845451Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T07:36:36.845465Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T07:36:36.845478Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T07:36:36.845515Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T07:36:36.845622Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T07:36:36.846207Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T07:36:36.847615Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T07:36:36.913117Z  INFO ottod: listening on http://127.0.0.1:17834
+2026-10-08T07:36:36.913309Z  INFO ottod: alt loopback lane on http://localhost:17834 ([::1] + 127.0.0.1 both held)
+2026-10-08T07:36:36.913396Z  INFO otto_server::boot: boot: ready in 471 ms (db_compact=0 db_open=241 maintenance=2 modules=19 restore=4 recovery=202)
+[e2e] test daemon ready (pid 63333); root onboarded.
+
+Running 1 test using 1 worker
+
+2026-10-08T07:36:37.090970Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-wjMXP1/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T07:36:37.092770Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T07:36:37.099618Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T07:36:37.153407Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T07:36:37.153783Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T07:36:37.153860Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:63449) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 10:36:37 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✘  1 [desktop-browser] › e2e/desktop-quality-round2-session-ux.spec.ts:76:3 › conversation load Retry and keyboard navigation preserve unsent draft light (12.2s)
+
+
+  1) [desktop-browser] › e2e/desktop-quality-round2-session-ux.spec.ts:76:3 › conversation load Retry and keyboard navigation preserve unsent draft light 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  getByRole('search', { name: 'Find in page', exact: true })
+    Expected: 0
+    Received: 1
+    Timeout:  10000ms
+
+    Call log:
+      - Expect "toHaveCount" getByRole('search', { name: 'Find in page', exact: true }) with timeout 10000ms
+      - waiting for getByRole('search', { name: 'Find in page', exact: true })
+        23 × locator resolved to 1 element
+           - unexpected value "1"
+
+
+      94 |     await expect(composer).toHaveValue('Unsent draft survives load recovery\nKeep the second line');
+      95 |     await composer.press('Meta+f');
+    > 96 |     await expect(page.getByRole('search', { name: 'Find in page', exact: true })).toHaveCount(0);
+         |                                                                                   ^
+      97 |     await page.locator('.conv .search-in').fill('retry');
+      98 |     await expect(page.locator('.conv .search-n')).not.toHaveAttribute('data-search-hits', '0');
+      99 |     await page.locator('.conv .search-in').press('Escape');
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-quality-round2-session-ux.spec.ts:96:83
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-quality-round2-ses-2fa8e-preserve-unsent-draft-light-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-quality-round2-ses-2fa8e-preserve-unsent-draft-light-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-quality-round2-ses-2fa8e-preserve-unsent-draft-light-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-quality-round2-ses-2fa8e-preserve-unsent-draft-light-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [desktop-browser] › e2e/desktop-quality-round2-session-ux.spec.ts:76:3 › conversation load Retry and keyboard navigation preserve unsent draft light 

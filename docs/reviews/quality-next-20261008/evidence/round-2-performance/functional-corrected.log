@@ -1,0 +1,11 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.57s
+     Running unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)
+
+running 1 test
+CHROME_START {"browser_fetch":true,"profile":"/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpSPCtpg","test_pid":58272,"version":"149.0.7827.55"}
+CHROME_RESULT {"blocked":644,"closed":true,"frames":87,"observations":[{"blocked_total":1,"elapsed_ms":100.9395,"frames_total":2,"resources":1,"round":0},{"blocked_total":33,"elapsed_ms":75.735833,"frames_total":10,"resources":32,"round":1},{"blocked_total":161,"elapsed_ms":87.63391700000001,"frames_total":18,"resources":128,"round":2},{"blocked_total":162,"elapsed_ms":77.624542,"frames_total":26,"resources":1,"round":3},{"blocked_total":194,"elapsed_ms":75.190541,"frames_total":33,"resources":32,"round":4},{"blocked_total":322,"elapsed_ms":93.148833,"frames_total":42,"resources":128,"round":5},{"blocked_total":323,"elapsed_ms":80.159042,"frames_total":48,"resources":1,"round":6},{"blocked_total":355,"elapsed_ms":75.7205,"frames_total":53,"resources":32,"round":7},{"blocked_total":483,"elapsed_ms":80.128541,"frames_total":60,"resources":128,"round":8},{"blocked_total":484,"elapsed_ms":72.181708,"frames_total":67,"resources":1,"round":9},{"blocked_total":516,"elapsed_ms":87.355458,"frames_total":75,"resources":32,"round":10},{"blocked_total":644,"elapsed_ms":90.63175,"frames_total":81,"resources":128,"round":11}],"screenshot_bytes":8070}
+test live::session::chromium_tests::real_chromium_resource_bursts_keep_navigation_and_frames_live ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 25.77s
+

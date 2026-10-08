@@ -1,0 +1,28 @@
+{
+  "base": "7cff9e538deccdd0e346af7c6285e11863285c00",
+  "source_sha256": {
+    "apps/desktop/src-tauri/examples/pane_spa_probe.rs": "f36a1a8d189618dd0933f35af59e4f9d02c64c70e37f898e37daedb3a4f4713d",
+    "apps/desktop/src-tauri/examples/probe_support/school.rs": "4cb72ae271cbf1b4784aabe7e6be8ec21d02d5ad95f6f9cb288e45f530b1f68c",
+    "crates/otto-browser/src/live/chrome.rs": "42278781d30b4a3f13a2e15fd925e293f4dd97c6fd5e24ebc680840ccf7a701d",
+    "crates/otto-browser/src/live/conn.rs": "bb2644e1a838d165b9eaeff082d02626919cd5a756005d78a712b5af5c8c2016",
+    "crates/otto-browser/src/live/process.rs": "99fe50fa03bc38370bfad7531faa0264a7de004e0c2cd7fdb550483b7f5b4629",
+    "crates/otto-browser/src/live/process_burst_tests.rs": "7722bfdaa58ef9a428229eff6685b72a90fe5b716610c92109e5304e747644e1",
+    "crates/otto-browser/src/live/proxy.rs": "42488ebae16a03b0cb0f3046345675257ff83517c532c1bb40ee7e73269a0b07",
+    "crates/otto-browser/src/live/session.rs": "e9452924b2fc4190e590d7309d6360c41f8174a26ea5816ffc3f6b3fa115a469",
+    "crates/otto-server/src/eval_score.rs": "2f17be26ec1340d7e2fa5373f7ece6468247754bfba0f6ed3bf13e1183a7b0e5",
+    "crates/otto-server/src/routes/goal_loops.rs": "66f1208ecb9aa95e3d14a24d7c4896e132e0103954999f1e782afeb1a5946f2b",
+    "crates/otto-server/src/skill_eval.rs": "5632125e8d236369d36f7ce42915ccffd57d19d8a441cbb78c29dbdcfb3c32a9",
+    "crates/otto-server/src/skill_eval_output_tests.rs": "03322aab7b271238e53741796aed701e295844aa687a9ee040a107c4b4b2d62e",
+    "crates/otto-server/tests/foundation_integrity.rs": "edc0deebd3b96bf02a34bb530a3b2a4324a76eb9f1205bff1be91e295645e440",
+    "crates/otto-state/src/goal_loops.rs": "14570d06fc6526bf2a1da38ff01bb659dbb7fd20a1a6a82611ee45a68ce3fa4a",
+    "ui/e2e/desktop-page-chrome.spec.ts": "d73ab2c6bb1ab408f97afb335f6cc065d3358b3848aa0ee1c0410682dc9d2bcf",
+    "ui/e2e/desktop-quality-next-design.spec.ts": "7fb6d09bc3be3fd211aac2591546ce1d408cde546fdb8b7738ef0edd59bcb72c",
+    "ui/e2e/desktop-quality-next-populated.spec.ts": "cfd4e734e6c922282fd4267d315a902e69cab9b91f8447f341c8f794a461c40d",
+    "ui/src/lib/api/types.ts": "b7a7a60e5bf050c1ac6e01e5a4ce82b5212e56eda385b9ad9d52514dd402bd7d",
+    "ui/src/lib/components/PageHeader.svelte": "76b0733fd58ab9e7c02a494852d299cf1ab69d64ff0093b53f4d0245a7cb0c98",
+    "ui/src/modules/proof/ProofPage.svelte": "efc243afc7a298f80c254dea8d9839c93df05a3513a0d6a71d9b0a468abeedea",
+    "ui/src/shell/App.svelte": "1b17c773fd986a29cdabba217b55112f7579e0217060bb38f1287a77cc0f1d0d"
+  },
+  "final_daemon_sha256": "ef5b20835f96449cb06f55ec757099b206fe63576df3cad6b37a90ec0441c187",
+  "native_probe_sha256": "50cb25881088b8a522dafbfacf64ed7a817aa11d946c01174d7f88438eeea732"
+}

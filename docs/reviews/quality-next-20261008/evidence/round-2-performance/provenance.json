@@ -1,0 +1,17 @@
+{
+  "head": "195de62c82394a6751d892ec1acba36dd6599d62",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "node": "v26.10.0",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "machine": "Mac15,9",
+  "files": {
+    "crates/otto-browser/src/live/conn.rs": "bb2644e1a838d165b9eaeff082d02626919cd5a756005d78a712b5af5c8c2016",
+    "crates/otto-browser/src/live/process.rs": "99fe50fa03bc38370bfad7531faa0264a7de004e0c2cd7fdb550483b7f5b4629",
+    "crates/otto-browser/src/live/proxy.rs": "42488ebae16a03b0cb0f3046345675257ff83517c532c1bb40ee7e73269a0b07",
+    "crates/otto-browser/src/live/session.rs": "737abd9af612905c9b95db101e49944226d18bf8b5ccc93df6fe07557a4270f6",
+    "crates/otto-browser/src/live/session_chromium_tests.rs": "ac4d5c07e2d48744b44218796d9a362d43eb2143e23cd1369124e5e70b28b02e",
+    "target/debug/deps/otto_browser-1194e6b985037524": "60109cb9bd4bf8df20e65006eb295736e1e350262b7f21141ab7532600fe89b5",
+    "/Users/itziklavon/Library/Caches/ms-playwright/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing": "b1b9e2dd063115031f08eadc10ed381ca0fa05b2284baff8f721d87f5f0f61b7"
+  },
+  "node_usage": "Node is not used by this Rust protocol workload; recorded for campaign provenance."
+}

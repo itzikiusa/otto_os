@@ -1,0 +1,94 @@
+   Compiling otto-browser v0.2.0 (/Users/itziklavon/otto_os/crates/otto-browser)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.92s
+     Running unittests src/lib.rs (target/debug/deps/otto_browser-1194e6b985037524)
+
+running 68 tests
+test live::control::tests::hand_back_without_a_waiting_agent_frees_the_session ... ok
+test live::control::tests::a_departing_driver_releases_only_their_own_control ... ok
+test live::control::tests::agent_release_clears_the_wait ... ok
+test live::control::tests::first_human_input_claims_an_idle_session ... ok
+test live::control::tests::human_input_is_refused_while_the_agent_drives_until_take_over ... ok
+test live::flow::tests::adaptive_steps_down_on_drops_and_saturates ... ok
+test live::flow::tests::adaptive_steps_down_on_latency_and_up_after_recovery ... ok
+test live::flow::tests::acks_are_cumulative_and_measure_rtt ... ok
+test live::flow::tests::a_viewer_that_never_acks_gets_nothing_more ... ok
+test live::flow::tests::window_limits_in_flight_and_keeps_only_the_newest_held_frame ... ok
+test live::chrome::tests::window_size_follows_the_clamped_viewport ... ok
+test live::guard::tests::only_agent_driven_outward_main_frame_documents_are_held ... ok
+test live::guard::tests::blocked_requests_fail_and_documents_are_flagged ... ok
+test live::guard::tests::parses_paused_events ... ok
+test live::conn::tests::command_frames_carry_the_flat_session_id ... ok
+test live::hooks::tests::outward_titles_name_where_and_what ... ok
+test live::guard::tests::verdict_cache_expires ... ok
+test live::chrome::tests::pipe_transport_and_no_debugging_port ... ok
+test live::chrome::tests::headless_mode_per_build ... ok
+test live::input::tests::mouse_events_map_to_cdp ... ok
+test live::input::tests::printable_keydown_carries_text ... ok
+test live::input::tests::enter_and_non_printing_keys ... ok
+test live::input::tests::cursor_normalization ... ok
+test live::input::tests::shortcuts_become_editing_commands_without_text ... ok
+test live::input::tests::virtual_key_codes ... ok
+test live::guard::tests::origins_and_hosts_never_leak_paths ... ok
+test live::guard::tests::vetting_refuses_internal_targets_through_the_cache ... ok
+test live::input::tests::text_ime_and_paste_are_capped ... ok
+test live::install::tests::pins_cover_both_builds_with_exact_sizes ... ok
+test live::install::tests::sha_pin_falls_back_to_a_well_formed_env_override_only ... ok
+test live::process::tests::filenames_are_display_safe ... ok
+test live::process::tests::profile_keys_scope_jars_by_workspace_owner_and_name ... ok
+test live::conn::tests::cancelled_live_call_removes_its_pending_reply ... ok
+test live::conn::tests::protocol_errors_and_eof_fail_the_caller ... ok
+test live::conn::tests::replies_are_matched_by_id_and_events_routed_by_session ... ok
+test live::protocol::tests::binary_frames_round_trip ... ok
+test live::protocol::tests::reads_jpeg_dimensions_from_the_sof_marker ... ok
+test live::protocol::tests::server_frames_are_tagged_snake_case ... ok
+test live::protocol::tests::parses_every_client_frame_kind ... ok
+test live::proxy::tests::parses_domain_and_ip_connects ... ok
+test live::process::tests::download_behavior_per_policy ... ok
+test live::proxy::tests::refuses_bind_udp_and_auth_only_clients ... ok
+test live::chrome::tests::launching_a_missing_binary_errors ... ok
+test live::runtime::tests::cdp_errors_map_to_live_errors ... ok
+test live::proxy::tests::the_proxy_refuses_a_loopback_connect_end_to_end ... ok
+test live::session::tests::element_box_expression_escapes_the_selector ... ok
+test live::session::tests::metrics_follow_the_viewport ... ok
+test live::install::tests::a_half_extracted_dir_is_not_installed ... ok
+test live::session::tests::navigation_targets_are_vetted ... ok
+test live::session::tests::screenshot_params_per_mode ... ok
+test live::session::tests::screenshot_request_defaults ... ok
+test live::types::tests::build_names_round_trip_on_the_wire ... ok
+test live::types::tests::profile_names_and_segments ... ok
+test live::types::tests::settings_default_and_validation ... ok
+test live::types::tests::stored_settings_fall_back_to_defaults ... ok
+test live::types::tests::viewport_is_clamped ... ok
+test live::runtime::tests::opening_without_an_engine_is_refused_before_any_launch ... ok
+test live::runtime::tests::bad_profile_names_are_rejected ... ok
+test live::runtime::tests::status_reports_both_builds_uninstalled_on_a_fresh_data_dir ... ok
+test live::runtime::tests::install_is_refused_when_the_checksum_is_not_pinned ... ok
+test live::install::tests::a_checksum_mismatch_installs_nothing ... ok
+test live::install::tests::wrong_sizes_are_refused_before_and_during_the_download ... ok
+test live::install::tests::installs_when_size_and_sha256_match ... ok
+test live::proxy::tests::vetting_blocks_internal_targets ... ok
+test live::chrome::tests::fds_3_and_4_are_wired_to_the_pipe ... ok
+
+thread 'live::conn::tests::output_flood_closes_connection_instead_of_retaining_commands' (6415828) panicked at crates/otto-browser/src/live/conn.rs:451:9:
+stalled output must have bounded admission
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test live::conn::tests::output_flood_closes_connection_instead_of_retaining_commands ... FAILED
+
+thread 'live::proxy::tests::dropping_proxy_cancels_accepted_handshakes' (6415875) panicked at crates/otto-browser/src/live/proxy.rs:297:9:
+accepted sockets must close with their proxy owner: Err(Elapsed(()))
+test live::proxy::tests::dropping_proxy_cancels_accepted_handshakes ... FAILED
+
+thread 'live::conn::tests::event_flood_closes_connection_and_fails_pending_calls' (6415827) panicked at crates/otto-browser/src/live/conn.rs:468:9:
+stalled event consumer must terminate the transport at its bound
+test live::conn::tests::event_flood_closes_connection_and_fails_pending_calls ... FAILED
+
+failures:
+
+failures:
+    live::conn::tests::event_flood_closes_connection_and_fails_pending_calls
+    live::conn::tests::output_flood_closes_connection_instead_of_retaining_commands
+    live::proxy::tests::dropping_proxy_cancels_accepted_handshakes
+
+test result: FAILED. 65 passed; 3 failed; 0 ignored; 0 measured; 51 filtered out; finished in 1.01s
+
+error: test failed, to rerun pass `-p otto-browser --lib`

@@ -32,6 +32,9 @@ use scraper::{Html, Selector};
 /// Consecutive engine failures for a host before we stop trying it and go
 /// straight to the fallback engine.
 const DENYLIST_THRESHOLD: u32 = 3;
+/// Failed hosts are hints for fallback, not durable history. Keep long-running
+/// readers bounded even when they visit many distinct failing origins.
+const DENYLIST_MAX_HOSTS: usize = 1024;
 
 /// How long a denylisted host skips the primary engine. Once this has passed
 /// since its last failure the host gets one primary-engine probe again — a
@@ -491,11 +494,27 @@ impl BrowserService {
 
     fn record_failure(&self, host: &str) {
         let mut denylist = self.denylist.lock().expect("denylist mutex poisoned");
-        let entry = denylist
-            .entry(host.to_string())
-            .or_insert((0, Instant::now()));
-        entry.0 = entry.0.saturating_add(1);
-        entry.1 = Instant::now();
+        let now = Instant::now();
+        if let Some(entry) = denylist.get_mut(host) {
+            // Preserve the failed probe's accumulated count so a host whose
+            // cooldown just elapsed goes straight back into fallback.
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = now;
+            return;
+        }
+        // Only a newly failing host does this bounded scan; ordinary reads and
+        // repeated failures remain O(1). Expired unrelated history is useless.
+        denylist.retain(|_, (_, last)| now.saturating_duration_since(*last) < self.denylist_window);
+        if denylist.len() >= DENYLIST_MAX_HOSTS {
+            let oldest = denylist
+                .iter()
+                .min_by_key(|(_, (_, last))| *last)
+                .map(|(host, _)| host.clone());
+            if let Some(oldest) = oldest {
+                denylist.remove(&oldest);
+            }
+        }
+        denylist.insert(host.to_string(), (1, now));
     }
 
     fn clear_failures(&self, host: &str) {
@@ -1304,6 +1323,71 @@ mod tests {
         // Still resolves fine — straight to fallback, no engine call needed.
         let page = svc.page("https://flaky.example.com").await.unwrap();
         assert_eq!(page.engine, "fallback");
+    }
+
+    #[test]
+    fn failure_history_is_bounded_without_resetting_recent_cooldowns() {
+        let svc = BrowserService::with_engines(
+            Arc::new(Down),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
+        for i in 0..1024 {
+            let host = format!("host-{i}.example.com");
+            for _ in 0..DENYLIST_THRESHOLD {
+                svc.record_failure(&host);
+            }
+        }
+        // Deterministic eviction candidate; refresh another existing entry at
+        // capacity without evicting anything or resetting its failure count.
+        svc.denylist
+            .lock()
+            .unwrap()
+            .get_mut("host-0.example.com")
+            .unwrap()
+            .1 = Instant::now() - Duration::from_secs(60);
+        svc.record_failure("host-1.example.com");
+        assert_eq!(svc.denylist.lock().unwrap().len(), 1024);
+        assert!(svc.is_denylisted("host-1.example.com"));
+        for _ in 0..DENYLIST_THRESHOLD {
+            svc.record_failure("new.example.com");
+        }
+        assert_eq!(
+            svc.denylist.lock().unwrap().len(),
+            1024,
+            "historical failed hosts must not grow without bound"
+        );
+        assert!(!svc.is_denylisted("host-0.example.com"));
+        assert!(svc.is_denylisted("host-1.example.com"));
+        assert!(svc.is_denylisted("new.example.com"));
+    }
+
+    #[test]
+    fn failure_history_prunes_expired_hosts_but_rearms_the_probed_host() {
+        let svc = BrowserService::with_engines(
+            Arc::new(Down),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
+        for host in ["stale.example.com", "probe.example.com"] {
+            for _ in 0..DENYLIST_THRESHOLD {
+                svc.record_failure(host);
+            }
+            svc.denylist.lock().unwrap().get_mut(host).unwrap().1 =
+                Instant::now() - svc.denylist_window - Duration::from_secs(1);
+        }
+        assert!(!svc.is_denylisted("probe.example.com"));
+        svc.record_failure("probe.example.com");
+        assert!(
+            svc.is_denylisted("probe.example.com"),
+            "an unsuccessful probe must rearm its cooldown"
+        );
+        svc.record_failure("fresh.example.com");
+        let history = svc.denylist.lock().unwrap();
+        assert!(
+            !history.contains_key("stale.example.com"),
+            "new failure must prune expired unrelated history"
+        );
+        assert!(history.contains_key("probe.example.com"));
+        assert!(history.contains_key("fresh.example.com"));
     }
 
     /// A denylisted host is retried once the window since its last failure

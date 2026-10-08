@@ -1,0 +1,76 @@
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sEIvMW OTTO_PORT=7821
+2026-10-08T06:44:27.410238Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sEIvMW)
+2026-10-08T06:44:27.664940Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sEIvMW/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T06:44:27.711516Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sEIvMW/clickhouse, port 62742)
+2026-10-08T06:44:27.751503Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T06:44:27.759161Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T06:44:27.760436Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T06:44:27.760482Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T06:44:27.765290Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T06:44:27.765749Z  INFO otto_server::boot::recovery: boot: post-listen work done in 11 ms (plugins=0)
+2026-10-08T06:44:27.766083Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T06:44:27.768887Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T06:44:27.768914Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T06:44:27.843829Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T06:44:27.857205Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T06:44:27.857481Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T06:44:27.857516Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T06:44:27.857562Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T06:44:27.857626Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T06:44:27.901306Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T06:44:27.910840Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T06:44:27.910884Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T06:44:27.910929Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T06:44:27.911101Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T06:44:27.911116Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T06:44:27.911403Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T06:44:27.911662Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T06:44:27.912317Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T06:44:28.001684Z  INFO ottod: listening on http://127.0.0.1:7821
+2026-10-08T06:44:28.001849Z  INFO ottod: alt loopback lane on http://localhost:7821 ([::1] + 127.0.0.1 both held)
+2026-10-08T06:44:28.003152Z  INFO otto_server::boot: boot: ready in 588 ms (db_compact=4 db_open=235 maintenance=6 modules=81 restore=9 recovery=250)
+[e2e] test daemon ready (pid 56738); root onboarded.
+2026-10-08T06:44:28.108441Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sEIvMW/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T06:44:28.110594Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T06:44:28.115073Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T06:44:28.115769Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T06:44:28.115844Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+2026-10-08T06:44:28.116629Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+node:internal/errors:999
+  const err = new Error(message);
+              ^
+
+Error: Command failed: /Users/itziklavon/otto_os/apps/desktop/src-tauri/target/debug/examples/pane_spa_probe
+
+thread '<unnamed>' (6558336) panicked at examples/probe_support/school.rs:40:5:
+Native modal occlusion did not set pane visible=true
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    at genericNodeError (node:internal/errors:999:15)
+    at wrappedFn (node:internal/errors:544:14)
+    at ChildProcess.exithandler (node:child_process:417:12)
+    at ChildProcess.emit (node:events:514:20)
+    at maybeClose (node:internal/child_process:1156:16)
+    at ChildProcess._handle.onexit (node:internal/child_process:334:5) {
+  code: 1,
+  killed: false,
+  signal: null,
+  cmd: '/Users/itziklavon/otto_os/apps/desktop/src-tauri/target/debug/examples/pane_spa_probe',
+  stdout: 'NATIVE_ZOOM_DIAGNOSTIC host_window_focused=true child={"activeId":"","activeTag":"BUTTON","documentFocused":true} host={"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":868,"overflow":0,"sheetVisible":true,"width":1500}\n' +
+    'NATIVE_ZOOM_STATE {"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":868,"overflow":0,"sheetVisible":true,"width":1500}\n' +
+    'NATIVE_ZOOM_DIAGNOSTIC host_window_focused=true child={"activeId":"","activeTag":"BUTTON","documentFocused":true} host={"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":434,"overflow":0,"sheetVisible":true,"width":750}\n' +
+    'NATIVE_ZOOM_STATE {"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":434,"overflow":0,"sheetVisible":true,"width":750}\n' +
+    'NATIVE_ZOOM_DIAGNOSTIC host_window_focused=true child={"activeId":"","activeTag":"BUTTON","documentFocused":true} host={"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":456,"overflow":0,"sheetVisible":true,"width":789}\n' +
+    'NATIVE_ZOOM_STATE {"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":456,"overflow":0,"sheetVisible":true,"width":789}\n' +
+    'NATIVE_ZOOM_DIAGNOSTIC host_window_focused=true child={"activeId":"","activeTag":"BUTTON","documentFocused":true} host={"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":868,"overflow":0,"sheetVisible":true,"width":1500}\n' +
+    'NATIVE_ZOOM_STATE {"activeDialog":"Add Workspace","activeId":"nw-name","activeLabel":null,"activeTag":"INPUT","activeText":"","documentFocused":true,"draft":"Unsubmitted native zoom draft","fieldConnected":true,"fieldVisible":true,"focusCalls":[],"focusEvents":[],"focused":true,"height":868,"overflow":0,"sheetVisible":true,"width":1500}\n' +
+    'PASS full SPA: isolated nonpersistent stores; native child ready handshake; real toolbar detach both directions; child-toolbar Return; retained root/child DOM+drafts; native menu zoom 100→200→190→100%; production unsaved workspace draft and focused field retained; sheet remains in bounds; no horizontal page clipping\n' +
+    'NATIVE_SCHOOL_RENDERER {"reducedMotion":false,"renderer":"Apple GPU","version":"WebGL 2.0"}\n',
+  stderr: '\n' +
+    "thread '<unnamed>' (6558336) panicked at examples/probe_support/school.rs:40:5:\n" +
+    'Native modal occlusion did not set pane visible=true\n' +
+    'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n'
+}
+
+Node.js v26.10.0

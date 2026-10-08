@@ -1,0 +1,37 @@
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.37s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 27 tests
+test policy::tests::skill_eval_promote_is_admin ... ok
+test skill_eval::recovery_tests::retry_admission_child_process ... ok
+test skill_eval::tests::best_iter_prefers_high_score_then_latest ... ok
+test skill_eval::output_tests::partial_validator_file_is_preserved_until_a_complete_verdict ... ok
+test skill_eval::tests::invalid_validator_output_is_distinct_from_a_clean_verdict ... ok
+test skill_eval::output_tests::valid_clean_transcript_is_a_verdict_and_invalid_passes_do_not_score ... ok
+test skill_eval::tests::diff_marks_changes ... ok
+test skill_eval::tests::parse_improvement_object ... ok
+test skill_eval::tests::parse_findings_tolerant ... ok
+test skill_eval::tests::sanitize_makes_safe_names ... ok
+test skill_eval::tests::score_subtracts_by_severity ... ok
+test skill_eval::tests::retry_admission_cancellation_and_cleanup_keep_attempt_identity ... ok
+test skill_eval::tests::validator_expansion_is_bounded_before_launch ... ok
+test skill_eval::tests::diff_trims_common_ends_and_caps_the_lcs ... ok
+test skill_eval::output_tests::completion_order_preserves_validator_dimension_in_improver_prompt ... ok
+test skill_eval::tests::cleanup_preserves_score_only_user_paths_with_a_similar_temp_prefix ... ok
+test skill_eval::output_tests::rating_waits_for_retry_publication_and_keeps_the_final_score_consistent ... ok
+test skill_eval::output_tests::rating_reselects_best_iteration_from_current_scores ... ok
+test skill_eval::recovery_tests::cancellation_storage_failure_is_reported_without_signalling_worker ... ok
+test skill_eval::output_tests::initial_scoring_publishes_rating_saved_while_commands_run ... ok
+test skill_eval::recovery_tests::dropped_rating_handler_recovers_pending_evidence_and_approval ... ok
+test skill_eval::output_tests::rating_storage_failure_does_not_keep_a_stale_publishable_score ... ok
+test skill_eval::tests::golden_task_from_another_workspace_is_rejected_before_creating_eval ... ok
+test skill_eval::tests::promotion_ignores_cached_pass_when_live_proof_is_missing_or_foreign ... ok
+test skill_eval::output_tests::malformed_validation_cannot_publish_passed_review_evidence ... ok
+
+running 1 test
+test skill_eval::recovery_tests::promotion_waits_for_publication_and_rechecks_pending_score ... ok
+test skill_eval::recovery_tests::killed_retry_process_preserves_commands_across_disk_reopen ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 960 filtered out; finished in 6.16s
+
