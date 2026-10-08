@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod cadence;
 pub mod cancel_signal;
+mod command_output;
 mod ctx;
 pub mod goal_loop;
 pub mod goal_loop_commands;

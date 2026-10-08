@@ -479,10 +479,12 @@ async fn repo_remote_op<S: GitCtx>(
     // under a push or fetch that is writing them (order: repo → remote).
     let rlock = remote_lock(&id);
     let _rg = rlock.lock().await;
-    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    Ok(Json(
-        git.remote_op(req.op, &req.name, req.url.as_deref()).await?,
-    ))
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let remotes = git.remote_op(req.op, &req.name, req.url.as_deref()).await?;
+    if req.name == "origin" {
+        crate::http::refresh_remote(&s, repo).await?;
+    }
+    Ok(Json(remotes))
 }
 
 async fn repo_commit_config<S: GitCtx>(

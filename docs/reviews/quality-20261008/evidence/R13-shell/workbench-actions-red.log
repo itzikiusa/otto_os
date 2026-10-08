@@ -1,0 +1,82 @@
+TAP version 13
+# Subtest: format completion cannot replace the newly selected file or later keystrokes
+not ok 1 - format completion cannot replace the newly selected file or later keystrokes
+  ---
+  duration_ms: 47.939375
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/workbenchActions.test.ts:23:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/workbenchActions.test.ts:30:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: reload confirmation cannot discard a newly selected file
+not ok 2 - reload confirmation cannot discard a newly selected file
+  ---
+  duration_ms: 15.1825
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/workbenchActions.test.ts:34:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/workbenchActions.test.ts:37:50)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: image upload cannot insert an old workspace asset into a different workspace
+not ok 3 - image upload cannot insert an old workspace asset into a different workspace
+  ---
+  duration_ms: 11.53675
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/workbenchActions.test.ts:40:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/workbenchActions.test.ts:44:60)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: unchanged editor still receives its format result
+ok 4 - unchanged editor still receives its format result
+  ---
+  duration_ms: 11.426833
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 1
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 335.746916

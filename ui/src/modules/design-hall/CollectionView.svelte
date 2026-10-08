@@ -233,10 +233,11 @@
 
   async function renameProject(): Promise<void> {
     if (!project) return;
-    const name = await confirmer.promptText('Project name', { title: 'Rename project', confirmLabel: 'Rename', initial: project.name });
-    if (!name || name === project.name) return;
+    const target = project;
+    const name = await confirmer.promptText('Project name', { title: 'Rename project', confirmLabel: 'Rename', initial: target.name });
+    if (!name || name === target.name) return;
     try {
-      await updateProject(project.id, { name });
+      await updateProject(target.id, { name });
       void library.load();
     } catch (e) {
       toastError('Couldn’t rename the project', e);
@@ -245,15 +246,16 @@
 
   async function archiveProject(): Promise<void> {
     if (!project) return;
+    const target = project;
     const ok = await confirmer.ask(
-      `Archive the project “${project.name}”? Its designs stay in the library (unchanged) and can be filed elsewhere.`,
+      `Archive the project “${target.name}”? Its designs stay in the library (unchanged) and can be filed elsewhere.`,
       { title: 'Archive project', confirmLabel: 'Archive', danger: false },
     );
     if (!ok) return;
     try {
-      await updateProject(project.id, { archived: true });
+      await updateProject(target.id, { archived: true });
       toasts.success('Project archived');
-      router.go('design');
+      if (project?.id === target.id) router.go('design');
     } catch (e) {
       toastError('Couldn’t archive the project', e);
     }

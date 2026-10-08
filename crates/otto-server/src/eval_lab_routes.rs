@@ -165,7 +165,7 @@ async fn run_golden(
     let g = ctx.golden_tasks_store.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &g.workspace_id, WorkspaceRole::Editor).await?;
     let req = golden_to_eval_req(&g, &run);
-    let eval = launch_eval(&ctx, &g.workspace_id, req, None)
+    let eval = launch_eval(&ctx, &g.workspace_id, &user, req, None)
         .await
         .map_err(ApiError)?;
     Ok(Json(eval))
@@ -219,6 +219,36 @@ async fn list_matrices(
     Ok(Json(matrices))
 }
 
+fn validate_matrix_shape(req: &StartMatrixReq) -> otto_core::Result<usize> {
+    let total = req
+        .providers
+        .len()
+        .checked_mul(req.skills.len())
+        .and_then(|n| n.checked_mul(req.prompts.len()));
+    if !total.is_some_and(|n| (1..=64).contains(&n)) {
+        return Err(Error::Invalid(
+            "a matrix requires 1 to 64 provider × skill × prompt cells".into(),
+        ));
+    }
+    let unique = |values: Vec<&str>| {
+        values.iter().all(|v| !v.trim().is_empty())
+            && values
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == values.len()
+    };
+    if !unique(req.providers.iter().map(String::as_str).collect())
+        || !unique(req.skills.iter().map(|s| s.reference.as_str()).collect())
+        || !unique(req.prompts.iter().map(|p| p.label.as_str()).collect())
+    {
+        return Err(Error::Invalid(
+            "matrix providers, skill names and prompt labels must be non-empty and unique".into(),
+        ));
+    }
+    Ok(total.unwrap_or(0))
+}
+
 async fn create_matrix(
     AxPath(ws_id): AxPath<Id>,
     State(ctx): State<ServerCtx>,
@@ -226,9 +256,23 @@ async fn create_matrix(
     Json(req): Json<StartMatrixReq>,
 ) -> ApiResult<Json<EvalMatrix>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    if req.providers.is_empty() || req.skills.is_empty() || req.prompts.is_empty() {
+    let total = validate_matrix_shape(&req).map_err(ApiError)?;
+    // Validate every cell before creating the matrix or launching any session.
+    // A foreign/missing golden task or invalid skill must not partially launch.
+    for provider in &req.providers {
+        for skill in &req.skills {
+            for prompt in &req.prompts {
+                let mut cell = cell_req(&req, provider, skill, prompt);
+                crate::skill_eval::validate_eval_request(&ctx, &ws_id, &mut cell)
+                    .await
+                    .map_err(ApiError)?;
+            }
+        }
+    }
+    let sample = cell_req(&req, &req.providers[0], &req.skills[0], &req.prompts[0]);
+    if total.saturating_mul(crate::skill_eval::eval_work_units(&sample).map_err(ApiError)?) > 256 {
         return Err(ApiError(Error::Invalid(
-            "a matrix needs at least one provider, skill, and prompt".into(),
+            "a matrix allows at most 256 implementation/validation steps".into(),
         )));
     }
     let skill_names: Vec<String> = req.skills.iter().map(|s| s.reference.clone()).collect();
@@ -255,7 +299,7 @@ async fn create_matrix(
     // eval carrying this matrix's id + the cell's dimensions; failures are logged
     // but don't abort the rest of the matrix.
     let matrix_id = matrix.id.clone();
-    let total = req.providers.len() * req.skills.len() * req.prompts.len();
+    let mut launch_failed = false;
     for provider in &req.providers {
         for skill in &req.skills {
             for prompt in &req.prompts {
@@ -266,13 +310,26 @@ async fn create_matrix(
                     skill.reference.clone(),
                     prompt.label.clone(),
                 );
-                if let Err(e) = launch_eval(&ctx, &ws_id, cell, Some(dims)).await {
+                if let Err(e) = launch_eval(&ctx, &ws_id, &user, cell, Some(dims)).await {
+                    launch_failed = true;
                     tracing::warn!(matrix = %matrix_id, "matrix cell failed to launch: {e}");
                 }
             }
         }
     }
     tracing::info!(matrix = %matrix_id, %total, "matrix launched");
+    if launch_failed {
+        ctx.eval_matrices_store
+            .set_status(&matrix_id, "error")
+            .await
+            .map_err(ApiError)?;
+        return Ok(Json(
+            ctx.eval_matrices_store
+                .get(&matrix_id)
+                .await
+                .map_err(ApiError)?,
+        ));
+    }
     Ok(Json(matrix))
 }
 
@@ -284,7 +341,12 @@ async fn matrix_view(ctx: &ServerCtx, mut matrix: EvalMatrix) -> EvalMatrix {
         .await
         .unwrap_or_default();
     let mut cells = Vec::with_capacity(cells_runs.len());
-    let mut all_terminal = !cells_runs.is_empty();
+    let expected = matrix
+        .providers
+        .len()
+        .saturating_mul(matrix.skills.len())
+        .saturating_mul(matrix.prompts.len());
+    let mut all_terminal = expected > 0 && cells_runs.len() == expected;
     for ev in &cells_runs {
         let status = ev.status.as_str().to_string();
         if status == "running" {
@@ -293,6 +355,7 @@ async fn matrix_view(ctx: &ServerCtx, mut matrix: EvalMatrix) -> EvalMatrix {
         let proof_status = ev
             .iterations
             .iter()
+            .filter(|i| Some(i.iter) == ev.best_iteration)
             .find_map(|i| i.scoring.as_ref().map(|s| s.proof_status.clone()))
             .unwrap_or_default();
         cells.push(MatrixCell {
@@ -308,8 +371,16 @@ async fn matrix_view(ctx: &ServerCtx, mut matrix: EvalMatrix) -> EvalMatrix {
     }
     // Lazily settle the matrix status when all its cells are terminal.
     if all_terminal && matrix.status == "running" {
-        let _ = ctx.eval_matrices_store.set_status(&matrix.id, "done").await;
-        matrix.status = "done".to_string();
+        let status = if cells_runs
+            .iter()
+            .all(|ev| ev.status == otto_core::domain::SkillEvalStatus::Done)
+        {
+            "done"
+        } else {
+            "error"
+        };
+        let _ = ctx.eval_matrices_store.set_status(&matrix.id, status).await;
+        matrix.status = status.to_string();
     }
     matrix.cells = cells;
     matrix
@@ -369,4 +440,29 @@ pub fn routes() -> Router<ServerCtx> {
         )
         .route("/eval-matrices/{id}", get(get_matrix))
         .route("/eval-matrices/{id}/cancel", post(cancel_matrix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(n: usize) -> StartMatrixReq {
+        serde_json::from_value(serde_json::json!({
+            "name":"fixture", "mode":"score_only", "providers":(0..n).map(|i|format!("p{i}")).collect::<Vec<_>>(),
+            "skills":[{"kind":"library","reference":"skill"}], "prompts":[{"label":"task","task":"fixture"}]
+        })).unwrap()
+    }
+
+    #[test]
+    fn matrix_shape_bounds_and_unique_labels() {
+        assert_eq!(validate_matrix_shape(&request(64)).unwrap(), 64);
+        assert!(validate_matrix_shape(&request(65)).is_err());
+        assert!(validate_matrix_shape(&request(0)).is_err());
+        let mut req = request(2);
+        req.providers[1] = req.providers[0].clone();
+        assert!(validate_matrix_shape(&req).is_err());
+        let mut req = request(1);
+        req.prompts.push(req.prompts[0].clone());
+        assert!(validate_matrix_shape(&req).is_err());
+    }
 }

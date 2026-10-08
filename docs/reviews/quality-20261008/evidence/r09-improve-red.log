@@ -1,0 +1,92 @@
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.82s
+     Running unittests src/lib.rs (target/debug/deps/otto_improve-b6a71ebb7d7e6f71)
+
+running 56 tests
+test classify::tests::non_allowlisted_skill_always_queues_even_on_auto ... ok
+test classify::tests::allowlisted_structural_skill_queues_on_tiered ... ok
+test classify::tests::oversized_memory_is_queued ... ok
+test classify::tests::memory_removal_bypasses_content_gate ... ok
+test classify::tests::propose_queues_everything ... ok
+test classify::tests::allowlisted_low_skill_applies_on_tiered ... ok
+test classify::tests::memory_low_applies_on_tiered_without_allowlist ... ok
+test classify::tests::memory_with_injection_marker_is_rejected_by_gate_and_queued ... ok
+test classify::tests::memory_with_ignore_instructions_phrase_is_queued ... ok
+test config::tests::disabled_is_never_due ... ok
+test config::tests::enabled_without_next_run_is_due ... ok
+test classify::tests::clean_memory_passes_gate ... ok
+test config::tests::enabled_with_future_next_run_is_not_due ... ok
+test config::tests::missing_block_yields_defaults ... ok
+test digest::tests::unicode_budget_includes_labels_and_keeps_latest_evidence ... ok
+test design::tests::rule_lines_round_trip_and_dedup ... ok
+test config::tests::write_config_preserves_other_keys ... ok
+test digest::tests::codex_deduplicates_event_and_response_messages ... ok
+test digest::tests::extracts_skills_turns_errors_text ... ok
+test digest::tests::text_is_capped ... ok
+test digest::tests::latest_correction_survives_long_history ... ok
+test digest::tests::correction_survives_a_verbose_assistant_response ... ok
+test engine::tests::auto_apply_queues_on_conflict_instead_of_clobbering ... ok
+test engine::tests::learning_discovery_rejects_symlink_escape_and_bounds_skill_bodies ... ok
+test engine::tests::auto_apply_remove_backs_up_then_deletes ... ok
+test engine::tests::auto_apply_creates_new_file_when_snapshot_was_absent ... ok
+test engine::tests::auto_apply_writes_atomically_and_leaves_a_backup ... ok
+test evidence::tests::cursors_skip_consumed_lines_and_retry_incomplete_lines_and_replacements ... ok
+test live::tests::live_trigger_round_trips ... ok
+test pathsafe::tests::memory_ref_resolves_under_project_memory ... ok
+test evidence::tests::replaced_file_with_identical_eof_anchor_is_reread ... ok
+test pathsafe::tests::skill_ref_resolves_under_workspace_without_library ... ok
+test pathsafe::tests::traversal_is_rejected ... ok
+test prompt::tests::build_prompt_fences_untrusted_digest_text ... ok
+test prompt::tests::escape_defangs_role_markers ... ok
+test prompt::tests::escape_neutralizes_code_fences ... ok
+test prompt::tests::escape_strips_sentinel_markers ... ok
+test prompt::tests::fenced_untrusted_cannot_break_out ... ok
+test proposal::tests::parses_fenced_proposal ... ok
+test pathsafe::tests::skill_ref_prefers_library_when_present ... ok
+test proposal::tests::parses_with_surrounding_prose ... ok
+test proposal::tests::rejects_non_json ... ok
+test evidence::tests::large_sources_read_recent_complete_tail ... ok
+
+thread 'engine::tests::memory_prompt_reads_only_the_bounded_prefix' (3305329) panicked at crates/otto-improve/src/engine.rs:1643:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test engine::tests::memory_prompt_reads_only_the_bounded_prefix ... FAILED
+test engine::tests::self_improve_provider_override_drives_the_run ... ok
+test design::tests::design_rules_are_pending_only_deduped_and_reproposed_after_conflict ... ok
+
+thread 'engine::tests::rollback_removal_preserves_recreated_file' (3305346) panicked at crates/otto-improve/src/engine.rs:1694:9:
+assertion `left == right` failed
+  left: RolledBack
+ right: Conflict
+test engine::tests::rollback_removal_preserves_recreated_file ... FAILED
+test engine::tests::learning_reads_used_unallowlisted_skill_but_only_queues_its_edit ... ok
+test engine::tests::narrative_cannot_self_authorize_skill_edit_outside_configured_allowlist ... ok
+test engine::tests::learning_latest_codex_delta_retries_failures_and_skips_duplicates ... ok
+test engine::tests::narrative_applies_skill_edit_only_when_configured_allowlisted ... ok
+test engine::tests::learning_keeps_a_new_trail_prompt_when_transcript_flush_lags ... ok
+test engine::tests::memory_low_edit_applies_and_rolls_back ... ok
+test engine::tests::learning_review_discovers_unallowlisted_catalog_and_target_body ... ok
+
+thread 'engine::tests::approve_removal_does_not_report_success_for_unreadable_target' (3305316) panicked at crates/otto-improve/src/engine.rs:1707:9:
+assertion failed: engine.approve_edit(&edit.id, "fixture").await.is_err()
+test engine::tests::approve_removal_does_not_report_success_for_unreadable_target ... FAILED
+test engine::tests::learning_uses_provider_neutral_trail_and_review_opt_in_dedup ... ok
+
+failures:
+
+failures:
+    engine::tests::approve_removal_does_not_report_success_for_unreadable_target
+    engine::tests::memory_prompt_reads_only_the_bounded_prefix
+    engine::tests::rollback_removal_preserves_recreated_file
+
+test result: FAILED. 53 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.17s
+
+error: test failed, to rerun pass `-p otto-improve --lib`

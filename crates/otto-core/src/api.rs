@@ -1289,15 +1289,18 @@ pub struct AuditLogResp {
 }
 
 /// `GET /api/v1/security-posture` (root only) — a snapshot the Trust & Safety
-/// Center renders, derived from settings + the auth store. No new state.
+/// Center renders, derived from the live listener, settings and auth store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityPostureResp {
-    /// Whether the daemon's network (0.0.0.0) listener is enabled.
+    /// Whether the daemon's network (0.0.0.0) listener is actually bound.
     pub network_listener: bool,
-    /// The port the network listener binds when enabled (None = daemon default).
+    /// The actual bound network port (None = no network listener).
     pub network_listener_port: Option<u16>,
-    /// True when no network listener is enabled (daemon is loopback-only).
+    /// True when no network listener is bound (daemon is loopback-only).
     pub loopback_only: bool,
+    /// Saved configuration differs from the running listener; restart to apply.
+    #[serde(default)]
+    pub network_listener_restart_required: bool,
     /// Count of currently-active (unexpired) API (personal access) tokens.
     pub active_api_tokens: i64,
 }

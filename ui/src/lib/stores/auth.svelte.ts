@@ -162,7 +162,28 @@ class AuthStore {
 
   /** Load identity + capabilities from /auth/me. */
   private async loadMe(): Promise<void> {
-    this.applyMe(await api.get<MeResp>('/auth/me'));
+    const token = getToken();
+    const response = await api.get<MeResp>('/auth/me');
+    if (token !== getToken()) throw new Error('Identity changed while refreshing');
+    this.applyMe(response);
+  }
+
+  /** A changed bearer cannot keep the previous identity's actionable shell.
+   * On failure the existing offline retry verifies the current token again. */
+  private async refreshChangedIdentity(): Promise<void> {
+    const token = getToken();
+    this.me = null;
+    this.realUser = null;
+    this.capabilities = {};
+    this.phase = 'loading';
+    try {
+      await this.loadMe();
+      await this.loadCapabilities();
+      if (token === getToken()) this.phase = 'ready';
+    } catch (error) {
+      if (token === getToken()) this.phase = 'offline';
+      throw error;
+    }
   }
 
   private applyMe(resp: MeResp): void {
@@ -309,8 +330,7 @@ class AuthStore {
     beginImpersonation(impToken);
 
     // Re-load identity + capabilities as the impersonated user.
-    await this.loadMe();
-    await this.loadCapabilities();
+    await this.refreshChangedIdentity();
   }
 
   /**
@@ -339,8 +359,7 @@ class AuthStore {
     }
 
     // Re-load as the real (admin) user.
-    await this.loadMe();
-    await this.loadCapabilities();
+    await this.refreshChangedIdentity();
   }
 
   private verifying401 = false;

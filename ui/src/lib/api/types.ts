@@ -401,7 +401,9 @@ export interface UpdateMcpControlServerReq {
   env?: Record<string, string>;
   url?: string | null;
   headers?: Record<string, string>;
+  /** Present replaces this map; omitted preserves it. Empty clears it. */
   secret_env?: Record<string, string>;
+  /** Present replaces this map; omitted preserves it. Empty clears it. */
   secret_headers?: Record<string, string>;
   injection_risk?: McpInjectionRisk;
   default_tool_access?: McpToolAccess;
@@ -2400,6 +2402,7 @@ export interface SecurityPostureResp {
   network_listener: boolean;
   network_listener_port: number | null;
   loopback_only: boolean;
+  network_listener_restart_required: boolean;
   active_api_tokens: number;
 }
 
@@ -3028,10 +3031,21 @@ export interface PullReq {
 export interface PushReq {
   /** Push THIS branch explicitly instead of the checked-out one. */
   branch?: string;
-  /** Overwrite the remote branch with `--force-with-lease --force-if-includes`.
-   *  Send only after the user confirmed it; refused (409) when the remote
-   *  moved since it was last fetched and integrated. */
+  /** Rewrite the captured target with an explicit remote OID lease and
+   *  integration check. Changed source/destination or missing target is 409. */
   force_with_lease?: boolean;
+  /** Required for force: source/destination captured before the original push. */
+  expected_target?: PushTarget;
+}
+
+/** Local-only snapshot from `GET /repos/{id}/push-target`; URLs stay secret. */
+export interface PushTarget {
+  branch: string;
+  source_sha: string;
+  remote: string;
+  destination_ref: string;
+  destination_hash: string;
+  remote_sha: string | null;
 }
 
 /** `POST /repos/{id}/discard` body. `keep_staged` reverts only the unstaged
@@ -4365,6 +4379,21 @@ export interface AttachedIssue {
 
 export type Channel = 'slack' | 'telegram' | 'webhook';
 
+/** Public-by-key POST /webhooks/{workspace_id}. Overload returns a 429
+ * `{code: 'busy', message}` problem before any work starts; retry later. */
+export interface WebhookInboundReq {
+  text: string;
+  conversation?: string;
+  thread?: string;
+  user?: string;
+  callback_url?: string;
+}
+export interface WebhookInboundResp {
+  accepted: boolean;
+  conversation: string;
+}
+
+
 export interface Integration {
   workspace_id: string;
   channel: Channel;
@@ -5619,6 +5648,7 @@ export interface EvalMatrix {
   created_at: string;
 }
 
+/** At most 64 cells / 256 expanded steps; dimensions are non-empty and unique. */
 export interface StartMatrixReq {
   name: string;
   mode?: string;
@@ -5638,7 +5668,7 @@ export interface StartMatrixReq {
 export interface SkillEvalValidationCfg {
   name: string;
   criteria: string;
-  /** CLIs to run this validation on (one agent each). */
+  /** Unique non-empty CLIs (one agent each); at most 16 expanded validators per run. */
   providers: string[];
   model: string;
 }
@@ -5672,6 +5702,7 @@ export interface SkillSourceReq {
   provider?: string | null;
 }
 
+/** Admission allows at most 10 iterations; golden task must belong to this workspace. */
 export interface StartSkillEvalReq {
   source: SkillSourceReq;
   task: string;
@@ -6245,6 +6276,8 @@ export interface QueryResult {
   truncated_reason?: 'bytes' | null;
   /** True when the server ran cell values through `otto_core::redact` (QueryRequest.mask=true). */
   masked?: boolean;
+  /** Stored cell values were shortened for display; row edits/copy-as-insert must be disabled. */
+  cells_truncated?: boolean;
   /** Later result sets from a multi-statement batch, in execution order (the
    *  top-level fields are the first statement's result). Absent/empty for a
    *  single statement. */
@@ -6899,6 +6932,7 @@ export interface MemoryQuery {
   kinds?: string[];
   tags?: string[];
   entities?: string[];
+  /** Zero/omitted defaults to 20; capped at 200 by the service. */
   k?: number;
   mode?: MemorySearchMode;
   include_inactive?: boolean;
@@ -7674,7 +7708,9 @@ export interface ContextPacketSendResp {
 // ---------------------------------------------------------------------------
 
 /**
- * One ranked result from the cross-module search endpoint.
+ * One ranked result from the cross-module search endpoint. Sources require
+ * their own feature View grant and retain workspace/private-memory visibility;
+ * at most five matches per source are returned.
  * `kind` discriminates the object type; `actions[0]` is always the primary
  * "open" navigation action.
  */
@@ -8000,6 +8036,7 @@ export interface BrowserTab {
 export interface BrowserAnnotation {
   id: Id;
   workspace_id: Id;
+  /** Optional origin tab; creation returns 404 unless it belongs to this workspace. */
   tab_id: Id | null;
   url: string;
   selector: string;
@@ -9504,6 +9541,12 @@ export interface K8sActionResp {
 // from PTY scrollback, so these shapes are what the parser guarantees.
 
 export type TranscriptProvider = 'claude' | 'codex' | 'agy';
+
+/** Query for POST /sessions/{id}/transcript/touch. */
+export interface TranscriptTouchQuery {
+  /** Keepalive only: never resume a dormant process. Server default: false. */
+  view?: boolean;
+}
 
 /** Why a session has no renderable transcript (returned with `turns: []`, 200 not 404). */
 export type TranscriptUnavailableReason =
@@ -11184,6 +11227,9 @@ export type AssistantRouteKind = 'chat' | 'code' | 'hard' | 'voice';
  *  a keyword rule, the chat default, or a (confirmed / auto) failover. */
 export type AssistantRouteReason = 'pin' | 'mention' | 'rule' | 'default' | 'failover';
 
+/** Thread list pagination: default 100, maximum 200; stable slot/update/id order. */
+export interface AssistantThreadQuery { limit?: number; offset?: number }
+
 /** One assistant thread = one resumable CLI session (resumed on demand). */
 export interface AssistantThread {
   id: Id;
@@ -11904,6 +11950,17 @@ export interface WorkbenchDocChangedEvent {
 }
 
 /** Broker schema history returns identifiers only, oldest first. */
+/** A replay can stop after acknowledged writes. Inspect error before claiming success. */
+export interface BrokerReplayResp {
+  replay_id: string;
+  source_topic: string;
+  target_topic: string;
+  count: number;
+  evidence: { partition: number; offset: number; key_preview: string | null; target_partition: number; target_offset: number }[];
+  error?: string;
+  evidence_saved: boolean;
+}
+
 export interface BrokerSchemaVersion { version: number; }
 /** Immutable numeric version body (the detail endpoint also accepts latest). */
 export interface BrokerSchemaVersionDetail {

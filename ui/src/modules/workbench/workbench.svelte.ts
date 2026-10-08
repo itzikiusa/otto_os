@@ -135,6 +135,11 @@ class WorkbenchStore {
   previewOn: Record<string, boolean> = $state(lsGet<Record<string, boolean>>(K_PREVIEW, {}));
   values: Record<string, Record<string, string>> = $state({});
 
+  private generation = 0;
+  private listRequest = 0;
+  private trashRequest = 0;
+  private reads = new Map<string, number>();
+
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private backupTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** A save is in flight for this id; `rerun` → save again after it. */
@@ -176,6 +181,11 @@ class WorkbenchStore {
       return;
     }
     this.flushAll();
+    const generation = ++this.generation;
+    for (const timer of this.backupTimers.values()) clearTimeout(timer);
+    this.backupTimers.clear();
+    if (this.listTimer) clearTimeout(this.listTimer);
+    this.listTimer = null;
     this.ws = ws;
     this.docs = [];
     this.trash = [];
@@ -186,7 +196,7 @@ class WorkbenchStore {
     this.active = saved.active && this.tabs.includes(saved.active) ? saved.active : (this.tabs[0] ?? null);
     this.subscribe();
     await this.loadList();
-    if (this.ws !== ws) return;
+    if (this.ws !== ws || generation !== this.generation || !this.loaded) return;
     // Drop tabs whose docs are gone (deleted elsewhere / trashed).
     const live = new Set(this.docs.map((d) => d.id));
     const kept = this.tabs.filter((t) => live.has(t));
@@ -208,6 +218,8 @@ class WorkbenchStore {
     this.flushAll();
     this.unlisten?.();
     this.unlisten = null;
+    if (this.listTimer) clearTimeout(this.listTimer);
+    this.listTimer = null;
   }
 
   private subscribe(): void {
@@ -255,33 +267,39 @@ class WorkbenchStore {
   async loadList(quiet = false): Promise<void> {
     const ws = this.ws;
     if (!ws) return;
+    const generation = this.generation;
+    const request = ++this.listRequest;
+    const current = () => this.ws === ws && this.generation === generation && this.listRequest === request;
     if (!quiet) this.loading = true;
     try {
       const docs = await listWorkbenchDocs(ws);
-      if (this.ws !== ws) return;
+      if (!current()) return;
       this.docs = docs;
       this.error = null;
       this.loaded = true;
     } catch (e) {
-      if (this.ws === ws) this.error = loadErrorText(e);
+      if (current()) this.error = loadErrorText(e);
     } finally {
-      if (this.ws === ws) this.loading = false;
+      if (current()) this.loading = false;
     }
   }
 
   async loadTrash(): Promise<void> {
     const ws = this.ws;
     if (!ws) return;
+    const generation = this.generation;
+    const request = ++this.trashRequest;
+    const current = () => this.ws === ws && this.generation === generation && this.trashRequest === request;
     this.trashLoading = true;
     try {
       const t = await listWorkbenchDocs(ws, { trash: true });
-      if (this.ws !== ws) return;
+      if (!current()) return;
       this.trash = t;
       this.trashError = null;
     } catch (e) {
-      if (this.ws === ws) this.trashError = loadErrorText(e);
+      if (current()) this.trashError = loadErrorText(e);
     } finally {
-      if (this.ws === ws) this.trashLoading = false;
+      if (current()) this.trashLoading = false;
     }
   }
 
@@ -362,10 +380,20 @@ class WorkbenchStore {
     if (!ws) return;
     const o = this.open[id];
     if (!o) return;
+    const generation = this.generation;
+    const request = (this.reads.get(id) ?? 0) + 1;
+    this.reads.set(id, request);
+    const buffer = o.buffer;
+    const current = () => this.ws === ws && this.generation === generation && this.open[id] === o && this.reads.get(id) === request;
     o.loading = true;
     try {
       const doc = await getWorkbenchDoc(ws, id);
-      if (this.ws !== ws || !this.open[id]) return;
+      if (!current()) return;
+      // A remote refresh must not replace keystrokes entered after it began.
+      if (o.buffer !== buffer) {
+        this.markRemoteChanged(id);
+        return;
+      }
       const cur = this.open[id];
       cur.doc = doc;
       cur.saved = doc.content;
@@ -385,10 +413,10 @@ class WorkbenchStore {
       this.upsertMeta(doc);
     } catch (e) {
       const cur = this.open[id];
-      if (cur) cur.loadError = loadErrorText(e);
+      if (current() && cur) cur.loadError = loadErrorText(e);
     } finally {
       const cur = this.open[id];
-      if (cur) cur.loading = false;
+      if (current() && cur) cur.loading = false;
     }
   }
 
@@ -486,6 +514,8 @@ class WorkbenchStore {
   async save(id: string, checkpoint: boolean): Promise<void> {
     const ws = this.ws;
     const o = this.open[id];
+    const generation = this.generation;
+    const current = () => this.ws === ws && this.generation === generation && this.open[id] === o;
     if (!ws || !o || !o.doc) return;
     const t = this.timers.get(id);
     if (t) {
@@ -514,19 +544,19 @@ class WorkbenchStore {
       // our buffer's base (even a coalesced autosave that kept `rev`).
       if (!force) body.if_hash = o.doc.content_hash;
       const meta = await updateWorkbenchDoc(ws, id, body);
-      this.forceNext.delete(id);
-      const cur = this.open[id];
+      if (current()) this.forceNext.delete(id);
+      const cur = current() ? this.open[id] : undefined;
       if (cur && cur.doc) {
         cur.saved = content;
         cur.doc = { ...cur.doc, ...meta, content };
         cur.saveError = null;
         if (cur.buffer === content) lsDel(K_UNSAVED(id));
-      } else {
+      } else if (!this.open[id]) {
         lsDel(K_UNSAVED(id));
       }
-      if (this.ws === ws) this.upsertMeta(meta);
+      if (current()) this.upsertMeta(meta);
     } catch (e) {
-      const cur = this.open[id];
+      const cur = current() ? this.open[id] : undefined;
       if (cur && isTrashConflict(e)) {
         // Not a lost race: the doc was trashed (here or in another window).
         // "Reload / Keep mine" can't resolve that — say what will (S18-307);
@@ -541,7 +571,7 @@ class WorkbenchStore {
       } else if (cur) cur.saveError = loadErrorText(e);
     } finally {
       this.inflight.delete(id);
-      const cur = this.open[id];
+      const cur = current() ? this.open[id] : undefined;
       if (cur) cur.saving = false;
       const again = this.rerun.get(id);
       if (again !== undefined) {
@@ -557,8 +587,10 @@ class WorkbenchStore {
 
   async patchMeta(id: string, body: Omit<WorkbenchUpdateReq, 'content' | 'checkpoint'>): Promise<void> {
     const ws = this.ws;
+    const generation = this.generation;
     if (!ws) return;
     const meta = await updateWorkbenchDoc(ws, id, { ...body, client_id: WB_CLIENT_ID });
+    if (this.ws !== ws || this.generation !== generation) return;
     this.upsertMeta(meta);
     const o = this.open[id];
     if (o?.doc) o.doc = { ...o.doc, ...meta, content: o.doc.content };
@@ -580,9 +612,11 @@ class WorkbenchStore {
 
   async create(body: { name?: string; language?: string; content?: string }): Promise<WorkbenchDocFull | null> {
     const ws = this.ws;
+    const generation = this.generation;
     if (!ws) return null;
     const name = body.name ?? nextUntitledName(this.docs.map((d) => d.name));
     const doc = await createWorkbenchDoc(ws, { name, language: body.language ?? 'auto', content: body.content ?? '' });
+    if (this.ws !== ws || this.generation !== generation) return doc;
     this.upsertMeta(doc);
     this.open[doc.id] = {
       id: doc.id,
@@ -602,8 +636,10 @@ class WorkbenchStore {
 
   async duplicate(id: string): Promise<WorkbenchDocFull | null> {
     const ws = this.ws;
+    const generation = this.generation;
     if (!ws) return null;
     const src = this.open[id]?.doc ? { ...this.open[id].doc!, content: this.open[id].buffer } : await getWorkbenchDoc(ws, id);
+    if (this.ws !== ws || this.generation !== generation) return null;
     const dot = src.name.lastIndexOf('.');
     const name = dot > 0 ? `${src.name.slice(0, dot)} copy${src.name.slice(dot)}` : `${src.name} copy`;
     const doc = await createWorkbenchDoc(ws, {
@@ -613,6 +649,7 @@ class WorkbenchStore {
       folder: src.folder,
       tags: src.tags,
     });
+    if (this.ws !== ws || this.generation !== generation) return doc;
     this.upsertMeta(doc);
     this.openDoc(doc.id);
     return doc;
@@ -620,10 +657,16 @@ class WorkbenchStore {
 
   async moveToTrash(id: string): Promise<void> {
     const ws = this.ws;
+    const generation = this.generation;
     if (!ws) return;
     // Persist the last keystrokes first: trash keeps the full history.
     if (this.isDirty(id)) await this.save(id, false);
+    if (this.ws !== ws || this.generation !== generation) return;
+    if (this.isDirty(id) || this.open[id]?.saving) {
+      throw new Error('Save your changes successfully before moving this doc to trash. Your text is kept here.');
+    }
     const meta = await trashWorkbenchDoc(ws, id);
+    if (this.ws !== ws || this.generation !== generation) return;
     this.closeTab(id, true);
     delete this.open[id];
     this.docs = this.docs.filter((d) => d.id !== id);
@@ -632,16 +675,20 @@ class WorkbenchStore {
 
   async restoreFromTrash(id: string): Promise<void> {
     const ws = this.ws;
+    const generation = this.generation;
     if (!ws) return;
     const meta = await restoreWorkbenchDoc(ws, id);
+    if (this.ws !== ws || this.generation !== generation) return;
     this.trash = this.trash.filter((d) => d.id !== id);
     this.upsertMeta(meta);
   }
 
   async purge(id: string): Promise<void> {
     const ws = this.ws;
+    const generation = this.generation;
     if (!ws) return;
     await purgeWorkbenchDoc(ws, id);
+    if (this.ws !== ws || this.generation !== generation) return;
     this.trash = this.trash.filter((d) => d.id !== id);
     lsDel(K_UNSAVED(id));
     lsDel(K_VALUES(id));

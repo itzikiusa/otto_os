@@ -206,12 +206,10 @@ async fn get_one<C: MemoryCtx>(
     Path(WsIdPath { ws, id }): Path<WsIdPath>,
 ) -> ApiResult<Json<Memory>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    let m = c.memory().get(&ws, &id).await?;
-    // Another user's private memory is invisible (404, not 403, to avoid leaking
-    // its existence).
-    if m.visibility == "private" && m.created_by != user.id && !user.is_root {
-        return Err(ApiErr(Error::NotFound("memory".into())));
-    }
+    let m = c
+        .memory()
+        .get_visible(&ws, &id, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     Ok(Json(m))
 }
 
@@ -222,6 +220,9 @@ async fn patch_one<C: MemoryCtx>(
     Json(p): Json<MemoryPatch>,
 ) -> ApiResult<Json<Memory>> {
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    c.memory()
+        .get_visible(&ws, &id, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     Ok(Json(c.memory().update(&ws, &id, p).await?))
 }
 
@@ -231,6 +232,9 @@ async fn delete_one<C: MemoryCtx>(
     Path(WsIdPath { ws, id }): Path<WsIdPath>,
 ) -> ApiResult<StatusCode> {
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    c.memory()
+        .get_visible(&ws, &id, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     c.memory().forget(&ws, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -276,7 +280,11 @@ async fn links<C: MemoryCtx>(
     Path(WsIdPath { ws, id }): Path<WsIdPath>,
 ) -> ApiResult<Json<Vec<MemoryLink>>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    Ok(Json(c.memory().links(&ws, &id).await?))
+    Ok(Json(
+        c.memory()
+            .links_visible(&ws, &id, (!user.is_root).then_some(user.id.as_str()))
+            .await?,
+    ))
 }
 
 async fn graph<C: MemoryCtx>(
@@ -287,8 +295,9 @@ async fn graph<C: MemoryCtx>(
 ) -> ApiResult<Json<GraphData>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
     let repo = c.memory().repo();
-    let nodes = repo
-        .graph_nodes(&ws, q.collection.as_deref())
+    let viewer = (!user.is_root).then_some(user.id.as_str());
+    let nodes: Vec<GraphNode> = repo
+        .graph_nodes_visible(&ws, q.collection.as_deref(), viewer)
         .await?
         .into_iter()
         .map(|(id, label, kind, collection)| GraphNode {
@@ -298,7 +307,13 @@ async fn graph<C: MemoryCtx>(
             collection,
         })
         .collect();
-    let edges = repo.all_links(&ws).await?;
+    let ids: std::collections::HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+    let edges = repo
+        .links_visible(&ws, None, viewer)
+        .await?
+        .into_iter()
+        .filter(|edge| ids.contains(edge.src_id.as_str()) && ids.contains(edge.dst_id.as_str()))
+        .collect();
     Ok(Json(GraphData { nodes, edges }))
 }
 
@@ -336,7 +351,10 @@ async fn entity_graph<C: MemoryCtx>(
     Path(WsIdPath { ws, id }): Path<WsIdPath>,
 ) -> ApiResult<Json<EntityGraphResp>> {
     require(&c, &user, &ws, WorkspaceRole::Viewer).await?;
-    let (links, neighbors) = c.memory().entity_graph(&ws, &id).await?;
+    let (links, neighbors) = c
+        .memory()
+        .entity_graph_visible(&ws, &id, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     Ok(Json(EntityGraphResp { links, neighbors }))
 }
 

@@ -18,6 +18,15 @@ test('real daemon room admission, control, chat and end preserve the running ses
   const host = await created.json() as RoomCredential;
   const guestContext = await browser.newContext({baseURL, storageState: {cookies: [], origins: []}});
   const guest = await guestContext.newPage();
+  // The terminal may render with WebGL. Read xterm's parsed screen through
+  // its existing opt-in probe rather than assuming DOM renderer internals.
+  for (const target of [page, guest]) await target.addInitScript(() => {
+    (window as unknown as {__ottoTermProbe: unknown[]}).__ottoTermProbe = [];
+  });
+  const terminalText = (target: Page) => target.evaluate(() =>
+    (window as unknown as {__ottoTermProbe: {disposed: boolean; text(): string}[]})
+      .__ottoTermProbe.filter(probe => !probe.disposed).map(probe => probe.text()).join('\n'));
+
   const guestRequests: string[] = [];
   const terminalFrames: {type: string; code?: string; epoch?: number}[] = [];
   const hostActions: unknown[] = [], browserErrors: string[] = [];
@@ -76,7 +85,7 @@ test('real daemon room admission, control, chat and end preserve the running ses
     await expect(guest.getByText('Waiting for the host')).toBeVisible();
     await page.getByRole('button', {name: 'Admit view only'}).click();
     await expect(guest.getByText('Live host controls the terminal', {exact: false})).toBeVisible();
-    await expect(guest.locator('.xterm-rows')).toContainText('the real claude CLI is disabled in tests');
+    await expect.poll(() => terminalText(guest)).toContain('the real claude CLI is disabled in tests');
     await expect.poll(() => terminalFrames.some(frame => frame.type === 'scrollback')).toBeTruthy();
     const processEpoch = terminalFrames.find(frame => frame.type === 'scrollback')!.epoch;
     await forgedInput(guestRoom!.grant_epoch!);
@@ -85,7 +94,7 @@ test('real daemon room admission, control, chat and end preserve the running ses
     await guest.getByLabel('Message everyone').fill('REAL_ROOM_CHAT');
     await guest.getByRole('button', {name: 'Send', exact: true}).click();
     await expect(page.getByText('REAL_ROOM_CHAT', {exact: true})).toBeVisible();
-    await expect(page.locator('.xterm-rows')).not.toContainText('REAL_ROOM_CHAT');
+    expect(await terminalText(page)).not.toContain('REAL_ROOM_CHAT');
     await page.getByRole('combobox', {name: 'Access', exact: true}).selectOption('editor');
     await expect.poll(() => guestRoom?.members?.find(member => member.id === guestRoom?.member_id)?.role, {message: 'Host role selection reaches the guest snapshot'}).toBe('editor');
     await guest.getByRole('button', {name: 'Request control', exact: true}).click();
@@ -94,13 +103,13 @@ test('real daemon room admission, control, chat and end preserve the running ses
     await expect(guest.getByRole('button', {name: 'Release control'})).toBeVisible();
     const grantedEpoch = guestRoom!.grant_epoch!;
     await typeTerminal(guest, 'REAL_ROOM_INPUT');
-    await expect(page.locator('.xterm-rows')).toContainText('REAL_ROOM_INPUT');
+    await expect.poll(() => terminalText(page)).toContain('REAL_ROOM_INPUT');
     await page.getByRole('button', {name: 'Take back control'}).click();
     await expect(guest.getByRole('button', {name: 'Request control', exact: true})).toBeVisible();
     const errors = terminalFrames.filter(frame => frame.type === 'error').length;
     await forgedInput(grantedEpoch);
     await expect.poll(() => terminalFrames.filter(frame => frame.type === 'error').length).toBeGreaterThan(errors);
-    await expect(page.locator('.xterm-rows')).not.toContainText('FORBIDDEN_ROOM_INPUT');
+    expect(await terminalText(page)).not.toContain('FORBIDDEN_ROOM_INPUT');
     await page.getByRole('button', {name: 'End room…'}).click();
     await page.getByRole('button', {name: 'End room', exact: true}).click();
     await expect(guest.getByRole('heading', {name: 'Room closed'})).toBeVisible();

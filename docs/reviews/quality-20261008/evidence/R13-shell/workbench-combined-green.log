@@ -1,0 +1,94 @@
+TAP version 13
+# Subtest: format completion cannot replace the newly selected file or later keystrokes
+ok 1 - format completion cannot replace the newly selected file or later keystrokes
+  ---
+  duration_ms: 59.929875
+  type: 'test'
+  ...
+# Subtest: reload confirmation cannot discard a newly selected file
+ok 2 - reload confirmation cannot discard a newly selected file
+  ---
+  duration_ms: 10.827958
+  type: 'test'
+  ...
+# Subtest: image upload cannot insert an old workspace asset into a different workspace
+ok 3 - image upload cannot insert an old workspace asset into a different workspace
+  ---
+  duration_ms: 10.923375
+  type: 'test'
+  ...
+# Subtest: unchanged editor still receives its format result
+ok 4 - unchanged editor still receives its format result
+  ---
+  duration_ms: 9.935917
+  type: 'test'
+  ...
+# Subtest: create finishing after workspace switch cannot add an old doc to the new workspace
+ok 5 - create finishing after workspace switch cannot add an old doc to the new workspace
+  ---
+  duration_ms: 80.562375
+  type: 'test'
+  ...
+# Subtest: metadata and restore completions remain with their originating workspace
+ok 6 - metadata and restore completions remain with their originating workspace
+  ---
+  duration_ms: 52.453416
+  type: 'test'
+  ...
+# Subtest: remote reload cannot overwrite edits made while its response is pending
+ok 7 - remote reload cannot overwrite edits made while its response is pending
+  ---
+  duration_ms: 18.665042
+  type: 'test'
+  ...
+# Subtest: failed initial list preserves persisted tabs for Retry
+ok 8 - failed initial list preserves persisted tabs for Retry
+  ---
+  duration_ms: 15.514791
+  type: 'test'
+  ...
+# Subtest: trash does not discard a dirty buffer after its save failed
+ok 9 - trash does not discard a dirty buffer after its save failed
+  ---
+  duration_ms: 18.280458
+  type: 'test'
+  ...
+# Subtest: ordinary reload and same-workspace create still publish
+ok 10 - ordinary reload and same-workspace create still publish
+  ---
+  duration_ms: 15.577041
+  type: 'test'
+  ...
+# Subtest: a remote change while dirty cancels the pending autosave and holds later ones
+ok 11 - a remote change while dirty cancels the pending autosave and holds later ones
+  ---
+  duration_ms: 985.287959
+  type: 'test'
+  ...
+# Subtest: content saves carry if_hash; a 409 raises the banner instead of an error
+ok 12 - content saves carry if_hash; a 409 raises the banner instead of an error
+  ---
+  duration_ms: 52.993416
+  type: 'test'
+  ...
+# Subtest: an event with our own hash (or an older rev) is ignored
+ok 13 - an event with our own hash (or an older rev) is ignored
+  ---
+  duration_ms: 31.522333
+  type: 'test'
+  ...
+# Subtest: a save to a trashed doc says so instead of the "changed elsewhere" banner (S18-307)
+ok 14 - a save to a trashed doc says so instead of the "changed elsewhere" banner (S18-307)
+  ---
+  duration_ms: 16.538084
+  type: 'test'
+  ...
+1..14
+# tests 14
+# suites 0
+# pass 14
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2113.556542

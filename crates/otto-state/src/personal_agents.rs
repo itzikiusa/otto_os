@@ -1162,16 +1162,20 @@ impl PersonalAgentsRepo {
         rows.iter().map(row_to_run).collect()
     }
 
-    /// The report hash of the most recent successful run for an agent (excluding
-    /// a given run id) — backs notify-on-change change detection.
+    /// Notification baseline from the latest successful non-proactive run.
+    /// A failed/absent delivery invalidates the baseline instead of falling back
+    /// to an older report. Unchanged skips carry it forward across history pruning;
+    /// proactive feed-only runs never establish an outward-delivery baseline.
     pub async fn last_ok_report_hash(
         &self,
         agent_id: &str,
         exclude_run: &str,
     ) -> Result<Option<String>> {
         let row = sqlx::query(
-            "SELECT report_hash FROM personal_agent_runs WHERE agent_id = ? AND status = 'ok' \
-             AND id != ? AND report_hash IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+            "SELECT CASE WHEN delivery_error IS NULL AND (delivered = 1 OR skipped_delivery = 1) \
+             THEN report_hash ELSE NULL END AS report_hash FROM personal_agent_runs \
+             WHERE agent_id = ? AND status = 'ok' AND mode != 'proactive' \
+             AND id != ? ORDER BY started_at DESC, id DESC LIMIT 1",
         )
         .bind(agent_id)
         .bind(exclude_run)
@@ -1989,6 +1993,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notification_baseline_requires_successful_delivery() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let a = repo.create(new_agent("ws1", "Recap")).await.unwrap();
+        for (i, delivered, error, skipped, mode) in [
+            (0, false, Some("offline"), false, "directed"),
+            (1, false, None, true, "proactive"),
+            (2, false, None, false, "directed"),
+            (3, true, None, false, "directed"),
+            (4, false, Some("offline"), false, "directed"),
+            (5, false, None, true, "proactive"),
+            (6, true, None, false, "directed"),
+            (7, false, None, true, "directed"),
+        ] {
+            let r = repo
+                .create_run(NewAgentRun {
+                    agent_id: a.id.clone(),
+                    schedule_id: None,
+                    workspace_id: "ws1".into(),
+                    trigger: "manual".into(),
+                })
+                .await
+                .unwrap();
+            repo.finish_run(
+                &r.id,
+                FinishAgentRun {
+                    status: "ok".into(),
+                    delivered,
+                    delivery_error: error.map(str::to_string),
+                    skipped_delivery: skipped,
+                    report_hash: Some(format!("h{i}")),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE personal_agent_runs SET started_at = ?, mode = ? WHERE id = ?")
+                .bind(format!("2026-10-08T00:00:0{i}Z"))
+                .bind(mode)
+                .bind(&r.id)
+                .execute(&p)
+                .await
+                .unwrap();
+            let hash = repo.last_ok_report_hash(&a.id, "next").await.unwrap();
+            let expected = match i {
+                3 => Some("h3"),
+                6 => Some("h6"),
+                7 => Some("h7"),
+                _ => None,
+            };
+            assert_eq!(
+                hash.as_deref(),
+                expected,
+                "run {i} cannot stand in for delivered content"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn runs_finish_prune_reap() {
         let p = pool().await;
         seed_ws(&p, "ws1").await;
@@ -2012,6 +2076,7 @@ mod tests {
                     summary: format!("run {i}"),
                     report_path: Some(format!("/x/{i}.md")),
                     report_hash: Some(format!("h{i}")),
+                    delivered: true,
                     attempts: 1,
                     ..Default::default()
                 },

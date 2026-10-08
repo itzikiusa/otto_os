@@ -187,18 +187,22 @@
 
   async function deleteMessage(m: SqsMessage): Promise<void> {
     if (!selected) return;
+    const queue = selected;
+    const accountId = account.id;
+    const region = rq;
     const ok = await confirmProd({
       env: account.environment,
       verb: 'Delete message',
-      where: queueWhere(selected.name),
+      where: queueWhere(queue.name),
       what: `Message ${m.message_id} — this cannot be undone.`,
     });
     if (!ok) return;
     try {
-      await awsApi.sqsDeleteMessage(account.id, selected.url, m.receipt_handle, rq || undefined);
-      messages = messages.filter((x) => x.message_id !== m.message_id);
+      await awsApi.sqsDeleteMessage(accountId, queue.url, m.receipt_handle, region || undefined);
+      if (selected?.url === queue.url && account.id === accountId && rq === region)
+        messages = messages.filter((x) => x.message_id !== m.message_id);
       toasts.success('Message deleted');
-      void aws.loadSqsAttrs(account.id, selected.url, rq);
+      void aws.loadSqsAttrs(accountId, queue.url, region);
     } catch (e) {
       toastError('Couldn’t delete', e);
     }

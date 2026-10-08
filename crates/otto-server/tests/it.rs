@@ -26,6 +26,8 @@ mod auth_security;
 mod canvas_refs_api;
 #[path = "email_sender_storage.rs"]
 mod email_sender_storage;
+#[path = "foundation_integrity.rs"]
+mod foundation_integrity;
 #[path = "git_spawn_guard.rs"]
 mod git_spawn_guard;
 #[path = "grants_api.rs"]

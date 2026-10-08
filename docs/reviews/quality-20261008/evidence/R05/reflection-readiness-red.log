@@ -1,0 +1,22 @@
+   Compiling otto-apiclient v0.2.0 (/Users/itziklavon/otto_os/crates/otto-apiclient)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.28s
+     Running unittests src/lib.rs (target/debug/deps/otto_apiclient-d7c3d297ff2c8046)
+
+running 1 test
+test grpc::tests::reflection_reserves_readiness_for_descriptor_rpc ... FAILED
+
+failures:
+
+---- grpc::tests::reflection_reserves_readiness_for_descriptor_rpc stdout ----
+
+thread 'grpc::tests::reflection_reserves_readiness_for_descriptor_rpc' (2946090) panicked at /Users/itziklavon/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tower-0.5.3/src/buffer/service.rs:122:23:
+`send_item` called without first calling `poll_reserve`
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    grpc::tests::reflection_reserves_readiness_for_descriptor_rpc
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p otto-apiclient --lib`

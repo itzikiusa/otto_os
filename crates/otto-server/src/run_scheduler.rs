@@ -19,7 +19,6 @@ const TICK: Duration = Duration::from_secs(30);
 
 pub fn spawn(ctx: ServerCtx) {
     tokio::spawn(async move {
-        reap(&ctx).await;
         loop {
             redrive_resumable(&ctx).await;
             tokio::time::sleep(TICK).await;
@@ -27,38 +26,40 @@ pub fn spawn(ctx: ServerCtx) {
     });
 }
 
-/// Fail interrupted runs; re-drive resumable ones once on boot.
-async fn reap(ctx: &ServerCtx) {
-    if let Ok(interrupted) = ctx.runs.list_interrupted().await {
-        for run in interrupted {
-            let _ = ctx
-                .runs
-                .set_error(&run.id, "interrupted by daemon restart")
-                .await;
-            let _ = ctx
-                .runs
-                .add_event(NewRunEvent {
-                    run_id: run.id.clone(),
-                    workspace_id: run.workspace_id.clone(),
-                    kind: "stage_error".to_string(),
-                    status: Some(RunStatus::Failed.as_str().to_string()),
-                    message: "Interrupted by a daemon restart (live work was lost). \
-                              The branch's commits are preserved; relaunch to continue."
-                        .to_string(),
-                    detail: None,
-                })
-                .await;
-            let _ = ctx.events.send(Event::OttoRunUpdated {
-                workspace_id: run.workspace_id.clone(),
+/// Settle the previous daemon life before any new work can be admitted.
+pub(crate) async fn recover_interrupted(ctx: &ServerCtx) -> otto_core::Result<()> {
+    let interrupted = ctx.runs.list_interrupted().await?;
+    for run in interrupted {
+        if !ctx
+            .runs
+            .set_error(&run.id, "interrupted by daemon restart")
+            .await?
+        {
+            continue;
+        }
+        let _ = ctx
+            .runs
+            .add_event(NewRunEvent {
                 run_id: run.id.clone(),
-                status: RunStatus::Failed.as_str().to_string(),
-            });
-            if let Ok(fresh) = ctx.runs.get(&run.id).await {
-                run_engine::project(ctx, &fresh).await;
-            }
+                workspace_id: run.workspace_id.clone(),
+                kind: "stage_error".to_string(),
+                status: Some(RunStatus::Failed.as_str().to_string()),
+                message: "Interrupted by a daemon restart (live work was lost). \
+                              The branch's commits are preserved; relaunch to continue."
+                    .to_string(),
+                detail: None,
+            })
+            .await;
+        let _ = ctx.events.send(Event::OttoRunUpdated {
+            workspace_id: run.workspace_id.clone(),
+            run_id: run.id.clone(),
+            status: RunStatus::Failed.as_str().to_string(),
+        });
+        if let Ok(fresh) = ctx.runs.get(&run.id).await {
+            run_engine::project(ctx, &fresh).await;
         }
     }
-    redrive_resumable(ctx).await;
+    Ok(())
 }
 
 async fn redrive_resumable(ctx: &ServerCtx) {

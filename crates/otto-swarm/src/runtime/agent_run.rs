@@ -87,17 +87,21 @@ fn key(swarm_id: &str, kind: &str) -> String {
 }
 
 /// Begin a cancellable `kind` (`plan`/`recruit`) turn for `swarm_id`
-/// (replaces any prior handle of the same kind).
-pub fn begin(swarm_id: &str, kind: &str) -> CancelState {
+/// without replacing the Stop handle of an already admitted turn.
+pub fn begin(swarm_id: &str, kind: &str) -> otto_core::Result<CancelState> {
+    let mut registry = registry().lock().unwrap();
+    let key = key(swarm_id, kind);
+    if registry.contains_key(&key) {
+        return Err(otto_core::Error::Conflict(format!(
+            "{kind} is already running for this swarm"
+        )));
+    }
     let cs = CancelState {
         flag: Arc::new(AtomicBool::new(false)),
         sessions: Arc::new(Mutex::new(Vec::new())),
     };
-    registry()
-        .lock()
-        .unwrap()
-        .insert(key(swarm_id, kind), cs.clone());
-    cs
+    registry.insert(key, cs.clone());
+    Ok(cs)
 }
 
 /// Drop the cancel handle once the plan/recruit finishes.
@@ -476,12 +480,29 @@ async fn set_run(
 mod registry_tests {
     use super::*;
 
+    #[test]
+    fn second_planner_cannot_replace_the_live_cancel_handle() {
+        let first = begin("r09-same-kind", "plan").unwrap();
+        assert!(begin("r09-same-kind", "plan").is_err());
+        registry()
+            .lock()
+            .unwrap()
+            .get(&key("r09-same-kind", "plan"))
+            .unwrap()
+            .signal();
+        assert!(
+            first.cancelled(),
+            "Stop must still reach the admitted planner"
+        );
+        end("r09-same-kind", "plan");
+    }
+
     /// S17-307: a plan and a recruit of the same swarm have separate handles
     /// — stopping one leaves the other running.
     #[test]
     fn plan_and_recruit_handles_are_independent() {
-        let plan = begin("sw-reg-test", "plan");
-        let recruit = begin("sw-reg-test", "recruit");
+        let plan = begin("sw-reg-test", "plan").unwrap();
+        let recruit = begin("sw-reg-test", "recruit").unwrap();
         {
             let reg = registry().lock().unwrap();
             reg.get(&key("sw-reg-test", "plan")).unwrap().signal();

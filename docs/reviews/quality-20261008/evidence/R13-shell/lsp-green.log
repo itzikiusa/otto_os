@@ -1,0 +1,8 @@
+
+running 4 tests
+test lsp::framing::tests::rejects_duplicate_length_and_truncated_headers ... ok
+test lsp::framing::tests::rejects_oversized_body_before_reading_or_allocating_it ... ok
+test lsp::framing::tests::accepts_fragmented_frames_empty_body_and_clean_eof ... ok
+test lsp::framing::tests::bounds_header_line_and_total_headers ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 957 filtered out; finished in 0.00s

@@ -28,6 +28,10 @@ pub(crate) const DEBOUNCE_MS: u64 = 300;
 pub(crate) const STALE_AFTER_WATCHED_SECS: i64 = 600;
 /// More touched paths than this in one burst → just scan (bulk change).
 const MAX_CHECKED_PATHS: usize = 256;
+/// A sustained stream must still make progress; neither queued events nor a
+/// single event may retain an unbounded list of paths.
+const MAX_BURST_MS: u64 = 1000;
+const MAX_QUEUED_EVENTS: usize = 16;
 
 /// One running watcher. Dropping it stops the FSEvents stream; the debounce
 /// task then sees its channel close and exits.
@@ -36,10 +40,20 @@ pub(crate) struct VaultWatch {
     pub(crate) healthy: Arc<AtomicBool>,
 }
 
+#[derive(Debug)]
 enum Touch {
     Paths(Vec<PathBuf>),
     /// Rescan needed regardless of paths (overflow / rescan flag / error).
     Rescan,
+}
+
+/// Record dropped paths after a full queue.
+fn request_rescan(tx: &tokio::sync::mpsc::Sender<Touch>, overflow: &AtomicBool) {
+    overflow.store(true, Ordering::Release);
+    // The consumer may have drained the queue before the flag was published.
+    // Sending again either wakes it or proves queued work exists AFTER the
+    // publication; a closed receiver no longer needs a rescan.
+    let _ = tx.try_send(Touch::Rescan);
 }
 
 /// The vault-relative form of `abs`, or `None` when the scanner never
@@ -95,20 +109,29 @@ impl VaultEngine {
     fn start_watch(self: &Arc<Self>, id: i64, root: PathBuf) -> bool {
         // FSEvents reports canonical paths (/private/var/… for /var/…).
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Touch>();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Touch>(MAX_QUEUED_EVENTS);
+        let overflow = Arc::new(AtomicBool::new(false));
+        let cb_overflow = overflow.clone();
         let healthy = Arc::new(AtomicBool::new(true));
         let cb_healthy = healthy.clone();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let touch = match res {
                 Ok(ev) if matches!(ev.kind, notify::EventKind::Access(_)) => return,
-                Ok(ev) if ev.need_rescan() => Touch::Rescan,
+                Ok(ev) if ev.need_rescan() || ev.paths.len() > MAX_CHECKED_PATHS => Touch::Rescan,
                 Ok(ev) => Touch::Paths(ev.paths),
                 Err(_) => {
                     cb_healthy.store(false, Ordering::Relaxed);
                     Touch::Rescan
                 }
             };
-            let _ = tx.send(touch);
+            if matches!(
+                tx.try_send(touch),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+            ) {
+                // Preserve dropped paths and ensure the consumer observes the
+                // overflow even if it drained the queue concurrently.
+                request_rescan(&tx, &cb_overflow);
+            }
         });
         let Ok(mut watcher) = watcher else {
             return false;
@@ -123,7 +146,13 @@ impl VaultEngine {
                 healthy: healthy.clone(),
             },
         );
-        tokio::spawn(Self::watch_loop(Arc::downgrade(self), id, root, rx));
+        tokio::spawn(Self::watch_loop(
+            Arc::downgrade(self),
+            id,
+            root,
+            rx,
+            overflow,
+        ));
         true
     }
 
@@ -131,32 +160,52 @@ impl VaultEngine {
         eng: Weak<Self>,
         id: i64,
         root: PathBuf,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<Touch>,
+        mut rx: tokio::sync::mpsc::Receiver<Touch>,
+        overflow: Arc<AtomicBool>,
     ) {
         while let Some(first) = rx.recv().await {
             let mut rescan = false;
             let mut paths: HashSet<String> = HashSet::new();
-            let mut absorb = |t: Touch, rescan: &mut bool| match t {
-                Touch::Rescan => *rescan = true,
-                Touch::Paths(ps) => {
-                    for p in ps {
-                        if let Some(rel) = indexable_rel(&root, &p) {
-                            paths.insert(rel);
+            let mut absorb = |t: Touch, rescan: &mut bool| {
+                if *rescan {
+                    return;
+                }
+                match t {
+                    Touch::Rescan => {
+                        *rescan = true;
+                        paths.clear();
+                    }
+                    Touch::Paths(ps) => {
+                        for p in ps {
+                            if let Some(rel) = indexable_rel(&root, &p) {
+                                paths.insert(rel);
+                                if paths.len() > MAX_CHECKED_PATHS {
+                                    *rescan = true;
+                                    paths.clear();
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
             };
             absorb(first, &mut rescan);
-            // Debounce: keep absorbing until the stream is quiet.
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(MAX_BURST_MS);
+            // Bound a burst even when recv is perpetually ready. A timeout
+            // alone may keep accepting immediately-ready messages forever.
             loop {
-                match tokio::time::timeout(std::time::Duration::from_millis(DEBOUNCE_MS), rx.recv())
-                    .await
-                {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let quiet = now + std::time::Duration::from_millis(DEBOUNCE_MS);
+                match tokio::time::timeout_at(deadline.min(quiet), rx.recv()).await {
                     Ok(Some(t)) => absorb(t, &mut rescan),
-                    Ok(None) => return,
-                    Err(_) => break,
+                    Ok(None) | Err(_) => break,
                 }
             }
+            rescan |= overflow.swap(false, Ordering::AcqRel);
             let Some(e) = eng.upgrade() else { return };
             if !rescan && paths.is_empty() {
                 continue;
@@ -256,6 +305,66 @@ impl VaultEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn continuous_events_do_not_starve_index_refresh() {
+        let engine = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+        let dir = tempfile::tempdir().unwrap();
+        let id = engine
+            .store()
+            .create_vault("ws", "Burst", dir.path().to_str().unwrap(), false)
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("a.md"), "# Before").unwrap();
+        engine.scan(id).await.unwrap();
+        std::fs::write(dir.path().join("a.md"), "# After the external edit").unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(MAX_QUEUED_EVENTS);
+        let task = tokio::spawn(VaultEngine::watch_loop(
+            Arc::downgrade(&engine),
+            id,
+            dir.path().to_path_buf(),
+            rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let path = dir.path().join("a.md");
+        let producer = tokio::spawn(async move {
+            for _ in 0..100 {
+                if tx.send(Touch::Paths(vec![path.clone()])).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let kicks = engine.watch_kicks.load(Ordering::Relaxed);
+        producer.abort();
+        task.abort();
+        assert!(
+            kicks > 0,
+            "continuous events must publish a bounded burst before waiting for silence"
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_published_after_queue_drain_still_wakes_consumer() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let overflow = AtomicBool::new(false);
+        tx.try_send(Touch::Paths(vec![])).unwrap();
+        assert!(matches!(
+            tx.try_send(Touch::Rescan),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        // Callback is descheduled immediately after Full. The consumer drains
+        // and completes its batch before the callback publishes overflow.
+        rx.try_recv().unwrap();
+        assert!(!overflow.swap(false, Ordering::AcqRel));
+        request_rescan(&tx, &overflow);
+        assert!(overflow.load(Ordering::Acquire));
+        assert!(
+            matches!(rx.try_recv(), Ok(Touch::Rescan)),
+            "late overflow must schedule a new batch even when no more filesystem events arrive"
+        );
+    }
 
     #[test]
     fn hidden_and_outside_paths_are_not_indexable() {

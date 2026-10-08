@@ -521,3 +521,21 @@ test('moving focus away from stage releases every held movement key', async ({ p
 });
 
 });
+
+test('hidden document suspends the School render loop and resumes without losing its room', async ({ page }) => {
+  await boot(page);
+  await enterOurRoom(page);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  const before = (await debug(page))!;
+  await page.waitForTimeout(350); // ui-guards: allow — prove no hidden frames occur over several frame intervals.
+  expect((await debug(page))!.frames, 'hidden native webviews must do no School rendering').toBe(before.frames);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(() => debug(page).then(d => d?.frames ?? 0)).toBeGreaterThan(before.frames);
+  expect((await debug(page))!.view).toEqual(before.view);
+});

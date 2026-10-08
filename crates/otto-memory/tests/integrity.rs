@@ -496,3 +496,26 @@ async fn undo_token_is_not_serialized_and_undo_is_pinned_to_its_memory() {
             .active
     );
 }
+
+#[tokio::test]
+async fn search_bounds_untrusted_result_counts_before_arithmetic_and_fetch() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let items = (0..205)
+        .map(|i| nm(&format!("Memory {i}"), &format!("bounded result {i}")))
+        .collect();
+    svc.save(&ws, &user, items).await.unwrap();
+    for (k, expected) in [(0, 20), (3, 3), (200, 200), (201, 200), (usize::MAX, 200)] {
+        let hits = svc
+            .search(
+                &ws,
+                MemoryQuery {
+                    k,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), expected, "requested k={k}");
+    }
+}

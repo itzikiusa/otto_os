@@ -20,6 +20,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import TabStrip from './TabStrip.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
   import AgentDock from './AgentDock.svelte';
@@ -784,7 +785,10 @@
   {/if}
 
   <div class="body">
-    {#if activeLive}
+    {#if browser.tabsError || (browser.loadingTabs && !browser.tabs.length)}
+      <LoadState what="browser tabs" variant="page" loading={browser.loadingTabs} error={browser.tabsError} empty
+        onretry={() => ws.currentId && void browser.loadTabs(ws.currentId)} />
+    {:else if activeLive}
       <!-- The native child webview paints ABOVE this div's rect — the div
            itself just holds the geometry the ResizeObserver above tracks. -->
       <div class="live-host" bind:this={liveHostEl}></div>

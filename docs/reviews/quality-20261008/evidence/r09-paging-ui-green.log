@@ -1,0 +1,64 @@
+TAP version 13
+# Subtest: thread paging retains rows on failure, retries the same offset and deduplicates
+ok 1 - thread paging retains rows on failure, retries the same offset and deduplicates
+  ---
+  duration_ms: 86.345166
+  type: 'test'
+  ...
+# Subtest: refresh invalidates an older page and selected older thread survives refresh
+ok 2 - refresh invalidates an older page and selected older thread survives refresh
+  ---
+  duration_ms: 31.869
+  type: 'test'
+  ...
+# Subtest: selected thread late failure cannot replace a newer selection
+ok 3 - selected thread late failure cannot replace a newer selection
+  ---
+  duration_ms: 23.341291
+  type: 'test'
+  ...
+# Subtest: template retry preserves the first created agent and schedule request key
+ok 4 - template retry preserves the first created agent and schedule request key
+  ---
+  duration_ms: 42.349709
+  type: 'test'
+  ...
+# Subtest: Athena history keeps its response region and rejects a late foreign history
+ok 5 - Athena history keeps its response region and rejects a late foreign history
+  ---
+  duration_ms: 15.839417
+  type: 'test'
+  ...
+# Subtest: 100 visited Assistant threads retain only acquired data and reconnect refreshes one view
+ok 6 - 100 visited Assistant threads retain only acquired data and reconnect refreshes one view
+  ---
+  duration_ms: 48.039542
+  type: 'test'
+  ...
+# Subtest: late Assistant fetch and live events cannot revive released history or remove pending sends
+ok 7 - late Assistant fetch and live events cannot revive released history or remove pending sends
+  ---
+  duration_ms: 573.094917
+  type: 'test'
+  ...
+# Subtest: AgentDocuments navigation keeps dirty drafts and blocks pending-save departure
+ok 8 - AgentDocuments navigation keeps dirty drafts and blocks pending-save departure
+  ---
+  duration_ms: 2.453583
+  type: 'test'
+  ...
+# Subtest: AgentAutonomy navigation keeps dirty drafts and blocks pending-save departure
+ok 9 - AgentAutonomy navigation keeps dirty drafts and blocks pending-save departure
+  ---
+  duration_ms: 2.172708
+  type: 'test'
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 932.537084

@@ -9,6 +9,7 @@ import { nativeBrowserAvailable } from '../nativeBrowser';
 import { browserLive } from './browserLive.svelte';
 import type { BrowserAnnotation, BrowserAskReq, BrowserPage, BrowserTab, OttoEvent } from '../api/types';
 import { announceModule } from '../lazyModule';
+import { loadErrorText } from '../loadError';
 
 /** localStorage key for the agent session the Browser page's dock is attached
  *  to — per workspace, so switching workspaces re-attaches to that
@@ -51,6 +52,7 @@ function isNativeLive(tab: BrowserTab): boolean {
 class BrowserStore {
   tabs: BrowserTab[] = $state([]);
   loadingTabs = $state(false);
+  tabsError = $state('');
   /** The open tab's id, or null when nothing is open. */
   activeId: string | null = $state(null);
   /** The active tab's fetched page (reader mode), or null while loading/empty. */
@@ -102,23 +104,28 @@ class BrowserStore {
       // A workspace switch must not keep showing the previous workspace's
       // open page / marks (or let its in-flight page load land).
       this.pageSeq++;
+      this.tabs = [];
       this.activeId = null;
       this.page = null;
       this.pageError = '';
       this.annotations = [];
       this.loadingPage = false;
-      this.summary = '';
+      this.clearSummary();
     }
     const generation = this.workspaceGeneration, sequence = ++this.tabsSequence;
     const current = () => generation === this.workspaceGeneration && sequence === this.tabsSequence;
     this.loadingTabs = true;
+    this.tabsError = '';
     try {
       const tabs = await browserApi.listTabs(workspaceId);
       if (!current()) return;
       this.tabs = tabs;
-      if (!this.activeId && this.tabs.length) this.activeId = this.tabs[0].id;
-    } catch {
-      if (current()) this.tabs = [];
+      if (!this.tabs.some((tab) => tab.id === this.activeId)) {
+        if (this.tabs.length) this.select(this.tabs[0].id);
+        else this.deselect();
+      }
+    } catch (e) {
+      if (current()) this.tabsError = loadErrorText(e);
     } finally {
       if (current()) this.loadingTabs = false;
     }
@@ -136,7 +143,7 @@ class BrowserStore {
       ? this.tabs.map((t) => (t.id === tab.id ? tab : t))
       : [...this.tabs, tab];
     this.activeId = tab.id;
-    this.summary = '';
+    this.clearSummary();
     await this.loadPage(url);
     return tab;
   }
@@ -148,12 +155,14 @@ class BrowserStore {
     this.activeId = null;
     this.page = null;
     this.annotations = [];
-    this.summary = '';
+    this.pageError = '';
+    this.loadingPage = false;
+    this.clearSummary();
   }
 
   select(id: string): void {
     // The summary panel belongs to the page it summarized.
-    if (id !== this.activeId) this.summary = '';
+    if (id !== this.activeId) this.clearSummary();
     this.activeId = id;
     this.annotations = [];
     const tab = this.activeTab;
@@ -178,6 +187,7 @@ class BrowserStore {
       this.pageSeq++;
       this.page = null;
       this.pageError = '';
+      this.loadingPage = false;
     }
   }
 
@@ -191,8 +201,10 @@ class BrowserStore {
     this.tabs = this.tabs.map((t) => (t.id === patched.id ? patched : t));
     if (id !== this.activeId) return;
     if (isNativeLive(patched)) {
+      this.pageSeq++;
       this.page = null;
       this.pageError = '';
+      this.loadingPage = false;
     } else {
       void this.loadPage(patched.url);
     }
@@ -209,8 +221,11 @@ class BrowserStore {
       ? this.tabs.map((t) => (t.id === patched.id ? patched : t))
       : [...this.tabs, patched];
     this.activeId = patched.id;
+    this.pageSeq++;
+    this.clearSummary();
     this.page = null;
     this.pageError = '';
+    this.loadingPage = false;
     return patched;
   }
 
@@ -229,6 +244,7 @@ class BrowserStore {
     const previous = { page: this.page, annotations: this.annotations, error: this.pageError };
     const workspace = this.workspaceGeneration;
     if (wasActive) {
+      this.clearSummary();
       // Invalidate before either await: the old reader can finish while the
       // close request (or its preceding PATCH) is still pending.
       this.pageSeq++;
@@ -276,6 +292,7 @@ class BrowserStore {
   /** Navigate the active tab to a new URL: fetches the page, then patches the
    *  tab (adopts the fetched title) so the tab strip + history stay in sync. */
   async navigate(url: string): Promise<void> {
+    this.clearSummary();
     const tab = this.activeTab;
     if (!tab) {
       await this.openTab(url);
@@ -380,16 +397,21 @@ class BrowserStore {
    *  failure (the caller reports it). A result for a page the user has since
    *  left is still returned but not shown. */
   async runSummarize(url: string): Promise<string> {
+    this.stopSummarize();
     this.summarizing = true;
     const ctl = new AbortController();
     this.summarizeCtl = ctl;
+    const workspace = this.workspaceGeneration, tab = this.activeId, page = this.pageSeq;
     try {
       const resp = await this.summarize(url, ctl.signal);
-      if (this.activeTab?.url === url) this.summary = resp.summary;
+      if (this.summarizeCtl === ctl && !ctl.signal.aborted && workspace === this.workspaceGeneration
+        && tab === this.activeId && page === this.pageSeq && this.activeTab?.url === url) this.summary = resp.summary;
       return resp.summary;
     } finally {
-      if (this.summarizeCtl === ctl) this.summarizeCtl = null;
-      this.summarizing = false;
+      if (this.summarizeCtl === ctl) {
+        this.summarizeCtl = null;
+        this.summarizing = false;
+      }
     }
   }
 
@@ -398,6 +420,13 @@ class BrowserStore {
    *  backing agent session when the request goes away mid-turn. */
   stopSummarize(): void {
     this.summarizeCtl?.abort();
+    this.summarizeCtl = null;
+    this.summarizing = false;
+  }
+
+  private clearSummary(): void {
+    this.stopSummarize();
+    this.summary = '';
   }
 
   /** Create a DOM annotation (a "mark") against the active page's URL. Pushes

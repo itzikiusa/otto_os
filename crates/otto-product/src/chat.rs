@@ -215,6 +215,10 @@ pub async fn send_message<C: ProductStudioHost>(
     Json(req): Json<SendMessageReq>,
 ) -> ApiResult<Json<ChatTurn>> {
     let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
+    let _turn = crate::studio_turn::claim("discovery", &chat.workspace_id, &cid)?;
+    // The earlier authorization read may predate a just-completed first turn.
+    // Reload under ownership so its newly persisted session is reused.
+    let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
 
     // Assemble the context bundle (also stored on the user message for audit).
     let context = assemble_context(&ctx, &chat.story_id).await;
@@ -271,7 +275,7 @@ pub async fn send_message<C: ProductStudioHost>(
         .await?;
     // Link the session on the first turn so later turns resume it.
     if chat.session_id.is_none() {
-        let _ = ctx.discovery_chat_repo().set_session(&cid, &sid).await;
+        ctx.discovery_chat_repo().set_session(&cid, &sid).await?;
     }
 
     let (markdown, actions_json) = split_actions(&raw);

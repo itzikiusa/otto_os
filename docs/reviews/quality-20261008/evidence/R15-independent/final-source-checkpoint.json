@@ -1,0 +1,17 @@
+{
+  "captured_utc": "2026-10-08T00:15:06.614134+00:00",
+  "base_head": "a0bd718b9fbc008d72c164ce643a24ed78e6368c",
+  "purpose": "Final independent source-review checkpoint; runtime logs predate some refinements. Not a test snapshot certification.",
+  "sha256": {
+    "crates/otto-git/src/push.rs": "141df1c1419dc5582755f3d87632440342a819d8556a45edc9fbde0952da6cbe",
+    "crates/otto-git/src/push_tests.rs": "01171d5c5881b08588a00457c21a3874ccc929dab165d03b2f68e5750b0d2a01",
+    "crates/otto-git/src/working_diff.rs": "7f30c71a8480805989ba92afb452e99ae1370f92d914a4bc878880a92933d464",
+    "crates/otto-server/src/run_service.rs": "eeddd102a12c101fec25265fb652dc82fe97277a0074a40a531b95012cca4348",
+    "crates/otto-server/tests/unit/run_pr_proof.rs": "b4b12f68e6f85007eccb685ce1c201f5c12d9e2ea8e6227588c2fbbac6ebe66f",
+    "crates/otto-server/src/skill_eval.rs": "05d4201f55c962046772dec92976fba2037b2b979e4b525d0943c21f33bf9d7a",
+    "crates/otto-server/src/eval_score.rs": "5542ff18de17084e686ea860c724c4950cb699b8a102d8b0e04ffcc0ee7e2bff",
+    "crates/otto-server/src/eval_lab_routes.rs": "7cb89174c78c501c51b426c8b2ddf8965c0afc49e9fce348f8459bedd5be1ee2",
+    "crates/otto-state/src/skill_evals.rs": "c5fbd8263b59ae5f13579972bb1c7b6011f4692ff7af3949218dfe9c1f69c74f",
+    "crates/otto-design/src/service.rs": "20090d2127ecd1693d5d678c13f57104884bfa052ebc3b909b5ba8909b1dfdb5"
+  }
+}

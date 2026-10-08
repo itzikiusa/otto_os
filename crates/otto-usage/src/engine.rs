@@ -176,7 +176,20 @@ pub struct UsageEngine {
 }
 
 /// `(days, otto_only)` → the last rollup that key produced (see `last_totals`).
-type TotalsMemo = HashMap<(u32, bool), Arc<Vec<SessionTotals>>>;
+type TotalsMemo = HashMap<(u32, bool), LastTotals>;
+struct LastTotals {
+    saved: std::time::Instant,
+    day: (chrono::NaiveDate, chrono::NaiveDate),
+    rows: Arc<Vec<SessionTotals>>,
+}
+const LAST_TOTAL_WINDOWS: usize = 16;
+fn totals_window_day() -> (chrono::NaiveDate, chrono::NaiveDate) {
+    let now = chrono::Utc::now();
+    (
+        now.with_timezone(&chrono::Local).date_naive(),
+        now.date_naive(),
+    )
+}
 
 /// How long a read waits for the writer to flush what it buffered before it
 /// queries anyway (S9-303). Bounded: a writer stuck in a slow insert must not
@@ -1007,10 +1020,24 @@ impl UsageEngine {
         rows: &Arc<Vec<SessionTotals>>,
     ) {
         *memo = Some((key, gen, std::time::Instant::now(), Arc::clone(rows)));
-        self.last_totals
-            .lock()
-            .expect("last totals lock")
-            .insert(key, Arc::clone(rows));
+        let mut last = self.last_totals.lock().expect("last totals lock");
+        last.insert(
+            key,
+            LastTotals {
+                saved: std::time::Instant::now(),
+                day: totals_window_day(),
+                rows: Arc::clone(rows),
+            },
+        );
+        if last.len() > LAST_TOTAL_WINDOWS {
+            if let Some(oldest) = last
+                .iter()
+                .min_by_key(|(_, value)| value.saved)
+                .map(|(key, _)| *key)
+            {
+                last.remove(&oldest);
+            }
+        }
     }
 
     /// [`Self::session_totals_shared`] for BACKGROUND callers — the budget
@@ -1033,7 +1060,8 @@ impl UsageEngine {
                 .lock()
                 .expect("last totals lock")
                 .get(&key)
-                .cloned()
+                .filter(|value| value.day == totals_window_day())
+                .map(|value| Arc::clone(&value.rows))
         };
         if ch.is_parked() {
             return last();
@@ -2622,6 +2650,71 @@ mod scope_tests {
         assert_eq!(json_u64(&serde_json::json!(7)), Some(7));
         assert_eq!(json_u64(&serde_json::json!("12")), Some(12));
         assert_eq!(json_u64(&serde_json::json!(null)), None);
+    }
+
+    #[tokio::test]
+    async fn last_known_rollups_do_not_retain_every_requested_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = UsageEngine::start(
+            UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            dir.path().to_path_buf(),
+        )
+        .await;
+        let rows = Arc::new(vec![SessionTotals {
+            session_id: "fixture".into(),
+            ..Default::default()
+        }]);
+        let mut memo = None;
+        for days in 1..=100 {
+            engine.remember_totals(&mut memo, (days, true), 1, &rows);
+        }
+        assert!(
+            engine.last_totals.lock().unwrap().len() <= 16,
+            "requested windows must not retain unbounded copies of session history"
+        );
+        assert!(engine
+            .last_totals
+            .lock()
+            .unwrap()
+            .contains_key(&(100, true)));
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn parked_rollups_expire_when_the_calendar_window_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = UsageEngine::start(
+            UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            dir.path().to_path_buf(),
+        )
+        .await;
+        engine.inner.write().unwrap().ch =
+            Some(Arc::new(ClickHouse::for_tests("http://127.0.0.1:9", true)));
+        let rows = Arc::new(vec![SessionTotals {
+            session_id: "fixture".into(),
+            ..Default::default()
+        }]);
+        engine.remember_totals(&mut None, (1, true), 1, &rows);
+        assert!(engine.session_totals_background(1, true).await.is_some());
+        engine
+            .last_totals
+            .lock()
+            .unwrap()
+            .get_mut(&(1, true))
+            .unwrap()
+            .day
+            .0 = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
+        assert!(
+            engine.session_totals_background(1, true).await.is_none(),
+            "yesterday's capped spend must not survive a rolling-window boundary"
+        );
+        engine.shutdown().await;
     }
 
     #[tokio::test]

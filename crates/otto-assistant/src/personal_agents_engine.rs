@@ -22,7 +22,7 @@
 //! * **Browser** — `agent.browser` flows into `meta.browser` so the session
 //!   manager reconciles the otto-browser MCP into the run's cwd.
 //!
-//! Concurrency contract: the scheduler claims a per-schedule in-flight guard
+//! Concurrency contract: the scheduler claims a per-agent in-flight guard
 //! *before* calling [`run_agent`]; a process-wide semaphore
 //! (`OTTO_PERSONAL_MAX_CONCURRENT`, default 2) bounds concurrent runs.
 //!
@@ -97,6 +97,23 @@ fn emit<C: AssistantCtx>(ctx: &C, agent: &PersonalAgent, run_id: &str, status: &
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested)
 // ---------------------------------------------------------------------------
+
+/// Delivery identity is part of notify-on-change: the same report has not
+/// reached a newly selected destination. Legacy unqualified hashes deliberately
+/// cause one fresh delivery because they cannot prove which target received it.
+fn destination_report_hash(destination: &serde_json::Value, content_hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let destination_hash = hex::encode(Sha256::digest(destination.to_string().as_bytes()));
+    format!("d1:{destination_hash}:{content_hash}")
+}
+
+fn content_hash_for_destination<'a>(
+    destination: &serde_json::Value,
+    stored: &'a str,
+) -> Option<&'a str> {
+    let prefix = destination_report_hash(destination, "");
+    stored.strip_prefix(&prefix)
+}
 
 /// Wrap a schedule's directive with the report contract + the persona/memory
 /// framing. The agent is told to read + update its `memory/notes.md` and to
@@ -809,13 +826,16 @@ async fn complete_agent_run<C: AssistantCtx>(
 
             // Notify only on meaningful change (always on for personal agents —
             // the report also always lands on the agent page regardless).
-            let hash = C::report_hash(&out.report);
+            let hash = destination_report_hash(&agent.delivery, &C::report_hash(&out.report));
             let unchanged = repo
                 .last_ok_report_hash(&agent.id, &run_id)
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|prev| C::report_hash_matches(&prev, &out.report));
+                .is_some_and(|prev| {
+                    content_hash_for_destination(&agent.delivery, &prev)
+                        .is_some_and(|hash| C::report_hash_matches(hash, &out.report))
+                });
             // Proactive findings go to the agent's feed only — never outward.
             let (delivered, derr, skipped) = if unchanged || plan.mode == "proactive" {
                 (false, None, true)
@@ -1066,6 +1086,20 @@ async fn prune<C: AssistantCtx>(ctx: &C, agent_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_hash_is_bound_to_destination() {
+        let a = serde_json::json!({"type":"slack", "channel":"team-a"});
+        let b = serde_json::json!({"type":"slack", "channel":"team-b"});
+        let stamped = destination_report_hash(&a, "s1:content");
+        assert_eq!(
+            content_hash_for_destination(&a, &stamped),
+            Some("s1:content")
+        );
+        assert_eq!(content_hash_for_destination(&b, &stamped), None);
+        assert_eq!(content_hash_for_destination(&a, "s1:legacy"), None);
+        assert!(!stamped.contains("team-a"));
+    }
 
     #[test]
     fn user_context_is_snapshotted_in_the_shared_prompt_for_every_provider() {

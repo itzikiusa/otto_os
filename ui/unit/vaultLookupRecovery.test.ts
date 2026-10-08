@@ -81,3 +81,67 @@ test('Down during pending empty lookup does not prevent deliberate creation afte
   assert.equal(opened.length, 0);
   assert.deepEqual(created, ['Existing note.md']);
 });
+
+test('refine does not dispatch after the before-snapshot outlives its workspace', async () => {
+  const snapshot = deferred<unknown>();
+  let sends = 0, polls = 0;
+  const vault = {wsId: 'A', current: {id: 1}, notePath: 'a.md', dirty: false, editing: false, open() {}};
+  const state = componentFunctions(new URL('../src/modules/vault/RefineDrawer.svelte', import.meta.url), ['send'], {
+    vault, path: 'a.md', prompt: 'Refine this note', provider: 'claude', sending: false, queued: false,
+    result: null, epoch: 0, sessionId: null, vaultNote: () => snapshot.promise,
+    refineNote: async () => {sends++; return {session_id: 'session-A', reply: 'done'};},
+    startSessionPoll() { polls++; }, stopPolling() {}, toasts: {success() {}}, toastError() {},
+  });
+  const running = state.send();
+  vault.wsId = 'B';
+  snapshot.resolve({raw: 'original'});
+  await running;
+  assert.equal(sends, 0, 'a departed workspace must not launch an agent');
+  assert.equal(polls, 0);
+});
+
+test('refine result cannot adopt a previous workspace session', async () => {
+  const response = deferred<unknown>();
+  const started = deferred<void>();
+  const vault = {wsId: 'A', current: {id: 1}, notePath: 'a.md', dirty: false, editing: false, open() {}};
+  const state = componentFunctions(new URL('../src/modules/vault/RefineDrawer.svelte', import.meta.url), ['send'], {
+    vault, path: 'a.md', prompt: 'Refine this note', provider: 'claude', sending: false, queued: false,
+    result: null, epoch: 0, sessionId: null, vaultNote: async () => ({raw: 'original'}),
+    refineNote: () => {started.resolve(); return response.promise;},
+    startSessionPoll() {}, stopPolling() {}, toasts: {success() {}}, toastError() {},
+  });
+  const running = state.send();
+  await started.promise;
+  vault.wsId = 'B';
+  response.resolve({session_id: 'session-A', reply: 'done'});
+  await running;
+  assert.equal(state.sessionId, null);
+});
+
+test('docs start response cannot select the old run in a newly selected vault', async () => {
+  const pending = deferred<unknown>();
+  const vault = {wsId: 'A', current: {id: 1}, lookupGeneration: 1, docsRun: null, refreshDocsRuns() {}};
+  const state = componentFunctions(new URL('../src/modules/vault/DocsAgentsView.svelte', import.meta.url), ['start'], {
+    vault, prompt: 'Document', targetDir: '', agents: [{provider: 'claude', model: ''}], starting: false,
+    tplSkills: [], reviewEnabled: false, openTerminals: new Set(), runDocsAgents: () => pending.promise,
+    startPoll() {}, toastError() {},
+  });
+  const running = state.start();
+  vault.current = {id: 2}; vault.lookupGeneration++;
+  pending.resolve({id: 'old-run', vault_id: 1});
+  await running;
+  assert.equal(vault.docsRun, null);
+});
+
+test('resolving one docs run cannot replace a newly selected run', async () => {
+  const pending = deferred<unknown>();
+  const vault = {docsRun: {id: 'A'}, refreshDocsRuns() {}};
+  const state = componentFunctions(new URL('../src/modules/vault/DocsAgentsView.svelte', import.meta.url), ['resolveRun'], {
+    vault, resolving: false, resolveDocsRun: () => pending.promise, toasts: {success() {}}, toastError() {},
+  });
+  const running = state.resolveRun('fixed');
+  vault.docsRun = {id: 'B'};
+  pending.resolve({id: 'A'});
+  await running;
+  assert.equal(vault.docsRun.id, 'B');
+});

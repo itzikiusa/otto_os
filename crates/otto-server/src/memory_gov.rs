@@ -43,6 +43,9 @@ pub async fn set_state(
     Json(req): Json<SetStateReq>,
 ) -> ApiResult<Json<Memory>> {
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    ctx.memory
+        .get_visible(&ws, &mid, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     let m = ctx.memory.set_state(&ws, &mid, &req.state).await?;
     Ok(Json(m))
 }
@@ -56,6 +59,9 @@ pub async fn forget(
     Path((ws, mid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<ForgetResp>> {
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    ctx.memory
+        .get_visible(&ws, &mid, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     let resp = ctx.memory.soft_forget(&ws, &mid).await?;
     Ok(Json(resp))
 }
@@ -71,6 +77,9 @@ pub async fn forget_undo(
     Json(req): Json<UndoForgetReq>,
 ) -> ApiResult<Json<Memory>> {
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    ctx.memory
+        .get_visible(&ws, &mid, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     // Only `{mid}` — a token for another row is a 404 (S7-307).
     let m = ctx
         .memory
@@ -90,6 +99,11 @@ pub async fn merge(
     Json(req): Json<MergeReq>,
 ) -> ApiResult<Json<MergeResp>> {
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    for id in &req.ids {
+        ctx.memory
+            .get_visible(&ws, id, (!user.is_root).then_some(user.id.as_str()))
+            .await?;
+    }
     let memory = ctx.memory.merge(&ws, &user.id, req).await?;
     Ok(Json(MergeResp { memory }))
 }
@@ -105,6 +119,9 @@ pub async fn split(
     Json(req): Json<SplitReq>,
 ) -> ApiResult<Json<SplitResp>> {
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    ctx.memory
+        .get_visible(&ws, &mid, (!user.is_root).then_some(user.id.as_str()))
+        .await?;
     let resp = ctx.memory.split(&ws, &user.id, &mid, req).await?;
     Ok(Json(resp))
 }

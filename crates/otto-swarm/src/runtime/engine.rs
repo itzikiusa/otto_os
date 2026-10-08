@@ -2669,7 +2669,7 @@ async fn recruit(
                 .first()
                 .map(|a| a.id.clone())
                 .unwrap_or_else(|| "recruiter".to_string());
-            let cancel = crate::runtime::agent_run::begin(sid, "recruit");
+            let cancel = crate::runtime::agent_run::begin(sid, "recruit").map_err(ApiError)?;
             let (raw, rid) = crate::runtime::agent_run::run_swarm_agent(
                 &ctx,
                 &workspace,
@@ -2799,7 +2799,7 @@ async fn plan(
     // Multi-agent plan: run one planner per angle as a REAL, openable session
     // (watchable live in the Runs list, Stop-able), then a summarizer reconciles
     // the candidate task lists. Each turn has no wall-clock cap + stuck-retry.
-    let cancel = crate::runtime::agent_run::begin(&project.swarm_id, "plan");
+    let cancel = crate::runtime::agent_run::begin(&project.swarm_id, "plan").map_err(ApiError)?;
     let mut candidates: Vec<String> = Vec::new();
     let angles = crate::recruiter::PLANNER_ANGLES;
     for (i, angle) in angles.iter().enumerate() {

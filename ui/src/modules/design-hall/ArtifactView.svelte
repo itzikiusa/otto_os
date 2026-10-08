@@ -514,23 +514,27 @@
 
   async function approve(): Promise<void> {
     if (!artifact || !head) return;
+    // Approval belongs to the version the person sees in this sheet. Live
+    // content updates may move head while the confirmation is open.
+    const target = id;
+    const version = head;
     const followers = split.usedIn.filter((r) => r.link.policy === 'follow_approved').length;
     const ok = await confirmer.ask(
-      `Approve v${head.seq} of “${artifact.title}”?` +
-        (followers ? ` ${plural(followers, 'design')} that follow its approved version will update to v${head.seq}.` : ''),
-      { title: 'Approve design', confirmLabel: `Approve v${head.seq}`, danger: false },
+      `Approve v${version.seq} of “${artifact.title}”?` +
+        (followers ? ` ${plural(followers, 'design')} that follow its approved version will update to v${version.seq}.` : ''),
+      { title: 'Approve design', confirmLabel: `Approve v${version.seq}`, danger: false },
     );
     if (!ok) return;
     try {
-      const a = await api.approveArtifact(id, head.id);
-      if (detail) detail = { ...detail, artifact: a, approved: head };
+      const a = await api.approveArtifact(target, version.id);
+      if (detail) detail = { ...detail, artifact: a, approved: version };
       const follow = split.usedIn.filter((r) => r.link.policy === 'follow_approved').map((r) => r.label);
       const pinned = split.usedIn.filter((r) => r.link.policy === 'pinned').map((r) => r.label);
       const parts = [
-        follow.length ? `${follow.join(', ')} ${follow.length === 1 ? 'follows' : 'follow'} Approved → now shows v${head.seq}` : '',
+        follow.length ? `${follow.join(', ')} ${follow.length === 1 ? 'follows' : 'follow'} Approved → now shows v${version.seq}` : '',
         pinned.length ? `${pinned.join(', ')} ${pinned.length === 1 ? 'pins' : 'pin'} an older version (update available)` : '',
       ].filter(Boolean);
-      toasts.success(`Approved v${head.seq}`, parts.join(' · ') || undefined);
+      toasts.success(`Approved v${version.seq}`, parts.join(' · ') || undefined);
     } catch (e) {
       toastError('Couldn’t approve', e);
     }
@@ -733,7 +737,7 @@
       {#if artifact}
         <span class="badges">
           <StudioBadge studio={artifact.studio} />
-          <StatusPill status={artifact.status} onclick={statusMenu} />
+          <StatusPill status={artifact.status === 'approved' && head?.id !== artifact.approved_version_id ? 'draft' : artifact.status} onclick={statusMenu} />
           {#if head}<span class="ver" title={`Current version: v${head.seq}`}>v{head.seq}</span>{/if}
           {#if dirty}<span class="chip edited" data-testid="design-dirty">Edited</span>{/if}
         </span>

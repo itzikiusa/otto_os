@@ -6,21 +6,25 @@
 //! command-table + live-key-prefix completion source.
 //!
 //! Connections are cached per [`ResolvedConfig::cache_key`] as a
-//! [`redis::aio::ConnectionManager`], which is cheaply cloneable and
-//! auto-reconnects — so the AUTH/handshake is paid once and reused across calls
-//! instead of re-dialing every time.
+//! [`transport::Connection`], which is cheaply cloneable and
+//! reconnects on the next acquisition after retirement. AUTH is reused across
+//! healthy calls. A shared operation gate bounds entire pipeline replies. No
+//! failed command is automatically replayed.
 
 use std::time::{Duration, Instant};
 
 use crate::resource_cache::ResourceCache;
 use async_trait::async_trait;
 use otto_core::Result;
-use redis::aio::ConnectionManager;
+mod framing;
+mod tls;
+mod transport;
 use redis::{
     Client, ConnectionAddr, ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo,
     TlsCertificates, Value as RedisValue,
 };
 use serde_json::{json, Value as JsonValue};
+use transport::Connection as BoundedConnection;
 
 use crate::driver::Driver;
 use crate::types::{
@@ -51,12 +55,12 @@ const DEFAULT_MAX_ROWS: usize = 1000;
 /// per-cell cap so a multi-hundred-MB string never crosses the wire whole.
 const PREVIEW_STRING_BYTES: isize = 1_048_575;
 
-/// Redis driver. Caches one [`ConnectionManager`] per [`ResolvedConfig::cache_key`].
+/// Redis driver. Caches one [`BoundedConnection`] per [`ResolvedConfig::cache_key`].
 /// `Mutex<HashMap>` is `Default`-constructible, so `#[derive(Default)]` (used
 /// by the registry) still works.
 #[derive(Default)]
 pub struct RedisDriver {
-    clients: ResourceCache<ConnectionManager>,
+    clients: ResourceCache<BoundedConnection>,
 }
 
 #[async_trait]
@@ -199,14 +203,14 @@ impl Driver for RedisDriver {
                     None => format!("{}:*", glob_escape(ns)),
                 };
                 let scan = scan_keys(&mut conn, Some(&pattern), KEY_LIST_CAP).await?;
-                Ok(build_key_nodes(&mut conn, db, scan).await)
+                build_key_nodes(&mut conn, db, scan).await
             }
             // Keyspace WITH a prefix filter: flat list of matching keys
             // (`SCAN MATCH <filter>*`) — no namespace grouping, capped + bulk type.
             (None, Some(f)) => {
                 let pattern = format!("{}*", glob_escape(f));
                 let scan = scan_keys(&mut conn, Some(&pattern), KEY_LIST_CAP).await?;
-                Ok(build_key_nodes(&mut conn, db, scan).await)
+                build_key_nodes(&mut conn, db, scan).await
             }
             // Keyspace overview (no filter): a sampled SCAN grouped into namespaces
             // (by the substring before the first `:`) plus any bare keys.
@@ -249,7 +253,7 @@ impl Driver for RedisDriver {
                     more: scan.more,
                     keys: bare,
                 };
-                nodes.extend(build_key_nodes(&mut conn, db, bare_scan).await);
+                nodes.extend(build_key_nodes(&mut conn, db, bare_scan).await?);
                 if scan.more {
                     nodes.push(truncation_hint(
                         db,
@@ -276,7 +280,9 @@ impl Driver for RedisDriver {
         // Trip 1 (DB-08): TYPE + TTL + OBJECT ENCODING pipelined. Trip 2: the
         // type-dependent length + preview, also pipelined where possible.
         let (ty, ttl, encoding) = key_header(&mut conn, &key).await;
+        conn.ensure_alive()?;
         let (length, preview) = length_and_preview(&mut conn, &key, &ty).await;
+        conn.ensure_alive()?;
 
         let mut detail = ObjectDetail::new(key, NodeKind::Key);
         detail.extra = json!({
@@ -362,8 +368,8 @@ impl Driver for RedisDriver {
     /// Evict the cached connection managers for `cache_key` (connection close,
     /// or a config change superseded them). Redis keys its cache per logical db
     /// (`<cache_key>|db=<n>`), so every db's manager for this config is dropped
-    /// — dropping a `ConnectionManager` closes the multiplexed connection and
-    /// stops its reconnect loop.
+    /// — dropping a `BoundedConnection` closes the multiplexed connection and
+    /// stops its driver task.
     fn detach(&self, cache_key: &str) -> Option<std::sync::Arc<dyn Driver>> {
         let captured = Self::default();
         for (key, value) in self
@@ -381,7 +387,7 @@ impl Driver for RedisDriver {
     }
 
     /// Drop connection managers unused for `idle` (DB-09). Dropping the
-    /// cache's clone stops the reconnect loop once any in-flight command
+    /// cache's clone stops the driver task once any in-flight command
     /// holding its own clone finishes — nothing is closed underneath it.
     async fn evict_idle(&self, idle: Duration) -> usize {
         self.clients.take_idle(idle).len()
@@ -511,40 +517,32 @@ fn build_client(cfg: &ResolvedConfig, db: i64) -> Result<Client> {
 }
 
 impl RedisDriver {
-    /// Get (or lazily build + cache) the `ConnectionManager` for `(cfg, db)`,
+    /// Get (or lazily build + cache) the `BoundedConnection` for `(cfg, db)`,
     /// keyed by [`ResolvedConfig::cache_key`] PLUS the logical database index.
     ///
     /// The per-db key is load-bearing, not an optimisation: clones of one
-    /// `ConnectionManager` share a single multiplexed connection, and `SELECT`
+    /// `BoundedConnection` share a single multiplexed connection, and `SELECT`
     /// is connection-wide state — the old shared-connection-plus-`SELECT`
     /// scheme let two concurrent requests for different keyspaces interleave
     /// `SELECT` + payload and land commands (including WRITES) in the wrong
     /// database. Each cached manager is instead PINNED to its db at handshake
-    /// (`set_db`), so no `SELECT` is ever issued and a reconnect re-lands on
+    /// (`set_db`), so no later `SELECT` is issued and a reconnect re-lands on
     /// the same db. Only callers of this exact key wait for its handshake.
-    async fn connect(&self, cfg: &ResolvedConfig, db: i64) -> Result<ConnectionManager> {
+    async fn connect(&self, cfg: &ResolvedConfig, db: i64) -> Result<BoundedConnection> {
         let cache_key = format!("{}|db={db}", cfg.cache_key());
         self.clients
-            .get_or_try_init(cache_key, cfg.lifecycle.as_ref(), |_| true, async {
-                let client = build_client(cfg, db)?;
-                ConnectionManager::new_with_config(client, manager_config())
-                    .await
-                    .map_err(types::upstream)
-            })
+            .get_or_try_init(
+                cache_key,
+                cfg.lifecycle.as_ref(),
+                BoundedConnection::is_alive,
+                async {
+                    let client = build_client(cfg, db)?;
+                    BoundedConnection::connect(cfg, client.get_connection_info().redis_settings())
+                        .await
+                },
+            )
             .await
     }
-}
-
-/// Connection-manager bounds (DB-09). The crate default (`ConnectionManager::new`)
-/// is a 1 s connect timeout — too tight through an SSH tunnel — and a 500 ms
-/// RESPONSE timeout that failed any legitimately slow command (a big `SCAN`
-/// page, `KEYS` on a large db). 10 s to connect, 30 s per response, and a
-/// small reconnect budget so a dead server fails fast instead of retrying ~6×.
-fn manager_config() -> redis::aio::ConnectionManagerConfig {
-    redis::aio::ConnectionManagerConfig::new()
-        .set_connection_timeout(Some(Duration::from_secs(10)))
-        .set_response_timeout(Some(Duration::from_secs(30)))
-        .set_number_of_retries(2)
 }
 
 // --- SCAN / type / length / preview ----------------------------------------
@@ -562,7 +560,7 @@ struct ScanOutcome {
 /// keyspace can't stall the tree by traversing every key. `more` reports whether
 /// the listing is partial.
 async fn scan_keys(
-    conn: &mut ConnectionManager,
+    conn: &mut BoundedConnection,
     pattern: Option<&str>,
     key_cap: usize,
 ) -> Result<ScanOutcome> {
@@ -609,12 +607,13 @@ async fn scan_keys(
 /// single pipelined batch (one round-trip instead of one TYPE per key). Appends
 /// a passive truncation hint when the listing was capped/partial.
 async fn build_key_nodes(
-    conn: &mut ConnectionManager,
+    conn: &mut BoundedConnection,
     db: i64,
     mut scan: ScanOutcome,
-) -> Vec<SchemaNode> {
+) -> Result<Vec<SchemaNode>> {
     scan.keys.sort();
     let types = types_of(conn, &scan.keys).await;
+    conn.ensure_alive()?;
     let mut nodes = Vec::with_capacity(scan.keys.len() + 1);
     for (i, key) in scan.keys.iter().enumerate() {
         let kind = types.get(i).cloned().unwrap_or_else(|| "unknown".into());
@@ -626,7 +625,7 @@ async fn build_key_nodes(
     if scan.more {
         nodes.push(truncation_hint(db, "More keys — refine the prefix"));
     }
-    nodes
+    Ok(nodes)
 }
 
 /// A passive (non-clickable, non-expandable) hint row appended to a truncated
@@ -655,7 +654,7 @@ fn glob_escape(s: &str) -> String {
 /// Pipelined `TYPE` for many keys: one round-trip per [`KEY_LIST_CAP`]-sized
 /// chunk instead of one per key. Returns a vec aligned with `keys` (missing or
 /// failed lookups become "unknown").
-async fn types_of(conn: &mut ConnectionManager, keys: &[String]) -> Vec<String> {
+async fn types_of(conn: &mut BoundedConnection, keys: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(keys.len());
     for chunk in keys.chunks(KEY_LIST_CAP) {
         let mut pipe = redis::pipe();
@@ -673,7 +672,7 @@ async fn types_of(conn: &mut ConnectionManager, keys: &[String]) -> Vec<String> 
 /// `TYPE`, `TTL` and `OBJECT ENCODING` for one key in a single pipelined
 /// round trip. Each reply is decoded independently, so one failing command
 /// (e.g. `OBJECT` disabled by ACL) degrades only its own field.
-async fn key_header(conn: &mut ConnectionManager, key: &str) -> (String, i64, Option<String>) {
+async fn key_header(conn: &mut BoundedConnection, key: &str) -> (String, i64, Option<String>) {
     let mut pipe = redis::pipe();
     // Per-command errors come back in place (as `ServerError` values).
     pipe.ignore_errors();
@@ -727,7 +726,7 @@ fn decode_key_header(replies: Vec<RedisValue>) -> (String, i64, Option<String>) 
 /// (string/list/zset) both commands go in ONE pipelined trip; hash/set
 /// previews are cursor scans, so they run after the length.
 async fn length_and_preview(
-    conn: &mut ConnectionManager,
+    conn: &mut BoundedConnection,
     key: &str,
     ty: &str,
 ) -> (Option<i64>, JsonValue) {
@@ -774,7 +773,7 @@ async fn length_and_preview(
 }
 
 /// `TYPE key` → "string"/"hash"/... ("none" when missing).
-async fn type_of(conn: &mut ConnectionManager, key: &str) -> String {
+async fn type_of(conn: &mut BoundedConnection, key: &str) -> String {
     redis::cmd("TYPE")
         .arg(key)
         .query_async::<String>(conn)
@@ -783,7 +782,7 @@ async fn type_of(conn: &mut ConnectionManager, key: &str) -> String {
 }
 
 /// Length of the value sized appropriately for its type.
-async fn length_of(conn: &mut ConnectionManager, key: &str, ty: &str) -> Option<i64> {
+async fn length_of(conn: &mut BoundedConnection, key: &str, ty: &str) -> Option<i64> {
     let cmd = match ty {
         "string" => "STRLEN",
         "hash" => "HLEN",
@@ -800,7 +799,7 @@ async fn length_of(conn: &mut ConnectionManager, key: &str, ty: &str) -> Option<
 /// value can be hundreds of MB), `HSCAN`/`SSCAN` instead of `HGETALL`/`SMEMBERS`
 /// (a hash/set can hold millions of members), and range commands with an
 /// explicit stop for list/zset.
-async fn preview_of(conn: &mut ConnectionManager, key: &str, ty: &str) -> JsonValue {
+async fn preview_of(conn: &mut BoundedConnection, key: &str, ty: &str) -> JsonValue {
     match ty {
         "string" => redis::cmd("GETRANGE")
             .arg(key)
@@ -838,7 +837,7 @@ async fn preview_of(conn: &mut ConnectionManager, key: &str, ty: &str) -> JsonVa
 /// entries or [`SCAN_MAX_ROUNDS`] round-trips — never materialising the whole
 /// collection the way `HGETALL`/`SMEMBERS` did.
 async fn scan_preview(
-    conn: &mut ConnectionManager,
+    conn: &mut BoundedConnection,
     key: &str,
     cmd: &str,
     pairs: bool,
@@ -955,9 +954,13 @@ fn reply_len(reply: &RedisValue) -> usize {
 fn bounded_reply_to_result(reply: RedisValue, max_rows: usize) -> QueryResult {
     let mut budget = types::ByteBudget::default();
     let mut truncated = false;
+    let mut cells_truncated = false;
     let mut truncated_reason = None;
     let mut push_row = |rows: &mut Vec<Vec<JsonValue>>, row: Vec<JsonValue>| -> bool {
-        let row: Vec<JsonValue> = row.into_iter().map(types::cap_cell).collect();
+        let row: Vec<JsonValue> = row
+            .into_iter()
+            .map(|v| types::cap_cell_tracked(v, &mut cells_truncated))
+            .collect();
         let size: usize = row.iter().map(types::approx_json_len).sum();
         if !budget.charge(size) && !rows.is_empty() {
             truncated_reason = Some(types::TruncatedReason::Bytes);
@@ -999,13 +1002,15 @@ fn bounded_reply_to_result(reply: RedisValue, max_rows: usize) -> QueryResult {
             let mut result = reply_to_result(other);
             for row in &mut result.rows {
                 for cell in row.iter_mut() {
-                    *cell = types::cap_cell(std::mem::take(cell));
+                    *cell =
+                        types::cap_cell_tracked(std::mem::take(cell), &mut result.cells_truncated);
                 }
             }
             return result;
         }
     };
     QueryResult {
+        cells_truncated,
         columns,
         rows,
         truncated,
@@ -1425,6 +1430,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oversized_scalar_and_nested_redis_replies_report_lossy_cells() {
+        let scalar = RedisValue::BulkString(vec![b'x'; types::MAX_CELL_CHARS + 1]);
+        assert!(bounded_reply_to_result(scalar.clone(), 10).cells_truncated);
+        assert!(bounded_reply_to_result(RedisValue::Array(vec![scalar]), 10).cells_truncated);
+        assert!(
+            !bounded_reply_to_result(
+                RedisValue::BulkString(b"ordinary...[truncated 1 chars]".to_vec()),
+                10
+            )
+            .cells_truncated
+        );
+    }
+
+    #[test]
     fn connection_state_commands_are_refused() {
         let p = |line: &str| split_args(line);
         for line in [
@@ -1721,13 +1740,5 @@ mod perf_tests {
         ]);
         assert_eq!((ty.as_str(), ttl, enc), ("string", 30, None));
         assert_eq!(decode_key_header(Vec::new()).0, "unknown");
-    }
-
-    #[test]
-    fn manager_config_bounds_connect_and_response() {
-        let c = manager_config();
-        assert_eq!(c.connection_timeout(), Some(Duration::from_secs(10)));
-        assert_eq!(c.response_timeout(), Some(Duration::from_secs(30)));
-        assert_eq!(c.number_of_retries(), 2);
     }
 }

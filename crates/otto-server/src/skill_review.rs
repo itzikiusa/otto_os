@@ -67,8 +67,11 @@ fn register_cancel(reg: &CancelRegistry, id: &str) -> Arc<AtomicBool> {
 }
 fn signal_cancel(reg: &CancelRegistry, id: &str) {
     if let Ok(map) = reg.lock() {
-        if let Some(flag) = map.get(id) {
-            flag.store(true, Ordering::SeqCst);
+        let retries = format!("{id}:retry:");
+        for (key, flag) in map.iter() {
+            if key == id || key.starts_with(&retries) {
+                flag.store(true, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -345,6 +348,10 @@ async fn cancel_review(
 ) -> ApiResult<Json<SkillReview>> {
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &review.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.skill_reviews_store
+        .set_status(&id, "cancelled", Some("Cancelled by user"))
+        .await
+        .map_err(ApiError)?;
     signal_cancel(&ctx.skill_review_cancels, &id);
     for a in &review.agents {
         if let Some(sid) = &a.session_id {
@@ -374,6 +381,10 @@ async fn delete_review(
 ) -> ApiResult<axum::http::StatusCode> {
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &review.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.skill_reviews_store
+        .set_status(&id, "cancelled", Some("Cancelled by user"))
+        .await
+        .map_err(ApiError)?;
     signal_cancel(&ctx.skill_review_cancels, &id);
     for a in &review.agents {
         if let Some(sid) = &a.session_id {
@@ -411,6 +422,15 @@ async fn retry_agent(
             "cannot retry the summarizer".into(),
         )));
     }
+    let retry =
+        crate::skill_eval::RetryLease::claim(&ctx.skill_review_cancels, &id, &index.to_string())
+            .map_err(ApiError)?;
+    let current = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
+    if current.status == "running" || current.status == "cancelled" {
+        return Err(ApiError(otto_core::Error::Conflict(
+            "retry requires a finished, non-cancelled review".into(),
+        )));
+    }
     let ctx_bg = ctx.clone();
     let review_id = id.clone();
     let ws = ctx
@@ -422,7 +442,7 @@ async fn retry_agent(
     let source = review.skill_source.clone();
     let instructions = review.instructions.clone();
     let provider = agent.provider.clone();
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&retry.flag);
     tokio::spawn(async move {
         let staged = match stage_target(&ctx_bg, &skill_name, &source) {
             Ok(s) => s,
@@ -455,6 +475,7 @@ async fn retry_agent(
         )
         .await;
         emit(&ctx_bg, &ws.id, &review_id, "running");
+        drop(retry);
     });
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     Ok(Json(review))
@@ -471,7 +492,7 @@ async fn apply_fixes(
 ) -> ApiResult<Json<SkillReview>> {
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &review.workspace_id, WorkspaceRole::Editor).await?;
-    if review.status == "running" {
+    if review.status != "done" {
         return Err(ApiError(otto_core::Error::Invalid(
             "wait for the review to finish before applying fixes".into(),
         )));
@@ -518,10 +539,18 @@ async fn apply_fixes(
         session_id: None,
         findings: vec![],
     };
-    ctx.skill_reviews_store
-        .set_fix(&id, &row)
-        .await
+    let fix_attempt = crate::skill_eval::RetryLease::claim(&ctx.skill_review_cancels, &id, "fix")
         .map_err(ApiError)?;
+    if !ctx
+        .skill_reviews_store
+        .claim_fix(&id, &row)
+        .await
+        .map_err(ApiError)?
+    {
+        return Err(ApiError(otto_core::Error::Conflict(
+            "review changed or a fixer is already running".into(),
+        )));
+    }
 
     let out = fix_result_path(&id);
     let prompt = fixer_prompt(
@@ -537,9 +566,18 @@ async fn apply_fixes(
     otto_sessions::trust::ensure_trusted(&provider, &dir.to_string_lossy());
     tokio::spawn(async move {
         run_fix_agent(
-            &ctx_bg, &ws, &user, &review_id, row, &provider, &dir, &prompt,
+            &ctx_bg,
+            &ws,
+            &user,
+            &review_id,
+            row,
+            &provider,
+            &dir,
+            &prompt,
+            &fix_attempt.flag,
         )
         .await;
+        drop(fix_attempt);
     });
 
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
@@ -608,11 +646,19 @@ async fn run_review_inner(
     instructions: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
-    let staged = stage_target(ctx, skill_name, source)?;
+    let staging_ctx = ctx.clone();
+    let staging_name = skill_name.to_string();
+    let staging_source = source.to_string();
+    let (staged, static_report) = tokio::task::spawn_blocking(move || {
+        let staged = stage_target(&staging_ctx, &staging_name, &staging_source)?;
+        let report = static_review(staged.path());
+        Ok::<_, otto_core::Error>((staged, report))
+    })
+    .await
+    .map_err(|e| otto_core::Error::Internal(format!("skill review preparation: {e}")))??;
     let dir = staged.path();
 
-    // 1. Static pass — always, instant, deterministic.
-    let static_report = static_review(dir);
+    // 1. Static pass — always deterministic, filesystem work off the reactor.
     ctx.skill_reviews_store
         .set_static(review_id, &static_report)
         .await?;
@@ -840,6 +886,11 @@ async fn run_skill_review_agent(
     row.note = String::new();
     let _ = repo.set_agent_at(review_id, index, &row).await;
 
+    if is_cancelled(cancel) {
+        let _ = ctx.manager.archive(&sid).await;
+        return vec![];
+    }
+
     submit_prompt(&ctx.manager, &sid, &prompt).await;
 
     let deadline = Instant::now() + AGENT_TIMEOUT;
@@ -967,7 +1018,11 @@ async fn run_fix_agent(
     provider: &str,
     dir: &Path,
     prompt: &str,
+    cancel: &Arc<AtomicBool>,
 ) {
+    if is_cancelled(cancel) {
+        return;
+    }
     let out = fix_result_path(review_id);
     let _ = std::fs::remove_file(&out);
     let repo = &ctx.skill_reviews_store;
@@ -1001,11 +1056,19 @@ async fn run_fix_agent(
     let _ = repo.set_fix(review_id, &row).await;
     emit(ctx, &ws.id, review_id, "done");
 
+    if is_cancelled(cancel) {
+        let _ = ctx.manager.archive(&sid).await;
+        return;
+    }
     submit_prompt(&ctx.manager, &sid, prompt).await;
 
     let deadline = Instant::now() + FIX_TIMEOUT;
     let mut flagged_waiting = false;
     loop {
+        if is_cancelled(cancel) {
+            let _ = ctx.manager.archive(&sid).await;
+            return;
+        }
         if let Ok(text) = std::fs::read_to_string(&out) {
             let _ = std::fs::remove_file(&out);
             row.status = "done".into();
@@ -1047,6 +1110,7 @@ async fn run_fix_agent(
             }
         }
         if Instant::now() >= deadline {
+            let _ = ctx.manager.archive(&sid).await;
             row.status = "error".into();
             row.note = "timed out".into();
             let _ = repo.set_fix(review_id, &row).await;
@@ -1382,6 +1446,22 @@ include!("skill_review_static.rs");
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // sync fs in test fixtures
 mod staging_tests {
+    #[test]
+    fn static_proximity_handles_multibyte_window_edges() {
+        assert!(!contains_near(
+            &format!("ignore{}tail", "€".repeat(20)),
+            &["ignore"],
+            &["system"],
+            40
+        ));
+        assert!(contains_near(
+            "ignore é system",
+            &["ignore"],
+            &["system"],
+            40
+        ));
+    }
+
     use super::*;
 
     fn write(p: &Path, body: &str) {

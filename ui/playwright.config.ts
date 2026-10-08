@@ -81,13 +81,13 @@ export default defineConfig({
       testIgnore: FUNCTIONAL_ONLY ? /desktop-.*perf.*\.spec\.ts/ : undefined,
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, storageState: STATE },
     },
-    // Desktop WEBKIT: the perf gates (desktop-*perf*) on the engine closest to
+    // Desktop WEBKIT: the perf gates and terminal parking regression on the engine closest to
     // the app's WKWebView, where style/layout/paint dominate (r3-10-02).
     // `npx playwright test --project=desktop-webkit`. Chromium-only probes
     // (long tasks, CDP heap) skip themselves here; see e2e/perf.ts.
     {
       name: 'desktop-webkit',
-      testMatch: /desktop-.*perf.*\.spec\.ts/,
+      testMatch: /desktop-(?:.*perf.*|terminal-park-redraw)\.spec\.ts/,
       // No service worker: once sw.js claims the page, WebKit's fetches go
       // through it and `page.route` mocks (most perf fixtures) never fire.
       use: {

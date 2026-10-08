@@ -489,8 +489,12 @@ class UsageStore {
   /** The full report (export / "Show more"), loading it once if the current
    *  one is the slim page shape. `null` when the load failed. */
   async fullReport(): Promise<UsageReport | null> {
-    if (!this.reportFull || !this.report) await this.loadReport(true);
-    return this.reportFull ? this.report : null;
+    const days = this.days;
+    const ottoOnly = this.ottoOnly;
+    const matches = () => this.report?.days === days && this.report.otto_only === ottoOnly;
+    if (!this.reportFull || !matches() || this.reportError || this.reportLoading) await this.loadReport(true);
+    return this.days === days && this.ottoOnly === ottoOnly && this.reportFull && matches()
+      && !this.reportError && !this.reportLoading ? this.report : null;
   }
 
   /** Opt-in: run `npx ccusage` through the daemon and compare (root only).

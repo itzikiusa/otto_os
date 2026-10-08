@@ -1,0 +1,24 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.73s
+     Running tests/pipeline_e2e.rs (target/debug/deps/pipeline_e2e-9eebebde2c5d378b)
+
+running 1 test
+test missing_or_invalid_saved_credentials_never_start_a_transport ... FAILED
+
+failures:
+
+---- missing_or_invalid_saved_credentials_never_start_a_transport stdout ----
+
+thread 'missing_or_invalid_saved_credentials_never_start_a_transport' (3233170) panicked at crates/otto-mcp/tests/pipeline_e2e.rs:728:9:
+invalid saved credential None must not fall back to an uncredentialed transport
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    missing_or_invalid_saved_credentials_never_start_a_transport
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p otto-mcp --test pipeline_e2e`

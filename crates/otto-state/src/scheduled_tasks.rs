@@ -638,23 +638,47 @@ impl ScheduledTasksRepo {
         Ok(())
     }
 
-    /// The report hash of the most recent successful run for a task (excluding a
-    /// given run id) — backs `notify_on_change` change detection.
+    /// An unchanged report suppresses delivery only when the latest successful
+    /// run delivered (or already inherited a delivered baseline) to the same
+    /// destination without error. Inspect the latest row first: filtering out a
+    /// failed delivery would incorrectly fall back to an older matching report.
     pub async fn last_ok_report_hash(
         &self,
         task_id: &str,
         exclude_run: &str,
+        destination: &serde_json::Value,
     ) -> Result<Option<String>> {
         let row = sqlx::query(
-            "SELECT report_hash FROM scheduled_task_runs WHERE task_id = ? AND status = 'ok' \
-             AND id != ? AND report_hash IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+            "SELECT report_hash, delivery_error, delivered, skipped_delivery, admitted_task_json \
+             FROM scheduled_task_runs WHERE task_id = ? AND status = 'ok' \
+             AND id != ? AND report_hash IS NOT NULL ORDER BY started_at DESC, id DESC LIMIT 1",
         )
         .bind(task_id)
         .bind(exclude_run)
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("last ok report hash"))?;
-        Ok(row.and_then(|r| r.get::<Option<String>, _>("report_hash")))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.get::<Option<String>, _>("delivery_error").is_some()
+            || !(row.get::<bool, _>("delivered") || row.get::<bool, _>("skipped_delivery"))
+        {
+            return Ok(None);
+        }
+        let snapshot = row
+            .get::<Option<String>, _>("admitted_task_json")
+            .and_then(|raw| serde_json::from_str::<AdmittedTaskSnapshot>(&raw).ok());
+        // Legacy rows have no destination snapshot: deliver once conservatively.
+        if snapshot
+            .as_ref()
+            .filter(|s| s.version == 1)
+            .map(|s| &s.task.destination)
+            != Some(destination)
+        {
+            return Ok(None);
+        }
+        Ok(row.get::<Option<String>, _>("report_hash"))
     }
 
     pub async fn get_run(&self, run_id: &str) -> Result<ScheduledTaskRun> {
@@ -971,11 +995,91 @@ mod tests {
         assert!(got.delivered);
         assert_eq!(got.session_id.as_deref(), Some("sess-1"));
         assert_eq!(got.attempts, 2);
-        // last_ok_report_hash returns this run's hash for a sibling lookup.
-        let h = repo.last_ok_report_hash(&t.id, "other-run").await.unwrap();
-        assert_eq!(h.as_deref(), Some("abc123"));
+        // A legacy create_run row has no destination snapshot, so re-deliver once.
+        let h = repo
+            .last_ok_report_hash(&t.id, "other-run", &t.destination)
+            .await
+            .unwrap();
+        assert_eq!(h, None);
         let runs = repo.list_runs(&t.id, 10).await.unwrap();
         assert_eq!(runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn notification_baseline_does_not_hide_failed_delivery() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let task = repo
+            .create(new_task("ws1", "delivery retry"))
+            .await
+            .unwrap();
+        for (delivered, skipped, error, expected) in [
+            (true, false, None, Some("same-report")),
+            (false, false, Some("fixture send failure"), None),
+            (true, false, Some("fixture attachment failure"), None),
+            (true, false, None, Some("same-report")),
+            (false, true, None, Some("same-report")),
+            (false, false, None, None),
+        ] {
+            let run = repo.admit_run(&task, "manual").await.unwrap();
+            repo.finish_run(
+                &run.id,
+                FinishRun {
+                    status: "ok".into(),
+                    delivered,
+                    skipped_delivery: skipped,
+                    delivery_error: error.map(str::to_owned),
+                    report_hash: Some("same-report".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                repo.last_ok_report_hash(&task.id, "next-run", &task.destination)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_baseline_is_bound_to_the_admitted_destination() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p);
+        let mut input = new_task("ws1", "destination ownership");
+        input.destination = json!({"type":"email", "to":"first@example.invalid"});
+        let task = repo.create(input).await.unwrap();
+        let run = repo.admit_run(&task, "manual").await.unwrap();
+        repo.finish_run(
+            &run.id,
+            FinishRun {
+                status: "ok".into(),
+                delivered: true,
+                report_hash: Some("unchanged".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.last_ok_report_hash(&task.id, "next", &task.destination)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("unchanged")
+        );
+        let changed = json!({"type":"email", "to":"second@example.invalid"});
+        assert_eq!(
+            repo.last_ok_report_hash(&task.id, "next", &changed)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

@@ -226,13 +226,15 @@
       toasts.info('Nothing to format', `No formatter for ${WB_LANGUAGES.find((l) => l.id === lang)?.label ?? lang}.`);
       return;
     }
+    const target = active, workspace = wsId, content = active.buffer, id = doc.id;
     formatting = true;
     try {
-      const res = await formatContent(lang, active.buffer);
+      const res = await formatContent(lang, content);
+      if (wsId !== workspace || active !== target || active.buffer !== content) return;
       if (res.ok) {
         issue = null;
         issueFromFormat = false;
-        if (res.changed) workbench.setBuffer(doc.id, res.text);
+        if (res.changed) workbench.setBuffer(id, res.text);
       } else {
         issue = { error: res.error, line: res.line, col: res.col };
         issueFromFormat = true;
@@ -257,12 +259,13 @@
   async function rename(id: string): Promise<void> {
     const cur = workbench.metaOf(id);
     if (!cur) return;
+    const workspace = wsId;
     const name = await confirmer.promptText('New name for this file', {
       title: 'Rename file',
       confirmLabel: 'Rename',
       initial: cur.name,
     });
-    if (!name || name === cur.name) return;
+    if (!name || name === cur.name || wsId !== workspace || workbench.metaOf(id) !== cur) return;
     try {
       await workbench.patchMeta(id, { name });
     } catch (e) {
@@ -304,11 +307,12 @@
 
   async function reloadRemote(): Promise<void> {
     if (!doc) return;
+    const id = doc.id, workspace = wsId, target = active;
     const ok = await confirmer.ask(
       'Load the version saved in the other window? Your unsaved edits in this tab will be discarded (everything already saved stays in History).',
       { title: 'Reload from the other window?', confirmLabel: 'Reload', danger: false },
     );
-    if (ok) await workbench.reload(doc.id);
+    if (ok && wsId === workspace && active === target && doc?.id === id) await workbench.reload(id);
   }
 
   // ⌘K: the page's verbs (New file creates at once; Open asks which).
@@ -366,13 +370,15 @@
   async function addImages(files: File[], intoMarkdown: boolean): Promise<void> {
     const id = wsId;
     if (!id) return;
+    const target = active, docId = doc?.id, position = cursor;
     for (const f of files) {
       try {
         const asset = await uploadWorkbenchAsset(id, f, f.type || 'application/octet-stream');
+        if (wsId !== id || (intoMarkdown && (active !== target || doc?.id !== docId))) return;
         const name = f.name || `image-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${(f.type.split('/')[1] || 'png').replace('svg+xml', 'svg')}`;
         if (intoMarkdown && active && doc) {
           const snippet = `![${name}](asset:${asset.id})`;
-          const at = Math.min(cursor, active.buffer.length);
+          const at = Math.min(position, active.buffer.length);
           workbench.setBuffer(doc.id, active.buffer.slice(0, at) + snippet + active.buffer.slice(at));
         } else {
           await workbench.create({ name, language: 'image', content: asset.id });
@@ -446,7 +452,7 @@
         loading={workbench.loading}
         error={workbench.error}
         empty
-        onretry={() => void workbench.loadList()}
+        onretry={() => { if (wsId) void workbench.attach(wsId); }}
       />
     {:else if workbench.loaded && workbench.docs.length === 0 && !workbench.showTrash}
       <EmptyState

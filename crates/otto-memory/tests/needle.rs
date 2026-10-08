@@ -281,3 +281,106 @@ async fn kinds_filter_applies_before_limit() {
     );
     assert_eq!(hits[0].memory.kind, "decision");
 }
+
+#[tokio::test]
+async fn private_rows_are_not_mutable_or_discoverable_through_graph_routes() {
+    let (pool, ws, owner) = otto_memory::test_support::mem_pool().await;
+    let svc = Arc::new(MemoryService::with_defaults(pool));
+    let mut private = nm("fact", "Private title", "private body");
+    private.visibility = "private".into();
+    let rows = svc
+        .save(
+            &ws,
+            &owner,
+            vec![private, nm("fact", "Public title", "public body")],
+        )
+        .await
+        .unwrap();
+    svc.repo()
+        .link(&rows[1].id, &rows[0].id, "relates_to", 1.0, None)
+        .await
+        .unwrap();
+    let app = otto_memory::router::<TestCtx>().with_state(TestCtx {
+        mem: svc.clone(),
+        roles: Arc::new(AllowRoles),
+    });
+    let mut other = test_user("other");
+    other.is_root = false;
+    for (method, suffix, body) in [
+        ("GET", "", ""),
+        ("PATCH", "", "{\"title\":\"Changed\"}"),
+        ("DELETE", "", ""),
+        ("GET", "/links", ""),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/workspaces/{ws}/memories/{}{suffix}", rows[0].id))
+                    .header("content-type", "application/json")
+                    .extension(AuthUser(other.clone()))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404, "{method} private{suffix}");
+    }
+    for suffix in [
+        "memory/graph".to_string(),
+        format!("memories/{}/links", rows[1].id),
+        format!("memory/entities/{}/graph", rows[1].id),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/workspaces/{ws}/{suffix}"))
+                    .extension(AuthUser(other.clone()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            !text.contains(&rows[0].id),
+            "private id leaked by {suffix}: {text}"
+        );
+        assert!(!text.contains("Private title"));
+    }
+    let preserved = svc.get(&ws, &rows[0].id).await.unwrap();
+    assert_eq!(preserved.title, "Private title");
+    assert!(preserved.active);
+    let mut creator = test_user(&owner);
+    creator.is_root = false;
+    for (who, id) in [
+        (creator, &rows[0].id),
+        (other, &rows[1].id),
+        (test_user("admin"), &rows[0].id),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/workspaces/{ws}/memories/{id}"))
+                    .header("content-type", "application/json")
+                    .extension(AuthUser(who))
+                    .body(Body::from("{\"title\":\"Allowed\"}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            200,
+            "own/private or shared edit stays allowed"
+        );
+    }
+}

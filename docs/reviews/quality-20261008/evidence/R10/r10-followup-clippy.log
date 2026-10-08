@@ -1,0 +1,7 @@
+    Checking otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Checking otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+    Checking otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+    Checking otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+    Checking otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+    Checking otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.55s

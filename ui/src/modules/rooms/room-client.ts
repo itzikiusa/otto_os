@@ -34,6 +34,8 @@ export class RoomClient {
     this.status('connecting');
     const socket = new WebSocket(roomSocketAddress(this.origin, this.credential.room_id), ['otto-room', this.credential.token]);
     this.socket = socket;
+    // A failed upgrade may never reach onopen; bound that wait as well.
+    this.armSilence(socket);
     socket.onopen = () => {
       this.armSilence(socket);
       this.heartbeat = setInterval(() => this.send({type: 'heartbeat'}), 5000);

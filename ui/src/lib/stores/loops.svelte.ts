@@ -45,6 +45,8 @@ class LoopsStore {
   /** Single-flight detail loads: a burst of events queues ONE rerun. */
   private detailInflight: Promise<void> | null = null;
   private detailRerun: string | null = null;
+  private detailId: string | null = null;
+  private detailGeneration = 0;
   private lastDetailJson = '';
   /** Every detail fetch (interactive or the background poll) takes a ticket:
    *  a poll response that was in flight when Pause/Resume/Stop re-fetched used
@@ -78,6 +80,14 @@ class LoopsStore {
   /** Load the open detail. Coalesced: while a load is in flight, further
    *  calls queue a single rerun (the latest id wins) instead of stacking. */
   loadDetail(id: string): Promise<void> {
+    if (this.detailId !== id) {
+      this.detailId = id;
+      this.detailGeneration++;
+      this.detailSeq.cancel();
+      this.detail = null;
+      this.fullIterations = {};
+      this.detailError = null;
+    }
     if (this.detailInflight) {
       this.detailRerun = id;
       // Settle after the queued rerun, so `await loadDetail()` after an action
@@ -136,12 +146,16 @@ class LoopsStore {
     const key = `${loopId}:${it.idx}:${it.status}`;
     const hit = this.fullIterations[key];
     if (hit) return hit;
+    const generation = this.detailGeneration;
     const full = await api.get<GoalLoopIteration>(`/goal-loops/${loopId}/iterations/${it.idx}`, signal);
-    this.fullIterations = { ...this.fullIterations, [key]: full };
+    if (generation === this.detailGeneration) this.fullIterations = { ...this.fullIterations, [key]: full };
     return full;
   }
 
   closeDetail(): void {
+    this.detailId = null;
+    this.detailRerun = null;
+    this.detailGeneration++;
     this.detailSeq.cancel();
     this.loadingDetail = false;
     this.detail = null;
@@ -178,22 +192,26 @@ class LoopsStore {
   /** Raise a paused/blocked/exhausted loop's limits (`PATCH /goal-loops/{id}
    *  {limits}`) — Resume alone re-exhausts at once when a cap was hit. */
   async updateLimits(id: string, limits: GoalLoopLimits): Promise<void> {
+    const generation = this.workspaceGeneration;
     const updated = await api.patch<GoalLoop>(`/goal-loops/${id}`, { limits } satisfies UpdateGoalLoopReq);
-    this.mergeLoop(updated);
+    if (generation === this.workspaceGeneration) this.mergeLoop(updated);
   }
 
   async verifyCriterion(id: string, criterion: string, evidence: string): Promise<void> {
+    const generation = this.detailGeneration;
     await api.post(`/goal-loops/${id}/criteria/${encodeURIComponent(criterion)}/verify`, { evidence });
-    await this.loadDetail(id);
+    if (generation === this.detailGeneration && this.detailId === id) await this.loadDetail(id);
   }
   async answerQuestion(id: string, question: string, answer: string): Promise<void> {
+    const generation = this.detailGeneration;
     await api.post(`/goal-loops/${id}/questions/${encodeURIComponent(question)}/answer`, { answer });
-    await this.loadDetail(id);
+    if (generation === this.detailGeneration && this.detailId === id) await this.loadDetail(id);
   }
 
   async retryExecutor(id: string, iterIdx: number, agentIndex: number): Promise<void> {
+    const generation = this.detailGeneration;
     await api.post(`/goal-loops/${id}/iterations/${iterIdx}/agents/${agentIndex}/retry`);
-    await this.loadDetail(id);
+    if (generation === this.detailGeneration && this.detailId === id) await this.loadDetail(id);
   }
 
   async remove(id: string): Promise<void> {
@@ -203,8 +221,9 @@ class LoopsStore {
   }
 
   private async lifecycle(id: string, action: 'start' | 'pause' | 'resume' | 'stop'): Promise<void> {
+    const generation = this.workspaceGeneration;
     const updated = await api.post<GoalLoop>(`/goal-loops/${id}/${action}`);
-    this.mergeLoop(updated);
+    if (generation === this.workspaceGeneration) this.mergeLoop(updated);
     if (this.detail?.loop.id === id) await this.loadDetail(id);
   }
 
@@ -232,6 +251,7 @@ class LoopsStore {
   }
 
   private mergeLoop(loop: GoalLoop): void {
+    if (loop.workspace_id !== this.listWs) return;
     const i = this.list.findIndex((l) => l.id === loop.id);
     if (i >= 0) this.list[i] = loop;
     else this.list = [loop, ...this.list];

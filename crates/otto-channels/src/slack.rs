@@ -597,6 +597,7 @@ pub async fn run(
     // unacked envelope, or the old socket's last frames) — a fresh window
     // used to forward those twice.
     let seen = seen_window(&bot_token);
+    let pending_notices = Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
 
     let mut backoff_ms: u64 = 3_000;
     const BACKOFF_MAX_MS: u64 = 60_000;
@@ -662,6 +663,7 @@ pub async fn run(
         };
 
         let (mut sink, mut stream) = ws_stream.split();
+        let (notice_acks, mut completed_notices) = tokio::sync::mpsc::channel::<String>(8);
 
         // --- Step 3: read frames ---
         let mut last_frame = std::time::Instant::now();
@@ -701,6 +703,13 @@ pub async fn run(
             // watchdog above) periodically.
             let maybe_msg = tokio::select! {
                 msg = stream.next() => msg,
+                Some(envelope_id) = completed_notices.recv() => {
+                    let ack = serde_json::json!({"envelope_id": envelope_id}).to_string();
+                    if let Err(error) = send_frame(&mut sink, Message::Text(ack.into())).await {
+                        break 'inner (format!("Rejection ack failed: {error}"), true);
+                    }
+                    continue 'inner;
+                }
                 _ = tokio::time::sleep(CANCEL_CHECK_INTERVAL) => {
                     continue 'inner;
                 }
@@ -773,44 +782,104 @@ pub async fn run(
                     break 'inner (format!("Slack asked to reconnect ({reason})"), false);
                 }
                 "events_api" => {
-                    // Always ack immediately.
+                    use crate::admission::{Admission, BUSY_REPLY};
                     let envelope_id = val["envelope_id"].as_str().unwrap_or("").to_string();
+                    let event = &val["payload"]["event"];
+                    let content = if event["subtype"].as_str() == Some("message_changed") {
+                        &event["message"]
+                    } else {
+                        event
+                    };
+                    let chat = content["channel"]
+                        .as_str()
+                        .or_else(|| event["channel"].as_str())
+                        .unwrap_or("");
+                    let thread = content["thread_ts"]
+                        .as_str()
+                        .or_else(|| event["thread_ts"].as_str())
+                        .or_else(|| content["ts"].as_str())
+                        .or_else(|| event["ts"].as_str());
+                    let dedup_key = format!("{chat}:{}", dedup_ts(event));
+                    if pending_notices.lock().await.contains(&dedup_key) {
+                        continue 'inner; // not acknowledged until its notice succeeds
+                    }
+                    let duplicate = seen.lock().await.set.contains(&dedup_key);
+                    let admission = if duplicate {
+                        None
+                    } else {
+                        Some(bridge.admission.admit_chat(
+                            &format!("slack:{}", integ.workspace_id),
+                            chat,
+                            thread,
+                            strip_mention(content["text"].as_str().unwrap_or("")),
+                            event["subtype"].as_str() == Some("message_changed"),
+                        ))
+                    };
+                    match admission {
+                        Some(Admission::Retry) => {
+                            health.failed("Inbound message queue is full; Slack will retry unacknowledged events", false);
+                            continue 'inner;
+                        }
+                        Some(Admission::Busy(permit)) => {
+                            let user = content["user"]
+                                .as_str()
+                                .or_else(|| event["user"].as_str())
+                                .unwrap_or("");
+                            let notify = crate::bridge::integration_admits(&integ, user)
+                                && !chat.is_empty()
+                                && !event["bot_id"].is_string()
+                                && !event["message"]["bot_id"].is_string()
+                                && matches!(
+                                    event["type"].as_str(),
+                                    Some("message" | "app_mention")
+                                );
+                            let chat = chat.to_owned();
+                            let thread = thread.map(str::to_owned);
+                            let adapter = SlackAdapter::new(bot_token.clone());
+                            let acks = notice_acks.clone();
+                            let seen = seen.clone();
+                            let pending = pending_notices.clone();
+                            pending.lock().await.insert(dedup_key.clone());
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                let notice = async {
+                                    if notify {
+                                        adapter
+                                            .send_notice(&chat, thread.as_deref(), BUSY_REPLY)
+                                            .await
+                                            .map(|_| ())
+                                    } else {
+                                        Ok(())
+                                    }
+                                };
+                                if acknowledge_rejection(notice, &acks, envelope_id).await {
+                                    seen.lock().await.insert(dedup_key.clone(), DEDUP_CAP);
+                                }
+                                pending.lock().await.remove(&dedup_key);
+                            });
+                            continue 'inner;
+                        }
+                        Some(Admission::Work(permit)) => {
+                            // Reserve work before ACK/dedup. The permit remains
+                            // held through attachment I/O and the bridge turn queue.
+                            seen.lock().await.insert(dedup_key, DEDUP_CAP);
+                            let event = event.clone();
+                            let integ = integ.clone();
+                            let bot_token = bot_token.clone();
+                            let bridge = Arc::clone(&bridge);
+                            tokio::spawn(async move {
+                                handle_event(&event, &integ, &bot_token, bridge, permit).await;
+                            });
+                        }
+                        None => {} // already admitted/delivered: ACK the retry
+                    }
                     if !envelope_id.is_empty() {
-                        let ack = format!(r#"{{"envelope_id":"{envelope_id}"}}"#);
-                        if let Err(e) = send_frame(&mut sink, Message::Text(ack.into())).await {
-                            error!("slack: failed to send ack: {e}");
-                            break 'inner (format!("Event ack failed: {e}"), true);
+                        let ack = serde_json::json!({"envelope_id": envelope_id}).to_string();
+                        if let Err(error) = send_frame(&mut sink, Message::Text(ack.into())).await {
+                            break 'inner (format!("Event ack failed: {error}"), true);
                         }
                     }
                     health.event();
-
-                    // Dedup: build key from (channel, ts).
-                    let event = &val["payload"]["event"];
-                    let dedup_key = {
-                        let ch = event["channel"].as_str().unwrap_or("");
-                        format!("{ch}:{}", dedup_ts(event))
-                    };
-                    {
-                        let mut guard = seen.lock().await;
-                        if !guard.insert(dedup_key.clone(), DEDUP_CAP) {
-                            debug!("slack: duplicate event {dedup_key}, skipping");
-                            continue 'inner;
-                        }
-                    }
-
-                    // Process the event payload OFF the read loop: attachment
-                    // downloads + session spawn can take seconds, and a slow
-                    // event must never delay reading (and acking) the next
-                    // frame. Ordering into a shared session is unaffected —
-                    // the bridge's find-or-create lock serializes that, and
-                    // PTY submits were already spawned per message.
-                    let event = event.clone();
-                    let integ = integ.clone();
-                    let bot_token = bot_token.clone();
-                    let bridge = Arc::clone(&bridge);
-                    tokio::spawn(async move {
-                        handle_event(&event, &integ, &bot_token, bridge).await;
-                    });
                 }
                 other => {
                     // Ack anything that carries an envelope_id (slash commands, interactive, etc.)
@@ -840,6 +909,21 @@ pub async fn run(
         sleep_unless_cancelled(backoff_ms, &cancel).await;
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
     }
+}
+
+/// A rejected message can be acknowledged only after its notice is delivered.
+async fn acknowledge_rejection(
+    notice: impl std::future::Future<Output = anyhow::Result<()>>,
+    acknowledgements: &tokio::sync::mpsc::Sender<String>,
+    envelope: String,
+) -> bool {
+    if notice.await.is_err() {
+        return false;
+    }
+    // Delivery is durable even if this socket disconnected before its ACK;
+    // remember it so the next generation ACKs the retry without another notice.
+    let _ = acknowledgements.send(envelope).await;
+    true
 }
 
 /// Why `apps.connections.open` failed: a user-facing `detail`, and whether
@@ -901,6 +985,7 @@ async fn handle_event(
     integ: &Integration,
     bot_token: &str,
     bridge: Arc<Bridge>,
+    permit: crate::admission::WorkPermit,
 ) {
     let event_type = event["type"].as_str().unwrap_or("");
 
@@ -1043,7 +1128,7 @@ async fn handle_event(
     );
 
     let adapter = Arc::new(SlackAdapter::new(bot_token.to_string())) as Arc<dyn Adapter>;
-    bridge.handle(integ, adapter, inbound).await;
+    bridge.handle(integ, adapter, inbound, permit).await;
 }
 
 /// Download every file attached to a message to a local temp path and return a
@@ -1179,6 +1264,50 @@ async fn download_slack_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejected_work_is_acknowledged_only_after_a_delivered_notice() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let delivered = tokio::sync::Notify::new();
+        let notice = async {
+            delivered.notified().await;
+            Ok(())
+        };
+        let reject = acknowledge_rejection(notice, &sender, "event".into());
+        tokio::pin!(reject);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut reject)
+            .await
+            .is_err());
+        assert!(
+            receiver.try_recv().is_err(),
+            "no ACK while rejection delivery waits"
+        );
+        delivered.notify_one();
+        assert!(reject.await);
+        assert_eq!(receiver.recv().await.as_deref(), Some("event"));
+        assert!(
+            !acknowledge_rejection(
+                async { Err(anyhow::anyhow!("fixture delivery failure")) },
+                &sender,
+                "retry".into()
+            )
+            .await
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "failed rejection must remain retryable"
+        );
+        drop(receiver);
+        assert!(
+            acknowledge_rejection(
+                async { Ok(()) },
+                &sender,
+                "delivered-before-disconnect".into()
+            )
+            .await,
+            "delivered notice stays deduplicated across socket generations"
+        );
+    }
 
     #[test]
     fn sweep_removes_only_stale_slack_attachments() {

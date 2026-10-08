@@ -20,10 +20,12 @@ pub struct Commit {
     pub parents: usize,
     pub refs: Vec<String>,
     pub repo: String,
+    /// Stable identity separate from the non-unique display name.
+    pub repo_key: String,
 }
 
 /// Load up to `depth` commits (all refs) with timestamp/parents/subject/refs.
-pub fn load_commits(repo_path: &str, repo_name: &str, depth: usize) -> Vec<Commit> {
+pub fn load_commits(repo_path: &str, repo_name: &str, depth: usize) -> Result<Vec<Commit>, String> {
     let out = Command::new("git")
         .args([
             "-C",
@@ -35,9 +37,17 @@ pub fn load_commits(repo_path: &str, repo_name: &str, depth: usize) -> Vec<Commi
             "--pretty=%ct\x1f%P\x1f%s\x1f%D",
         ])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    out.lines()
+        .map_err(|error| format!("Cannot read repository {repo_name}: {error}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "Cannot read repository {repo_name}: git log failed ({})",
+            out.status
+        ));
+    }
+    let text = String::from_utf8(out.stdout)
+        .map_err(|_| format!("Cannot read repository {repo_name}: git returned invalid UTF-8"))?;
+    Ok(text
+        .lines()
         .filter_map(|line| {
             let f: Vec<&str> = line.split('\x1f').collect();
             if f.len() < 4 {
@@ -56,9 +66,10 @@ pub fn load_commits(repo_path: &str, repo_name: &str, depth: usize) -> Vec<Commi
                 parents,
                 refs,
                 repo: repo_name.to_string(),
+                repo_key: repo_path.to_string(),
             })
         })
-        .collect()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +231,8 @@ struct WindowStats {
     cfr: Option<f64>,
     mttr: Option<f64>,
     batch_median: Option<f64>,
+    feature_to_release: Option<f64>,
+    release_to_deploy: Option<f64>,
 }
 
 /// All window math over the closed interval `[from, to]`. `span_days` is the
@@ -243,7 +256,7 @@ fn window_stats(
         if c.ts < from || c.ts > to {
             continue;
         }
-        let slot = by_repo.entry(c.repo.as_str()).or_default();
+        let slot = by_repo.entry(c.repo_key.as_str()).or_default();
         if let Some(tag) = deploy_tag(&c.refs, &cfg.deploy_tag_pattern) {
             slot.0.push(Deploy {
                 ts: c.ts,
@@ -271,15 +284,36 @@ fn window_stats(
     let mut recoveries: Vec<(i64, f64)> = vec![];
     let mut unrecovered = 0u32;
     let mut batches: Vec<f64> = vec![];
+    let mut feature_gaps = vec![];
+    let mut release_gaps = vec![];
 
     for (_, (mut rdeploys, mut rmerges)) in by_repo {
         rdeploys.sort_by_key(|d| d.ts);
         rmerges.sort_by_key(|m| m.ts);
 
+        let features: Vec<i64> = rmerges
+            .iter()
+            .filter(|m| m.kind == "feature")
+            .map(|m| m.ts)
+            .collect();
+        let releases: Vec<i64> = rmerges
+            .iter()
+            .filter(|m| m.kind == "release")
+            .map(|m| m.ts)
+            .collect();
+        let hotfixes: Vec<i64> = rmerges
+            .iter()
+            .filter(|m| m.kind == "hotfix")
+            .map(|m| m.ts)
+            .collect();
+        let deployed: Vec<i64> = rdeploys.iter().map(|d| d.ts).collect();
+        feature_gaps.extend(stage_gaps(&releases, &features));
+        release_gaps.extend(stage_gaps(&deployed, &releases));
+
         // Lead time: each merge pairs with the first subsequent deploy in the
         // SAME repo; merges with none are censored (counted, excluded).
         for m in &rmerges {
-            match rdeploys.iter().find(|d| d.ts >= m.ts) {
+            match rdeploys.get(rdeploys.partition_point(|d| d.ts < m.ts)) {
                 Some(d) => leads.push((d.ts, (d.ts - m.ts) as f64 / 3600.0)),
                 None => unshipped += 1,
             }
@@ -290,9 +324,9 @@ fn window_stats(
         // to that next deploy.
         for i in 0..rdeploys.len() {
             let wend = rdeploys.get(i + 1).map(|d| d.ts).unwrap_or(to);
-            let failed = rmerges
-                .iter()
-                .any(|m| m.kind == "hotfix" && m.ts > rdeploys[i].ts && m.ts <= wend);
+            let failed = hotfixes
+                .get(hotfixes.partition_point(|&ts| ts <= rdeploys[i].ts))
+                .is_some_and(|&ts| ts <= wend);
             rdeploys[i].failed = failed;
             if failed {
                 match rdeploys.get(i + 1) {
@@ -307,10 +341,8 @@ fn window_stats(
         let mut prev = from - 1;
         for d in &rdeploys {
             batches.push(
-                rmerges
-                    .iter()
-                    .filter(|m| m.ts > prev && m.ts <= d.ts)
-                    .count() as f64,
+                (rmerges.partition_point(|m| m.ts <= d.ts)
+                    - rmerges.partition_point(|m| m.ts <= prev)) as f64,
             );
             prev = d.ts;
         }
@@ -339,6 +371,8 @@ fn window_stats(
         },
         mttr: percentile(&rec_hours, 50.0),
         batch_median: percentile(&batches, 50.0),
+        feature_to_release: mean(&feature_gaps),
+        release_to_deploy: mean(&release_gaps),
         deploys,
         merges,
         leads,
@@ -348,23 +382,22 @@ fn window_stats(
     }
 }
 
-/// Mean gap (hours) from each target to the latest source at or before it.
-fn avg_gap(targets: &[i64], sources: &[i64]) -> Option<f64> {
-    let gaps: Vec<f64> = targets
+/// Per-repository gaps against sorted timestamps. Binary search keeps large
+/// histories O(n log n), and samples are aggregated only after pairing.
+fn stage_gaps(targets: &[i64], sources: &[i64]) -> Vec<f64> {
+    targets
         .iter()
-        .filter_map(|&t| {
+        .filter_map(|&target| {
             sources
-                .iter()
-                .filter(|&&s| s <= t)
-                .max()
-                .map(|&s| (t - s) as f64 / 3600.0)
+                .partition_point(|&source| source <= target)
+                .checked_sub(1)
+                .map(|index| (target - sources[index]) as f64 / 3600.0)
         })
-        .collect();
-    if gaps.is_empty() {
-        None
-    } else {
-        Some(gaps.iter().sum::<f64>() / gaps.len() as f64)
-    }
+        .collect()
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
 }
 
 fn opt(v: Option<f64>) -> Value {
@@ -439,20 +472,6 @@ pub fn compute(commits: &[Commit], days: i64, label: &str, now: i64, cfg: &Confi
     }
 
     let count = |k: &str| cur.merges.iter().filter(|m| m.kind == k).count();
-    let feat_ts: Vec<i64> = cur
-        .merges
-        .iter()
-        .filter(|m| m.kind == "feature")
-        .map(|m| m.ts)
-        .collect();
-    let rel_ts: Vec<i64> = cur
-        .merges
-        .iter()
-        .filter(|m| m.kind == "release")
-        .map(|m| m.ts)
-        .collect();
-    let dep_ts: Vec<i64> = cur.deploys.iter().map(|d| d.ts).collect();
-
     let mut recent: Vec<&MergeRec> = cur.merges.iter().collect();
     recent.sort_by_key(|m| std::cmp::Reverse(m.ts));
     recent.truncate(50);
@@ -470,9 +489,9 @@ pub fn compute(commits: &[Commit], days: i64, label: &str, now: i64, cfg: &Confi
         tier_lead: t_lead,
         tier_mttr: t_mttr,
         batch_median: cur.batch_median,
-        feat_to_rel_h: avg_gap(&rel_ts, &feat_ts),
-        rel_to_dep_h: avg_gap(&dep_ts, &rel_ts),
-        deploy_ts: dep_ts.clone(),
+        feat_to_rel_h: cur.feature_to_release,
+        rel_to_dep_h: cur.release_to_deploy,
+        deploy_ts: cur.deploys.iter().map(|d| d.ts).collect(),
         failed_tags: cur
             .deploys
             .iter()
@@ -509,8 +528,8 @@ pub fn compute(commits: &[Commit], days: i64, label: &str, now: i64, cfg: &Confi
         "weekly": weekly,
         "counts": { "feature": count("feature"), "release": count("release"), "hotfix": count("hotfix") },
         "batch_median": opt(cur.batch_median),
-        "avg_feature_to_release_hours": opt(avg_gap(&rel_ts, &feat_ts)),
-        "avg_release_to_deploy_hours": opt(avg_gap(&dep_ts, &rel_ts)),
+        "avg_feature_to_release_hours": opt(cur.feature_to_release),
+        "avg_release_to_deploy_hours": opt(cur.release_to_deploy),
         "deployments": cur.deploys.iter().map(|d| json!({"ts": d.ts, "tag": d.tag, "failed": d.failed, "repo": d.repo})).collect::<Vec<_>>(),
         "recent_merges": recent.iter().map(|m| json!({"ts": m.ts, "kind": m.kind, "subject": m.subject, "repo": m.repo})).collect::<Vec<_>>(),
         "suggestions": sugg.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
@@ -532,6 +551,7 @@ mod tests {
             parents,
             refs: refs.iter().map(|s| s.to_string()).collect(),
             repo: repo.into(),
+            repo_key: repo.into(),
         }
     }
 
@@ -547,6 +567,124 @@ mod tests {
 
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    #[test]
+    fn same_display_names_and_stage_gaps_do_not_cross_repository_identity() {
+        let mut feature = mk(NOW - 10 * D, "Merge feature/a", 2, &[], "same-name");
+        feature.repo_key = "repo-a".into();
+        let mut release = mk(NOW - 5 * D, "Merge release/b", 2, &[], "same-name");
+        release.repo_key = "repo-b".into();
+        let mut deploy = mk(NOW - D, "deploy", 1, &["tag: deployed"], "same-name");
+        deploy.repo_key = "repo-c".into();
+        let m = compute(&[feature, release, deploy], 14, "All", NOW, &cfg());
+        assert!(
+            m["lead_median_h"].is_null(),
+            "display labels are not repository identity"
+        );
+        assert!(m["avg_feature_to_release_hours"].is_null());
+        assert!(m["avg_release_to_deploy_hours"].is_null());
+    }
+
+    #[test]
+    fn indexed_pairing_matches_exhaustive_oracle_including_equal_timestamps() {
+        for seed in 0..32 {
+            let commits: Vec<Commit> = (0..80)
+                .map(|i| {
+                    let ts = NOW - ((i * 37 + seed * 19) % 100) * 3600;
+                    let kind =
+                        ["Merge feature/a", "Merge release/a", "Merge hotfix/a"][i as usize % 3];
+                    mk(
+                        ts,
+                        kind,
+                        2,
+                        if i % 4 == 0 { &["tag: deployed"] } else { &[] },
+                        "repo",
+                    )
+                })
+                .collect();
+            let stats = window_stats(&commits, NOW - 14 * D, NOW, 14, &cfg());
+            let mut deploys: Vec<_> = commits
+                .iter()
+                .filter(|c| !c.refs.is_empty())
+                .map(|c| c.ts)
+                .collect();
+            deploys.sort();
+            let mut expected_leads: Vec<_> = commits
+                .iter()
+                .filter_map(|m| {
+                    deploys
+                        .iter()
+                        .find(|&&d| d >= m.ts)
+                        .map(|&d| (d - m.ts) as f64 / 3600.0)
+                })
+                .collect();
+            expected_leads.sort_by(f64::total_cmp);
+            assert_eq!(stats.lead_median, percentile(&expected_leads, 50.0));
+            assert_eq!(
+                stats.unshipped as usize,
+                commits.len() - expected_leads.len()
+            );
+            let mut batches = vec![];
+            let mut previous = NOW - 14 * D - 1;
+            for (index, &deploy) in deploys.iter().enumerate() {
+                let end = deploys.get(index + 1).copied().unwrap_or(NOW);
+                let failed = commits
+                    .iter()
+                    .any(|c| c.subject.contains("hotfix") && c.ts > deploy && c.ts <= end);
+                assert_eq!(stats.deploys[index].failed, failed);
+                batches.push(
+                    commits
+                        .iter()
+                        .filter(|c| c.ts > previous && c.ts <= deploy)
+                        .count() as f64,
+                );
+                previous = deploy;
+            }
+            batches.sort_by(f64::total_cmp);
+            assert_eq!(stats.batch_median, percentile(&batches, 50.0));
+            let releases: Vec<_> = commits
+                .iter()
+                .filter(|c| c.subject.contains("release"))
+                .map(|c| c.ts)
+                .collect();
+            let features: Vec<_> = commits
+                .iter()
+                .filter(|c| c.subject.contains("feature"))
+                .map(|c| c.ts)
+                .collect();
+            let gaps: Vec<_> = releases
+                .iter()
+                .filter_map(|r| {
+                    features
+                        .iter()
+                        .filter(|f| *f <= r)
+                        .max()
+                        .map(|f| (r - f) as f64 / 3600.0)
+                })
+                .collect();
+            approx(stats.feature_to_release.unwrap(), mean(&gaps).unwrap());
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated 50k-history measurement"]
+    fn report_at_50k_commits() {
+        let commits: Vec<_> = (0..50_000)
+            .map(|i| {
+                mk(
+                    NOW - i * 10,
+                    ["Merge feature/a", "Merge release/a", "Merge hotfix/a"][i as usize % 3],
+                    2,
+                    if i % 4 == 0 { &["tag: deployed"] } else { &[] },
+                    "repo",
+                )
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let report = compute(&commits, 14, "fixture", NOW, &cfg());
+        assert_eq!(report["deployments"].as_array().unwrap().len(), 12_500);
+        eprintln!("50k report elapsed={:?}", start.elapsed());
     }
 
     #[test]

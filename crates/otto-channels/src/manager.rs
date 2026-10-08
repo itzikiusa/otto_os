@@ -189,6 +189,7 @@ pub struct ChannelManager {
     pub settings: SettingsRepo,
     pub secrets: Arc<dyn SecretStore>,
     pub root_user_id: String,
+    admission: crate::admission::InboundAdmission,
     /// Daemon event bus (the same one the WS subscribes to). The proactive
     /// self-improvement notifier subscribes to this; `None` disables it.
     pub events: Option<broadcast::Sender<Event>>,
@@ -223,12 +224,19 @@ impl ChannelManager {
             settings,
             secrets,
             root_user_id,
+            admission: Default::default(),
             events,
             swarm_trigger: None,
             improver: None,
             run_trigger: None,
             workflow_trigger: None,
         }
+    }
+
+    /// Share the daemon budget with the separately constructed webhook bridge.
+    pub fn with_admission(mut self, admission: crate::admission::InboundAdmission) -> Self {
+        self.admission = admission;
+        self
     }
 
     /// Wire the Run with Otto launch/approval hook (otto-server provides it).
@@ -304,6 +312,7 @@ impl ChannelManager {
             self.swarm_trigger.clone(),
             self.run_trigger.clone(),
             self.workflow_trigger.clone(),
+            self.admission.clone(),
         );
 
         let mut gen_cancel: Option<Arc<AtomicBool>> = None;
@@ -327,8 +336,14 @@ impl ChannelManager {
             let integrations = match self.integrations.list_all_enabled().await {
                 Ok(list) => list,
                 Err(e) => {
-                    warn!("channel manager: failed to load integrations: {e}");
-                    Vec::new()
+                    warn!("channel manager: failed to load integrations; retaining current listeners: {e}");
+                    // A failed read is not an explicit empty configuration.
+                    // Preserve healthy listeners and retry on the usual timer.
+                    tokio::select! {
+                        _ = tokio::time::sleep(RESCAN_INTERVAL) => {}
+                        _ = wake.notified() => {}
+                    }
+                    continue;
                 }
             };
 

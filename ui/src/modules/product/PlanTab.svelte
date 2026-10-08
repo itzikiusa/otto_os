@@ -271,11 +271,12 @@
   }
 
   async function regenerate(): Promise<void> {
+    const current = product.captureSelection();
     const ok = await confirmer.ask(
       'Generate a new plan? This creates a new plan version; your current checkbox progress stays on the existing version but a fresh plan will be shown.',
       { title: 'Regenerate plan', confirmLabel: 'Regenerate', danger: false },
     );
-    if (!ok) return;
+    if (!ok || !current()) return;
     await generate();
   }
 
@@ -377,7 +378,10 @@
       await openLinkedSwarm();
       return;
     }
-    const target = swarm.swarms.find((s) => s.id === targetSwarmId);
+    const current = product.captureSelection();
+    const wsId = ws.currentId;
+    const swarmId = targetSwarmId;
+    const target = swarm.swarms.find((s) => s.id === swarmId);
     const where = target ? `“${target.name}”` : 'a swarm';
     // Lifecycle gate: nudge the operator to approve the story first (soft gate).
     const stage = product.detail?.story?.stage;
@@ -389,16 +393,17 @@
       `Create a project in ${where} from this story and seed it with the plan tasks? You can then run the swarm to implement it.${warn}`,
       { title: 'Send to Swarm', confirmLabel: 'Send to Swarm', danger: !!notApproved },
     );
-    if (!ok) return;
+    if (!ok || !current()) return;
     sendingToSwarm = true;
     try {
-      const resp = await product.sendToSwarm(targetSwarmId ? { swarm_id: targetSwarmId } : {});
+      const resp = await product.sendToSwarm(swarmId ? { swarm_id: swarmId } : {});
       toasts.success(
         'Sent to Swarm',
         `Project “${resp.project.name}” created in “${resp.swarm.name}” with ${resp.tasks.length} task(s).`,
       );
-      await swarm.openProject(ws.currentId, resp.swarm.id, resp.project.id);
-      router.go('swarm');
+      if (!current()) return;
+      await swarm.openProject(wsId, resp.swarm.id, resp.project.id);
+      if (current()) router.go('swarm');
     } catch (e) {
       toastError('Couldn’t send to Swarm', e);
     } finally {

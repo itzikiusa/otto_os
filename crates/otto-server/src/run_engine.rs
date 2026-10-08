@@ -768,8 +768,14 @@ where
 async fn poll_goal_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<otto_core::domain::GoalLoop> {
     for _ in 0..GOAL_LOOP_POLL_MAX {
         let gl = ctx.goal_loops_repo.get(loop_id).await?;
-        if gl.status.is_terminal() {
+        if gl.status == otto_core::domain::GoalLoopStatus::Succeeded {
             return Ok(gl);
+        }
+        if gl.status.is_terminal() {
+            return Err(Error::Conflict(format!(
+                "goal loop ended as {} — execution did not succeed",
+                gl.status.as_str()
+            )));
         }
         tokio::time::sleep(POLL_EVERY).await;
     }
@@ -1212,3 +1218,7 @@ mod cancel_tests {
         assert!(p.contains("`origin`"), "{p}");
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/run_goal_outcome.rs"]
+mod run_goal_outcome_tests;

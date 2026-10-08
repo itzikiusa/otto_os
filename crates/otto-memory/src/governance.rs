@@ -165,6 +165,15 @@ impl MemoryService {
         }
         // Load the first source to inherit metadata.
         let first = self.repo().get(ws, &req.ids[0]).await?;
+        // A merge must not widen the visibility of any source, including a
+        // private row appearing after a shared first row. Validate every source
+        // before creating the destination or recording provenance.
+        let mut visibility = first.visibility.clone();
+        for id in &req.ids[1..] {
+            if self.repo().get(ws, id).await?.visibility != "shared" {
+                visibility = "private".into();
+            }
+        }
 
         let provenance = serde_json::json!({
             "op": "merge",
@@ -188,7 +197,7 @@ impl MemoryService {
             refs: vec![],
             confidence: Some(first.confidence),
             salience: Some(first.salience),
-            visibility: first.visibility.clone(),
+            visibility,
         };
         let mut created = self.save(ws, by, vec![new_mem]).await?;
         let merged = created.remove(0);

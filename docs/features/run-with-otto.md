@@ -255,7 +255,11 @@ a webhook, REST, or the UI.
 - All source bodies and delivered summaries run through `otto_core::redact`.
 - The agent works in an **isolated worktree branch** — never the user's checkout or
   branch.
-- No PR is opened without approval + opt-in + a passing/waived proof pack.
+- No PR is opened without approval + opt-in + a current passing/waived proof pack.
+  Publication rechecks the pack and requires a clean worktree at the commit captured
+  in its diff evidence. It never auto-commits leftover edits. After changing code
+  or when opening an older run whose proof lacks a commit binding, assemble fresh
+  proof before trying again.
 - Loopback-only defaults are unchanged; no new network listeners.
 
 ---
@@ -266,11 +270,14 @@ a webhook, REST, or the UI.
   explicit `repo_id` on launch.
 - **A run `failed` during `executing`/`reviewing` after a restart** — the boot reaper
   fails runs caught mid live-work (their agent/review processes are gone); the branch's
-  commits are preserved, so just relaunch.
+  commits are preserved, so just relaunch. Recovery completes before restored sessions,
+  background workers or HTTP requests can admit new work; a recovery database error
+  stops startup so new runs cannot be mistaken for interrupted work.
 - **The PR draft says "branch not pushed"** — the repo has no authorized git account;
   the draft (title/description) is still produced. Bind a git account to push/open.
-- **`open-pr` returns 409** — the run isn't approved, or its proof pack isn't
-  `passed`/`waived`.
+- **`open-pr` returns 409** — its current proof is not `passed`/`waived`, is missing,
+  or does not match the clean working revision. Commit the intended code and
+  assemble fresh proof, then retry. Approval is required separately.
 - **A Slack `approve` reply did nothing** — there must be a run currently
   `awaiting_approval` bound to that exact `(workspace, channel, thread)`, and the
   replying user must be in the integration's `allowed_users`.

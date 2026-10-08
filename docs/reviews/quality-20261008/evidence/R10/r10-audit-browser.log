@@ -1,0 +1,50 @@
+[WebServer] (node:31650) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VUorDR OTTO_PORT=17810
+2026-10-07T23:01:08.135080Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VUorDR)
+2026-10-07T23:01:08.377387Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VUorDR/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:01:08.382248Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VUorDR/clickhouse, port 53608)
+2026-10-07T23:01:08.384888Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:01:08.387207Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:01:08.387273Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:01:08.387296Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:01:08.387384Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:01:08.387412Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:01:08.387502Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:01:08.387551Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:01:08.392731Z  INFO otto_server::boot::recovery: boot: post-listen work done in 5 ms (plugins=0)
+2026-10-07T23:01:08.454291Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:01:08.511508Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:01:08.511601Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:01:08.511627Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:01:08.511645Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:01:08.511682Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:01:08.512824Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:01:08.512859Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:01:08.512885Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:01:08.512911Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:01:08.512934Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:01:08.512976Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:01:08.513085Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:01:08.535035Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:01:08.538485Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:01:08.568597Z  INFO ottod: listening on http://127.0.0.1:17810
+2026-10-07T23:01:08.568771Z  INFO ottod: alt loopback lane on http://localhost:17810 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:01:08.568816Z  INFO otto_server::boot: boot: ready in 433 ms (db_compact=0 db_open=237 maintenance=2 modules=8 restore=0 recovery=183)
+[e2e] test daemon ready (pid 31694); root onboarded.
+
+Running 1 test using 1 worker
+
+2026-10-07T23:01:08.777959Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VUorDR/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:01:08.779532Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:01:08.786379Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-07T23:01:08.820055Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:01:08.820513Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:01:08.820562Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:31760) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 2:01:09 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  1 [desktop-browser] › e2e/desktop-review5-mcp-audit-details.spec.ts:6:1 › audit full identities and failure details are reachable by keyboard and phone disclosure (2.0s)
+
+  1 passed (3.5s)

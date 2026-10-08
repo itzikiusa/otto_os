@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   // RefineChat — displays a single refinement thread transcript and handles
   // sending new messages to the agent.  Props: { tid } (the thread id).
@@ -32,6 +33,12 @@
   let inputText = $state('');
   let sending = $state(false);
 
+  let loadSeq = 0;
+  let activeId = '';
+  let alive = true;
+  const drafts = new Map<string, string>();
+  onDestroy(() => { alive = false; ++loadSeq; });
+
   // ── Load / reload when tid changes ────────────────────────────────────────
   $effect(() => {
     // Reactive on tid — re-runs whenever the active thread switches.
@@ -40,16 +47,28 @@
   });
 
   async function loadThread(threadId: string): Promise<void> {
+    const my = ++loadSeq;
+    const current = () => alive && my === loadSeq && tid === threadId;
+    if (activeId !== threadId) {
+      // An empty draft is an intentional decision too. While sending, the
+      // cleared composer belongs to that in-flight request, not a new draft.
+      if (activeId && !sending) drafts.set(activeId, inputText);
+      activeId = threadId;
+      inputText = drafts.get(threadId) ?? '';
+      messages = [];
+      sending = false;
+    }
     loading = true;
     loadError = null;
     try {
       const detail = await product.getRefinementThread(threadId);
+      if (!current()) return;
       messages = detail.messages;
       threadModel = detail.thread.model;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (current()) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
   }
 
@@ -58,6 +77,10 @@
   async function send(): Promise<void> {
     const body = inputText.trim();
     if (!body || sending) return;
+    const target = tid;
+    const generation = loadSeq;
+    const current = () => alive && tid === target && loadSeq === generation;
+    drafts.delete(target);
 
     // Optimistic user bubble (temporary — will be reconciled with server msg).
     const optimisticMsg: RefinementMessage = {
@@ -75,6 +98,7 @@
     try {
       const resp = await product.sendRefinementMessage(tid, body, provider);
 
+      if (!current()) return;
       // Reconcile: replace the optimistic bubble with the real one and append agent reply.
       messages = [
         ...messages.filter((m) => m.id !== optimisticMsg.id),
@@ -82,12 +106,17 @@
         resp.agent_message,
       ];
     } catch (e) {
+      // Keep a failed send with its original conversation; never overwrite
+      // the draft the person is composing in the newly selected one.
+      // A newer draft (including an explicit clear) wins over an old failure.
+      if (!drafts.has(target)) drafts.set(target, body);
+      if (!current()) return;
       // Roll back the optimistic bubble, restore the typed text, and show an error.
       messages = messages.filter((m) => m.id !== optimisticMsg.id);
       inputText = body;
       toastError('Couldn’t send the message', e);
     } finally {
-      sending = false;
+      if (current()) sending = false;
     }
   }
 

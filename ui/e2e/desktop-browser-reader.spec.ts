@@ -3,6 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
+import { expectNoHorizontalOverflow } from './helpers';
 
 // Browser module: DOM marks, the notes rail, send-to-session, and vault save.
 //
@@ -70,6 +71,34 @@ async function openFixture(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Go', exact: true }).click();
   await expect(page.locator('.reader h1')).toHaveText('Fixture Page', { timeout: 15_000 });
 }
+
+test('restores the selected reader after reload and captures responsive reader states', async ({ page }, info) => {
+  await openFixture(page);
+  await page.reload();
+  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  for (const scheme of ['light', 'dark']) {
+    await page.evaluate((value) => localStorage.setItem('otto_scheme', value), scheme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.reload();
+    await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+    await page.screenshot({ path: info.outputPath(`reader-${scheme}.png`) });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: info.outputPath('reader-phone.png') });
+});
+
+test('tab list failures show an inline retry and recover the saved reader', async ({ page }, info) => {
+  await openFixture(page);
+  await page.route('**/browser/tabs', (route) => route.fulfill({ status: 503, json: { message: 'Temporary tab-list failure' } }));
+  await page.reload();
+  const error = page.getByTestId('load-error');
+  await expect(error).toContainText('Couldn’t load browser tabs');
+  await page.screenshot({ path: info.outputPath('reader-tabs-error.png') });
+  await page.unroute('**/browser/tabs');
+  await error.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+});
 
 test('mark → note → rail shows it', async ({ page }) => {
   await openFixture(page);

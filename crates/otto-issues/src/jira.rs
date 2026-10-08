@@ -84,9 +84,10 @@ static JQL_WALKS: OnceLock<Mutex<HashMap<u64, JqlWalk>>> = OnceLock::new();
 
 /// Walk-cache key: the account (auth header — never stored, only hashed) and
 /// the exact JQL.
-fn jql_walk_key(auth_header: &str, jql: &str) -> u64 {
+fn jql_walk_key(base_url: &str, auth_header: &str, jql: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    base_url.trim_end_matches('/').hash(&mut h);
     auth_header.hash(&mut h);
     jql.hash(&mut h);
     h.finish()
@@ -356,7 +357,7 @@ impl JiraClient {
         let base_url = base_url.trim_end_matches('/').to_string();
         let credentials = format!("{email}:{token}");
         let auth_header = format!("Basic {}", B64.encode(credentials.as_bytes()));
-        // Reuse a cached client keyed by the auth header (encodes base_url + credentials).
+        // Reuse a cached client keyed by site and credentials.
         let http = get_or_build_client(&format!("{base_url}\x00{auth_header}"));
         Self {
             base_url,
@@ -528,7 +529,7 @@ impl JiraClient {
         const MAX_PAGES: u32 = 10;
         let fields = "summary,status,issuetype";
         let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
-        let key = jql_walk_key(&self.auth_header, jql);
+        let key = jql_walk_key(&self.base_url, &self.auth_header, jql);
         let page_size = JQL_PAGE.to_string();
 
         // Resume from the memoised token nearest to `start_at` — "Load more"
@@ -2736,9 +2737,22 @@ mod tests {
 
     #[test]
     fn jql_walk_key_separates_accounts_and_queries() {
-        assert_ne!(jql_walk_key("Basic a", "q"), jql_walk_key("Basic b", "q"));
-        assert_ne!(jql_walk_key("Basic a", "q1"), jql_walk_key("Basic a", "q2"));
-        assert_eq!(jql_walk_key("Basic a", "q"), jql_walk_key("Basic a", "q"));
+        assert_ne!(
+            jql_walk_key("site", "Basic a", "q"),
+            jql_walk_key("site", "Basic b", "q")
+        );
+        assert_ne!(
+            jql_walk_key("site", "Basic a", "q1"),
+            jql_walk_key("site", "Basic a", "q2")
+        );
+        assert_ne!(
+            jql_walk_key("site-a", "Basic a", "q"),
+            jql_walk_key("site-b", "Basic a", "q")
+        );
+        assert_eq!(
+            jql_walk_key("site/", "Basic a", "q"),
+            jql_walk_key("site", "Basic a", "q")
+        );
     }
 
     #[test]
@@ -3441,6 +3455,34 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn jql_walks_isolate_sites_with_identical_credentials() {
+        async fn site(prefix: &'static str) -> String {
+            use axum::extract::Query;
+            use std::collections::HashMap;
+            fixture(axum::Router::new().route("/rest/api/3/search/jql", axum::routing::get(
+                move |Query(q): Query<HashMap<String, String>>| async move {
+                    let start = match q.get("nextPageToken") {
+                        None => 0,
+                        Some(token) if token == &format!("{prefix}-next") => 100,
+                        other => panic!("wrong site's continuation token: {other:?}"),
+                    };
+                    let issues: Vec<_> = (start..start + 100).map(|i| serde_json::json!({
+                        "key": format!("{prefix}-{i}"), "fields": {"summary": format!("{prefix} issue {i}")}
+                    })).collect();
+                    axum::Json(serde_json::json!({"issues": issues, "nextPageToken": format!("{prefix}-next")}))
+                }
+            ))).await
+        }
+        let a = JiraClient::new(&site("A").await, "same@example.test", "same-token");
+        let b = JiraClient::new(&site("B").await, "same@example.test", "same-token");
+        let jql = "project = SITE_ISOLATION_FIXTURE";
+        assert_eq!(a.search_jql(jql, 0).await.unwrap()[0].key, "A-0");
+        assert_eq!(b.search_jql(jql, 0).await.unwrap()[0].key, "B-0");
+        assert_eq!(a.search_jql(jql, 25).await.unwrap()[0].key, "A-25");
+        assert_eq!(a.search_jql(jql, 100).await.unwrap()[0].key, "A-100");
     }
 
     #[tokio::test]

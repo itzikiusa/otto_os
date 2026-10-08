@@ -5324,7 +5324,7 @@ pub(crate) fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Err
 /// GitHub (any username + PAT), Bitbucket (see [`AskPass::envs`] — API tokens
 /// need the magic `x-bitbucket-api-token-auth` username; access tokens use
 /// `x-token-auth`) and GitLab (any username + PAT).
-struct AskPass {
+pub(crate) struct AskPass {
     // Held to keep the temp file alive for the duration of the command.
     _file: tempfile::TempPath,
     path: PathBuf,
@@ -5332,7 +5332,7 @@ struct AskPass {
 }
 
 impl AskPass {
-    fn new(token: &str) -> Result<Self> {
+    pub(crate) fn new(token: &str) -> Result<Self> {
         use std::io::Write;
         let mut f = tempfile::Builder::new()
             .prefix("otto-askpass-")
@@ -5358,7 +5358,7 @@ impl AskPass {
         })
     }
 
-    fn envs(&self) -> Vec<(String, String)> {
+    pub(crate) fn envs(&self) -> Vec<(String, String)> {
         let mut envs = vec![
             (
                 "GIT_ASKPASS".to_string(),

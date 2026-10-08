@@ -1,0 +1,24 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.76s
+     Running unittests src/lib.rs (target/debug/deps/otto_state-b408ed1d6f830c13)
+
+running 1 test
+test assistant::tests::thread_history_first_page_is_bounded ... FAILED
+
+failures:
+
+---- assistant::tests::thread_history_first_page_is_bounded stdout ----
+
+thread 'assistant::tests::thread_history_first_page_is_bounded' (3316237) panicked at crates/otto-state/src/assistant.rs:1079:9:
+assertion `left == right` failed
+  left: 105
+ right: 100
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    assistant::tests::thread_history_first_page_is_bounded
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 422 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p otto-state --lib`

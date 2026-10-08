@@ -1,0 +1,45 @@
++ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --download-only redis-server ffmpeg
+::warning::apt acquisition exited 100; retrying once with the official Ubuntu archive
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmp54hy22vn/apt/sources.list
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmp54hy22vn/apt/apt-mirrors.txt
++ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --download-only redis-server ffmpeg
+::error::apt dependencies unavailable after both acquisition attempts (exit 100)
+.+ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
+::warning::apt acquisition exited 100; retrying once with the official Ubuntu archive
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmp6kgrtuiv/apt/sources.list
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmp6kgrtuiv/apt/apt-mirrors.txt
++ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
+::error::apt dependencies unavailable after both acquisition attempts (exit 100)
+.+ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --download-only redis-server ffmpeg
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-download redis-server ffmpeg
+.Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmpq9fvt7vu/apt/sources.list
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmpq9fvt7vu/apt/apt-mirrors.txt
+.+ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-install-recommends --download-only redis-server ffmpeg
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-install-recommends --no-download redis-server ffmpeg
+.+ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --download-only redis-server ffmpeg
+::warning::apt acquisition exited 124; retrying once with the official Ubuntu archive
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmprm6tqtp5/apt/sources.list
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmprm6tqtp5/apt/apt-mirrors.txt
++ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --download-only redis-server ffmpeg
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-download redis-server ffmpeg
+.+ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
+::warning::apt acquisition exited 124; retrying once with the official Ubuntu archive
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmpvnayykga/apt/sources.list
+Using Ubuntu's official archive in /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/tmpvnayykga/apt/apt-mirrors.txt
++ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --download-only redis-server ffmpeg
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-download redis-server ffmpeg
+.+ timeout --kill-after=10s 180s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 -o APT::Update::Error-Mode=any update
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --download-only redis-server ffmpeg
++ timeout --kill-after=10s 300s apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=1 install -y --no-download redis-server ffmpeg
+..................
+----------------------------------------------------------------------
+Ran 25 tests in 0.910s
+
+OK

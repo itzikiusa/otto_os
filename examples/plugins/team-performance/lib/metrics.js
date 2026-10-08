@@ -238,7 +238,7 @@ function flowRecord(r, estimates) {
     sprints: r.sprints || [],
     sprint_changes: (r.sprint_changes || []).map((c) => ({ ...c, at: toMs(c.at) })),
     phases: ph
-      ? { design: ph.design.days, dev: ph.dev.days, review: ph.review.total, deployment: ph.deploy.days, rework: ph.rework.in_days ?? null }
+      ? ph
       : null,
   };
 }
@@ -256,6 +256,7 @@ function computeMetrics(scope, window, side = {}) {
   const fr = recs.map((r) => flowRecord(r, estimates));
   const doneIn = fr.filter((r) => r.done_at != null && r.done_at >= window.since && r.done_at < window.until && !r.subtask);
   const delivered = doneIn.filter((r) => !r.scope_excluded);
+  const deliveredKeys = new Set(delivered.map((r) => r.key));
 
   // Capacity (per canonical person who delivered or is registered+included).
   const ids = new Set();
@@ -352,7 +353,7 @@ function computeMetrics(scope, window, side = {}) {
     pr_count: side.prs ? prsInWin.length : 0,
     design_tracked_share: phaseRecs.length ? designTracked / phaseRecs.length : null,
     estimate_coverage: delivered.length ? delivered.filter((r) => r.estimate_days > 0).length / delivered.length : null,
-    git_evidence_share: delivered.length ? recs.filter((r) => delivered.some((d) => d.key === r.key) && r.git_change && r.git_change.commits).length / delivered.length : null,
+    git_evidence_share: delivered.length ? recs.filter((r) => deliveredKeys.has(r.key) && r.git_change && r.git_change.commits).length / delivered.length : null,
     target_ref: staleRepo ? { name: staleRepo[0], stale: true, behind_days: Math.round(staleRepo[1]) } : null,
     unmapped_authors: (side.unmatched_authors || []).map((a) => a.name || a),
     capacity: { capacity_days: capacity.capacity_days, business_days: capacity.business_days },

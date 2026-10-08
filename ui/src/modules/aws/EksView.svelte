@@ -84,13 +84,16 @@
   });
 
   let detail = $state<{ c: EksClusterSummary; d: EksClusterDetail | null; error: string } | null>(null);
+  let detailRequest = 0;
   async function openDetail(c: EksClusterSummary): Promise<void> {
-    detail = { c, d: null, error: '' };
+    const request = ++detailRequest;
+    const target = { ...c, region: rowRegion(c) };
+    detail = { c: target, d: null, error: '' };
     try {
-      const d = await awsApi.eksCluster(account.id, c.name, rowRegion(c));
-      if (detail?.c.name === c.name) detail = { c, d, error: '' };
+      const d = await awsApi.eksCluster(account.id, target.name, target.region);
+      if (request === detailRequest && detail) detail = { c: target, d, error: '' };
     } catch (e) {
-      if (detail?.c.name === c.name) detail = { c, d: null, error: e instanceof Error ? e.message : String(e) };
+      if (request === detailRequest && detail) detail = { c: target, d: null, error: e instanceof Error ? e.message : String(e) };
     }
   }
 

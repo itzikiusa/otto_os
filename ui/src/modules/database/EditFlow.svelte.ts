@@ -121,7 +121,7 @@ export class EditFlow {
     const sql = this.statement;
     const result = this.result;
     if (!sql || !this.connectionId || !result || result.columns.length === 0) return null;
-    if (result.masked) return null; // INSERTs of redacted placeholders = data loss
+    if (result.masked || result.cells_truncated) return null; // INSERTs of redacted placeholders = data loss
     if (this.engine === 'mongodb') {
       const coll = mongoCollectionForEdit(sql);
       return coll ? { db: this.ranDb(), table: coll } : null;
@@ -181,6 +181,12 @@ export class EditFlow {
     // safely attributed to one statement's table (see parseSimpleSelect).
     if (this.resultCount > 1 || /;\s*\S/.test(sql.trim().replace(/;\s*$/, ''))) {
       this.editReason = 'Editing is unavailable for multi-statement batches.';
+      return;
+    }
+    // Row/byte pagination preserves kept rows, but shortened cells are lossy:
+    // never write their display placeholders back as stored values.
+    if (this.result?.cells_truncated) {
+      this.editReason = 'Editing is disabled because one or more values were shortened for display. Narrow the query or export the full values.';
       return;
     }
     // Masked values are REDACTED placeholders — writing them back would destroy
@@ -955,7 +961,7 @@ export class EditFlow {
   }
 
   // ── Whole-document editor (JSON / Vertical views) ──────────────────────────
-  // Edits the full row as one JSON object; Save builds a Mongo replaceOne (or
+  // Edits the full row as one JSON object; Save builds a Mongo updateOne (or
   // a per-changed-column SQL UPDATE) and opens the normal review modal. With
   // `rowIdx === -1` it is the INSERT editor: the draft starts as `{}` (SQL: a
   // template of the columns, a single key omitted so it regenerates) and Save

@@ -104,13 +104,17 @@
 
   async function act(i: Ec2Instance, action: Ec2Action): Promise<void> {
     if (!resourceAccess.can('aws_account', account.id, `ec2_${action}`, 'aws_ec2', 'edit')) return;
+    // Approval belongs to the target shown in the sheet, even if navigation or
+    // a region change occurs before it resolves.
+    const accountId = account.id;
+    const targetRegion = rowRegion(i);
     const label = i.name ? `${i.name} (${i.instance_id})` : i.instance_id;
     const verb = action === 'start' ? 'Start' : action === 'stop' ? 'Stop' : 'Reboot';
     const ok = await confirmProd({
       env: account.environment,
       verb,
       title: `${verb} instance`,
-      where: `EC2 ${label} · ${account.name} · ${rowRegion(i)}`,
+      where: `EC2 ${label} · ${account.name} · ${targetRegion}`,
       // Start is reversible; stop / reboot interrupt a running host, so type the id.
       typed: action === 'start' ? undefined : i.instance_id,
       danger: action !== 'start',
@@ -118,7 +122,7 @@
     if (!ok) return;
     busy = { ...busy, [i.instance_id]: true };
     try {
-      const r = await awsApi.ec2Action(account.id, i.instance_id, action, rowRegion(i));
+      const r = await awsApi.ec2Action(accountId, i.instance_id, action, targetRegion);
       toasts.success(`${verb} sent`, `${i.instance_id}: ${r.previous_state} → ${r.current_state}`);
       await load();
     } catch (e) {

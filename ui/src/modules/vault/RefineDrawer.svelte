@@ -6,7 +6,7 @@
   // after POSTing we poll GET refine-session until the session id lands so the
   // live terminal attaches while the agent is still typing. Once a session
   // exists the provider is locked (follow-up prompts reuse the same session).
-  // The drawer is remounted per note ({#key vault.notePath} in NoteView), so
+  // The drawer is remounted per workspace, vault and note in NoteView, so
   // on mount we reattach to any session an earlier open of this note started.
   import { onMount } from 'svelte';
   import type { Poller } from '../../lib/poll';
@@ -87,10 +87,10 @@
 
   async function checkSession(): Promise<void> {
     if (!vault.current) return;
-    const myEpoch = epoch;
+    const myEpoch = epoch, workspace = vault.wsId, id = vault.current.id;
     try {
-      const s = await refineSession(vault.wsId, vault.current.id, path);
-      if (myEpoch !== epoch) return; // reset raced this poll
+      const s = await refineSession(workspace, id, path);
+      if (myEpoch !== epoch || vault.wsId !== workspace || vault.current?.id !== id) return; // reset raced this poll
       if (s.session_id) {
         sessionId = s.session_id;
         stopPolling();
@@ -109,6 +109,7 @@
     const myEpoch = epoch;
     const wsId = vault.wsId;
     const vaultId = vault.current.id;
+    const current = () => epoch === myEpoch && vault.wsId === wsId && vault.current?.id === vaultId;
     // Snapshot the note as it is on disk BEFORE the agent touches it (Undo).
     let before: string | null = null;
     try {
@@ -116,10 +117,11 @@
     } catch {
       /* no snapshot → the turn still runs, just without Undo */
     }
+    if (!current()) return;
     startSessionPoll();
     try {
       const r = await refineNote(wsId, vaultId, { path, prompt: p, provider });
-      if (myEpoch !== epoch) return; // reset happened mid-turn — stale result
+      if (!current()) return; // reset or selection changed mid-turn — stale result
       sessionId = r.session_id;
       stopPolling();
       prompt = '';
@@ -127,6 +129,7 @@
       if (before !== null) {
         try {
           const after = await vaultNote(wsId, vaultId, path);
+          if (!current()) return;
           if (after.raw !== before) {
             result = {
               before,
@@ -146,11 +149,11 @@
         void vault.open(path);
       }
     } catch (e) {
-      if (myEpoch !== epoch) return;
+      if (!current()) return;
       stopPolling();
       toastError('Couldn’t refine', e);
     } finally {
-      if (myEpoch === epoch) sending = false;
+      if (current()) sending = false;
     }
   }
 
@@ -212,7 +215,7 @@
       prompt = pending.prompt;
       queued = true;
     }
-    return () => stopPolling();
+    return () => { epoch++; stopPolling(); };
   });
 </script>
 

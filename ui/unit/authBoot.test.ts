@@ -3,7 +3,7 @@
 // (and polls) — or, re-booting a running app, stays up.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSource } from './sourceHarness.ts';
+import { deferred, loadSource } from './sourceHarness.ts';
 
 class ApiError extends Error {
   status: number;
@@ -121,6 +121,54 @@ function impHarness(api: Record<string, unknown>) {
 }
 
 const me = (id: string, real = 'root') => ({ user: { id }, real_user: { id: real } });
+
+test('a late impersonation identity cannot replace a newer sign-in', async () => {
+  const identity = deferred<ReturnType<typeof me>>();
+  const started = deferred<void>();
+  const h = impHarness({
+    post: async () => ({ token: 'imp' }),
+    get: async (path: string) => {
+      if (path === '/auth/me') { started.resolve(); return identity.promise; }
+      return { capabilities: {} };
+    },
+  });
+  const changing = h.auth.impersonate('guest');
+  await started.promise;
+  await h.auth.acceptLogin({ token: 'new-admin', user: { id: 'new-admin', is_root: true } });
+  identity.resolve(me('guest'));
+  await assert.rejects(changing, /Identity changed/);
+  assert.equal(h.auth.me.id, 'new-admin');
+  assert.equal(h.auth.phase, 'ready');
+  assert.equal(h.shared.token, 'new-admin');
+});
+
+for (const direction of ['start', 'stop']) {
+  test(`failed impersonation ${direction} blocks actions until the current bearer identity is verified`, async () => {
+    let fail = false;
+    const h = impHarness({
+      post: async () => ({ token: 'imp' }),
+      get: async (path: string) => {
+        if (path === '/auth/me') {
+          if (fail) throw new ApiError(503);
+          return me('guest');
+        }
+        return { capabilities: {} };
+      },
+    });
+    h.auth.me = { id: 'root', is_root: true };
+    h.auth.realUser = h.auth.me;
+    h.auth.phase = 'ready';
+    if (direction === 'stop') await h.auth.impersonate('guest');
+    fail = true;
+    await assert.rejects(direction === 'start' ? h.auth.impersonate('guest') : h.auth.stopImpersonating());
+    assert.equal(h.auth.phase, 'offline');
+    assert.equal(h.auth.me, null);
+    assert.equal(h.auth.realUser, null);
+    assert.equal(h.auth.isRoot, false);
+    assert.equal(h.auth.can('Users', 'admin'), false);
+    assert.equal(h.tab.imp, direction === 'start' ? 'imp' : null);
+  });
+}
 
 test('impersonation start lives in this tab\'s sessionStorage, not shared localStorage (S13-07)', async () => {
   const api = {

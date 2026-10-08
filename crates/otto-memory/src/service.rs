@@ -72,7 +72,7 @@ impl MemoryService {
         Self::build(pool, Some(RemoteClient::new(base_url, token)))
     }
 
-    /// Enable Obsidian-vault write-through: saved memories are also written as
+    /// Enable Obsidian-vault write-through: saved shared memories are also written as
     /// markdown notes under `root/<workspace>/`.
     pub fn with_vault(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.vault = Some(crate::vault::VaultWriter::new(root));
@@ -186,7 +186,7 @@ impl MemoryService {
         let mut out = Vec::with_capacity(items.len());
         for nm in items {
             let (m, outcome) = self.repo.save_one(ws, by, nm, fts).await?;
-            if outcome.is_new() {
+            if outcome.is_new() && m.visibility == "shared" {
                 if let Some(v) = &self.vault {
                     let _ = v.write(ws, &m, &[]);
                 }
@@ -201,6 +201,43 @@ impl MemoryService {
             return r.get(ws, id).await;
         }
         self.repo.get(ws, id).await
+    }
+
+    /// Resolve a row using the caller's visibility. Root/internal callers pass
+    /// `None`; authenticated non-root callers must pass their actual user id.
+    pub async fn get_visible(&self, ws: &str, id: &str, viewer: Option<&str>) -> Result<Memory> {
+        let memory = self.get(ws, id).await?;
+        if viewer.is_some_and(|viewer| memory.visibility != "shared" && memory.created_by != viewer)
+        {
+            return Err(otto_core::Error::NotFound("memory".into()));
+        }
+        Ok(memory)
+    }
+
+    pub async fn links_visible(
+        &self,
+        ws: &str,
+        id: &str,
+        viewer: Option<&str>,
+    ) -> Result<Vec<MemoryLink>> {
+        self.get_visible(ws, id, viewer).await?;
+        if self.remote.is_none() {
+            return self.repo.links_visible(ws, Some(id), viewer).await;
+        }
+        let mut visible = Vec::new();
+        for link in self.links(ws, id).await? {
+            let other = if link.src_id == id {
+                &link.dst_id
+            } else {
+                &link.src_id
+            };
+            match self.get_visible(ws, other, viewer).await {
+                Ok(_) => visible.push(link),
+                Err(otto_core::Error::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(visible)
     }
 
     pub async fn list(&self, ws: &str, f: ListFilter) -> Result<Vec<Memory>> {
@@ -300,11 +337,20 @@ impl MemoryService {
 
     /// An entity's immediate neighborhood: its links + the memories they connect.
     pub async fn entity_graph(&self, ws: &str, id: &str) -> Result<(Vec<MemoryLink>, Vec<Memory>)> {
-        let links = self.repo.links_of(ws, id).await?;
+        self.entity_graph_visible(ws, id, None).await
+    }
+
+    pub async fn entity_graph_visible(
+        &self,
+        ws: &str,
+        id: &str,
+        viewer: Option<&str>,
+    ) -> Result<(Vec<MemoryLink>, Vec<Memory>)> {
+        let links = self.links_visible(ws, id, viewer).await?;
         let mut neighbors = Vec::new();
         for l in &links {
             let other = if l.src_id == id { &l.dst_id } else { &l.src_id };
-            if let Ok(m) = self.repo.get(ws, other).await {
+            if let Ok(m) = self.get_visible(ws, other, viewer).await {
                 neighbors.push(m);
             }
         }
@@ -315,11 +361,12 @@ impl MemoryService {
     /// structured "why selected" reason per hit. The legacy `semantic`/`hybrid`
     /// modes are accepted and execute the same keyword path (tolerant contract
     /// for existing callers; vectors are gone).
-    pub async fn search(&self, ws: &str, q: MemoryQuery) -> Result<Vec<MemoryHit>> {
+    pub async fn search(&self, ws: &str, mut q: MemoryQuery) -> Result<Vec<MemoryHit>> {
+        q.k = if q.k == 0 { 20 } else { q.k.min(200) };
         if let Some(r) = &self.remote {
             return r.search(ws, &q).await;
         }
-        let limit = if q.k == 0 { 20 } else { q.k };
+        let limit = q.k;
         let text = q.text.clone().unwrap_or_default();
 
         let kf = SearchFilter {
@@ -354,7 +401,7 @@ impl MemoryService {
             }
             // Sharing: hide other users' private memories.
             if let Some(viewer) = &q.viewer {
-                if m.visibility == "private" && &m.created_by != viewer {
+                if m.visibility != "shared" && &m.created_by != viewer {
                     continue;
                 }
             }

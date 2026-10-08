@@ -1,0 +1,606 @@
+TAP version 13
+# Subtest: Home pending approvals cannot publish after workspace changes while its poll is busy
+ok 1 - Home pending approvals cannot publish after workspace changes while its poll is busy
+  ---
+  duration_ms: 109.031959
+  type: 'test'
+  ...
+# Subtest: Home stops displaying old scoped rows immediately on workspace switch
+ok 2 - Home stops displaying old scoped rows immediately on workspace switch
+  ---
+  duration_ms: 46.69725
+  type: 'test'
+  ...
+# Subtest: Esc closes the top sheet
+ok 3 - Esc closes the top sheet
+  ---
+  duration_ms: 62.92525
+  type: 'test'
+  ...
+# Subtest: Esc already handled inside the sheet (CodeMirror popup) keeps the modal open
+ok 4 - Esc already handled inside the sheet (CodeMirror popup) keeps the modal open
+  ---
+  duration_ms: 21.182833
+  type: 'test'
+  ...
+# Subtest: a busy (non-dismissable) sheet ignores Esc
+ok 5 - a busy (non-dismissable) sheet ignores Esc
+  ---
+  duration_ms: 9.66425
+  type: 'test'
+  ...
+# Subtest: the Tab trap counts contenteditable editors as focusable
+ok 6 - the Tab trap counts contenteditable editors as focusable
+  ---
+  duration_ms: 0.275208
+  type: 'test'
+  ...
+# Subtest: native embedded context requires Tauri and an injected host, never query flags
+ok 7 - native embedded context requires Tauri and an injected host, never query flags
+  ---
+  duration_ms: 0.823375
+  type: 'test'
+  ...
+# Subtest: native pane geometry rejects hidden or invalid rectangles and clips to viewport
+ok 8 - native pane geometry rejects hidden or invalid rectangles and clips to viewport
+  ---
+  duration_ms: 0.148083
+  type: 'test'
+  ...
+# Subtest: native presence excludes hidden pane even while WebKit reports visible and focused
+ok 9 - native presence excludes hidden pane even while WebKit reports visible and focused
+  ---
+  duration_ms: 0.09425
+  type: 'test'
+  ...
+# Subtest: layout coalesces during IPC and final hide cannot be overtaken by stale geometry
+ok 10 - layout coalesces during IPC and final hide cannot be overtaken by stale geometry
+  ---
+  duration_ms: 0.172
+  type: 'test'
+  ...
+# Subtest: layout continues with newest state after rejected native IPC
+ok 11 - layout continues with newest state after rejected native IPC
+  ---
+  duration_ms: 0.097083
+  type: 'test'
+  ...
+# Subtest: detached surfaces remain addressable when the host split is narrow
+ok 12 - detached surfaces remain addressable when the host split is narrow
+  ---
+  duration_ms: 0.161125
+  type: 'test'
+  ...
+# Subtest: native layout scales CSS geometry by page zoom in window logical points
+ok 13 - native layout scales CSS geometry by page zoom in window logical points
+  ---
+  duration_ms: 0.077875
+  type: 'test'
+  ...
+# Subtest: overlay focus restoration is cancelled when detach or a new overlay wins the race
+ok 14 - overlay focus restoration is cancelled when detach or a new overlay wins the race
+  ---
+  duration_ms: 0.07325
+  type: 'test'
+  ...
+# Subtest: native menus honor primary window focus after macOS window cycling leaves a stale side flag
+ok 15 - native menus honor primary window focus after macOS window cycling leaves a stale side flag
+  ---
+  duration_ms: 1.9865
+  type: 'test'
+  ...
+# Subtest: kick-out confirms with the session, the workspace and no-undo; mid-turn says so
+ok 16 - kick-out confirms with the session, the workspace and no-undo; mid-turn says so
+  ---
+  duration_ms: 0.531542
+  type: 'test'
+  ...
+# Subtest: kick-out: confirmed → delete + walk-out together, then a toast
+ok 17 - kick-out: confirmed → delete + walk-out together, then a toast
+  ---
+  duration_ms: 0.411625
+  type: 'test'
+  ...
+# Subtest: kick-out: cancelled → nothing happens; failed delete → the kid walks back
+ok 18 - kick-out: cancelled → nothing happens; failed delete → the kid walks back
+  ---
+  duration_ms: 0.522709
+  type: 'test'
+  ...
+# Subtest: no actions for a kid you can’t manage
+ok 19 - no actions for a kid you can’t manage
+  ---
+  duration_ms: 0.150625
+  type: 'test'
+  ...
+# Subtest: detention archives (with the working hint) while the kid walks to the bench
+ok 20 - detention archives (with the working hint) while the kid walks to the bench
+  ---
+  duration_ms: 0.687667
+  type: 'test'
+  ...
+# Subtest: detention: a cancelled guard walks the kid back without an error
+ok 21 - detention: a cancelled guard walks the kid back without an error
+  ---
+  duration_ms: 3.166792
+  type: 'test'
+  ...
+# Subtest: release unarchives and says the kid is back
+ok 22 - release unarchives and says the kid is back
+  ---
+  duration_ms: 0.19025
+  type: 'test'
+  ...
+# Subtest: actor disposal releases unique cloned skeletons and mixer bindings while preserving shared templates
+ok 23 - actor disposal releases unique cloned skeletons and mixer bindings while preserving shared templates
+  ---
+  duration_ms: 4.710041
+  type: 'test'
+  ...
+# Subtest: every workspace is a classroom door, the current one first
+ok 24 - every workspace is a classroom door, the current one first
+  ---
+  duration_ms: 3.144041
+  type: 'test'
+  ...
+# Subtest: status → pose: only real output is typing; an alive-but-quiet process sits idle
+ok 25 - status → pose: only real output is typing; an alive-but-quiet process sits idle
+  ---
+  duration_ms: 0.07
+  type: 'test'
+  ...
+# Subtest: each provider gets its own kid; unknown providers the custom kid
+ok 26 - each provider gets its own kid; unknown providers the custom kid
+  ---
+  duration_ms: 0.05175
+  type: 'test'
+  ...
+# Subtest: seating is stable: a status change never moves a kid to another desk
+ok 27 - seating is stable: a status change never moves a kid to another desk
+  ---
+  duration_ms: 0.282542
+  type: 'test'
+  ...
+# Subtest: a room hangs behind its corridor door: back wall on the corridor, door segment on its door
+ok 28 - a room hangs behind its corridor door: back wall on the corridor, door segment on its door
+  ---
+  duration_ms: 0.12275
+  type: 'test'
+  ...
+# Subtest: engine sessions sit in the back row only while live; viewers cannot manage
+ok 29 - engine sessions sit in the back row only while live; viewers cannot manage
+  ---
+  duration_ms: 0.318916
+  type: 'test'
+  ...
+# Subtest: archived sessions sit on the detention bench (newest first, max 3)
+ok 30 - archived sessions sit on the detention bench (newest first, max 3)
+  ---
+  duration_ms: 0.305125
+  type: 'test'
+  ...
+# Subtest: complete membership keeps overflow sessions actionable while geometry stays capped
+ok 31 - complete membership keeps overflow sessions actionable while geometry stays capped
+  ---
+  duration_ms: 1.0335
+  type: 'test'
+  ...
+# Subtest: roomSummary reads like a door sign
+ok 32 - roomSummary reads like a door sign
+  ---
+  duration_ms: 1.029958
+  type: 'test'
+  ...
+# Subtest: a full grid of desks, each with a chair, and one door each side of the wall
+ok 33 - a full grid of desks, each with a chair, and one door each side of the wall
+  ---
+  duration_ms: 1.031209
+  type: 'test'
+  ...
+# Subtest: no furniture footprint lands on a walkway
+ok 34 - no furniture footprint lands on a walkway
+  ---
+  duration_ms: 0.475625
+  type: 'test'
+  ...
+# Subtest: lanePath only walks axis-aligned along lanes and aisles
+ok 35 - lanePath only walks axis-aligned along lanes and aisles
+  ---
+  duration_ms: 0.163042
+  type: 'test'
+  ...
+# Subtest: busy kids never leave their desks; idle kids do wander, and come back
+ok 36 - busy kids never leave their desks; idle kids do wander, and come back
+  ---
+  duration_ms: 16.481542
+  type: 'test'
+  ...
+# Subtest: a wandering kid hurries back when its session wakes up
+ok 37 - a wandering kid hurries back when its session wakes up
+  ---
+  duration_ms: 1.296125
+  type: 'test'
+  ...
+# Subtest: the headmaster checks on the kid that needs you first
+ok 38 - the headmaster checks on the kid that needs you first
+  ---
+  duration_ms: 0.946625
+  type: 'test'
+  ...
+# Subtest: kick-out walks the kid out of the door; detention walks it to the bench
+ok 39 - kick-out walks the kid out of the door; detention walks it to the bench
+  ---
+  duration_ms: 0.886958
+  type: 'test'
+  ...
+# Subtest: restore puts a kicked kid back at its desk (the delete failed)
+ok 40 - restore puts a kicked kid back at its desk (the delete failed)
+  ---
+  duration_ms: 0.112666
+  type: 'test'
+  ...
+# Subtest: reduced motion: nobody wanders, the headmaster stays at the board, kicks are instant
+ok 41 - reduced motion: nobody wanders, the headmaster stays at the board, kicks are instant
+  ---
+  duration_ms: 1.630584
+  type: 'test'
+  ...
+# Subtest: every clip life asks for is in the asset contract
+ok 42 - every clip life asks for is in the asset contract
+  ---
+  duration_ms: 8.758542
+  type: 'test'
+  ...
+# Subtest: an unanswered "needs you" frees the kid to wander after BORED_MS; a fresh one keeps the hand up
+ok 43 - an unanswered "needs you" frees the kid to wander after BORED_MS; a fresh one keeps the hand up
+  ---
+  duration_ms: 6.10325
+  type: 'test'
+  ...
+# (node:41011) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: hidden documents abort screen reads, suppress late feeds, and resume one nonoverlapping batch
+ok 44 - hidden documents abort screen reads, suppress late feeds, and resume one nonoverlapping batch
+  ---
+  duration_ms: 4.687792
+  type: 'test'
+  ...
+# Subtest: a poller created while hidden waits for reveal and still caps each batch at twelve
+ok 45 - a poller created while hidden waits for reveal and still caps each batch at twelve
+  ---
+  duration_ms: 3.566458
+  type: 'test'
+  ...
+# Subtest: annosHash is stable for equal states and changes on any edit (upload skip key)
+ok 46 - annosHash is stable for equal states and changes on any edit (upload skip key)
+  ---
+  duration_ms: 0.439875
+  type: 'test'
+  ...
+# Subtest: an unchanged annotation list makes zero uploads
+ok 47 - an unchanged annotation list makes zero uploads
+  ---
+  duration_ms: 0.482291
+  type: 'test'
+  ...
+# Subtest: only a state that differs from the last save uploads
+ok 48 - only a state that differs from the last save uploads
+  ---
+  duration_ms: 0.088208
+  type: 'test'
+  ...
+# Subtest: a real change is detected (geometry, text and order)
+ok 49 - a real change is detected (geometry, text and order)
+  ---
+  duration_ms: 0.096583
+  type: 'test'
+  ...
+# Subtest: the file extension wins over the content
+ok 50 - the file extension wins over the content
+  ---
+  duration_ms: 0.539875
+  type: 'test'
+  ...
+# Subtest: content sniffing per language
+ok 51 - content sniffing per language
+  ---
+  duration_ms: 1.38925
+  type: 'test'
+  ...
+# Subtest: effectiveLanguage: auto resolves, an explicit override sticks
+ok 52 - effectiveLanguage: auto resolves, an explicit override sticks
+  ---
+  duration_ms: 0.078834
+  type: 'test'
+  ...
+# Subtest: every language maps to a CodeEditor key and an extension
+ok 53 - every language maps to a CodeEditor key and an extension
+  ---
+  duration_ms: 0.234792
+  type: 'test'
+  ...
+# Subtest: svg behind an xml prologue and comments is still svg, in linear time
+ok 54 - svg behind an xml prologue and comments is still svg, in linear time
+  ---
+  duration_ms: 6.048417
+  type: 'test'
+  ...
+# Subtest: json: pretty prints and keeps the trailing-newline policy
+ok 55 - json: pretty prints and keeps the trailing-newline policy
+  ---
+  duration_ms: 34.522
+  type: 'test'
+  ...
+# Subtest: json: an error reports a line and column and changes nothing
+ok 56 - json: an error reports a line and column and changes nothing
+  ---
+  duration_ms: 0.411333
+  type: 'test'
+  ...
+# Subtest: json: error position parsing across engine message formats
+ok 57 - json: error position parsing across engine message formats
+  ---
+  duration_ms: 0.347959
+  type: 'test'
+  ...
+# Subtest: yaml: normalises and reports parse errors with a line
+ok 58 - yaml: normalises and reports parse errors with a line
+  ---
+  duration_ms: 36.767375
+  type: 'test'
+  ...
+# Subtest: sql: formats and keeps :name, {name} and {{name}} placeholders intact
+ok 59 - sql: formats and keeps :name, {name} and {{name}} placeholders intact
+  ---
+  duration_ms: 111.602459
+  type: 'test'
+  ...
+# Subtest: html: indents block elements, keeps <pre>/<script> verbatim, idempotent
+ok 60 - html: indents block elements, keeps <pre>/<script> verbatim, idempotent
+  ---
+  duration_ms: 0.894625
+  type: 'test'
+  ...
+# Subtest: xml: pretty prints, keeps attributes, CDATA and comments, flags mismatches
+ok 61 - xml: pretty prints, keeps attributes, CDATA and comments, flags mismatches
+  ---
+  duration_ms: 0.907541
+  type: 'test'
+  ...
+# Subtest: html: tolerant of stray end tags and implicit closes
+ok 62 - html: tolerant of stray end tags and implicit closes
+  ---
+  duration_ms: 0.097333
+  type: 'test'
+  ...
+# Subtest: csv: round-trips quotes, delimiters and embedded newlines
+ok 63 - csv: round-trips quotes, delimiters and embedded newlines
+  ---
+  duration_ms: 0.685334
+  type: 'test'
+  ...
+# Subtest: markdown/toml/code: conservative whitespace normalisation, idempotent
+ok 64 - markdown/toml/code: conservative whitespace normalisation, idempotent
+  ---
+  duration_ms: 0.809958
+  type: 'test'
+  ...
+# Subtest: canFormat covers the text languages but not images
+ok 65 - canFormat covers the text languages but not images
+  ---
+  duration_ms: 0.129542
+  type: 'test'
+  ...
+# Subtest: sql: all three syntaxes, counts and first index
+ok 66 - sql: all three syntaxes, counts and first index
+  ---
+  duration_ms: 1.14625
+  type: 'test'
+  ...
+# Subtest: sql: skips literals, comments, casts and keys — same as the DB editor
+ok 67 - sql: skips literals, comments, casts and keys — same as the DB editor
+  ---
+  duration_ms: 0.257417
+  type: 'test'
+  ...
+# Subtest: non-sql: only {name} / {{name}}, including inside JSON strings
+ok 68 - non-sql: only {name} / {{name}}, including inside JSON strings
+  ---
+  duration_ms: 0.208583
+  type: 'test'
+  ...
+# Subtest: fill: substitutes known non-empty values, leaves the rest
+ok 69 - fill: substitutes known non-empty values, leaves the rest
+  ---
+  duration_ms: 0.166416
+  type: 'test'
+  ...
+# Subtest: previewKind maps languages to renderers
+ok 70 - previewKind maps languages to renderers
+  ---
+  duration_ms: 1.053875
+  type: 'test'
+  ...
+# Subtest: lineColAt is 1-based and counts newlines
+ok 71 - lineColAt is 1-based and counts newlines
+  ---
+  duration_ms: 0.716833
+  type: 'test'
+  ...
+# Subtest: parseJsonWithPos parses or reports a position
+ok 72 - parseJsonWithPos parses or reports a position
+  ---
+  duration_ms: 0.41325
+  type: 'test'
+  ...
+# Subtest: csvView caps rows, pads width, drops trailing blank row
+ok 73 - csvView caps rows, pads width, drops trailing blank row
+  ---
+  duration_ms: 0.349083
+  type: 'test'
+  ...
+# Subtest: svgDataUrl encodes markup
+ok 74 - svgDataUrl encodes markup
+  ---
+  duration_ms: 0.140875
+  type: 'test'
+  ...
+# Subtest: format completion cannot replace the newly selected file or later keystrokes
+ok 75 - format completion cannot replace the newly selected file or later keystrokes
+  ---
+  duration_ms: 119.381458
+  type: 'test'
+  ...
+# Subtest: reload confirmation cannot discard a newly selected file
+ok 76 - reload confirmation cannot discard a newly selected file
+  ---
+  duration_ms: 20.495458
+  type: 'test'
+  ...
+# Subtest: image upload cannot insert an old workspace asset into a different workspace
+ok 77 - image upload cannot insert an old workspace asset into a different workspace
+  ---
+  duration_ms: 24.443542
+  type: 'test'
+  ...
+# Subtest: unchanged editor still receives its format result
+ok 78 - unchanged editor still receives its format result
+  ---
+  duration_ms: 20.363042
+  type: 'test'
+  ...
+# Subtest: Workbench revision wrapper transmits bounded limit and exclusive cursor without changing direct revision URLs
+ok 79 - Workbench revision wrapper transmits bounded limit and exclusive cursor without changing direct revision URLs
+  ---
+  duration_ms: 69.359458
+  type: 'test'
+  ...
+# Subtest: History requests one bounded exclusive page and replaces the rendered window
+ok 80 - History requests one bounded exclusive page and replaces the rendered window
+  ---
+  duration_ms: 63.8275
+  type: 'test'
+  ...
+# Subtest: History superseded success cannot publish rows, error, or loading
+ok 81 - History superseded success cannot publish rows, error, or loading
+  ---
+  duration_ms: 12.796792
+  type: 'test'
+  ...
+# Subtest: History superseded failure cannot publish rows, error, or loading
+ok 82 - History superseded failure cannot publish rows, error, or loading
+  ---
+  duration_ms: 21.261167
+  type: 'test'
+  ...
+# Subtest: History A-B-A navigation rejects the first A response
+ok 83 - History A-B-A navigation rejects the first A response
+  ---
+  duration_ms: 49.533
+  type: 'test'
+  ...
+# Subtest: History restore approval stays bound to the selected revision
+ok 84 - History restore approval stays bound to the selected revision
+  ---
+  duration_ms: 13.420542
+  type: 'test'
+  ...
+# Subtest: History changed document cancels pending restore approval before mutation
+ok 85 - History changed document cancels pending restore approval before mutation
+  ---
+  duration_ms: 8.713209
+  type: 'test'
+  ...
+# Subtest: History old restore completion cannot replace a newly selected document
+ok 86 - History old restore completion cannot replace a newly selected document
+  ---
+  duration_ms: 10.262542
+  type: 'test'
+  ...
+# Subtest: History actual destroy callback cancels pending restore approval
+ok 87 - History actual destroy callback cancels pending restore approval
+  ---
+  duration_ms: 25.924208
+  type: 'test'
+  ...
+# Subtest: History A-B-A visit cancels earlier restore approval
+ok 88 - History A-B-A visit cancels earlier restore approval
+  ---
+  duration_ms: 8.139042
+  type: 'test'
+  ...
+# Subtest: History navigation goes back without retaining prior page rows
+ok 89 - History navigation goes back without retaining prior page rows
+  ---
+  duration_ms: 8.990791
+  type: 'test'
+  ...
+# Subtest: create finishing after workspace switch cannot add an old doc to the new workspace
+ok 90 - create finishing after workspace switch cannot add an old doc to the new workspace
+  ---
+  duration_ms: 121.627209
+  type: 'test'
+  ...
+# Subtest: metadata and restore completions remain with their originating workspace
+ok 91 - metadata and restore completions remain with their originating workspace
+  ---
+  duration_ms: 111.29725
+  type: 'test'
+  ...
+# Subtest: remote reload cannot overwrite edits made while its response is pending
+ok 92 - remote reload cannot overwrite edits made while its response is pending
+  ---
+  duration_ms: 33.390125
+  type: 'test'
+  ...
+# Subtest: failed initial list preserves persisted tabs for Retry
+ok 93 - failed initial list preserves persisted tabs for Retry
+  ---
+  duration_ms: 16.633833
+  type: 'test'
+  ...
+# Subtest: trash does not discard a dirty buffer after its save failed
+ok 94 - trash does not discard a dirty buffer after its save failed
+  ---
+  duration_ms: 16.952959
+  type: 'test'
+  ...
+# Subtest: ordinary reload and same-workspace create still publish
+ok 95 - ordinary reload and same-workspace create still publish
+  ---
+  duration_ms: 16.201167
+  type: 'test'
+  ...
+# Subtest: a remote change while dirty cancels the pending autosave and holds later ones
+ok 96 - a remote change while dirty cancels the pending autosave and holds later ones
+  ---
+  duration_ms: 1132.035083
+  type: 'test'
+  ...
+# Subtest: content saves carry if_hash; a 409 raises the banner instead of an error
+ok 97 - content saves carry if_hash; a 409 raises the banner instead of an error
+  ---
+  duration_ms: 40.052292
+  type: 'test'
+  ...
+# Subtest: an event with our own hash (or an older rev) is ignored
+ok 98 - an event with our own hash (or an older rev) is ignored
+  ---
+  duration_ms: 43.8575
+  type: 'test'
+  ...
+# Subtest: a save to a trashed doc says so instead of the "changed elsewhere" banner (S18-307)
+ok 99 - a save to a trashed doc says so instead of the "changed elsewhere" banner (S18-307)
+  ---
+  duration_ms: 21.423041
+  type: 'test'
+  ...
+1..99
+# tests 99
+# suites 0
+# pass 99
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2466.252875

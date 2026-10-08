@@ -1,0 +1,9 @@
+
+> ui@0.2.0 check
+> node scripts/ui-guards.mjs && svelte-check --tsconfig ./tsconfig.app.json --fail-on-warnings && node node_modules/typescript7/bin/tsc -p tsconfig.node.json && node node_modules/typescript7/bin/tsc -p tsconfig.e2e.json && node node_modules/typescript7/bin/tsc -p tsconfig.unit.json
+
+ui-guards: ok (1042 files; no native dialogs, no undefined CSS vars, no ratchet regressions)
+Loading svelte-check in workspace: /Users/itziklavon/otto_os/ui
+Getting Svelte diagnostics...
+
+svelte-check found 0 errors and 0 warnings

@@ -3,8 +3,8 @@
 //! reconcile agent pass, and triggers the self-improvement engine.
 //!
 //! Modelled on `otto-channels::ChannelManager`: a single `WatcherManager::start`
-//! call spawns one supervisor task. Per-story polls are spawned as independent
-//! tokio tasks so a slow poll never blocks the scan. The handle's `Drop`
+//! call spawns one supervisor task. Per-story polls are admitted to a bounded set of owned
+//! tokio tasks so a slow poll never blocks the scan or builds a waiting queue. The handle's `Drop`
 //! implementation sets the cancel flag for a clean shutdown.
 
 use std::collections::HashMap;
@@ -111,9 +111,42 @@ type LastPollMap = HashMap<Id, Instant>;
 /// agent) — unbounded, they all fired together (backlog B6 / SE-13).
 const MAX_CONCURRENT_POLLS: usize = 4;
 
+/// Owns every admitted poll for the supervisor's lifetime.
+#[derive(Default)]
+struct PollTasks {
+    tasks: tokio::task::JoinSet<()>,
+    in_flight: otto_core::cancel_signal::InFlightSet,
+}
+
+impl PollTasks {
+    fn try_spawn(
+        &mut self,
+        id: &str,
+        work: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> bool {
+        while self.tasks.try_join_next().is_some() {}
+        if self.tasks.len() >= MAX_CONCURRENT_POLLS {
+            return false;
+        }
+        let Some(claim) = self.in_flight.claim(id) else {
+            return false;
+        };
+        self.tasks.spawn(async move {
+            let _claim = claim;
+            work.await;
+        });
+        true
+    }
+}
+
+/// Stable oldest-first ordering lets every due story progress across rounds.
+fn prioritize<T>(items: &mut [T], last_poll: &LastPollMap, id: impl Fn(&T) -> &Id) {
+    items.sort_by_key(|item| last_poll.get(id(item)).copied());
+}
+
 async fn supervise(watcher: WatcherManager, cancel: CancelSignal) {
     let mut last_poll: LastPollMap = HashMap::new();
-    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_POLLS));
+    let mut polls = PollTasks::default();
 
     loop {
         if cancel.is_cancelled() {
@@ -121,16 +154,27 @@ async fn supervise(watcher: WatcherManager, cancel: CancelSignal) {
         }
 
         // --- Scan: list all watched stories ---
-        let stories = match watcher.product_repo.list_watching().await {
+        let mut stories = match watcher.product_repo.list_watching().await {
             Ok(list) => list,
             Err(e) => {
                 warn!("story watcher: list_watching failed: {e}");
-                Vec::new()
+                if cancel.sleep(SCAN_INTERVAL).await {
+                    return;
+                }
+                continue;
             }
         };
 
+        // Oldest admission first, including never-polled stories. A poll that
+        // lasts longer than its cadence must not monopolize the first slots.
+        prioritize(&mut stories, &last_poll, |story| &story.id);
+        let live: std::collections::HashSet<_> = stories.iter().map(|s| s.id.clone()).collect();
+        last_poll.retain(|id, _| live.contains(id));
         let now = Instant::now();
         for story in stories {
+            if cancel.is_cancelled() {
+                return;
+            }
             // A story is "due" if it has never been polled, or if cadence_min
             // minutes have elapsed since the last poll.
             // Floor at 5 minutes so a misconfigured story can't hammer the Atlassian APIs.
@@ -143,9 +187,6 @@ async fn supervise(watcher: WatcherManager, cancel: CancelSignal) {
             if !is_due {
                 continue;
             }
-
-            // Record poll time before spawning so rapid rescans don't double-poll.
-            last_poll.insert(story.id.clone(), now);
 
             // Spawn an independent task per story; isolate errors.
             let product_repo = watcher.product_repo.clone();
@@ -172,18 +213,16 @@ async fn supervise(watcher: WatcherManager, cancel: CancelSignal) {
                 );
             }
 
-            let permits = Arc::clone(&permits);
-            tokio::spawn(async move {
-                // Closed only if the semaphore is dropped — never, while this runs.
-                let Ok(_permit) = permits.acquire_owned().await else {
-                    return;
-                };
+            let story_id = story.id.clone();
+            if polls.try_spawn(&story_id, async move {
                 if let Err(e) =
                     poll_story(story, product_repo, product, orchestrator, improve, events).await
                 {
                     warn!("story watcher: poll_story failed: {e}");
                 }
-            });
+            }) {
+                last_poll.insert(story_id, now);
+            }
         }
 
         // One timer per scan; cancel() wakes it (was 500 ms slices).
@@ -668,5 +707,78 @@ mod tests {
             prompt.contains("(none)"),
             "empty questions should produce '(none)' marker; got:\n{prompt}"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn admission_is_bounded_and_duplicate_free() {
+        let mut polls = PollTasks::default();
+        let admitted = (0..1000)
+            .filter(|i| polls.try_spawn(&format!("story-{i}"), std::future::pending()))
+            .count();
+        assert_eq!(admitted, MAX_CONCURRENT_POLLS);
+        assert!(!polls.try_spawn("story-0", std::future::pending()));
+        assert_eq!(polls.tasks.len(), MAX_CONCURRENT_POLLS);
+    }
+
+    #[tokio::test]
+    async fn admitted_story_cannot_queue_a_second_poll() {
+        let mut polls = PollTasks::default();
+        assert!(polls.try_spawn("story", std::future::pending()));
+        assert!(!polls.try_spawn("story", std::future::pending()));
+    }
+
+    #[tokio::test]
+    async fn saturated_rounds_progress_through_all_due_stories() {
+        let mut polls = PollTasks::default();
+        let mut last_poll = LastPollMap::new();
+        let mut stories: Vec<Id> = (0..12).map(|n| format!("story-{n}")).collect();
+        let mut admitted = std::collections::HashSet::new();
+        for round in 0..3 {
+            prioritize(&mut stories, &last_poll, |id| id);
+            let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+            let mut count = 0;
+            for id in &stories {
+                let gate = gate.clone();
+                if polls.try_spawn(id, async move {
+                    gate.notified().await;
+                }) {
+                    assert!(
+                        admitted.insert(id.clone()),
+                        "earlier stories must not starve later ones"
+                    );
+                    last_poll.insert(id.clone(), Instant::now() + Duration::from_secs(round));
+                    count += 1;
+                }
+            }
+            assert_eq!(count, MAX_CONCURRENT_POLLS);
+            // Each waiter is registered before releasing this round.
+            tokio::task::yield_now().await;
+            gate.notify_waiters();
+            while polls.tasks.join_next().await.is_some() {}
+        }
+        assert_eq!(admitted.len(), stories.len());
+    }
+
+    #[tokio::test]
+    async fn dropping_supervisor_cancels_its_polls_and_releases_claims() {
+        let mut polls = PollTasks::default();
+        let ownership = polls.in_flight.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        assert!(polls.try_spawn("story", async move {
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        }));
+        assert!(ownership.claim("story").is_none());
+        drop(polls);
+        assert!(tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(ownership.claim("story").is_some());
     }
 }

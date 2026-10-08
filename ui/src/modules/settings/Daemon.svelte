@@ -149,35 +149,38 @@
     const saveListener = listenerDirty;
     const saveSandbox = sandboxDirty;
     const saveSessions = sessionsDirty;
+    const submittedListener = { enabled, port };
+    const submittedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+    const submittedSessions = { persist: persistEnabled, manualGrace };
     saving = true;
     try {
       allSettings = await api.put<Record<string, unknown>>('/settings', body);
       const notes: string[] = [];
       if (saveListener) {
-        savedListener = { enabled, port };
-        if (auth.meta) auth.meta.network_listener = enabled;
+        savedListener = submittedListener;
+        if (auth.meta) auth.meta.network_listener = submittedListener.enabled;
         // The listener is bound once at daemon start — say so rather than
         // claim a socket that isn't open yet.
         notes.push(
-          enabled
-            ? `https://0.0.0.0:${port} after the daemon restarts`
+          submittedListener.enabled
+            ? `https://0.0.0.0:${submittedListener.port} after the daemon restarts`
             : 'Loopback only after the daemon restarts',
         );
       }
       if (saveSandbox) {
-        savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+        savedSandbox = submittedSandbox;
         notes.push(
-          sandboxEnabled
-            ? `New sessions confined (network: ${sandboxNetwork})`
+          submittedSandbox.enabled
+            ? `New sessions confined (network: ${submittedSandbox.network})`
             : 'Sandbox off for new sessions',
         );
       }
       if (saveSessions) {
-        savedSessions = { persist: persistEnabled, manualGrace };
+        savedSessions = submittedSessions;
         // The Agents panes' "suspends in …" hint reads this policy.
         idleSuspend.policy = policyFromSettings(allSettings);
         notes.push(
-          persistEnabled
+          submittedSessions.persist
             ? 'New sessions you start keep running across daemon restarts'
             : 'New sessions stop when the daemon restarts',
         );

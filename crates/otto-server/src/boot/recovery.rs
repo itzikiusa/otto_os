@@ -12,6 +12,11 @@ use crate::state::ServerCtx;
 /// Restore sessions, fail orphaned reviews / skill evals, settle interrupted
 /// API runs and recover workflow runs. Marks the `restore` boot phase.
 pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Result<(), String> {
+    // Finish the old-life scan before restored sessions or channel/background
+    // supervisors can admit fresh live work. A failed scan must prevent serving.
+    crate::run_scheduler::recover_interrupted(ctx)
+        .await
+        .map_err(|e| format!("run-with-otto recovery: {e}"))?;
     restore_sessions(ctx).await?;
     boot.mark("restore");
     fail_orphaned_reviews(ctx).await;

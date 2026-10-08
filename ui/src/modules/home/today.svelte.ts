@@ -103,6 +103,20 @@ class TodayStore {
   private users = 0;
   private poller: Poller | null = null;
   private seq = 0;
+  private workspace: string | null | undefined;
+
+  private syncWorkspace(): void {
+    if (this.workspace === ws.currentId) return;
+    this.workspace = ws.currentId;
+    this.seq++;
+    this.approvals = [];
+    this.workApprovals = 0;
+    this.designs = [];
+    this.prs = [];
+    this.scheduled = [];
+    this.loaded = false;
+    this.failed = false;
+  }
 
   /** Sessions blocked on the operator (foreground only, like the sidebar). */
   waiting = $derived(ws.foregroundActive.filter((s) => ws.needsYou[s.id] === true));
@@ -263,6 +277,7 @@ class TodayStore {
   });
 
   private async load(): Promise<boolean> {
+    this.syncWorkspace();
     const mine = ++this.seq;
     // The assistant store stays live over the WS once loaded; this re-syncs it
     // on the same quiet cadence (its loaders guard their own stale results).
@@ -281,7 +296,7 @@ class TodayStore {
       wsId && can('mission_control') ? settle(missionControlApi.items(wsId, { kind: 'pr', limit: 3 }), [] as WorkItem[]) : { ok: true, v: [] as WorkItem[] },
       wsId && can('scheduled_tasks') ? settle(scheduledTasksApi.list(wsId), [] as ScheduledTask[]) : { ok: true, v: [] as ScheduledTask[] },
     ]);
-    if (mine !== this.seq) return true;
+    if (mine !== this.seq || ws.currentId !== wsId) return true;
     this.approvals = appr.v.filter((a) => !a.workspace_id || !wsId || a.workspace_id === wsId);
     this.workApprovals = summary.v?.needs_approval ?? 0;
     this.designs = designs.v;
@@ -319,12 +334,14 @@ class TodayStore {
   stop(): void {
     this.users = Math.max(0, this.users - 1);
     if (this.users > 0) return;
+    this.seq++;
     this.poller?.stop();
     this.poller = null;
   }
 
   /** Workspace switched / manual refresh. */
   refresh(): void {
+    this.syncWorkspace();
     this.poller?.now();
   }
 }

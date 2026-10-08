@@ -1,0 +1,8 @@
+   Compiling otto-desktop v0.2.0 (/Users/itziklavon/otto_os/apps/desktop/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.71s
+     Running `apps/desktop/src-tauri/target/debug/examples/visibility_probe`
+VISIBILITY visible: "{\"hidden\":false,\"state\":\"visible\",\"events\":[]}"
+VISIBILITY hidden: "{\"hidden\":true,\"state\":\"hidden\",\"events\":[{\"hidden\":true,\"state\":\"hidden\"}]}"
+VISIBILITY shown: "{\"hidden\":false,\"state\":\"visible\",\"events\":[{\"hidden\":true,\"state\":\"hidden\"},{\"hidden\":false,\"state\":\"visible\"}]}"
+VISIBILITY minimized: "{\"hidden\":true,\"state\":\"hidden\",\"events\":[{\"hidden\":true,\"state\":\"hidden\"},{\"hidden\":false,\"state\":\"visible\"},{\"hidden\":true,\"state\":\"hidden\"}]}"
+VISIBILITY restored: "{\"hidden\":false,\"state\":\"visible\",\"events\":[{\"hidden\":true,\"state\":\"hidden\"},{\"hidden\":false,\"state\":\"visible\"},{\"hidden\":true,\"state\":\"hidden\"},{\"hidden\":false,\"state\":\"visible\"}]}"

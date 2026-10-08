@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
+import { loadErrorText } from '../src/lib/loadError.ts';
 
 function fixture(overrides: Record<string, unknown> = {}) {
   const pageReads: string[] = [];
@@ -15,7 +16,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
   const { browser } = loadSource(new URL('../src/lib/stores/browser.svelte.ts', import.meta.url), {
-    '../api/browser': api, '../nativeBrowser': { nativeBrowserAvailable: false },
+    '../loadError': { loadErrorText }, '../api/browser': api, '../nativeBrowser': { nativeBrowserAvailable: false },
     './browserLive.svelte': { browserLive: {} }, '../lazyModule': { announceModule() {} },
   });
   return { browser, pageReads, writes };
@@ -30,12 +31,13 @@ for (const method of ['openTab', 'openLiveTab']) {
       const pending = browser[method]('https://created.test');
       await browser.loadTabs('B');
       if (returnToOrigin) await browser.loadTabs('A');
+      const readsBeforeCompletion = pageReads.length;
       const selected = browser.activeId;
       created.resolve({ id: 'A-created', url: 'https://created.test', mode: 'reader' });
       await pending;
       assert.equal(browser.activeId, selected, 'a stale creation must not steal current selection');
       assert.equal(browser.tabs.some((tab: { id: string }) => tab.id === 'A-created'), false);
-      assert.equal(pageReads.length, 0, 'stale creation must not fetch its URL into the current workspace');
+      assert.equal(pageReads.length, readsBeforeCompletion, 'stale creation must not fetch its URL into the current workspace');
     });
   }
 }

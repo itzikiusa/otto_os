@@ -144,6 +144,7 @@ struct RawRows {
     prepared: bool,
     /// The reader stopped because the byte budget ran out (more rows existed).
     truncated_bytes: bool,
+    cells_truncated: bool,
     /// The reader stopped before the end of the reply, so the trailing
     /// statistics (`bytes_read`) are unknown.
     partial: bool,
@@ -753,6 +754,7 @@ impl ClickhouseDriver {
 
         let total = resp.data.len();
         let mut truncated = total > max_rows;
+        let mut cells_truncated = resp.cells_truncated;
         // Cap oversized cells (e.g. AggregateFunction/*State blobs) so a giant
         // value can't break the grid, and stop at the response byte budget like
         // the MySQL/Postgres readers (at least one row is always kept).
@@ -771,7 +773,10 @@ impl ClickhouseDriver {
         } else {
             let mut rows = Vec::with_capacity(total.min(max_rows));
             for row in resp.data.into_iter().take(max_rows) {
-                let row: Vec<Value> = row.into_iter().map(cap_cell).collect();
+                let row: Vec<Value> = row
+                    .into_iter()
+                    .map(|v| types::cap_cell_tracked(v, &mut cells_truncated))
+                    .collect();
                 let size = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
                 if !budget.charge(size) && !rows.is_empty() {
                     truncated = true;
@@ -785,6 +790,7 @@ impl ClickhouseDriver {
         let row_count = rows.len();
 
         Ok(QueryResult {
+            cells_truncated,
             columns,
             rows,
             stats: QueryStats {
@@ -1417,6 +1423,7 @@ struct CompactStream {
     row_cap: Option<usize>,
     budget: types::ByteBudget,
     truncated_bytes: bool,
+    cells_truncated: bool,
     /// Enough rows are held: further data rows are skipped undecoded (the
     /// network loop hangs up at the next batch boundary; a reply already fully
     /// received is still walked to its trailer for `statistics`).
@@ -1433,6 +1440,7 @@ impl CompactStream {
             row_cap,
             budget: types::ByteBudget::default(),
             truncated_bytes: false,
+            cells_truncated: false,
             stopped: false,
         }
     }
@@ -1500,7 +1508,10 @@ impl CompactStream {
     }
 
     fn accept_row(&mut self, row: Vec<Value>) {
-        let row: Vec<Value> = row.into_iter().map(cap_cell).collect();
+        let row: Vec<Value> = row
+            .into_iter()
+            .map(|v| types::cap_cell_tracked(v, &mut self.cells_truncated))
+            .collect();
         let size = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
         // At least one row is always kept, like the MySQL/Postgres readers.
         if !self.budget.charge(size) && !self.rows.is_empty() {
@@ -1533,6 +1544,7 @@ impl CompactStream {
                 bytes_read: 0,
                 prepared: true,
                 truncated_bytes: self.truncated_bytes,
+                cells_truncated: self.cells_truncated,
                 partial: true,
             });
         }
@@ -1573,6 +1585,7 @@ impl CompactStream {
                     bytes_read,
                     prepared: true,
                     truncated_bytes: self.truncated_bytes,
+                    cells_truncated: self.cells_truncated,
                     partial: false,
                 })
             }
@@ -1969,7 +1982,6 @@ fn is_system_db(name: &str) -> bool {
 // Per-cell size capping (≈1 MiB, truncation marker) now lives in
 // [`crate::types::cap_cell`], shared by the MySQL and Postgres drivers too so
 // oversized cells behave identically across engines.
-use crate::types::cap_cell;
 
 #[async_trait]
 impl Driver for ClickhouseDriver {
@@ -3001,6 +3013,16 @@ const FUNCTIONS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn streamed_clickhouse_cells_keep_truncation_provenance() {
+        let mut stream = CompactStream::new(Some(1));
+        stream.phase = StreamPhase::Data;
+        stream.accept_row(vec![
+            serde_json::json!({"nested": "x".repeat(types::MAX_CELL_CHARS + 1)}),
+        ]);
+        assert!(stream.finish().unwrap().cells_truncated);
+    }
 
     #[test]
     fn mid_stream_exception_field_is_an_error_not_partial_rows() {

@@ -2147,7 +2147,7 @@ async fn exec_read_conn(
     let mut columns: Vec<Column> = Vec::new();
     let mut decoders: std::sync::Arc<[CellDecoder]> = std::sync::Arc::from(Vec::new());
     let mut chunk: Vec<MySqlRow> = Vec::new();
-    let mut decoding: Vec<tokio::task::JoinHandle<Vec<Vec<Value>>>> = Vec::new();
+    let mut decoding: Vec<tokio::task::JoinHandle<(Vec<Vec<Value>>, bool)>> = Vec::new();
     let mut kept = 0usize;
     let mut truncated = false;
     let mut truncated_reason = None;
@@ -2189,27 +2189,30 @@ async fn exec_read_conn(
     drop(stream);
 
     let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(kept);
+    let mut cells_truncated = false;
     for task in decoding {
-        out_rows.extend(
-            task.await
-                .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?,
-        );
+        let (rows, capped) = task
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?;
+        out_rows.extend(rows);
+        cells_truncated |= capped;
     }
     if !chunk.is_empty() {
-        if chunk.len() * decoders.len() <= INLINE_DECODE_CELLS {
-            out_rows.extend(decode_rows(&chunk, &decoders));
+        let (rows, capped) = if chunk.len() * decoders.len() <= INLINE_DECODE_CELLS {
+            decode_rows(&chunk, &decoders)
         } else {
             let dec = decoders.clone();
-            out_rows.extend(
-                tokio::task::spawn_blocking(move || decode_rows(&chunk, &dec))
-                    .await
-                    .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?,
-            );
-        }
+            tokio::task::spawn_blocking(move || decode_rows(&chunk, &dec))
+                .await
+                .map_err(|e| otto_core::Error::Internal(format!("decode task failed: {e}")))?
+        };
+        out_rows.extend(rows);
+        cells_truncated |= capped;
     }
 
     Ok(ReadOut {
         result: QueryResult {
+            cells_truncated,
             columns,
             rows: out_rows,
             truncated,
@@ -2222,16 +2225,21 @@ async fn exec_read_conn(
 
 /// Decode fetched rows with their per-column decoders (capping oversized cells
 /// like ClickHouse does — an uncapped multi-MB cell freezes the grid).
-fn decode_rows(rows: &[MySqlRow], decoders: &[CellDecoder]) -> Vec<Vec<Value>> {
-    rows.iter()
+fn decode_rows(rows: &[MySqlRow], decoders: &[CellDecoder]) -> (Vec<Vec<Value>>, bool) {
+    let mut cells_truncated = false;
+    let rows = rows
+        .iter()
         .map(|row| {
             decoders
                 .iter()
                 .enumerate()
-                .map(|(i, dec)| types::cap_cell(mysql_cell(row, i, *dec)))
+                .map(|(i, dec)| {
+                    types::cap_cell_tracked(mysql_cell(row, i, *dec), &mut cells_truncated)
+                })
                 .collect()
         })
-        .collect()
+        .collect();
+    (rows, cells_truncated)
 }
 
 /// Estimated JSON size of a row, from its raw wire bytes (no decoding): text

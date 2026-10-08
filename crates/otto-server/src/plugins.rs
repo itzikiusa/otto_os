@@ -369,7 +369,11 @@ fn proxy_client(connect: Duration, total: Duration) -> reqwest::Client {
 /// Send a proxied request and relay the sidecar's answer. A deadline hit —
 /// while waiting for headers OR mid-body — is `504`, never a truncated `200`.
 async fn forward(rb: reqwest::RequestBuilder) -> Response {
-    let resp = match rb.send().await {
+    forward_with_limit(rb, 64 * 1024 * 1024).await
+}
+
+async fn forward_with_limit(rb: reqwest::RequestBuilder, limit: usize) -> Response {
+    let mut resp = match rb.send().await {
         Ok(r) => r,
         Err(e) if e.is_timeout() => {
             return (StatusCode::GATEWAY_TIMEOUT, "plugin did not answer in time").into_response()
@@ -383,15 +387,38 @@ async fn forward(rb: reqwest::RequestBuilder) -> Response {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) if e.is_timeout() => {
-            return (StatusCode::GATEWAY_TIMEOUT, "plugin response timed out").into_response()
+    if resp
+        .content_length()
+        .is_some_and(|size| size > limit as u64)
+    {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "plugin response exceeds the buffered response limit",
+        )
+            .into_response();
+    }
+    let mut bytes = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if chunk.len() > limit.saturating_sub(bytes.len()) {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        "plugin response exceeds the buffered response limit",
+                    )
+                        .into_response();
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) if e.is_timeout() => {
+                return (StatusCode::GATEWAY_TIMEOUT, "plugin response timed out").into_response()
+            }
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("plugin proxy body: {e}")).into_response()
+            }
         }
-        Err(e) => {
-            return (StatusCode::BAD_GATEWAY, format!("plugin proxy body: {e}")).into_response()
-        }
-    };
+    }
     Response::builder()
         .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY))
         .header("content-type", ct)
@@ -1043,6 +1070,62 @@ mod proxy_timeout_tests {
             "bounded by the deadline"
         );
         h.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_plugin_responses_are_rejected_before_publication() {
+        for chunked in [false, true] {
+            for size in [16usize, 17] {
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = l.local_addr().unwrap().port();
+                let peer = tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let (mut socket, _) = l.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(socket.read_u8().await.unwrap());
+                        assert!(request.len() <= 8192, "fixture request header too large");
+                    }
+                    let framing = if chunked {
+                        "Transfer-Encoding: chunked\r\n".to_string()
+                    } else {
+                        format!("Content-Length: {size}\r\n")
+                    };
+                    socket.write_all(format!("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n{framing}\r\n").as_bytes()).await.unwrap();
+                    let body = "x".repeat(size);
+                    let wire = if chunked {
+                        format!("{size:x}\r\n{body}\r\n0\r\n\r\n")
+                    } else {
+                        body
+                    };
+                    let _ = socket.write_all(wire.as_bytes()).await;
+                });
+                let client = proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT);
+                let response =
+                    forward_with_limit(client.get(format!("http://127.0.0.1:{port}/data")), 16)
+                        .await;
+                assert_eq!(
+                    response.status(),
+                    if size > 16 {
+                        StatusCode::BAD_GATEWAY
+                    } else {
+                        StatusCode::CREATED
+                    },
+                    "chunked={chunked}, size={size}"
+                );
+                if size == 16 {
+                    assert_eq!(response.headers()["content-type"], "application/json");
+                    assert_eq!(
+                        axum::body::to_bytes(response.into_body(), 32)
+                            .await
+                            .unwrap()
+                            .len(),
+                        16
+                    );
+                }
+                peer.await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]

@@ -49,7 +49,14 @@ prompt (persona note + directive + memory instructions + report-file
 instruction), watches for the report file, retries on failure, and records a
 `PersonalAgentRun` (summary, report, delivery state, session id). Concurrency
 is capped (`OTTO_PERSONAL_MAX_CONCURRENT`, default 2). Reports are kept for the
-last 100 runs; run updates stream over WS.
+last 100 runs; run updates stream over WS. Notify-on-change compares the
+last non-proactive successful run only when delivery succeeded or that run
+intentionally skipped an unchanged report. A delivery failure does not suppress
+the next identical report; proactive feed-only reports do not count as delivered.
+The comparison also includes the destination. Older hashes without destination
+identity trigger one fresh delivery after upgrade. Schedule-load failures keep
+the last known cadence visible and offer Retry in Schedules.
+
 
 Manual fire: **Run now** on the agent (or a specific schedule) →
 `POST /personal-agents/{id}/run`.

@@ -1,0 +1,24 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.08s
+     Running tests/pipeline_e2e.rs (target/debug/deps/pipeline_e2e-9eebebde2c5d378b)
+
+running 1 test
+test disabling_a_server_while_credentials_are_loading_prevents_execution ... FAILED
+
+failures:
+
+---- disabling_a_server_while_credentials_are_loading_prevents_execution stdout ----
+
+thread 'disabling_a_server_while_credentials_are_loading_prevents_execution' (3330800) panicked at crates/otto-mcp/tests/pipeline_e2e.rs:906:5:
+disabled server must not execute the queued call: Executed { content: Object {"content": Array [Object {"text": String("done"), "type": String("text")}], "isError": Bool(false)}, is_error: false }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    disabling_a_server_while_credentials_are_loading_prevents_execution
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.25s
+
+error: test failed, to rerun pass `-p otto-mcp --test pipeline_e2e`

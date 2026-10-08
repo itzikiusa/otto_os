@@ -50,8 +50,53 @@ fn register_cancel(reg: &CancelRegistry, eval_id: &str) -> Arc<AtomicBool> {
 
 fn signal_cancel(reg: &CancelRegistry, eval_id: &str) {
     if let Ok(map) = reg.lock() {
-        if let Some(flag) = map.get(eval_id) {
-            flag.store(true, Ordering::SeqCst);
+        let retries = format!("{eval_id}:retry:");
+        for (key, flag) in map.iter() {
+            if key == eval_id || key.starts_with(&retries) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+/// One retry per slot, registered before asynchronous preparation. Drop only
+/// removes this attempt, including on request errors or task cancellation.
+pub(crate) struct RetryLease {
+    registry: CancelRegistry,
+    key: String,
+    pub(crate) flag: Arc<AtomicBool>,
+}
+
+impl RetryLease {
+    pub(crate) fn claim(registry: &CancelRegistry, run: &str, slot: &str) -> Result<Self> {
+        let key = format!("{run}:retry:{slot}");
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut map = registry
+            .lock()
+            .map_err(|_| Error::Internal("retry registry unavailable".into()))?;
+        if map.contains_key(&key) {
+            return Err(Error::Conflict(
+                "this agent retry is already running".into(),
+            ));
+        }
+        map.insert(key.clone(), Arc::clone(&flag));
+        Ok(Self {
+            registry: Arc::clone(registry),
+            key,
+            flag,
+        })
+    }
+}
+
+impl Drop for RetryLease {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.registry.lock() {
+            if map
+                .get(&self.key)
+                .is_some_and(|flag| Arc::ptr_eq(flag, &self.flag))
+            {
+                map.remove(&self.key);
+            }
         }
     }
 }
@@ -929,6 +974,15 @@ async fn run_agent_capture(
     let sid = session.id.clone();
     slot.set("running", Some(&sid), "").await;
 
+    if is_cancelled(cancel) {
+        let _ = manager.archive(&sid).await;
+        return AgentOutcome {
+            session_id: Some(sid),
+            text: String::new(),
+            errored: true,
+        };
+    }
+
     crate::review_session::submit_prompt(manager, &sid, prompt).await;
 
     let deadline = Instant::now() + timeout;
@@ -1092,10 +1146,14 @@ async fn run_skill_eval(
             Err(e) => (SkillEvalStatus::Error, Some(e.to_string())),
         }
     };
-    let _ = ctx
+    if !ctx
         .skill_evals_store
-        .set_status(&eval_id, status, error.as_deref())
-        .await;
+        .finish_running(&eval_id, status, error.as_deref())
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
     match status {
         SkillEvalStatus::Done => tracing::info!(eval = %eval_id, "skill evaluation complete"),
         SkillEvalStatus::Cancelled => tracing::info!(eval = %eval_id, "skill evaluation cancelled"),
@@ -1163,7 +1221,7 @@ async fn run_skill_eval_core(
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
     if req.mode == "score_only" {
-        return run_score_only_core(ctx, eval_id, ws, req).await;
+        return run_score_only_core(ctx, eval_id, ws, req, cancel).await;
     }
     let resolved = resolve_skill_source_async(&ctx.context_library, &req.source).await?;
     // Use the workspace repo when it's a git repo with commits; otherwise fall
@@ -1216,10 +1274,7 @@ async fn run_skill_eval_core(
     // Eval-lab scoring inputs (constant across iterations): golden task, resolved
     // test/lint commands (request → golden → config default), and weights.
     let cfg = load_skill_eval_config(ctx).await;
-    let golden = match &req.golden_task_id {
-        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
-        None => None,
-    };
+    let golden = golden_for_workspace(ctx, &ws.id, req.golden_task_id.as_deref()).await?;
     let weights = req.weights.clone().unwrap_or_else(|| cfg.weights.clone());
     let test_cmd = first_nonempty_opt(&[
         req.test_cmd.clone(),
@@ -1355,27 +1410,7 @@ async fn run_skill_eval_core(
         // instead of each spawning a separate `git diff` call. Best-effort:
         // if the diff can't be produced the validators fall back to running
         // `git diff` themselves (via the prompt instruction).
-        #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
-        let precomputed_diff: Option<String> = {
-            let dest_c = dest_str.clone();
-            tokio::task::spawn_blocking(move || {
-                otto_git::hardened_std_command()
-                    .args(["diff", "HEAD"])
-                    .current_dir(&dest_c)
-                    .output()
-                    .ok()
-                    .and_then(|o| {
-                        if o.status.success() {
-                            String::from_utf8(o.stdout).ok()
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .await
-            .ok()
-            .flatten()
-        };
+        let precomputed_diff = validator_diff(&dest_str).await;
 
         let mut set = tokio::task::JoinSet::new();
         for (index, run) in val_runs.into_iter().enumerate() {
@@ -1510,6 +1545,7 @@ async fn run_skill_eval_core(
                 None,
                 test_cmd.as_deref(),
                 lint_cmd.as_deref(),
+                cancel,
             )
             .await
             {
@@ -1658,13 +1694,11 @@ async fn run_score_only_core(
     eval_id: &Id,
     ws: &Workspace,
     req: &StartSkillEvalReq,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
     let eval = ctx.skill_evals_store.get_eval(eval_id).await?;
     let cfg = load_skill_eval_config(ctx).await;
-    let golden = match &req.golden_task_id {
-        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
-        None => None,
-    };
+    let golden = golden_for_workspace(ctx, &ws.id, req.golden_task_id.as_deref()).await?;
     let weights = req.weights.clone().unwrap_or_else(|| cfg.weights.clone());
     let test_cmd = first_nonempty_opt(&[
         req.test_cmd.clone(),
@@ -1734,6 +1768,7 @@ async fn run_score_only_core(
         diff_base.as_deref(),
         test_cmd.as_deref(),
         lint_cmd.as_deref(),
+        cancel,
     )
     .await?;
     ctx.skill_evals_store
@@ -2015,7 +2050,7 @@ async fn start_eval(
     Json(req): Json<StartSkillEvalReq>,
 ) -> ApiResult<Json<SkillEval>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    let eval = launch_eval(&ctx, &ws_id, req, None)
+    let eval = launch_eval(&ctx, &ws_id, &user, req, None)
         .await
         .map_err(ApiError)?;
     Ok(Json(eval))
@@ -2024,26 +2059,70 @@ async fn start_eval(
 /// Create + spawn an eval run. Shared by `start_eval`, golden-task run, and matrix
 /// cells. `matrix_cell` is `(matrix_id, provider, skill, prompt)` when this run is
 /// one cell of a matrix. Caller is responsible for the workspace role check.
-pub(crate) async fn launch_eval(
+pub(crate) async fn golden_for_workspace(
     ctx: &ServerCtx,
     ws_id: &Id,
-    req: StartSkillEvalReq,
-    matrix_cell: Option<(String, String, String, String)>,
-) -> Result<SkillEval> {
-    let mode = if req.mode.trim().is_empty() {
-        "generate".to_string()
-    } else {
-        req.mode.trim().to_string()
-    };
-    let ws = ctx.workspaces.get(ws_id).await?;
+    id: Option<&str>,
+) -> Result<Option<GoldenTask>> {
+    let Some(id) = id else { return Ok(None) };
+    let golden = ctx.golden_tasks_store.get(id).await?;
+    if golden.workspace_id != *ws_id {
+        return Err(Error::Invalid(
+            "golden task belongs to another workspace".into(),
+        ));
+    }
+    Ok(Some(golden))
+}
 
+/// Upper bound on queued implementation/validation/improvement steps.
+pub(crate) fn eval_work_units(req: &StartSkillEvalReq) -> Result<usize> {
+    let mut expanded = 0usize;
+    let mut names = std::collections::HashSet::new();
+    for validation in &req.validations {
+        if validation.name.trim().is_empty() || !names.insert(validation.name.trim()) {
+            return Err(Error::Invalid(
+                "validation names must be non-empty and unique".into(),
+            ));
+        }
+        let mut providers = std::collections::HashSet::new();
+        for provider in &validation.providers {
+            if provider.trim().is_empty() || !providers.insert(provider.trim()) {
+                return Err(Error::Invalid(
+                    "validation providers must be non-empty and unique".into(),
+                ));
+            }
+        }
+        expanded = expanded.saturating_add(validation.providers.len().max(1));
+    }
+    if req.iterations > 10 || expanded > 16 {
+        return Err(Error::Invalid(
+            "an evaluation allows at most 10 iterations and 16 expanded validators".into(),
+        ));
+    }
+    if req.mode.trim() == "score_only" {
+        return Ok(1);
+    }
+    Ok(req.iterations.max(1) as usize * (2 + expanded * req.validator_passes.clamp(1, 3) as usize))
+}
+
+/// Shared admission checks run before persistence or any agent launch.
+pub(crate) async fn validate_eval_request(
+    ctx: &ServerCtx,
+    ws_id: &Id,
+    req: &mut StartSkillEvalReq,
+) -> Result<(String, String)> {
+    req.mode = match req.mode.trim() {
+        "" | "generate" => "generate".into(),
+        "score_only" => "score_only".into(),
+        _ => return Err(Error::Invalid("mode must be generate or score_only".into())),
+    };
+    eval_work_units(req)?;
+    req.iterations = req.iterations.max(1);
+    let mode = req.mode.as_str();
     // Resolve the run's source-skill name + task. `generate` requires an impl CLI
     // and a resolvable skill; `score_only` runs no agent, so it tolerates an empty
     // impl CLI and derives its task/name from the golden task when not given.
-    let golden = match &req.golden_task_id {
-        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
-        None => None,
-    };
+    let golden = golden_for_workspace(ctx, ws_id, req.golden_task_id.as_deref()).await?;
     let (source_name, task) = if mode == "score_only" {
         let task = if req.task.trim().is_empty() {
             golden
@@ -2073,6 +2152,19 @@ pub(crate) async fn launch_eval(
         (resolved.name, req.task.trim().to_string())
     };
 
+    Ok((source_name, task))
+}
+
+pub(crate) async fn launch_eval(
+    ctx: &ServerCtx,
+    ws_id: &Id,
+    user: &User,
+    mut req: StartSkillEvalReq,
+    matrix_cell: Option<(String, String, String, String)>,
+) -> Result<SkillEval> {
+    let (source_name, task) = validate_eval_request(ctx, ws_id, &mut req).await?;
+    let mode = req.mode.clone();
+    let ws = ctx.workspaces.get(ws_id).await?;
     let config = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
     let dims = matrix_cell
         .as_ref()
@@ -2093,13 +2185,8 @@ pub(crate) async fn launch_eval(
         )
         .await?;
 
-    // Resolve the root user the autonomous sessions run as (like reviews).
-    let run_user = otto_state::UsersRepo::new(ctx.pool.clone())
-        .list()
-        .await
-        .ok()
-        .and_then(|us| us.into_iter().find(|u| u.is_root))
-        .ok_or_else(|| Error::Internal("no root user to run eval agents".into()))?;
+    // Sessions retain the initiating user's permissions and ownership.
+    let run_user = user.clone();
 
     let ctx_bg = ctx.clone();
     let eval_id = eval.id.clone();
@@ -2302,13 +2389,39 @@ async fn archive_eval_sessions(manager: &Arc<SessionManager>, eval: &SkillEval) 
 /// user's real repo (`kind=working`/`path`); those must NEVER be removed — the
 /// guard below skips any path that isn't an Otto temp worktree.
 async fn remove_eval_worktrees(repo_root: &str, eval: &SkillEval) {
+    // Working/path score-only targets are user-owned even below our temp dir.
+    if eval.mode == "score_only"
+        && eval.config.pointer("/target/kind").and_then(|v| v.as_str()) != Some("branch")
+    {
+        return;
+    }
     let managed_root = std::env::temp_dir().join("otto-skilleval");
-    let managed_root = managed_root.to_string_lossy().to_string();
     let mut removed_any = false;
     for it in &eval.iterations {
         if let Some(path) = &it.worktree_path {
-            if !path.starts_with(&managed_root) {
-                // Not an Otto-created worktree (e.g. a score_only target) — leave it.
+            let expected = managed_root
+                .join(&eval.id)
+                .join(if eval.mode == "score_only" {
+                    "score".into()
+                } else {
+                    format!("iter{}", it.iter)
+                });
+            if Path::new(path) != expected {
+                continue;
+            }
+            // A replaced symlink must not redirect cleanup outside our tree.
+            let Ok(temp_root) = tokio::fs::canonicalize(std::env::temp_dir()).await else {
+                continue;
+            };
+            let Ok(actual) = tokio::fs::canonicalize(path).await else {
+                continue;
+            };
+            if actual
+                != temp_root
+                    .join("otto-skilleval")
+                    .join(&eval.id)
+                    .join(expected.file_name().unwrap_or_default())
+            {
                 continue;
             }
             let _ = otto_git::hardened_command()
@@ -2336,10 +2449,7 @@ async fn remove_eval_worktrees(repo_root: &str, eval: &SkillEval) {
 /// Signal-cancel a run, kill its live sessions, and mark it cancelled (idempotent;
 /// the background task also finalizes). Used by `cancel_eval` and matrix cancel.
 pub(crate) async fn cancel_run(ctx: &ServerCtx, eval_id: &Id) {
-    signal_cancel(&ctx.skill_eval_cancels, eval_id);
-    if let Ok(eval) = ctx.skill_evals_store.get_eval(eval_id).await {
-        archive_eval_sessions(&ctx.manager, &eval).await;
-    }
+    // Admission checks persisted status after registering its cancellation flag.
     let _ = ctx
         .skill_evals_store
         .set_status(
@@ -2348,6 +2458,10 @@ pub(crate) async fn cancel_run(ctx: &ServerCtx, eval_id: &Id) {
             Some("Cancelled by user"),
         )
         .await;
+    signal_cancel(&ctx.skill_eval_cancels, eval_id);
+    if let Ok(eval) = ctx.skill_evals_store.get_eval(eval_id).await {
+        archive_eval_sessions(&ctx.manager, &eval).await;
+    }
 }
 
 async fn cancel_eval(
@@ -2362,17 +2476,7 @@ async fn cancel_eval(
         .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
 
-    signal_cancel(&ctx.skill_eval_cancels, &eval_id);
-    archive_eval_sessions(&ctx.manager, &eval).await;
-    // Reflect immediately; the background task also finalizes (idempotent).
-    let _ = ctx
-        .skill_evals_store
-        .set_status(
-            &eval_id,
-            SkillEvalStatus::Cancelled,
-            Some("Cancelled by user"),
-        )
-        .await;
+    cancel_run(&ctx, &eval_id).await;
     let eval = ctx
         .skill_evals_store
         .get_eval(&eval_id)
@@ -2394,8 +2498,29 @@ async fn delete_eval(
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
 
     // Stop any in-flight work, kill sessions, remove worktrees, then delete rows.
-    signal_cancel(&ctx.skill_eval_cancels, &eval_id);
-    archive_eval_sessions(&ctx.manager, &eval).await;
+    cancel_run(&ctx, &eval_id).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let active = ctx
+                .skill_eval_cancels
+                .lock()
+                .map(|map| {
+                    map.keys()
+                        .any(|key| key == &eval_id || key.starts_with(&format!("{eval_id}:retry:")))
+                })
+                .unwrap_or(true);
+            if !active {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if stopped.is_err() {
+        return Err(ApiError(Error::Conflict(
+            "evaluation is still stopping; retry deletion shortly".into(),
+        )));
+    }
     if let Ok(ws) = ctx.workspaces.get(&eval.workspace_id).await {
         remove_eval_worktrees(&ws.root_path, &eval).await;
     }
@@ -2410,16 +2535,29 @@ async fn delete_eval(
 /// proof not required). Reads the run's config thresholds.
 async fn iteration_gate(
     ctx: &ServerCtx,
-    _eval: &SkillEval,
+    eval: &SkillEval,
     it: &otto_core::domain::EvalIteration,
 ) -> PromoteGate {
     let cfg = load_skill_eval_config(ctx).await;
-    let composite = it.scoring.as_ref().map(|s| s.composite);
-    let proof_status = it
-        .scoring
-        .as_ref()
-        .map(|s| s.proof_status.clone())
-        .unwrap_or_default();
+    let composite = (eval.status == SkillEvalStatus::Done
+        && it.status == "done"
+        && it.agents.iter().all(|a| a.status == "done"))
+    .then(|| it.scoring.as_ref().map(|s| s.composite))
+    .flatten();
+    // Scoring is a snapshot; promotion must use current evidence and policy.
+    let proof_status = match it.proof_pack_id.as_deref() {
+        Some(id) => match crate::proof::recompute_and_emit(ctx, id).await {
+            Ok(pack)
+                if pack.workspace_id == eval.workspace_id
+                    && pack.work_item_id == it.id
+                    && pack.work_item_kind == otto_core::proof::WorkItemKind::Task =>
+            {
+                pack.status.as_str().to_string()
+            }
+            _ => String::new(),
+        },
+        None => String::new(),
+    };
     otto_core::eval_score::promote_gate(
         composite,
         &proof_status,
@@ -2728,10 +2866,9 @@ async fn iteration_regression(
             lint_cmd: None,
             weights: None,
         });
-    let golden = match &eval.golden_task_id {
-        Some(id) => ctx.golden_tasks_store.get(id).await.ok(),
-        None => None,
-    };
+    let golden = golden_for_workspace(&ctx, &eval.workspace_id, eval.golden_task_id.as_deref())
+        .await
+        .map_err(ApiError)?;
     let conf = load_skill_eval_config(&ctx).await;
     let test_cmd = first_nonempty_opt(&[
         cfg.test_cmd.clone(),
@@ -2820,42 +2957,29 @@ async fn impl_diff(
             truncated: false,
         }));
     }
-    // Stage everything (incl. new files, honoring .gitignore) in the disposable
-    // worktree, then show the full staged diff against its base.
-    let _ = otto_git::hardened_command()
-        .arg("-C")
-        .arg(&wt)
-        .args(["add", "-A"])
-        .output()
-        .await;
-    let out = otto_git::hardened_command()
-        .arg("-C")
-        .arg(&wt)
-        .args(["--no-pager", "diff", "--cached", "--no-color"])
-        .output()
+    let (mut diff, truncated) = otto_git::LocalGit::new(&wt)
+        .working_diff_with_untracked_capped(IMPL_DIFF_CAP)
         .await
-        .map_err(|e| ApiError(Error::Internal(format!("git diff: {e}"))))?;
-    let mut diff = String::from_utf8_lossy(&out.stdout).into_owned();
-    let truncated = cap_impl_diff(&mut diff, IMPL_DIFF_CAP);
+        .map_err(ApiError)?;
+    if truncated {
+        diff.push_str("\n… (diff truncated)");
+    }
     Ok(Json(ImplDiffResp { diff, truncated }))
 }
 
 const IMPL_DIFF_CAP: usize = 200 * 1024;
 
-/// Cap `diff` at `cap` bytes, backing off to a char boundary — a bare
-/// `String::truncate` at a byte inside a multi-byte char (any non-ASCII diff)
-/// panics. Returns whether anything was cut (a marker is appended then).
-fn cap_impl_diff(diff: &mut String, cap: usize) -> bool {
-    if diff.len() <= cap {
-        return false;
+/// Prompts retain 6000 characters; bound command output before allocating or
+/// cloning it for the at-most-16 admitted validators.
+async fn validator_diff(path: &str) -> Option<String> {
+    let (mut diff, truncated) = otto_git::LocalGit::new(path)
+        .diff_text_capped(Some("HEAD"), 24_004)
+        .await
+        .ok()?;
+    if truncated {
+        diff.push_str("\n… (diff truncated; inspect the repository for remaining changes)");
     }
-    let mut end = cap;
-    while end > 0 && !diff.is_char_boundary(end) {
-        end -= 1;
-    }
-    diff.truncate(end);
-    diff.push_str("\n… (diff truncated)");
-    true
+    Some(diff)
 }
 
 async fn retry_validation(
@@ -2869,6 +2993,22 @@ async fn retry_validation(
         .await
         .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
+    let retry =
+        RetryLease::claim(&ctx.skill_eval_cancels, &eval_id, "validation").map_err(ApiError)?;
+    let current = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
+    if matches!(
+        current.status,
+        SkillEvalStatus::Running | SkillEvalStatus::Cancelled
+    ) {
+        return Err(ApiError(Error::Conflict(
+            "retry requires a finished, non-cancelled evaluation".into(),
+        )));
+    }
+    let eval = current;
     let it = eval
         .iterations
         .iter()
@@ -2900,12 +3040,7 @@ async fn retry_validation(
         .ok_or_else(|| ApiError(Error::NotFound("validation criteria".into())))?;
     let passes = cfg.validator_passes.clamp(1, 3);
 
-    let run_user = otto_state::UsersRepo::new(ctx.pool.clone())
-        .list()
-        .await
-        .ok()
-        .and_then(|us| us.into_iter().find(|u| u.is_root))
-        .ok_or_else(|| ApiError(Error::Internal("no root user to run eval agents".into())))?;
+    let run_user = user.clone();
     let ws = ctx
         .workspaces
         .get(&eval.workspace_id)
@@ -2916,33 +3051,20 @@ async fn retry_validation(
     let mut pending = agent.clone();
     pending.status = "pending".into();
     pending.note = "retrying…".into();
-    let _ = ctx
-        .skill_evals_store
-        .set_iter_agent_at(&iter_id, index, &pending)
-        .await;
+    let previous_scoring = it.scoring.clone();
 
-    // Pre-compute git diff for the retry case as well.
-    #[allow(clippy::disallowed_methods)] // runs inside spawn_blocking
-    let retry_diff: Option<String> = {
-        let wt = worktree.clone();
-        tokio::task::spawn_blocking(move || {
-            otto_git::hardened_std_command()
-                .args(["diff", "HEAD"])
-                .current_dir(&wt)
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        String::from_utf8(o.stdout).ok()
-                    } else {
-                        None
-                    }
-                })
-        })
+    let retry_diff = validator_diff(&worktree).await;
+
+    if !ctx
+        .skill_evals_store
+        .begin_validation_retry(&eval_id, &iter_id, index, &pending)
         .await
-        .ok()
-        .flatten()
-    };
+        .map_err(ApiError)?
+    {
+        return Err(ApiError(Error::Conflict(
+            "evaluation changed before retry admission".into(),
+        )));
+    }
 
     let ctx_bg = ctx.clone();
     let iter_id_bg = iter_id.clone();
@@ -2951,12 +3073,15 @@ async fn retry_validation(
     let provider = agent.provider.clone();
     let base = agent.clone();
     tokio::spawn(async move {
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::clone(&retry.flag);
         let mut pass_scores: Vec<f64> = Vec::new();
         let mut union: Vec<EvalFinding> = Vec::new();
         let mut last_sid: Option<String> = None;
         let mut any_ok = false;
         for pass in 0..passes {
+            if is_cancelled(&cancel) {
+                break;
+            }
             let out_path = output_path(&eval_id_bg, iter_num, &format!("val{index}-retry{pass}"));
             let prompt = build_validation_prompt(
                 &base.validation,
@@ -2994,6 +3119,9 @@ async fn retry_validation(
             merge_findings(&mut union, findings);
         }
 
+        if is_cancelled(&cancel) {
+            return;
+        }
         let mut final_state = base;
         final_state.session_id = last_sid;
         if !any_ok {
@@ -3038,6 +3166,53 @@ async fn retry_validation(
                     .await;
             }
         }
+        let rescored = async {
+            let eval = ctx_bg.skill_evals_store.get_eval(&eval_id_bg).await?;
+            let updated = ctx_bg.skill_evals_store.get_iteration(&iter_id_bg).await?;
+            let (scoring, pack_id) =
+                crate::eval_score::rescore_validation(&ctx_bg, &eval, &updated, previous_scoring)
+                    .await?;
+            ctx_bg
+                .skill_evals_store
+                .set_iter_scoring(&iter_id_bg, &scoring, Some(&pack_id))
+                .await?;
+            ctx_bg
+                .skill_evals_store
+                .set_iter_status(&iter_id_bg, "done", "validation retry complete")
+                .await?;
+            let fresh = ctx_bg.skill_evals_store.get_eval(&eval_id_bg).await?;
+            if let Some((iter, score)) = fresh
+                .iterations
+                .iter()
+                .filter_map(|it| it.scoring.as_ref().map(|score| (it.iter, score.composite)))
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+            {
+                ctx_bg
+                    .skill_evals_store
+                    .set_summary(
+                        &eval_id_bg,
+                        &format!("Validation retry complete · best score {score:.0}"),
+                        Some(iter),
+                        Some(score),
+                    )
+                    .await?;
+                ctx_bg
+                    .skill_evals_store
+                    .set_eval_composite(&eval_id_bg, score)
+                    .await?;
+            }
+            Ok::<_, Error>(())
+        };
+        let result = crate::eval_score::cancellable(&cancel, rescored).await;
+        let (status, error) = match result {
+            Ok(()) => (SkillEvalStatus::Done, None),
+            Err(e) => (SkillEvalStatus::Error, Some(e.to_string())),
+        };
+        let _ = ctx_bg
+            .skill_evals_store
+            .finish_running(&eval_id_bg, status, error.as_deref())
+            .await;
+        drop(retry);
     });
 
     let eval = ctx
@@ -3092,20 +3267,208 @@ pub fn routes() -> Router<ServerCtx> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cleanup_preserves_score_only_user_paths_with_a_similar_temp_prefix() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("otto-skilleval-user-repo-")
+            .tempdir()
+            .unwrap();
+        let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+        let ws = ctx
+            .workspaces
+            .create("A", dir.path().to_str().unwrap(), &"editor".into())
+            .await
+            .unwrap();
+        let mut eval = ctx
+            .skill_evals_store
+            .create_eval(
+                &ws.id,
+                "skill",
+                "task",
+                "fixture",
+                1,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let mut iteration = ctx
+            .skill_evals_store
+            .add_iteration(&eval.id, 1, None, "skill", "body", "fixture", &[])
+            .await
+            .unwrap();
+        let sentinel = dir.path().join("user-work.txt");
+        std::fs::write(&sentinel, "keep this work").unwrap();
+        iteration.worktree_path = Some(dir.path().to_string_lossy().into_owned());
+        eval.iterations = vec![iteration];
+        eval.mode = "score_only".into();
+        eval.config = serde_json::json!({"target":{"kind":"path"}});
+        remove_eval_worktrees(dir.path().to_str().unwrap(), &eval).await;
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "keep this work");
+    }
+
     #[test]
-    fn cap_impl_diff_backs_off_to_a_char_boundary() {
-        // "é" is 2 bytes: a cap landing mid-char used to panic in `truncate`.
-        let mut d = "é".repeat(10);
-        assert!(super::cap_impl_diff(&mut d, 5));
-        assert!(d.starts_with("éé\n"), "{d:?}");
-        let mut emoji = "a🦀🦀".to_string();
-        for cap in 0..emoji.len() {
-            let mut s = emoji.clone();
-            assert!(super::cap_impl_diff(&mut s, cap));
-            assert!(s.ends_with("(diff truncated)"));
-        }
-        assert!(!super::cap_impl_diff(&mut emoji, 64));
-        assert_eq!(emoji, "a🦀🦀");
+    fn retry_admission_cancellation_and_cleanup_keep_attempt_identity() {
+        let registry = otto_core::cancel::new_cancel_registry();
+        let first = RetryLease::claim(&registry, "eval", "iteration:0").unwrap();
+        assert!(RetryLease::claim(&registry, "eval", "iteration:0").is_err());
+        let other = RetryLease::claim(&registry, "other", "iteration:0").unwrap();
+        signal_cancel(&registry, "eval");
+        assert!(is_cancelled(&first.flag));
+        assert!(!is_cancelled(&other.flag));
+        // A replaced registry entry must survive an older attempt dropping.
+        let replacement = Arc::new(AtomicBool::new(false));
+        registry
+            .lock()
+            .unwrap()
+            .insert(first.key.clone(), replacement.clone());
+        let key = first.key.clone();
+        drop(first);
+        assert!(Arc::ptr_eq(
+            registry.lock().unwrap().get(&key).unwrap(),
+            &replacement
+        ));
+        drop(other);
+        assert!(!registry
+            .lock()
+            .unwrap()
+            .contains_key("other:retry:iteration:0"));
+    }
+
+    #[tokio::test]
+    async fn promotion_ignores_cached_pass_when_live_proof_is_missing_or_foreign() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+        let ws = ctx
+            .workspaces
+            .create("A", dir.path().to_str().unwrap(), &"editor".into())
+            .await
+            .unwrap();
+        let mut eval = ctx
+            .skill_evals_store
+            .create_eval(
+                &ws.id,
+                "skill",
+                "task",
+                "fixture",
+                1,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let mut iteration = ctx
+            .skill_evals_store
+            .add_iteration(&eval.id, 1, None, "skill", "body", "fixture", &[])
+            .await
+            .unwrap();
+        eval.status = SkillEvalStatus::Done;
+        iteration.status = "done".into();
+        iteration.scoring = Some(EvalScore {
+            composite: 100.0,
+            proof_status: "passed".into(),
+            ..Default::default()
+        });
+        iteration.proof_pack_id = Some("missing".into());
+        assert!(!iteration_gate(&ctx, &eval, &iteration).await.allowed);
+        let pack = ctx
+            .proof_repo
+            .create_pack(
+                &ws.id,
+                otto_core::proof::WorkItemKind::Task,
+                "different-iteration",
+                "foreign",
+                "editor",
+                None,
+            )
+            .await
+            .unwrap();
+        iteration.proof_pack_id = Some(pack.id);
+        assert!(!iteration_gate(&ctx, &eval, &iteration).await.allowed);
+    }
+
+    #[tokio::test]
+    async fn golden_task_from_another_workspace_is_rejected_before_creating_eval() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+        let editor = otto_state::UsersRepo::new(pool.clone())
+            .get(&"editor".into())
+            .await
+            .unwrap();
+        let a = ctx
+            .workspaces
+            .create("A", dir.path().to_str().unwrap(), &editor.id)
+            .await
+            .unwrap();
+        let b = ctx
+            .workspaces
+            .create("B", dir.path().to_str().unwrap(), &editor.id)
+            .await
+            .unwrap();
+        let golden = ctx
+            .golden_tasks_store
+            .create(
+                &b.id,
+                &b.id,
+                &otto_state::GoldenTaskInput {
+                    name: "private".into(),
+                    prompt: "Other workspace prompt".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                "manual",
+                None,
+                None,
+                &editor.id,
+            )
+            .await
+            .unwrap();
+        let req: StartSkillEvalReq = serde_json::from_value(serde_json::json!({
+            "source":{"kind":"library","reference":""}, "task":"", "impl_cli":"", "validations":[],
+            "iterations":1,"mode":"score_only","golden_task_id":golden.id
+        }))
+        .unwrap();
+        let result = start_eval(
+            AxPath(a.id.clone()),
+            State(ctx.clone()),
+            CurrentUser(editor),
+            Json(req),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ApiError(Error::Invalid(_)))),
+            "cross-workspace task must fail at admission"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM skill_evals WHERE workspace_id = ?")
+                .bind(&a.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "rejection must not leave a running evaluation");
+    }
+
+    #[test]
+    fn validator_expansion_is_bounded_before_launch() {
+        let mut req: StartSkillEvalReq = serde_json::from_value(serde_json::json!({
+            "source":{"kind":"library","reference":"skill"}, "task":"test", "impl_cli":"codex",
+            "validations":[{"name":"review", "criteria":"correctness", "providers":["codex"]}],
+            "iterations":10, "validator_passes":3
+        }))
+        .unwrap();
+        assert_eq!(eval_work_units(&req).unwrap(), 50);
+        req.validations[0].providers = (0..16).map(|i| format!("provider-{i}")).collect();
+        assert_eq!(eval_work_units(&req).unwrap(), 500);
+        req.validations[0].providers.push("provider-16".into());
+        assert!(eval_work_units(&req).is_err());
+        req.validations[0].providers = vec!["codex".into(); 1000];
+        assert!(eval_work_units(&req).is_err());
+        req.validations[0].providers = vec![" ".into()];
+        assert!(eval_work_units(&req).is_err());
     }
 
     use super::*;

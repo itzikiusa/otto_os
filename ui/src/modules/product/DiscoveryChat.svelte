@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   // DiscoveryChat — the chat pane for one Discovery Chat. A conversational agent
   // that works from an EMPTY/Untitled draft to help with early discovery &
   // research, and proposes Apply-able action cards.
@@ -59,6 +60,12 @@
     'Summarize this into a story I can publish',
   ];
 
+  let loadSeq = 0;
+  let activeId = '';
+  let alive = true;
+  const drafts = new Map<string, string>();
+  onDestroy(() => { alive = false; ++loadSeq; });
+
   // ── Load / reload when cid changes ────────────────────────────────────────
   $effect(() => {
     // Reactive on cid — re-runs whenever the active chat switches.
@@ -67,16 +74,28 @@
   });
 
   async function loadChat(chatId: string): Promise<void> {
+    const my = ++loadSeq;
+    const current = () => alive && my === loadSeq && cid === chatId;
+    if (activeId !== chatId) {
+      // An empty draft is an intentional decision too. While sending, the
+      // cleared composer belongs to that in-flight request, not a new draft.
+      if (activeId && !sending) drafts.set(activeId, inputText);
+      activeId = chatId;
+      inputText = drafts.get(chatId) ?? '';
+      messages = [];
+      sending = false;
+    }
     loading = true;
     loadError = null;
     try {
       const detail = await product.getDiscoveryChat(chatId);
+      if (!current()) return;
       messages = detail.messages;
       chatModel = detail.chat.model;
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (current()) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
   }
 
@@ -85,6 +104,10 @@
   async function send(): Promise<void> {
     const body = inputText.trim();
     if (!body || sending) return;
+    const target = cid;
+    const generation = loadSeq;
+    const current = () => alive && cid === target && loadSeq === generation;
+    drafts.delete(target);
 
     // Optimistic user bubble (temporary — reconciled with the server message).
     const optimisticMsg: DiscoveryChatMessage = {
@@ -108,6 +131,7 @@
         body,
         messages.length <= 1 ? provider : undefined,
       );
+      if (!current()) return;
       // Reconcile: drop the optimistic bubble, append the real user + agent msgs.
       messages = [
         ...messages.filter((m) => m.id !== optimisticMsg.id),
@@ -115,12 +139,17 @@
         resp.agent_message,
       ];
     } catch (e) {
+      // Keep a failed send with its original conversation; never overwrite
+      // the draft the person is composing in the newly selected one.
+      // A newer draft (including an explicit clear) wins over an old failure.
+      if (!drafts.has(target)) drafts.set(target, body);
+      if (!current()) return;
       // Roll back the optimistic bubble, restore the typed text, show an error.
       messages = messages.filter((m) => m.id !== optimisticMsg.id);
       inputText = body;
       toastError('Couldn’t send the message', e);
     } finally {
-      sending = false;
+      if (current()) sending = false;
     }
   }
 

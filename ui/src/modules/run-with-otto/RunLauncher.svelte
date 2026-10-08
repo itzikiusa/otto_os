@@ -9,6 +9,8 @@
   // "auto-open PR" toggle: the daemon stores `auto_open_pr` but no engine path
   // reads it, and opening the PR is the one outward action that must stay an
   // explicit, confirmed click in RunDetail (patterns.md §5).
+  import { onDestroy } from 'svelte';
+  import { latestOnly } from '../../lib/latest';
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -85,6 +87,14 @@
   // --- debounced source detection -----------------------------------------
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let detectAbort: AbortController | null = null;
+  const detectSeq = latestOnly();
+  let alive = true;
+  onDestroy(() => {
+    alive = false;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    detectAbort?.abort();
+    detectSeq.cancel();
+  });
 
   function onInput(): void {
     detected = null;
@@ -92,6 +102,7 @@
     error = '';
     if (debounceTimer) clearTimeout(debounceTimer);
     detectAbort?.abort();
+    detectSeq.cancel();
     const q = query.trim();
     if (q.length < 3) {
       detecting = false;
@@ -102,19 +113,22 @@
   }
 
   async function runDetect(q: string): Promise<void> {
-    detectAbort = new AbortController();
+    detectAbort?.abort();
+    const controller = new AbortController();
+    detectAbort = controller;
+    const ticket = detectSeq.begin();
+    const current = () => alive && ticket.current && q === query.trim();
     try {
-      const resp = await runWithOttoApi.detect(wsId, q, detectAbort.signal);
-      // Ignore a stale response (the input moved on).
-      if (q !== query.trim()) return;
+      const resp = await runWithOttoApi.detect(wsId, q, controller.signal);
+      if (!current()) return;
       detected = resp.detected ?? null;
       detectFailed = false;
     } catch {
-      if (detectAbort?.signal.aborted) return;
+      if (controller.signal.aborted || !current()) return;
       detected = null;
-      if (q === query.trim()) detectFailed = true;
+      detectFailed = true;
     } finally {
-      if (q === query.trim()) detecting = false;
+      if (current()) detecting = false;
     }
   }
 
@@ -169,6 +183,7 @@
         detectAbort?.abort();
         await runDetect(q);
       }
+      if (!alive || q !== query.trim()) return;
       const run = await runWithOtto.launch(wsId, {
         source_kind: detected?.source_kind,
         source_ref: detected?.source_ref,
@@ -181,8 +196,8 @@
         // the daemon rejects a foreign repo too).
         repo_id: repoId && repos.some((r) => r.id === repoId) ? repoId : undefined,
       });
-      query = '';
-      detected = null;
+      if (!alive) return;
+      if (query.trim() === q) { query = ''; detected = null; }
       onLaunched(run);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Launch failed';

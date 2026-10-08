@@ -14,6 +14,7 @@ import type {
 } from '../api/types';
 import { loadErrorText } from '../loadError';
 import { announceModule } from '../lazyModule';
+import { mapLimit } from '../poll';
 
 /** Room messages per request / kept in memory on live appends. */
 const ROOM_PAGE = 200;
@@ -29,6 +30,8 @@ class PersonalAgentsStore {
   roomsError: string | null = $state(null);
   /** agent_id → its schedules (loaded with the list so cards can show next-run). */
   schedulesByAgent: Record<string, PersonalAgentSchedule[]> = $state({});
+  schedulesError: Record<string, string> = $state({});
+  schedulesLoading: Record<string, boolean> = $state({});
   /** agent_id → its recent runs (loaded on demand when the Runs tab opens). */
   runsByAgent: Record<string, PersonalAgentRun[]> = $state({});
   /** agent_id → its last runs-load failure (human text); cleared on success. A
@@ -91,19 +94,28 @@ class PersonalAgentsStore {
     }
     if (!current()) return;
     // Schedules feed the cards' next-run + the Schedules tab; best-effort.
-    await Promise.all(this.agents.map((a) => this.loadSchedules(a.id)));
+    await mapLimit(this.agents, 2, async (a) => {
+      if (current()) await this.loadSchedules(a.id);
+    });
   }
 
   async loadSchedules(agentId: string): Promise<void> {
     const request = (this.scheduleRequests.get(agentId) ?? 0) + 1;
     this.scheduleRequests.set(agentId, request);
+    this.schedulesLoading = { ...this.schedulesLoading, [agentId]: true };
     try {
       const schedules = await personalAgentsApi.schedules(agentId);
       if (this.scheduleRequests.get(agentId) !== request) return;
       this.schedulesByAgent = { ...this.schedulesByAgent, [agentId]: schedules };
-    } catch {
+      const { [agentId]: _cleared, ...rest } = this.schedulesError;
+      this.schedulesError = rest;
+    } catch (e) {
       if (this.scheduleRequests.get(agentId) !== request) return;
-      this.schedulesByAgent = { ...this.schedulesByAgent, [agentId]: [] };
+      this.schedulesError = { ...this.schedulesError, [agentId]: loadErrorText(e) };
+    } finally {
+      if (this.scheduleRequests.get(agentId) === request) {
+        this.schedulesLoading = { ...this.schedulesLoading, [agentId]: false };
+      }
     }
   }
 

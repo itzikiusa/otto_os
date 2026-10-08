@@ -1,0 +1,146 @@
+[WebServer] (node:85490) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-YzNpJq OTTO_PORT=17819
+2026-10-08T00:40:19.012216Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-YzNpJq)
+2026-10-08T00:40:19.245745Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-YzNpJq/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T00:40:19.250302Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-YzNpJq/clickhouse, port 57847)
+2026-10-08T00:40:19.252634Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T00:40:19.253087Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T00:40:19.253123Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T00:40:19.253136Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T00:40:19.253279Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T00:40:19.253331Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T00:40:19.253447Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T00:40:19.253460Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T00:40:19.255058Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T00:40:19.331792Z  INFO otto_server::boot::recovery: boot: post-listen work done in 78 ms (plugins=73)
+2026-10-08T00:40:19.340652Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T00:40:19.340733Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T00:40:19.340754Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T00:40:19.340783Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T00:40:19.340813Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T00:40:19.369927Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T00:40:19.369988Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T00:40:19.370008Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T00:40:19.370021Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T00:40:19.370033Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T00:40:19.370107Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T00:40:19.370216Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T00:40:19.371415Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T00:40:19.372956Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-08T00:40:19.424735Z  INFO ottod: listening on http://127.0.0.1:17819
+2026-10-08T00:40:19.424893Z  INFO ottod: alt loopback lane on http://localhost:17819 ([::1] + 127.0.0.1 both held)
+2026-10-08T00:40:19.424943Z  INFO otto_server::boot: boot: ready in 412 ms (db_compact=0 db_open=229 maintenance=2 modules=7 restore=0 recovery=172)
+[e2e] test daemon ready (pid 85533); root onboarded.
+2026-10-08T00:40:19.640674Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-YzNpJq/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T00:40:19.642215Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T00:40:19.648955Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T00:40:19.677499Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T00:40:19.677811Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T00:40:19.677873Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+
+Running 33 tests using 1 worker
+
+(node:85590) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 3:40:22 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[WebServer] 3:40:23 AM [vite] (client) [console.warn] [svelte] derived_inert
+[WebServer] Reading a derived belonging to a now-destroyed effect may result in stale values
+[WebServer] https://svelte.dev/e/derived_inert
+  ✓   1 [desktop-webkit] › e2e/desktop-agents-scale-perf.spec.ts:99:1 › 2,000 background + 300 archived sessions: list, archive paging, event storm, workspace switch (3.8s)
+[WebServer] 3:40:24 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[WebServer] 3:40:26 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[boot-perf] #/agents {"shellMounted":187,"pagePainted":201,"apiBeforePaint":17,"apiPaths":["/api/v1/auth/me","/api/v1/auth/capabilities","/api/v1/meta","/api/v1/telemetry/config","/api/v1/notifications","/api/v1/notifications/settings","/api/v1/workspaces/scratch/sessions/usage","/api/v1/plugins","/api/v1/workspaces/scratch","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions","/api/v1/workspaces/scratch/sessions","/api/v1/workspaces","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/activity/summary","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions/usage","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/repos","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workflow-runs/active","/api/v1/sessions"],"overlap":{"meStartedBeforeMetaEnd":true,"capsStartedBeforeMetaEnd":true,"scratchStartedBeforeListEnd":true,"sessionsStartedBeforeListEnd":true},"bootRequests":["GET /api/v1/auth/me","GET /api/v1/auth/capabilities","GET /api/v1/meta","GET /api/v1/telemetry/config","GET /api/v1/notifications","GET /api/v1/notifications/settings","GET /api/v1/workspaces/scratch/sessions/usage?days=30","GET /api/v1/plugins","GET /api/v1/workspaces/scratch","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions?archived=false&foreground=true&with_sources=channel","GET /api/v1/workspaces/scratch/sessions?archived=false&foreground=true&with_sources=channel","GET /api/v1/workspaces","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/activity/summary","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions/usage?days=30","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/repos","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workflow-runs/active","GET /api/v1/sessions?archived=false&foreground=true","GET /api/v1/assistant/needs-you","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions?archived=true&limit=1","GET /api/v1/workspaces/scratch/sessions?archived=true&limit=1"],"distinct":20}
+  ✓   2 [desktop-webkit] › e2e/desktop-boot-perf.spec.ts:179:3 › cold boot of #/agents: shell + first page within budget, no duplicate requests, bounded request count, no serial auth waterfall (4.6s)
+[WebServer] 3:40:29 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[WebServer] 3:40:31 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[boot-perf] #/home {"shellMounted":143,"pagePainted":169,"apiBeforePaint":25,"apiPaths":["/api/v1/auth/me","/api/v1/auth/capabilities","/api/v1/meta","/api/v1/telemetry/config","/api/v1/notifications","/api/v1/notifications/settings","/api/v1/workspaces/scratch/sessions/usage","/api/v1/plugins","/api/v1/workspaces/scratch","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions","/api/v1/workspaces/scratch/sessions","/api/v1/workspaces","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/activity/summary","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions/usage","/api/v1/assistant/needs-you","/api/v1/assistant/tasks","/api/v1/mcp/approvals","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workgraph/summary","/api/v1/design/artifacts","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workgraph/items","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/scheduled-tasks","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/repos","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workflow-runs/active","/api/v1/sessions","/api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workgraph/items"],"overlap":{"meStartedBeforeMetaEnd":true,"capsStartedBeforeMetaEnd":true,"scratchStartedBeforeListEnd":true,"sessionsStartedBeforeListEnd":true},"bootRequests":["GET /api/v1/auth/me","GET /api/v1/auth/capabilities","GET /api/v1/meta","GET /api/v1/telemetry/config","GET /api/v1/notifications","GET /api/v1/notifications/settings","GET /api/v1/workspaces/scratch/sessions/usage?days=30","GET /api/v1/plugins","GET /api/v1/workspaces/scratch","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions?archived=false&foreground=true&with_sources=channel","GET /api/v1/workspaces/scratch/sessions?archived=false&foreground=true&with_sources=channel","GET /api/v1/workspaces","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/activity/summary","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions/usage?days=30","GET /api/v1/assistant/needs-you","GET /api/v1/assistant/tasks?limit=200","GET /api/v1/mcp/approvals?status=pending","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workgraph/summary","GET /api/v1/design/artifacts?workspace_id=01M4CF8H7408QT82CFGRAB21YB&limit=4","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workgraph/items?kind=pr&limit=3","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/scheduled-tasks","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/repos","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workflow-runs/active","GET /api/v1/sessions?archived=false&foreground=true","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/workgraph/items?limit=12","GET /api/v1/k8s/status","GET /api/v1/k8s/clusters","GET /api/v1/k8s/monitor/overview?window=24h","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/connections","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/db/dashboards","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/db/widgets","GET /api/v1/workspaces/01M4CF8H7408QT82CFGRAB21YB/sessions?archived=true&limit=1","GET /api/v1/workspaces/scratch/sessions?archived=true&limit=1"],"distinct":33}
+  ✓   3 [desktop-webkit] › e2e/desktop-boot-perf.spec.ts:179:3 › cold boot of #/home: shell + first page within budget, no duplicate requests, bounded request count, no serial auth waterfall (4.8s)
+[WebServer] 3:40:34 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[perf] 100k×30: DOM 1977 nodes; scroll step p50 6.0 / p95 7.0 ms; painted step p95 19.0 ms; jump 17.0 ms; sort 29 ms; search key→frame 17.0 ms, key→filtered 159 ms
+  ✓   4 [desktop-webkit] › e2e/desktop-db-results-perf.spec.ts:139:1 › 100k × 30 result: bounded DOM, fast scroll / jump / sort / search (5.2s)
+[WebServer] 3:40:39 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[perf] fat docs: scroll-in step p50 1.0 ms, max 2.0 ms
+  ✓   5 [desktop-webkit] › e2e/desktop-db-results-perf.spec.ts:210:1 › 40 × 50 KB documents: complex cells preview without serializing whole docs (1.9s)
+[WebServer] 3:40:41 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   6 [desktop-webkit] › e2e/desktop-docs-orch-perf.spec.ts:63:1 › GFM markdown: one DOM parse, output identical to the old triple-parse path (3.0s)
+[WebServer] 3:40:44 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   7 [desktop-webkit] › e2e/desktop-docs-orch-perf.spec.ts:108:1 › vault graph: at most one graph request per 20 s while idle (24.3s)
+[WebServer] 3:41:08 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   8 [desktop-webkit] › e2e/desktop-docs-orch-perf.spec.ts:126:1 › vault FileViewer: a 5k-row CSV mounts at most 200 rows and grows on demand (3.0s)
+[WebServer] 3:41:11 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   9 [desktop-webkit] › e2e/desktop-docs-orch-perf.spec.ts:134:1 › vault FileViewer: a 5k-line code file is windowed, not highlighted eagerly (2.7s)
+[WebServer] 3:41:14 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  10 [desktop-webkit] › e2e/desktop-docs-orch-perf.spec.ts:141:1 › insights: 500 reports mount at most 200 list rows (2.7s)
+[WebServer] 3:41:18 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  11 [desktop-webkit] › e2e/desktop-docs-orch-perf.spec.ts:179:1 › design hall: a metadata change patches one card, no full library reload (4.5s)
+2026-10-08T00:41:21.718585Z  WARN otto_git::local: git failed: upstream: git exited 2: error: No such remote 'origin' repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sidebar-1E6HRQ/work args=["remote", "get-url", "origin"] code=2
+[WebServer] 3:41:22 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T00:41:24.810640Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sidebar-1E6HRQ/work args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+2026-10-08T00:41:25.015000Z  WARN otto_git::local: git failed: upstream: git exited 128: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref repo=/private/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-sidebar-1E6HRQ/work args=["symbolic-ref", "refs/remotes/origin/HEAD"] code=128
+  ✓  12 [desktop-webkit] › e2e/desktop-git-sidebar-perf.spec.ts:59:1 › 2,000 branches in 40 folders mount one section budget, and Show more grows it (3.7s)
+[WebServer] 3:41:26 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  13 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:208:1 › Kafka: a 5,000-message peek mounts ≤ 150 table rows and still reaches the last message (1.2s)
+[WebServer] 3:41:27 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  14 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:225:1 › Kafka: 1,000 groups and a 12,000-offset group mount ≤ 150 rows each (1.0s)
+[WebServer] 3:41:28 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  15 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:242:1 › Kafka: 3,000 schema subjects mount ≤ 150 rows (933ms)
+[WebServer] 3:41:29 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T00:41:49.255735Z  INFO otto_server::proof: proof media store maintenance moved=0 removed=0 files=0 bytes=0
+  ✓  16 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:251:1 › Kafka: the overview never has more than one /metrics in flight (slow sweep) (20.8s)
+[WebServer] 3:41:50 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  17 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:269:1 › SFTP: a capped 20k listing shows the truncation note, mounts ≤ 200 rows and paints fast (1.1s)
+[WebServer] 3:41:52 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  18 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:328:1 › S3: 100k objects mount ≤ 200 rows; auto-refresh re-reads one page and keeps the loaded ones (14.3s)
+  -  19 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:432:1 › K8s: typing a filter over 5k pods makes no long task and mounts ≤ 150 rows
+[WebServer] 3:42:06 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  20 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:449:1 › K8s: 10 rapid j presses in the drawer cost ≤ 3 /resource loads (5.3s)
+  -  21 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:472:1 › K8s: the resources poll sends If-None-Match and a 304 keeps the rows
+[WebServer] 3:42:12 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  22 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:559:1 › K8s Fleet: one coalesced refresh tick costs ≤ 3 /fleet requests (one series batch, no filters) (3.1s)
+[WebServer] 3:42:15 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  23 [desktop-webkit] › e2e/desktop-infra-perf.spec.ts:595:1 › K8s Fleet: a 2,400-row table mounts ≤ 150 rows and scrolls to the last one (1.1s)
+[WebServer] 3:42:16 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[nav-smooth] cold {"git":64,"connections":118,"home":37,"vault":54,"agents":18} warm {"git":19,"connections":17,"home":14,"vault":14,"agents":11} warm-dist {"n":5,"p50":14,"p95":19,"max":19} probe {"sameShell":true,"sameSidebar":true,"removed":0,"boot":0,"emptyFrames":0,"frames":79,"resizes":0}
+  ✓  24 [desktop-webkit] › e2e/desktop-nav-smooth-perf.spec.ts:151:1 › sidebar switches keep the shell mounted, never blank, and paint the next header within budget (3.9s)
+[WebServer] 3:42:20 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[nav-pending] busy 123.0 ms after the click
+  ✓  25 [desktop-webkit] › e2e/desktop-nav-smooth-perf.spec.ts:212:1 › a slow cold page switch marks the tapped item busy and shows the progress bar (1.5s)
+[compact-queue] widen: compacts {"p1":1,"p2":1,"p3":1,"p4":0}, max in flight 1
+  ✓  26 [desktop-webkit] › e2e/desktop-terminal-compact-queue-perf.spec.ts:135:1 › widening the window compacts one pane at a time, and an off-screen pane only once it scrolls into view (10.0s)
+  ✓  27 [desktop-webkit] › e2e/desktop-terminal-compact-queue-perf.spec.ts:170:1 › narrowing the window never compacts (6.6s)
+[compact-queue] p2 acks on return: [589824]
+[compact-queue] p3 acks on return: [589824]
+  ✓  28 [desktop-webkit] › e2e/desktop-terminal-compact-queue-perf.spec.ts:183:1 › a hidden window: only the focused pane acks; the others send one cumulative ack on return (6.4s)
+[flood] credit burst=2 20MB (webgl): peak backlog 1.00 MB, acks 48, skip-resyncs 5, snapshots 6, frames ["credit","scrollback","resize"]
+  ✓  29 [desktop-webkit] › e2e/desktop-terminal-flood-perf.spec.ts:302:3 › a 20 MB flood at 2 frames/tick keeps the backlog ≤ 2.5 MB (credit) and ends on the last line (2.9s)
+[flood] credit burst=8 20MB (webgl): peak backlog 1.00 MB, acks 21, skip-resyncs 1, snapshots 2, frames ["credit","scrollback","resize"]
+  ✓  30 [desktop-webkit] › e2e/desktop-terminal-flood-perf.spec.ts:302:3 › a 20 MB flood at 8 frames/tick keeps the backlog ≤ 2.5 MB (credit) and ends on the last line (2.6s)
+[flood] legacy 20MB (webgl): peak backlog 5.94 MB, frames ["credit","scrollback","resize","pause","resume","pause","resume"], snapshots 2
+  ✓  31 [desktop-webkit] › e2e/desktop-terminal-flood-perf.spec.ts:336:1 › an older daemon (no credit grant): the pause/resume fallback still pauses and ends on the last line (2.6s)
+[flood] ^C (webgl): 13 ms, peak backlog 1.00 MB, frames ["credit","scrollback","resize","claim","input","resync"], snapshots 22
+  ✓  32 [desktop-webkit] › e2e/desktop-terminal-flood-perf.spec.ts:352:1 › ^C mid-flood shows up in under 150 ms (queue dropped, one resync) (2.9s)
+[WebServer] 3:42:56 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+2026-10-08T00:42:56.892719Z  INFO otto_sessions::manager: pty resize 80x24 -> 197x72 session=01M4CFD5V5EHKH0G8XMZWT5RZQ
+2026-10-08T00:42:57.123932Z  INFO otto_sessions::manager: pty resize 80x24 -> 197x72 session=01M4CFD5HJ5D3B8TVV5RC0CFBM
+[WebServer] 3:42:58 AM [vite] (client) [console.warn] task queue exceeded allotted deadline by 34ms
+2026-10-08T00:42:58.766285Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5J906PN3K644DWXMZ29
+2026-10-08T00:42:58.767202Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5JTZBMTVFW1M149HNBZ
+2026-10-08T00:42:58.769258Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5KBCP7VW1V761B16KNT
+2026-10-08T00:42:58.771252Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5KWNAG8JAG1PS5VNCZM
+2026-10-08T00:42:58.773134Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5MF748T9S9H0HG5W996
+2026-10-08T00:42:58.775108Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5N1HFVQ703BQ1XETJ7W
+2026-10-08T00:42:58.777166Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5NREBDZYV22BWXYNNHV
+2026-10-08T00:42:58.779169Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5PHFYBK9FRRC9ZRN004
+2026-10-08T00:42:58.781185Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5Q86CM669HHXTFHT9YG
+2026-10-08T00:42:58.852273Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5R77CQNN9D6PZQZAQ0G
+2026-10-08T00:42:58.855605Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5RYCHNRGF910SMA37JR
+2026-10-08T00:42:58.859290Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5SKKE9HGCBHJD44Y3RM
+2026-10-08T00:42:58.860064Z  INFO otto_sessions::manager: pty resize 80x24 -> 80x16 session=01M4CFD5TB9T581VBV771PCZVQ
+2026-10-08T00:42:59.042121Z  INFO otto_sessions::manager: pty resize 197x72 -> 80x16 session=01M4CFD5HJ5D3B8TVV5RC0CFBM
+2026-10-08T00:42:59.307079Z  INFO otto_sessions::manager: pty resize 80x16 -> 197x72 session=01M4CFD5HJ5D3B8TVV5RC0CFBM
+  ✓  33 [desktop-webkit] › e2e/desktop-terminal-flood-perf.spec.ts:401:3 › tiled scrollback budget › 15 live tiles keep ≤ 2k scrollback each; the maximized tile gets 4000 (4.0s)
+
+  2 skipped
+  31 passed (2.7m)

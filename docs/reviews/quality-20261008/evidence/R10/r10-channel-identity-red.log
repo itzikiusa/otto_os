@@ -1,0 +1,29 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.58s
+     Running unittests src/lib.rs (target/debug/deps/otto_channels-6162d955698b9ad8)
+
+running 1 test
+test bridge::conv_lock_tests::transports_with_the_same_chat_id_have_distinct_sessions_and_locks ... FAILED
+
+failures:
+
+---- bridge::conv_lock_tests::transports_with_the_same_chat_id_have_distinct_sessions_and_locks stdout ----
+
+thread 'bridge::conv_lock_tests::transports_with_the_same_chat_id_have_distinct_sessions_and_locks' (3235832) panicked at crates/otto-channels/src/bridge.rs:1313:9:
+assertion `left == right` failed: webhook must never reuse a Telegram session
+  left: Some("telegram-session")
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bridge::conv_lock_tests::transports_with_the_same_chat_id_have_distinct_sessions_and_locks
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p otto-channels --lib`

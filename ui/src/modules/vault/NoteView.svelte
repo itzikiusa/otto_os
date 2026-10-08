@@ -493,7 +493,7 @@
       <!-- Keyed by path (NOT by note content): reloading the same note after
            the agent’s edit keeps the drawer + terminal mounted; opening a
            different note resets the drawer to that note’s refine session. -->
-      {#key vault.notePath}
+      {#key `${vault.wsId}:${vault.current?.id}:${vault.notePath}`}
         <RefineDrawer path={vault.notePath} />
       {/key}
     {/if}

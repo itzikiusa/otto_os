@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
+import { loadErrorText } from '../src/lib/loadError.ts';
 
 function fixture(api: Record<string, unknown>) {
   const { browser } = loadSource(new URL('../src/lib/stores/browser.svelte.ts', import.meta.url), {
-    '../api/browser': api, '../nativeBrowser': { nativeBrowserAvailable: false },
+    '../loadError': { loadErrorText }, '../api/browser': api, '../nativeBrowser': { nativeBrowserAvailable: false },
     './browserLive.svelte': { browserLive: {} }, '../lazyModule': { announceModule() {} },
   });
   browser.wsId = 'ws';

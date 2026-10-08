@@ -1,0 +1,5 @@
+
+running 1 test
+test routes::search::tests::search_respects_each_sources_feature_grant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 960 filtered out; finished in 0.22s

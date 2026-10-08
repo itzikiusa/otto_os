@@ -5,20 +5,83 @@
 // …}`, …) — the same ones the results carry — so a round-trip is lossless.
 import { cellStr, isComplex, SET_EMPTY, SET_NULL } from './results-format';
 import { parseSimpleSelect } from './edit-sql';
-import { flattenPaths, getAtPath } from './expansion-plan';
+import { getAtPath } from './expansion-plan';
 import type { DiffLine, EditAdapter, RowPatch, TypedValue } from './edit-types';
 import { plural } from '../../lib/plural';
 
-/** Collection name for an editable Mongo result: a `db.<coll>.find(...)` or a
- * single-collection SELECT (which translates to a find). Null otherwise. */
+/** Read one balanced method call without confusing commas/parens in literals
+ * for method boundaries. Unknown JavaScript syntax is deliberately read-only. */
+function mongoCall(source: string): { args: string[]; rest: string } | null {
+  if (!source.startsWith('(')) return null;
+  const stack = ['('];
+  const args: string[] = [];
+  let start = 1;
+  for (let i = 1; i < source.length; i++) {
+    const c = source[i];
+    if (c === '"' || c === "'") {
+      const quote = c;
+      for (i++; i < source.length; i++) {
+        if (source[i] === '\\') i++;
+        else if (source[i] === quote) break;
+      }
+      if (i >= source.length) return null;
+    } else if (c === '/') {
+      // Filters may contain regular expressions. Comments are not part of the
+      // small proven grammar; the query still runs, but cannot enable editing.
+      if (source[i + 1] === '/' || source[i + 1] === '*') return null;
+      let inClass = false;
+      for (i++; i < source.length; i++) {
+        if (source[i] === '\\') i++;
+        else if (source[i] === '[') inClass = true;
+        else if (source[i] === ']') inClass = false;
+        else if (source[i] === '/' && !inClass) break;
+      }
+      if (i >= source.length) return null;
+    } else if (c === '`' || c === ';') return null;
+    else if ('([{'.includes(c)) stack.push(c);
+    else if (')]}'.includes(c)) {
+      if (stack.pop() !== ({ ')': '(', ']': '[', '}': '{' } as Record<string, string>)[c]) return null;
+      if (!stack.length) {
+        const last = source.slice(start, i).trim();
+        if (last || args.length) args.push(last);
+        return { args, rest: source.slice(i + 1).trim() };
+      }
+    } else if (c === ',' && stack.length === 1) {
+      args.push(source.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  return null;
+}
+
+/** Only direct inclusion/exclusion projections preserve field provenance.
+ * Computed expressions can replace _id with another document's key. */
+function directMongoProjection(source: string): boolean {
+  const key = `(?:[A-Za-z_][\\w-]*|"[^".$\\\\]*"|'[^'.$\\\\]*')`;
+  const field = `${key}\\s*:\\s*(?:0|1|true|false)`;
+  return new RegExp(`^\\{\\s*(?:${field}(?:\\s*,\\s*${field})*\\s*,?)?\\s*\\}$`).test(source);
+}
+
+/** Prove a complete single-collection find and direct projection before any
+ * mutation builder trusts the result's _id. A prefix alone is insufficient:
+ * the backend accepts subsequent operations and computed find projections. */
 export function mongoCollectionForEdit(s: string): string | null {
-  const t = s.trim();
-  // Same multi-statement rejection as parseSimpleSelect — a batch's first
-  // `db.<coll>.find` must not make a LATER result set's rows "editable".
-  if (/;\s*\S/.test(t.replace(/;\s*$/, ''))) return null;
-  const m = t.match(/^db\.([A-Za-z0-9_$.-]+)\.find\s*\(/i);
-  if (m) return m[1];
-  return parseSimpleSelect(t)?.table ?? null;
+  const t = s.trim().replace(/;\s*$/, '');
+  const m = t.match(/^db\.([A-Za-z0-9_$-]+)\.find\s*(\()/);
+  if (!m) return parseSimpleSelect(t)?.table ?? null;
+  const first = mongoCall(t.slice(m[0].length - 1));
+  if (!first || first.args.length > 2 || (first.args[1] && !directMongoProjection(first.args[1]))) return null;
+  let rest = first.rest;
+  while (rest) {
+    const method = rest.match(/^\.(sort|limit|projection)\s*(\()/);
+    if (!method) return null;
+    const call = mongoCall(rest.slice(method[0].length - 1));
+    if (!call || call.args.length !== 1) return null;
+    if (method[1] === 'projection' && !directMongoProjection(call.args[0])) return null;
+    if (method[1] === 'limit' && !/^-?\d+$/.test(call.args[0])) return null;
+    rest = call.rest;
+  }
+  return m[1];
 }
 
 /** JSON-encode a value typed into a Mongo cell editor: keep numbers/bools when
@@ -151,7 +214,7 @@ export const mongoAdapter: EditAdapter = {
   target(statement, columns, ctx) {
     const coll = mongoCollectionForEdit(statement);
     if (!coll) {
-      return { target: null, reason: 'Editing needs a single-collection find or SELECT (no aggregate/join).' };
+      return { target: null, reason: 'Editing needs a single-collection find or SELECT with direct fields (no computed projection, aggregate or join).' };
     }
     if (!columns.includes('_id')) {
       return { target: null, reason: 'Include _id in the result to enable editing.' };
@@ -224,27 +287,37 @@ export const mongoAdapter: EditAdapter = {
     return `db.${ctx.target.table}.insertOne({ ${fields.join(', ')} })`;
   },
 
-  /** replaceOne by `_id`; the filter carries the id, so drop it from the body
-   *  (replacing _id is rejected by the server anyway). The diff is path-level:
-   *  the leaves of the old row vs the leaves of the new document. */
+  /** Patch the displayed fields by _id. A find/SELECT can project only part
+   * of a document, so replacing the row would delete undisplayed fields. Direct
+   * top-level projections are required above: nested projections could hide
+   * siblings inside an object that this editor replaces as one field. */
   buildReplace(rowIdx, doc, ctx) {
-    const body = { ...doc };
-    delete body._id;
-    const before = flattenPaths(rowObject(ctx.columns, ctx.liveRows[rowIdx]));
-    const after = flattenPaths(doc);
+    const original = rowObject(ctx.columns, ctx.liveRows[rowIdx]);
+    const sets: Record<string, unknown> = Object.create(null);
+    const unsets: Record<string, string> = Object.create(null);
     const diff: DiffLine[] = [];
-    for (const [path, v] of after) {
-      if (!before.has(path)) diff.push({ row: rowIdx, path, op: 'set', before: '∅', after: shown(v) });
-      else if (JSON.stringify(before.get(path)) !== JSON.stringify(v)) {
-        diff.push({ row: rowIdx, path, op: 'set', before: shown(before.get(path)), after: shown(v) });
+    for (const [key, value] of Object.entries(doc)) {
+      if (key === '_id') continue;
+      if (JSON.stringify(original[key]) !== JSON.stringify(value)) {
+        // Mongo update paths cannot name literal dotted/dollar field names.
+        if (key.includes('.') || key.startsWith('$')) return null;
+        sets[key] = value;
+        diff.push({ row: rowIdx, path: key, op: 'set', before: shown(original[key]), after: shown(value) });
       }
     }
-    for (const [path, v] of before) {
-      if (!after.has(path)) diff.push({ row: rowIdx, path, op: 'unset', before: shown(v), after: '∅' });
+    for (const [key, value] of Object.entries(original)) {
+      if (key === '_id' || Object.hasOwn(doc, key)) continue;
+      if (key.includes('.') || key.startsWith('$')) return null;
+      unsets[key] = '';
+      diff.push({ row: rowIdx, path: key, op: 'unset', before: shown(value), after: '∅' });
     }
+    const update: Record<string, unknown> = {};
+    if (Object.keys(sets).length) update.$set = sets;
+    if (Object.keys(unsets).length) update.$unset = unsets;
+    if (!Object.keys(update).length) return null;
     return {
-      title: 'Review replaceOne',
-      sql: `db.${ctx.target.table}.replaceOne(${mongoIdFilterFor(idOf(ctx, rowIdx))}, ${JSON.stringify(body)})`,
+      title: 'Review updateOne',
+      sql: `db.${ctx.target.table}.updateOne(${mongoIdFilterFor(idOf(ctx, rowIdx))}, ${JSON.stringify(update)})`,
       diff,
     };
   },

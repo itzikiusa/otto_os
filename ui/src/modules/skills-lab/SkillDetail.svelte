@@ -14,7 +14,7 @@
   //              rendered through the sanitized GFM renderer
   //   Edit     — the multi-file editor (SkillEditor)
   //   Evals / Usage — SkillActivity
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { loadErrorText } from '../../lib/loadError';
   import Tabs from '../../lib/components/Tabs.svelte';
@@ -92,6 +92,8 @@
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let loadGeneration = 0;
+  let disposed = false;
+  onDestroy(() => { disposed = true; loadGeneration++; });
 
   async function load(name: string, src: VariantSource): Promise<void> {
     const generation = ++loadGeneration;
@@ -146,25 +148,34 @@
   });
   const refBody = $derived(group.reference === 'library' ? libraryBody : bodyOf(group.reference));
   async function compare(s: VariantSource): Promise<void> {
+    const owner = selectionKey;
+    const name = group.name;
+    const reference = group.reference;
+    const generation = loadGeneration;
     if (comparing !== s && tab === 'edit' && !(await confirmDiscard())) return;
+    if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
     comparing = comparing === s ? null : s;
     compareError = null;
     // The diff lives on Overview, above the rendered SKILL.md.
     if (comparing && tab !== 'overview') ontab('overview');
     if (comparing && s !== 'library' && s !== 'bundled' && bodyOf(s) == null) {
       try {
-        const p = await skillLabApi.getProvider(s, group.name);
+        const p = await skillLabApi.getProvider(s, name);
+        if (disposed || owner !== selectionKey || generation !== loadGeneration || comparing !== s) return;
         onbody(s, p.body);
       } catch (e) {
+        if (disposed || owner !== selectionKey || generation !== loadGeneration || comparing !== s) return;
         compareError = `Couldn’t read the ${sourceLabel(s)} copy: ${loadErrorText(e)}`;
       }
     }
     if (comparing && group.reference !== 'library' && bodyOf(group.reference) == null) {
       try {
-        const p = await skillLabApi.getProvider(group.reference, group.name);
-        onbody(group.reference, p.body);
+        const p = await skillLabApi.getProvider(reference, name);
+        if (disposed || owner !== selectionKey || generation !== loadGeneration || comparing !== s) return;
+        onbody(reference, p.body);
       } catch (e) {
-        compareError = `Couldn’t read the ${sourceLabel(group.reference)} copy: ${loadErrorText(e)}`;
+        if (disposed || owner !== selectionKey || generation !== loadGeneration || comparing !== s) return;
+        compareError = `Couldn’t read the ${sourceLabel(reference)} copy: ${loadErrorText(e)}`;
       }
     }
   }
@@ -173,10 +184,12 @@
     if (comparing === 'bundled' && bundledBody == null) {
       // On failure don’t fake an empty body (that renders as "everything was
       // deleted"); say the bundled copy couldn’t be read.
-      void skillLabApi
-        .getBundled(group.name)
-        .then((b) => (bundledBody = b.body))
-        .catch((e) => (compareError = `Couldn’t read the bundled copy: ${loadErrorText(e)}`));
+      const owner = selectionKey;
+      let active = true;
+      void skillLabApi.getBundled(group.name)
+        .then((b) => { if (active && !disposed && owner === selectionKey) bundledBody = b.body; })
+        .catch((e) => { if (active && !disposed && owner === selectionKey) compareError = `Couldn’t read the bundled copy: ${loadErrorText(e)}`; });
+      return () => { active = false; };
     }
   });
   $effect(() => {
@@ -189,14 +202,19 @@
   // ---- Actions ----------------------------------------------------------
   let busy = $state(false);
   async function install(): Promise<void> {
+    const name = group.name;
+    const owner = selectionKey;
+    const generation = loadGeneration;
     const b = group.variants.find((v) => v.source === 'bundled');
     const updating = hasLibrary;
     if (updating && !(await confirmer.ask(`Replace the library copy of ${group.name} with bundled v${b?.bundledVersion}? Your current copy is backed up first.`, { title: 'Replace from bundled', confirmLabel: 'Replace', danger: false }))) return;
+    if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
     busy = true;
     try {
-      await skillLabApi.install(group.name);
+      await skillLabApi.install(name);
+      if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       toasts.success(updating ? 'Library copy updated' : 'Installed to library', updating ? 'The previous copy was backed up.' : 'You can edit it now.');
-      onchanged({ name: group.name, source: 'library' });
+      onchanged({ name, source: 'library' });
     } catch (e) {
       toastError(`Couldn’t install ${group.name}`, e);
     } finally {
@@ -204,13 +222,17 @@
     }
   }
   async function copyToLibrary(): Promise<void> {
+    const name = group.name;
+    const owner = selectionKey;
+    const generation = loadGeneration;
     if (hasLibrary) return;
     busy = true;
     try {
       const src = bodyOf(variant.source) ?? body;
       await skillLabApi.create({ name: group.name, category: group.category === 'uncategorized' ? '' : group.category, description: group.description, body: src });
+      if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       toasts.success('Copied to library', `Only SKILL.md was copied from the ${sourceLabel(variant.source)} copy.`);
-      onchanged({ name: group.name, source: 'library' });
+      onchanged({ name, source: 'library' });
     } catch (e) {
       toastError(`Couldn’t copy ${group.name} to the library`, e);
     } finally {
@@ -218,9 +240,14 @@
     }
   }
   async function remove(): Promise<void> {
+    const name = group.name;
+    const owner = selectionKey;
+    const generation = loadGeneration;
     if (!(await confirmer.ask(`Delete “${group.name}” from the Otto library? Its files are removed; copies in ${group.variants.filter((v) => v.source !== 'library').map((v) => sourceLabel(v.source)).join(', ') || 'other places'} are not touched.`, { title: 'Delete skill' }))) return;
     try {
-      await skillLabApi.remove(group.name);
+      if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
+      await skillLabApi.remove(name);
+      if (disposed || owner !== selectionKey || generation !== loadGeneration) return;
       toasts.success('Skill deleted', group.name);
       ondeleted();
     } catch (e) {

@@ -1,0 +1,45 @@
+{
+  "node": "v22.22.3",
+  "kind": "production store with deterministic 1ms fake transport; not browser/network latency",
+  "samples": [
+    {
+      "agents": 1,
+      "scheduleRequests": 1,
+      "peakOutstanding": 1,
+      "elapsedMs": 1.7690829999999664
+    },
+    {
+      "agents": 100,
+      "scheduleRequests": 100,
+      "peakOutstanding": 100,
+      "elapsedMs": 2.6281249999999545
+    },
+    {
+      "agents": 1000,
+      "scheduleRequests": 1000,
+      "peakOutstanding": 1000,
+      "elapsedMs": 14.10087500000003
+    }
+  ],
+  "after": [
+    {
+      "agents": 1,
+      "scheduleRequests": 1,
+      "peakOutstanding": 1,
+      "elapsedMs": 1.761792000000014
+    },
+    {
+      "agents": 100,
+      "scheduleRequests": 100,
+      "peakOutstanding": 2,
+      "elapsedMs": 63.236875
+    },
+    {
+      "agents": 1000,
+      "scheduleRequests": 1000,
+      "peakOutstanding": 2,
+      "elapsedMs": 634.626
+    }
+  ],
+  "limitations": "Schedule transport remains N requests; autonomy adds N with its own two-worker cap. Fake 1ms service latency measures concurrency/queueing, not real network latency. Total schedule completion increases to N/2 rounds while preserving socket capacity for interactive work."
+}

@@ -161,15 +161,7 @@ pub async fn set_members(
     // Existence check (404 for unknown workspace before mutating membership).
     repo.get(&id).await?;
 
-    let current = repo.members(&id).await?;
-    for member in &current {
-        if !req.members.iter().any(|m| m.user_id == member.user_id) {
-            repo.remove_member(&id, &member.user_id).await?;
-        }
-    }
-    for entry in &req.members {
-        repo.set_member(&id, &entry.user_id, entry.role).await?;
-    }
+    repo.replace_members(&id, &req.members).await?;
     list_members(&ctx, &id).await.map(Json)
 }
 

@@ -29,6 +29,56 @@ mod github {
     use super::*;
     use crate::providers::github::Github;
 
+    #[tokio::test]
+    async fn approval_history_reports_effective_unique_reviewers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/acme/app/(pulls|issues)/7/comments$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        let review = |name: &str, state: &str| json!({"user":{"login":name}, "state":state});
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                review("alice", "APPROVED"),
+                review("alice", "CHANGES_REQUESTED"),
+                review("bob", "APPROVED"),
+                review("bob", "APPROVED"),
+                review("carol", "DISMISSED"),
+                review("dan", "APPROVED"),
+                review("dan", "COMMENTED"),
+                review("eve", "COMMENTED")
+            ])))
+            .mount(&server)
+            .await;
+        let detail = Github::with_base("tok".into(), server.uri())
+            .get_pr(&rr(), 7)
+            .await
+            .unwrap();
+        assert_eq!(detail.approved_by, ["bob", "dan"]);
+        let opinions: Vec<_> = detail
+            .reviewers
+            .iter()
+            .map(|r| (r.name.as_str(), r.approved))
+            .collect();
+        assert_eq!(
+            opinions,
+            [
+                ("alice", false),
+                ("bob", true),
+                ("carol", false),
+                ("dan", true),
+                ("eve", false)
+            ]
+        );
+    }
+
     fn pr(number: u64) -> serde_json::Value {
         json!({
             "number": number,

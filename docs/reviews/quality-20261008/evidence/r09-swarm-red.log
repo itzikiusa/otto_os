@@ -1,0 +1,90 @@
+   Compiling sqlx-core v0.9.0
+   Compiling ignore v0.4.33
+   Compiling tree-sitter v0.27.0
+   Compiling tree-sitter-python v0.25.0
+   Compiling tree-sitter-javascript v0.25.0
+   Compiling tree-sitter-go v0.25.0
+   Compiling tree-sitter-typescript v0.23.2
+   Compiling tree-sitter-rust v0.24.2
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+   Compiling otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+   Compiling otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.25s
+     Running unittests src/lib.rs (target/debug/deps/otto_swarm-00c5ace0746436dc)
+
+running 44 tests
+test recruiter::tests::discovery_planner_prompt_is_investigation_framed ... ok
+
+thread 'runtime::agent_run::registry_tests::second_planner_cannot_replace_the_live_cancel_handle' (3314436) panicked at crates/otto-swarm/src/runtime/agent_run.rs:489:9:
+Stop must still reach the admitted planner
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test recruiter::tests::extract_fenced_json ... ok
+test runtime::run::shared_files_tests::forgetting_the_last_branch_drops_the_swarm_entry ... ok
+test recruiter::tests::extract_balanced_json ... ok
+test recruiter::tests::cap_skills_fewer_than_cap_returns_all ... ok
+test recruiter::tests::cap_skills_respects_hard_limit ... ok
+test recruiter::tests::cap_skills_ranks_relevant_first ... ok
+test runtime::engine::row_workspace_guard::scanner_flags_unchecked_handlers_of_any_binding_shape ... ok
+test runtime::agent_run::registry_tests::plan_and_recruit_handles_are_independent ... ok
+
+thread 'runtime::verify::tests::cancellation_during_final_verdict_never_merges' (3314450) panicked at crates/otto-swarm/src/runtime/verify.rs:1275:9:
+assertion failed: s.cancelled
+test recruiter::tests::parse_recruited_minimal ... ok
+test runtime::scheduler::tests::interval_due_when_never_run ... ok
+test runtime::run::shared_files_tests::turn_cleanup_unregisters_and_removes_the_out_file ... ok
+test runtime::scheduler::tests::daily_armed_after_today_slot_waits_for_tomorrow ... ok
+test runtime::scheduler::tests::interval_not_due_within_window ... ok
+
+thread 'runtime::verify::tests::missing_blocking_verdict_never_merges' (3314455) panicked at crates/otto-swarm/src/runtime/verify.rs:1252:9:
+assertion failed: s.blocked
+test runtime::scheduler::tests::daily_respects_schedule_timezone ... ok
+test runtime::verify::tests::cancel_short_circuits_before_merge ... ok
+test runtime::verify::tests::classify_table ... ok
+test runtime::verify::tests::advisory_warns_without_fix_loop ... ok
+test runtime::scheduler::tests::edited_schedule_keeps_cursor_so_it_does_not_refire ... ok
+test runtime::verify::tests::failed_fix_turn_is_distinct_and_does_not_burn_retries ... ok
+test runtime::verify::tests::far_miss_blocks_merge_and_escalates ... ok
+test runtime::verify::tests::missing_advisory_verdict_remains_nonblocking ... ok
+test runtime::verify::tests::near_miss_warns_only_after_retries_then_merges ... ok
+test runtime::verify::tests::over_budget_stops_with_escalation ... ok
+test runtime::agent_run::registry_tests::second_planner_cannot_replace_the_live_cancel_handle ... FAILED
+test runtime::verify::tests::pass_first_then_merge ... ok
+test runtime::verify::tests::sequential_later_goal_runs_after_earlier_passes ... ok
+test runtime::verify::tests::missing_blocking_verdict_never_merges ... FAILED
+test runtime::verify::tests::cancellation_during_final_verdict_never_merges ... FAILED
+test runtime::wake::tests::only_swarm_events_ring ... ok
+test runtime::wake::tests::poke_never_inserts_and_the_last_guard_drops_the_bell ... ok
+test runtime::workspace::tests::agent_worktree_is_keyed_by_project ... ok
+test runtime::workspace::tests::cwd_mode_defaults_to_worktree_for_code_projects ... ok
+test runtime::workspace::tests::helper_scripts_parse_flags_and_fail_loud ... ok
+test runtime::workspace::tests::resolve_skills_agent_only_when_no_layers ... ok
+test runtime::workspace::tests::resolve_skills_unions_team_project_agent ... ok
+test runtime::engine::row_workspace_guard::workspace_scoped_row_handlers_check_row_ownership ... ok
+test runtime::engine::waiting_tests::waiting_keeps_since_per_code_and_clears_started_tasks ... ok
+test runtime::workspace::tests::exclude_helpers_is_a_noop_outside_git ... ok
+test runtime::wake::tests::cancel_stops_the_wait_at_once ... ok
+test runtime::workspace::tests::helpers_are_excluded_from_git_in_a_checkout ... ok
+test runtime::engine::dispatch_tests::stopping_during_readiness_does_not_wait_or_send_late_input ... ok
+test runtime::wake::tests::a_poke_wakes_the_coordinator_after_the_min_gap ... ok
+test runtime::wake::tests::a_burst_of_pokes_is_one_tick ... ok
+
+failures:
+
+failures:
+    runtime::agent_run::registry_tests::second_planner_cannot_replace_the_live_cancel_handle
+    runtime::verify::tests::cancellation_during_final_verdict_never_merges
+    runtime::verify::tests::missing_blocking_verdict_never_merges
+
+test result: FAILED. 41 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.21s
+
+error: test failed, to rerun pass `-p otto-swarm --lib`

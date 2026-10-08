@@ -546,7 +546,12 @@
         </div>
       </div>
     {/if}
-    {#if schedules.length === 0 && !schedFormOpen}
+    <LoadState what="this agent’s schedules" variant="compact"
+      loading={personalAgents.schedulesLoading[agentId] ?? false}
+      error={personalAgents.schedulesError[agentId] ?? null}
+      empty={schedules.length === 0}
+      onretry={() => void personalAgents.loadSchedules(agentId)} />
+    {#if schedules.length === 0 && !schedFormOpen && !personalAgents.schedulesLoading[agentId] && !personalAgents.schedulesError[agentId]}
       <EmptyState
         icon="calendar"
         title="No schedules"

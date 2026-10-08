@@ -60,6 +60,7 @@ pub mod reviews;
 pub mod runs;
 pub mod saved_views;
 pub mod scheduled_tasks;
+pub mod search;
 pub mod sessions;
 pub mod settings;
 pub mod skill_evals;

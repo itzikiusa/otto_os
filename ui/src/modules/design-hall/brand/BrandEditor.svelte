@@ -348,17 +348,21 @@
   // ── Approve ───────────────────────────────────────────────────────────────
   async function approve(): Promise<void> {
     if (!artifact || !head || dirty) return;
+    // Approval belongs to the version the person sees in this sheet. Live
+    // content updates may move head while the confirmation is open.
+    const target = id;
+    const version = head;
     const followers = usage?.consumers.filter((c) => c.policy === 'follow_approved').length ?? 0;
     const ok = await confirmer.ask(
-      `Accept v${head.seq} of “${artifact.title}”?` +
-        (followers ? ` ${followers} ${followers === 1 ? 'design that follows' : 'designs that follow'} the approved kit will switch to v${head.seq}.` : ''),
-      { title: 'Accept brand kit', confirmLabel: `Accept v${head.seq}`, danger: false },
+      `Accept v${version.seq} of “${artifact.title}”?` +
+        (followers ? ` ${followers} ${followers === 1 ? 'design that follows' : 'designs that follow'} the approved kit will switch to v${version.seq}.` : ''),
+      { title: 'Accept brand kit', confirmLabel: `Accept v${version.seq}`, danger: false },
     );
     if (!ok) return;
     try {
-      artifact = await api.approveArtifact(id, head.id);
-      approved = head;
-      toasts.success(`Accepted v${head.seq}`, followers ? 'Following designs re-tint now; pinned ones get an update prompt.' : undefined);
+      artifact = await api.approveArtifact(target, version.id);
+      approved = version;
+      toasts.success(`Accepted v${version.seq}`, followers ? 'Following designs re-tint now; pinned ones get an update prompt.' : undefined);
       void loadUsage();
     } catch (e) {
       toasts.error('Couldn’t accept the brand kit', errText(e));
@@ -490,7 +494,7 @@
     {/snippet}
     {#snippet badge()}
       {#if head}<span class="vbadge mono" title="Current version">v{head.seq}</span>{/if}
-      <StatusPill status={artifact?.status ?? 'draft'} />
+      <StatusPill status={needsApproval && artifact?.status === 'approved' ? 'draft' : (artifact?.status ?? 'draft')} />
     {/snippet}
     {#snippet actions()}
       <button class="btn small" data-overflow="2" onclick={() => jump('brand-used')} data-testid="brand-used-btn" data-icon="link">

@@ -25,8 +25,8 @@ pub struct SchemaRegistry {
     /// schema id → (retry-after instant, error) for ids whose lookup FAILED.
     /// Keys that merely look Confluent-framed (first byte 0x00) would otherwise
     /// cost a registry round trip (often through the SSH tunnel) on every 3 s
-    /// live-tail tick. Bounded in practice by the distinct ids seen.
-    negative: DashMap<i32, (std::time::Instant, String)>,
+    /// live-tail tick. Admission is serialized and capped across distinct ids.
+    negative: std::sync::Mutex<std::collections::HashMap<i32, (std::time::Instant, String)>>,
     /// Last subject listing + when it was fetched (`SUBJECTS_TTL`).
     subjects_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<SchemaSubject>)>>,
 }
@@ -91,7 +91,7 @@ impl SchemaRegistry {
             via_tunnel,
             cache: DashMap::new(),
             parsed: DashMap::new(),
-            negative: DashMap::new(),
+            negative: std::sync::Mutex::new(std::collections::HashMap::new()),
             subjects_cache: std::sync::Mutex::new(None),
         })
     }
@@ -124,11 +124,13 @@ impl SchemaRegistry {
 
     /// A remembered failure for `id`, while its TTL runs.
     fn negative_hit(&self, id: i32) -> Option<Error> {
-        let hit = self.negative.get(&id).map(|e| e.value().clone());
-        match hit {
-            Some((until, msg)) if std::time::Instant::now() < until => Some(Error::Upstream(msg)),
+        let mut entries = self.negative.lock().unwrap_or_else(|e| e.into_inner());
+        match entries.get(&id) {
+            Some((until, msg)) if std::time::Instant::now() < *until => {
+                Some(Error::Upstream(msg.clone()))
+            }
             Some(_) => {
-                self.negative.remove(&id);
+                entries.remove(&id);
                 None
             }
             None => None,
@@ -140,8 +142,21 @@ impl SchemaRegistry {
             Error::Upstream(m) => m.clone(),
             other => other.to_string(),
         };
-        self.negative
-            .insert(id, (std::time::Instant::now() + ttl, msg));
+        let now = std::time::Instant::now();
+        let mut entries = self.negative.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|_, (until, _)| *until > now);
+        // Unknown ids may come from arbitrary message bytes. Keep the most
+        // useful recent failures without retaining every distinct id forever.
+        if entries.len() >= 512 && !entries.contains_key(&id) {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, (until, _))| *until)
+                .map(|(&id, _)| id)
+            {
+                entries.remove(&oldest);
+            }
+        }
+        entries.insert(id, (now + ttl, msg));
     }
 
     /// Fetch (and cache) the schema document for a registry schema id. A
@@ -495,9 +510,33 @@ mod tests {
             via_tunnel: true,
             cache: DashMap::new(),
             parsed: DashMap::new(),
-            negative: DashMap::new(),
+            negative: std::sync::Mutex::new(std::collections::HashMap::new()),
             subjects_cache: std::sync::Mutex::new(None),
         }
+    }
+
+    #[tokio::test]
+    async fn distinct_failed_schema_ids_do_not_grow_without_limit() {
+        let reg = registry("http://unused.invalid");
+        for id in 0..1024 {
+            reg.remember_failure(id, NEGATIVE_TTL, &Error::Upstream("unknown schema".into()));
+        }
+        assert!(
+            reg.negative.lock().unwrap().len() <= 512,
+            "retained {} failed schema IDs",
+            reg.negative.lock().unwrap().len()
+        );
+        assert!(
+            reg.negative_hit(1023).is_some(),
+            "the most recent failure still throttles retries"
+        );
+        // A different fresh ID must also sweep expired, never-revisited IDs.
+        reg.negative
+            .lock()
+            .unwrap()
+            .insert(2048, (std::time::Instant::now(), "expired".into()));
+        reg.remember_failure(2049, NEGATIVE_TTL, &Error::Upstream("new failure".into()));
+        assert!(!reg.negative.lock().unwrap().contains_key(&2048));
     }
 
     #[tokio::test]
@@ -529,6 +568,8 @@ mod tests {
         );
         // Expired entries are retried.
         reg.negative
+            .lock()
+            .unwrap()
             .insert(7, (std::time::Instant::now(), "stale".into()));
         assert!(reg.schema_by_id(7).await.is_err());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
@@ -580,6 +621,6 @@ mod tests {
             "8 lookups took {:?}",
             t.elapsed()
         );
-        assert_eq!(reg.negative.len(), 8);
+        assert_eq!(reg.negative.lock().unwrap().len(), 8);
     }
 }

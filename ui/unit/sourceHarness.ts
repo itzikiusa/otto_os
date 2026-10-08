@@ -34,6 +34,12 @@ export function loadSource(path: URL, imports: Record<string, unknown>, globals:
       if (!(name in imports) && (name === '../latest' || name === './latest' || name === '../../lib/latest')) {
         return loadSource(new URL('../src/lib/latest.ts', import.meta.url), {}, globals);
       }
+      // Execute the real bounded worker helper; transport lanes are unused here.
+      if (!(name in imports) && name === '../poll') {
+        return loadSource(new URL('../src/lib/poll.ts', import.meta.url), {
+          './api/lane': { inLane() { throw new Error('Unexpected lane call'); }, tagSignal() {} },
+        }, globals);
+      }
       if (!(name in imports)) throw new Error(`Missing fixture import: ${name}`);
       return imports[name];
     },

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use otto_core::secrets::SecretStore;
+use otto_core::secrets::{delete_async, get_async, put_async, SecretStore};
 use otto_core::{new_id, Result};
 use otto_mcp::{InvokeCtx, InvokeOutcome, McpService};
 use otto_state::{
@@ -712,4 +712,261 @@ async fn sweep_is_lazy_for_unused_stdio_servers() {
     let after = svc.registry().get(&server.id).await.unwrap();
     assert_eq!(after.health_status, "healthy");
     assert!(after.health_latency_ms.is_some());
+}
+
+#[tokio::test]
+async fn missing_or_invalid_saved_credentials_never_start_a_transport() {
+    let pool = pool().await;
+    let (ws, user) = seed_ws(&pool).await;
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    let svc = McpService::new(pool.clone(), secrets.clone());
+    let server = register_mock(&svc, &pool, &ws, &user).await;
+    let key = McpService::secret_ref(&server.id);
+    svc.registry()
+        .set_secret_meta(&server.id, Some(&key), &["API_KEY".into()], &[])
+        .await
+        .unwrap();
+    for blob in [
+        None,
+        Some("not json"),
+        Some(r#"{"env":{},"headers":{}}"#),
+        Some(r#"{"env":{"API_KEY":42},"headers":{}}"#),
+    ] {
+        if let Some(blob) = blob {
+            put_async(&secrets, &key, blob).await.unwrap();
+        } else {
+            delete_async(&secrets, &key).await.unwrap();
+        }
+        assert!(
+            svc.discover(&server.id).await.is_err(),
+            "invalid saved credential {blob:?} must not fall back to an uncredentialed transport"
+        );
+        assert_eq!(svc.pooled_clients(), 0);
+    }
+    put_async(
+        &secrets,
+        &key,
+        r#"{"env":{"API_KEY":"fixture-value"},"headers":{}}"#,
+    )
+    .await
+    .unwrap();
+    assert_eq!(svc.discover(&server.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn patching_secret_env_preserves_omitted_secret_headers() {
+    use tower::ServiceExt;
+    let pool = pool().await;
+    let (ws, uid) = seed_ws(&pool).await;
+    sqlx::query("UPDATE users SET is_root=1 WHERE id=?")
+        .bind(&uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    let svc = Arc::new(McpService::new(pool.clone(), secrets.clone()));
+    let server = register_mock(&svc, &pool, &ws, &uid).await;
+    let key = McpService::secret_ref(&server.id);
+    put_async(
+        &secrets,
+        &key,
+        r#"{"env":{"OLD":"old"},"headers":{"Authorization":"fixture-token"}}"#,
+    )
+    .await
+    .unwrap();
+    svc.registry()
+        .set_secret_meta(
+            &server.id,
+            Some(&key),
+            &["OLD".into()],
+            &["Authorization".into()],
+        )
+        .await
+        .unwrap();
+    let user = otto_state::UsersRepo::new(pool.clone())
+        .get(&uid)
+        .await
+        .unwrap();
+    let context = HttpCtx {
+        service: svc.clone(),
+        pool: pool.clone(),
+        secrets: secrets.clone(),
+        roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool)),
+    };
+    let app = otto_mcp::api_router::<HttpCtx>()
+        .layer(axum::Extension(otto_core::auth::AuthUser(user)))
+        .with_state(context);
+    for env in [serde_json::json!({"NEW":"new"}), serde_json::json!({})] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/mcp/servers/{}", server.id))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"secret_env":env}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let saved: serde_json::Value =
+            serde_json::from_str(&get_async(&secrets, &key).await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved["headers"]["Authorization"], "fixture-token",
+            "an omitted map must survive a partial credential update"
+        );
+        assert_eq!(
+            saved["env"], env,
+            "an explicitly supplied map replaces only that map"
+        );
+        assert_eq!(
+            svc.registry()
+                .get(&server.id)
+                .await
+                .unwrap()
+                .secret_header_keys,
+            vec!["Authorization"]
+        );
+    }
+}
+
+struct HeldCredentials {
+    reading: tokio::sync::Notify,
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+impl SecretStore for HeldCredentials {
+    fn put(&self, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn delete(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn get(&self, _: &str) -> Result<Option<String>> {
+        self.reading.notify_one();
+        let (released, _) = self
+            .wake
+            .wait_timeout_while(
+                self.released.lock().unwrap(),
+                std::time::Duration::from_secs(5),
+                |v| !*v,
+            )
+            .unwrap();
+        if !*released {
+            return Err(otto_core::Error::Internal(
+                "fixture credential wait expired".into(),
+            ));
+        }
+        Ok(Some(
+            r#"{"env":{"API_KEY":"fixture-value"},"headers":{}}"#.into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn governance_changes_while_credentials_are_loading_prevent_execution() {
+    for change in [
+        "server",
+        "tool",
+        "allowlist",
+        "policy",
+        "approval",
+        "configuration",
+    ] {
+        let pool = pool().await;
+        let (ws, user) = seed_ws(&pool).await;
+        let secrets = Arc::new(HeldCredentials {
+            reading: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        let svc = Arc::new(McpService::new(pool.clone(), secrets.clone()));
+        let server = register_mock(&svc, &pool, &ws, &user).await;
+        svc.discover(&server.id).await.unwrap();
+        svc.evict_client(&server.id);
+        let key = McpService::secret_ref(&server.id);
+        svc.registry()
+            .set_secret_meta(&server.id, Some(&key), &["API_KEY".into()], &[])
+            .await
+            .unwrap();
+        let mut context = ctx(&ws, false);
+        context.caller_user_id = Some(user.clone());
+        let running = {
+            let svc = svc.clone();
+            let id = server.id.clone();
+            tokio::spawn(async move {
+                svc.invoke(&id, "list_items", &serde_json::json!({}), &context)
+                    .await
+            })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            secrets.reading.notified(),
+        )
+        .await
+        .unwrap();
+        match change {
+            "server" => {
+                sqlx::query("UPDATE mcp_servers SET enabled=0 WHERE id=?")
+                    .bind(&server.id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            "configuration" => {
+                sqlx::query("UPDATE mcp_servers SET command='unused-fixture-command' WHERE id=?")
+                    .bind(&server.id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            "tool" | "approval" => {
+                sqlx::query(if change == "tool" {
+            "UPDATE mcp_tools SET enabled=0 WHERE server_id=? AND name='list_items'"
+        } else {
+            "UPDATE mcp_tools SET require_approval=1 WHERE server_id=? AND name='list_items'"
+        }).bind(&server.id).execute(&pool).await.unwrap();
+            }
+            "allowlist" => {
+                svc.allowlist()
+                    .replace_for_ws(
+                        &ws,
+                        &[NewAllowlistEntry {
+                            server_id: server.id.clone(),
+                            tool_name: Some("list_items".into()),
+                            mode: "deny".into(),
+                        }],
+                        &user,
+                    )
+                    .await
+                    .unwrap();
+            }
+            "policy" => {
+                svc.policies()
+                    .create(NewPolicy {
+                        workspace_id: Some(ws.clone()),
+                        name: "Revoked while queued".into(),
+                        reason: None,
+                        created_by: user.clone(),
+                        enabled: true,
+                        priority: 1,
+                        match_json: serde_json::json!({}),
+                        effect: "deny".into(),
+                    })
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        *secrets.released.lock().unwrap() = true;
+        secrets.wake.notify_all();
+        let outcome = running.await.unwrap().unwrap();
+        assert!(
+            matches!(outcome, InvokeOutcome::Denied { .. }),
+            "{change} revocation must not execute the queued call: {outcome:?}"
+        );
+    }
 }

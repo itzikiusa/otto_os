@@ -68,11 +68,12 @@
   }
 
   async function cancel(): Promise<void> {
+    const runId = run.id;
     if (!(await confirmer.ask('Stop this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', danger: true, confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
     error = '';
     busy = true;
     try {
-      await runWithOtto.cancel(run.id);
+      await runWithOtto.cancel(runId);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Cancel failed';
     } finally {
@@ -80,17 +81,17 @@
     }
   }
 
-  // Mirrors the daemon's open-PR gate (otto-core open_pr_block_reason) so the
-  // button says WHY it can't open instead of failing with the raw gate text.
+  // Proof here is the execution snapshot. The server checks current evidence
+  // and the working revision when publishing; a later waiver must stay actionable.
   const prBlock = $derived.by(() => {
     if (run.approval_decision !== 'approved') return 'Approve the run first';
-    if (run.proof_status !== 'passed' && run.proof_status !== 'waived') return 'The proof pack must pass (or be waived) before a PR can be opened';
     if (!run.repo_id) return 'This run has no repository to open a PR in';
     return '';
   });
 
   /** The one outward-facing action: say where it goes and who sees it first. */
   async function openPr(): Promise<void> {
+    const runId = run.id;
     const into = prDraft?.target || run.base_branch || 'the default branch';
     const from = prDraft?.source || run.branch || 'the run branch';
     const where = run.repo_path ? ` in ${run.repo_path}` : '';
@@ -102,7 +103,7 @@
     error = '';
     busy = true;
     try {
-      await runWithOtto.openPr(run.id);
+      await runWithOtto.openPr(runId);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Open PR failed';
     } finally {
@@ -175,12 +176,13 @@
   <!-- proof + findings -->
   <section class="block stats">
     {#if run.proof_pack_id && run.proof_status}
+      <span class="muted">Proof at execution:</span>
       <button
         type="button"
         class="chip-btn"
         onclick={() => router.go(`proof/${encodeURIComponent(run.proof_pack_id ?? '')}`)}
         aria-label="Open the proof pack"
-        title="Open the proof pack"
+        title="Open the current proof pack; this badge records proof at execution"
       >
         <ProofStatusChip status={run.proof_status} risk={run.risk_score} />
       </button>
@@ -233,7 +235,7 @@
       <p class="gate-what">
         <span class="mono">{run.branch || 'the run branch'}</span>
         · {plural(run.findings_total, 'finding')}{run.findings_blocking > 0 ? ` (${run.findings_blocking} blocking)` : ''}
-        · {run.proof_status ? `proof ${run.proof_status}` : 'no proof pack yet'}{run.result_summary ? ` · ${run.result_summary}` : ''}
+        · {run.proof_status ? `proof at execution: ${run.proof_status}` : 'no proof pack yet'}{run.result_summary ? ` · ${run.result_summary}` : ''}
       </p>
       {#if evidence.length > 0}
         <div class="gate-review" data-testid="run-gate-evidence">
@@ -279,7 +281,7 @@
         {#if run.pr_url}
           {@render prLinks(run.pr_url)}
         {:else}
-          <button class="btn primary" disabled={busy || !!prBlock} title={prBlock || 'Push the branch and open this draft as a real pull request'} onclick={openPr}>Open PR</button>
+          <button class="btn primary" disabled={busy || !!prBlock} title={prBlock || 'Recheck current proof, push the branch and open this pull request'} onclick={openPr}>Open PR</button>
           {#if prBlock}<span class="muted hint">{prBlock}.</span>{/if}
         {/if}
       </div>

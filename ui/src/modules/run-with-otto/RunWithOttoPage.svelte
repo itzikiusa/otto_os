@@ -109,7 +109,7 @@
   }
 
   function onLaunched(run: OttoRun): void {
-    show(run);
+    if (run.workspace_id === ws.currentId) show(run);
   }
 
   function selectRun(run: OttoRun): void {

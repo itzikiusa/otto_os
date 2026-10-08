@@ -1291,14 +1291,15 @@
   // "Stop run…" and a Stop in Goal Loops; "Keep running" is the safe way out.
   async function stop(): Promise<void> {
     if (!run) return;
+    const runId = run.id;
     const name = current?.name ?? 'this workflow';
     const ok = await confirmer.ask(
       `Stop this run of “${name}”? It finishes the current step, then halts. Completed steps and their output are kept; to continue you start a new run.`,
       { title: 'Stop run', confirmLabel: 'Stop run', cancelLabel: 'Keep running', danger: true },
     );
-    if (!ok || !run) return;
+    if (!ok) return;
     try {
-      await api.post(`/workflow-runs/${run.id}/cancel`, {});
+      await api.post(`/workflow-runs/${runId}/cancel`, {});
       toasts.info('Stopping the run…', 'Finishes the current step, then halts.');
     } catch (e) {
       toastError('Couldn’t stop the run', e);

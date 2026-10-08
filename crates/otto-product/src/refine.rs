@@ -266,6 +266,9 @@ pub async fn send_message<C: ProductStudioHost>(
 ) -> ApiResult<Json<TurnResp>> {
     // 1. Resolve thread + Editor role-check.
     let thread = thread_with_role(&ctx, &user, &tid, WorkspaceRole::Editor).await?;
+    let _turn = crate::studio_turn::claim("refinement", &thread.workspace_id, &tid)?;
+    let thread = thread_with_role(&ctx, &user, &tid, WorkspaceRole::Editor).await?;
+
     let story = ctx
         .product_repo()
         .get_story(&thread.story_id)

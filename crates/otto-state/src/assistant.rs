@@ -338,11 +338,23 @@ impl AssistantRepo {
 
     /// Slotted threads first (by slot), then most recently updated.
     pub async fn list_threads(&self, owner: &str) -> Result<Vec<AssistantThread>> {
+        self.list_threads_page(owner, 100, 0).await
+    }
+
+    /// Bounded history page. Explicit id tie-break keeps equal timestamps stable.
+    pub async fn list_threads_page(
+        &self,
+        owner: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AssistantThread>> {
         let rows = sqlx::query(
             "SELECT * FROM assistant_threads WHERE owner_user_id = ? \
-             ORDER BY (space_slot IS NULL), space_slot, updated_at DESC",
+             ORDER BY (space_slot IS NULL), space_slot, updated_at DESC, id DESC LIMIT ? OFFSET ?",
         )
         .bind(owner)
+        .bind(limit.clamp(1, 200))
+        .bind(offset.max(0))
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list assistant threads"))?;
@@ -1067,6 +1079,61 @@ mod tests {
             provider: "claude".into(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn thread_history_first_page_is_bounded() {
+        let r = repo().await;
+        for _ in 0..105 {
+            r.create_thread(thread("history-owner", None))
+                .await
+                .unwrap();
+        }
+        let rows = r.list_threads("history-owner").await.unwrap();
+        assert_eq!(rows.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn thread_history_pages_are_complete_stable_and_indexed() {
+        let r = repo().await;
+        for i in 0..1000 {
+            sqlx::query("INSERT INTO assistant_threads (id,owner_user_id,title,provider,created_at,updated_at) VALUES (?, 'history', 'fixture', 'claude', '2026-01-01', '2026-01-01')")
+                .bind(format!("t{i:04}" )).execute(&r.pool).await.unwrap();
+        }
+        let pinned = r.create_thread(thread("history", Some(1))).await.unwrap();
+        r.create_thread(thread("other", None)).await.unwrap();
+        let first = r.list_threads_page("history", 100, 0).await.unwrap();
+        assert_eq!(first.len(), 100);
+        assert_eq!(first[0].id, pinned.id);
+        assert_eq!(first[1].id, "t0999");
+        let mut ids = std::collections::HashSet::new();
+        for offset in (0..1100).step_by(100) {
+            for row in r.list_threads_page("history", 100, offset).await.unwrap() {
+                assert!(ids.insert(row.id), "duplicate page boundary");
+            }
+        }
+        assert_eq!(ids.len(), 1001);
+        assert_eq!(
+            r.list_threads_page("history", 99999, -1)
+                .await
+                .unwrap()
+                .len(),
+            200
+        );
+        assert_eq!(r.get_thread("history", "t0000").await.unwrap().id, "t0000");
+        let plan = sqlx::query("EXPLAIN QUERY PLAN SELECT * FROM assistant_threads WHERE owner_user_id = ? ORDER BY (space_slot IS NULL), space_slot, updated_at DESC, id DESC LIMIT 100 OFFSET 900")
+            .bind("history").fetch_all(&r.pool).await.unwrap();
+        let details: Vec<String> = plan.iter().map(|row| row.get("detail")).collect();
+        assert!(
+            details
+                .iter()
+                .any(|s| s.contains("idx_assistant_thread_page")),
+            "{details:?}"
+        );
+        assert!(
+            !details.iter().any(|s| s.contains("TEMP B-TREE")),
+            "{details:?}"
+        );
     }
 
     #[tokio::test]

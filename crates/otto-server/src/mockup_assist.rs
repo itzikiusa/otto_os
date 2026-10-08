@@ -91,6 +91,9 @@ pub async fn assist_mockup(
         .await
         .map_err(ApiError)?;
 
+    // Own an existing target before reading its resumable session and source.
+    let mut _ownership = req.mockup_id.as_deref().map(claim_mockup).transpose()?;
+
     // Resolve the agent provider (honored only when a NEW mockup session is
     // created; a refine resumes the existing one). Precedence mirrors Discovery
     // Chat: request → workspace default → global default → claude.
@@ -104,6 +107,9 @@ pub async fn assist_mockup(
     let (att, created_now, format, current, session_id) =
         resolve_target(&ctx, &story, &user.id, &req).await?;
     let attachment_id = att.id.clone();
+    if _ownership.is_none() {
+        _ownership = Some(claim_mockup(&attachment_id)?);
+    }
 
     // Working dir (isolated from sibling attachments) — the agent's cwd + file.
     // Attachment ids are daemon-minted, but a refine's id arrived in the request
@@ -120,12 +126,24 @@ pub async fn assist_mockup(
         ))));
     }
     let work_file = dir.join(format.file_name());
-    let _ = tokio::fs::write(&work_file, &current).await;
+    if let Err(error) = write_source(&work_file, current.as_bytes()).await {
+        if created_now {
+            cleanup(&ctx, &att).await;
+        }
+        return Err(ApiError(error));
+    }
     let dir_str = dir.to_string_lossy().to_string();
     otto_sessions::trust::ensure_trusted(&provider, &dir_str);
 
     // Live preview: broadcast each file change while the turn runs.
-    let poll = spawn_file_poll(&ctx, &story, &attachment_id, &work_file, format, &current);
+    let poll = AbortOnDrop(spawn_file_poll(
+        &ctx,
+        &story,
+        &attachment_id,
+        &work_file,
+        format,
+        &current,
+    ));
 
     let prompt = build_mockup_prompt(
         &req.prompt,
@@ -159,6 +177,9 @@ pub async fn assist_mockup(
             session_id: sid.clone(),
         });
     };
+    crate::agent_session::require_owned_resume(&ctx.pool, &ws.id, &user.id, session_id.as_ref())
+        .await
+        .map_err(ApiError)?;
     let turn = crate::agent_session::run_session_turn(
         &ctx,
         &ws,
@@ -173,7 +194,7 @@ pub async fn assist_mockup(
         on_ready,
     )
     .await;
-    poll.abort();
+    drop(poll);
     // (S2) On turn failure, don't leak the just-minted "Generating…" attachment.
     let (raw, sid) = match turn {
         Ok(v) => v,
@@ -204,7 +225,7 @@ pub async fn assist_mockup(
     if let Some(parent) = full.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    let _ = tokio::fs::write(&full, &bytes).await;
+    write_source(&full, &bytes).await.map_err(ApiError)?;
     let meta_json = serde_json::json!({
         "assist_session_id": sid, "format": format, "group": format.default_group(),
     })
@@ -224,6 +245,36 @@ pub async fn assist_mockup(
     });
 
     Ok(Json(updated))
+}
+
+// Preparation and publication share checked writes; the owner spans the turn.
+fn claim_mockup(id: &str) -> ApiResult<otto_core::cancel_signal::InFlightGuard> {
+    static TURNS: std::sync::OnceLock<otto_core::cancel_signal::InFlightSet> =
+        std::sync::OnceLock::new();
+    TURNS
+        .get_or_init(Default::default)
+        .claim(id)
+        .ok_or_else(|| ApiError(Error::Conflict("a mockup turn is already running".into())))
+}
+
+async fn write_source(path: &std::path::Path, bytes: &[u8]) -> otto_core::Result<()> {
+    let temporary = path.with_extension(format!("{}.tmp", otto_core::new_id()));
+    let result = async {
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(&temporary, path).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result.map_err(|e| Error::Internal(format!("write mockup source: {e}")))
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Resolve the artifact we're going to edit. Either an existing `mockup_id`
@@ -290,7 +341,9 @@ async fn resolve_target(
                 .await
                 .map_err(|e| ApiError(Error::Internal(format!("attachment dir: {e}"))))?;
         }
-        let _ = tokio::fs::write(&full, current.as_bytes()).await;
+        write_source(&full, current.as_bytes())
+            .await
+            .map_err(ApiError)?;
         let att = ctx
             .attachment_repo
             .create(NewAttachment {
@@ -328,16 +381,16 @@ async fn cleanup(ctx: &ServerCtx, att: &ProductAttachment) {
 /// attachment cap (`otto_product::media::MAX_RAW_BYTES`) or not UTF-8: `None` means
 /// "unusable", and callers keep the prior source.
 async fn read_text_capped(path: &std::path::Path) -> Option<String> {
-    let len = tokio::fs::metadata(path).await.ok()?.len();
-    if len > otto_product::media::MAX_RAW_BYTES as u64 {
-        tracing::warn!(
-            "mockup assist: {} exceeds the {} MB cap; ignored",
-            path.display(),
-            otto_product::media::MAX_RAW_BYTES / (1024 * 1024)
-        );
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await.ok()?;
+    let mut bytes = Vec::new();
+    file.take(otto_product::media::MAX_RAW_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .ok()?;
+    if bytes.len() > otto_product::media::MAX_RAW_BYTES {
         return None;
     }
-    let bytes = tokio::fs::read(path).await.ok()?;
     String::from_utf8(bytes).ok()
 }
 
@@ -651,6 +704,39 @@ mod tests {
             extract_fenced(raw3, DesignFormat::Scene3d.fence_lang()).as_deref(),
             Some("{\"type\":\"otto-scene3d\"}")
         );
+    }
+
+    #[test]
+    fn ownership_rejects_overlap_and_releases_after_failure() {
+        let id = otto_core::new_id();
+        let owner = claim_mockup(&id).unwrap();
+        assert!(claim_mockup(&id).is_err());
+        drop(owner);
+        assert!(claim_mockup(&id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_storage_write_cannot_report_success() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_source(&dir.path().join("absent/file"), b"new source")
+            .await
+            .is_err());
+        let path = dir.path().join("source");
+        write_source(&path, b"stored").await.unwrap();
+        assert_eq!(tokio::fs::read(path).await.unwrap(), b"stored");
+    }
+
+    #[tokio::test]
+    async fn dropped_request_aborts_the_live_file_poll() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let poll = AbortOnDrop(tokio::spawn(async move {
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        }));
+        drop(poll);
+        assert!(tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

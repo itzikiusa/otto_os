@@ -935,6 +935,11 @@ impl DesignService {
         bytes: &[u8],
     ) -> Result<LinkReport> {
         let ex = extract_async(&a.format, bytes).await?;
+        // Opposing updates on different artifacts still share one cycle
+        // invariant. Always acquire artifact locks before this graph lock.
+        let graph_lock = commit_lock(self.root(), "__render_graph__").await?;
+        let graph_guard = graph_lock.lock().await;
+
         let mut report = LinkReport::default();
         let mut links: Vec<NewLink> = Vec::new();
 
@@ -1114,6 +1119,7 @@ impl DesignService {
 
         report.extracted = links.len();
         let changed = self.store.replace_extracted(&a.id, &links).await?;
+        drop(graph_guard);
         if changed {
             self.emit(Event::DesignLinkUpdated {
                 workspace_id: a.workspace_id.clone(),
@@ -1449,6 +1455,17 @@ impl DesignService {
                 req.dst_kind
             )));
         }
+        // Validation and insertion must see one graph snapshot, including
+        // concurrent extracted links committed on a different artifact.
+        let graph_lock = if RENDER_RELS.contains(&req.rel.as_str()) {
+            Some(commit_lock(self.root(), "__render_graph__").await?)
+        } else {
+            None
+        };
+        let graph_guard = match graph_lock.as_ref() {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let dst_id = req.dst_id.trim().to_string();
         if dst_id.is_empty() || dst_id.len() > 2_048 {
             return Err(Error::Invalid("dst_id must be 1..=2048 chars".into()));
@@ -1519,6 +1536,7 @@ impl DesignService {
                 created_by: actor.id.clone(),
             })
             .await?;
+        drop(graph_guard);
         self.emit(Event::DesignLinkUpdated {
             workspace_id: src.workspace_id.clone(),
             artifact_id: src.id.clone(),
@@ -1942,6 +1960,74 @@ mod tests {
         let s = DesignService::new(otto_state::db::test_pool().await, dir.path(), Some(tx));
         assert!(s.store().ensure_fts().await);
         (s, dir, rx)
+    }
+
+    fn render_link(target: &str) -> CreateLinkReq {
+        CreateLinkReq {
+            rel: "embeds".into(),
+            dst_kind: "artifact".into(),
+            dst_id: target.into(),
+            dst_node: None,
+            src_node: None,
+            policy: None,
+            pinned_version_id: None,
+            meta: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn opposing_explicit_links_cannot_both_pass_cycle_validation() {
+        let (s, _dir, _rx) = svc().await;
+        let a = s
+            .create_artifact(input("html", "A", Some("<p>A</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let b = s
+            .create_artifact(input("html", "B", Some("<p>B</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let author = Author::user("u1");
+        let (ab, ba) = tokio::join!(
+            s.create_link(&a, render_link(&b.id), &author),
+            s.create_link(&b, render_link(&a.id), &author),
+        );
+        assert_eq!(
+            usize::from(ab.is_ok()) + usize::from(ba.is_ok()),
+            1,
+            "opposing concurrent edges must not both be committed: {ab:?}, {ba:?}"
+        );
+        assert!(matches!(ab, Err(Error::Conflict(_))) || matches!(ba, Err(Error::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn extracted_and_explicit_links_share_cycle_validation_ownership() {
+        let (s, _dir, _rx) = svc().await;
+        let a = s
+            .create_artifact(input("html", "A", Some("<p>A</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let b = s
+            .create_artifact(input("html", "B", Some("<p>B</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let author = Author::user("u1");
+        let bytes = format!("<iframe src=\"otto://design/{}\"></iframe>", b.id).into_bytes();
+        let (saved, linked) = tokio::join!(
+            s.commit_bytes(&a, bytes, opts(None, author.clone())),
+            s.create_link(&b, render_link(&a.id), &author),
+        );
+        let saved = saved.unwrap();
+        assert!(
+            linked.is_err() || !saved.links.cycles.is_empty(),
+            "one opposing mutation must report its cycle"
+        );
+        let ab = s.store.links_out(&a.id).await.unwrap();
+        let ba = s.store.links_out(&b.id).await.unwrap();
+        assert_eq!(ab.len() + ba.len(), 1);
     }
 
     fn input(format: &str, title: &str, content: Option<&str>) -> CreateInput {

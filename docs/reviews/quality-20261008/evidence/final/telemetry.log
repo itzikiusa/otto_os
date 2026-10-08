@@ -1,0 +1,31 @@
+   Compiling syn v2.0.119
+   Compiling serde v1.0.229
+   Compiling futures-util v0.3.34
+   Compiling serde_json v1.0.151
+   Compiling hyper v1.11.1
+   Compiling chrono v0.4.45
+   Compiling serde_urlencoded v0.7.1
+   Compiling cookie_store v0.22.1
+   Compiling tower v0.5.3
+   Compiling tower-http v0.6.11
+   Compiling chrono-tz v0.10.4
+   Compiling tracing-attributes v0.1.31
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling tracing v0.1.44
+   Compiling hyper-util v0.1.21
+   Compiling otto-transcript v0.2.0 (/Users/itziklavon/otto_os/crates/otto-transcript)
+   Compiling hyper-rustls v0.27.10
+   Compiling reqwest v0.13.5
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.59s
+     Running unittests src/lib.rs (target/debug/deps/otto_telemetry-fbca3e79fc9e7f36)
+
+running 5 tests
+test collector::recovery_tests::changed_start_time_is_never_signaled ... ok
+test collector::recovery_tests::disabled_start_reaps_crashed_parent_collector_but_preserves_decoy_config ... ok
+test collector::recovery_tests::live_owner_blocks_duplicate_start_without_overwriting_config ... ok
+test collector::recovery_tests::relative_data_directory_launches_with_recoverable_absolute_config ... ok
+test tests::real_collector_delivers_all_signals_and_recovers ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 155.52s

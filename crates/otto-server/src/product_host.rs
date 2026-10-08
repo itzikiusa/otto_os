@@ -494,6 +494,7 @@ impl otto_product::ProductStudioHost for ServerCtx {
         prompt: &str,
         stuck_after: Duration,
     ) -> otto_core::Result<(String, Id)> {
+        crate::agent_session::require_owned_resume(&self.pool, &ws.id, &user.id, existing).await?;
         crate::agent_session::run_session_turn(
             self,
             ws,

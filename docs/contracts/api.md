@@ -69,7 +69,7 @@ connection library unusable for every non-root account.)
 | 13 | PATCH /api/v1/workspaces/{id} | ws admin | UpdateWorkspaceReq | Workspace |
 | 14 | DELETE /api/v1/workspaces/{id} | ws admin | — | 204 (archives) |
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
-| 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
+| 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` — atomic full replacement; invalid or duplicate users return 400 without changing existing membership |
 | 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
 | 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number` + `held: bool` (the live PTY runs in a PTY holder AND `session_persistence` is on, so a daemon restart leaves it running; `false` otherwise). Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
@@ -108,7 +108,8 @@ connection library unusable for every non-root account.)
 | 41 | POST /api/v1/repos/{id}/stage | ws editor | StagePathsReq | RepoStatusResp |
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` — `sign?: bool` — `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config. |
-| 44 | POST /api/v1/repos/{id}/push | ws editor | `PushReq {branch?, force_with_lease?}` (all optional; `branch` pushes THAT branch explicitly as `refs/heads/<branch>` — Create-PR passes its source branch; absent = current branch) | RepoStatusResp — a branch with no upstream is published with `--set-upstream` (named or current). The remote rejecting a non-fast-forward (`fetch first` / `non-fast-forward`) → **409** `push rejected: the remote branch has commits yours doesn't — …` (not a 502: nothing is wrong with the provider). Holds only the repo's network-leg lock (shared with fetch, pull, tag push and remote edits), not the worktree lock, so stage/commit/discard never queue behind a slow push; the returned status is read after the lock is released (every mutating repo route does the same). `force_with_lease:true` pushes with `--force-with-lease --force-if-includes` — never a bare `--force`; sent only after the user confirmed it; refused with **409** `force push refused: the remote branch moved …` when the remote changed since it was last fetched AND integrated (remote untouched); 409 on a detached HEAD. Auth failures stay 502 with a next step appended (Git Accounts token / SSH agent). |
+| 44 | POST /api/v1/repos/{id}/push | ws editor | `PushReq {branch?, force_with_lease?, expected_target?}` (all optional; `branch` pushes THAT branch explicitly as `refs/heads/<branch>` — Create-PR passes its source branch; absent = current branch) | RepoStatusResp — a branch with no upstream is published with `--set-upstream` (named or current). The remote rejecting a non-fast-forward (`fetch first` / `non-fast-forward`) → **409** `push rejected: the remote branch has commits yours doesn't — …` (not a 502: nothing is wrong with the provider). Holds only the repo's network-leg lock (shared with fetch, pull, tag push and remote edits), not the worktree lock, so stage/commit/discard never queue behind a slow push; the returned status is read after the lock is released (every mutating repo route does the same). `force_with_lease:true` requires `expected_target` captured before the original push (see 44a); missing or changed source/checkout/destination/tracking OID → **409** asking to refresh and reconfirm. The final command pins the source SHA, destination URL/ref and explicit expected-remote OID lease, never bare `--force`. Before sending, the observed remote OID must be reachable from the source or the branch’s last 256 reflog entries (Git ignores `--force-if-includes` with an explicit OID lease); otherwise **409** asks to integrate/review first. Detached HEAD and ambiguous/multi-ref push configurations are refused for force retry. Normal push remains compatible with an empty body. Auth failures stay 502 with a next step appended (Git Accounts token / SSH agent). |
+| 44a | GET /api/v1/repos/{id}/push-target | ws editor | — | `PushTarget {branch, source_sha, remote, destination_ref, destination_hash, remote_sha: string|null}` — local-only snapshot for a possible force retry. `destination_hash` is SHA-256 of the resolved push URL, so credential-bearing URLs are never returned. Supports a single destination with `push.default=simple/current/upstream`; custom/multiple refspecs, mirror/multiple push URLs, and detached HEAD return 409. A failed snapshot must not offer a force retry; ordinary push is unchanged. |
 | 45 | POST /api/v1/repos/{id}/pull | ws editor | `{auto_stash?, mode?}` (both optional) | `{status: RepoStatusResp, note?}` — a pull whose merge CONFLICTS is a normal 200: the fetch landed and a merge is left in progress, with the unmerged paths returned as `status.changes[].kind="conflicted"` (clients route to the conflict resolver). `auto_stash:true` wraps a dirty tree in stash → pull → pop (`note` says what happened to the stash: restored, kept because the pull conflicted, or pop conflicted); a refused auto-stash pull pops the stash back. Local refusals (dirty tree, no upstream, divergent branches, unfinished merge) are 409 with git's own line; only genuine network/auth failures are 502. Optional `mode?: "merge"\|"rebase"\|"ff_only"` (absent → the repo's `pull.rebase`/`pull.ff` config); `ff_only` on a diverged branch → 409 "Not possible to fast-forward". |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | `CheckoutReq {branch, create?, auto_stash?}` | RepoStatusResp — **never pulls**. `branch` is always a REVISION (`checkout <b> --`): a name that is only a path (a directory `docs/`, no branch `docs`) is 409 "invalid reference" instead of silently restoring that path. `auto_stash:true` = stash -u → checkout → pop (the pop addresses the auto-stash by SHA); a conflicting pop returns 200 with `kind:"conflicted"` rows and no `op_in_progress`; a failed checkout restores the stash and returns git's 409; a failed (non-conflict) pop is 409 with the stash kept. Local git spawns are bounded (30 s local / 180 s remote, `OTTO_GIT_TIMEOUT_SECS` / `OTTO_GIT_REMOTE_TIMEOUT_SECS`); a timeout is 502 "git <verb> timed out after Ns". |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
@@ -328,12 +329,12 @@ workspace from the row.
 | 66 | POST /api/v1/swarm/swarms/{sid}/agents | ws editor | CreateAgentReq | SwarmAgent |
 | 67 | PATCH /api/v1/swarm/agents/{aid} | ws editor | UpdateAgentReq | SwarmAgent — present fields apply; `schedule: null` clears the schedule, an absent `schedule` keeps it. The schedule's `last_run` / `armed_at` keys are server-owned: an edit carries the stored ones (client values ignored); `armed_at` is re-stamped on create, resume (`enabled` false→true) or a change to `cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`, and the scheduler fires from `max(last_run, armed_at)`. `at` is read in the schedule's IANA `timezone` (absent = UTC); `every_min` floors at 5 |
 | 68 | DELETE /api/v1/swarm/agents/{aid} | ws editor | — | 204 |
-| 69 | POST /api/v1/workspaces/{id}/swarm/recruit | ws editor | RecruitReq | RecruitedAgent |
+| 69 | POST /api/v1/workspaces/{id}/swarm/recruit | ws editor | RecruitReq | RecruitedAgent; 409 if another recruit is already active for the requested swarm |
 | 70 | GET /api/v1/swarm/swarms/{sid}/projects | ws viewer | — | `SwarmProject[]` |
 | 71 | POST /api/v1/swarm/swarms/{sid}/projects | ws editor | CreateProjectReq | SwarmProject |
 | 72 | PATCH /api/v1/swarm/projects/{pid} | ws editor | UpdateProjectReq | SwarmProject |
 | 73 | DELETE /api/v1/swarm/projects/{pid} | ws editor | — | 204 |
-| 74 | POST /api/v1/workspaces/{id}/swarm/projects/{pid}/plan | ws editor | PlanReq | `SwarmTask[]` |
+| 74 | POST /api/v1/workspaces/{id}/swarm/projects/{pid}/plan | ws editor | PlanReq | `SwarmTask[]`; 409 if planning is already active for this swarm |
 | 74b | POST /api/v1/swarm/projects/{pid}/clear | ws editor | — | `{ok, runs_stopped, tasks_deleted, messages_deleted}` — stops the project's in-flight runs, deletes ALL its tasks + project-scoped feed messages (runs/spend history kept), emits `swarm_project_cleared` |
 | 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}], waiting: {<task_id>: {code, detail, since}}}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool). `waiting` = why each ready task did not start on the last coordinator tick (in memory, rebuilt every tick; empty when the swarm isn't active): `code` ∈ `no_agent_fit` \| `agent_busy` \| `verifying` \| `capacity` \| `run_budget`, `detail` = board text, `since` = when it started waiting for that code. The Kanban board shows it on To-do cards |
 | 74c2 | GET /api/v1/swarm/swarms/{sid}/waiting | ws viewer | — | `{swarm_id, waiting: {<task_id>: {code, detail, since}}}` — only the coordinator's in-memory waiting reasons (same shape as `utilization.waiting`), no DB work beyond the swarm/auth lookup. The Kanban board polls this (15 s while visible + 800 ms after task changes) instead of the full utilization snapshot |
@@ -776,7 +777,7 @@ coalesced file-change invalidations plus this read path when not admitted.
 |---|---|---|---|
 | GET /sessions/{id}/transcript?before=&limit=&sub= | ws viewer + owner-or-admin | `before` = opaque cursor from a prior page (exclusive), `limit` turns (default 60, max 500), `sub` = subagent id (Claude `subagents/agent-<id>.jsonl`) | `Transcript` — the last `limit` turns (or the page before `before`); `cursor` = record index of the oldest returned turn, `has_earlier` drives "Load earlier". No resolvable transcript → **200** with `turns: []` and `unavailable_reason` ∈ `no_provider_session_id \| transcript_missing \| provider_unsupported \| codex_rollout_unresolved` (agy is always `provider_unsupported`). A `sub` view carries only turns + `stats.turns/tool_calls`. `subagents` (the full tree) rides on the newest page only — a `before` page returns `subagents: []` (the client keeps the first page's). For a live session the call first (re)arms the live tail (`transcript_appended` events; ≤ 64 concurrent, stops 60 s after exit / 2 min without a touch — see `POST …/transcript/touch`) and pages the TAIL's fold, waiting up to 15 s for its initial fold when it is just starting: one fold of the file per open, the page is the state the deltas continue from, and an agent appending to the file never makes the read 409. Without a tail (not live, cap reached) the fold cache below serves it |
 | POST /workspaces/{wid}/transcript/touch | ws viewer | — | `{armed}` — arms (or re-arms) the live tail of every live agent session in the workspace the caller may read (owner / admin / root; Claude + Codex with a resolvable transcript). The app pings it every 60 s for the current workspace while visible, on switching to it and on regaining focus, so every session you can open there stays hot; the other workspaces' tails lapse 2 min after the last ping. Cap 64 tails |
-| POST /sessions/{id}/transcript/touch | ws viewer + owner-or-admin | — | **204**. Keep-alive for an open chat: re-arms (or starts) the live tail for a live session so `transcript_appended` / `transcript_live` keep flowing; the view pings it every 60 s while mounted, and the tail stops 2 min after the last touch, so only sessions whose chat is open are tailed. Like a terminal attach, the ping also **resumes** a suspended (`reconnectable`, resumable) session via `ensure_live` before arming — the chat sends it on mount, so a session you stepped away from comes back live instead of dead behind a Resume banner. The ping also counts the caller as a **viewer** for the idle-suspend sweep for 3 min (`VIEW_HOLD`): a chat mounts no terminal WS, so without it the daemon saw a Chat-mode session as unattached and suspended it 5 min after the last output while the user was looking at it. Session not live → 204 (nothing to arm); live but no transcript yet → **409** (the client keeps retrying the GET) |
+| POST /sessions/{id}/transcript/touch?view= | ws viewer + owner-or-admin | `view` boolean (default false) | **204**. Keep-alive for an open chat: re-arms (or starts) the live tail for a live session so `transcript_appended` / `transcript_live` keep flowing; the view pings it every 60 s while mounted, and the tail stops 2 min after the last touch, so only sessions whose chat is open are tailed. With `view=false` (or omitted), it also **resumes** a suspended (`reconnectable`, resumable) session via `ensure_live` before arming, preserving active attach behavior. With `view=true`, it **never starts a process**: dormant sessions stay dormant. Chat sends `view=false` only when mounted as an active pane (`resumeOnOpen`); passive tiles, periodic keepalive and reconnect/visibility resync send `view=true`. Explicit Resume remains available in passive Chat. The ping also counts the caller as a **viewer** for the idle-suspend sweep for 3 min (`VIEW_HOLD`): a chat mounts no terminal WS, so without it the daemon saw a Chat-mode session as unattached and suspended it 5 min after the last output while the user was looking at it. Session not live → 204 (nothing to arm); live but no transcript yet → **409** (the client keeps retrying the GET) |
 | GET /sessions/{id}/transcript/tool/{tool_id} | ws viewer + owner-or-admin | `tool_id` = a `tool_call` block's `id` | the full `tool_call` `Block` (result `text`/`patch` at the 64 KB fold cap, never `elided`) — the lazy half of the live push's oversize trim: an over-64 KB `transcript_appended` delta ships results shortened with `result.elided: true`, and the view fetches the rest here when the step is expanded. Served from the running live tail's fold when there is one (no disk read), else the fold cache. Unknown id → 404; no resolvable transcript → 404 |
 | GET /sessions/{id}/transcript/images/{img_id} | ws viewer + owner-or-admin | `img_id` from an `image` block / `ToolResult.image_ids` (hex only) | image bytes, `inline`, `X-Content-Type-Options: nosniff`. Images are extracted once to `<data>/transcripts/<provider_session_id>/img/` and never inlined in JSON |
 | GET /sessions/{id}/artifacts | ws viewer + owner-or-admin | — | `Artifact[]` newest first — files written by `Write`/`Edit`/`FileChange`, PR links (`pr-link` records + PR URLs in prose), pasted/extracted images. `id = sha1(kind + ':' + (path ?? url))`, deduped per path (last producing turn wins). Best-effort mirrored into `work_artifacts` |
@@ -1142,6 +1143,23 @@ ignores it and pages by `skip`; a request without a cursor (the pager's **Prev**
 pages by `offset` on the same forced order, so Prev lands on exactly the page
 Next produced. An undecodable cursor is a `400`. `next_cursor` is omitted from
 the wire when absent (back-compat); every other engine ignores `cursor`.
+
+`QueryResult.cells_truncated?: boolean` — true when at least one stored cell
+(including nested object/array strings) was shortened for display. Omitted when
+false; distinct from row/byte pagination, which can retain complete rows. Clients
+must disable row mutations and Copy as INSERT for such a result, since displayed
+values are not lossless write inputs. Export can retrieve complete original values.
+
+Redis additionally enforces a **receive budget before RESP decoding**, for console
+commands and metadata/tree/value previews: **32 MiB of plaintext response bytes,
+100,000 value nodes, and 64 nested aggregates**. Byte/node totals include every
+reply of one pipeline. Exceeding a budget returns an upstream error with narrower
+read guidance and retires the connection; it does not return a partial successful
+result or rewrite the command. The next request reconnects with the same credentials,
+TLS settings and logical database. Active-request cancellation also retires the
+connection; cancelling a queued request leaves the active request intact. Commands
+are never automatically replayed: an errored write response may follow an already
+applied write, so callers must verify before explicitly retrying writes.
 
 `QueryResult.truncated_reason?: "bytes"` — **response byte budget (MySQL,
 Postgres, ClickHouse, MongoDB `find`/`aggregate`).** Besides the row cap (`max_rows`, up to "All" = 1,000,000), a read
@@ -1697,7 +1715,7 @@ numbers, ≤ 2 000 objects, `attachment_id` a safe id component; `version` 1 or
 | POST /product/attachments/{aid}/annotations | ws editor | AnnotationCreateReq | MockupAnnotation |
 | PATCH /product/annotations/{id} | ws editor | AnnotationPatchReq | MockupAnnotation |
 | DELETE /product/annotations/{id} | ws editor | — | 204 |
-| POST /product/stories/{sid}/mockups/assist | ws editor | MockupAssistReq `{prompt, format?, mockup_id?, provider?, model?}` | ProductAttachment — in-place design agent: generates (`format`: `html` (default) \| `mermaid` \| `excalidraw` \| `scene3d`; **400 otherwise**) or refines (`mockup_id`, any `kind:mockup`/`kind:design` row whose mime is a `DesignFormat`) an attachment; streams `mockup_session_started` + `mockup_updated` WS events. An agent-produced `scene3d` that fails validation is not committed (prior source kept). `provider`/`model` pick the agent (resolved via configured default when empty; honored on the first/new session). The `excalidraw`/`scene3d` prompts inline the bundled `otto-design-2d` / `otto-design-3d` skills |
+| POST /product/stories/{sid}/mockups/assist | ws editor | MockupAssistReq `{prompt, format?, mockup_id?, provider?, model?}` | ProductAttachment — in-place design agent: generates (`format`: `html` (default) \| `mermaid` \| `excalidraw` \| `scene3d`; **400 otherwise**) or refines (`mockup_id`, any `kind:mockup`/`kind:design` row whose mime is a `DesignFormat`) an attachment; streams `mockup_session_started` + `mockup_updated` WS events. An agent-produced `scene3d` that fails validation is not committed (prior source kept). `provider`/`model` pick the agent (resolved via configured default when empty; honored on the first/new session). The `excalidraw`/`scene3d` prompts inline the bundled `otto-design-2d` / `otto-design-3d` skills. 409 if another turn owns the attachment; preparation/storage errors fail the request instead of publishing success |
 
 #### Blender bridge (optional, detected)
 
@@ -1743,7 +1761,7 @@ story's workspace gates each route (Viewer reads, Editor converse/mutate).
 | POST /product/stories/{sid}/refinement-threads | ws editor | CreateThreadReq? ({discovery_run_id?, title?}) | RefinementThread |
 | GET /product/stories/{sid}/refinement-threads | ws viewer | — | RefinementThread[] (newest first) |
 | GET /product/refinement-threads/{tid} | ws viewer | — | {thread, messages} |
-| POST /product/refinement-threads/{tid}/messages | ws editor | {body, provider?, model?} | {user_message, agent_message, story_updated, version_no?} (synchronous; the agent turn runs inline as a managed `run_session_turn` session — `provider`/`model` pick the agent, resolved via the configured default when empty) |
+| POST /product/refinement-threads/{tid}/messages | ws editor | {body, provider?, model?} | {user_message, agent_message, story_updated, version_no?} (synchronous; the agent turn runs inline as a managed `run_session_turn` session — `provider`/`model` pick the agent, resolved via the configured default when empty); 409 while another turn owns this thread |
 | POST /product/refinement-threads/{tid}/archive | ws editor | — | RefinementThread |
 
 ### Product discovery swarm
@@ -1874,7 +1892,7 @@ the CRUD endpoints above first.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /webhooks/{workspace_id} | public-by-key (`X-Otto-Webhook-Key`) | WebhookInboundReq | 202 `{accepted, conversation}` |
+| POST /webhooks/{workspace_id} | public-by-key (`X-Otto-Webhook-Key`) | WebhookInboundReq | 202 `{accepted, conversation}`; 429 `{code:"busy",message}` when inbound capacity is full |
 | POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
 
 `SwarmTriggerReq`: `{ goal: string (required), name?: string, repo_path?: string,
@@ -1892,13 +1910,22 @@ the channel webhook above (keychain `chan-bot-{ws}-webhook`), via `X-Otto-Webhoo
 `Authorization: Bearer <key>`. Errors: 401 (bad/missing key), 404 (swarm not in workspace),
 400 (empty `goal`, unregistered `repo_path`, or any `goals[].verify_cmd`).
 
+Channel bridge admission is bounded to 256 active/queued ordinary turns globally,
+64 per integration, and 8 per conversation, plus 8 reserved quick-command slots
+so `/stop` and other existing control commands remain usable during overload.
+Webhook overload returns 429 before starting work; callers may retry later. Slack/Telegram overload sends an explicit
+not-started notice with a separate bounded notice budget. A notice that cannot be
+delivered leaves the provider event unacknowledged for retry; Telegram advances
+only the contiguous handled update prefix. Slack heartbeat processing continues
+while notices are delivered.
+
 `WebhookInboundReq`: `{ text: string (required), conversation?: string, thread?: string,
 user?: string, callback_url?: string }`. The **conversation key** drives session reuse:
 explicit `conversation` → `user` → a fresh unique id per call (so distinct callers are
 never silently merged into one session). The resolved key is returned as `conversation`
 in the 202 body — pass it back as `conversation` to deliberately continue that session.
-Errors: 404 (no enabled webhook), 401 (bad/missing key), 400 (empty `text`), 503 (no
-root user yet). The callback URL passes through the SSRF guard before each POST. The
+Errors: 404 (no enabled webhook), 401 (bad/missing key), 400 (empty `text`),
+429 (inbound capacity full, retry later), 503 (no root user yet). The callback URL passes through the SSRF guard before each POST. The
 callback body is `{kind:"reply", conversation, thread, text}` or, for attachments /
 long replies, `{kind:"file", conversation, thread, filename, content_base64}`. A message
 that never reached an agent (delivery or session creation failed) is reported as
@@ -1955,6 +1982,22 @@ and a `human_rating`.
 | GET /settings/skill-eval | root | — | skill-eval config (+ weights, promote_min_score, require_proof_pass, default cmds) |
 | PUT /settings/skill-eval | root | SkillEvalConfig | config |
 
+Admission accepts only `generate` (default) or `score_only`, at most 10 iterations
+and 16 expanded validators (each provider counts separately). Validation names and
+provider entries must be non-empty and unique. Golden-task references must belong
+to the requested workspace; all spawned sessions retain the initiating user.
+Cancellation stops scoring commands as well as agent sessions. Deletion returns
+409 while cancellation is still settling, so a managed worktree cannot be removed
+under an active scorer. Working-directory/path score targets are never deleted.
+
+Validation retries are serialized per evaluation. Admission clears cached scores
+and marks the run running; completion refreshes review proof and composite from
+persisted signals without rerunning test/lint commands. Failed validators cannot
+produce passing review evidence. Promotion requires a completed iteration and
+fresh proof for that iteration/workspace. The diff endpoint is read-only (including
+the Git index), includes tracked and untracked changes, and caps output at 200 KiB
+with `truncated=true` when the capture budget is reached.
+
 ### Golden tasks (per-repo evaluation corpus)
 
 | Method & path | Auth | Request | Response |
@@ -1974,6 +2017,12 @@ and a `human_rating`.
 | POST /workspaces/{id}/eval-matrices | ws editor | StartMatrixReq | EvalMatrix (cells fan out as eval runs) |
 | GET /eval-matrices/{id} | ws viewer | — | EvalMatrix (with live cell composites/proof) |
 | POST /eval-matrices/{id}/cancel | ws editor | — | cancel all still-running cells |
+
+Matrix admission validates every cell before persistence or session creation.
+Dimensions require non-empty unique provider names, skill references and prompt
+labels; the Cartesian product is limited to 64 cells and 256 expanded execution
+steps (including iterations/validator passes). A partially failed launch is
+reported as an error instead of remaining running indefinitely.
 
 ## Skills review (Skills Lab)
 
@@ -2467,7 +2516,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
 | PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
-| POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`, or the **Secret host binding** 409 (`needs_confirm=new_host: a stored secret would be sent to host '<host>' …`) when — after `vars` overrides and the pre-request script — a stored secret would leave its bound host (agents can never confirm that one). Network/send failure is 502 and still writes history |
+| POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. GraphQL variables must be blank/absent or a JSON object; malformed/non-object JSON returns 400 before scripts or sending. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`, or the **Secret host binding** 409 (`needs_confirm=new_host: a stored secret would be sent to host '<host>' …`) when — after `vars` overrides and the pre-request script — a stored secret would leave its bound host (agents can never confirm that one). Network/send failure is 502 and still writes history |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
 | POST /workspaces/{wid}/api-client/environments | ws editor | CreateEnvironmentReq | Environment |
@@ -2482,7 +2531,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result. The whole call is bounded at 60 s (unary: `DEADLINE_EXCEEDED` result); a server stream stops at 60 s, 1000 messages or 5 MiB of JSON and returns what arrived with `truncated: true` |
-| POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
+| POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing. Reflection has a 20 s total deadline (including connect and both RPCs), an aggregate 8 MiB / 2,048-message response budget, at most 1,024 services and 4,096 descriptor files; exceeding a limit or an upstream stream failure returns an error, never a partial schema. The same limits apply to invoke-time reflection |
 | POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only). 30 s budget, redirects are NOT followed (a 307/308 would resend the client secret), the body read is capped at 256 KiB, and an error without `error`/`error_description` quotes at most 300 chars of the body. Honours the workspace `allow_local` opt-in like `execute` |
 | GET /workspaces/{wid}/api-client/cookies | ws editor | — | the CALLER's cookie jar in this workspace (jars are per (workspace, user) — never shared across workspaces or users; automation runs use their actor's jar; values are live credentials — editor-gated) |
 | DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear the caller's jar in this workspace |
@@ -2501,6 +2550,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /ws/api-client/stream?workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade; bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed) only — `?token=` → 401 | relay; scoped/share and MCP-only tokens rejected |
 | POST /workspaces/{wid}/api-client/postman/sync | ws editor | `{api_key?, remember?}` | fetch EVERY collection + environment from the user's Postman account (api.getpostman.com) → `{collections: PostmanV21[], environments: PostmanEnv[], failed: [{name,error}], remembered}`. `api_key` optional when a prior sync stored one (`remember: true` → Keychain, ref `apiclient-postman`; only persisted after the key proved valid). Caps at 200 items per kind (Postman rate limits). The UI imports the returned docs through its normal import pipeline. |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command. Understands attached short flags (`-XPOST`, `-HName:v`, `-uuser:pw`), `-F`/`--form`/`--form-string` (→ `body_mode:"multipart"`, a `[{key,type,value,filename}]` row array; `name=@path` becomes a `file` row with only the file name), `--json` (body + JSON Content-Type/Accept), `--data-urlencode` (encoded like curl), `-A`/`-e`/`-b name=v` (User-Agent/Referer/Cookie headers), `-I` (HEAD), `--oauth2-bearer` (bearer auth); value-taking flags it doesn't model (`--cacert`, `--resolve`, `-c`, …) consume their value |
+
+Saved execution and automation steps treat script variables as a complete snapshot: `pm.environment.unset` removes a chained variable, and a failed script does not publish its variable changes. GraphQL automation steps reject malformed/non-object variables before scripts or sending (blank/absent means `{}`).
 
 On request PATCH, absent/null `auth` keeps the stored auth row and Keychain blob,
 and absent `extras` keeps the stored extras. A non-empty `X-Otto-Session` or
@@ -2657,7 +2708,7 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 | Method & path | Auth | Notes |
 |---|---|---|
 | GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui}]` for the sidebar; UI filters by grant. Exempt in policy. |
-| ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Gated by the dedicated plugin branch in the feature guard. |
+| ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Responses are buffered with a 64 MiB limit (502 on overflow), preserving upstream status/content type within the existing deadline. Gated by the dedicated plugin branch in the feature guard. |
 | GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
 | GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
 | POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). Reinstall is serialized with enable/disable/remove: disables old credentials and stops the sidecar before replacing local files, then installs the new executable metadata/token disabled. A failed replacement remains disabled. Explicitly enable to start the replacement. |
@@ -2758,9 +2809,9 @@ the UI restores the admin's own token.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /audit-log | root | query: `from?` `to?` (RFC3339, inclusive `ts` bounds) · `action?` · `user_id?` · `limit?` (≤500, default 100) · `offset?` | AuditLogResp `{entries: AuditEntry[], total}` (newest first; `total` ignores paging) |
-| GET /security-posture | root | — | SecurityPostureResp `{network_listener, network_listener_port?, loopback_only, active_api_tokens}` |
+| GET /security-posture | root | — | SecurityPostureResp `{network_listener, network_listener_port?, loopback_only, network_listener_restart_required, active_api_tokens}` |
 
-The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`), and `impersonate.start` / `impersonate.stop` (an admin began / ended acting-as another user; `user_id` = the real admin, `target` = the effective/impersonated user, `detail.real_user_id` + `detail.effective_user_id`). The posture summary derives entirely from existing settings + the auth store (no new state): the network listener key drives `network_listener` / `network_listener_port` / `loopback_only`, and `active_api_tokens` counts unexpired API tokens instance-wide.
+The audit log is an **append-only** ledger written best-effort by the daemon at security-relevant sites — it is never updated or deleted, and an audit-insert failure never fails the audited request. `AuditEntry` = `{id, ts, user_id?, action, target?, detail?, ip?}` where `action` is a stable snake_case verb. Wired actions today: `login.success`, `login.failure`, `login.lockout` (`user_id` null — the actor is unauthenticated; `target` = attempted username; `ip` = real socket peer), `token.mint` / `token.revoke` (`target` = token id), `settings.change` (`target` = changed key list; `detail.keys`; secret values are NOT captured), `network_listener.toggle` (`target` = `on`/`off`; `detail` = the new listener config), `db.write_confirmed` (a confirmed write on a guarded production/read-only connection; `target` = connection name; `detail.environment` + truncated `detail.statement`), `grant.changed` (`target` = the user whose grants changed; `detail.old`/`detail.new` grant lists), `session.terminated` (an admin force-terminated a session via `POST /admin/sessions/{id}/terminate`; `target` = session id; `detail.owner_id` + `detail.workspace_id`), and `impersonate.start` / `impersonate.stop` (an admin began / ended acting-as another user; `user_id` = the real admin, `target` = the effective/impersonated user, `detail.real_user_id` + `detail.effective_user_id`). The posture summary reports the actually bound network listener through `network_listener` / `network_listener_port` / `loopback_only`. `network_listener_restart_required` is true when saved listener settings differ from runtime (including a failed bind); restart to apply them, and check daemon logs if the difference persists. `active_api_tokens` counts unexpired API tokens instance-wide.
 
 ## Database maintenance
 
@@ -3022,7 +3073,7 @@ These self-authenticate (WS: the `otto-bearer` subprotocol; `/browser/proxy`: a 
 |---|---|---|
 | GET /ws/term/{session_id} | `otto-bearer` subprotocol only (`?token=` → 401); ws viewer attach, editor input | terminal stream (see ws.md) |
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` only — keeps the token out of the URL (`?token=` → 401); member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
+| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. Language-server stdout frames are limited to 8 KiB of headers and 16 MiB of body; oversized or malformed framing closes the shared server transport. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
 | GET /ws/api-client/stream | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | API-client streaming-response bridge |
 | GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
@@ -3076,13 +3127,23 @@ keyword (FTS5) recall. Reads require `ws viewer`, mutations `ws editor`. `Memory
 Notes:
 - `MemoryQuery.mode` ∈ `{hybrid (default), semantic, keyword}` — ALL execute the
   keyword path since Vault v3 removed embeddings; the legacy values remain accepted
-  aliases so existing callers keep working. `k` defaults to 20.
+  aliases so existing callers keep working. `k` defaults to 20 (also when zero)
+  and is capped at 200 before candidate retrieval.
 - `MemoryHit` carries `reasons: ContextReason[]` (`{kind, detail, score}`,
   `kind ∈ {keyword, scope}`) alongside `why: string[]`.
-- `visibility` ∈ `{shared (default — all workspace members), private (creator-only)}`.
+- `visibility` ∈ `{shared (default — all workspace members), private (creator-only; root may administer)}`.
+  Invalid values return `400`. Direct reads, mutations, governance, links and graph
+  neighborhoods enforce the same visibility; another user's private id returns
+  `404`, and graph edges require both endpoints to be visible. Dedup collisions
+  with another user's private row or a different visibility return `409` without
+  disclosing or reactivating that row. Merging any private source keeps the result
+  private; split children retain the parent's visibility.
 - Sharing across machines: set `OTTO_MEMORY_REMOTE_URL`/`OTTO_MEMORY_REMOTE_TOKEN`
   to point an instance at a shared host, or sync an `OTTO_MEMORY_VAULT_DIR` vault
-  folder (git) and re-index. A shared SQLite *file* over a network is unsupported.
+  folder (git) and re-index. Automatic folder write-through exports only shared
+  memories; private rows remain in the access-controlled database. Files exported
+  by older versions are not automatically removed. A shared SQLite *file* over a
+  network is unsupported.
 
 ## Vault v3 — the docs home (file-backed markdown vaults, OKF)
 
@@ -3277,9 +3338,9 @@ The response/persisted DTOs are mirrored in `ui/src/lib/api/types.ts`:
 | POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run/review/current round and active nested slots `cancelled`, stops orchestration, and terminates active sessions; finished slots keep their results. 404 once terminal. |
 | POST /vault/docs-agents/runs/{run_id}/resolve | ws editor (the run's ws, re-checked) | `{outcome: "ok"\|"fixed"}` | `VaultDocsRun` — user disposition for a `done_with_findings` run: flips it to `done` durably and stamps `review.outcome` `resolved_ok`/`resolved_fixed`. `409` for any other state; `400` for an unknown outcome. |
 | DELETE /vault/docs-agents/runs/{run_id} | ws editor (the run's ws, re-checked) | — | `204` — history cleanup: drops one TERMINAL run's durable row (and any lingering registry snapshot). `409` while the run is active (cancel first). |
-| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — long request; one resumed session per (vault, note), rehydrated after restart. An explicit `provider` DIFFERENT from the bound session's starts a FRESH session (rebinds the note); same/omitted resumes. |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — long request; one resumed session per (workspace, authenticated user, vault, note), rehydrated only from a session owned by that user in that workspace. `409` if a turn for that binding is already running. An explicit `provider` DIFFERENT from the bound session's starts a FRESH session (rebinds the note); same/omitted resumes. |
 | GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws viewer | `?path=` | `{session_id: string\|null, running: boolean}` — poll after posting refine to attach the live shell. |
-| DELETE /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws editor | `?path=` | `{session_id: null, running: false}` — detach the note's refine session (the old session stays in the sessions list). Writes a tombstone so rehydration doesn't resurrect the binding; the next refine POST starts a fresh agent with any provider. |
+| DELETE /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws editor | `?path=` | `{session_id: null, running: false}` — detach the caller's workspace/note refine session (the old session stays in the sessions list). Detached callbacks cannot restore the binding. Writes a tombstone so rehydration doesn't resurrect the binding; the next refine POST starts a fresh agent with any provider. |
 
 ## Message Brokers (Kafka viewer)
 
@@ -3366,13 +3427,15 @@ policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`�
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {produced, evidence_id}` |
+| POST /brokers/clusters/{id}/replay | ws editor | `ReplayReq {source_topic, target_topic, selector, transform?}` | `ReplayResp {replay_id, source_topic, target_topic, count, evidence, error?, evidence_saved}` |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions | ws viewer | — | `SchemaVersion[]` (`{version:number}` only; oldest first) |
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
 | POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
 | GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
 | POST /brokers/clusters/{id}/lag-alerts | ws editor | `UpsertLagAlertReq` | `LagAlert` |
 | DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
+
+Replay returns HTTP 201 after processing, including when a later publish fails: `count` and `evidence` describe only acknowledged writes (`partition`, `offset`, `key_preview`, `target_partition`, `target_offset`). An `error` means the run stopped or its evidence could not be saved; clients must show this as partial/failed, retain the evidence, and warn before a retry that prior writes can be duplicated. A failed send can have an unknown broker outcome. `evidence_saved` confirms that the acknowledged prefix was persisted in `broker_replays`; false means keep the returned evidence. `broker_write_audit` includes `replay_id`, `count`, `error` and `evidence_saved` for completed and stopped runs. This is not an exactly-once or resumable job: daemon termination or request cancellation during publication is not transactionally coupled to Kafka or SQLite. An `offset_range` is inclusive and never publishes outside its partition and offset bounds, including compacted/retained gaps. Selections must request 1–5000 messages (or at most 5000 inclusive non-negative offsets); invalid selections return 400 instead of silently clamping. Reads share a 16 MiB raw key/value/header budget. A read that exceeds it or reaches its deadline before completing the selection returns 400 before any target publication; narrow the selection and retry.
 
 Schema history lists identifiers only; opening it does not fetch every schema body. `GET .../versions/{version}` returns `{subject,version,id,schema_type,schema}` for a numeric version or `latest`. The comparison fetches its two selected bodies lazily, cancels superseded loads and retains immutable numeric versions in an 8 MiB / 64-entry UI cache. History entries no longer contain `id`, `schema_type` or `schema`; use the detail endpoint for these fields.
 
@@ -3514,7 +3577,7 @@ routes via request flags (`timeout_ms` / `filter` / `mask`) — no new route.
 | GET /workspaces/{id}/mission/views | ws viewer (Agents:View) | — | `SavedView[]` |
 | POST /workspaces/{id}/mission/views | ws editor (Agents:Edit) | `{name, filter}` | `SavedView` (201) |
 | DELETE /mission-views/{id} | ws editor (Agents:Edit, owner) | — | 204 |
-| GET /workspaces/{id}/search | ws viewer (Agents:View) | `?q=` | `SearchHit[]` (ranked cross-module: stories/workflows/api-requests/swarm/memories/repos/broker-clusters) |
+| GET /workspaces/{id}/search | ws viewer (Agents:View) | `?q=` | `SearchHit[]` (ranked cross-module: stories/workflows/api-requests/swarm/memories/vault-notes/repos/broker-clusters/canvas; each source additionally requires its feature View grant and retains workspace/private-memory visibility; at most 5 hits per source, streaming narrow metadata candidates) |
 | GET /settings/export | root | — | redacted settings JSON + `excluded_keys` |
 | POST /settings/import | root | settings JSON (secret-keyed entries rejected) | `{accepted, rejected}` |
 | GET /state/backup | root | — | non-secret state snapshot (settings + manifest + migration level) |
@@ -3712,7 +3775,7 @@ to (`dst_kind: "story"` — `implements` — links), sorted;
 | POST /api/v1/design/artifacts/{id}/versions/{v}/restore | ws editor | `DesignRestoreReq {base_version?, message?}`; `{v}` as above | `DesignSaveResult` — the version's blob re-committed server-side as a new `kind: "restore"` head (`provenance.restored_from`/`restored_seq`; message defaults to `Restored v<n>`); the blob is reused, nothing round-trips through the client. `base_version` ≠ head → 409 |
 | POST /api/v1/design/artifacts/{id}/approve | ws editor | `{version_id?}` (default head; id / `v12` / `12`) | `DesignArtifact` (status `approved`, `approved_version_id` moved). Records `status_change`; emits `design_artifact_updated {change:"approved"}` and `design_link_updated {reason:"target_approved"}` to every `follow_approved` consumer. Humans only — no MCP tool approves |
 | GET /api/v1/design/artifacts/{id}/links | ws viewer | `?dir=out\|in\|both` (default both) | `DesignLinksResp {links, artifacts}` — `artifacts` = the other ends the caller may view |
-| POST /api/v1/design/artifacts/{id}/links | ws editor (+ viewer on an artifact target) | `CreateDesignLinkReq {rel, dst_kind, dst_id, dst_node?, src_node?, policy?, pinned_version_id?, meta?}` | 201 `DesignLink` (`origin:"explicit"`). 400 unknown rel/dst_kind/policy or non-http(s) url; 404 missing artifact/story; **409 render cycle** (embeds/uses_component/uses_tokens) or duplicate. Default policy: render rels `follow_approved`; `derived_from`/`references`/`variant_of`/`resized_from` `pinned` (pinned to approved/head when no version given); others `follow_latest` |
+| POST /api/v1/design/artifacts/{id}/links | ws editor (+ viewer on an artifact target) | `CreateDesignLinkReq {rel, dst_kind, dst_id, dst_node?, src_node?, policy?, pinned_version_id?, meta?}` | 201 `DesignLink` (`origin:"explicit"`). 400 unknown rel/dst_kind/policy, non-http(s) url, or render validation exceeding 2,000 reachable artifacts; 404 missing artifact/story; **409 render cycle** (embeds/uses_component/uses_tokens) or duplicate. Default policy: render rels `follow_approved`; `derived_from`/`references`/`variant_of`/`resized_from` `pinned` (pinned to approved/head when no version given); others `follow_latest` |
 | DELETE /api/v1/design/artifacts/{id}/links/{link_id} | ws editor | — | 204; 409 for an `extracted` link (edit the document instead) |
 | GET /api/v1/design/links | design view (+ ws viewer per artifact) | `?artifact_ids=a,b,c&dir=out\|in\|both` (default both; 1–100 comma-separated ids) | `DesignLinksResp {links, artifacts}` — the links FROM (`out`) and/or TO (`in`) any of the ids in one call (Product's design strip), each link once even when both ends were requested, ordered by source (≤ 10 000 rows); ids that don't exist or whose workspace the caller can't view are skipped (never an error); `artifacts` = the OTHER ends the caller may view (not the requested ones). 400 no ids / > 100 ids / bad `dir` |
 | GET /api/v1/design/search | design view | `?q=` + the `GET /design/artifacts` filters (default limit 50) | `DesignSearchHit[] {artifact, snippet, score, reference_count, story_ids}` (enriched with one grouped query per page, not two per hit; `story_ids` sorted) — FTS5 over title, tags, extracted text (copy, layer/object names, token names), linked story keys+titles and project name; AND of terms, last term prefix-matched; shipped → approved → review → draft, then relevance. Empty `q` = filter listing (accepts the same keyset `cursor=<updated_at>\|<id>` as `GET /design/artifacts`). Snippets are computed for the returned page only. Powers the References drawer |
@@ -3738,7 +3801,16 @@ embeds, `component` uses_component, `brand`/`tokens` uses_tokens,
 missing artifact/version/node targets are reported in `DesignLinkReport.broken`
 and stored with `broken:true` (never a crash); render links that would close a
 cycle are reported in `cycles` and not stored; chains deeper than 4 are
-reported in `depth_exceeded`.
+reported in `depth_exceeded`. Render graph traversal rejects snapshots exceeding
+2,000 reachable artifacts instead of accepting a partial cycle check; explicit
+link creation returns 400. Extracted-link indexing leaves existing links unchanged
+if traversal fails (the content version remains saved).
+
+Studio resume authority: Product discovery, mockup, Canvas and Design assist
+check an existing session's persisted workspace and creator before executing it.
+A foreign user/workspace binding is 403 even when the artifact/transcript is
+shared. A missing old session retains the fresh-session fallback. This does not
+change shared artifact/transcript read permissions.
 
 ### Design assist — agent turns, variants, learned rules
 
@@ -3984,7 +4056,7 @@ Persistence: `otto_state::product_chat` (`DiscoveryChat`, `DiscoveryChatMessage`
 | 109 | POST /api/v1/product/stories/{sid}/discovery-chats | ws editor | `{title?}` | DiscoveryChat |
 | 110 | GET /api/v1/product/stories/{sid}/discovery-chats | ws viewer | — | `DiscoveryChat[]` (newest first) |
 | 111 | GET /api/v1/product/discovery-chats/{cid} | ws viewer | — | `{chat, messages}` |
-| 112 | POST /api/v1/product/discovery-chats/{cid}/messages | ws editor | `{body, provider?, model?}` | `{user_message, agent_message}` (one turn; agent_message carries `actions_json`; `provider`/`model` pick the agent, resolved via the configured default when empty) |
+| 112 | POST /api/v1/product/discovery-chats/{cid}/messages | ws editor | `{body, provider?, model?}` | `{user_message, agent_message}` (one turn; agent_message carries `actions_json`; `provider`/`model` pick the agent, resolved via the configured default when empty); 409 while another turn owns this chat |
 | 113 | POST /api/v1/product/discovery-chats/{cid}/archive | ws editor | — | DiscoveryChat |
 | 114 | POST /api/v1/product/discovery-chats/{cid}/apply | ws editor | `{action}` | ApplyResult `{story_updated, created_question_ids, created_note_ids, canvas_id}` |
 
@@ -4119,6 +4191,13 @@ enforce the entity's workspace role.
 | CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin + human credential (`403` for an agent session's / MCP / share token); approver≠requester, except agent-raised requests, which their human owner may decide | `{approved, note?}` | McpApproval |
 | CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters, `limit` (default 200, max 1000), `offset`, `paged?` | `McpCallLogRow[]`; with `paged=true` the envelope `McpAuditPage {rows, next_offset, has_more}` instead — `has_more` is true when the LEDGER read filled `limit` and `next_offset` = `offset` + ledger rows read, so a page the visibility check shortened (even to empty) still pages on (the Audit tab uses it) — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller. `limit`/`offset` page the ledger BEFORE the per-row visibility check, so a page can hold fewer than `limit` rows |
 | CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` (same row scoping as CP22) |
+
+Control-plane `UpdateServerReq.secret_env` and `secret_headers` replace only the supplied
+map; omitting a map preserves it, and `{}` explicitly clears it. Saved credentials must
+be readable, valid string maps and contain every advertised secret key before a client
+is opened. Missing/unreadable/incomplete credentials fail with a recoverable conflict;
+Otto never silently invokes the server without its configured credentials. Replacing both
+maps allows recovery from a missing or corrupt saved blob.
 
 ### Otto as an MCP server (outward) + live-agent gateway
 
@@ -4299,7 +4378,7 @@ its `workspace_id` (IDOR guard).
 - **visible session** — every agent run creates a session row (`run.session_id`) you can Open live.
 - **sandbox** — `sandbox:"worktree"` runs in a fresh isolated git worktree (when `cwd` is a repo).
 - **retry policy** — `max_retries` (0..5); the agent session is retried with backoff (`run.attempts`).
-- **notify on change** — `notify_on_change` delivers only when the report hash differs from the last ok run (else `run.skipped_delivery`).
+- **notify on change** — `notify_on_change` skips an identical report only when the latest ok run was delivered (or already skipped as unchanged), has no delivery error, and its admitted destination matches the current run. Failed/partial delivery, no delivery, a changed destination, or a legacy run without a destination snapshot causes another delivery attempt. The report is always stored; unchanged runs set `run.skipped_delivery`.
 - **proof pack** — `attach_proof` builds a proof pack per run (`run.proof_pack_id`).
 
 `schedule` = `{cadence:"interval"|"daily"|"weekly"|"cron"|"once", every_min (whole
@@ -4592,7 +4671,7 @@ purchase, delete, submit, prod) open an `approval` item in the guideline shape �
 
 | Method & path | Role | Body | Response |
 |---|---|---|---|
-| GET /api/v1/assistant/threads | agents view | — | `AssistantThread[]` — slotted threads first (by slot), then `updated_at` desc |
+| GET /api/v1/assistant/threads | agents view | query `limit?` (default 100, clamped 1–200), `offset?` (default 0, nonnegative) | `AssistantThread[]` — slotted threads first (by slot), then `updated_at` desc and `id` desc. A full page may have more; advance offset by returned count. Pages reflect current ordering; concurrent updates can move rows (deduplicate by id; refresh restarts paging). Fetch a selected older thread by id independently. |
 | POST /api/v1/assistant/threads | agents edit | `{title?, space_slot?, provider?, model?, account_id?, incognito?}` — `provider` given ⇒ the thread starts **pinned** | `AssistantThread` (no session yet — the first turn starts it) |
 | GET /api/v1/assistant/threads/{id} | agents view | — | `AssistantThread` |
 | PATCH /api/v1/assistant/threads/{id} | agents edit | `{title?, space_slot?}` (`space_slot: null` unslots) | `AssistantThread` |
@@ -4753,7 +4832,7 @@ The run advances in the background; subscribe to `Event::OttoRunUpdated` (see `w
 | GET /api/v1/runs/{id}/events | run_with_otto view + ws viewer | — | `RunEvent[]` (the stage timeline) |
 | POST /api/v1/runs/{id}/approve | run_with_otto edit + ws editor | `{decision: "approve"\|"reject", note?}` | OttoRun |
 | POST /api/v1/runs/{id}/cancel | run_with_otto edit + ws editor | — | OttoRun — stops the WORK, not just the status: the in-flight stage is dropped (its agent CLI is killed), the run's review is cancelled and its goal loop stopped; the worktree is removed only after the stage has stopped. A stage error landing after the cancel never turns the run `failed` (no failure notice, no second callback). |
-| POST /api/v1/runs/{id}/open-pr | run_with_otto edit + ws editor | — | PrSummary (requires approved + passed/waived proof) |
+| POST /api/v1/runs/{id}/open-pr | run_with_otto edit + ws editor | — | PrSummary (requires approved + current passed/waived proof owned by this run; 409 when proof is missing/stale, the worktree is dirty, HEAD differs from captured diff evidence, or the draft source differs from the proven branch; pushes the captured commit ID to that branch with normal fast-forward rules, never auto-commits) |
 
 Webhook entry (public-by-key, same per-workspace `X-Otto-Webhook-Key` as the channel
 webhook; classified `Exempt` in `policy.rs`):
@@ -4880,7 +4959,7 @@ budget is wall-clock for the whole fetch (head + body). Broadcasts `browser_tab_
 | GET /api/v1/workspaces/{wid}/browser/page?url=…[&include_html=0][&fresh=1] | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS). `include_html=0` (or `false`) returns `html: ""` — the reader UI and the `browser_page` MCP tool pass it (raw markup is up to 2 MB); default includes it. Renders are cached per workspace + URL (fragment ignored) for 60 s, concurrent requests share one in-flight render (≤32 pages / 32 MB); `fresh=1` (or `true`) forces a new render. A `/browser/login` drops that host's cached pages |
 | GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=…[&fresh=1] | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page (served from the same 60 s page cache as `/page`; `fresh=1` re-renders). Bounded: ≤500 matches, `outer_html` ≤16 KB each (`…[truncated]`), ≤1 MB total |
 | GET /api/v1/workspaces/{wid}/browser/annotations | ws viewer · Browser View | query `url?` (filters to one page) | `BrowserAnnotation[]` |
-| POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt?, text?, comment?, color?, tab_id?}` (`excerpt`/`text` default `""`, `color` defaults `"yellow"`) | `BrowserAnnotation` |
+| POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt?, text?, comment?, color?, tab_id?}` (`excerpt`/`text` default `""`, `color` defaults `"yellow"`) | `BrowserAnnotation`; supplied `tab_id` must exist in `{wid}` (404 otherwise) |
 | PATCH /api/v1/browser/annotations/{id} | ws editor · Browser Edit | `{comment}` | `BrowserAnnotation` |
 | DELETE /api/v1/browser/annotations/{id} | ws editor · Browser Edit | — | 204 |
 | POST /api/v1/workspaces/{wid}/browser/summarize | ws editor · Browser Edit | `{url}` | `{summary, engine, degraded}` |
@@ -5828,7 +5907,7 @@ archive carries explicit `excluded` and `reconnect` lists.
   `{records_inserted,records_skipped,files_restored,files_skipped,restore_root,reconnect}`.
   Apply is bound to the reviewed archive/policy and checks conflicts again.
   Existing records/files are never replaced. Imported automatic activity is
-  inactive and imported users cannot authenticate until configured explicitly.
+  inactive (including MCP automatic-approval rules) and imported users cannot authenticate until configured explicitly. Portable snapshots preserve Canvas scenes but omit their runtime session attachments because session histories are excluded. Older portable archives containing orphan Canvas references are rejected during preview with the missing-reference diagnostic; re-export with this build or restore into a compatible profile. Full archives retain valid Canvas/session links.
 
 Encoded archives are bounded to 256 MiB and individual files to 64 MiB. An
 oversize export/import fails explicitly; it is not silently truncated — with
@@ -5958,7 +6037,7 @@ Returns `{"entries":[HistoryEntry],"next_cursor":"opaque-or-null"}`. `HistoryEnt
 
 Each request scans/resolves at most `4*limit` metadata candidates. Unicode substring search uses Rust lowercase parity, with literal `%`/`_`; exact-or-descendant cwd matching is case-sensitive. An empty entries array may still include next_cursor when matching conversations occur beyond the current scan budget. Follow the cursor to continue; only null indicates exhaustion. The UI exposes Load more for this case.
 
-Transcript session/history GETs reuse bounded immutable folds (32 retained entries / 128 MiB charged payload, 32 MiB per-entry retention cutoff, 2 min idle expiry). Two cold folds run concurrently; further distinct files QUEUE for a worker (up to 8 queued or running), and same-key followers are limited to eight. A Claude file is folded streaming (one record parsed at a time, never the whole file as JSON values). Transcripts are append-only, so a file that only GREW during a fold (same inode, not shorter) is not an error: the fold (a prefix) is returned to its readers but not cached as current, and a reader of the grown file joins a fold already running. Only more than 8 pending folds, same-key followers past eight, or a file replaced/shrunk mid-fold return 409 `transcript busy; retry shortly`. Authorization precedes reuse and file identity/stamps invalidate changed snapshots. Running-session GETs are served from (and arm) their file tail; provider resume remains a side effect of explicit transcript touch, which the UI sends only for a mounted visible chat.
+Transcript session/history GETs reuse bounded immutable folds (32 retained entries / 128 MiB charged payload, 32 MiB per-entry retention cutoff, 2 min idle expiry). Two cold folds run concurrently; further distinct files QUEUE for a worker (up to 8 queued or running), and same-key followers are limited to eight. A Claude file is folded streaming (one record parsed at a time, never the whole file as JSON values). Transcripts are append-only, so a file that only GREW during a fold (same inode, not shorter) is not an error: the fold (a prefix) is returned to its readers but not cached as current, and a reader of the grown file joins a fold already running. Only more than 8 pending folds, same-key followers past eight, or a file replaced/shrunk mid-fold return 409 `transcript busy; retry shortly`. Authorization precedes reuse and file identity/stamps invalidate changed snapshots. Running-session GETs are served from (and arm) their file tail; provider resume remains a side effect of active transcript touch (`view=false`), which the UI sends only on an active Chat mount. Passive keepalive and recovery use `view=true`.
 
 
 ### API client history summaries

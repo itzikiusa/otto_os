@@ -40,6 +40,7 @@ class ApiStreamStore {
   error = $state('');
   dropped = $state(0);
   workspaceId = $state('');
+  tabId = $state<string | undefined>();
   mode: 'sse' | 'websocket' = $state('sse');
 
   private ws: WebSocket | null = null;
@@ -54,21 +55,22 @@ class ApiStreamStore {
   /** The last `connect` call — replayed once with `confirm_new_host` when the
    *  daemon refuses to send a stored secret to an unbound host and the person
    *  confirms. */
-  private last: { workspaceId: string; kind: 'sse' | 'websocket'; request: ExecuteApiReq } | null = null;
+  private last: { workspaceId: string; tabId?: string; kind: 'sse' | 'websocket'; request: ExecuteApiReq } | null = null;
 
   get active(): boolean {
     return this.status === 'connecting' || this.status === 'open';
   }
 
   /** Open a streaming connection of the given kind. */
-  connect(workspaceId: string, kind: 'sse' | 'websocket', request: ExecuteApiReq): void {
+  connect(workspaceId: string, kind: 'sse' | 'websocket', request: ExecuteApiReq, tabId?: string): void {
     this.disconnect();
     this.reset();
     this.workspaceId = workspaceId;
+    this.tabId = tabId;
     this.error = '';
     this.mode = kind;
     this.status = 'connecting';
-    const last = { workspaceId, kind, request };
+    const last = { workspaceId, tabId, kind, request };
     this.last = last;
 
     let wsUrl: string;
@@ -147,6 +149,18 @@ class ApiStreamStore {
     if (this.active) this.status = 'closed';
   }
 
+  /** One relay belongs to one editor tab. Leaving it cannot make another
+   * request's message composer send to the old upstream. */
+  retainOwner(workspaceId: string | null, tabId: string | undefined): void {
+    if (!this.workspaceId || (this.workspaceId === workspaceId && this.tabId === tabId)) return;
+    this.disconnect();
+    this.reset();
+    this.workspaceId = '';
+    this.tabId = undefined;
+    this.status = 'idle';
+    this.error = '';
+  }
+
   clear(): void {
     this.reset();
   }
@@ -167,14 +181,14 @@ class ApiStreamStore {
   }
 
   private async offerNewHostConfirm(
-    last: { workspaceId: string; kind: 'sse' | 'websocket'; request: ExecuteApiReq },
+    last: { workspaceId: string; tabId?: string; kind: 'sse' | 'websocket'; request: ExecuteApiReq },
     message: string,
   ): Promise<void> {
     const host = /host '([^']*)'/.exec(message)?.[1] ?? '';
     if (!(await confirmNewHost(host))) return;
     // The person started (or stopped) another stream meanwhile — don't revive this one.
     if (this.last !== last) return;
-    this.connect(last.workspaceId, last.kind, { ...last.request, confirm_new_host: true });
+    this.connect(last.workspaceId, last.kind, { ...last.request, confirm_new_host: true }, last.tabId);
   }
 
   private push(item: Omit<StreamItem, 't'>): void {

@@ -1,0 +1,35 @@
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-brokers v0.2.0 (/Users/itziklavon/otto_os/crates/otto-brokers)
+   Compiling otto-apiclient v0.2.0 (/Users/itziklavon/otto_os/crates/otto-apiclient)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 24s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-1a101a9211bc88ec)
+
+running 3 tests
+test routes::api_client::tests::invalid_graphql_variables_fail_saved_and_automation_replay ... FAILED
+test routes::api_client::tests::script_variable_unset_survives_server_replay ... FAILED
+test workflow_engine::tests::interrupted_loop_requires_checkpoint_before_replay ... ok
+
+failures:
+
+---- routes::api_client::tests::invalid_graphql_variables_fail_saved_and_automation_replay stdout ----
+
+thread 'routes::api_client::tests::invalid_graphql_variables_fail_saved_and_automation_replay' (3006379) panicked at crates/otto-server/src/routes/../../tests/unit/api_client.rs:1311:9:
+{bad: upstream: blocked address 127.0.0.1 (SSRF guard)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- routes::api_client::tests::script_variable_unset_survives_server_replay stdout ----
+
+thread 'routes::api_client::tests::script_variable_unset_survives_server_replay' (3006409) panicked at crates/otto-server/src/routes/../../tests/unit/api_client.rs:43:5:
+assertion `left == right` failed
+  left: {"token": String("old"), "keep": String("yes"), "next": String("new")}
+ right: {"keep": String("yes"), "next": String("new")}
+
+
+failures:
+    routes::api_client::tests::invalid_graphql_variables_fail_saved_and_automation_replay
+    routes::api_client::tests::script_variable_unset_survives_server_replay
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 936 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p otto-server --lib`

@@ -726,6 +726,8 @@ impl otto_canvas::CanvasAssistCtx for ServerCtx {
         t: otto_canvas::AgentTurn<'_>,
         on_ready: F,
     ) -> otto_core::Result<(String, otto_core::Id)> {
+        crate::agent_session::require_owned_resume(&self.pool, &t.ws.id, &t.user.id, t.existing)
+            .await?;
         crate::agent_session::run_session_turn(
             self,
             t.ws,
@@ -832,6 +834,8 @@ impl otto_design_assist::DesignAssistCtx for ServerCtx {
         t: otto_design_assist::AgentTurn<'_>,
         on_ready: F,
     ) -> otto_core::Result<(String, otto_core::Id)> {
+        crate::agent_session::require_owned_resume(&self.pool, &t.ws.id, &t.user.id, t.existing)
+            .await?;
         crate::agent_session::run_session_turn_with(
             self,
             t.ws,
@@ -1437,25 +1441,7 @@ pub(crate) async fn resolve_provider_remote(
     user: &otto_core::domain::User,
     repo: &otto_core::domain::Repo,
 ) -> Result<(Arc<dyn otto_git::GitProvider>, otto_git::RemoteRef)> {
-    let _kind = repo
-        .provider
-        .ok_or_else(|| Error::Invalid("repo has no git provider".into()))?;
-    let account_id = repo
-        .git_account_id
-        .as_ref()
-        .ok_or_else(|| Error::Invalid("repo has no git account".into()))?;
-    let account = ctx.git_store.get_account(account_id).await?;
-    otto_core::auth::authorize_owner(&account, user)?;
-    let remote_url = repo
-        .remote_url
-        .as_deref()
-        .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
-    let (_, remote_ref) = otto_git::detect(remote_url)
-        .ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote_url}")))?;
-    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
-        .await?
-        .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))?;
-    Ok((otto_git::make_provider(&account, token), remote_ref))
+    otto_git::http::provider_ctx(ctx, &otto_core::auth::AuthUser(user.clone()), repo).await
 }
 
 /// Materialize complete skill packages into `bundle`, with two views:

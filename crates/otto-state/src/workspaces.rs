@@ -296,6 +296,44 @@ impl WorkspacesRepo {
         Ok(())
     }
 
+    /// Replace access atomically: a bad user or failed insert must preserve
+    /// the complete previous membership, including the caller's access.
+    pub async fn replace_members(
+        &self,
+        ws: &Id,
+        members: &[otto_core::api::SetMemberEntry],
+    ) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for member in members {
+            if !seen.insert(&member.user_id) {
+                return Err(Error::Invalid("duplicate workspace member".into()));
+            }
+        }
+        let mut tx = self.pool.begin().await.map_err(dberr("replace members"))?;
+        sqlx::query("DELETE FROM workspace_members WHERE workspace_id = ?")
+            .bind(ws)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("replace members"))?;
+        for member in members {
+            sqlx::query(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)",
+            )
+            .bind(ws)
+            .bind(&member.user_id)
+            .bind(member.role.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                    Error::Invalid("workspace member does not exist".into())
+                }
+                _ => dberr("replace members")(e),
+            })?;
+        }
+        tx.commit().await.map_err(dberr("replace members"))
+    }
+
     pub async fn set_member(&self, ws: &Id, user: &Id, role: WorkspaceRole) -> Result<()> {
         sqlx::query(
             "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)

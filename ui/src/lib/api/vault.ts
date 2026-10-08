@@ -203,7 +203,7 @@ export function retryDocsRevision(runId: string, iteration: number) {
   );
 }
 
-/** LONG request — resolves when the refine turn completes. */
+/** LONG request — one turn per authenticated user/workspace/note; concurrent turns return 409. */
 export function refineNote(
   ws: string,
   id: number,
@@ -215,14 +215,14 @@ export function refineNote(
   );
 }
 
-/** Poll right after POSTing refine to attach the live shell. */
+/** Poll the authenticated user's workspace/note binding after POSTing refine. */
 export function refineSession(ws: string, id: number, path: string) {
   return api.get<{ session_id: string | null; running: boolean }>(
     `${base(ws)}/${id}/docs-agents/refine-session?path=${enc(path)}`,
   );
 }
 
-/** Detach the note's refine session — the next Send starts a fresh agent. */
+/** Detach only the caller's workspace/note binding; the next Send starts a fresh agent. */
 export function resetRefineSession(ws: string, id: number, path: string) {
   return api.del<{ session_id: string | null; running: boolean }>(
     `${base(ws)}/${id}/docs-agents/refine-session?path=${enc(path)}`,

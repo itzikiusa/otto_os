@@ -1,0 +1,226 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+   Compiling otto-insights v0.2.0 (/Users/itziklavon/otto_os/crates/otto-insights)
+   Compiling otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+   Compiling otto-assistant v0.2.0 (/Users/itziklavon/otto_os/crates/otto-assistant)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.13s
+     Running unittests src/lib.rs (target/debug/deps/otto_assistant-71f24047bc205ea1)
+
+running 68 tests
+test assistant::hermes::tests::user_md_is_tagged_profile ... ok
+test assistant::memory::tests::title_is_the_first_line_capped ... ok
+test assistant::hermes::tests::splits_on_the_section_sign_and_trims ... ok
+test assistant::router::tests::alternative_picks_another_provider ... ok
+test assistant::hermes::tests::overlong_entries_are_truncated_not_dropped ... ok
+test assistant::memory::tests::ownership_needs_collection_creator_and_partition ... ok
+test assistant::limits::tests::ordinary_text_and_old_mentions_do_not_trip_it ... ok
+test assistant::limits::tests::detects_the_claude_and_codex_limit_lines ... ok
+test assistant::limits::tests::snapshot_replaces_per_provider_and_expires ... ok
+test assistant::memory::tests::a_symlinked_profile_is_refused ... ok
+test assistant::router::tests::failover_only_when_allowed ... ok
+test assistant::router::tests::keywords_match_whole_words_only ... ok
+test assistant::memory::tests::wire_shape_maps_state_and_source ... ok
+test assistant::router::tests::voice_mode_uses_the_voice_target ... ok
+test assistant::tasks::tests::a_blocked_task_resumes_on_an_answer_and_is_cancelled_on_no ... ok
+test assistant::router::tests::pin_beats_rules ... ok
+test assistant::router::tests::mention_routes_one_turn_and_is_stripped ... ok
+test assistant::router::tests::code_and_data_go_to_codex ... ok
+test assistant::router::tests::a_weak_hint_does_not_flip_an_existing_thread ... ok
+test assistant::router::tests::plain_conversation_goes_to_the_chat_default ... ok
+test assistant::tasks::tests::approvals_settle_either_way ... ok
+test assistant::router::tests::settings_round_trip_the_wire_shape ... ok
+test assistant::router::tests::merge_settings_is_partial_and_validated ... ok
+test assistant::tasks::tests::cancel_ends_live_or_open_tasks_only ... ok
+test assistant::hermes::tests::a_missing_dir_is_empty_and_symlinks_are_skipped ... ok
+test assistant::tasks::tests::delegated_runs_cannot_claim_resumable_takeover ... ok
+test assistant::router::tests::hard_beats_code_and_long_requests_are_hard ... ok
+test assistant::tasks::tests::takeover_pauses_and_handback_resumes ... ok
+test assistant::tests::check_text_rejects_blank_and_oversized ... ok
+test assistant::tests::local_timezone_is_a_valid_iana_name ... ok
+test assistant::threads::tests::cap_bytes_respects_char_boundaries ... ok
+test assistant::threads::tests::a_session_is_reused_unless_the_route_really_changes ... ok
+test assistant::threads::tests::compose_prompt_lists_attachments_after_the_text ... ok
+test assistant::memory::tests::profile_saves_with_compare_and_swap ... ok
+test assistant::threads::tests::handoff_packet_replays_turns_with_badges_and_profile ... ok
+test assistant::threads::tests::persona_names_every_assistant_tool_and_the_approval_rule ... ok
+test assistant::threads::tests::reply_texts_skip_tool_only_turns_and_join_text_blocks ... ok
+test assistant::threads::tests::turn_claims_are_exclusive_and_released_on_drop ... ok
+test assistant::tools::tests::every_tool_segment_backs_one_mcp_tool ... ok
+test assistant::threads::tests::stopping_an_old_task_never_signals_a_replacement_turn ... ok
+test assistant::tools::tests::the_token_binding_overrides_the_body_session ... ok
+test assistant::types::tests::approval_card_has_the_guideline_shape ... ok
+test assistant::types::tests::approval_card_requires_every_field_and_a_known_category ... ok
+test assistant::hermes::tests::scan_reads_only_md_files_and_never_writes ... ok
+test assistant::types::tests::purchases_and_prod_can_never_be_always_allowed ... ok
+test assistant::types::tests::update_thread_distinguishes_null_from_absent ... ok
+test personal_agent_memory::tests::parses_items_with_sources_and_sections ... ok
+test personal_agent_memory::tests::forget_and_edit_are_content_checked ... ok
+test personal_agents_engine::cwd_tests::absolute_and_tilde_are_accepted ... ok
+test personal_agents_engine::cwd_tests::empty_means_default ... ok
+test personal_agents_engine::cwd_tests::relative_parent_and_nul_are_rejected ... ok
+test personal_agents_engine::tests::render_identity_has_soul_and_memory_sections ... ok
+test personal_agents_engine::tests::notification_hash_is_bound_to_destination ... ok
+test personal_agents_engine::tests::render_rooms_lists_rooms_members_and_the_tools ... ok
+test personal_agents_engine::tests::report_rel_uses_agent_id_and_stamp ... ok
+test personal_agents_engine::tests::seed_notes_names_the_agent ... ok
+test personal_agents_engine::tests::user_context_is_snapshotted_in_the_shared_prompt_for_every_provider ... ok
+test personal_agents_engine::tests::wrap_prompt_embeds_sentinel_memory_and_directive ... ok
+test personal_agents_scheduler::tests::parse_ts_roundtrips ... ok
+test personal_agents_scheduler::tests::proactive_goal_respects_switch_budget_spacing_and_round_robin ... ok
+test personal_agent_documents::tests::reading_missing_memory_does_not_provision_it ... ok
+test assistant::threads::tests::reply_index_matches_a_whole_file_fold ... ok
+test personal_agent_documents::tests::memory_version_binds_the_original_directory_even_for_missing_or_identical_notes ... ok
+test personal_agent_documents::tests::memory_save_preserves_existing_notes_and_rejects_stale_writes ... ok
+test personal_agent_documents::tests::memory_rejects_symlink_escape_and_oversized_content ... ok
+test assistant::threads::tests::foreign_thread_or_owner_cannot_rebind_an_agent_task ... ok
+test assistant::tasks::tests::a_canonical_denial_never_becomes_approved_or_creates_a_grant ... ok
+test assistant::threads::tests::explicit_task_resume_rebinds_stop_to_the_new_execution ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_improve-5800fc84c68530e6)
+
+running 56 tests
+test classify::tests::non_allowlisted_skill_always_queues_even_on_auto ... ok
+test classify::tests::clean_memory_passes_gate ... ok
+test config::tests::enabled_without_next_run_is_due ... ok
+test classify::tests::memory_low_applies_on_tiered_without_allowlist ... ok
+test classify::tests::memory_with_injection_marker_is_rejected_by_gate_and_queued ... ok
+test classify::tests::allowlisted_low_skill_applies_on_tiered ... ok
+test classify::tests::memory_removal_bypasses_content_gate ... ok
+test classify::tests::oversized_memory_is_queued ... ok
+test classify::tests::allowlisted_structural_skill_queues_on_tiered ... ok
+test config::tests::enabled_with_future_next_run_is_not_due ... ok
+test classify::tests::memory_with_ignore_instructions_phrase_is_queued ... ok
+test classify::tests::propose_queues_everything ... ok
+test config::tests::missing_block_yields_defaults ... ok
+test config::tests::disabled_is_never_due ... ok
+test digest::tests::unicode_budget_includes_labels_and_keeps_latest_evidence ... ok
+test config::tests::write_config_preserves_other_keys ... ok
+test design::tests::rule_lines_round_trip_and_dedup ... ok
+test digest::tests::codex_deduplicates_event_and_response_messages ... ok
+test digest::tests::extracts_skills_turns_errors_text ... ok
+test digest::tests::text_is_capped ... ok
+test digest::tests::latest_correction_survives_long_history ... ok
+test engine::tests::auto_apply_queues_on_conflict_instead_of_clobbering ... ok
+test engine::tests::auto_apply_creates_new_file_when_snapshot_was_absent ... ok
+test digest::tests::correction_survives_a_verbose_assistant_response ... ok
+test engine::tests::auto_apply_remove_backs_up_then_deletes ... ok
+test engine::tests::memory_prompt_reads_only_the_bounded_prefix ... ok
+test engine::tests::auto_apply_writes_atomically_and_leaves_a_backup ... ok
+test engine::tests::learning_discovery_rejects_symlink_escape_and_bounds_skill_bodies ... ok
+test evidence::tests::cursors_skip_consumed_lines_and_retry_incomplete_lines_and_replacements ... ok
+test live::tests::live_trigger_round_trips ... ok
+test pathsafe::tests::memory_ref_resolves_under_project_memory ... ok
+test pathsafe::tests::skill_ref_resolves_under_workspace_without_library ... ok
+test pathsafe::tests::traversal_is_rejected ... ok
+test prompt::tests::build_prompt_fences_untrusted_digest_text ... ok
+test prompt::tests::escape_defangs_role_markers ... ok
+test prompt::tests::escape_neutralizes_code_fences ... ok
+test prompt::tests::escape_strips_sentinel_markers ... ok
+test prompt::tests::fenced_untrusted_cannot_break_out ... ok
+test proposal::tests::parses_fenced_proposal ... ok
+test proposal::tests::parses_with_surrounding_prose ... ok
+test proposal::tests::rejects_non_json ... ok
+test evidence::tests::replaced_file_with_identical_eof_anchor_is_reread ... ok
+test pathsafe::tests::skill_ref_prefers_library_when_present ... ok
+test evidence::tests::large_sources_read_recent_complete_tail ... ok
+test engine::tests::rollback_removal_preserves_recreated_file ... ok
+test engine::tests::approve_removal_does_not_report_success_for_unreadable_target ... ok
+test engine::tests::learning_latest_codex_delta_retries_failures_and_skips_duplicates ... ok
+test engine::tests::narrative_cannot_self_authorize_skill_edit_outside_configured_allowlist ... ok
+test engine::tests::self_improve_provider_override_drives_the_run ... ok
+test engine::tests::narrative_applies_skill_edit_only_when_configured_allowlisted ... ok
+test engine::tests::learning_review_discovers_unallowlisted_catalog_and_target_body ... ok
+test engine::tests::learning_reads_used_unallowlisted_skill_but_only_queues_its_edit ... ok
+test engine::tests::memory_low_edit_applies_and_rolls_back ... ok
+test engine::tests::learning_keeps_a_new_trail_prompt_when_transcript_flush_lags ... ok
+test engine::tests::learning_uses_provider_neutral_trail_and_review_opt_in_dedup ... ok
+test design::tests::design_rules_are_pending_only_deduped_and_reproposed_after_conflict ... ok
+
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.23s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_insights-999341242375cdb9)
+
+running 20 tests
+test tests::due_week_on_a_monday_uses_the_full_prior_week ... ok
+test tests::due_week_is_previous_iso_week_mon_sun ... ok
+test tests::due_day_is_yesterday ... ok
+test tests::due_month_january_rolls_to_previous_december ... ok
+test tests::due_month_is_previous_calendar_month ... ok
+test tests::kind_period_and_word ... ok
+test tests::pending_reservations_are_recognised ... ok
+test tests::manual_regeneration_overrides_existing_report_while_scheduler_keeps_idempotency ... ok
+test tests::parse_period_from_filename_accepts_all_three_prefixes ... ok
+test tests::active_runs_list_and_cancel_are_scoped_to_the_insights_dir ... ok
+test tests::a_second_run_for_the_same_period_attaches_to_the_live_one ... ok
+test tests::period_key_format ... ok
+test tests::requested_period_matches_collector_calendar_and_offset ... ok
+test tests::run_liveness_follows_the_session_not_the_clock ... ok
+test tests::config_round_trips_and_defaults_off ... ok
+test tests::period_done_detects_html_metrics_and_index ... ok
+test tests::list_reports_parses_and_sorts_newest_first ... ok
+test tests::previews_are_bounded_cached_and_refresh_after_external_edit ... ok
+test tests::pinned_collector_preserves_legacy_skill_and_concurrent_materialization ... ok
+test tests::status_io_is_constant_for_300_and_1000_reports_and_requires_new_html ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_swarm-00c5ace0746436dc)
+
+running 44 tests
+test recruiter::tests::discovery_planner_prompt_is_investigation_framed ... ok
+test recruiter::tests::extract_fenced_json ... ok
+test recruiter::tests::cap_skills_respects_hard_limit ... ok
+test recruiter::tests::extract_balanced_json ... ok
+test runtime::run::shared_files_tests::forgetting_the_last_branch_drops_the_swarm_entry ... ok
+test runtime::engine::row_workspace_guard::scanner_flags_unchecked_handlers_of_any_binding_shape ... ok
+test recruiter::tests::cap_skills_fewer_than_cap_returns_all ... ok
+test recruiter::tests::cap_skills_ranks_relevant_first ... ok
+test runtime::agent_run::registry_tests::second_planner_cannot_replace_the_live_cancel_handle ... ok
+test recruiter::tests::parse_recruited_minimal ... ok
+test runtime::agent_run::registry_tests::plan_and_recruit_handles_are_independent ... ok
+test runtime::scheduler::tests::daily_respects_schedule_timezone ... ok
+test runtime::scheduler::tests::daily_armed_after_today_slot_waits_for_tomorrow ... ok
+test runtime::scheduler::tests::interval_due_when_never_run ... ok
+test runtime::scheduler::tests::edited_schedule_keeps_cursor_so_it_does_not_refire ... ok
+test runtime::scheduler::tests::interval_not_due_within_window ... ok
+test runtime::verify::tests::cancellation_during_final_verdict_never_merges ... ok
+test runtime::verify::tests::advisory_warns_without_fix_loop ... ok
+test runtime::verify::tests::classify_table ... ok
+test runtime::verify::tests::cancel_short_circuits_before_merge ... ok
+test runtime::verify::tests::failed_fix_turn_is_distinct_and_does_not_burn_retries ... ok
+test runtime::verify::tests::far_miss_blocks_merge_and_escalates ... ok
+test runtime::verify::tests::missing_advisory_verdict_remains_nonblocking ... ok
+test runtime::verify::tests::missing_blocking_verdict_never_merges ... ok
+test runtime::verify::tests::near_miss_warns_only_after_retries_then_merges ... ok
+test runtime::verify::tests::over_budget_stops_with_escalation ... ok
+test runtime::verify::tests::pass_first_then_merge ... ok
+test runtime::verify::tests::sequential_later_goal_runs_after_earlier_passes ... ok
+test runtime::run::shared_files_tests::turn_cleanup_unregisters_and_removes_the_out_file ... ok
+test runtime::wake::tests::only_swarm_events_ring ... ok
+test runtime::wake::tests::poke_never_inserts_and_the_last_guard_drops_the_bell ... ok
+test runtime::workspace::tests::agent_worktree_is_keyed_by_project ... ok
+test runtime::workspace::tests::cwd_mode_defaults_to_worktree_for_code_projects ... ok
+test runtime::workspace::tests::helper_scripts_parse_flags_and_fail_loud ... ok
+test runtime::workspace::tests::resolve_skills_agent_only_when_no_layers ... ok
+test runtime::workspace::tests::resolve_skills_unions_team_project_agent ... ok
+test runtime::engine::row_workspace_guard::workspace_scoped_row_handlers_check_row_ownership ... ok
+test runtime::engine::waiting_tests::waiting_keeps_since_per_code_and_clears_started_tasks ... ok
+test runtime::workspace::tests::exclude_helpers_is_a_noop_outside_git ... ok
+test runtime::wake::tests::cancel_stops_the_wait_at_once ... ok
+test runtime::workspace::tests::helpers_are_excluded_from_git_in_a_checkout ... ok
+test runtime::engine::dispatch_tests::stopping_during_readiness_does_not_wait_or_send_late_input ... ok
+test runtime::wake::tests::a_poke_wakes_the_coordinator_after_the_min_gap ... ok
+test runtime::wake::tests::a_burst_of_pokes_is_one_tick ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.21s

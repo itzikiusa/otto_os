@@ -23,7 +23,10 @@ use otto_state::{
     McpRegistryRepo, McpServerDetail, McpTool, McpToolsRepo, NewApproval, NewCallLog, SettingsRepo,
 };
 
-use crate::client::{McpClient, Transport};
+use crate::client::{CheckedCallError, McpClient, Transport};
+
+#[path = "service_preflight.rs"]
+mod preflight;
 use crate::policy::{self, Effect, PolicyCtx};
 use crate::risk;
 
@@ -367,49 +370,69 @@ impl McpService {
     }
 
     /// Resolve the keychain secret blob `{env:{},headers:{}}` for a server.
-    async fn resolve_secrets(
+    pub(crate) async fn resolve_secrets(
         &self,
         server: &McpServerDetail,
-    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
-        let mut env = BTreeMap::new();
-        let mut headers = BTreeMap::new();
+    ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
         if !server.has_secret {
-            return (env, headers);
-        }
-        // Every governed invoke + health check lands here: cache hit inline,
-        // a keychain miss on the blocking pool (never a stalled worker).
-        if let Ok(Some(blob)) =
-            otto_core::secrets::get_async(&self.secrets, &Self::secret_ref(&server.id)).await
-        {
-            if let Ok(v) = serde_json::from_str::<Value>(&blob) {
-                if let Some(e) = v.get("env").and_then(Value::as_object) {
-                    for (k, val) in e {
-                        if let Some(s) = val.as_str() {
-                            env.insert(k.clone(), s.to_string());
-                        }
-                    }
-                }
-                if let Some(h) = v.get("headers").and_then(Value::as_object) {
-                    for (k, val) in h {
-                        if let Some(s) = val.as_str() {
-                            headers.insert(k.clone(), s.to_string());
-                        }
-                    }
-                }
+            if !server.secret_env_keys.is_empty() || !server.secret_header_keys.is_empty() {
+                return Err(Error::Conflict(
+                    "MCP credentials were not saved. Save the server credentials again.".into(),
+                ));
             }
+            return Ok((BTreeMap::new(), BTreeMap::new()));
         }
-        (env, headers)
+        // Never silently fall back to an uncredentialed client or a command's
+        // default account when the configured credential cannot be recovered.
+        let blob = otto_core::secrets::get_async(&self.secrets, &Self::secret_ref(&server.id))
+            .await
+            .map_err(|_| {
+                Error::Conflict(
+                    "MCP credentials are unavailable. Unlock the secret store and retry.".into(),
+                )
+            })?
+            .ok_or_else(|| {
+                Error::Conflict(
+                    "MCP credentials are missing. Save the server credentials again.".into(),
+                )
+            })?;
+        #[derive(serde::Deserialize)]
+        struct SavedSecrets {
+            #[serde(default)]
+            env: BTreeMap<String, String>,
+            #[serde(default)]
+            headers: BTreeMap<String, String>,
+        }
+        let saved: SavedSecrets = serde_json::from_str(&blob).map_err(|_| {
+            Error::Conflict(
+                "Saved MCP credentials are invalid. Save the server credentials again.".into(),
+            )
+        })?;
+        if server
+            .secret_env_keys
+            .iter()
+            .any(|k| !saved.env.contains_key(k))
+            || server
+                .secret_header_keys
+                .iter()
+                .any(|k| !saved.headers.contains_key(k))
+        {
+            return Err(Error::Conflict(
+                "Saved MCP credentials are incomplete. Save the server credentials again.".into(),
+            ));
+        }
+        Ok((saved.env, saved.headers))
     }
 
     /// The pooled outbound client for a server (SE-14): reused while the
     /// server's effective config is unchanged, so governed calls stop paying a
     /// spawn + `initialize` each (1–3 s for an `npx` server). A config or
     /// secret change hashes differently and replaces the entry.
-    async fn client_for(&self, server: &McpServerDetail) -> Arc<McpClient> {
+    async fn client_for(&self, server: &McpServerDetail) -> Result<Arc<McpClient>> {
         if let Ok(mut m) = self.last_use.lock() {
             m.insert(server.id.clone(), Instant::now());
         }
-        let (secret_env, secret_headers) = self.resolve_secrets(server).await;
+        let (secret_env, secret_headers) = self.resolve_secrets(server).await?;
         let hash = client_config_hash(server, &secret_env, &secret_headers);
         if let Ok(mut m) = self.clients.lock() {
             m.retain(|_, c| {
@@ -418,7 +441,7 @@ impl McpService {
             if let Some(entry) = m.get_mut(&server.id) {
                 if entry.config_hash == hash {
                     entry.last_used = Instant::now();
-                    return entry.client.clone();
+                    return Ok(entry.client.clone());
                 }
             }
         }
@@ -429,7 +452,7 @@ impl McpService {
             if let Some(entry) = m.get_mut(&server.id) {
                 if entry.config_hash == hash {
                     entry.last_used = Instant::now();
-                    return entry.client.clone();
+                    return Ok(entry.client.clone());
                 }
             }
             if m.len() >= CLIENT_POOL_CAP && !m.contains_key(&server.id) {
@@ -452,7 +475,7 @@ impl McpService {
                 },
             );
         }
-        client
+        Ok(client)
     }
 
     /// Build an outbound client for a server, overlaying keychain secrets onto the
@@ -491,7 +514,7 @@ impl McpService {
     /// Discover a server's tools, label their risk, and upsert the catalog.
     pub async fn discover(&self, server_id: &str) -> Result<Vec<McpTool>> {
         let server = self.registry().get(&server_id.to_string()).await?;
-        let client = self.client_for(&server).await;
+        let client = self.client_for(&server).await?;
         let raw = client
             .list_tools()
             .await
@@ -539,7 +562,7 @@ impl McpService {
         }
         // Startup probes use the same server admission slots as discovery and
         // tool calls. The probe replaces one parked session while testing startup.
-        let client = self.client_for(&server).await;
+        let client = self.client_for(&server).await?;
         let start = Instant::now();
         let res = client.health().await;
         let latency = start.elapsed().as_millis() as i64;
@@ -955,46 +978,26 @@ impl McpService {
                      // no outcome.
         let mut pending_row = PendingAuditRow::new(self.call_log(), audit_id.clone());
 
-        let client = self.client_for(&server).await;
+        let client = self.client_for(&server).await?;
         let start = Instant::now();
-        // The pre-execution RE-CHECK (a security property: a policy tightened
-        // or a server deleted while the call waited must stop it). The live
-        // read re-proves the server exists (NotFound ⇒ error, as the separate
-        // `registry().get` that used to follow did) and reloads the policy.
-        let latest = otto_state::ResourceAccessRepo::new(self.pool.clone())
-            .get_live_policy(otto_core::access::ResourceKind::McpServer, &server.id)
-            .await?;
-        if latest.mode == otto_core::access::AccessMode::Enforced {
-            let permitted = match &ctx.caller_user_id {
-                Some(id) => match otto_state::UsersRepo::new(self.pool.clone()).get(id).await {
-                    Ok(user) => {
-                        self.resource_allowed_under(
-                            &latest,
-                            &server,
-                            &user,
-                            &[("invoke", Some(tool_name))],
-                        )
-                        .await?[0]
-                    }
-                    Err(_) => false,
-                },
-                None => false,
-            };
-            if !permitted {
-                // Finalize the pre-execution row AS the denial (one row, true
-                // decision) rather than inserting a second "denied" row and
-                // leaving the first claiming "allowed".
-                let reason = "resource access revoked before execution";
+        // Recheck at the transport boundary, after queueing and initialize,
+        // so credentials/admission waits cannot carry stale authorization.
+        let checked = client
+            .call_tool_checked(tool_name, args, || {
+                self.authorize_before_send(&server, tool_name, ctx, approval_id_used.is_some())
+            })
+            .await;
+        let res = match checked {
+            Err(CheckedCallError::Denied(reason)) => {
                 pending_row.disarm();
                 self.call_log()
-                    .finalize_decision(&audit_id, "denied", reason)
+                    .finalize_decision(&audit_id, "denied", &reason)
                     .await?;
-                return Ok(InvokeOutcome::Denied {
-                    reason: reason.to_string(),
-                });
+                return Ok(InvokeOutcome::Denied { reason });
             }
-        }
-        let res = client.call_tool(tool_name, args).await;
+            Err(CheckedCallError::Transport(error)) => Err(error),
+            Ok(call) => Ok(call),
+        };
         let latency = start.elapsed().as_millis() as i64;
         // Health on use: a transport failure marks the server unhealthy, any
         // answer (even a tool-level error) healthy — written on change only.
@@ -1711,13 +1714,14 @@ done
         );
         svc.evict_client(&server.id);
     }
-    /// Measured 8: server row, tool row, live policy, allowlist, policy
-    /// rules, the fail-closed audit insert, the pre-execution live re-check
-    /// and the audit finalize (settings + secrets cached, session reused).
-    const LEGACY_INVOKE_BUDGET: u64 = 9;
-    /// Measured 16: Legacy + user / capability / membership / groups at BOTH
+    /// Measured 12: entry server/tool/access/allowlist/policy, audit insert,
+    /// the same five live reads AFTER transport admission, and audit finalize.
+    /// Four extra reads close server/tool/allowlist/policy revocation races;
+    /// their cost is constant in the number of tools (warm reused session).
+    const LEGACY_INVOKE_BUDGET: u64 = 13;
+    /// Measured 20: Legacy + user / capability / membership / groups at BOTH
     /// authorization points (deliberately live at the re-check).
-    const ENFORCED_INVOKE_BUDGET: u64 = 18;
+    const ENFORCED_INVOKE_BUDGET: u64 = 22;
     async fn audit_row(
         svc: &McpService,
         id: &str,

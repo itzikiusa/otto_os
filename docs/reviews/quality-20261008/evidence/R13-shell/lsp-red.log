@@ -1,0 +1,45 @@
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+   Compiling otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 36s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 4 tests
+test lsp::framing::tests::accepts_fragmented_frames_empty_body_and_clean_eof ... ok
+test lsp::framing::tests::rejects_oversized_body_before_reading_or_allocating_it ... FAILED
+test lsp::framing::tests::bounds_header_line_and_total_headers ... FAILED
+test lsp::framing::tests::rejects_duplicate_length_and_truncated_headers ... FAILED
+
+failures:
+
+---- lsp::framing::tests::rejects_oversized_body_before_reading_or_allocating_it stdout ----
+
+thread 'lsp::framing::tests::rejects_oversized_body_before_reading_or_allocating_it' (3709964) panicked at crates/otto-server/src/lsp/framing.rs:82:9:
+assertion `left == right` failed
+  left: UnexpectedEof
+ right: InvalidData
+
+---- lsp::framing::tests::bounds_header_line_and_total_headers stdout ----
+
+thread 'lsp::framing::tests::bounds_header_line_and_total_headers' (3709962) panicked at crates/otto-server/src/lsp/framing.rs:91:81:
+called `Result::unwrap_err()` on an `Ok` value: Some([])
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- lsp::framing::tests::rejects_duplicate_length_and_truncated_headers stdout ----
+
+thread 'lsp::framing::tests::rejects_duplicate_length_and_truncated_headers' (3709963) panicked at crates/otto-server/src/lsp/framing.rs:99:76:
+called `Result::unwrap_err()` on an `Ok` value: Some([120])
+
+
+failures:
+    lsp::framing::tests::bounds_header_line_and_total_headers
+    lsp::framing::tests::rejects_duplicate_length_and_truncated_headers
+    lsp::framing::tests::rejects_oversized_body_before_reading_or_allocating_it
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 952 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p otto-server --lib`

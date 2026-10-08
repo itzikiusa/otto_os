@@ -118,3 +118,32 @@ async fn reindex_shared_vault_makes_it_searchable() {
         "re-indexed shared note should be searchable"
     );
 }
+
+#[tokio::test]
+async fn automatic_shared_vault_export_omits_private_memories() {
+    let dir = tempfile::tempdir().unwrap();
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool).with_vault(dir.path());
+    let mut private = nm("creator-only fixture body");
+    private.visibility = "private".into();
+    let saved = svc
+        .save(&ws, &user, vec![private, nm("shared fixture body")])
+        .await
+        .unwrap();
+    assert_eq!(
+        svc.get(&ws, &saved[0].id).await.unwrap().visibility,
+        "private"
+    );
+    let files: Vec<_> = std::fs::read_dir(dir.path().join(&ws))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "only shared memories belong in the shareable write-through folder"
+    );
+    let content = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(content.contains("shared fixture body"));
+    assert!(!content.contains("creator-only fixture body"));
+}

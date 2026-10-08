@@ -532,6 +532,13 @@ pub async fn get_transcript(
     Ok(Json(t))
 }
 
+/// Passive viewers keep an existing tail warm without starting a process.
+#[derive(Default, Deserialize)]
+pub struct TranscriptTouchQuery {
+    #[serde(default)]
+    pub view: bool,
+}
+
 /// `POST /sessions/{id}/transcript/touch` — keep the live tail armed for a
 /// session whose conversation is open (the tail otherwise stops 5 min after
 /// the last `GET …/transcript`; clients ping this every minute while the view
@@ -544,18 +551,16 @@ pub async fn touch_transcript(
     AxPath(id): AxPath<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    Query(q): Query<TranscriptTouchQuery>,
 ) -> ApiResult<StatusCode> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
     // An open chat is a viewer: hold the session against the idle-suspend
     // sweep (it mounts no terminal, so this ping is its only attachment).
     ctx.manager.note_view(&id);
-    // Parity with a terminal attach: a suspended-but-resumable session is
-    // resumed (`ensure_live`, same call the `/ws/term` attach makes). Without
-    // this, stepping away from a chat for a few minutes left the session
-    // suspended and the chat dead on return, while a terminal tab came back
-    // live. Errors (archived, spawn failure) are logged; the ping still
-    // answers 204 — the view keeps retrying every minute.
-    if !ctx.manager.is_live(&id)
+    // Match terminal view-only attach: keepalive/recovery must not activate
+    // a dormant process. Omitting `view` preserves the legacy active attach.
+    if !q.view
+        && !ctx.manager.is_live(&id)
         && session.status == SessionStatus::Reconnectable
         && session.provider_session_id.is_some()
     {

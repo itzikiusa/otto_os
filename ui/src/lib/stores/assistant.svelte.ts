@@ -79,6 +79,13 @@ const SIGNIN_CONCURRENCY = 2;
 
 class AssistantStore {
   threads: Loadable<AssistantThread[]> = $state(initial([]));
+  threadsHasMore = $state(false);
+  threadsMoreLoading = $state(false);
+  threadsMoreError = $state('');
+  private threadsOffset = 0;
+  private threadsGeneration = 0;
+  selectedThread: Loadable<AssistantThread | null> = $state(initial(null));
+  selectedThreadId = $state<string | null>(null);
   /** thread_id → its turn index (oldest first). `$state.raw` (A6): turns are
    *  replaced, never mutated, so deep proxies over every turn's text and
    *  blocks bought nothing but proxy cost on each read. Write through
@@ -114,7 +121,7 @@ class AssistantStore {
     return needsYouByThread(this.needs.items);
   }
   thread(id: string | null): AssistantThread | undefined {
-    return id ? this.threads.data.find((t) => t.id === id) : undefined;
+    return id ? this.threads.data.find((t) => t.id === id) ?? (this.selectedThread.data?.id === id ? this.selectedThread.data : undefined) : undefined;
   }
   /** The freshest row we have for a task (queue, board, or a one-off fetch). */
   task(id: string): AssistantTask | undefined {
@@ -130,7 +137,50 @@ class AssistantStore {
   // ── loaders ────────────────────────────────────────────────────────────────
 
   async loadThreads(): Promise<void> {
-    await this.load('threads', () => assistantApi.threads(), (v) => (this.threads = v), () => this.threads);
+    const generation = ++this.threadsGeneration;
+    this.threadsMoreLoading = false;
+    this.threadsMoreError = '';
+    await this.load('threads', async () => {
+      const rows = await assistantApi.threads(0, 100);
+      if (generation === this.threadsGeneration) {
+        this.threadsOffset = rows.length;
+        this.threadsHasMore = rows.length === 100;
+      }
+      return rows;
+    }, (v) => (this.threads = v), () => this.threads);
+  }
+
+  async loadMoreThreads(): Promise<void> {
+    if (this.threadsMoreLoading || !this.threadsHasMore) return;
+    const generation = this.threadsGeneration;
+    this.threadsMoreLoading = true;
+    this.threadsMoreError = '';
+    try {
+      const rows = await assistantApi.threads(this.threadsOffset, 100);
+      if (generation !== this.threadsGeneration) return;
+      const ids = new Set(this.threads.data.map((t) => t.id));
+      this.threads = { ...this.threads, data: [...this.threads.data, ...rows.filter((t) => !ids.has(t.id))] };
+      this.threadsOffset += rows.length;
+      this.threadsHasMore = rows.length === 100;
+    } catch (e) {
+      if (generation === this.threadsGeneration) this.threadsMoreError = describeError(e);
+    } finally {
+      if (generation === this.threadsGeneration) this.threadsMoreLoading = false;
+    }
+  }
+
+  /** Keep one selected row independently of history pages, including deep links. */
+  async loadSelectedThread(id: string): Promise<void> {
+    const current = this.ticket('selectedThread');
+    this.selectedThreadId = id;
+    const cached = untrack(() => this.thread(id));
+    this.selectedThread = { state: cached ? 'ready' : 'loading', data: cached ?? null, error: '' };
+    try {
+      const row = await assistantApi.thread(id);
+      if (current()) this.selectedThread = { state: 'ready', data: row, error: '' };
+    } catch (e) {
+      if (current()) this.selectedThread = { state: 'error', data: cached ?? null, error: describeError(e) };
+    }
   }
 
   async loadTurns(threadId: string): Promise<void> {

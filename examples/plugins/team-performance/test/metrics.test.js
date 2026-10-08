@@ -197,3 +197,20 @@ test('estimate accuracy contract: corpus identity and effective estimate reach t
   assert.equal(acc.n, 1);
   assert.equal(acc.bins.reduce((sum, b) => sum + b.n, 0), 1);
 });
+
+test('flow adapter preserves measured review wait and QA phases for efficiency', () => {
+  const phases = {
+    design: { days: null }, dev: { days: 3 },
+    review: { pickup: 4, in_review: 1, total: 5 },
+    qa: { wait: 2, rework: 1 }, deploy: { days: 1 }, rework: { in_days: null },
+  };
+  const r = { key: 'ABC-1', status_category: 'done', first_active_at: t0,
+    done_at: t0 + 14 * DAY, phases };
+  const F = require('../lib/flow.js');
+  const adapted = M.flowRecord(r, {});
+  assert.deepStrictEqual(F.phaseValues(adapted), F.phaseValues({ phases }));
+  const efficiency = F.flowEfficiency([adapted]);
+  assert.strictEqual(efficiency.active_days, 4, 'three dev days including one QA rework plus one active review; pickup is waiting');
+  assert.strictEqual(efficiency.elapsed_days, 10);
+  assert.strictEqual(efficiency.value, 0.4);
+});

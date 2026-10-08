@@ -1,0 +1,4 @@
+    Checking otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+    Checking otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+    Checking otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.78s

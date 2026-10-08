@@ -409,6 +409,7 @@
 
   async function assemble(): Promise<void> {
     if (!detail || assembling) return;
+    const packId = detail.pack.id;
     const initial = await packRepoPath();
     const cwd = await confirmer.promptText('Working folder to assemble proof from:', {
       title: 'Assemble proof',
@@ -417,11 +418,11 @@
       placeholder: 'e.g. ~/code/my-repo',
       initial,
     });
-    if (cwd === null || !detail) return;
+    if (cwd === null) return;
     assembling = true;
     try {
-      await assembleProof(detail.pack.id, { cwd: cwd.trim() || undefined });
-      await proof.refreshDetail();
+      await assembleProof(packId, { cwd: cwd.trim() || undefined });
+      if (detail?.pack.id === packId) await proof.refreshDetail();
       toasts.success('Proof assembled', 'Re-assembled from the working folder.');
     } catch (e) {
       toasts.error("Couldn’t assemble proof", loadErrorText(e));
@@ -694,16 +695,20 @@
 
   async function removePack(): Promise<void> {
     if (!detail) return;
+    const packId = detail.pack.id;
+    const wsId = ws.currentId;
     const t = detail.pack.title || 'this pack';
     const n = detail.artifacts.length;
     if (!(await confirmer.ask(`Delete proof pack “${t}”? Its ${plural(n, 'artifact')} and snapshots are deleted too.`, { title: 'Delete proof pack' }))) {
       return;
     }
     try {
-      await deleteProofPack(detail.pack.id);
+      await deleteProofPack(packId);
+      if (detail?.pack.id !== packId || ws.currentId !== wsId) return;
       proof.closeDetail();
       toasts.success('Proof pack deleted', t);
-      if (ws.currentId) await loadList(ws.currentId, filter);
+      if (wsId) await loadList(wsId, filter);
+      if (ws.currentId !== wsId || detail) return;
       // Land on the next pack instead of an empty "pick one" pane.
       if (!viewport.isPhone && proof.packs.length > 0) void open(proof.packs[0].id);
     } catch (e) {
@@ -729,7 +734,7 @@
       if (!ok) return;
       const r = await archiveStaleSessionPacks(wsId, { older_than_days: 30, apply: true });
       toasts.success('Session packs archived', `${r.archived} hidden (nothing deleted).`);
-      await loadList(wsId, filter);
+      if (ws.currentId === wsId) await loadList(wsId, filter);
     } catch (e) {
       toasts.error("Couldn’t archive session packs", loadErrorText(e));
     }
@@ -737,7 +742,8 @@
 
   // ---- create a manual pack ------------------------------------------------
   async function newPack(): Promise<void> {
-    if (!ws.currentId) {
+    const wsId = ws.currentId;
+    if (!wsId) {
       toasts.warn('No workspace selected');
       return;
     }
@@ -748,13 +754,14 @@
     });
     if (!title || !title.trim()) return;
     try {
-      const created = await createProofPack(ws.currentId, {
+      const created = await createProofPack(wsId, {
         work_item_kind: 'manual',
         work_item_id: crypto.randomUUID(),
         title: title.trim(),
       });
-      await loadList(ws.currentId, filter);
-      await open(created.id);
+      if (ws.currentId !== wsId) return;
+      await loadList(wsId, filter);
+      if (ws.currentId === wsId) await open(created.id);
     } catch (e) {
       toasts.error("Couldn’t create the proof pack", loadErrorText(e));
     }
