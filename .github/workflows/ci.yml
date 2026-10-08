@@ -266,7 +266,9 @@ jobs:
         run: npm run test:unit
 
       - name: Install Chromium for the Team Performance plugin gate
-        run: npx playwright install --with-deps chromium
+        run: |
+          sudo python3 ../scripts/ci-apt-install.py --prepare-external
+          timeout --kill-after=10s 15m npx playwright install --with-deps chromium
 
       - name: Team Performance unit, server and browser regressions
         working-directory: examples/plugins/team-performance
@@ -357,7 +359,9 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: ui
-        run: npx playwright install --with-deps chromium webkit
+        run: |
+          sudo python3 ../scripts/ci-apt-install.py --prepare-external
+          timeout --kill-after=10s 15m npx playwright install --with-deps chromium webkit
 
       # OTTO_E2E_GATE narrows the REAL desktop-browser / iphone-portrait
       # projects to ui/e2e/gate-specs.ts, so every spec's project guard
@@ -512,7 +516,9 @@ jobs:
       # desktop-browser = Chromium; iphone-portrait = WebKit (device default).
       - name: Install Playwright browsers
         working-directory: ui
-        run: npx playwright install --with-deps chromium webkit
+        run: |
+          sudo python3 ../scripts/ci-apt-install.py --prepare-external
+          timeout --kill-after=10s 15m npx playwright install --with-deps chromium webkit
 
       # Same wait as db-drivers.yml: every service has a compose healthcheck
       # (seeds run before it reports healthy); redis-seed is a one-shot.
@@ -674,7 +680,9 @@ jobs:
 
       - name: Install Playwright WebKit
         working-directory: ui
-        run: npx playwright install --with-deps webkit
+        run: |
+          sudo python3 ../scripts/ci-apt-install.py --prepare-external
+          timeout --kill-after=10s 15m npx playwright install --with-deps webkit
 
       - name: Perf gates (desktop-webkit)
         working-directory: ui

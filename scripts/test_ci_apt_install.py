@@ -79,6 +79,17 @@ if mode == 'install_fail' and phase == 'install': sys.exit(100)
         self.assertNotIn("--no-install-recommends", commands[-1]["args"])
         self.assertEqual(commands[-1]["args"][-2:], ["redis-server", "ffmpeg"])
 
+    def test_prepare_external_installer_uses_official_mirror_and_bounded_acquisition(self):
+        installer.prepare_external_installer(self.apt)
+        self.assertNotIn("azure.archive.ubuntu.com/", self.mirrors.read_text())
+        self.assertIn("https://security.ubuntu.com/ubuntu", self.mirrors.read_text())
+        settings = (self.apt / "apt.conf.d/99-otto-ci-acquisition").read_text()
+        self.assertIn('Acquire::http::Timeout "30";', settings)
+        self.assertIn('Acquire::https::Timeout "30";', settings)
+        self.assertIn('Acquire::Retries "1";', settings)
+        self.assertIn('APT::Update::Error-Mode "any";', settings)
+        self.assertFalse(self.log.exists(), "preparation must not invoke apt/dpkg")
+
     def test_recommendation_policy_is_the_same_for_download_and_install(self):
         result, commands = self.run_install("success", no_recommends=True)
         self.assertEqual(result, 0)

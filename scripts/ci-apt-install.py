@@ -30,6 +30,24 @@ def fallback_mirror(apt_dir: Path) -> None:
             print(f"Using Ubuntu's official archive in {path}", flush=True)
 
 
+def prepare_external_installer(apt_dir: Path = Path("/etc/apt")) -> None:
+    """Bound apt used inside tools such as Playwright, without invoking dpkg.
+
+    Those tools own their package list. Use the known-good fallback immediately
+    and persist acquisition options for their sudo apt subprocess. The caller
+    must also bound the complete tool invocation to stop continuous slow reads.
+    """
+    fallback_mirror(apt_dir)
+    settings = apt_dir / "apt.conf.d/99-otto-ci-acquisition"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        'Acquire::http::Timeout "30";\n'
+        'Acquire::https::Timeout "30";\n'
+        'Acquire::Retries "1";\n'
+        'APT::Update::Error-Mode "any";\n'
+    )
+
+
 def install(packages: list[str], apt_dir: Path = Path("/etc/apt"), *, no_recommends: bool = False) -> int:
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
     options = ["-o", "Acquire::http::Timeout=30", "-o", "Acquire::https::Timeout=30", "-o", "Acquire::Retries=1"]
@@ -60,6 +78,14 @@ def install(packages: list[str], apt_dir: Path = Path("/etc/apt"), *, no_recomme
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-install-recommends", action="store_true")
-    parser.add_argument("packages", nargs="+")
+    parser.add_argument("--prepare-external", action="store_true", help="prepare apt for a bounded external installer, without installing packages")
+    parser.add_argument("packages", nargs="*")
     args = parser.parse_args()
+    if args.prepare_external:
+        if args.packages or args.no_install_recommends:
+            parser.error("--prepare-external does not take packages or install options")
+        prepare_external_installer()
+        sys.exit(0)
+    if not args.packages:
+        parser.error("at least one package is required")
     sys.exit(install(args.packages, no_recommends=args.no_install_recommends))
