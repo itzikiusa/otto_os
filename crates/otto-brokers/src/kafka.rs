@@ -42,9 +42,8 @@ const MAX_SCAN_WITH_FILTER: usize = 50_000;
 /// threads — a few hundred partitions over a slow/tunnelled link complete in a
 /// couple of round-trip batches instead of one-by-one (minutes).
 pub const WATERMARK_WORKERS: usize = 16;
-/// Raw key+value byte budget for one viewer peek (the response is ~1.3–2×
-/// this once decoded/escaped). Hitting it ends the peek early with
-/// `truncated = true`. Replay reads are unbounded (they must copy everything).
+/// Raw key/value/header byte budget for one peek or replay read. Viewer
+/// responses are marked truncated; replay refuses incomplete reads before sending.
 pub const MAX_CONSUME_BYTES: usize = 16 * 1024 * 1024;
 
 fn kerr(e: KafkaError) -> Error {
@@ -161,6 +160,8 @@ pub struct RawConsume {
     pub messages: Vec<RawMessage>,
     pub partitions: Vec<PartitionRange>,
     pub truncated: bool,
+    /// Requested count/range was not completely read before a resource limit.
+    pub incomplete: bool,
 }
 
 pub struct KafkaClient {
@@ -918,15 +919,15 @@ impl KafkaClient {
     }
 
     /// Peek raw messages with the pooled, manually-assigned consumer; never
-    /// commits. Unbounded bytes (replay produces everything it reads).
+    /// commits. Replay must reject an incomplete read before producing anything.
     pub fn consume_raw(&self, topic: &str, req: &ConsumeReq) -> Result<RawConsume> {
-        self.consume_raw_from(topic, req, None, None)
+        self.consume_raw_from(topic, req, None, Some(MAX_CONSUME_BYTES))
     }
 
     /// [`Self::consume_raw`] with viewer options: `starts` consumes ONLY those
     /// partitions, each from its own offset (the live tail's single request),
-    /// and `byte_budget` ends the peek early (`truncated`) once the raw
-    /// key+value bytes reach it.
+    /// and `byte_budget` ends the peek before copying a record whose raw
+    /// key/value/header bytes would exceed it (`truncated` and `incomplete`).
     pub fn consume_raw_from(
         &self,
         topic: &str,
@@ -960,6 +961,7 @@ impl KafkaClient {
                 messages: Vec::new(),
                 partitions: Vec::new(),
                 truncated: false,
+                incomplete: false,
             });
         }
         let limit = req.limit.clamp(1, 5000);
@@ -976,7 +978,9 @@ impl KafkaClient {
         let mut high_of: HashMap<i32, i64> = HashMap::new();
         let mut low_of: HashMap<i32, i64> = HashMap::new();
         for &p in &parts {
-            let (low, high) = wm.get(&(topic.to_string(), p)).copied().unwrap_or((0, 0));
+            let (low, high) = wm.get(&(topic.to_string(), p)).copied().ok_or_else(|| {
+                Error::Upstream(format!("could not read offsets for {topic} partition {p}; retry after the broker recovers"))
+            })?;
             ranges.push(PartitionRange {
                 partition: p,
                 low,
@@ -1067,6 +1071,7 @@ impl KafkaClient {
                 messages,
                 partitions: ranges,
                 truncated: false,
+                incomplete: false,
             });
         }
 
@@ -1086,8 +1091,8 @@ impl KafkaClient {
         let deadline = Instant::now() + Duration::from_millis(req.max_wait_ms.unwrap_or(5000));
         let mut done: HashSet<i32> = HashSet::new();
         let mut scanned = 0usize;
-        // Response byte budget: stop (and flag `truncated`) once the raw
-        // key+value bytes reach it — 5000 × MB-sized payloads is GBs of JSON.
+        // Stop before copying beyond the response budget: 5000 × MB-sized
+        // payloads would otherwise accumulate GBs before replay publication.
         let mut bytes = 0usize;
         let mut over_budget = false;
         let start_of: HashMap<i32, i64> = tpl
@@ -1130,6 +1135,23 @@ impl KafkaClient {
                         }
                     }
 
+                    let header_bytes = m.headers().map_or(0usize, |hs| {
+                        (0..hs.count()).fold(0usize, |total, i| {
+                            let h = hs.get(i);
+                            total
+                                .saturating_add(h.key.len())
+                                .saturating_add(h.value.map_or(0, |v| v.len()))
+                        })
+                    });
+                    let size = m
+                        .key_len()
+                        .saturating_add(m.payload_len())
+                        .saturating_add(header_bytes);
+                    // Inspect borrowed lengths before copying any payload/header.
+                    if byte_budget.is_some_and(|budget| size > budget.saturating_sub(bytes)) {
+                        over_budget = true;
+                        break;
+                    }
                     let mut headers = Vec::new();
                     if let Some(hs) = m.headers() {
                         for i in 0..hs.count() {
@@ -1139,7 +1161,6 @@ impl KafkaClient {
                     }
                     let key = m.key().map(|k| k.to_vec());
                     let value = m.payload().map(|v| v.to_vec());
-                    let size = m.key_len() + m.payload_len();
                     bytes += size;
                     messages.push(RawMessage {
                         partition: part,
@@ -1153,10 +1174,6 @@ impl KafkaClient {
                     if offset + 1 >= high_of.get(&part).copied().unwrap_or(i64::MAX) {
                         done.insert(part);
                     }
-                    if byte_budget.is_some_and(|b| bytes >= b) {
-                        over_budget = true;
-                        break;
-                    }
                 }
                 Some(Err(KafkaError::PartitionEOF(p))) => {
                     done.insert(p);
@@ -1169,13 +1186,15 @@ impl KafkaClient {
                 }
             }
         }
+        let incomplete = over_budget || (messages.len() < want && done.len() < parts.len());
         let truncated =
-            over_budget || ((messages.len() as i64) < expected && messages.len() >= want);
+            incomplete || ((messages.len() as i64) < expected && messages.len() >= want);
         messages.sort_by(|a, b| a.partition.cmp(&b.partition).then(a.offset.cmp(&b.offset)));
         Ok(RawConsume {
             messages,
             partitions: ranges,
             truncated,
+            incomplete,
         })
     }
 
@@ -1328,7 +1347,7 @@ impl KafkaClient {
         match mode {
             OffsetResetMode::Earliest => Ok(low),
             OffsetResetMode::Latest => Ok(high),
-            OffsetResetMode::Offset(o) => Ok((*o).clamp(low, high)),
+            OffsetResetMode::Offset { offset } => Ok((*offset).clamp(low, high)),
             OffsetResetMode::Timestamp => {
                 let ts = timestamp_ms.unwrap_or(0);
                 let mut q = TopicPartitionList::new();
@@ -2174,6 +2193,42 @@ mod tests {
             // SAFETY: created in `new`, destroyed exactly once, before `_owner`.
             unsafe { rdkafka::bindings::rd_kafka_mock_cluster_destroy(self.mock) };
         }
+    }
+
+    #[test]
+    fn mock_consume_byte_budget_never_returns_an_oversized_record() {
+        let mock = TrackedMock::new(&[("bounded", 3)]);
+        mock.produce("bounded", 3);
+        let client = mock.client();
+        let req: ConsumeReq = serde_json::from_value(serde_json::json!({
+            "limit": 3, "max_wait_ms": 3000
+        }))
+        .unwrap();
+        let raw = client
+            .consume_raw_from("bounded", &req, None, Some(1))
+            .unwrap();
+        assert!(
+            raw.messages.is_empty(),
+            "a record larger than the entire budget must not be copied"
+        );
+        assert!(raw.truncated);
+    }
+
+    #[test]
+    fn mock_consume_deadline_reports_unfinished_selection() {
+        let mock = TrackedMock::new(&[("deadline", 3)]);
+        mock.produce("deadline", 3);
+        let client = mock.client();
+        let req: ConsumeReq = serde_json::from_value(serde_json::json!({
+            "limit": 3, "max_wait_ms": 0
+        }))
+        .unwrap();
+        let raw = client.consume_raw("deadline", &req).unwrap();
+        assert!(raw.messages.is_empty());
+        assert!(
+            raw.truncated,
+            "deadline before reads must not look complete"
+        );
     }
 
     /// N5 budget, against a real (in-process) Kafka protocol peer: the

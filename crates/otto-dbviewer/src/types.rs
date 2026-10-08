@@ -874,6 +874,10 @@ pub struct QueryResult {
     /// (because `QueryRequest::mask` was `true`). The UI surfaces this as a badge.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub masked: bool,
+    /// One or more stored cell values were shortened for display. Such values
+    /// are not lossless mutation inputs, independently of row pagination.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cells_truncated: bool,
     /// Later result sets from a multi-statement batch, in execution order. The
     /// **top-level** fields of this `QueryResult` describe the FIRST statement's
     /// result; each entry here is one subsequent statement. Empty for the common
@@ -920,6 +924,7 @@ impl QueryResult {
             truncated: false,
             truncated_reason: None,
             masked: false,
+            cells_truncated: false,
             more_results: Vec::new(),
             statement: None,
             errored: false,
@@ -1784,21 +1789,33 @@ pub fn approx_json_len(v: &serde_json::Value) -> usize {
 /// Recursively cap oversized string values in a result cell (covers nested
 /// Array/Tuple/Map columns too). Non-strings pass through unchanged.
 pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
+    cap_cell_tracked(v, &mut false)
+}
+
+/// Cap a cell and retain explicit provenance for result mutation guards.
+pub fn cap_cell_tracked(v: serde_json::Value, truncated: &mut bool) -> serde_json::Value {
     use serde_json::Value;
     match v {
         Value::String(s) => {
             let len = s.chars().count();
             if len > MAX_CELL_CHARS {
+                *truncated = true;
                 let kept: String = s.chars().take(MAX_CELL_CHARS).collect();
                 Value::String(format!("{kept}…[truncated {} chars]", len - MAX_CELL_CHARS))
             } else {
                 Value::String(s)
             }
         }
-        Value::Array(a) => Value::Array(a.into_iter().map(cap_cell).collect()),
-        Value::Object(o) => {
-            Value::Object(o.into_iter().map(|(k, val)| (k, cap_cell(val))).collect())
-        }
+        Value::Array(a) => Value::Array(
+            a.into_iter()
+                .map(|v| cap_cell_tracked(v, truncated))
+                .collect(),
+        ),
+        Value::Object(o) => Value::Object(
+            o.into_iter()
+                .map(|(k, val)| (k, cap_cell_tracked(val, truncated)))
+                .collect(),
+        ),
         other => other,
     }
 }

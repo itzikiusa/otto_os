@@ -33,7 +33,7 @@ pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &Atomic
         .kill_on_drop(true);
     #[cfg(unix)]
     command_spec.process_group(0);
-    let child = match command_spec.spawn() {
+    let mut child = match command_spec.spawn() {
         Ok(child) => child,
         Err(error) => return failure(format!("failed to spawn verification: {error}")),
     };
@@ -44,12 +44,26 @@ pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &Atomic
         .id()
         .and_then(|id| rustix::process::Pid::from_raw(id as i32))
         .map(ProcessGroup);
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let capture = async {
+        let (status, stdout, stderr) = tokio::try_join!(
+            child.wait(),
+            crate::command_output::drain(stdout),
+            crate::command_output::drain(stderr)
+        )?;
+        Ok::<_, std::io::Error>(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
     let output = tokio::select! {
         biased;
         // Parks on the loop flag bell (perf W8) instead of a 25 ms poll.
         _ = crate::goal_loop::until_flag(|| cancelled.load(Ordering::Relaxed))
             => return failure("verification cancelled".into()),
-        result = tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()) => result,
+        result = tokio::time::timeout(Duration::from_secs(timeout_secs), capture) => result,
     };
     match output {
         Ok(Ok(output)) => {
@@ -73,6 +87,26 @@ pub async fn run(cwd: &str, command: &str, timeout_secs: u64, cancelled: &Atomic
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn output_capture_is_bounded_but_drains_both_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = run(
+            dir.path().to_str().unwrap(),
+            "head -c 3145728 /dev/zero; head -c 3145728 /dev/zero >&2; printf done > completed",
+            10,
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(result.success, "{}", result.output);
+        assert!(dir.path().join("completed").exists());
+        assert!(
+            result.output.len() <= 2 * crate::command_output::STREAM_BYTES + 256,
+            "captured {} bytes",
+            result.output.len()
+        );
+        assert!(result.output.contains("bytes omitted"));
+    }
+
     #[tokio::test]
     async fn cancellation_before_spawn_does_not_execute_verification() {
         let dir = tempfile::tempdir().unwrap();

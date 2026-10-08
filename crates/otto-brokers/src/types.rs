@@ -595,7 +595,7 @@ pub enum OffsetResetMode {
     /// Reset to the latest offset (end) for each partition.
     Latest,
     /// Reset to an explicit absolute offset (requires `offset` field).
-    Offset(i64),
+    Offset { offset: i64 },
     /// Reset to the first offset at or after `timestamp_ms`.
     Timestamp,
 }
@@ -761,6 +761,11 @@ pub struct ReplayResp {
     pub target_topic: String,
     pub count: usize,
     pub evidence: Vec<ReplayEvidence>,
+    /// A stopped or incompletely audited replay; acknowledged writes remain in evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// False when the evidence could not be saved; callers must keep the returned evidence.
+    pub evidence_saved: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -818,6 +823,17 @@ pub struct NewLagAlertReq {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_reset_offset_uses_the_documented_object_shape() {
+        let request: super::GroupResetReq = serde_json::from_value(serde_json::json!({
+            "mode": "offset", "offset": 42, "confirm": true
+        }))
+        .expect("the UI's explicit-offset request must deserialize");
+        assert_eq!(
+            serde_json::to_value(&request.mode).unwrap(),
+            serde_json::json!({"mode": "offset", "offset": 42})
+        );
+    }
     use super::*;
 
     #[test]

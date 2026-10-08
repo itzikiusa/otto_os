@@ -23,6 +23,33 @@ use serde_json::Value;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
+/// Shared artifact visibility does not grant authority to resume its owner's
+/// agent. SessionManager's live lookup also reads this authoritative DB row.
+/// Only R12's studio adapters opt into this check; missing old sessions retain
+/// the runner's existing fresh-session fallback.
+pub(crate) async fn require_owned_resume(
+    pool: &otto_state::DbPool,
+    workspace: &str,
+    user: &str,
+    existing: Option<&Id>,
+) -> otto_core::Result<()> {
+    let Some(id) = existing else {
+        return Ok(());
+    };
+    match otto_state::SessionsRepo::new(pool.clone()).get(id).await {
+        Ok(session) if session.workspace_id == workspace && session.created_by == user => Ok(()),
+        Ok(_) => Err(Error::Forbidden(
+            "cannot resume an assistant session owned by another user or workspace".into(),
+        )),
+        Err(Error::NotFound(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/assist_resume_ownership.rs"]
+mod resume_ownership_tests;
+
 /// Absolute cap on one turn (cold claude spawn + a long reply). Deliberately very
 /// generous (10h): a workflow agent step (e.g. "write tests", a long refactor) can
 /// legitimately run for hours, and the operator stops a run manually rather than

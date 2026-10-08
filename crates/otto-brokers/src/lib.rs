@@ -9,6 +9,7 @@ pub mod http;
 pub mod kafka;
 pub mod metrics;
 pub mod proxy;
+mod replay;
 pub mod schema_registry;
 pub mod service;
 pub mod types;

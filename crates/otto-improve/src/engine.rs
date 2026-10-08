@@ -669,7 +669,7 @@ impl ImprovementEngine {
             return Err(Error::Invalid("edit is not pending".into()));
         }
         // Conflict: the file changed since we snapshotted `before_content`.
-        let current = tokio::fs::read_to_string(&edit.target_path).await.ok();
+        let current = read_edit_target(Path::new(&edit.target_path)).await?;
         if current != edit.before_content {
             return self
                 .improvements
@@ -680,7 +680,7 @@ impl ImprovementEngine {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         if edit.kind == ImprovementEditKind::Remove {
-            let _ = tokio::fs::remove_file(&edit.target_path).await;
+            remove_edit_target(Path::new(&edit.target_path)).await?;
         } else {
             tokio::fs::write(&edit.target_path, &edit.after_content)
                 .await
@@ -711,17 +711,47 @@ impl ImprovementEngine {
                 "only applied edits can be rolled back".into(),
             ));
         }
-        let current = tokio::fs::read_to_string(&edit.target_path).await.ok();
+        let current = read_edit_target(Path::new(&edit.target_path)).await?;
         // If the file changed since we wrote it, don't clobber — flag conflict.
-        if edit.kind != ImprovementEditKind::Remove
-            && current.as_deref() != Some(edit.after_content.as_str())
-        {
+        let expected = if edit.kind == ImprovementEditKind::Remove {
+            None
+        } else {
+            Some(edit.after_content.as_str())
+        };
+        if current.as_deref() != expected {
             return self
                 .improvements
                 .set_edit_status(edit_id, ImprovementEditStatus::Conflict, Some(actor))
                 .await;
         }
         match &edit.before_content {
+            Some(before) if edit.kind == ImprovementEditKind::Remove => {
+                // A user may recreate the path after the check above. create_new
+                // refuses that race instead of truncating their replacement.
+                use tokio::io::AsyncWriteExt;
+                match tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&edit.target_path)
+                    .await
+                {
+                    Ok(mut file) => file.write_all(before.as_bytes()).await.map_err(|e| {
+                        Error::Internal(format!("restore {}: {e}", edit.target_path))
+                    })?,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return self
+                            .improvements
+                            .set_edit_status(edit_id, ImprovementEditStatus::Conflict, Some(actor))
+                            .await
+                    }
+                    Err(e) => {
+                        return Err(Error::Internal(format!(
+                            "restore {}: {e}",
+                            edit.target_path
+                        )))
+                    }
+                }
+            }
             Some(before) => {
                 tokio::fs::write(&edit.target_path, before)
                     .await
@@ -729,7 +759,7 @@ impl ImprovementEngine {
             }
             None => {
                 // File was created by the edit → rollback deletes it.
-                let _ = tokio::fs::remove_file(&edit.target_path).await;
+                remove_edit_target(Path::new(&edit.target_path)).await?;
             }
         }
         self.improvements
@@ -1041,16 +1071,19 @@ fn blocking_read_memory(root: &str) -> Vec<(String, String)> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                if let (Some(name), Ok(content)) = (
+                use std::io::Read;
+                if !path.is_file() {
+                    continue;
+                }
+                if let (Some(name), Ok(file)) = (
                     path.file_name().and_then(|n| n.to_str()),
-                    std::fs::read_to_string(&path),
+                    std::fs::File::open(&path),
                 ) {
-                    let content = if content.len() > 8000 {
-                        cap_bytes(&content, 8000).to_string()
-                    } else {
-                        content
-                    };
-                    out.push((name.to_string(), content));
+                    let mut bytes = Vec::new();
+                    if file.take(8000).read_to_end(&mut bytes).is_ok() {
+                        let content = String::from_utf8_lossy(&bytes);
+                        out.push((name.to_string(), cap_bytes(&content, 8000).to_string()));
+                    }
                 }
             }
             if out.len() >= 20 {
@@ -1059,6 +1092,23 @@ fn blocking_read_memory(root: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Only absence is an empty snapshot; I/O/UTF-8 errors must never authorize a write.
+async fn read_edit_target(path: &Path) -> Result<Option<String>> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::Internal(format!("read {}: {e}", path.display()))),
+    }
+}
+
+async fn remove_edit_target(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Internal(format!("remove {}: {e}", path.display()))),
+    }
 }
 
 /// Result of an auto-apply write attempt.
@@ -1136,10 +1186,9 @@ async fn safe_auto_apply(
     let target_str = target.to_string_lossy().to_string();
 
     // (2) Conflict check against the snapshot the decision was based on. Reading
-    // here (rather than trusting the earlier snapshot) closes the TOCTOU window
-    // between the decision and this write: a concurrent edit is detected and
-    // queued instead of being silently clobbered.
-    let now_on_disk = tokio::fs::read_to_string(&target).await.ok();
+    // here catches changes since the proposal was evaluated. External writers
+    // can still race the filesystem operation; the backup preserves this snapshot.
+    let now_on_disk = read_edit_target(&target).await?;
     if now_on_disk.as_deref() != expected {
         return Ok(ApplyOutcome::Conflict);
     }
@@ -1149,7 +1198,7 @@ async fn safe_auto_apply(
         if let Some(prev) = now_on_disk.as_deref() {
             write_backup(&target, prev).await?;
         }
-        let _ = tokio::fs::remove_file(&target).await;
+        remove_edit_target(&target).await?;
         return Ok(ApplyOutcome::Applied);
     }
 
@@ -1622,6 +1671,94 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(producer.prompts.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn memory_prompt_reads_only_the_bounded_prefix() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let memory = crate::pathsafe::project_dir(dir.path().to_str().unwrap()).join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        let mut file = std::fs::File::create(memory.join("MEMORY.md")).unwrap();
+        file.write_all(&vec![b'x'; 7999]).unwrap();
+        file.write_all("é".as_bytes()).unwrap();
+        // Neither an oversized tail nor invalid bytes beyond the prompt budget
+        // should be read. Sparse file keeps this fixture cheap on disk.
+        file.set_len(64 * 1024 * 1024).unwrap();
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        let read = blocking_read_memory(dir.path().to_str().unwrap());
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].1, "x".repeat(7999));
+    }
+
+    async fn removal_edit(
+        engine: &ImprovementEngine,
+        ws: &Id,
+        path: &Path,
+        before: Option<&str>,
+        status: ImprovementEditStatus,
+    ) -> ImprovementEdit {
+        let run = engine
+            .improvements
+            .create_run(ws, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
+        engine
+            .improvements
+            .create_edit(NewEdit {
+                run_id: run.id,
+                workspace_id: ws.clone(),
+                target: ImprovementTarget::Memory,
+                target_ref: "MEMORY.md".into(),
+                target_path: path.to_string_lossy().into_owned(),
+                kind: ImprovementEditKind::Remove,
+                risk: ImprovementRisk::Low,
+                status,
+                rationale: "fixture".into(),
+                evidence: vec![],
+                before_content: before.map(str::to_string),
+                after_content: String::new(),
+                actor: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rollback_removal_preserves_recreated_file() {
+        let (engine, ws, _, dir) = harness().await;
+        let path = dir.path().join("MEMORY.md");
+        let edit = removal_edit(
+            &engine,
+            &ws,
+            &path,
+            Some("original"),
+            ImprovementEditStatus::Applied,
+        )
+        .await;
+        tokio::fs::write(&path, "new user work").await.unwrap();
+        let result = engine.rollback_edit(&edit.id, "fixture").await.unwrap();
+        assert_eq!(result.status, ImprovementEditStatus::Conflict);
+        assert_eq!(
+            tokio::fs::read_to_string(path).await.unwrap(),
+            "new user work"
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_removal_does_not_report_success_for_unreadable_target() {
+        let (engine, ws, _, dir) = harness().await;
+        let path = dir.path().join("MEMORY.md");
+        tokio::fs::create_dir(&path).await.unwrap();
+        let edit = removal_edit(&engine, &ws, &path, None, ImprovementEditStatus::Pending).await;
+        assert!(engine.approve_edit(&edit.id, "fixture").await.is_err());
+        assert_eq!(
+            engine.improvements.get_edit(&edit.id).await.unwrap().status,
+            ImprovementEditStatus::Pending
+        );
+        assert!(path.is_dir());
     }
 
     #[tokio::test]

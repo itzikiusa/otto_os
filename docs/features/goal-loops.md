@@ -86,7 +86,7 @@ A blocked loop can retry one executor from its **current** iteration using its s
 
 ## Limits and evidence details
 
-The iteration counter measures iterations started, including interrupted iterations. Pause does not refund elapsed time. Raising limits does not erase previous work or progress. Each managed role has an absolute deadline including session startup and publication. Verification commands have a timeout and are stopped with their process group on cancellation or timeout. Executor recovery remains bounded by attempts and its per-attempt waiting rules.
+The iteration counter measures iterations started, including interrupted iterations. Pause does not refund elapsed time. Raising limits does not erase previous work or progress. Each managed role has an absolute deadline including session startup and publication. Verification commands have a timeout and are stopped with their process group on cancellation or timeout. Captured output retains up to 512 KiB from each of stdout and stderr, marks omitted bytes, and keeps draining both pipes so verbose commands can finish. Executor recovery remains bounded by attempts and its per-attempt waiting rules.
 
 The narrative digest is auxiliary context; the retained working directory is the source of truth. The ledger preserves questions/answers, identity and evidence for human checks, the latest next action, repeated-failure state and completion-review results. It is not a complete task/file dependency tracker. The failure threshold is currently two matching unsuccessful evaluations and is not configurable.
 

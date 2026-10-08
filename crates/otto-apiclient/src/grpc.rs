@@ -433,13 +433,18 @@ fn find_method(pool: &DescriptorPool, path: &str) -> Option<MethodDescriptor> {
 /// server on localhost is a first-class API-client use case) — honoured by
 /// reflection AND invoke alike.
 pub async fn invoke(req: GrpcInvokeReq, allow_local: bool) -> Result<ApiResponse, Error> {
+    let deadline = tokio::time::Instant::now() + GRPC_CALL_TIMEOUT;
     // Descriptors come from the uploaded .proto, or from server reflection when
     // none was provided.
-    let pool = if req.proto.trim().is_empty() {
-        reflect_pool_cached(&req.url, &req.headers, allow_local, false).await?
-    } else {
-        pool_from_proto_cached(&req.proto).await?
-    };
+    let pool = tokio::time::timeout_at(deadline, async {
+        if req.proto.trim().is_empty() {
+            reflect_pool_cached(&req.url, &req.headers, allow_local, false).await
+        } else {
+            pool_from_proto_cached(&req.proto).await
+        }
+    })
+    .await
+    .map_err(|_| upstream(deadline_status().to_string()))??;
     let method = find_method(&pool, &req.method)
         .ok_or_else(|| invalid(format!("method not found: {}", req.method)))?;
     if method.is_client_streaming() {
@@ -468,7 +473,9 @@ pub async fn invoke(req: GrpcInvokeReq, allow_local: bool) -> Result<ApiResponse
 
     // SSRF guard (pinned) + channel build (TLS for https/grpcs) — reused
     // from the channel cache (the reflection above dialled it already).
-    let channel = cached_channel(&req.url, allow_local).await?;
+    let channel = tokio::time::timeout_at(deadline, cached_channel(&req.url, allow_local))
+        .await
+        .map_err(|_| upstream(deadline_status().to_string()))??;
     trace.push(TraceStep {
         label: "Connected".into(),
         detail: req.url.clone(),
@@ -477,7 +484,10 @@ pub async fn invoke(req: GrpcInvokeReq, allow_local: bool) -> Result<ApiResponse
     });
 
     let mut client = tonic::client::Grpc::new(channel);
-    if let Err(e) = client.ready().await {
+    if let Err(e) = tokio::time::timeout_at(deadline, client.ready())
+        .await
+        .map_err(|_| upstream(deadline_status().to_string()))?
+    {
         forget_channel(&req.url, allow_local);
         return Err(upstream(format!("not ready: {e}")));
     }
@@ -507,7 +517,6 @@ pub async fn invoke(req: GrpcInvokeReq, allow_local: bool) -> Result<ApiResponse
     // answers fails DEADLINE_EXCEEDED; a long-lived (watch-style) stream is
     // cut there — or at the message / byte cap — and returns what arrived,
     // flagged `truncated`.
-    let deadline = tokio::time::Instant::now() + GRPC_CALL_TIMEOUT;
     let outcome: Result<(Vec<Value>, String, bool), Status> = if server_streaming {
         let sent =
             match tokio::time::timeout_at(deadline, client.server_streaming(request, path, codec))
@@ -779,6 +788,39 @@ async fn reflect_pool(
     headers: &[KV],
     allow_local: bool,
 ) -> Result<DescriptorPool, Error> {
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        reflect_pool_inner(url, headers, allow_local),
+    )
+    .await
+    .map_err(|_| upstream("reflection timed out after 20s"))?
+}
+
+/// Bound the cumulative response, including duplicate/irrelevant messages:
+/// tonic's per-message decode cap alone cannot bound a streaming RPC.
+#[derive(Default)]
+struct ReflectionBudget {
+    messages: usize,
+    bytes: usize,
+}
+impl ReflectionBudget {
+    fn account(&mut self, message: &DynamicMessage) -> Result<(), Error> {
+        self.messages += 1;
+        self.bytes = self.bytes.saturating_add(message.encoded_len());
+        if self.messages > 2048 || self.bytes > 8 * 1024 * 1024 {
+            return Err(upstream(
+                "reflection response limit exceeded (2048 messages / 8 MiB)",
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn reflect_pool_inner(
+    url: &str,
+    headers: &[KV],
+    allow_local: bool,
+) -> Result<DescriptorPool, Error> {
     use futures_util::stream;
     use prost::Message as _;
     use prost_reflect::Value as PValue;
@@ -822,7 +864,14 @@ async fn reflect_pool(
         .map_err(|s| upstream(format!("reflection unavailable: {}", s.message())))?;
     let mut s1 = resp1.into_inner();
     let mut services: Vec<String> = Vec::new();
-    while let Ok(Some(m)) = s1.message().await {
+    let mut service_names = std::collections::HashSet::new();
+    let mut budget = ReflectionBudget::default();
+    while let Some(m) = s1
+        .message()
+        .await
+        .map_err(|s| upstream(format!("reflection listing failed: {}", s.message())))?
+    {
+        budget.account(&m)?;
         if let Some(lsr) = m.get_field_by_name("list_services_response") {
             if let Some(list) = lsr
                 .as_message()
@@ -835,14 +884,23 @@ async fn reflect_pool(
                             .and_then(|x| x.get_field_by_name("name"))
                             .and_then(|v| v.as_str().map(String::from))
                         {
-                            services.push(name);
+                            if !name.is_empty()
+                                && !name.starts_with("grpc.reflection")
+                                && service_names.insert(name.clone())
+                            {
+                                if services.len() >= 1024 {
+                                    return Err(upstream(
+                                        "reflection service limit exceeded (1024 services)",
+                                    ));
+                                }
+                                services.push(name);
+                            }
                         }
                     }
                 }
             }
         }
     }
-    services.retain(|s| !s.is_empty() && !s.starts_with("grpc.reflection"));
     if services.is_empty() {
         return Err(upstream(
             "server returned no services (reflection may be disabled)",
@@ -856,6 +914,12 @@ async fn reflect_pool(
         .collect();
     let mut req2 = tonic::Request::new(stream::iter(reqs));
     *req2.metadata_mut() = md;
+    // Each RPC consumes tonic's readiness reservation. Reserve again before
+    // the second call; otherwise a healthy reflection server can panic here.
+    client
+        .ready()
+        .await
+        .map_err(|e| upstream(format!("reflection not ready: {e}")))?;
     let resp2 = client
         .streaming(req2, path, DynamicCodec { output: resp_desc })
         .await
@@ -863,7 +927,12 @@ async fn reflect_pool(
     let mut s2 = resp2.into_inner();
     let mut files: Vec<prost_types::FileDescriptorProto> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    while let Ok(Some(m)) = s2.message().await {
+    while let Some(m) = s2
+        .message()
+        .await
+        .map_err(|s| upstream(format!("reflection descriptors failed: {}", s.message())))?
+    {
+        budget.account(&m)?;
         if let Some(fdr) = m.get_field_by_name("file_descriptor_response") {
             if let Some(list) = fdr
                 .as_message()
@@ -876,6 +945,11 @@ async fn reflect_pool(
                             {
                                 let name = fdp.name.clone().unwrap_or_default();
                                 if seen.insert(name) {
+                                    if files.len() >= 4096 {
+                                        return Err(upstream(
+                                            "reflection file limit exceeded (4096 descriptors)",
+                                        ));
+                                    }
                                     files.push(fdp);
                                 }
                             }
@@ -999,6 +1073,149 @@ mod tests {
         assert_eq!(m.input().full_name(), "demo.HelloRequest");
         assert_eq!(m.output().full_name(), "demo.HelloReply");
         assert!(!m.is_client_streaming() && !m.is_server_streaming());
+    }
+
+    async fn reflection_peer(
+        message: Option<DynamicMessage>,
+        repeats: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        reflection_peer_responses(vec![message], repeats).await
+    }
+
+    async fn reflection_peer_responses(
+        messages: Vec<Option<DynamicMessage>>,
+        repeats: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            let mut held = Vec::new();
+            let mut messages = messages.into_iter();
+            while let Some(Ok((request, mut reply))) = connection.accept().await {
+                let response = http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .unwrap();
+                let mut body = reply.send_response(response, false).unwrap();
+                if let Some(Some(message)) = messages.next() {
+                    let encoded = message.encode_to_vec();
+                    let mut frame = vec![0];
+                    frame.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+                    frame.extend_from_slice(&encoded);
+                    for _ in 0..repeats {
+                        body.send_data(frame.clone().into(), false).unwrap();
+                    }
+                    let mut trailers = http::HeaderMap::new();
+                    trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+                    body.send_trailers(trailers).unwrap();
+                }
+                held.push((request, body));
+            }
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn reflection_reserves_readiness_for_descriptor_rpc() {
+        use prost_reflect::Value as PValue;
+        let reflection = pool_from_proto(REFLECTION_PROTO).unwrap();
+        let response = reflection
+            .get_message_by_name("grpc.reflection.v1alpha.ServerReflectionResponse")
+            .unwrap();
+        let mut listing_json = serde_json::Deserializer::from_str(
+            r#"{"listServicesResponse":{"service":[{"name":"demo.Greeter"}]}}"#,
+        );
+        let listing = DynamicMessage::deserialize(response.clone(), &mut listing_json).unwrap();
+        let mut descriptors = DynamicMessage::new(
+            reflection
+                .get_message_by_name("grpc.reflection.v1alpha.FileDescriptorResponse")
+                .unwrap(),
+        );
+        let sample = pool_from_proto(SAMPLE).unwrap();
+        descriptors.set_field_by_name(
+            "file_descriptor_proto",
+            PValue::List(
+                sample
+                    .files()
+                    .map(|f| PValue::Bytes(f.file_descriptor_proto().encode_to_vec().into()))
+                    .collect(),
+            ),
+        );
+        let mut descriptor_response = DynamicMessage::new(response);
+        descriptor_response
+            .set_field_by_name("file_descriptor_response", PValue::Message(descriptors));
+        let (url, server) =
+            reflection_peer_responses(vec![Some(listing), Some(descriptor_response)], 1).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), reflect_pool(&url, &[], true)).await;
+        server.abort();
+        forget_channel(&url, true);
+        let reflected = result.unwrap().unwrap();
+        assert!(reflected.get_service_by_name("demo.Greeter").is_some());
+    }
+
+    #[tokio::test]
+    async fn reflection_deadline_covers_a_server_that_never_finishes() {
+        let (url, server) = reflection_peer(None, 0).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(22), reflect_pool(&url, &[], true)).await;
+        server.abort();
+        forget_channel(&url, true);
+        let error = result
+            .expect("reflection must have its own deadline")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("reflection timed out"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reflection_rejects_excessive_service_listing() {
+        let pool = pool_from_proto(REFLECTION_PROTO).unwrap();
+        let descriptor = pool
+            .get_message_by_name("grpc.reflection.v1alpha.ServerReflectionResponse")
+            .unwrap();
+        let body = json!({"listServicesResponse":{"service":(0..1025).map(|n| json!({"name":format!("service{n}")})).collect::<Vec<_>>()}}).to_string();
+        let message =
+            DynamicMessage::deserialize(descriptor, &mut serde_json::Deserializer::from_str(&body))
+                .unwrap();
+        let (url, server) = reflection_peer(Some(message), 1).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), reflect_pool(&url, &[], true)).await;
+        server.abort();
+        forget_channel(&url, true);
+        let error = result.unwrap().unwrap_err();
+        assert!(error.to_string().contains("service limit"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reflection_rejects_excessive_bytes_and_message_counts() {
+        let pool = pool_from_proto(REFLECTION_PROTO).unwrap();
+        let descriptor = pool
+            .get_message_by_name("grpc.reflection.v1alpha.ServerReflectionResponse")
+            .unwrap();
+        for (name, count) in [
+            ("grpc.reflection".to_string(), 2049),
+            (format!("grpc.reflection{}", "x".repeat(1024 * 1024)), 9),
+        ] {
+            let body = json!({"listServicesResponse":{"service":[{"name":name}]}}).to_string();
+            let message = DynamicMessage::deserialize(
+                descriptor.clone(),
+                &mut serde_json::Deserializer::from_str(&body),
+            )
+            .unwrap();
+            let (url, server) = reflection_peer(Some(message), count).await;
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), reflect_pool(&url, &[], true)).await;
+            server.abort();
+            forget_channel(&url, true);
+            let error = result.unwrap().unwrap_err();
+            assert!(error.to_string().contains("response limit"), "{error}");
+        }
     }
 
     #[test]

@@ -168,6 +168,11 @@ pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> Ver
             }
             let Some(v) = ops.verify_goal(goal, scrutiny).await else {
                 ops.record(goal, "error", iterations, None).await;
+                if goal.blocking {
+                    summary.blocked = true;
+                    ops.escalate(goal, "required verification produced no verdict")
+                        .await;
+                }
                 break "error";
             };
             ops.post_verdict(goal, &v).await;
@@ -221,7 +226,9 @@ pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> Ver
             status: status.to_string(),
         });
     }
-    // Merge only when no blocking goal is unmet.
+    // Stop can arrive during the final awaited verdict or persistence call.
+    summary.cancelled = ops.cancelled();
+    // Required verification errors block too; advisory errors remain nonblocking.
     if !summary.cancelled && !summary.blocked {
         summary.merge_status = Some(ops.merge_back().await);
     }
@@ -1243,6 +1250,38 @@ mod tests {
             classify(&goal("g", true, 2), &vd(false, true), 2),
             Decision::Unmet
         );
+    }
+
+    #[tokio::test]
+    async fn missing_blocking_verdict_never_merges() {
+        let ops = MockOps::new(FixOutcome::Completed);
+        let s = run_verification(vec![goal("required", true, 3)], &ops).await;
+        assert!(s.blocked);
+        assert!(s.merge_status.is_none());
+        assert!(!ops.logged().iter().any(|entry| entry == "merge"));
+        assert!(ops
+            .logged()
+            .iter()
+            .any(|entry| entry.starts_with("escalate:required:")));
+    }
+
+    #[tokio::test]
+    async fn missing_advisory_verdict_remains_nonblocking() {
+        let ops = MockOps::new(FixOutcome::Completed);
+        let s = run_verification(vec![goal("advisory", false, 3)], &ops).await;
+        assert!(!s.blocked);
+        assert_eq!(s.results[0].status, "error");
+        assert_eq!(s.merge_status.as_deref(), Some("merged"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_final_verdict_never_merges() {
+        let mut ops = MockOps::new(FixOutcome::Completed).script("g", vec![vd(true, true)]);
+        ops.cancel_after_first_verify = true;
+        let s = run_verification(vec![goal("g", true, 3)], &ops).await;
+        assert!(s.cancelled);
+        assert!(s.merge_status.is_none());
+        assert!(!ops.logged().iter().any(|entry| entry == "merge"));
     }
 
     #[tokio::test]

@@ -360,7 +360,8 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
     let mut backup_path: Option<String> = None;
 
     if backup && installed_dir.exists() {
-        let dest = backup_dir(&library.root, name);
+        let dest = backup_dir(&library.root, name)
+            .map_err(|e| Error::Internal(format!("reserve backup directory: {e}")))?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Error::Internal(format!("create backup dir: {e}")))?;
@@ -398,13 +399,23 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
     })
 }
 
-/// `<library_root>/skills-backup/<name>-<unix_secs>/`.
-fn backup_dir(root: &FsPath, name: &str) -> std::path::PathBuf {
+/// Atomically reserve a unique backup; two installs in one second must not
+/// merge their safety copies. Legacy `<name>-<secs>` directories remain valid.
+fn backup_dir(root: &FsPath, name: &str) -> std::io::Result<std::path::PathBuf> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    root.join("skills-backup").join(format!("{name}-{secs}"))
+    let parent = root.join("skills-backup");
+    std::fs::create_dir_all(&parent)?;
+    loop {
+        let dest = parent.join(format!("{name}-{secs}-{}", otto_core::new_id()));
+        match std::fs::create_dir(&dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Keep only the newest `keep` `skills-backup/<name>-<secs>` dirs for `name`
@@ -414,15 +425,20 @@ fn prune_backups(root: &FsPath, name: &str, keep: usize) {
         return;
     };
     let prefix = format!("{name}-");
-    let mut dirs: Vec<(u64, std::path::PathBuf)> = rd
+    let mut dirs: Vec<((u64, String), std::path::PathBuf)> = rd
         .flatten()
         .filter_map(|e| {
             let file = e.file_name();
-            let secs = file.to_str()?.strip_prefix(&prefix)?.parse::<u64>().ok()?;
-            e.file_type().ok()?.is_dir().then(|| (secs, e.path()))
+            let suffix = file.to_str()?.strip_prefix(&prefix)?;
+            let (timestamp, unique) = suffix.split_once('-').unwrap_or((suffix, ""));
+            let secs = timestamp.parse::<u64>().ok()?;
+            e.file_type()
+                .ok()?
+                .is_dir()
+                .then(|| ((secs, unique.to_string()), e.path()))
         })
         .collect();
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
     for (_, d) in dirs.into_iter().skip(keep) {
         let _ = std::fs::remove_dir_all(d);
     }
@@ -447,6 +463,30 @@ fn copy_tree(src: &FsPath, dest: &FsPath) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consecutive_backups_never_reuse_the_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = backup_dir(dir.path(), "grill").unwrap();
+        let second = backup_dir(dir.path(), "grill").unwrap();
+        assert_ne!(
+            first, second,
+            "a later install must not overwrite the earlier safety copy"
+        );
+        std::fs::write(first.join("SKILL.md"), "original").unwrap();
+        std::fs::write(second.join("SKILL.md"), "edited").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(first.join("SKILL.md")).unwrap(),
+            "original"
+        );
+        prune_backups(dir.path(), "grill", 1);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("skills-backup"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn prune_backups_keeps_newest_n_for_that_skill_only() {

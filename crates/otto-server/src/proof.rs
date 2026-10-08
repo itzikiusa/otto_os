@@ -108,40 +108,15 @@ pub use otto_core::proof::CmdRun;
 /// Run `sh -c <cmd>` in `cwd`, capturing combined output, exit code, and wall
 /// time. Bounded by `timeout_secs`.
 pub async fn run_command(cwd: &str, cmd: &str, timeout_secs: u64) -> CmdRun {
-    let start = std::time::Instant::now();
-    let fut = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
-        .output();
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), fut).await {
-        Ok(Ok(out)) => {
-            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
-            let err = String::from_utf8_lossy(&out.stderr);
-            if !err.is_empty() {
-                s.push_str("\n--- stderr ---\n");
-                s.push_str(&err);
-            }
-            CmdRun {
-                success: out.status.success(),
-                exit_code: out.status.code().unwrap_or(-1),
-                output: s,
-                duration_ms: start.elapsed().as_millis() as u64,
-            }
-        }
-        Ok(Err(e)) => CmdRun {
-            success: false,
-            exit_code: -1,
-            output: format!("failed to spawn command: {e}"),
-            duration_ms: start.elapsed().as_millis() as u64,
-        },
-        Err(_) => CmdRun {
-            success: false,
-            exit_code: -1,
-            output: format!("command timed out after {timeout_secs}s"),
-            duration_ms: start.elapsed().as_millis() as u64,
-        },
-    }
+    // Share the verification runner: timeout/drop kills the whole process
+    // group and both output streams retain only bounded previews while draining.
+    otto_automation::goal_loop_commands::run(
+        cwd,
+        cmd,
+        timeout_secs,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +243,9 @@ pub async fn assemble_diff(
     base: Option<&str>,
 ) -> Result<()> {
     let git = LocalGit::new(cwd);
+    let Ok(head_commit) = git.rev_parse("HEAD").await else {
+        return Ok(());
+    };
     // Counts come from ONE `--raw --numstat` summary (never the patch): this
     // runs automatically at every session/run completion, often on a huge
     // worktree, and the old full parsed diff only fed four numbers. The
@@ -294,6 +272,11 @@ pub async fn assemble_diff(
     let Ok((text, _)) = git.diff_text_capped(base, 2 * STORE_CAP).await else {
         return Ok(());
     };
+    if git.rev_parse("HEAD").await? != head_commit {
+        return Err(Error::Conflict(
+            "repository HEAD changed while assembling proof; retry".into(),
+        ));
+    }
     let additions: u32 = resp.files.iter().filter_map(|f| f.added).sum();
     let deletions: u32 = resp.files.iter().filter_map(|f| f.deleted).sum();
     let risky_files: Vec<String> = resp
@@ -303,6 +286,7 @@ pub async fn assemble_diff(
         .filter(|p| is_risky_file(p))
         .collect();
     let meta = json!({
+        "head_commit": head_commit,
         "files_changed": resp.files.len(),
         "additions": additions,
         "deletions": deletions,
@@ -1239,6 +1223,21 @@ mod tests {
         assert!(!bad.success && bad.exit_code == 3);
         let echo = run_command(here, "echo hello", 30).await;
         assert!(echo.output.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn run_command_timeout_kills_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = run_command(
+            dir.path().to_str().unwrap(),
+            "(sleep 2; touch survived-timeout) & wait",
+            1,
+        )
+        .await;
+        assert!(!result.success);
+        assert!(result.output.contains("timed out"));
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!dir.path().join("survived-timeout").exists());
     }
 
     #[test]

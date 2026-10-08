@@ -257,6 +257,7 @@ impl AuthRepo {
                 return Ok(ctx);
             }
         }
+        let cache_generation = self.cache.as_ref().map(AuthCache::generation);
         // Resolve the row's own fields (kind/expiry/target) plus the REAL user
         // (the token owner) in one shot. The target user (impersonation only) is
         // loaded separately below to keep the common path a single join.
@@ -511,7 +512,12 @@ impl AuthRepo {
         // We use the `user_id` column read from the join above (the `id` field
         // of `real_user`, which is always the token-owner row's `user_id`).
         if let Some(cache) = self.cache.as_ref().filter(|_| managed_session.is_none()) {
-            cache.insert(hash, ctx.real_user.id.clone(), ctx.clone());
+            cache.insert_if_current(
+                cache_generation.unwrap_or_default(),
+                hash,
+                ctx.real_user.id.clone(),
+                ctx.clone(),
+            );
         }
 
         Ok(ctx)

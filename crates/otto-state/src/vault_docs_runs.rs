@@ -139,6 +139,26 @@ impl VaultDocsRunsRepo {
         Ok(row.as_ref().map(row_to_run))
     }
 
+    /// A conversation can only be resumed by its creator in its actual session
+    /// workspace. Shared vault history is deliberately a separate read surface.
+    pub async fn latest_refine_for_note_scoped(
+        &self,
+        vault_id: i64,
+        note_path: &str,
+        workspace: &str,
+        creator: &str,
+    ) -> Result<Option<VaultDocsRunRow>> {
+        let row = sqlx::query(
+            "SELECT r.* FROM vault_docs_runs r JOIN sessions s
+             ON s.id = CASE WHEN json_valid(r.payload) THEN json_extract(r.payload, '$.agents[0].session_id') END
+             WHERE r.vault_id=?1 AND r.kind='refine' AND r.note_path=?2
+             AND r.ws_id=?3 AND s.workspace_id=?3 AND s.created_by=?4
+             ORDER BY r.started_at DESC, r.id DESC LIMIT 1"
+        ).bind(vault_id).bind(note_path).bind(workspace).bind(creator)
+            .fetch_optional(&self.pool).await.map_err(dberr("latest scoped refine for note"))?;
+        Ok(row.as_ref().map(row_to_run))
+    }
+
     /// Delete one run row (history cleanup). Returns whether a row existed.
     pub async fn delete(&self, id: &str) -> Result<bool> {
         let res = sqlx::query("DELETE FROM vault_docs_runs WHERE id = ?1")

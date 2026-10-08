@@ -48,11 +48,13 @@ klickhouse = { version = "0.15.3", features = ["tls"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "tls12", "std"] }
 rustls-pki-types = "1.15.1"
+rustls-native-certs = "0.8.4"
 webpki-roots = "1.0.9"
 # mongosh-script execution: the pasted script is written to a temp .js file and
 # run through the real `mongosh --file` (drivers/mongodb.rs `run_script`).
 tempfile = { workspace = true }
 
 [dev-dependencies]
+rcgen = "0.14.10"
 serde_json = { workspace = true }
 sqlx = { workspace = true }

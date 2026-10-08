@@ -1632,15 +1632,24 @@ impl Store {
     }
 
     /// Bounded BFS over render edges from `start`, returning the adjacency of
-    /// every node reached (≤ `max_nodes`).
+    /// every node reached (≤ `max_nodes`). Rejects oversized graphs rather
+    /// than returning a partial snapshot that could miss a cycle.
     pub async fn render_adjacency(&self, start: &[String], max_nodes: usize) -> Result<Adjacency> {
         let mut adj = Adjacency::new();
         let mut seen: HashSet<String> = start.iter().cloned().collect();
-        let mut frontier: Vec<String> = start.to_vec();
+        let too_large = || {
+            Error::Invalid(format!(
+                "render graph exceeds the {max_nodes}-artifact validation limit"
+            ))
+        };
+        if seen.len() > max_nodes {
+            return Err(too_large());
+        }
+        let mut frontier: Vec<String> = seen.iter().cloned().collect();
         let rels = placeholders(RENDER_RELS.len());
-        while !frontier.is_empty() && seen.len() <= max_nodes {
+        while !frontier.is_empty() {
             let sql = format!(
-                "SELECT src_artifact_id, dst_id FROM design_links
+                "SELECT DISTINCT src_artifact_id, dst_id FROM design_links
                  WHERE dst_kind = 'artifact' AND rel IN ({rels}) AND src_artifact_id IN ({})",
                 placeholders(frontier.len())
             );
@@ -1661,6 +1670,9 @@ impl Store {
                 let d: String = r.get("dst_id");
                 adj.entry(s).or_default().push(d.clone());
                 if seen.insert(d.clone()) {
+                    if seen.len() > max_nodes {
+                        return Err(too_large());
+                    }
                     next.push(d);
                 }
             }
@@ -2274,6 +2286,25 @@ mod tests {
 
     async fn store() -> Store {
         Store::new(otto_state::db::test_pool().await)
+    }
+
+    #[tokio::test]
+    async fn render_adjacency_never_returns_an_incomplete_cycle_check() {
+        let s = store().await;
+        for id in ["A", "B", "C", "D"] {
+            s.insert_artifact(&art(id, "w")).await.unwrap();
+        }
+        for (a, b) in [("A", "B"), ("B", "C"), ("C", "D"), ("D", "A")] {
+            s.insert_link(&link(a, b, "embeds", "explicit"))
+                .await
+                .unwrap();
+        }
+        assert!(
+            s.render_adjacency(&["A".into()], 3).await.is_err(),
+            "partial graph must not certify absence of a cycle"
+        );
+        let complete = s.render_adjacency(&["A".into()], 4).await.unwrap();
+        assert!(crate::graph::reaches(&complete, "B", "A", 4));
     }
 
     fn art(id: &str, ws: &str) -> NewArtifactRow {

@@ -206,7 +206,7 @@ pub struct SearchFilter {
     /// LIMIT — filtering after it let a section come back empty even though
     /// matching memories existed.
     pub kinds: Vec<String>,
-    /// Hide OTHER users' private memories (non-`private` rows, or this user's
+    /// Hide OTHER users' private memories (`shared` rows, or this user's
     /// own). `None` sees everything.
     pub viewer: Option<String>,
 }
@@ -222,7 +222,7 @@ impl SearchFilter {
         }
         if self.viewer.is_some() {
             sql.push_str(&format!(
-                " AND ({col}visibility != 'private' OR {col}created_by = ?)"
+                " AND ({col}visibility = 'shared' OR {col}created_by = ?)"
             ));
         }
         sql
@@ -322,6 +322,15 @@ impl SaveOutcome {
 const DUPLICATE_MEMORY: &str =
     "a memory with the same content already exists in this collection and scope";
 
+fn validate_visibility(visibility: &str) -> Result<()> {
+    if !matches!(visibility, "" | "shared" | "private") {
+        return Err(Error::Invalid(
+            "visibility must be shared or private".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn insert_conn(
     conn: &mut sqlx::SqliteConnection,
     id: &str,
@@ -329,6 +338,7 @@ async fn insert_conn(
     by: &str,
     nm: &NewMemory,
 ) -> Result<()> {
+    validate_visibility(&nm.visibility)?;
     let now = fmt(Utc::now());
     let hash = MemoriesRepo::content_hash(&nm.body);
     sqlx::query(
@@ -435,10 +445,11 @@ impl MemoriesRepo {
         nm: NewMemory,
         fts: bool,
     ) -> Result<(Memory, SaveOutcome)> {
+        validate_visibility(&nm.visibility)?;
         let hash = Self::content_hash(&nm.body);
         let mut tx = self.pool.begin().await.map_err(dberr("memory.save"))?;
-        let found: Option<(String, i64)> = sqlx::query_as(
-            "SELECT id, active FROM memories WHERE workspace_id = ? AND collection = ? AND scope = ? \
+        let found: Option<(String, i64, String, String)> = sqlx::query_as(
+            "SELECT id, active, visibility, created_by FROM memories WHERE workspace_id = ? AND collection = ? AND scope = ? \
              AND IFNULL(story_id,'') = IFNULL(?,'') AND content_hash = ?",
         )
         .bind(ws)
@@ -449,13 +460,25 @@ impl MemoriesRepo {
         .fetch_optional(&mut *tx)
         .await
         .map_err(dberr("memory.save.find"))?;
+        let requested_visibility = if nm.visibility.is_empty() {
+            "shared"
+        } else {
+            &nm.visibility
+        };
+        if let Some((_, _, visibility, creator)) = &found {
+            // Dedup is not permission to disclose or reactivate another user's
+            // private row, nor to silently change the requested sharing scope.
+            if visibility != requested_visibility || (visibility == "private" && creator != by) {
+                return Err(Error::Conflict(DUPLICATE_MEMORY.into()));
+            }
+        }
         let (id, outcome) = match found {
-            Some((id, active)) if active != 0 => {
+            Some((id, active, _, _)) if active != 0 => {
                 let m = get_conn(&mut tx, ws, &id).await?;
                 tx.rollback().await.map_err(dberr("memory.save"))?;
                 return Ok((m, SaveOutcome::Existing));
             }
-            Some((id, _)) => {
+            Some((id, _, _, _)) => {
                 sqlx::query(
                     "UPDATE memories SET active=1, superseded_by=NULL, forgotten_at=NULL, \
                      undo_token=NULL, state='accepted', version=version+1, updated_at=? \
@@ -788,13 +811,29 @@ impl MemoriesRepo {
         ws: &str,
         collection: Option<&str>,
     ) -> Result<Vec<(String, String, String, String)>> {
+        self.graph_nodes_visible(ws, collection, None).await
+    }
+
+    /// Filter visibility before the node cap so private rows cannot hide shared rows.
+    pub async fn graph_nodes_visible(
+        &self,
+        ws: &str,
+        collection: Option<&str>,
+        viewer: Option<&str>,
+    ) -> Result<Vec<(String, String, String, String)>> {
         let mut sql =
             String::from("SELECT id, title, kind, collection FROM memories WHERE workspace_id = ? AND active = 1");
+        if viewer.is_some() {
+            sql.push_str(" AND (visibility = 'shared' OR created_by = ?)");
+        }
         if collection.is_some() {
             sql.push_str(" AND collection = ?");
         }
         sql.push_str(" LIMIT 5000");
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str())).bind(ws);
+        if let Some(viewer) = viewer {
+            q = q.bind(viewer);
+        }
         if let Some(c) = collection {
             q = q.bind(c);
         }
@@ -849,6 +888,31 @@ impl MemoriesRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("memory.all_links"))?;
+        Ok(rows.iter().map(row_to_link).collect())
+    }
+
+    /// Edges are visible only when both endpoints belong to the workspace and
+    /// are visible to the viewer. `None` is reserved for root/internal callers.
+    pub async fn links_visible(
+        &self,
+        ws: &str,
+        id: Option<&str>,
+        viewer: Option<&str>,
+    ) -> Result<Vec<MemoryLink>> {
+        let rows = sqlx::query(
+            "SELECT l.src_id, l.dst_id, l.rel, l.weight, l.certainty FROM memory_links l
+             JOIN memories s ON s.id=l.src_id JOIN memories d ON d.id=l.dst_id
+             WHERE s.workspace_id=?1 AND d.workspace_id=?1
+             AND (?2 IS NULL OR l.src_id=?2 OR l.dst_id=?2)
+             AND (?3 IS NULL OR ((s.visibility='shared' OR s.created_by=?3)
+                                AND (d.visibility='shared' OR d.created_by=?3)))",
+        )
+        .bind(ws)
+        .bind(id)
+        .bind(viewer)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("memory.links_visible"))?;
         Ok(rows.iter().map(row_to_link).collect())
     }
 

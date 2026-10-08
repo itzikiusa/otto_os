@@ -258,6 +258,56 @@ impl SkillEvalsRepo {
         Ok(())
     }
 
+    /// Worker completion must never resurrect a cancelled/deleted run.
+    pub async fn finish_running(
+        &self,
+        id: &Id,
+        status: SkillEvalStatus,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let row = sqlx::query(
+            "UPDATE skill_evals SET status = ?, error = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(status.as_str())
+        .bind(error)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("finish skill eval"))?;
+        Ok(row.rows_affected() == 1)
+    }
+
+    /// Atomically admit a validation retry and invalidate publication scores.
+    /// The server owns a per-eval retry lease until completion; cancellation is
+    /// persisted before it signals that lease.
+    pub async fn begin_validation_retry(
+        &self,
+        eval_id: &Id,
+        iter_id: &Id,
+        index: usize,
+        agent: &EvalValidationState,
+    ) -> Result<bool> {
+        let elem = serde_json::to_string(agent)
+            .map_err(|e| Error::Internal(format!("serialize retry agent: {e}")))?;
+        let path = format!("$[{index}]");
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin validation retry"))?;
+        let row = sqlx::query("UPDATE skill_evals SET status = 'running', error = NULL, composite_score = NULL, best_score = NULL, best_iteration = NULL WHERE id = ? AND status IN ('done', 'error') AND EXISTS (SELECT 1 FROM skill_eval_iterations WHERE id = ? AND eval_id = ? AND json_type(agents_json, ?) = 'object')")
+            .bind(eval_id).bind(iter_id).bind(eval_id).bind(&path).execute(&mut *tx).await.map_err(dberr("admit validation retry"))?;
+        if row.rows_affected() == 0 {
+            return Ok(false);
+        }
+        sqlx::query("UPDATE skill_eval_iterations SET agents_json = json_replace(agents_json, ?, json(?)), scoring_json = NULL, score = 0, status = 'validating' WHERE id = ? AND eval_id = ?")
+            .bind(path).bind(elem).bind(iter_id).bind(eval_id).execute(&mut *tx).await.map_err(dberr("invalidate retried score"))?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit validation retry"))?;
+        Ok(true)
+    }
+
     /// Record the final summary and the winning iteration.
     pub async fn set_summary(
         &self,
@@ -677,6 +727,76 @@ impl SkillEvalsRepo {
 mod tests {
     use super::*;
     use otto_core::domain::EvalFinding;
+
+    #[tokio::test]
+    async fn retry_invalidates_scores_and_completion_cannot_overwrite_cancellation() {
+        let pool = mem_pool().await;
+        let repo = SkillEvalsRepo::new(pool);
+        let eval = repo
+            .create_eval(
+                &"ws".into(),
+                "skill",
+                "task",
+                "fixture",
+                1,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let it = repo
+            .add_iteration(
+                &eval.id,
+                1,
+                None,
+                "skill",
+                "body",
+                "fixture",
+                &[agent("validation", "done")],
+            )
+            .await
+            .unwrap();
+        let score = EvalScore {
+            composite: 99.0,
+            proof_status: "passed".into(),
+            ..Default::default()
+        };
+        repo.set_iter_scoring(&it.id, &score, Some("proof"))
+            .await
+            .unwrap();
+        repo.set_eval_composite(&eval.id, 99.0).await.unwrap();
+        repo.set_summary(&eval.id, "passed", Some(1), Some(99.0))
+            .await
+            .unwrap();
+        repo.set_status(&eval.id, SkillEvalStatus::Done, None)
+            .await
+            .unwrap();
+        let pending = agent("validation", "pending");
+        let (a, b) = tokio::join!(
+            repo.begin_validation_retry(&eval.id, &it.id, 0, &pending),
+            repo.begin_validation_retry(&eval.id, &it.id, 0, &pending)
+        );
+        assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
+        let current = repo.get_eval(&eval.id).await.unwrap();
+        assert!(current.composite_score.is_none());
+        assert!(current.best_score.is_none());
+        assert!(current.iterations[0].scoring.is_none());
+        assert_eq!(current.status, SkillEvalStatus::Running);
+        repo.set_status(&eval.id, SkillEvalStatus::Cancelled, None)
+            .await
+            .unwrap();
+        assert!(!repo
+            .finish_running(&eval.id, SkillEvalStatus::Done, None)
+            .await
+            .unwrap());
+        assert!(!repo
+            .begin_validation_retry(&eval.id, &it.id, 0, &pending)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.get_eval(&eval.id).await.unwrap().status,
+            SkillEvalStatus::Cancelled
+        );
+    }
 
     async fn mem_pool() -> DbPool {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()

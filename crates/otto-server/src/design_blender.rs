@@ -188,6 +188,7 @@ pub const MAX_CONCURRENT_RENDERS: usize = 2;
 /// detection cache. Nothing here survives a restart.
 pub struct DesignJobs {
     jobs: Mutex<HashMap<Id, RenderJob>>,
+    admission: otto_core::cancel_signal::InFlightSet,
     render_permits: Arc<tokio::sync::Semaphore>,
     detect_cache: Mutex<Option<(Instant, BlenderStatus)>>,
 }
@@ -197,8 +198,17 @@ pub type JobRegistry = Arc<DesignJobs>;
 pub fn new_job_registry() -> JobRegistry {
     Arc::new(DesignJobs {
         jobs: Mutex::new(HashMap::new()),
+        admission: Default::default(),
         render_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RENDERS)),
         detect_cache: Mutex::new(None),
+    })
+}
+
+fn claim_render(reg: &JobRegistry, id: &str) -> ApiResult<otto_core::cancel_signal::InFlightGuard> {
+    reg.admission.claim(id).ok_or_else(|| {
+        ApiError(Error::Conflict(
+            "a Blender render is already in progress".into(),
+        ))
     })
 }
 
@@ -349,6 +359,7 @@ pub async fn blender_render(
     // `MAX_CONCURRENT_RENDERS` Blender processes overall. The permit is taken
     // HERE (not in the task) so an over-capacity request is a 409 immediately;
     // it is released as soon as the render process exits.
+    let admission = claim_render(&ctx.design_jobs, &att.id)?;
     if job_in_flight_for(&ctx.design_jobs, &att.id) {
         return Err(ApiError(Error::Conflict(format!(
             "a Blender render for attachment {} is already in progress",
@@ -395,6 +406,7 @@ pub async fn blender_render(
     let user_id = user.id.clone();
     let jid = job_id.clone();
     tokio::spawn(async move {
+        let _admission = admission;
         job_update(&ctx2.design_jobs, &jid, |j| j.status = "running".into());
         let result = run_render(&bin, &script, &out_dir).await;
         drop(permit);
@@ -575,6 +587,16 @@ async fn attach_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_admission_covers_preparation_before_the_job_is_recorded() {
+        let reg = new_job_registry();
+        let first = claim_render(&reg, "artifact").unwrap();
+        assert!(claim_render(&reg, "artifact").is_err());
+        assert!(claim_render(&reg, "other").is_ok());
+        drop(first);
+        assert!(claim_render(&reg, "artifact").is_ok());
+    }
 
     #[test]
     fn parses_blender_version_line() {

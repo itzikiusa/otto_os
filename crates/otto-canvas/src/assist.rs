@@ -139,16 +139,8 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
     } else {
         (current.clone(), ExcalidrawKeep::default())
     };
-    let _ = tokio::fs::write(&file_path, &agent_view).await;
+    let busy = prepare_scene_file(&scene.id, &file_path, &agent_view).await?;
     let dir_str = dir.to_string_lossy().to_string();
-    // One assist turn per scene at a time (S4-20): two tabs' turns would paste
-    // into the same resumed PTY (or mint two sessions while `session_id` is
-    // still unset) and race to commit. Released on drop, incl. a dropped request.
-    let busy = SceneBusy::claim(&scene.id).ok_or_else(|| {
-        ApiError(Error::Conflict(
-            "an Ask AI turn is already running on this canvas".into(),
-        ))
-    })?;
     // The agent gets Edit/Write tools in this cwd; trust it so the PTY doesn't
     // stall on a first-run trust prompt (same as the orchestrate path). Trust the
     // SCENE's provider — a non-claude provider must trust the dir it will run in.
@@ -222,7 +214,7 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
 
     // The committed source = the edited file, or the reply's block as a fallback.
     let parsed = parse_assist(&raw);
-    let resolved = resolve_source(&file_path, &agent_view, &format, &parsed).await;
+    let resolved = resolve_source(&file_path, &agent_view, &format, &parsed).await?;
     // Untouched view → keep the ORIGINAL source (full elements + files);
     // otherwise fold the set-aside elements back into the agent's scene.
     let new_source = if resolved.trim() == agent_view.trim() {
@@ -247,8 +239,50 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
             .snapshot(&scene.id, "agent", Some(&user.id), None)
             .await;
     }
-    let commit = ctx
-        .canvas_repo()
+    committed_doc = commit_assist_doc(
+        ctx.canvas_repo(),
+        &scene,
+        &current,
+        committed_doc,
+        &mut note,
+    )
+    .await?;
+    let final_source = current_source(&committed_doc, &doc_format(&committed_doc));
+    let _ = ctx.events().send(Event::CanvasUpdated {
+        workspace_id: scene.workspace_id.clone(),
+        scene_id: scene.id.clone(),
+        doc: committed_doc,
+    });
+
+    Ok(Json(result_for(&format, &final_source, note)))
+}
+
+/// Materialize only while owning the scene's entire turn, including preparation.
+async fn prepare_scene_file(
+    scene: &Id,
+    path: &std::path::Path,
+    source: &str,
+) -> ApiResult<SceneBusy> {
+    let busy = SceneBusy::claim(scene).ok_or_else(|| {
+        ApiError(Error::Conflict(
+            "an Ask AI turn is already running on this canvas".into(),
+        ))
+    })?;
+    tokio::fs::write(path, source)
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("write canvas source: {e}"))))?;
+    Ok(busy)
+}
+
+/// Publish only the document actually accepted by optimistic concurrency.
+async fn commit_assist_doc(
+    repo: &otto_state::CanvasRepo,
+    scene: &otto_state::CanvasScene,
+    current: &str,
+    mut committed_doc: Value,
+    note: &mut String,
+) -> ApiResult<Value> {
+    let commit = repo
         .update(
             &scene.id,
             otto_state::SceneUpdate {
@@ -258,47 +292,45 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
             },
         )
         .await;
-    if let Err(Error::Conflict(_)) = commit {
-        if let Ok(Some(fresh)) = ctx.canvas_repo().get(&scene.id).await {
-            let fresh_doc: Value = serde_json::from_str(&fresh.doc_json).unwrap_or(Value::Null);
-            let fresh_src = current_source(&fresh_doc, &doc_format(&fresh_doc));
-            if fresh_src == current {
-                // Source untouched by the user — apply the agent's result
-                // against the fresh stamp (preserves their title edit).
-                let _ = ctx
-                    .canvas_repo()
-                    .update(
-                        &scene.id,
-                        otto_state::SceneUpdate {
-                            doc_json: Some(committed_doc.to_string()),
-                            expect_updated_at: Some(fresh.updated_at),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-            } else {
-                // The user edited the diagram during the turn: their version
-                // wins; converge the UI back to the persisted truth.
-                committed_doc = fresh_doc;
-                let kept = "Kept your manual edits saved during the turn; the agent's \
-                            version was NOT applied. Re-run Ask AI to regenerate on \
-                            top of your changes.";
-                note = if note.is_empty() {
-                    kept.to_string()
-                } else {
-                    format!("{kept}\n\n{note}")
-                };
-            }
-        }
+    match commit {
+        Ok(_) => return Ok(committed_doc),
+        Err(Error::Conflict(_)) => {}
+        Err(error) => return Err(ApiError(error)),
     }
-    let final_source = current_source(&committed_doc, &doc_format(&committed_doc));
-    let _ = ctx.events().send(Event::CanvasUpdated {
-        workspace_id: scene.workspace_id.clone(),
-        scene_id: scene.id.clone(),
-        doc: committed_doc,
-    });
-
-    Ok(Json(result_for(&format, &final_source, note)))
+    let fresh = repo
+        .get(&scene.id)
+        .await?
+        .ok_or_else(|| ApiError(Error::NotFound("canvas scene".into())))?;
+    let fresh_doc: Value = serde_json::from_str(&fresh.doc_json).map_err(Error::from)?;
+    let format = doc_format(&committed_doc);
+    let fresh_src = current_source(&fresh_doc, &doc_format(&fresh_doc));
+    if fresh_src == current && doc_format(&fresh_doc) == format {
+        // Merge onto the latest metadata; a second conflict is an error, never
+        // a successful broadcast of content that was not persisted.
+        committed_doc = build_doc(
+            &fresh_doc,
+            &format,
+            &current_source(&committed_doc, &format),
+        );
+        repo.update(
+            &scene.id,
+            otto_state::SceneUpdate {
+                doc_json: Some(committed_doc.to_string()),
+                expect_updated_at: Some(fresh.updated_at),
+                ..Default::default()
+            },
+        )
+        .await?;
+    } else {
+        committed_doc = fresh_doc;
+        let kept = "Kept your manual edits saved during the turn; the agent's version was NOT applied. Re-run Ask AI to regenerate on top of your changes.";
+        *note = if note.is_empty() {
+            kept.to_string()
+        } else {
+            format!("{kept}\n\n{note}")
+        };
+    }
+    Ok(committed_doc)
 }
 
 /// `POST /canvas/assist/preview` — generate blocks with no scene (the Discovery-
@@ -864,6 +896,26 @@ fn inline_source(current: &str) -> String {
     }
 }
 
+/// Agent files obey the same byte budget as the scene upload surface.
+async fn read_agent_source(path: &std::path::Path) -> otto_core::Result<String> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| Error::Internal(format!("open canvas source: {e}")))?;
+    let mut bytes = Vec::new();
+    file.take(crate::http::SCENE_BODY_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| Error::Internal(format!("read canvas source: {e}")))?;
+    if bytes.len() > crate::http::SCENE_BODY_LIMIT {
+        return Err(Error::PayloadTooLarge(
+            "canvas source exceeds scene byte limit".into(),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| Error::Invalid(format!("canvas source must be UTF-8: {e}")))
+}
+
 /// Decide the committed source: prefer the agent's in-place file edit; fall back
 /// to a fenced block in the reply (E2E stub / agent that printed instead of
 /// editing), writing it into the file so the next resumed turn sees it; else keep
@@ -873,12 +925,10 @@ async fn resolve_source(
     current: &str,
     format: &str,
     parsed: &AssistResult,
-) -> String {
-    let after = tokio::fs::read_to_string(file_path)
-        .await
-        .unwrap_or_default();
+) -> otto_core::Result<String> {
+    let after = read_agent_source(file_path).await?;
     if !after.trim().is_empty() && after.trim() != current.trim() {
-        return after;
+        return Ok(after);
     }
     let from_reply = match format {
         "excalidraw" => parsed.excalidraw.as_ref().map(|v| v.to_string()),
@@ -887,10 +937,17 @@ async fn resolve_source(
     };
     match from_reply {
         Some(s) if !s.trim().is_empty() => {
-            let _ = tokio::fs::write(file_path, &s).await;
-            s
+            if s.len() > crate::http::SCENE_BODY_LIMIT {
+                return Err(Error::PayloadTooLarge(
+                    "canvas source exceeds scene byte limit".into(),
+                ));
+            }
+            tokio::fs::write(file_path, &s)
+                .await
+                .map_err(|e| Error::Internal(format!("write canvas source: {e}")))?;
+            Ok(s)
         }
-        _ => current.to_string(),
+        _ => Ok(current.to_string()),
     }
 }
 
@@ -932,7 +989,7 @@ fn spawn_file_poll<C: CanvasAssistCtx>(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(POLL).await;
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Ok(content) = read_agent_source(&path).await {
                 if content != last && !content.trim().is_empty() {
                     last = content.clone();
                     let _ = events.send(Event::CanvasUpdated {
@@ -1439,7 +1496,9 @@ mod tests {
             .await
             .unwrap();
         let parsed = AssistResult::default();
-        let got = resolve_source(&path, "flowchart TD\n", "mermaid", &parsed).await;
+        let got = resolve_source(&path, "flowchart TD\n", "mermaid", &parsed)
+            .await
+            .unwrap();
         assert!(got.contains("B-->C"));
 
         // File unchanged (== base) → fall back to the reply, and write it back.
@@ -1448,7 +1507,9 @@ mod tests {
             mermaid: Some("flowchart LR\n  X-->Y".into()),
             ..Default::default()
         };
-        let got = resolve_source(&path, "flowchart TD\n", "mermaid", &parsed).await;
+        let got = resolve_source(&path, "flowchart TD\n", "mermaid", &parsed)
+            .await
+            .unwrap();
         assert!(got.contains("X-->Y"));
         let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(
@@ -1465,7 +1526,9 @@ mod tests {
             d2: Some("direction: right\na -> b: hi".into()),
             ..Default::default()
         };
-        let got = resolve_source(&d2_path, "direction: right\n", "d2", &parsed).await;
+        let got = resolve_source(&d2_path, "direction: right\n", "d2", &parsed)
+            .await
+            .unwrap();
         assert!(got.contains("a -> b: hi"));
         let on_disk = tokio::fs::read_to_string(&d2_path).await.unwrap();
         assert!(
@@ -1476,3 +1539,7 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }
+
+#[cfg(test)]
+#[path = "assist_regressions.rs"]
+mod regressions;

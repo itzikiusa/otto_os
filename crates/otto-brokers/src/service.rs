@@ -995,10 +995,9 @@ impl BrokersService {
     /// Read messages from `source_topic`, apply an optional transform, and produce
     /// each one to `target_topic`, recording an evidence row.
     pub async fn replay(&self, cluster_id: &Id, req: &ReplayReq) -> Result<ReplayResp> {
-        let (client, registry) = self.client_for(cluster_id).await?;
-
-        // Build a consume request from the replay selector.
-        let consume_req = selector_to_consume_req(&req.selector);
+        // Reject unsupported selections before opening a broker connection.
+        let consume_req = selector_to_consume_req(&req.selector)?;
+        let (client, _registry) = self.client_for(cluster_id).await?;
 
         let raw = {
             let client = client.clone();
@@ -1009,91 +1008,28 @@ impl BrokersService {
                 .map_err(join)??
         };
 
-        let mut evidence = Vec::with_capacity(raw.messages.len());
-        for m in &raw.messages {
-            // Decode key for evidence preview (best-effort; no schema registry needed).
-            let key_preview = m.key.as_deref().and_then(|k| {
-                std::str::from_utf8(k).ok().map(|s| {
-                    let s = s.trim_end_matches('\0');
-                    let mut chars = s.chars();
-                    let mut preview: String = chars.by_ref().take(64).collect();
-                    if chars.next().is_some() {
-                        preview.push('…');
-                    }
-                    preview
-                })
-            });
-
-            // Apply transform: override key if requested.
-            let key: Option<Vec<u8>> = if let Some(t) = &req.transform {
-                t.set_key
-                    .as_deref()
-                    .map(|k| k.as_bytes().to_vec())
-                    .or_else(|| m.key.clone())
-            } else {
-                m.key.clone()
-            };
-
-            // Build headers: original + any added by the transform.
-            let mut headers = m.headers.clone();
-            if let Some(t) = &req.transform {
-                if let Some((hk, hv)) = &t.add_header {
-                    // Overwrite existing header with the same key, else append.
-                    if let Some(pos) = headers.iter().position(|(k, _)| k == hk) {
-                        headers[pos] = (hk.clone(), Some(hv.as_bytes().to_vec()));
-                    } else {
-                        headers.push((hk.clone(), Some(hv.as_bytes().to_vec())));
-                    }
-                }
-            }
-
-            let resp = client
-                .produce_raw(
-                    &req.target_topic,
-                    None, // let the broker choose; the source partition need not exist there
-                    key.as_deref(),
-                    m.value.as_deref(),
-                    &headers,
-                )
-                .await?;
-            let _ = registry; // kept alive for the duration
-
-            evidence.push(ReplayEvidence {
-                partition: m.partition,
-                offset: m.offset,
-                key_preview,
-                target_partition: resp.partition,
-                target_offset: resp.offset,
-            });
+        if raw.incomplete {
+            return Err(Error::Invalid("Replay selection exceeded the 16 MiB read budget or could not be read completely before its deadline. Narrow the selection and retry; no messages were published.".into()));
         }
-
-        let count = evidence.len();
-
-        // Persist the evidence row so operators can audit replays.
-        let replay_id = if let Some(ops) = &self.ops {
-            let ev_json =
-                serde_json::to_value(&evidence).unwrap_or(serde_json::Value::Array(vec![]));
-            let row = ops
-                .record_replay(
-                    cluster_id,
-                    &req.source_topic,
-                    &req.target_topic,
-                    count as i64,
-                    ev_json,
-                )
-                .await?;
-            row.id
-        } else {
-            otto_core::new_id()
-        };
-
-        Ok(ReplayResp {
-            replay_id,
-            source_topic: req.source_topic.clone(),
-            target_topic: req.target_topic.clone(),
-            count,
-            evidence,
-        })
+        let messages = replay_selection(&req.selector, raw.messages);
+        Ok(
+            crate::replay::publish(self.ops.as_ref(), cluster_id, req, messages, |m| {
+                let client = client.clone();
+                let topic = req.target_topic.clone();
+                async move {
+                    client
+                        .produce_raw(
+                            &topic,
+                            None,
+                            m.key.as_deref(),
+                            m.value.as_deref(),
+                            &m.headers,
+                        )
+                        .await
+                }
+            })
+            .await,
+        )
     }
 
     // ---- lag alerts ---------------------------------------------------------
@@ -1493,9 +1429,44 @@ fn nonempty(s: Option<String>) -> Option<String> {
     s.filter(|v| !v.is_empty())
 }
 
+/// Offset distance is not a message count on compacted topics. The peek may
+/// return later records to fill its quota; never publish outside the approved
+/// inclusive range (also handles a start clamped to the retention watermark).
+fn replay_selection(
+    selector: &ReplaySelector,
+    mut messages: Vec<crate::kafka::RawMessage>,
+) -> Vec<crate::kafka::RawMessage> {
+    if let ReplaySelector::OffsetRange {
+        partition,
+        from,
+        to,
+    } = selector
+    {
+        messages.retain(|m| m.partition == *partition && (*from..=*to).contains(&m.offset));
+    }
+    messages
+}
+
 /// Convert a `ReplaySelector` into a `ConsumeReq` for the kafka driver.
-fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
-    match sel {
+fn selector_to_consume_req(sel: &ReplaySelector) -> Result<ConsumeReq> {
+    let valid = match sel {
+        ReplaySelector::Latest { count } => (1..=MAX_CONSUME).contains(count),
+        ReplaySelector::Timestamp { limit, .. } => (1..=MAX_CONSUME).contains(limit),
+        ReplaySelector::OffsetRange {
+            partition,
+            from,
+            to,
+        } => {
+            *partition >= 0
+                && *from >= 0
+                && *to >= *from
+                && to.saturating_sub(*from) < MAX_CONSUME as i64
+        }
+    };
+    if !valid {
+        return Err(Error::Invalid("Replay requires 1–5000 messages or an inclusive range of at most 5000 non-negative offsets in a non-negative partition.".into()));
+    }
+    Ok(match sel {
         ReplaySelector::Latest { count } => ConsumeReq {
             partition: None,
             start: StartPosition::Latest,
@@ -1514,7 +1485,7 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
         } => ConsumeReq {
             partition: Some(*partition),
             start: StartPosition::Offset { offset: *from },
-            limit: (*to - *from + 1).max(1) as usize,
+            limit: (to - from + 1) as usize,
             max_wait_ms: Some(30_000),
             key_filter: None,
             value_filter: None,
@@ -1538,7 +1509,7 @@ fn selector_to_consume_req(sel: &ReplaySelector) -> ConsumeReq {
             decode: ValueFormat::Auto,
             mask: None,
         },
-    }
+    })
 }
 
 /// Map a persisted `LagAlertRow` to the API type, enriching with the current
@@ -1627,6 +1598,37 @@ mod replay_integrity_tests {
     use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{FutureProducer, FutureRecord};
 
+    #[test]
+    fn replay_range_excludes_compacted_gaps_and_other_partitions() {
+        let messages = [(0, 9), (0, 10), (0, 12), (0, 17), (1, 11)]
+            .into_iter()
+            .map(|(partition, offset)| crate::kafka::RawMessage {
+                partition,
+                offset,
+                timestamp_ms: None,
+                key: None,
+                value: None,
+                headers: vec![],
+                size: 0,
+            })
+            .collect();
+        let selected = replay_selection(
+            &ReplaySelector::OffsetRange {
+                partition: 0,
+                from: 10,
+                to: 12,
+            },
+            messages,
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .map(|m| (m.partition, m.offset))
+                .collect::<Vec<_>>(),
+            vec![(0, 10), (0, 12)]
+        );
+    }
+
     struct NoSecrets;
     impl SecretStore for NoSecrets {
         fn get(&self, _: &str) -> Result<Option<String>> {
@@ -1637,6 +1639,59 @@ mod replay_integrity_tests {
         }
         fn delete(&self, _: &str) -> Result<()> {
             Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_replay_selectors_fail_before_looking_up_a_cluster() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let service = BrokersService::new(BrokerClustersRepo::new(pool), Arc::new(NoSecrets), None);
+        for selector in [
+            ReplaySelector::Latest { count: 0 },
+            ReplaySelector::Latest { count: 5001 },
+            ReplaySelector::Timestamp {
+                timestamp_ms: 0,
+                limit: 5001,
+            },
+            ReplaySelector::OffsetRange {
+                partition: 0,
+                from: 0,
+                to: 5000,
+            },
+            ReplaySelector::OffsetRange {
+                partition: 0,
+                from: 9,
+                to: 3,
+            },
+            ReplaySelector::OffsetRange {
+                partition: -1,
+                from: 0,
+                to: 3,
+            },
+            ReplaySelector::OffsetRange {
+                partition: 0,
+                from: -1,
+                to: 3,
+            },
+        ] {
+            let result = service
+                .replay(
+                    &"missing-cluster".into(),
+                    &ReplayReq {
+                        source_topic: "source".into(),
+                        target_topic: "target".into(),
+                        selector,
+                        transform: None,
+                        confirm: true,
+                    },
+                )
+                .await;
+            assert!(
+                matches!(result, Err(Error::Invalid(_))),
+                "invalid selection reached cluster lookup: {result:?}"
+            );
         }
     }
 

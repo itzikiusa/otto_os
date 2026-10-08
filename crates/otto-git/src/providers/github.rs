@@ -768,31 +768,41 @@ impl super::GitProvider for Github {
         }
         comments.append(&mut top);
 
-        let approved_by: Vec<String> = varr(&reviews, &[])
-            .iter()
-            .filter(|rv| vstr(rv, &["state"]) == "APPROVED")
-            .map(|rv| vstr(rv, &["user", "login"]))
-            .collect();
-
-        // Reviews come back in chronological order; dedupe by reviewer keeping
-        // their latest review while preserving first-seen order.
+        // Reviews are chronological events, not one row per current opinion.
+        // Comment-only/pending reviews do not replace an earlier opinion;
+        // changes requested and dismissal do. Derive the approval count from
+        // the same unique reviewers used by the detail UI.
         let mut reviewers: Vec<PrReviewer> = Vec::new();
         for rv in varr(&reviews, &[]) {
             let name = vstr(rv, &["user", "login"]);
             if name.is_empty() {
                 continue;
             }
-            let entry = PrReviewer {
-                approved: vstr(rv, &["state"]) == "APPROVED",
+            let state = vstr(rv, &["state"]);
+            let mut entry = PrReviewer {
+                approved: state == "APPROVED",
                 avatar_url: vstr_opt(rv, &["user", "avatar_url"]),
                 reviewed_at: vstr_opt(rv, &["submitted_at"]).map(|s| ts(&s)),
                 name: name.clone(),
             };
             match reviewers.iter_mut().find(|r| r.name == name) {
-                Some(existing) => *existing = entry,
+                Some(existing) => {
+                    if !matches!(
+                        state.as_str(),
+                        "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
+                    ) {
+                        entry.approved = existing.approved;
+                    }
+                    *existing = entry;
+                }
                 None => reviewers.push(entry),
             }
         }
+        let approved_by = reviewers
+            .iter()
+            .filter(|r| r.approved)
+            .map(|r| r.name.clone())
+            .collect();
 
         let mut summary = summary_from(&pr);
         summary.ci_status = Some(ci.state.clone());

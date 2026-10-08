@@ -366,12 +366,28 @@ pub(crate) async fn stop_run_sessions(ctx: &ServerCtx, workspace_id: &Id, run_id
 /// be passed/waived (mirrors the `gate_pr` posture) — an outward action.
 pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
     let run = ctx.runs.get(run_id).await?;
+    // The run column is a list snapshot. Publication checks current evidence
+    // and policy, including a pack that has failed or disappeared since approval.
+    let live_pack = match run.proof_pack_id.as_deref() {
+        Some(id) => match crate::proof::recompute_and_emit(ctx, id).await {
+            Ok(pack)
+                if pack.workspace_id == run.workspace_id
+                    && pack.work_item_id == run.id
+                    && pack.work_item_kind == otto_core::proof::WorkItemKind::Task =>
+            {
+                Some(pack)
+            }
+            Ok(_) | Err(Error::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
     // The single outward-facing gate: approved AND proof passed/waived AND a
     // draft + repo to point at. Pure decision in otto-core; mapped to the same
     // transport errors as before (proof → Conflict, the rest → Invalid).
     if let Some(block) = open_pr_block_reason(
         run.approval_decision.as_deref(),
-        run.proof_status.as_deref(),
+        live_pack.as_ref().map(|pack| pack.status.as_str()),
         run.pr_draft_json.is_some(),
         run.repo_id.is_some(),
     ) {
@@ -381,42 +397,27 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
             _ => Error::Invalid(msg),
         });
     }
+    let (proved_revision, proved_branch) = check_proof_revision(ctx, &run).await?;
     let draft_json = run
         .pr_draft_json
         .as_deref()
         .ok_or_else(|| Error::Invalid("run has no PR draft".into()))?;
     let draft: otto_core::api::DraftPrResp =
         serde_json::from_str(draft_json).map_err(|e| Error::Internal(format!("bad draft: {e}")))?;
+    if draft.source_branch != proved_branch {
+        return Err(Error::Conflict(
+            "PR source branch differs from the proven run branch — regenerate the draft".into(),
+        ));
+    }
     let repo_id = run
         .repo_id
         .as_deref()
         .ok_or_else(|| Error::Invalid("run has no repo".into()))?;
     let repo = ctx.git_store.get_repo(&repo_id.to_string()).await?;
-    let (provider, remote) = crate::run_sources::provider_for_repo(ctx, &repo).await?;
 
     // Push the branch first so the PR has a head to point at.
     if let Some(wt) = run.worktree_path.as_deref() {
         let git = otto_git::LocalGit::new(wt);
-        // FIRST check before the PR: a stalled agent can leave its work
-        // uncommitted — the push is then a no-op and the provider rejects the
-        // PR ("no changes to be pulled"). Run worktrees only (this path is
-        // always a dedicated worktree, never the user's main checkout).
-        if let Ok(Some(_)) = git
-            .commit_all_if_dirty("chore: commit run changes left before PR")
-            .await
-        {
-            let _ = ctx
-                .runs
-                .add_event(NewRunEvent {
-                    run_id: run.id.clone(),
-                    workspace_id: run.workspace_id.clone(),
-                    kind: "note".to_string(),
-                    status: Some(run.status.as_str().to_string()),
-                    message: "committed leftover worktree changes before PR".to_string(),
-                    detail: None,
-                })
-                .await;
-        }
         let token = match repo.git_account_id.as_ref() {
             Some(aid) => match ctx.git_store.get_account(aid).await {
                 Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
@@ -427,9 +428,11 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
             },
             None => None,
         };
-        let _ = git.push(token).await;
+        git.push_revision(token, &proved_revision, &proved_branch)
+            .await?;
     }
 
+    let (provider, remote) = crate::run_sources::provider_for_repo(ctx, &repo).await?;
     let create = CreatePrReq {
         title: draft.title,
         description: draft.description,
@@ -462,6 +465,52 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
         })
         .await;
     Ok(pr)
+}
+
+/// Publication cannot add or substitute code after the captured proof revision.
+async fn check_proof_revision(ctx: &ServerCtx, run: &OttoRun) -> Result<(String, String)> {
+    let conflict = || {
+        Error::Conflict("run work changed since proof — commit the intended changes and assemble fresh proof before opening a PR".into())
+    };
+    let cwd = run.worktree_path.as_deref().ok_or_else(conflict)?;
+    let pack_id = run.proof_pack_id.as_deref().ok_or_else(conflict)?;
+    let git = otto_git::LocalGit::new(cwd);
+    let status = git.status().await?;
+    // These untracked runtime files were excluded from the old auto-commit and
+    // never belong to diff evidence. Tracked edits to the same names still block.
+    let changes = status.changes.iter().any(|change| {
+        !(change.kind == "untracked"
+            && (change.path == ".mcp.json"
+                || change.path == ".env"
+                || change.path.starts_with(".env.")
+                || change.path.rsplit('/').next() == Some(".DS_Store")))
+    });
+    if status.branch == "HEAD"
+        || changes
+        || status.untracked_truncated
+        || status.op_in_progress.is_some()
+        || run
+            .branch
+            .as_deref()
+            .is_some_and(|branch| branch != status.branch)
+    {
+        return Err(conflict());
+    }
+    let head = git.rev_parse("HEAD").await?;
+    let artifacts = ctx.proof_repo.list_artifacts_meta(pack_id).await?;
+    let matches = artifacts.iter().any(|artifact| {
+        artifact.kind == otto_core::proof::ProofArtifactKind::Diff
+            && artifact.title == "Working tree diff"
+            && artifact
+                .metadata
+                .get("head_commit")
+                .and_then(serde_json::Value::as_str)
+                == Some(head.as_str())
+    });
+    if !matches {
+        return Err(conflict());
+    }
+    Ok((head, status.branch))
 }
 
 #[cfg(test)]
@@ -534,3 +583,7 @@ mod tests {
         assert_ne!(status(interactive.id).await, SessionStatus::Exited);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/run_pr_proof.rs"]
+mod run_pr_proof_tests;

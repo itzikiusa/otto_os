@@ -72,3 +72,95 @@ async fn private_memory_is_hidden_from_other_members() {
         .iter()
         .any(|h| h.memory.body.contains("shared settlement runbook")));
 }
+
+#[tokio::test]
+async fn dedup_never_returns_or_reactivates_another_users_private_row() {
+    let (pool, ws, _) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let row = svc
+        .save(&ws, "alice", vec![mk("private", "same known content")])
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(svc
+        .save(&ws, "bob", vec![mk("shared", "same known content")])
+        .await
+        .is_err());
+    svc.soft_forget(&ws, &row.id).await.unwrap();
+    assert!(svc
+        .save(&ws, "bob", vec![mk("private", "same known content")])
+        .await
+        .is_err());
+    assert!(!svc.get(&ws, &row.id).await.unwrap().active);
+    assert_eq!(
+        svc.save(&ws, "alice", vec![mk("private", "same known content")])
+            .await
+            .unwrap()[0]
+            .id,
+        row.id
+    );
+}
+
+#[tokio::test]
+async fn malformed_visibility_is_rejected_instead_of_becoming_shared() {
+    let (pool, ws, _) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    assert!(svc
+        .save(&ws, "alice", vec![mk("Private", "private-intended note")])
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn merging_shared_and_private_sources_keeps_result_private() {
+    let (pool, ws, _) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let shared = svc
+        .save(&ws, "alice", vec![mk("shared", "public source")])
+        .await
+        .unwrap()
+        .remove(0);
+    let private = svc
+        .save(&ws, "alice", vec![mk("private", "private source")])
+        .await
+        .unwrap()
+        .remove(0);
+    let merged = svc
+        .merge(
+            &ws,
+            "alice",
+            otto_memory::governance::MergeReq {
+                ids: vec![shared.id, private.id],
+                title: "Merged".into(),
+                body: "combined sources".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(merged.visibility, "private");
+    assert!(svc.get_visible(&ws, &merged.id, Some("bob")).await.is_err());
+    let parts = svc
+        .split(
+            &ws,
+            "alice",
+            &merged.id,
+            otto_memory::governance::SplitReq {
+                parts: vec![
+                    otto_memory::governance::SplitPart {
+                        title: "One".into(),
+                        body: "first separate piece".into(),
+                    },
+                    otto_memory::governance::SplitPart {
+                        title: "Two".into(),
+                        body: "second separate piece".into(),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(parts
+        .memories
+        .iter()
+        .all(|memory| memory.visibility == "private"));
+}

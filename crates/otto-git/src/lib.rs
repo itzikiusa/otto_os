@@ -15,12 +15,14 @@ pub mod parse;
 pub mod patch;
 pub mod pr_checks;
 pub mod providers;
+pub mod push;
 pub mod recovery;
 #[cfg(test)]
 mod spawn_budget_tests;
 mod status_cache;
 pub mod types;
 pub mod watch;
+mod working_diff;
 mod worktree_probe;
 
 pub use http::{router, GitCtx};

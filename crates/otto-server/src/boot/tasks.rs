@@ -500,6 +500,14 @@ async fn start_channel_manager(
         // (opt-in via the `channels.notify_self_improvement` setting).
         Some(ctx.events.clone()),
     )
+    // Both bridge instances consume one daemon-owned admission budget;
+    // independently constructed test contexts retain independent counters.
+    .with_admission(
+        ctx.channel_bridge
+            .as_ref()
+            .map(|bridge| bridge.admission.clone())
+            .unwrap_or_default(),
+    )
     // An inbound message on a swarm-bound channel launches that swarm.
     .with_swarm_trigger(Arc::new(otto_swarm::runtime::channels::SwarmTriggerImpl {
         ctx: ctx.swarm_rt(),
@@ -750,9 +758,8 @@ fn start_assistant(ctx: &ServerCtx) -> impl Send + 'static {
     h
 }
 
-/// Run with Otto: boot reaper (fail interrupted runs, re-drive resumable
-/// ones) + a 30 s tick that re-drives still-active runs. The engine drives
-/// the stage machine.
+/// Run with Otto: a 30 s tick re-drives resumable runs. Interrupted live
+/// work was already settled by `recover_before_serve`, before admission.
 fn start_run_scheduler(ctx: &ServerCtx) {
     crate::run_scheduler::spawn(ctx.clone());
     tracing::info!("run-with-otto scheduler started");
@@ -819,3 +826,7 @@ fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
     });
     tracing::info!("mcp control plane: health sweep started");
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/run_scheduler_boot.rs"]
+mod run_scheduler_boot_tests;

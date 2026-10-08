@@ -72,12 +72,22 @@ pub fn routes() -> Router<ServerCtx> {
 
 // --- Threads ---------------------------------------------------------------------
 
+#[derive(serde::Deserialize, Default)]
+struct ThreadPageQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
 async fn list_threads(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    Query(q): Query<ThreadPageQuery>,
 ) -> ApiResult<Json<Vec<AssistantThread>>> {
     let mut out = Vec::new();
-    for t in repo(&ctx).list_threads(&user.id).await? {
+    for t in repo(&ctx)
+        .list_threads_page(&user.id, q.limit.unwrap_or(100), q.offset.unwrap_or(0))
+        .await?
+    {
         out.push(threads::with_status(&ctx, t).await);
     }
     Ok(Json(out))

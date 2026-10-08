@@ -147,6 +147,9 @@ pub(crate) async fn build_snapshot_parts(
     let mut tx = pool.begin_read().await.map_err(db_error)?;
     let tables = schema::schema(&mut tx).await?;
     let mut excluded=vec![".otto-sync Git snapshot output directories".into(),"Authentication sessions, password hashes, Keychain contents, secret references and active permission bindings/allowlists".into(),"Live processes, sockets, PTY state, external repository working trees and database-engine data".into(),"Derived FTS/Vault indexes, provider catalogs and disposable caches".into(),"External provider transcript directories and workflow/agent worktrees (references retained)".into()];
+    if options.portable {
+        excluded.push("Canvas session attachments (session histories are not portable)".into());
+    }
     let mut reconnect = BTreeSet::new();
     let mut records = BTreeMap::new();
     let mut total = 0;

@@ -12,6 +12,7 @@ mod config;
 mod housekeeping;
 mod mcp_server;
 mod mcp_tools;
+mod profile_lock;
 #[cfg(feature = "embed-ui")]
 mod ui_assets;
 mod usage_tailer;
@@ -121,6 +122,15 @@ fn main() -> ExitCode {
     }
 
     let cfg = Config::load();
+    // Hold ownership through runtime shutdown too: a blocking task can outlive
+    // run() while the runtime drains. Acquire before profile/log mutations.
+    let _profile_lock = match profile_lock::acquire(&cfg.data_dir) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("ottod: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Tracing: daily-rolling file in ~/Library/Logs/Otto/ AND stderr.
     let log_dir = cfg.log_dir();
@@ -326,8 +336,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         at
     };
 
-    // Single-instance lock FIRST: holding the loopback port is what proves no
-    // other ottod owns this data dir. Everything below mutates shared state —
+    // The profile lock above proves exclusive data-directory ownership, even
+    // with another OTTO_PORT. Bind before boot side effects as well —
     // the usage engine's reclaim_dir kills whatever ClickHouse server holds the
     // data dir, plugin supervisors spawn sidecars, schedulers fire. A second
     // instance (launchd respawn racing a still-running daemon) used to get all

@@ -329,8 +329,8 @@ impl BrowserService {
             }
         }
         let gate = self.cache.gate(&key);
-        let result = {
-            let _turn = gate.lock().await;
+        {
+            let _turn = gate.lock.lock().await;
             // Someone else rendered while we waited: a plain read takes any
             // live entry, a `fresh` one only a render newer than the request.
             let newer_than = fresh.then_some(asked_at);
@@ -342,9 +342,7 @@ impl BrowserService {
                     page
                 }),
             }
-        };
-        self.cache.release_gate(&key, gate);
-        result
+        }
     }
 
     /// Drop every cached page whose URL is on `host` (a `login()` changes
@@ -744,6 +742,23 @@ struct PageCache {
     ttl: Option<Duration>,
 }
 
+/// Releases the single-flight map entry on success, error AND cancellation,
+/// including cancellation while waiting for another render's lock.
+struct PageGate<'a> {
+    cache: &'a PageCache,
+    key: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for PageGate<'_> {
+    fn drop(&mut self) {
+        let mut gates = self.cache.gates.lock().expect("page cache gates poisoned");
+        if Arc::strong_count(&self.lock) <= 2 {
+            gates.remove(&self.key);
+        }
+    }
+}
+
 impl PageCache {
     fn ttl(&self) -> Duration {
         self.ttl.unwrap_or(PAGE_CACHE_TTL)
@@ -821,20 +836,16 @@ impl PageCache {
         inner.bytes = inner.entries.values().map(|e| e.bytes).sum();
     }
 
-    fn gate(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    fn gate(&self, key: &str) -> PageGate<'_> {
         let mut gates = self.gates.lock().expect("page cache gates poisoned");
-        gates
+        let lock = gates
             .entry(key.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-
-    /// Drop the gate once nobody else holds or waits on it (map + this
-    /// caller = 2), so the map only ever holds keys with a render in flight.
-    fn release_gate(&self, key: &str, gate: Arc<tokio::sync::Mutex<()>>) {
-        let mut gates = self.gates.lock().expect("page cache gates poisoned");
-        if Arc::strong_count(&gate) <= 2 {
-            gates.remove(key);
+            .clone();
+        PageGate {
+            cache: self,
+            key: key.to_string(),
+            lock,
         }
     }
 
@@ -1510,6 +1521,42 @@ mod tests {
         }
         assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(svc.cache.gates.lock().unwrap().is_empty(), "gates released");
+    }
+
+    #[tokio::test]
+    async fn cancelled_page_shared_releases_render_gate() {
+        let (renders, svc) = counting_svc(Duration::from_secs(60));
+        let svc = Arc::new(svc);
+        let owner = svc.clone();
+        let task =
+            tokio::spawn(
+                async move { owner.page_shared("ws", "https://e.com/cancel", false).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while renders.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(svc.cache.gates.lock().unwrap().len(), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(svc.cache.gates.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_gate_waiter_keeps_the_active_render_gate() {
+        let cache = PageCache::default();
+        let first = cache.gate("same");
+        let _turn = first.lock.lock().await;
+        let second = cache.gate("same");
+        assert!(Arc::ptr_eq(&first.lock, &second.lock));
+        drop(second);
+        assert_eq!(cache.gates.lock().unwrap().len(), 1);
+        drop(_turn);
+        drop(first);
+        assert!(cache.gates.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

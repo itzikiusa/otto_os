@@ -483,10 +483,16 @@ async fn update_server<S: McpCtx>(
             "only the owner can change MCP credentials or commands".into(),
         )));
     }
-    // Secret rotation: merge new secret values into the keychain blob.
+    // Each supplied map replaces that map; omitted maps retain their secrets.
+    // Replacing both maps is also the recovery path for a missing/corrupt blob.
     if req.secret_env.is_some() || req.secret_headers.is_some() {
-        let env = req.secret_env.clone().unwrap_or_default();
-        let headers = req.secret_headers.clone().unwrap_or_default();
+        let (old_env, old_headers) = if req.secret_env.is_none() || req.secret_headers.is_none() {
+            ctx.mcp().resolve_secrets(&server).await?
+        } else {
+            Default::default()
+        };
+        let env = req.secret_env.clone().unwrap_or(old_env);
+        let headers = req.secret_headers.clone().unwrap_or(old_headers);
         let blob = json!({ "env": env, "headers": headers }).to_string();
         let sref = McpService::secret_ref(&id);
         otto_core::secrets::put_async(ctx.mcp_secrets(), &sref, &blob)

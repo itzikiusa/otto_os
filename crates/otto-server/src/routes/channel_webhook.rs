@@ -53,6 +53,23 @@ pub struct InboundResp {
     pub conversation: String,
 }
 
+/// Admission precedes spawning or callback delivery, so 429 is retryable.
+fn admit_webhook(
+    admission: &otto_channels::admission::InboundAdmission,
+    workspace: &str,
+    chat: &str,
+    thread: Option<&str>,
+) -> Result<otto_channels::admission::WorkPermit, Box<Response>> {
+    match admission.admit(&format!("webhook:{workspace}"), chat, thread) {
+        otto_channels::admission::Admission::Work(permit) => Ok(permit),
+        _ => Err(Box::new(problem(
+            StatusCode::TOO_MANY_REQUESTS,
+            "busy",
+            "Inbound message queue is full; retry later",
+        ))),
+    }
+}
+
 /// Build a `{code,message}` problem response with an explicit status.
 fn problem(status: StatusCode, code: &str, message: &str) -> Response {
     (
@@ -213,9 +230,13 @@ pub async fn inbound(
         text,
         edited: false,
     };
+    let permit = match admit_webhook(&bridge.admission, &ws_id, &msg.chat, msg.thread.as_deref()) {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
     let adapter: Arc<dyn Adapter> = Arc::new(WebhookAdapter::new(callback));
     tokio::spawn(async move {
-        bridge.handle(&integ, adapter, msg).await;
+        bridge.handle(&integ, adapter, msg, permit).await;
     });
 
     (
@@ -379,6 +400,21 @@ pub async fn run_inbound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_webhook_conversation_is_retryable_without_starting_more_work() {
+        let admission = otto_channels::admission::InboundAdmission::default();
+        let held: Vec<_> = (0..8)
+            .map(|_| admit_webhook(&admission, "w", "chat", None).ok().unwrap())
+            .collect();
+        let response = admit_webhook(&admission, "w", "chat", None)
+            .err()
+            .expect("full conversation");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(admit_webhook(&admission, "w", "other", None).is_ok());
+        drop(held);
+        assert!(admit_webhook(&admission, "w", "chat", None).is_ok());
+    }
 
     #[test]
     fn ct_eq_matches_only_identical_keys() {

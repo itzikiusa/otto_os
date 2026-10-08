@@ -576,6 +576,9 @@ async fn replay<S: BrokersCtx>(
                 "source_topic": req.source_topic,
                 "target_topic": req.target_topic,
                 "count": resp.count,
+                "replay_id": resp.replay_id,
+                "error": resp.error,
+                "evidence_saved": resp.evidence_saved,
             }),
         )
         .await;

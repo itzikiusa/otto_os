@@ -347,7 +347,7 @@ async fn complete_run_with(
             let hash = report_hash(&out.report);
             let unchanged = task.notify_on_change
                 && repo
-                    .last_ok_report_hash(&task.id, &run_id)
+                    .last_ok_report_hash(&task.id, &run_id, &task.destination)
                     .await
                     .ok()
                     .flatten()
@@ -966,31 +966,6 @@ async fn run_shell_with_retry(
     )
 }
 
-/// Keep a bounded preview while continuing to drain each pipe. Discarding the
-/// excess is essential: a full stderr pipe must not stall a stdout-heavy child.
-const SHELL_STREAM_BYTES: usize = 512 * 1024;
-async fn drain_shell_stream(
-    mut stream: impl tokio::io::AsyncRead + Unpin,
-) -> std::io::Result<Vec<u8>> {
-    use tokio::io::AsyncReadExt;
-    let mut kept = Vec::new();
-    let mut omitted = 0u64;
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        let take = n.min(SHELL_STREAM_BYTES - kept.len());
-        kept.extend_from_slice(&chunk[..take]);
-        omitted = omitted.saturating_add((n - take) as u64);
-    }
-    if omitted > 0 {
-        kept.extend_from_slice(format!("\n[{} bytes omitted]\n", omitted).as_bytes());
-    }
-    Ok(kept)
-}
-
 /// A confined shell argv: `(program, args)` from `SandboxPolicy::wrap`.
 type ShellArgv = (String, Vec<String>);
 
@@ -1052,8 +1027,8 @@ async fn run_shell_once(
     let capture = async {
         let (status, stdout, stderr) = tokio::try_join!(
             child.wait(),
-            drain_shell_stream(stdout),
-            drain_shell_stream(stderr)
+            crate::command_output::drain(stdout),
+            crate::command_output::drain(stderr)
         )?;
         Ok::<_, std::io::Error>(std::process::Output {
             status,
@@ -2057,7 +2032,7 @@ mod tests {
         .unwrap();
         assert_eq!(out.status.code(), Some(7));
         for stream in [&out.stdout, &out.stderr] {
-            assert!(stream.len() <= SHELL_STREAM_BYTES + 100);
+            assert!(stream.len() <= crate::command_output::STREAM_BYTES + 100);
             assert!(String::from_utf8_lossy(stream).contains("bytes omitted"));
         }
     }

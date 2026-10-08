@@ -174,6 +174,20 @@ impl SkillReviewsRepo {
         self.touch_json(id, "fix_json", &json, false).await
     }
 
+    /// Admit one fixer. This is separate from progress writes after admission.
+    pub async fn claim_fix(&self, id: &Id, agent: &SkillReviewAgent) -> Result<bool> {
+        let json = serde_json::to_string(agent)
+            .map_err(|e| Error::Internal(format!("serialize fix agent: {e}")))?;
+        let result = sqlx::query(
+            "UPDATE skill_reviews SET fix_json = ?, updated_at = ? WHERE id = ? AND status = 'done' \
+             AND (fix_json IS NULL OR CASE WHEN json_valid(fix_json) \
+             THEN json_extract(fix_json, '$.status') IN ('done', 'error', 'cancelled') ELSE 0 END)",
+        )
+        .bind(json).bind(fmt(Utc::now())).bind(id)
+        .execute(&self.pool).await.map_err(dberr("claim skill fixer"))?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Set the terminal status (+ optional error message).
     pub async fn set_status(&self, id: &Id, status: &str, error: Option<&str>) -> Result<()> {
         let now = fmt(Utc::now());
@@ -224,6 +238,46 @@ mod tests {
         let pool = DbPool::connect("sqlite::memory:").await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews() {
+        let repo = SkillReviewsRepo::new(pool().await);
+        let rev = repo
+            .create(&"ws1".into(), "fixture", "library", "static", "", None)
+            .await
+            .unwrap();
+        let pending = SkillReviewAgent {
+            name: "fixer".into(),
+            provider: "fixture".into(),
+            model: String::new(),
+            status: "pending".into(),
+            note: String::new(),
+            session_id: None,
+            findings: vec![],
+        };
+        assert!(
+            !repo.claim_fix(&rev.id, &pending).await.unwrap(),
+            "running review cannot admit a fixer"
+        );
+        repo.set_status(&rev.id, "done", None).await.unwrap();
+        let (a, b) = tokio::join!(
+            repo.claim_fix(&rev.id, &pending),
+            repo.claim_fix(&rev.id, &pending)
+        );
+        assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
+        let mut done = pending.clone();
+        done.status = "done".into();
+        repo.set_fix(&rev.id, &done).await.unwrap();
+        assert!(
+            repo.claim_fix(&rev.id, &pending).await.unwrap(),
+            "completed fixer may be retried"
+        );
+        repo.set_status(&rev.id, "cancelled", None).await.unwrap();
+        repo.set_fix(&rev.id, &done).await.unwrap();
+        assert!(!repo.claim_fix(&rev.id, &pending).await.unwrap());
+        repo.delete(&rev.id).await.unwrap();
+        assert!(!repo.claim_fix(&rev.id, &pending).await.unwrap());
     }
 
     #[tokio::test]

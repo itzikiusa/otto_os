@@ -24,9 +24,9 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use otto_core::domain::WorkspaceRole;
+use otto_core::domain::{Capability, Feature, WorkspaceRole};
 use otto_core::Id;
-use otto_state::{ApiClientRepo, BrokerClustersRepo, MemoriesRepo, WorkflowsRepo};
+use otto_state::MemoriesRepo;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::CurrentUser;
@@ -94,158 +94,63 @@ pub async fn search(
 
     let mut all: Vec<Scored> = Vec::new();
 
-    // --- 1. Product stories -----------------------------------------------
-    if let Ok(stories) = ctx.product_repo.list_stories().await {
-        for s in stories
-            .into_iter()
-            .filter(|s| matches_title_or_sub(&s.title, &s.source_key, &q))
-            .take(CAP)
-        {
-            all.push(Scored {
-                score: score_title(&s.title, &q),
-                updated_at: s.updated_at.to_rfc3339(),
-                hit: SearchHit {
-                    kind: "story".into(),
-                    id: s.id.to_string(),
-                    title: s.title.clone(),
-                    subtitle: Some(s.source_key.clone()),
-                    actions: vec!["open".into(), "send-to-agent".into(), "copy-context".into()],
-                },
-            });
+    // Authorize each source BEFORE touching its data. Agents View permits the
+    // palette itself, not every module it aggregates. One grant read serves
+    // the whole request; a failed authorization read fails closed.
+    let grants = if user.is_root {
+        vec![]
+    } else {
+        otto_state::GrantsRepo::new(ctx.pool.clone())
+            .grants_for(&user.id)
+            .await
+            .map_err(crate::error::ApiError)?
+    };
+    let can = |feature: Feature| {
+        user.is_root
+            || grants
+                .iter()
+                .any(|(f, level)| *f == feature && *level >= Capability::View)
+    };
+    for source in otto_state::search::Source::ALL {
+        if !can(source.feature()) {
+            continue;
         }
-    }
-
-    // --- 2. Workflows -----------------------------------------------------
-    {
-        let repo = WorkflowsRepo::new(ctx.pool.clone());
-        if let Ok(wfs) = repo.list(&ws_id).await {
-            for wf in wfs
-                .into_iter()
-                .filter(|w| matches_title_or_sub(&w.name, &w.description, &q))
-                .take(CAP)
-            {
+        if let Ok(rows) = otto_state::search::search(&ctx.pool, source, &ws_id, &q, CAP).await {
+            for row in rows {
+                let actions: &[&str] = match source {
+                    otto_state::search::Source::Story | otto_state::search::Source::SwarmTask => {
+                        &["open", "send-to-agent", "copy-context"]
+                    }
+                    otto_state::search::Source::Workflow => &["open", "rerun"],
+                    otto_state::search::Source::ApiRequest => &["open", "rerun", "send-to-agent"],
+                    otto_state::search::Source::Repo => &["open", "review"],
+                    otto_state::search::Source::Canvas => &["Open in Canvas"],
+                    _ => &["open", "send-to-agent"],
+                };
                 all.push(Scored {
-                    score: score_title(&wf.name, &q),
-                    // Workflow has no updated_at; use id as a stable tiebreaker stub.
-                    updated_at: wf.id.to_string(),
+                    score: row.score,
+                    updated_at: row.updated_at,
                     hit: SearchHit {
-                        kind: "workflow".into(),
-                        id: wf.id.to_string(),
-                        title: wf.name.clone(),
-                        subtitle: if wf.description.is_empty() {
-                            None
-                        } else {
-                            Some(wf.description.clone())
-                        },
-                        actions: vec!["open".into(), "rerun".into()],
+                        kind: source.kind().into(),
+                        id: row.id,
+                        title: row.title,
+                        subtitle: row.subtitle,
+                        actions: actions.iter().map(|s| (*s).into()).collect(),
                     },
                 });
-            }
-        }
-    }
-
-    // --- 3. API-client saved requests -------------------------------------
-    {
-        let repo = ApiClientRepo::new(ctx.pool.clone());
-        // Summaries (scalar projection), not full rows: a search keystroke
-        // must not load every saved body, script and doc (perf N7).
-        if let Ok(reqs) = repo.list_request_summaries(&ws_id, None).await {
-            for r in reqs
-                .into_iter()
-                .filter(|r| matches_title_or_sub(&r.name, &format!("{} {}", r.method, r.url), &q))
-                .take(CAP)
-            {
-                all.push(Scored {
-                    score: score_title(&r.name, &q),
-                    updated_at: r.updated_at.to_rfc3339(),
-                    hit: SearchHit {
-                        kind: "api_request".into(),
-                        id: r.id.to_string(),
-                        title: r.name.clone(),
-                        subtitle: Some(format!("{} {}", r.method, r.url)),
-                        actions: vec!["open".into(), "rerun".into(), "send-to-agent".into()],
-                    },
-                });
-            }
-        }
-    }
-
-    // --- 4. Swarm projects + tasks ----------------------------------------
-    {
-        let repo = &ctx.swarm_repo;
-        if let Ok(swarms) = repo.list_swarms(&ws_id).await {
-            let mut proj_count = 0usize;
-            let mut task_count = 0usize;
-            'outer: for swarm in &swarms {
-                // Projects first.
-                if proj_count < CAP {
-                    if let Ok(projects) = repo.list_projects(&swarm.id).await {
-                        for p in projects
-                            .into_iter()
-                            .filter(|p| matches_title_or_sub(&p.name, &p.description, &q))
-                        {
-                            if proj_count >= CAP {
-                                break;
-                            }
-                            all.push(Scored {
-                                score: score_title(&p.name, &q),
-                                updated_at: p.updated_at.to_rfc3339(),
-                                hit: SearchHit {
-                                    kind: "swarm_project".into(),
-                                    id: p.id.to_string(),
-                                    title: p.name.clone(),
-                                    subtitle: Some(swarm.name.clone()),
-                                    actions: vec!["open".into(), "send-to-agent".into()],
-                                },
-                            });
-                            proj_count += 1;
-                        }
-                    }
-                }
-                // Tasks.
-                if task_count < CAP {
-                    if let Ok(tasks) = repo.list_tasks_for_swarm(&swarm.id).await {
-                        for t in tasks
-                            .into_iter()
-                            .filter(|t| matches_title_or_sub(&t.title, &t.description, &q))
-                        {
-                            if task_count >= CAP {
-                                break;
-                            }
-                            all.push(Scored {
-                                score: score_title(&t.title, &q),
-                                updated_at: t.updated_at.to_rfc3339(),
-                                hit: SearchHit {
-                                    kind: "swarm_task".into(),
-                                    id: t.id.to_string(),
-                                    title: t.title.clone(),
-                                    subtitle: Some(format!("{} · {}", swarm.name, t.status)),
-                                    actions: vec![
-                                        "open".into(),
-                                        "send-to-agent".into(),
-                                        "copy-context".into(),
-                                    ],
-                                },
-                            });
-                            task_count += 1;
-                        }
-                    }
-                }
-                if proj_count >= CAP && task_count >= CAP {
-                    break 'outer;
-                }
             }
         }
     }
 
     // --- 5. Vault memories ------------------------------------------------
-    {
+    if can(Feature::Product) {
         let repo = MemoriesRepo::new(ctx.pool.clone());
         let filter = otto_state::memory::SearchFilter {
             collection: None,
             story_id: None,
             include_inactive: false,
             limit: CAP as i64,
+            viewer: (!user.is_root).then(|| user.id.clone()),
             ..Default::default()
         };
         if let Ok(hits) = repo.search_keyword(ws_id.as_str(), &q, &filter).await {
@@ -274,15 +179,24 @@ pub async fn search(
     // --- 5b. Vault notes (docs home) ---------------------------------------
     // FTS over every registered vault; the hit id is `<vault_id>:<path>` so the
     // UI can route to `#/vault` with the right vault + note selected.
-    if let Ok(vaults) = ctx.vault.list(ws_id.as_str()).await {
+    if let Ok(vaults) = if can(Feature::Product) {
+        ctx.vault.list(ws_id.as_str()).await
+    } else {
+        Ok(vec![])
+    } {
+        let mut remaining = CAP;
         for v in vaults {
+            if remaining == 0 {
+                break;
+            }
             let req = otto_vault::types::SearchReq {
                 query: q.clone(),
-                limit: CAP,
+                limit: remaining,
                 ..Default::default()
             };
             if let Ok(hits) = ctx.vault.search(ws_id.as_str(), v.id, &req).await {
-                for h in hits.into_iter().take(CAP) {
+                for h in hits.into_iter().take(remaining) {
+                    remaining -= 1;
                     all.push(Scored {
                         score: if h.title.to_lowercase().contains(&q) {
                             2
@@ -303,72 +217,6 @@ pub async fn search(
         }
     }
 
-    // --- 6. Git repos (name + remote URL only; no live fetch) -------------
-    if let Ok(repos) = ctx.git_store.list_repos(&ws_id).await {
-        for r in repos
-            .into_iter()
-            .filter(|r| matches_title_or_sub(&r.name, r.remote_url.as_deref().unwrap_or(""), &q))
-            .take(CAP)
-        {
-            all.push(Scored {
-                score: score_title(&r.name, &q),
-                updated_at: r.created_at.to_rfc3339(),
-                hit: SearchHit {
-                    kind: "repo".into(),
-                    id: r.id.to_string(),
-                    title: r.name.clone(),
-                    subtitle: r.remote_url.clone(),
-                    actions: vec!["open".into(), "review".into()],
-                },
-            });
-        }
-    }
-
-    // --- 7. Broker clusters -----------------------------------------------
-    {
-        let repo = BrokerClustersRepo::new(ctx.pool.clone());
-        if let Ok(clusters) = repo.list_visible(&ws_id).await {
-            for c in clusters
-                .into_iter()
-                .filter(|c| matches_title_or_sub(&c.name, &c.bootstrap_servers, &q))
-                .take(CAP)
-            {
-                all.push(Scored {
-                    score: score_title(&c.name, &q),
-                    updated_at: c.created_at.to_rfc3339(),
-                    hit: SearchHit {
-                        kind: "broker_cluster".into(),
-                        id: c.id.to_string(),
-                        title: c.name.clone(),
-                        subtitle: Some(c.bootstrap_servers.clone()),
-                        actions: vec!["open".into(), "send-to-agent".into()],
-                    },
-                });
-            }
-        }
-    }
-
-    // --- 8. Canvas scenes ---------------------------------------------------
-    if let Ok(scenes) = ctx.canvas_repo.list_for_workspace(&ws_id).await {
-        for s in scenes
-            .into_iter()
-            .filter(|s| matches_title_or_sub(&s.title, s.section.as_deref().unwrap_or(""), &q))
-            .take(CAP)
-        {
-            all.push(Scored {
-                score: score_title(&s.title, &q),
-                updated_at: s.updated_at.to_rfc3339(),
-                hit: SearchHit {
-                    kind: "canvas".into(),
-                    id: s.id.to_string(),
-                    title: s.title.clone(),
-                    subtitle: s.section.clone(),
-                    actions: vec!["Open in Canvas".into()],
-                },
-            });
-        }
-    }
-
     // --- Rank: title-match first, then recency (desc) ---------------------
     all.sort_by(|a, b| {
         b.score
@@ -380,24 +228,6 @@ pub async fn search(
 }
 
 // ---------------------------------------------------------------------------
-// Ranking helpers
-// ---------------------------------------------------------------------------
-
-/// 2 = title contains the query, 1 = only the secondary string does.
-fn score_title(title: &str, q: &str) -> i32 {
-    if title.to_lowercase().contains(q) {
-        2
-    } else {
-        1
-    }
-}
-
-/// True when either the title or the secondary string contains the query.
-fn matches_title_or_sub(title: &str, secondary: &str, q: &str) -> bool {
-    title.to_lowercase().contains(q) || secondary.to_lowercase().contains(q)
-}
-
-// ---------------------------------------------------------------------------
 // Router — one line wired into `module_routers()` in modules.rs
 // ---------------------------------------------------------------------------
 
@@ -405,3 +235,7 @@ fn matches_title_or_sub(title: &str, secondary: &str, q: &str) -> bool {
 pub fn search_routes() -> axum::Router<ServerCtx> {
     axum::Router::new().route("/workspaces/{id}/search", axum::routing::get(search))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/search.rs"]
+mod tests;

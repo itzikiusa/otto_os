@@ -1,6 +1,6 @@
 //! Bridge: routes an inbound channel message to an agent session.
 //!
-//! Reuses an existing live session keyed by `(workspace_id, chat, thread)` or
+//! Reuses an existing live session keyed by `(workspace_id, channel, chat, thread)` or
 //! spawns a new one.  The in-memory map is a fast path; when it misses (daemon
 //! restart, or the mapped session died) the workspace's sessions are searched
 //! by the `channel`/`chat`/`thread` stamped in their `meta`, so a thread keeps
@@ -29,7 +29,16 @@ use crate::run_trigger::RunTrigger;
 use crate::swarm_trigger::SwarmTrigger;
 
 /// Composite key that identifies a conversation thread.
-type ConvKey = (String, String, Option<String>);
+type ConvKey = (String, String, String, Option<String>);
+
+fn conversation_key(channel: Channel, msg: &Inbound) -> ConvKey {
+    (
+        msg.workspace_id.clone(),
+        channel.as_str().into(),
+        msg.chat.clone(),
+        msg.thread.clone(),
+    )
+}
 
 /// Per-conversation serialization (perf SI-09). Message routing used to hold
 /// the ONE conversation map lock across the session lookup (an unfiltered
@@ -82,6 +91,28 @@ impl<K: std::hash::Hash + Eq + Clone> KeyedLocks<K> {
         };
         Queued { wait, now }
     }
+}
+
+/// Keep lookup and persistence in the same conversation critical section.
+async fn detach_binding<L, P, F>(
+    locks: &ConvLocks,
+    key: &ConvKey,
+    lookup: L,
+    persist: P,
+) -> otto_core::Result<Option<Id>>
+where
+    L: std::future::Future<Output = Option<Id>>,
+    P: FnOnce(Id) -> F,
+    F: std::future::Future<Output = otto_core::Result<()>>,
+{
+    let _guard = locks.lock(key).await;
+    let Some(sid) = lookup.await else {
+        return Ok(None);
+    };
+    // A map miss can recover this session until persistence marks it detached.
+    // Keep routing excluded across that await, including a failed write.
+    persist(sid.clone()).await?;
+    Ok(Some(sid))
 }
 
 type QueuedWait =
@@ -540,7 +571,8 @@ pub struct Bridge {
     pub settings: SettingsRepo,
     pub mirror: Arc<Mirror>,
     pub root_user_id: String,
-    /// Map (workspace_id, chat, thread) → session_id. Short critical sections
+    pub admission: crate::admission::InboundAdmission,
+    /// Map (workspace_id, channel, chat, thread) → session_id. Short critical sections
     /// only — conversation-level serialization is `conv_locks`.
     sessions: Mutex<HashMap<ConvKey, Id>>,
     conv_locks: ConvLocks,
@@ -573,6 +605,7 @@ impl Bridge {
             settings,
             mirror,
             root_user_id,
+            admission: Default::default(),
             sessions: Mutex::new(HashMap::new()),
             conv_locks: ConvLocks::default(),
             turn_locks: KeyedLocks::default(),
@@ -594,6 +627,7 @@ impl Bridge {
         swarm_trigger: Option<Arc<dyn SwarmTrigger>>,
         run_trigger: Option<Arc<dyn RunTrigger>>,
         workflow_trigger: Option<Arc<dyn crate::workflow_trigger::WorkflowChatTrigger>>,
+        admission: crate::admission::InboundAdmission,
     ) -> Arc<Self> {
         Arc::new(Self {
             manager,
@@ -601,6 +635,7 @@ impl Bridge {
             settings,
             mirror,
             root_user_id,
+            admission,
             sessions: Mutex::new(HashMap::new()),
             conv_locks: ConvLocks::default(),
             turn_locks: KeyedLocks::default(),
@@ -626,7 +661,12 @@ impl Bridge {
         let mapped = self.sessions.lock().await.get(key).cloned();
         if let Some(sid) = mapped {
             match self.manager.get(&sid).await {
-                Ok(s) if session_alive(&s) => return Some(sid),
+                Ok(s)
+                    if session_alive(&s)
+                        && session_matches_conversation(&s, channel, &key.2, key.3.as_deref()) =>
+                {
+                    return Some(sid)
+                }
                 // Dead mapping: drop it so the map only holds live threads.
                 _ => {
                     let mut map = self.sessions.lock().await;
@@ -636,7 +676,7 @@ impl Bridge {
                 }
             }
         }
-        let (ws_id, chat, thread) = key;
+        let (ws_id, _, chat, thread) = key;
         let list = self.live_channel_sessions(ws_id).await.ok()?;
         let s = list
             .into_iter()
@@ -697,27 +737,36 @@ impl Bridge {
     /// matching. The old session is left running (still inspectable in the app;
     /// the idle reaper archives it later); its feed tailer is stopped. Returns
     /// the detached session id, if one was bound.
-    async fn detach_conversation(&self, key: &ConvKey, channel: &str) -> Option<Id> {
-        let sid = {
-            let _conv = self.conv_locks.lock(key).await;
-            let sid = self.lookup_live_session(key, channel).await;
-            self.sessions.lock().await.remove(key);
-            sid
-        }?;
-        if let Err(e) = self
-            .manager
-            .update_meta(&sid, serde_json::json!({ "channel_detached": true }))
-            .await
-        {
-            warn!(session = %sid, "bridge: could not mark session detached: {e}");
-        }
-        self.mirror.cancel(&sid).await;
-        info!(session = %sid, "bridge: detached conversation from session");
-        Some(sid)
+    async fn detach_conversation(
+        &self,
+        key: &ConvKey,
+        channel: &str,
+    ) -> otto_core::Result<Option<Id>> {
+        let detached = detach_binding(
+            &self.conv_locks,
+            key,
+            async { self.lookup_live_session(key, channel).await },
+            |sid| async move {
+                self.manager
+                    .update_meta(&sid, serde_json::json!({ "channel_detached": true }))
+                    .await?;
+                self.sessions.lock().await.remove(key);
+                self.mirror.cancel(&sid).await;
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(detached)
     }
 
     /// Handle one inbound message.
-    pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, mut msg: Inbound) {
+    pub async fn handle(
+        &self,
+        integ: &Integration,
+        adapter: Arc<dyn Adapter>,
+        mut msg: Inbound,
+        permit: crate::admission::WorkPermit,
+    ) {
         info!(
             channel = %adapter.channel().as_str(),
             workspace = %msg.workspace_id,
@@ -902,11 +951,7 @@ impl Bridge {
         }
 
         // --- 4. Find or create a session ---
-        let key: ConvKey = (
-            msg.workspace_id.clone(),
-            msg.chat.clone(),
-            msg.thread.clone(),
-        );
+        let key = conversation_key(adapter.channel(), &msg);
         let (session_id, turn) = {
             // Serialize THIS conversation only (two quick messages must not
             // both spawn an agent); other chats proceed in parallel.
@@ -1143,7 +1188,7 @@ impl Bridge {
             chat: msg.chat.clone(),
             thread: msg.thread.clone(),
         };
-        tokio::spawn(submit_to_agent(
+        let submit = submit_to_agent(
             Arc::clone(&self.manager),
             Arc::clone(&self.mirror),
             session_id.clone(),
@@ -1151,7 +1196,11 @@ impl Bridge {
             input,
             reply,
             turn,
-        ));
+        );
+        tokio::spawn(async move {
+            let _permit = permit;
+            submit.await;
+        });
     }
 
     /// Handle a `/command`. Returns `true` if the command was consumed (caller
@@ -1217,11 +1266,7 @@ impl Bridge {
                 true
             }
             "/stop" => {
-                let key: ConvKey = (
-                    msg.workspace_id.clone(),
-                    msg.chat.clone(),
-                    msg.thread.clone(),
-                );
+                let key = conversation_key(adapter.channel(), msg);
                 // Same map-then-meta lookup as message routing, so /stop
                 // still finds the thread's agent after a daemon restart.
                 let sid = {
@@ -1256,13 +1301,16 @@ impl Bridge {
                 true
             }
             "/new" | "/restart" => {
-                let key: ConvKey = (
-                    msg.workspace_id.clone(),
-                    msg.chat.clone(),
-                    msg.thread.clone(),
-                );
-                self.detach_conversation(&key, adapter.channel().as_str())
-                    .await;
+                let key = conversation_key(adapter.channel(), msg);
+                if let Err(error) = self
+                    .detach_conversation(&key, adapter.channel().as_str())
+                    .await
+                {
+                    warn!("bridge: could not detach conversation: {error}");
+                    let _ = adapter.send_notice(&msg.chat, msg.thread.as_deref(),
+                        "Could not confirm a fresh conversation. Try again before sending your next message.").await;
+                    return true;
+                }
                 let reply = if cmd == "/new" {
                     "new session will start on your next message"
                 } else {
@@ -1272,11 +1320,7 @@ impl Bridge {
                 true
             }
             "/who" => {
-                let key: ConvKey = (
-                    msg.workspace_id.clone(),
-                    msg.chat.clone(),
-                    msg.thread.clone(),
-                );
+                let key = conversation_key(adapter.channel(), msg);
                 let bound_id = {
                     let _conv = self.conv_locks.lock(&key).await;
                     self.lookup_live_session(&key, adapter.channel().as_str())
@@ -1311,7 +1355,34 @@ mod conv_lock_tests {
     use super::*;
 
     fn key(chat: &str) -> ConvKey {
-        ("ws".into(), chat.into(), None)
+        ("ws".into(), "telegram".into(), chat.into(), None)
+    }
+
+    #[tokio::test]
+    async fn transports_with_the_same_chat_id_have_distinct_sessions_and_locks() {
+        let msg = Inbound {
+            workspace_id: "w".into(),
+            chat: "123".into(),
+            thread: None,
+            user: "u".into(),
+            user_name: None,
+            text: "hello".into(),
+            edited: false,
+        };
+        let telegram = conversation_key(Channel::Telegram, &msg);
+        let webhook = conversation_key(Channel::Webhook, &msg);
+        let mut sessions = HashMap::new();
+        sessions.insert(telegram.clone(), "telegram-session");
+        assert_eq!(
+            sessions.get(&webhook),
+            None,
+            "webhook must never reuse a Telegram session"
+        );
+        let locks = ConvLocks::default();
+        let _held = locks.lock(&telegram).await;
+        tokio::time::timeout(Duration::from_millis(100), locks.lock(&webhook))
+            .await
+            .expect("different transports are different conversations");
     }
 
     #[tokio::test]
@@ -1335,6 +1406,105 @@ mod conv_lock_tests {
             .await
             .expect("released")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn separately_constructed_bridges_share_injected_capacity_only() {
+        use crate::admission::Admission;
+        let directory =
+            std::env::temp_dir().join(format!("otto-channel-admission-{}", otto_core::new_id()));
+        let pool = otto_state::db::open(&directory.join("state.sqlite"))
+            .await
+            .unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let manager = Arc::new(SessionManager::new(
+            otto_state::SessionsRepo::new(pool.clone()),
+            events,
+            otto_sessions::providers::ProviderRegistry::new(None),
+        ));
+        let make = || {
+            Bridge::new(
+                manager.clone(),
+                WorkspacesRepo::new(pool.clone()),
+                SettingsRepo::new(pool.clone()),
+                Mirror::new(manager.clone()),
+                "fixture-root".into(),
+            )
+        };
+        let webhook = make();
+        let unrelated = make();
+        let chat = Bridge::new_with_swarm_trigger(
+            manager.clone(),
+            WorkspacesRepo::new(pool.clone()),
+            SettingsRepo::new(pool.clone()),
+            Mirror::new(manager.clone()),
+            "fixture-root".into(),
+            None,
+            None,
+            None,
+            webhook.admission.clone(),
+        );
+        let mut held = Vec::new();
+        for workspace in 0..4 {
+            for conversation in 0..64 {
+                match webhook.admission.admit(
+                    &format!("webhook:{workspace}"),
+                    &conversation.to_string(),
+                    None,
+                ) {
+                    Admission::Work(permit) => held.push(permit),
+                    _ => panic!("capacity available"),
+                }
+            }
+        }
+        assert!(matches!(
+            chat.admission.admit("slack:new", "channel", None),
+            Admission::Busy(_)
+        ));
+        assert!(matches!(
+            unrelated.admission.admit("slack:new", "channel", None),
+            Admission::Work(_)
+        ));
+        drop(held);
+        assert!(matches!(
+            chat.admission.admit("slack:new", "channel", None),
+            Admission::Work(_)
+        ));
+        drop((chat, webhook, unrelated, manager, pool));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_conversation_cannot_recover_the_old_session_during_detachment() {
+        let locks = ConvLocks::default();
+        let key = key("chat");
+        let attached = std::sync::atomic::AtomicBool::new(true);
+        let entered = tokio::sync::Notify::new();
+        let release = tokio::sync::Notify::new();
+        let detach = detach_binding(&locks, &key, async { Some("old".into()) }, |_| async {
+            entered.notify_one();
+            release.notified().await;
+            attached.store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        let next_message = async {
+            entered.notified().await;
+            // A message arriving while persistence is blocked must wait; it
+            // cannot use the same metadata fallback to recover the old session.
+            let attempt = locks.lock(&key);
+            tokio::pin!(attempt);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut attempt)
+                    .await
+                    .is_err(),
+                "routing entered before metadata was detached"
+            );
+            release.notify_one();
+            let _guard = attempt.await;
+            assert!(!attached.load(std::sync::atomic::Ordering::SeqCst));
+        };
+        let (result, _) = tokio::join!(detach, next_message);
+        assert_eq!(result.unwrap(), Some("old".into()));
     }
 
     /// S5-303: a turn that ends WITHOUT its Final (the watch never goes idle)

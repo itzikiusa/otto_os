@@ -38,6 +38,19 @@ pub struct CdpEvent {
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, CdpError>>>>>;
 type Routes = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<CdpEvent>>>>;
 
+struct PendingCall<'a> {
+    pending: &'a Pending,
+    id: u64,
+}
+
+impl Drop for PendingCall<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
+}
+
 pub struct CdpConn {
     next_id: AtomicU64,
     pending: Pending,
@@ -176,6 +189,12 @@ impl CdpConn {
         if let Ok(mut p) = self.pending.lock() {
             p.insert(id, tx);
         }
+        // An HTTP/socket caller can disappear before a reply or timeout.
+        // Keep its waiter scoped to this future even on cancellation.
+        let _pending = PendingCall {
+            pending: &self.pending,
+            id,
+        };
         let frame = build_command(id, method, params, session_id);
         if self.out.send(frame).is_err() {
             self.forget(id);
@@ -402,5 +421,23 @@ mod tests {
         let f = build_command(4, "Browser.getVersion", json!({}), None);
         let v: Value = serde_json::from_slice(&f).unwrap();
         assert!(v.get("sessionId").is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_live_call_removes_its_pending_reply() {
+        let (ours, mut theirs) = tokio::io::duplex(1 << 16);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _events) = CdpConn::start(read, write);
+        let caller = conn.clone();
+        let call = tokio::spawn(async move {
+            caller
+                .call("Page.captureScreenshot", json!({}), Some("S"))
+                .await
+        });
+        let _ = read_frame(&mut theirs).await;
+        assert_eq!(conn.pending.lock().unwrap().len(), 1);
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        assert!(conn.pending.lock().unwrap().is_empty());
     }
 }

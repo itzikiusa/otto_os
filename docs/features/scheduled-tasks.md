@@ -40,8 +40,11 @@ runs, `cwd` not a sandbox, one-agent-run-per-task):
 - **Retry policy** — `max_retries` (0..5); a failed/stuck agent session is killed
   and retried with backoff. `run.attempts` records how many it took.
 - **Only notify on change** — `notify_on_change` delivers only when the report's
-  normalized hash differs from the last successful run; otherwise the run is marked
-  `skipped_delivery` (the report is still stored).
+  normalized hash differs from the latest ok run with confirmed delivery (or an
+  unchanged skip) to the same destination;
+  an unchanged run is marked `skipped_delivery` (the report is still stored). A failed
+  or partial delivery does not suppress the next attempt. Changing the destination
+  sends the report to the new target even when its content is unchanged.
 - **Attach a proof pack** — `attach_proof` builds a proof pack per run
   (`run.proof_pack_id`) with the report + run metadata as evidence.
 - **Recurring PR / review / security scans** — built-in presets

@@ -151,7 +151,7 @@ fn collect(root: Node, src: &[u8]) -> (Vec<Def>, HashMap<String, usize>) {
                     .map(|l| {
                         let t = l.trim();
                         if t.len() > 120 {
-                            format!("{}…", &t[..120])
+                            format!("{}…", &t[..t.floor_char_boundary(120)])
                         } else {
                             t.to_string()
                         }
@@ -427,6 +427,14 @@ mod tests {
         let core = map.find("core.rs").expect("core listed");
         let a = map.find("a.rs").unwrap_or(usize::MAX);
         assert!(core < a, "core.rs should rank before a.rs:\n{map}");
+    }
+
+    #[test]
+    fn r02_unicode_signature_truncation_does_not_panic() {
+        let source = format!("fn {}() {{}}", "é".repeat(59));
+        let (defs, _) = extract("rs", &source).expect("valid Rust definition");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].signature, format!("fn {}…", "é".repeat(58)));
     }
 
     #[test]

@@ -646,73 +646,18 @@ pub async fn run(
         backoff_ms = 3_000;
         health.connected();
 
-        for update in &updates {
-            if let Some(msg) = &update.message {
-                if inbound_text(msg).is_none() && msg.has_attachment() {
-                    // A bare file: tell an admitted sender instead of
-                    // dropping it silently (strangers get nothing).
-                    let user = msg
-                        .from
-                        .as_ref()
-                        .map(|u| u.id.to_string())
-                        .unwrap_or_default();
-                    if crate::bridge::integration_admits(&integ, &user) {
-                        let adapter = Arc::clone(&adapter);
-                        let chat = msg.chat.id.to_string();
-                        let reply_to = msg.message_id.to_string();
-                        tokio::spawn(async move {
-                            let _ = adapter
-                                .send(&chat, Some(&reply_to), ATTACHMENT_ONLY_REPLY)
-                                .await;
-                        });
-                    }
-                }
-                if let Some(text) = &inbound_text(msg) {
-                    let user = msg
-                        .from
-                        .as_ref()
-                        .map(|u| u.id.to_string())
-                        .unwrap_or_default();
-                    let chat = msg.chat.id.to_string();
-                    let thread = msg.message_thread_id.map(|t| t.to_string());
-                    health.event();
-
-                    let inbound = Inbound {
-                        workspace_id: integ.workspace_id.clone(),
-                        chat,
-                        thread,
-                        user,
-                        user_name: msg.from.as_ref().and_then(TgUser::display),
-                        text: text.clone(),
-                        edited: false,
-                    };
-                    info!(
-                        workspace = %inbound.workspace_id,
-                        chat = %inbound.chat,
-                        thread = ?inbound.thread,
-                        user = %inbound.user,
-                        update_id = update.update_id,
-                        "telegram: inbound text update received"
-                    );
-                    // Handle OFF the poll loop (as Slack does): a slow trigger
-                    // (workflow / swarm / run launch, session spawn) must not
-                    // stall polling for every other chat of this bot. Same-
-                    // conversation routing stays serialized by the bridge's
-                    // find-or-create lock.
-                    let bridge = Arc::clone(&bridge);
-                    let integ = integ.clone();
-                    let adapter = Arc::clone(&adapter) as Arc<dyn Adapter>;
-                    tokio::spawn(async move {
-                        bridge.handle(&integ, adapter, inbound).await;
-                    });
-                }
-            }
-            // Advance offset past this update so we don't re-process it.
-            offset = update.update_id + 1;
-        }
+        let next = dispatch_prefix(&updates, offset, |update| {
+            handle_update(update, &integ, &adapter, &bridge, &health)
+        })
+        .await;
+        let deferred = next == offset && !updates.is_empty();
+        offset = next;
         // Persist across generations (see `offsets`).
         store_offset(&token, offset);
 
+        if deferred {
+            sleep_unless_cancelled(1000, &cancel).await;
+        }
         // If we got no updates, yield briefly to avoid a hot spin.
         if updates.is_empty() {
             tokio::task::yield_now().await;
@@ -720,9 +665,155 @@ pub async fn run(
     }
 }
 
+/// Only a contiguous handled prefix may advance Telegram's acknowledgement.
+async fn dispatch_prefix<'a, F, Fut>(updates: &'a [TgUpdate], mut offset: i64, mut handle: F) -> i64
+where
+    F: FnMut(&'a TgUpdate) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for update in updates {
+        if update.update_id < offset {
+            continue;
+        }
+        if !handle(update).await {
+            break;
+        }
+        offset = update.update_id + 1;
+    }
+    offset
+}
+
+async fn handle_update(
+    update: &TgUpdate,
+    integ: &Integration,
+    adapter: &Arc<TelegramAdapter>,
+    bridge: &Arc<Bridge>,
+    health: &crate::health::Health,
+) -> bool {
+    if let Some(msg) = &update.message {
+        if inbound_text(msg).is_none() && msg.has_attachment() {
+            // A bare file: tell an admitted sender instead of
+            // dropping it silently (strangers get nothing).
+            let user = msg
+                .from
+                .as_ref()
+                .map(|u| u.id.to_string())
+                .unwrap_or_default();
+            if crate::bridge::integration_admits(integ, &user) {
+                let adapter = Arc::clone(adapter);
+                let chat = msg.chat.id.to_string();
+                let reply_to = msg.message_id.to_string();
+                if adapter
+                    .send(&chat, Some(&reply_to), ATTACHMENT_ONLY_REPLY)
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+        if let Some(text) = &inbound_text(msg) {
+            let user = msg
+                .from
+                .as_ref()
+                .map(|u| u.id.to_string())
+                .unwrap_or_default();
+            let chat = msg.chat.id.to_string();
+            let thread = msg.message_thread_id.map(|t| t.to_string());
+            health.event();
+
+            let inbound = Inbound {
+                workspace_id: integ.workspace_id.clone(),
+                chat,
+                thread,
+                user,
+                user_name: msg.from.as_ref().and_then(TgUser::display),
+                text: text.clone(),
+                edited: false,
+            };
+            info!(
+                workspace = %inbound.workspace_id,
+                chat = %inbound.chat,
+                thread = ?inbound.thread,
+                user = %inbound.user,
+                update_id = update.update_id,
+                "telegram: inbound text update received"
+            );
+            // Handle OFF the poll loop (as Slack does): a slow trigger
+            // (workflow / swarm / run launch, session spawn) must not
+            // stall polling for every other chat of this bot. Same-
+            // conversation routing stays serialized by the bridge's
+            // find-or-create lock.
+            use crate::admission::{Admission, BUSY_REPLY};
+            let permit = bridge.admission.admit_chat(
+                &format!("telegram:{}", integ.workspace_id),
+                &inbound.chat,
+                inbound.thread.as_deref(),
+                &inbound.text,
+                inbound.edited,
+            );
+            match permit {
+                Admission::Work(permit) => {
+                    let bridge = Arc::clone(bridge);
+                    let integ = integ.clone();
+                    let adapter = Arc::clone(adapter) as Arc<dyn Adapter>;
+                    tokio::spawn(async move {
+                        bridge.handle(&integ, adapter, inbound, permit).await;
+                    });
+                }
+                Admission::Busy(_permit) => {
+                    // Telegram has no socket heartbeat to service here.
+                    // A failed notice keeps this update and its suffix
+                    // pending at Telegram instead of silently losing it.
+                    if crate::bridge::integration_admits(integ, &inbound.user)
+                        && adapter
+                            .send_notice(&inbound.chat, inbound.thread.as_deref(), BUSY_REPLY)
+                            .await
+                            .is_err()
+                    {
+                        return false;
+                    }
+                }
+                Admission::Retry => return false,
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_admission_retains_suffix_and_retry_does_not_duplicate_prefix() {
+        let updates: Vec<TgUpdate> = serde_json::from_value(serde_json::json!([
+            {"update_id":10}, {"update_id":11}, {"update_id":12}
+        ]))
+        .unwrap();
+        let mut handled = Vec::new();
+        let offset = dispatch_prefix(&updates, 10, |update| {
+            let accepted = update.update_id != 11;
+            if accepted {
+                handled.push(update.update_id);
+            }
+            std::future::ready(accepted)
+        })
+        .await;
+        assert_eq!(offset, 11);
+        assert_eq!(
+            handled,
+            vec![10],
+            "later update must not leapfrog rejection"
+        );
+        let offset = dispatch_prefix(&updates, offset, |update| {
+            handled.push(update.update_id);
+            std::future::ready(true)
+        })
+        .await;
+        assert_eq!(offset, 13);
+        assert_eq!(handled, vec![10, 11, 12]);
+    }
 
     #[test]
     fn http_clients_build() {

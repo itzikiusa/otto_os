@@ -5,6 +5,12 @@
 //! with no new safety code. v1 targets SQL engines.
 
 use serde_json::{Map, Value};
+use std::collections::HashSet;
+
+/// Bound the dense expansion of sparse JSON records before allocating cells.
+/// At 32 bytes per Value slot, this caps the matrix itself near 64 MiB; the
+/// input file byte cap separately bounds the strings/objects carried by it.
+const MAX_EXPANDED_CELLS: usize = 2_000_000;
 
 use otto_core::{Error, Result};
 
@@ -65,15 +71,23 @@ pub fn parse_rows(format: ImportFormat, bytes: &[u8]) -> Result<ParsedTable> {
 /// order and filling absent keys with `null`.
 fn parse_objects(objects: Vec<Value>) -> Result<ParsedTable> {
     let mut columns: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    let row_count = objects.len();
     let mut maps: Vec<Map<String, Value>> = Vec::with_capacity(objects.len());
     for obj in objects {
-        let map = obj
-            .as_object()
-            .ok_or_else(|| Error::Invalid("every import record must be a JSON object".into()))?
-            .clone();
+        let Value::Object(map) = obj else {
+            return Err(Error::Invalid(
+                "every import record must be a JSON object".into(),
+            ));
+        };
         for k in map.keys() {
-            if !columns.iter().any(|c| c == k) {
+            if seen.insert(k.clone()) {
                 columns.push(k.clone());
+                if row_count > MAX_EXPANDED_CELLS / columns.len() {
+                    return Err(Error::Invalid(format!(
+                        "JSON import exceeds {MAX_EXPANDED_CELLS} expanded cells (rows × union of fields); split the file into smaller batches or use fewer fields"
+                    )));
+                }
             }
         }
         maps.push(map);
@@ -314,6 +328,36 @@ pub fn build_insert_batch(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sparse_json_import_rejects_dense_expansion_before_allocation() {
+        // Only ~20KB on disk, but 1500 unique keys would expand to 2.25M cells.
+        let objects: Vec<Value> = (0..1500)
+            .map(|i| json!({format!("field_{i}"): i}))
+            .collect();
+        let bytes = serde_json::to_vec(&objects).unwrap();
+        assert!(bytes.len() < 100_000);
+        let result = parse_rows(ImportFormat::Json, &bytes);
+        assert!(
+            result.is_err(),
+            "sparse records must be rejected before dense allocation"
+        );
+        assert!(result.unwrap_err().to_string().contains("expanded cells"));
+    }
+
+    #[test]
+    fn sparse_json_import_keeps_small_union_order_and_nulls() {
+        let table = parse_rows(ImportFormat::Json, br#"[{"z":1},{"a":2},{"z":3}]"#).unwrap();
+        assert_eq!(table.columns, vec!["z", "a"]);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![json!(1), Value::Null],
+                vec![Value::Null, json!(2)],
+                vec![json!(3), Value::Null]
+            ]
+        );
+    }
 
     #[test]
     fn parse_csv_uses_first_row_as_headers() {

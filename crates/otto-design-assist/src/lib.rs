@@ -104,6 +104,7 @@ const MAX_MEMORIES: usize = 6;
 const MAX_LINK_LINES: usize = 12;
 /// Recent turns kept in memory per artifact (`GET …/assist`).
 const TURN_HISTORY: usize = 20;
+const ARTIFACT_HISTORY: usize = 256;
 /// Look-back for the learning extractor (≈ the proposal's 90-day half-life).
 const LEARN_LOOKBACK_DAYS: i64 = 90;
 const LEARN_SIGNAL_LIMIT: i64 = 1_000;
@@ -1003,6 +1004,7 @@ struct ArtifactRuns {
     busy: Option<String>,
     /// Recent turns, oldest first (capped).
     turns: VecDeque<DesignAssistTurn>,
+    touched: Option<std::time::Instant>,
 }
 
 fn registry() -> &'static Mutex<HashMap<Id, ArtifactRuns>> {
@@ -1012,7 +1014,29 @@ fn registry() -> &'static Mutex<HashMap<Id, ArtifactRuns>> {
 
 fn with_registry<T>(f: impl FnOnce(&mut HashMap<Id, ArtifactRuns>) -> T) -> T {
     let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut g)
+    let result = f(&mut g);
+    prune_inactive_history(&mut g);
+    result
+}
+
+/// Keep recent inactive histories bounded without evicting a running turn.
+fn prune_inactive_history(runs: &mut HashMap<Id, ArtifactRuns>) {
+    if runs.len() <= ARTIFACT_HISTORY {
+        return;
+    }
+    let mut inactive: Vec<_> = runs
+        .iter()
+        .filter(|(_, run)| run.busy.is_none())
+        .map(|(id, run)| (run.touched, id.clone()))
+        .collect();
+    let excess = inactive.len().saturating_sub(ARTIFACT_HISTORY);
+    if excess == 0 {
+        return;
+    }
+    inactive.sort_unstable();
+    for (_, id) in inactive.into_iter().take(excess) {
+        runs.remove(&id);
+    }
 }
 
 /// Holds an artifact's single run slot; released on drop (every path).
@@ -1037,6 +1061,7 @@ fn try_busy(artifact_id: &str, what: String) -> Result<BusyGuard, Error> {
             )));
         }
         r.busy = Some(what);
+        r.touched = Some(std::time::Instant::now());
         Ok(BusyGuard(artifact_id.to_string()))
     })
 }
@@ -1048,6 +1073,7 @@ fn busy_of(artifact_id: &str) -> Option<String> {
 fn put_turn(t: DesignAssistTurn) {
     with_registry(|m| {
         let r = m.entry(t.artifact_id.clone()).or_default();
+        r.touched = Some(std::time::Instant::now());
         match r.turns.iter().position(|x| x.turn_id == t.turn_id) {
             Some(i) => r.turns[i] = t,
             None => {
@@ -3163,5 +3189,36 @@ mod tests {
             get_turn(&aid, "t0").is_none(),
             "the oldest turns are evicted"
         );
+    }
+}
+
+#[cfg(test)]
+mod retention_regressions {
+    use super::*;
+    #[test]
+    fn histories_are_bounded_and_active_turns_survive() {
+        let mut runs = HashMap::new();
+        runs.insert(
+            "active".into(),
+            ArtifactRuns {
+                busy: Some("turn:x".into()),
+                ..Default::default()
+            },
+        );
+        let old = std::time::Instant::now();
+        for n in 0..1024 {
+            runs.insert(
+                format!("artifact-{n}"),
+                ArtifactRuns {
+                    touched: Some(old + std::time::Duration::from_millis(n)),
+                    ..Default::default()
+                },
+            );
+        }
+        prune_inactive_history(&mut runs);
+        assert_eq!(runs.len(), ARTIFACT_HISTORY + 1);
+        assert!(runs.contains_key("active"));
+        assert!(runs.contains_key("artifact-1023"));
+        assert!(!runs.contains_key("artifact-0"));
     }
 }

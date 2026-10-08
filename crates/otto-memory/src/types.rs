@@ -58,6 +58,7 @@ pub struct MemoryQuery {
     pub kinds: Vec<String>,
     pub tags: Vec<String>,
     pub entities: Vec<String>,
+    /// Zero/omitted defaults to 20; requests above 200 are capped before retrieval.
     pub k: usize,
     pub mode: SearchMode,
     pub include_inactive: bool,

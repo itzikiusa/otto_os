@@ -823,3 +823,8 @@ Repo: `otto_state::ProofRepo`. Engine + gates: `otto_server::proof`.
 - [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md) — the `ProofPack` feature roles.
 - `docs/contracts/api.md` (#115–137), `docs/contracts/ws.md` — authoritative
   endpoint + WS contract.
+
+Proof assembly commands share the goal-loop verification runner: timeout or cancellation
+terminates their process group. Output retains up to 512 KiB per stdout/stderr stream
+with an omitted-byte marker; both pipes continue draining so output limits cannot
+deadlock a verbose command.

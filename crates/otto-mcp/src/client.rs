@@ -57,6 +57,25 @@ pub struct CallResult {
     pub bytes: usize,
 }
 
+/// A governed call distinguishes admission denial from a transport failure.
+#[derive(Debug)]
+pub enum CheckedCallError {
+    Denied(String),
+    Transport(String),
+}
+impl From<String> for CheckedCallError {
+    fn from(value: String) -> Self {
+        Self::Transport(value)
+    }
+}
+impl std::fmt::Display for CheckedCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Denied(s) | Self::Transport(s) => f.write_str(s),
+        }
+    }
+}
+
 /// Transport configuration for one server.
 pub enum Transport {
     Stdio {
@@ -189,11 +208,30 @@ impl McpClient {
 
     /// `tools/call` for a named tool.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<CallResult, String> {
-        let req = json!({
-            "jsonrpc":"2.0","method":"tools/call",
-            "params": {"name": name, "arguments": args}
-        });
-        let result = self.op(req).await?;
+        self.call_tool_checked(name, args, || async { Ok(()) })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Reauthorize after admission and after each new transport's handshake.
+    /// The hook also runs before the safe stale-session retry.
+    pub async fn call_tool_checked<F, Fut>(
+        &self,
+        name: &str,
+        args: &Value,
+        authorize: F,
+    ) -> Result<CallResult, CheckedCallError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let result = self
+            .op_checked(
+                json!({"jsonrpc":"2.0","method":"tools/call",
+            "params":{"name":name,"arguments":args}}),
+                authorize,
+            )
+            .await?;
         let bytes = serde_json::to_vec(&result).map(|v| v.len()).unwrap_or(0);
         let is_error = result
             .get("isError")
@@ -222,10 +260,25 @@ impl McpClient {
     /// parked session ([`Self::checkout`]); saturated callers queue with a
     /// deadline and never launch extra fallback transports.
     async fn op(&self, request: Value) -> Result<Value, String> {
+        self.op_checked(request, || async { Ok(()) })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn op_checked<F, Fut>(
+        &self,
+        request: Value,
+        mut authorize: F,
+    ) -> Result<Value, CheckedCallError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
         let mut guard = self
             .checkout()
             .await
             .ok_or_else(|| "MCP server busy; try again".to_string())?;
+        authorize().await.map_err(CheckedCallError::Denied)?;
         let reused = guard.is_some();
         // Own the transport outside the slot until success. Cancellation drops
         // it as well: unread responses must never leak into the next operation.
@@ -233,6 +286,9 @@ impl McpClient {
             Some(live) => live,
             None => self.open().await?,
         };
+        if !reused {
+            authorize().await.map_err(CheckedCallError::Denied)?;
+        }
         let result = tokio::time::timeout(
             OP_TIMEOUT,
             run_on(&mut live, &self.transport, request.clone()),
@@ -245,7 +301,9 @@ impl McpClient {
             }
             Ok(Err(OpError::NotDelivered(error))) if reused => {
                 drop(live);
+                authorize().await.map_err(CheckedCallError::Denied)?;
                 let mut fresh = self.open().await?;
+                authorize().await.map_err(CheckedCallError::Denied)?;
                 let result =
                     tokio::time::timeout(OP_TIMEOUT, run_on(&mut fresh, &self.transport, request))
                         .await
@@ -258,10 +316,12 @@ impl McpClient {
                 if result.is_ok() {
                     *guard = Some(fresh);
                 }
-                result
+                result.map_err(CheckedCallError::Transport)
             }
-            Ok(Err(OpError::NotDelivered(error) | OpError::Failed(error))) => Err(error),
-            Err(_) => Err(timeout_msg()),
+            Ok(Err(OpError::NotDelivered(error) | OpError::Failed(error))) => {
+                Err(CheckedCallError::Transport(error))
+            }
+            Err(_) => Err(CheckedCallError::Transport(timeout_msg())),
         }
     }
 
@@ -1228,6 +1288,58 @@ mod tests {
         assert!(spawns(&log) <= SESSION_SLOTS);
     }
 
+    #[tokio::test]
+    async fn queued_call_rechecks_authorization_after_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let client = stdio_client_with(&[("SPAWNS", log.display().to_string())]);
+        let first = client.checkout().await.unwrap();
+        let second = client.checkout().await.unwrap();
+        let allowed = std::sync::atomic::AtomicBool::new(true);
+        let args = json!({});
+        let call = client.call_tool_checked("echo", &args, || async {
+            if allowed.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("revoked while queued".into())
+            }
+        });
+        tokio::pin!(call);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut call)
+            .await
+            .is_err());
+        allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+        drop(first);
+        drop(second);
+        assert!(matches!(call.await, Err(CheckedCallError::Denied(_))));
+        assert_eq!(spawns(&log), 0, "revoked call must not open a transport");
+    }
+
+    #[tokio::test]
+    async fn fresh_transport_rechecks_after_initialize_before_tool_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = dir.path().join("calls");
+        let log = dir.path().join("spawns");
+        let client = stdio_client_with(&[
+            ("SPAWNS", log.display().to_string()),
+            ("CALLS", calls.display().to_string()),
+        ]);
+        let mut checks = 0;
+        let result = client
+            .call_tool_checked("echo", &json!({}), || {
+                checks += 1;
+                std::future::ready(if checks == 1 {
+                    Ok(())
+                } else {
+                    Err("revoked during handshake".into())
+                })
+            })
+            .await;
+        assert!(matches!(result, Err(CheckedCallError::Denied(_))));
+        assert_eq!(spawns(&log), 1, "initialize really ran");
+        assert_eq!(spawns(&calls), 0, "tools/call was never delivered");
+    }
+
     // Drives the stdio client against a tiny shell MCP server so the framing +
     // initialize→list/call sequence is exercised end to end (no external deps).
     // Replies echo the request id (a pooled session numbers its requests).
@@ -1242,7 +1354,7 @@ while IFS= read -r line; do
   case "$line" in
     *'"initialize"'*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"1"}}}\n' ;;
     *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
-    *'"tools/call"'*) [ -n "$CALL_SLEEP" ] && sleep "$CALL_SLEEP"; printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id"; [ -n "$EXIT_AFTER_CALL" ] && exit 0 ;;
+    *'"tools/call"'*) [ -n "$CALLS" ] && echo x >> "$CALLS"; [ -n "$CALL_SLEEP" ] && sleep "$CALL_SLEEP"; printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id"; [ -n "$EXIT_AFTER_CALL" ] && exit 0 ;;
     *'"notifications/initialized"'*) : ;;
   esac
 done

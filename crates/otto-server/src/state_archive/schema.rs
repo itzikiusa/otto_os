@@ -110,7 +110,6 @@ pub fn excluded_table(name: &str, portable: bool) -> bool {
                 | "db_widgets"
                 | "vaults"
                 | "canvas_scenes"
-                | "canvas_scene_refs"
                 | "product_attachments"
                 | "product_stories"
                 | "product_story_versions"
@@ -331,6 +330,7 @@ pub fn inert(table: &str, row: &mut ArchiveRow) {
     if matches!(
         table,
         "scheduled_tasks"
+            | "mcp_auto_approve_rules"
             | "personal_agents"
             | "personal_agent_schedules"
             | "workflow_triggers"
