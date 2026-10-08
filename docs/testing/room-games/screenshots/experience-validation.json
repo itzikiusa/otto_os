@@ -1,0 +1,303 @@
+{
+  "verified_at": "2026-10-08T18:15:00.101664+00:00",
+  "method": "Real isolated ottod7898 + production preview5298 + Chromium Metal. 17-case full run16passed/1 stale scenario assertion; after actual arena fix and precise scenario correction, all4 affected cases passed. Latest result for each17 case is passing. No API replies, simulation state or camera state fabricated.",
+  "full_run_stats": {
+    "startTime": "2026-10-08T18:08:40.321Z",
+    "duration": 159162.065,
+    "expected": 16,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  },
+  "affected_rerun_stats": {
+    "startTime": "2026-10-08T18:13:13.983Z",
+    "duration": 44017.808000000005,
+    "expected": 4,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "cases": [
+    {
+      "title": "chooser previews and controls in light",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "chooser previews and controls in dark",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "phone and tablet chooser fit; touch controls drive a real kart",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "shooter station: assets, movement, focus loss, menu and rendering",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "accepted-affected4"
+    },
+    {
+      "title": "shooter foundry: assets, movement, focus loss, menu and rendering",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "accepted-affected4"
+    },
+    {
+      "title": "shooter dunes: assets, movement, focus loss, menu and rendering",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "accepted-affected4"
+    },
+    {
+      "title": "kart coast: assets, movement, focus loss, menu and rendering",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "kart forest: assets, movement, focus loss, menu and rendering",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "kart neon: assets, movement, focus loss, menu and rendering",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "kart coast: sustained steering and nearby grass remain continuous",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "kart forest: sustained steering and nearby grass remain continuous",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "kart neon: leaving the elevated deck falls and recovers",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "accepted-affected4"
+    },
+    {
+      "title": "failed model download offers Retry and successfully loads the real asset",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "shooter: real invitation, unauthenticated guest, ready, input relay and leave",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "kart: real invitation, unauthenticated guest, ready, input relay and disconnect",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "shooter loadout keys equip three weapons and E performs a visible dash",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    },
+    {
+      "title": "four selectable drivers and a real coast lap through jumps and the underwater reef",
+      "status": "expected",
+      "attempts": [
+        "passed"
+      ],
+      "run": "suite17"
+    }
+  ],
+  "artifacts": "experience-final-artifacts.json",
+  "full_run_artifacts": "experience-suite17-artifacts.json",
+  "renderer_reports": [
+    {
+      "map": {
+        "kind": "shooter",
+        "id": "station",
+        "name": "Orbital Station"
+      },
+      "fps": 60.23102310231023,
+      "drawCalls": 369,
+      "triangles": 262996,
+      "frameMs": 1.1341469948941116,
+      "errors": []
+    },
+    {
+      "map": {
+        "kind": "shooter",
+        "id": "foundry",
+        "name": "Ember Foundry"
+      },
+      "fps": 60.18136850783182,
+      "drawCalls": 369,
+      "triangles": 273826,
+      "frameMs": 1.283546076813624,
+      "errors": []
+    },
+    {
+      "map": {
+        "kind": "shooter",
+        "id": "dunes",
+        "name": "Sunken Dunes"
+      },
+      "fps": 60.28075970272502,
+      "drawCalls": 300,
+      "triangles": 111144,
+      "frameMs": 0.9112466239049978,
+      "errors": []
+    },
+    {
+      "map": {
+        "kind": "kart",
+        "id": "coast",
+        "name": "Coral Coast"
+      },
+      "fps": 60.23102310231023,
+      "drawCalls": 373,
+      "triangles": 500306,
+      "frameMs": 1.1758100787063257,
+      "errors": []
+    },
+    {
+      "map": {
+        "kind": "kart",
+        "id": "forest",
+        "name": "Fernwood Rally"
+      },
+      "fps": 59.35696619950536,
+      "drawCalls": 245,
+      "triangles": 200734,
+      "frameMs": 1.072573959291658,
+      "errors": []
+    },
+    {
+      "map": {
+        "kind": "kart",
+        "id": "neon",
+        "name": "Neon Overdrive"
+      },
+      "fps": 60.18136850783182,
+      "drawCalls": 248,
+      "triangles": 583156,
+      "frameMs": 0.9912494600995696,
+      "errors": []
+    }
+  ],
+  "mobile": {
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "fps": 60.28075970272502,
+    "drawCalls": 366,
+    "triangles": 493838,
+    "frameMs": 1.3580021479056148,
+    "errors": []
+  },
+  "coast_lap": {
+    "lap": 1,
+    "airborne": 117,
+    "submerged": 371,
+    "maxHeight": 3.9998081710900344,
+    "minHeight": -5.187153518563848,
+    "errors": []
+  },
+  "neon_recovery": {
+    "samples": 541,
+    "resets": [
+      {
+        "dt": 0.016666666666666666,
+        "displacement": 15.849035628167115,
+        "speedChange": 5.65685424949238,
+        "reset": true,
+        "itemHit": false,
+        "previousTrackDistance": 15.822854889490161,
+        "previousGrounded": false,
+        "previousHeight": -5.98859199763573,
+        "recoveryDistance": 0,
+        "recovering": true,
+        "cameraStep": 16.848584322564882
+      },
+      {
+        "dt": 0.016666666666666666,
+        "displacement": 15.01614810858427,
+        "speedChange": 5.65685424949238,
+        "reset": true,
+        "itemHit": false,
+        "previousTrackDistance": 15.0072835920187,
+        "previousGrounded": false,
+        "previousHeight": -5.977675684095298,
+        "recoveryDistance": 0,
+        "recovering": true,
+        "cameraStep": 14.241485359454602
+      },
+      {
+        "dt": 0.016666666666666666,
+        "displacement": 13.48911250234439,
+        "speedChange": 5.65685424949238,
+        "reset": true,
+        "itemHit": false,
+        "previousTrackDistance": 11.102095603464477,
+        "previousGrounded": false,
+        "previousHeight": -5.818682423084216,
+        "recoveryDistance": 0,
+        "recovering": true,
+        "cameraStep": 14.225229700305322
+      }
+    ],
+    "errors": []
+  },
+  "limitations": [
+    "Headless Chromium does not support native pointer lock in this environment; click/drag, Escape release and production release unit regression covered.",
+    "Phone and tablet are emulated viewports, not physical devices.",
+    "Observed FPS is a short sample on Apple M3 Max Metal, not a low-end hardware benchmark."
+  ]
+}

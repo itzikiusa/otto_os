@@ -5,6 +5,68 @@
   "forward": "+Z",
   "texture_max_px": 0,
   "files": {
+    "adventure-kit.glb": {
+      "bytes": 846268,
+      "sha256": "b1faa456a6a9fe734798664f07cf1aa9ed084b8ae862b997909f7a4cae1dab70",
+      "triangles": 19700,
+      "nodes": [
+        "Barn_Surface",
+        "Barn",
+        "BridgeRail_Surface",
+        "BridgeRail",
+        "Buoy_Surface",
+        "Buoy",
+        "CoralCluster_Surface",
+        "CoralCluster",
+        "CoralFan_Surface",
+        "CoralFan",
+        "Cottage_Surface",
+        "Cottage",
+        "Fence_Surface",
+        "Fence",
+        "Fish_Surface",
+        "Fish",
+        "ReefRock_Surface",
+        "ReefRock",
+        "Seaweed_Surface",
+        "Seaweed",
+        "Windmill_Surface",
+        "WindmillSails_Surface",
+        "WindmillSails",
+        "Windmill"
+      ],
+      "animations": [],
+      "meshes": 12,
+      "materials": 19
+    },
+    "drivers.glb": {
+      "bytes": 1226092,
+      "sha256": "662701460b6d5b6e2417be49c8916b95cf9c0ed38629e3deb67e340f74ac78dd",
+      "triangles": 36520,
+      "nodes": [
+        "DriverFox_Surface",
+        "FoxHead_Surface",
+        "FoxHead",
+        "FoxTail_Surface",
+        "FoxTail",
+        "DriverFox",
+        "DriverPanda_Surface",
+        "PandaHead_Surface",
+        "PandaHead",
+        "DriverPanda",
+        "DriverRabbit_Surface",
+        "RabbitHead_Surface",
+        "RabbitHead",
+        "DriverRabbit",
+        "DriverRobot_Surface",
+        "RobotHead_Surface",
+        "RobotHead",
+        "DriverRobot"
+      ],
+      "animations": [],
+      "meshes": 9,
+      "materials": 22
+    },
     "environment-kit.glb": {
       "bytes": 2227292,
       "sha256": "d3ef6f2239a74b4292941d0889c745a8a27ebc33f6acffc316bf47034bcf9d0a",
@@ -56,11 +118,11 @@
       "materials": 19
     },
     "fighter-azure.glb": {
-      "bytes": 804016,
-      "sha256": "4c19f64a38cd834068fabf6e4ec6dff24bf33afaa9540313cf87280be879e01a",
-      "triangles": 14632,
+      "bytes": 983176,
+      "sha256": "a91f0d9a904f8035a52a8b964e5b679227e8cc2dfd7983cb7b0bce34c6f3785f",
+      "triangles": 18816,
       "nodes": [
-        "Pelvis",
+        "Hips_Surface",
         "Head_Surface",
         "Head",
         "Torso_Surface",
@@ -94,14 +156,14 @@
         "Death"
       ],
       "meshes": 12,
-      "materials": 10
+      "materials": 13
     },
     "fighter-ember.glb": {
-      "bytes": 807848,
-      "sha256": "2521da3483e6648e55ceff1a90d27b850a5606a62473f4c723dbfe42a3360b48",
-      "triangles": 14632,
+      "bytes": 986208,
+      "sha256": "8d6e08cd783392dc4cfab6b7c86df73a9c14ef359d69224e73c9c9c2d676bfa2",
+      "triangles": 18816,
       "nodes": [
-        "Pelvis",
+        "Hips_Surface",
         "Head_Surface",
         "Head",
         "Torso_Surface",
@@ -135,17 +197,14 @@
         "Death"
       ],
       "meshes": 12,
-      "materials": 11
+      "materials": 14
     },
     "kart-azure.glb": {
-      "bytes": 989388,
-      "sha256": "be73ed7e9b784b327caa34ec67235ae555b2a6ce245e4d9ad6a2368381db966d",
-      "triangles": 20796,
+      "bytes": 839016,
+      "sha256": "a5b3938a2f00c51bb95e908b823c401c8f7d7f4676cf81360f16d6a0cac8cc24",
+      "triangles": 17552,
       "nodes": [
-        "Driver_Surface",
-        "DriverHead_Surface",
-        "DriverHead",
-        "Driver",
+        "DriverSocket",
         "Kart_Surface",
         "WheelFL_Surface",
         "WheelFL",
@@ -158,18 +217,15 @@
         "Kart"
       ],
       "animations": [],
-      "meshes": 7,
-      "materials": 12
+      "meshes": 5,
+      "materials": 10
     },
     "kart-ember.glb": {
-      "bytes": 989396,
-      "sha256": "cac0179092c38cdb9954dda656af932cbc9eead8902ff7f5c1a2911dc75cb409",
-      "triangles": 20796,
+      "bytes": 839024,
+      "sha256": "713300fd239054fffecb3f9736075645ff586df22798c2cb77cf55ffe8be7284",
+      "triangles": 17552,
       "nodes": [
-        "Driver_Surface",
-        "DriverHead_Surface",
-        "DriverHead",
-        "Driver",
+        "DriverSocket",
         "Kart_Surface",
         "WheelFL_Surface",
         "WheelFL",
@@ -182,8 +238,8 @@
         "Kart"
       ],
       "animations": [],
-      "meshes": 7,
-      "materials": 12
+      "meshes": 5,
+      "materials": 10
     },
     "rifle.glb": {
       "bytes": 103732,
@@ -201,14 +257,38 @@
   },
   "previews": {
     "arena-preview.png": {
-      "bytes": 1303529,
-      "sha256": "3bbffebf5cfc18e0809c9a283623583691c6d4edeb993dfb07334b654e4e6032",
+      "bytes": 1305393,
+      "sha256": "24be00b1e2e8174dcb388b752cf65e92d2f58a51f4c7b3eb63f12aba13a659ef",
       "width": 1280,
       "height": 720
     },
+    "driver-fox.png": {
+      "bytes": 294252,
+      "sha256": "a620d297174d724ccf18db8800b99fcc49603ed5d51fe16bb804135d32e75063",
+      "width": 640,
+      "height": 640
+    },
+    "driver-panda.png": {
+      "bytes": 266140,
+      "sha256": "e80bc6dd16389b21aa242498cdb0d5738ceca3b8a46c8a3893ff4a69bb5bf18d",
+      "width": 640,
+      "height": 640
+    },
+    "driver-rabbit.png": {
+      "bytes": 279303,
+      "sha256": "ce8d106519c6ff7188bfe5dfec5964c26441f3020d0f3e8776d9b9cd21c097ff",
+      "width": 640,
+      "height": 640
+    },
+    "driver-robot.png": {
+      "bytes": 258226,
+      "sha256": "2d13138f7ab57a24edda26c71a9174c665afc74f1447ae2502698dff1101d732",
+      "width": 640,
+      "height": 640
+    },
     "kart-preview.png": {
-      "bytes": 1299137,
-      "sha256": "2d480aafb3656bddb741aebb6db0b7587dae7f0783311044bb209604dc7223df",
+      "bytes": 1296199,
+      "sha256": "fb19612d18baeaa58717af322f6afc8ad68abb5632620afde66c73f880030b9a",
       "width": 1280,
       "height": 720
     }

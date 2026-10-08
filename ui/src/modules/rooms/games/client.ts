@@ -1,5 +1,6 @@
 import type {GameRoomCommand, GameRoomCredential, GameRoomEvent} from '../../../lib/api/game-room-types';
 import type {GameInput, GameConfig, GameState} from './types';
+import {trackFor} from './maps.ts';
 
 export function parseGameInvite(value: string): {origin: string; roomId: string; invite: string} {
   const url = new URL(value.trim());
@@ -16,22 +17,28 @@ export function gameSocketUrl(origin: string, id: string): string {
 const numericInput = ['moveX', 'moveZ', 'yaw', 'pitch'] as const;
 const booleanInput = ['fire', 'reload', 'jump', 'sprint', 'drift', 'item', 'reset'] as const;
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
+const characters=['fox','panda','rabbit','robot'];
 function finite(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) < 1e9; }
 export function decodeInput(value: unknown): GameInput | null {
-  if (!record(value) || numericInput.some(k => !finite(value[k])) || booleanInput.some(k => typeof value[k] !== 'boolean') || Math.abs(value.moveX as number) > 1 || Math.abs(value.moveZ as number) > 1 || Math.abs(value.pitch as number) > 1.6) return null;
+  if (!record(value) || (value.weapon!==undefined&&![0,1,2,3].includes(value.weapon as number)) || (value.character!==undefined&&!characters.includes(value.character as string)) || numericInput.some(k => !finite(value[k])) || booleanInput.some(k => typeof value[k] !== 'boolean') || Math.abs(value.moveX as number) > 1 || Math.abs(value.moveZ as number) > 1 || Math.abs(value.pitch as number) > 1.6) return null;
   return value as unknown as GameInput;
 }
 export function decodeSnapshot(value: unknown, config: GameConfig): GameState | null {
   if (!record(value) || !record(value.config) || value.config.kind !== config.kind || value.config.map !== config.map || !['easy','normal','hard'].includes(String(value.config.difficulty)) || typeof value.config.vsComputer !== 'boolean') return null;
   if (!['countdown','playing','finished'].includes(String(value.phase)) || !Array.isArray(value.players) || value.players.length !== 2 || !Array.isArray(value.events) || value.events.length > 128 || !Array.isArray(value.pickupTimers) || value.pickupTimers.length > 64 || value.pickupTimers.some(n => !finite(n))) return null;
-  if (!['countdown','elapsed','remaining','eventSequence','rng','accumulator','tick'].every(k => finite(value[k])) || ![null,0,1].includes(value.winner as null | number)) return null;
-  const numeric = ['x','y','z','yaw','pitch','hp','ammo','score','speed','steering','velocityY','cooldown','reloadTime','respawnTime','invulnerable','lap','checkpoint','boost','driftCharge','itemCooldown','offTrackTime','resetCooldown','botThink','botTarget','botStrafe'];
+  if (typeof value.rng!=='number'||!Number.isInteger(value.rng)||value.rng<0||value.rng>0xffffffff)return null;
+  if (!Array.isArray(value.projectiles)||value.projectiles.length>8)return null;
+  for(const p of value.projectiles)if(!record(p)||!['id','x','y','z','life'].every(k=>finite(p[k]))||![0,1].includes(p.owner as number)||![0,1].includes(p.target as number))return null;
+  if (!['countdown','elapsed','remaining','eventSequence','accumulator','tick'].every(k => finite(value[k])) || ![null,0,1].includes(value.winner as null | number)) return null;
+  const numeric = ['shield','damageTime','dashCooldown','airTime','launchCooldown','x','y','z','yaw','pitch','hp','ammo','score','speed','steering','velocityY','cooldown','reloadTime','respawnTime','invulnerable','lap','checkpoint','boost','driftCharge','itemCooldown','offTrackTime','resetCooldown','botThink','botTarget','botStrafe'];
+  const checkpointCount=config.kind==='kart'?trackFor(config.map).route.length:0;
   for (let i = 0; i < 2; i++) {
     const p = value.players[i];
-    if (!record(p) || p.id !== i || numeric.some(k => !finite(p[k])) || ['grounded','moving','drifting','offTrack'].some(k => typeof p[k] !== 'boolean') || !decodeInput(p.botInput) || ![null,'boost','pulse'].includes(p.item as null | string) || (p.finishTime !== null && !finite(p.finishTime))) return null;
+    if (!record(p) || !characters.includes(p.character as string) || !['rifle','scatter','rail'].includes(p.weapon as string) || p.id !== i || numeric.some(k => !finite(p[k])) || ['grounded','moving','drifting','offTrack','underwater','trick'].some(k => typeof p[k] !== 'boolean') || !decodeInput(p.botInput) || ![null,'boost','pulse','shield','seeker'].includes(p.item as null | string) || (p.finishTime !== null && !finite(p.finishTime))) return null;
+    if(config.kind==='kart'&&(!Number.isInteger(p.checkpoint)||(p.checkpoint as number)<0||(p.checkpoint as number)>=checkpointCount))return null;
   }
   for (const e of value.events) {
-    if (!record(e) || !['shot','hit','kill','respawn','boost','pickup','lap','finish'].includes(String(e.type)) || !['id','player','x','y','z'].every(k => finite(e[k])) || ![0,1].includes(e.player as number) || (e.end !== undefined && (!record(e.end) || !['x','y','z'].every(k => finite((e.end as Record<string,unknown>)[k]))))) return null;
+    if (!record(e) || !['shot','hit','kill','respawn','boost','pickup','lap','finish','launch','land','trick','shield','dash'].includes(String(e.type)) || !['id','player','x','y','z'].every(k => finite(e[k])) || ![0,1].includes(e.player as number) || (e.end !== undefined && (!record(e.end) || !['x','y','z'].every(k => finite((e.end as Record<string,unknown>)[k]))))) return null;
   }
   return value as unknown as GameState;
 }

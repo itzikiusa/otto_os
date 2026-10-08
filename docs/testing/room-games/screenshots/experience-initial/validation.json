@@ -1,0 +1,53 @@
+{
+  "verified_at": "2026-10-08T17:55:13.687216+00:00",
+  "scope": "Initial intermediate production build; four focused browser cases passed. Final world camera fog and bridge rail corrections not included.",
+  "tests": 4,
+  "passed": 4,
+  "artifacts": [
+    {
+      "path": "ui/dist/room-games/fighter-azure.glb",
+      "sha256": "d98cb8d068c89c142742bc6fbc6bef303fbc9623214842f32811da91636c3b66",
+      "bytes": 983176
+    },
+    {
+      "path": "ui/dist/room-games/drivers.glb",
+      "sha256": "662701460b6d5b6e2417be49c8916b95cf9c0ed38629e3deb67e340f74ac78dd",
+      "bytes": 1226092
+    },
+    {
+      "path": "ui/dist/room-games/fighter-ember.glb",
+      "sha256": "0b671ccfc41f8e8ff20e1eb31fb1d38d2d8cb1a48dab70d8906cbac241581f77",
+      "bytes": 984076
+    },
+    {
+      "path": "ui/dist/room-games/kart-ember.glb",
+      "sha256": "cac0179092c38cdb9954dda656af932cbc9eead8902ff7f5c1a2911dc75cb409",
+      "bytes": 989396
+    },
+    {
+      "path": "ui/dist/room-games/rifle.glb",
+      "sha256": "e562674c97810ce66d27b3d7b5d8677788ae10f96a1c7b9effbb6e2e1cee8b7a",
+      "bytes": 103732
+    },
+    {
+      "path": "ui/dist/room-games/adventure-kit.glb",
+      "sha256": "c35a0f1e93d9cc009e5c345854d6d5650336d85ca25b01960717a7883cabc8b1",
+      "bytes": 846204
+    },
+    {
+      "path": "ui/dist/room-games/kart-azure.glb",
+      "sha256": "a5b3938a2f00c51bb95e908b823c401c8f7d7f4676cf81360f16d6a0cac8cc24",
+      "bytes": 839016
+    },
+    {
+      "path": "ui/dist/room-games/environment-kit.glb",
+      "sha256": "d3ef6f2239a74b4292941d0889c745a8a27ebc33f6acffc316bf47034bcf9d0a",
+      "bytes": 2227292
+    },
+    {
+      "path": "ui/dist/assets/scene-DJyBXhuh.js",
+      "sha256": "71f4b922609b8143310581f7e53e19a060c8c245075419afae32d9a896dc01f5",
+      "bytes": 49809
+    }
+  ]
+}

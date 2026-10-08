@@ -5,20 +5,20 @@
     "name": "Ember Foundry"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 60.62624916722185,
-  "frames": 865,
-  "drawCalls": 251,
-  "triangles": 242736,
-  "frameMs": 1.6306634158478746,
+  "fps": 60.18136850783182,
+  "frames": 419,
+  "drawCalls": 369,
+  "triangles": 273826,
+  "frameMs": 1.283546076813624,
   "camera": {
-    "x": -15.888730169799018,
-    "y": 2.5999999999999988,
-    "z": -14.88873016979902
+    "x": -18.328250237914915,
+    "y": 2.5999999997900622,
+    "z": -18.247489053273632
   },
   "cameraDirection": {
-    "x": 0.7056964645761853,
-    "y": -0.0631268545814344,
-    "z": 0.7056964645761853
+    "x": 0.6775466221730287,
+    "y": -0.06307869926368478,
+    "z": 0.7327698495988497
   },
   "errors": [],
   "assets": [
@@ -44,6 +44,10 @@
     },
     {
       "path": "/room-games/rifle.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/adventure-kit.glb",
       "status": 200
     }
   ]

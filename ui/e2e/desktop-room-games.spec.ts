@@ -72,7 +72,7 @@ async function playing(page: Page) {
   await expect(page.locator('.game-play [role=alert]')).toHaveCount(0);
 }
 async function startComputer(page: Page, kind: GameKind, mapName: string) {
-  await page.getByRole('button', { name: kind === 'shooter' ? /Arena Duel Find/ : /Circuit Clash Hold/ }).click();
+  await page.getByRole('button', { name: kind === 'shooter' ? /Arena Duel Find/ : /Circuit Clash From/ }).click();
   await page.getByRole('combobox', { name: /Difficulty/ }).selectOption('easy');
   await page.getByRole('button', { name: new RegExp(mapName) }).click();
   await page.getByRole('button', { name: 'Play computer', exact: true }).click();
@@ -124,7 +124,8 @@ test('phone and tablet chooser fit; touch controls drive a real kart', async ({ 
     await boot(mobile, 'light');
     for (const viewport of [{ width: 390, height: 844 }, { width: 768, height: 1024 }]) {
       await mobile.setViewportSize(viewport);
-      await expect(mobile.getByRole('button', { name: /Circuit Clash Hold/ })).toBeVisible();
+      await mobile.getByRole('button', { name: /Circuit Clash From/ }).click();
+      await expect(mobile.locator('.games-drivers button')).toHaveCount(4);
       await expectNoHorizontalOverflow(mobile);
       await capture(mobile, `chooser-touch-${viewport.width}`, info);
     }
@@ -171,9 +172,10 @@ for (const map of maps) {
     await boot(page, map.id === 'station' || map.id === 'coast' ? 'light' : 'dark');
     await startComputer(page, map.kind, map.name);
     await expect(page.locator('.game-play')).toHaveAttribute('data-map', map.id);
-    await expect(page.locator('.game-score')).toContainText(map.kind === 'shooter' ? 'First to 7' : 'Lap / 3');
-    await expect(page.locator('.game-bottom-hud')).toContainText(map.kind === 'shooter' ? 'Health' : 'Speed');
-    for (const file of ['environment-kit.glb', `${map.kind === 'shooter' ? 'fighter' : 'kart'}-azure.glb`, `${map.kind === 'shooter' ? 'fighter' : 'kart'}-ember.glb`, ...(map.kind === 'shooter' ? ['rifle.glb'] : [])]) {
+    await capture(page, `${map.kind}-${map.id}-starting-camera`, info);
+    await expect(page.locator(map.kind === 'shooter'?'.game-score':'.race-lap')).toContainText(map.kind === 'shooter'?'First to 7':'Lap');
+    await expect(page.locator(map.kind === 'shooter'?'.combat-vitals':'.race-speed')).toBeVisible();
+    for (const file of ['environment-kit.glb', `${map.kind === 'shooter' ? 'fighter' : 'kart'}-azure.glb`, `${map.kind === 'shooter' ? 'fighter' : 'kart'}-ember.glb`, ...(map.kind === 'shooter' ? ['rifle.glb'] : ['drivers.glb']),'adventure-kit.glb']) {
       expect(observed.assets.some(asset => asset.path.endsWith(file) && asset.status === 200), `${file} loaded successfully`).toBe(true);
     }
     await move(page);
@@ -197,6 +199,12 @@ for (const map of maps) {
         await page.waitForTimeout(350); // ui-guards: allow — prove Escape clears held fire before pointerup arrives.
         expect((await snapshot(page)).players[0].ammo).toBe(ammo);
       } finally { await page.mouse.up(); }
+      await page.getByRole('button', { name: 'Full screen', exact: true }).click();
+      await expect(page.getByRole('button', { name: 'Exit full screen', exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.fullscreenElement?.classList.contains('game-play'))).toBe(true);
+      await capture(page, 'experience-station-fullscreen', info);
+      await page.getByRole('button', { name: 'Exit full screen', exact: true }).click();
+      await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
     }
 
     // Lose canvas focus while W remains physically held. The simulation must
@@ -261,7 +269,7 @@ for (const map of maps) {
 }
 
 for (const map of maps.filter(map => map.kind === 'kart')) {
-  test(`kart ${map.id}: sustained steering and nearby grass remain continuous`, async ({ page }, info) => {
+  test(`kart ${map.id}: ${map.id === 'neon' ? 'leaving the elevated deck falls and recovers' : 'sustained steering and nearby grass remain continuous'}`, async ({ page }, info) => {
     const observed = observe(page);
     await boot(page);
     await startComputer(page, 'kart', map.name);
@@ -270,15 +278,15 @@ for (const map of maps.filter(map => map.kind === 'kart')) {
     // trusted browser keyboard events, never from changing the simulation.
     const collecting = page.locator('.game-stage').evaluate(el => new Promise<{
       at: number; tick: number; x: number; y: number; z: number; speed: number;
-      yaw: number; steering: number; offTrack: boolean; offTrackTime: number;
-      resetCooldown: number; camera?: { x: number; y: number; z: number };
+      yaw: number; steering: number; offTrack: boolean; offTrackTime: number; grounded: boolean;
+      resetCooldown: number; checkpoint: number; damageTime: number; hitEvent: number; camera?: { x: number; y: number; z: number };
     }[]>(resolve => {
       const probe = (el as HTMLDivElement & { __ottoGame: GameDiagnostic }).__ottoGame;
-      const samples: { at: number; tick: number; x: number; y: number; z: number; speed: number; yaw: number; steering: number; offTrack: boolean; offTrackTime: number; resetCooldown: number; camera?: { x: number; y: number; z: number } }[] = [];
+      const samples: { at: number; tick: number; x: number; y: number; z: number; speed: number; yaw: number; steering: number; offTrack: boolean; offTrackTime: number; grounded: boolean; resetCooldown: number; checkpoint: number; damageTime: number; hitEvent: number; camera?: { x: number; y: number; z: number } }[] = [];
       const started = performance.now();
       const read = (at: number) => {
         const state = probe.snapshot(), player = state.players[0];
-        samples.push({ at, tick: state.tick, x: player.x, y: player.y, z: player.z, speed: player.speed, yaw: player.yaw, steering: player.steering, offTrack: player.offTrack, offTrackTime: player.offTrackTime, resetCooldown: player.resetCooldown, camera: probe.stats().camera });
+        samples.push({ at, tick: state.tick, x: player.x, y: player.y, z: player.z, speed: player.speed, yaw: player.yaw, steering: player.steering, offTrack: player.offTrack, offTrackTime: player.offTrackTime, grounded: player.grounded, resetCooldown: player.resetCooldown, checkpoint: player.checkpoint, damageTime: player.damageTime, hitEvent: state.events.reduce((id, event) => event.type === 'hit' && event.target === 0 ? Math.max(id, event.id) : id, 0), camera: probe.stats().camera });
         if (at - started >= 9000) resolve(samples); else requestAnimationFrame(read);
       };
       requestAnimationFrame(read);
@@ -301,7 +309,7 @@ for (const map of maps.filter(map => map.kind === 'kart')) {
     const trackDistances = samples.map(sample => nearestTrackPoint(sample, track).distance);
     const transitions = samples.slice(1).map((sample, i) => {
       const previous = samples[i], dt = (sample.tick - previous.tick) / 60;
-      return { dt, displacement: distance(sample, previous), speedChange: Math.abs(sample.speed - previous.speed), reset: sample.resetCooldown > previous.resetCooldown + .1, previousTrackDistance: trackDistances[i], cameraStep: sample.camera && previous.camera ? Math.hypot(sample.camera.x - previous.camera.x, sample.camera.y - previous.camera.y, sample.camera.z - previous.camera.z) : null };
+      return { dt, displacement: distance(sample, previous), speedChange: Math.abs(sample.speed - previous.speed), reset: sample.resetCooldown > previous.resetCooldown + .1, itemHit: sample.hitEvent > previous.hitEvent && sample.damageTime > previous.damageTime, previousTrackDistance: trackDistances[i], previousGrounded: previous.grounded, previousHeight: previous.y - nearestTrackPoint(previous, track).point.y, recoveryDistance: distance(sample, track.route[(previous.checkpoint + track.route.length - 1) % track.route.length]), recovering: sample.resetCooldown > .1 || previous.resetCooldown > .1, cameraStep: sample.camera && previous.camera ? Math.hypot(sample.camera.x - previous.camera.x, sample.camera.y - previous.camera.y, sample.camera.z - previous.camera.z) : null };
     });
     const report = {
       map: map.id, durationMs: samples.at(-1)!.at - samples[0].at, samples: samples.length,
@@ -317,12 +325,19 @@ for (const map of maps.filter(map => map.kind === 'kart')) {
     await info.attach('driving-continuity', { body: JSON.stringify(report), contentType: 'application/json' });
     await capture(page, `kart-${map.id}-after-sustained-driving`, info);
     expect(samples.length).toBeGreaterThan(60);
-    expect(report.maxOffTrackSeconds, 'scenario must actually exercise nearby grass').toBeGreaterThan(2);
-    expect(report.resets.filter(reset => reset.previousTrackDistance < track.width * 3), 'no involuntary recovery near the circuit').toEqual([]);
-    expect(transitions.filter(sample => sample.displacement > 35 * sample.dt + 1.5), 'no position jumps beyond driving and collision movement').toEqual([]);
-    expect(transitions.filter(sample => sample.speedChange > 30 * sample.dt + 3), 'no abrupt terrain speed clamps').toEqual([]);
+    if (map.id === 'neon') {
+      expect(samples.some(sample => !sample.grounded && sample.offTrack), 'leaving the supported deck causes free fall').toBe(true);
+      expect(report.resets.length, 'falling below the elevated deck recovers at an earned checkpoint').toBeGreaterThan(0);
+      expect(report.resets.every(reset => !reset.previousGrounded && reset.previousHeight < -4), 'recovery follows an actual fall, not nearby steering').toBe(true);
+      expect(report.resets.every(reset => reset.recoveryDistance < 1), 'recovery returns to the last earned checkpoint').toBe(true);
+    } else {
+      expect(report.maxOffTrackSeconds, 'scenario must actually exercise nearby grass').toBeGreaterThan(2);
+      expect(report.resets.filter(reset => reset.previousTrackDistance < track.width * 3), 'no involuntary recovery near the circuit').toEqual([]);
+    }
+    expect(transitions.filter(sample => !sample.reset && sample.displacement > 35 * sample.dt + 1.5), 'no position jumps beyond driving and collision movement').toEqual([]);
+    expect(transitions.filter(sample => !sample.reset && !sample.itemHit && sample.speedChange > 30 * sample.dt + 3), 'no abrupt terrain speed clamps').toEqual([]);
     expect(samples.every(sample => sample.camera !== undefined), 'production camera samples are available').toBe(true);
-    expect(transitions.filter(sample => (sample.cameraStep ?? 0) > 60 * sample.dt + 1.5), 'no spontaneous follow-camera position jumps').toEqual([]);
+    expect(transitions.filter(sample => !sample.recovering && (sample.cameraStep ?? 0) > 60 * sample.dt + 1.5), 'no spontaneous follow-camera position jumps').toEqual([]);
     expect(observed.errors).toEqual([]);
   });
 }
@@ -353,7 +368,7 @@ for (const kind of ['shooter', 'kart'] as const) {
     });
     try {
       await boot(page);
-      await page.getByRole('button', { name: kind === 'shooter' ? /Arena Duel Find/ : /Circuit Clash Hold/ }).click();
+      await page.getByRole('button', { name: kind === 'shooter' ? /Arena Duel Find/ : /Circuit Clash From/ }).click();
       await page.getByRole('button', { name: 'Another person', exact: true }).click();
       await page.getByLabel('Your display name').fill('Games host');
       await page.getByRole('button', { name: 'Create game room', exact: true }).click();
@@ -366,14 +381,22 @@ for (const kind of ['shooter', 'kart'] as const) {
       await guest.getByLabel('Your display name').fill('Games guest');
       await guest.getByRole('button', { name: 'Join game', exact: true }).click();
       await expect(page.locator('.game-members')).toContainText('Games guest');
+      if (kind === 'kart') {
+        await page.locator('.game-wait-drivers').getByRole('button', { name: /Bao/ }).click();
+        await guest.locator('.game-wait-drivers').getByRole('button', { name: /Bolt/ }).click();
+      }
       await page.getByRole('button', { name: 'Ready', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Start match', exact: true })).toBeDisabled();
       await guest.getByRole('button', { name: 'Ready', exact: true }).click();
       await expect(page.getByRole('button', { name: 'Start match', exact: true })).toBeEnabled();
       await page.getByRole('button', { name: 'Start match', exact: true }).click();
       await Promise.all([playing(page), playing(guest)]);
-      await expect(guest.locator('.game-score')).toContainText('Games host');
-      await expect(guest.locator('.game-score')).toContainText('Games guest');
+      if (kind === 'kart') {
+        await expect.poll(async () => (await snapshot(page)).players.map(p => p.character)).toEqual(['panda', 'robot']);
+        await expect.poll(async () => (await snapshot(guest)).players.map(p => p.character)).toEqual(['panda', 'robot']);
+      }
+      await expect(guest.locator(kind === 'kart' ? '.race-map' : '.game-score')).toContainText('Games host');
+      await expect(guest.locator(kind === 'kart' ? '.race-map' : '.game-score')).toContainText('Games guest');
       const guestBefore = (await snapshot(page)).players[1];
       await move(guest, 1);
       await expect.poll(async () => distance((await snapshot(page)).players[1], guestBefore)).toBeGreaterThan(1);
@@ -412,3 +435,113 @@ for (const kind of ['shooter', 'kart'] as const) {
     }
   });
 }
+
+test('shooter loadout keys equip three weapons and E performs a visible dash', async ({ page }, info) => {
+  const observed = observe(page);
+  await boot(page);
+  await startComputer(page, 'shooter', 'Orbital Station');
+  const canvas = page.locator('.game-stage canvas');
+  await canvas.focus();
+  for (const [key, weapon, name] of [['2', 'scatter', 'Scatter blaster'], ['3', 'rail', 'Rail lance'], ['1', 'rifle', 'Pulse rifle']] as const) {
+    await page.keyboard.down(key);
+    try { await expect.poll(async () => (await snapshot(page)).players[0].weapon).toBe(weapon); }
+    finally { await page.keyboard.up(key); }
+    await expect(page.getByRole('button', { name: `Equip ${name}` })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('.combat-ammo')).toContainText(name);
+  }
+  const before = (await snapshot(page)).players[0];
+  await page.keyboard.down('e');
+  try { await expect.poll(async () => (await snapshot(page)).players[0].dashCooldown).toBeGreaterThan(3); }
+  finally { await page.keyboard.up('e'); }
+  expect(distance(before, (await snapshot(page)).players[0])).toBeGreaterThan(3);
+  await expect(page.locator('.combat-vitals')).toContainText('Dash');
+  await capture(page, 'experience-shooter-loadout', info);
+  expect(observed.errors).toEqual([]);
+});
+
+test('four selectable drivers and a real coast lap through jumps and the underwater reef', async ({ page }, info) => {
+  test.setTimeout(120_000);
+  const observed = observe(page);
+  await boot(page, 'light');
+  await page.getByRole('button', { name: /Circuit Clash From/ }).click();
+  const roster = page.locator('.games-drivers');
+  await expect(roster.getByRole('button')).toHaveCount(4);
+  for (const name of ['Rory', 'Bao', 'Pip', 'Bolt']) {
+    const driver = roster.getByRole('button', { name: new RegExp(name) });
+    await driver.click();
+    await expect(driver).toHaveAttribute('aria-pressed', 'true');
+    expect(await driver.locator('img').evaluate(el => (el as HTMLImageElement).naturalWidth)).toBeGreaterThan(100);
+  }
+  await roster.getByRole('button', { name: /Pip/ }).click();
+  await capture(page, 'experience-four-driver-roster', info);
+  await page.getByRole('combobox', { name: /Difficulty/ }).selectOption('easy');
+  await page.getByRole('button', { name: /Coral Coast/ }).click();
+  await page.getByRole('button', { name: 'Play computer', exact: true }).click();
+  await playing(page);
+  await expect.poll(async () => (await snapshot(page)).players[0].character).toBe('rabbit');
+  await expect(page.locator('.race-position')).toContainText('Pip');
+  await expect(page.getByRole('img', { name: /Coral Coast, your position/ })).toBeVisible();
+  await page.locator('.game-stage canvas').focus();
+  // Read-only diagnostics guide ordinary DOM keyboard input through GameControls.
+  // The controller never edits a player, simulation field, clock or camera.
+  const drive = page.locator('.game-stage').evaluate((el, route) => new Promise<{
+    lap: number; airborne: number; submerged: number; maxHeight: number; minHeight: number;
+    samples: { tick: number; x: number; y: number; z: number; speed: number; grounded: boolean; underwater: boolean; checkpoint: number; lap: number }[];
+  }>(resolve => {
+    const probe = (el as HTMLDivElement & { __ottoGame: GameDiagnostic }).__ottoGame;
+    const canvas = el.querySelector('canvas')!;
+    const pressed = new Set<string>(), samples: { tick: number; x: number; y: number; z: number; speed: number; grounded: boolean; underwater: boolean; checkpoint: number; lap: number }[] = [];
+    let airborne = 0, submerged = 0, maxHeight = -Infinity, minHeight = Infinity;
+    const start = performance.now();
+    function key(code: string, down: boolean) {
+      if (pressed.has(code) === down) return;
+      if (down) pressed.add(code); else pressed.delete(code);
+      canvas.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code, bubbles: true, cancelable: true }));
+    }
+    function frame() {
+      const state = probe.snapshot(), p = state.players[0];
+      samples.push({ tick: state.tick, x: p.x, y: p.y, z: p.z, speed: p.speed, grounded: p.grounded, underwater: p.underwater, checkpoint: p.checkpoint, lap: p.lap });
+      if (!p.grounded) airborne++;
+      if (p.underwater) submerged++;
+      maxHeight = Math.max(maxHeight, p.y); minHeight = Math.min(minHeight, p.y);
+      if (p.lap >= 1 || state.phase === 'finished' || performance.now() - start > 85_000) {
+        for (const code of [...pressed]) key(code, false);
+        resolve({ lap: p.lap, airborne, submerged, maxHeight, minHeight, samples }); return;
+      }
+      // Target the next checkpoint, then look slightly ahead once it is near.
+      const checkpoint = route[p.checkpoint];
+      const next = route[(p.checkpoint + 1) % route.length];
+      const look = Math.hypot(checkpoint.x - p.x, checkpoint.z - p.z) < 7 ? next : checkpoint;
+      const wanted = Math.atan2(look.x - p.x, look.z - p.z);
+      const delta = Math.atan2(Math.sin(wanted - p.yaw), Math.cos(wanted - p.yaw));
+      const corrected = delta + p.steering * .12;
+      key('KeyW', Math.abs(delta) < 1.1 || p.speed < 9);
+      key('KeyA', corrected > .065); key('KeyD', corrected < -.065);
+      key('Space', !p.grounded && p.airTime > .15);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }), TRACKS.coast.route);
+  try {
+    await expect.poll(async () => !(await snapshot(page)).players[0].grounded, { timeout: 25_000, intervals: [40] }).toBe(true);
+    await capture(page, 'experience-coast-jump', info);
+    await expect.poll(async () => (await snapshot(page)).players[0].underwater, { timeout: 35_000, intervals: [80] }).toBe(true);
+    await expect(page.locator('.race-charge')).toContainText('Under the waves');
+    await expect.poll(async () => (await stats(page)).camera!.y, { timeout: 15_000, intervals: [80] }).toBeLessThan(-1.1);
+    await capture(page, 'experience-coast-underwater', info);
+    const report = await drive;
+    writeFileSync(resolve(evidenceDir, 'experience-coast-lap.json'), JSON.stringify({ ...report, ...observed }, null, 2));
+    await info.attach('actual-input-coast-lap', { body: JSON.stringify(report), contentType: 'application/json' });
+    expect(report.airborne).toBeGreaterThan(5);
+    expect(report.submerged).toBeGreaterThan(20);
+    expect(report.minHeight).toBeLessThan(-3);
+    expect(report.maxHeight).toBeGreaterThan(3);
+    expect(report.lap).toBeGreaterThanOrEqual(1);
+    await expect(page.locator('.race-lap')).toContainText('2');
+    await capture(page, 'experience-coast-completed-lap', info);
+    expect(observed.errors).toEqual([]);
+  } finally {
+    await page.keyboard.press('Escape');
+    await info.attach('coast-experience-console', { body: JSON.stringify(observed), contentType: 'application/json' });
+  }
+});

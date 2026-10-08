@@ -23,7 +23,16 @@ for p in sorted(OUT.glob('*.glb')):
   assert 1.75<result['bounds']['size'][1]<2.1
   assert abs(result['bounds']['min'][1])<.02
  if p.name.startswith('kart'):
-  assert all(x in names for x in ['Kart','WheelFL','WheelFR','WheelRL','WheelRR','DriverHead'])
+  assert all(x in names for x in ['Kart','WheelFL','WheelFR','WheelRL','WheelRR','DriverSocket'])
+ if p.name=='drivers.glb':
+  assert set(o.name for o in roots)=={'DriverFox','DriverPanda','DriverRabbit','DriverRobot'}
+  assert all(x in names for x in ['FoxHead','PandaHead','RabbitHead','RobotHead'])
+  assert len(d)<int(1.5*1024**2), 'Driver roster exceeds 1.5MiB'
+  result['items']={o.name:bounds([o]+list(o.children_recursive)) for o in roots}
+ if p.name=='adventure-kit.glb':
+  assert set(o.name for o in roots)=={'Cottage','Barn','Windmill','Fence','BridgeRail','CoralFan','CoralCluster','Seaweed','Fish','ReefRock','Buoy'}
+  result['items']={o.name:bounds([o]+list(o.children_recursive)) for o in roots}
+  assert all(abs(v['min'][1])<.015 for v in result['items'].values()), str({k:v['min'][1] for k,v in result['items'].items()})
  if p.name=='rifle.glb':assert 'Rifle' in names and 'Muzzle' in names
  if p.name=='environment-kit.glb':
   assert set(o.name for o in roots)==set(expected)

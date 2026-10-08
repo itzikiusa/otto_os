@@ -24,3 +24,9 @@ test('releasing controls exits pointer lock so match overlays can receive clicks
  const controls=new GameControls(canvas,true,()=>{});controls.touch('Fire',true);controls.release();
  assert.equal(fakeDocument.pointerLockElement,null);assert.equal(controls.read().fire,false);controls.dispose();
 });
+
+test('weapon keys select explicit slots and releasing clears the selection',()=>{
+ assert.equal(inputFromKeys(new Set(['Digit2']),0,0,false).weapon,2);
+ assert.equal(inputFromKeys(new Set(['Digit3']),0,0,false).weapon,3);
+ assert.equal(inputFromKeys(new Set(),0,0,false).weapon,0);
+});

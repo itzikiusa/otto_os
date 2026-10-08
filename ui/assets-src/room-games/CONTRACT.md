@@ -7,7 +7,7 @@ internal mesh names and glTF accessor indices are implementation details.
 ## Fighters
 
 `fighter-azure.glb`, `fighter-ember.glb`: root **Fighter**, floor at Y=0;
-W×H×D = **0.969×1.847×1.264 m**, including the forward-pointing rifle.
+W×H×D = **0.969×1.847×1.501 m**, including the forward-pointing rifle.
 
 Exact clips: **Idle**, **Run**, **Shoot**, **Death**. Idle is two seconds, Run
 0.8 seconds, Shoot one third second, Death 1.1667 seconds. Idle/Run loop;
@@ -30,15 +30,14 @@ Do not mutate shared material instances when recoloring only one actor.
 ## Karts
 
 `kart-azure.glb`, `kart-ember.glb`: root **Kart**, ground Y≈0;
-W×H×D = **1.812×1.369×2.484 m**.
+W×H×D = **1.812×1.030×2.484 m**.
 
 Exact wheel pivots: **WheelFL**, **WheelFR**, **WheelRL**, **WheelRR**.
 Rotate local X for rolling. Set front wheel steering around local Y; combine
 with wheel rolling in a quaternion or wrapper pivot rather than overwriting
 one angle with the other. Wheel pivot centers: X=±0.75, Y=0.31, Z=+0.67 (front)
-and −0.66 (rear). Tire radius including tread ≈0.331m. **DriverHead** is an independent pivot
-for subtle look/lean feedback. Driver and steering wheel are modeled; karts
-have no baked animation clips.
+and −0.66 (rear). Tire radius including tread ≈0.331m. **DriverSocket** accepts a separately loaded roster driver (see below). The
+steering wheel and seat are modeled; karts contain no baked driver or clips.
 
 ## Rifle
 
@@ -90,8 +89,52 @@ the shipped fighters/karts and environments. Source contact sheets are under
 
 ## Budget and manifest
 
-Six GLBs together are about 5.65 MiB, with zero textures. Two chooser images are
+Eight GLBs, including the roster and adventure kit, remain below the combined 20 MiB budget, with zero textures. Two chooser images are
 loaded outside gameplay. Total public folder must remain below 20 MiB.
 `manifest.json` records SHA-256, bytes, triangle count, mesh/material count,
 exact node names and animation clips for each GLB. `validation.json` independently
 re-imports the GLBs through Blender and measures geometry/roots/clip presence.
+
+## Character roster and adventure scenery (experience revision)
+
+`drivers.glb` is an independent, reusable roster. **DriverFox**, **DriverPanda**,
+**DriverRabbit**, and **DriverRobot** are top-level roots at identity transform.
+Their origin is the **seated pelvis**, not the floor. Attach exactly one root at
+identity transform to the kart's **DriverSocket**, located at kart local
+`(0, 0.67, -0.15)`. Kart GLBs no longer contain a baked helmeted driver. Driver
+hands reach `(±0.25, -0.029, 0.365)` relative to the socket, matching the steering
+wheel. Head pivots are **FoxHead**, **PandaHead**, **RabbitHead**, **RobotHead**;
+fox additionally has **FoxTail**. Rotate the head subtly around Y for gaze,
+Z for lean. There are no baked driver clips. The roster is under 1.5 MiB and
+shares materials. Each actor should clone its hierarchy before posing pivots.
+
+Portraits: **driver-fox.png**, **driver-panda.png**, **driver-rabbit.png**,
+**driver-robot.png**. These are 640×640 transparent renders of the shipped roots.
+Fox has orange fur/cream cheeks, pointed ears, a tail and scarf; panda has
+round black ears/eye patches; rabbit has long ears/whiskers/teeth; robot has a
+friendly digital face and antenna. Runtime palette recoloring must not recolor
+fur or facial materials.
+
+`adventure-kit.glb` supplies **Cottage**, **Barn**, **Windmill**, **Fence**,
+**BridgeRail**, **CoralFan**, **CoralCluster**, **Seaweed**, **Fish**, **ReefRock**,
+and **Buoy**. Roots are identity transforms, +Z front, grounded to minimum Y=0.
+Exact per-root bounds are measured in `validation.json`. **WindmillSails** is
+an optional child pivot; rotate local Z to turn sails. Fish faces +Z; animate
+its root along a path. The scenery is visual decoration; simulation route and
+collision definitions remain authoritative.
+
+Adventure library measured bounds (W×H×D, meters):
+
+| Root | Dimensions |
+|---|---|
+| Barn | 6.935×4.369×5.57 |
+| BridgeRail | 4.16×1.2×0.15 |
+| Buoy | 0.74×1.7×0.74 |
+| CoralCluster | 1.495×1.032×1.497 |
+| CoralFan | 2.87×2.803×0.294 |
+| Cottage | 5.581×4.31×4.825 |
+| Fence | 3.16×1.2×0.15 |
+| Fish | 0.365×0.57×0.875 |
+| ReefRock | 3.083×1.744×2.296 |
+| Seaweed | 1.361×1.82×0.28 |
+| Windmill | 7.4×8.5×2.52 |

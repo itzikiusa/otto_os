@@ -19,7 +19,7 @@ def mat(n,c,metal=0,rough=.4,em=0):
  return m
 M={}
 def palette():
- for n,c,met,r,e in [('Gunmetal',(.045,.065,.095),.8,.3,0),('Obsidian',(.013,.02,.029),.3,.47,0),('Titanium',(.23,.3,.33),.75,.37,0),('Ivory',(.54,.61,.59),.18,.37,0),('Azure',(.008,.13,.34),.32,.32,0),('Ember',(.62,.043,.015),.27,.33,0),('Copper',(.47,.19,.075),.8,.32,0),('CyanLight',(.005,.42,.7),.1,.3,2),('AmberLight',(1,.38,.035),.2,.3,3),('PinkLight',(.98,.055,.41),.25,.2,3),('Glass',(.013,.09,.15),.8,.15,0),('Sand',(.64,.39,.21),0,.9,0),('SandLight',(.57,.38,.16),0,.92,0),('Rock',(.32,.39,.41),0,.88,0),('Bark',(.19,.105,.047),0,.92,0),('Leaf',(.014,.125,.034),0,.85,0),('LeafLight',(.048,.23,.07),0,.83,0),('Rubber',(.016,.022,.027),0,.85,0),('Road',(.085,.1,.13),0,.95,0),('Yellow',(1,.66,.045),.2,.4,0)]:M[n]=mat(n,c,met,r,e)
+ for n,c,met,r,e in [('Gunmetal',(.045,.065,.095),.8,.3,0),('Obsidian',(.013,.02,.029),.3,.47,0),('Titanium',(.23,.3,.33),.75,.37,0),('Ivory',(.54,.61,.59),.18,.37,0),('Azure',(.008,.13,.34),.32,.32,0),('Ember',(.62,.043,.015),.27,.33,0),('Copper',(.47,.19,.075),.8,.32,0),('CyanLight',(.005,.42,.7),.1,.3,2),('AmberLight',(1,.38,.035),.2,.3,3),('PinkLight',(.98,.055,.41),.25,.2,3),('Glass',(.013,.09,.15),.8,.15,0),('Sand',(.64,.39,.21),0,.9,0),('SandLight',(.57,.38,.16),0,.92,0),('Rock',(.32,.39,.41),0,.88,0),('Bark',(.19,.105,.047),0,.92,0),('Leaf',(.014,.125,.034),0,.85,0),('LeafLight',(.048,.23,.07),0,.83,0),('Rubber',(.016,.022,.027),0,.85,0),('Road',(.085,.1,.13),0,.95,0),('Yellow',(1,.66,.045),.2,.4,0),('SkinAzure',(.5,.255,.14),0,.8,0),('SkinEmber',(.25,.1,.048),0,.83,0),('EyeWhite',(.75,.82,.79),0,.35,0),('EyeIris',(.035,.17,.19),0,.3,0),('Fabric',(.025,.036,.047),0,.94,0)]:M[n]=mat(n,c,met,r,e)
 def group(n,parent=None,p=(0,0,0)):
  o=bpy.data.objects.new(n,None);bpy.context.collection.objects.link(o);o.location=xyz(p);o.parent=parent;return o
 def finish(o,n,m,parent):
@@ -92,7 +92,7 @@ def anim(o,clip,length,keys):
  for f,rot,loc in keys:
   o.rotation_euler=rot;o.location=loc;o.keyframe_insert(data_path='rotation_euler',frame=f);o.keyframe_insert(data_path='location',frame=f)
  track=o.animation_data.nla_tracks.new();track.name=clip;track.strips.new(clip,1,a);o.animation_data.action=None
- o.rotation_euler=(0,0,0)
+ o.rotation_euler=keys[0][1]
  # retain the rest translation
  o.location=keys[0][2]
 def weapon(parent=None,origin=(0,0,0)):
@@ -107,7 +107,7 @@ def weapon(parent=None,origin=(0,0,0)):
  group('Muzzle',g,(0,.025,.58));return g
 def fighter(color):
  reset();g=group('Fighter');hips=group('Hips',g,(0,.885,0));body=group('Torso',hips,(0,.28,0))
- uv('Core',(0,.015,0),(.245,.3,.135),'Obsidian',body);armor('Swept breastplate',(0,0,.075),[(-.14,.29,.2,0),(.02,.51,.29,0),(.21,.54,.26,-.01),(.25,.35,.2,0)],color,body)
+ uv('Tactical undersuit',(0,.015,0),(.235,.3,.145),'Fabric',body);armor('Swept breastplate',(0,0,.075),[(-.14,.29,.2,0),(.02,.51,.29,0),(.21,.54,.26,-.01),(.25,.35,.2,0)],color,body)
  armor('Sternum shield',(0,.05,.224),[(-.08,.1,.025,0),(.055,.25,.035,0),(.12,.3,.025,0)],'Ivory',body);box('Reactor light',(0,.13,.25),(.11,.035,.016),'CyanLight',body,.007)
  for side in [-1,1]:
   slash((side*.18,.14,.211),(.13,.03,.018),'Gunmetal',body,side*.35)
@@ -126,17 +126,29 @@ def fighter(color):
   cyl('Thruster',(x,.05,-.26),.061,.24,'Titanium',body);cyl('Thruster port',(x,-.09,-.26),.043,.04,'CyanLight',body)
  head=group('Head',body,(0,.39,0));armor('Faceted command helmet',(0,0,0),[(-.17,.22,.2,.018),(-.1,.34,.31,0),(.1,.39,.34,-.02),(.21,.26,.24,-.035)],color,head)
  armor('Visor frame',(0,0,.149),[(-.075,.28,.04,0),(.095,.365,.075,0),(.125,.32,.05,0)],'Obsidian',head)
- armor('Visor glass',(0,0,.191),[(-.044,.22,.025,0),(.07,.315,.033,0),(.09,.28,.025,0)],'Glass',head)
+ uv('Visible human face',(0,-.027,.19),(.136,.145,.055),'Skin'+color,head,20)
+ uv('Nose bridge',(0,-.025,.244),(.023,.041,.027),'Skin'+color,head)
  for side in [-1,1]:
-  slash((side*.078,.039,.217),(.103,.024,.012),'CyanLight',head,-side*.22)
+  uv('Human eye',(side*.059,.024,.239),(.033,.011,.009),'EyeWhite',head,12)
+  uv('Human iris',(side*.06,.024,.251),(.01,.009,.004),'EyeIris',head,12)
+  slash((side*.06,.058,.242),(.072,.016,.012),'Fabric',head,-side*.12)
   armor('Cheek armor',(side*.142,-.079,.14),[(-.068,.063,.072,0),(.054,.098,.092,0)],'Ivory',head)
  armor('Helmet crest',(0,.14,-.04),[(-.025,.068,.31,0),(.06,.043,.21,-.02)],'Ivory',head)
  armor('Chin guard',(0,-.125,.16),[(-.05,.16,.045,0),(.028,.22,.063,0)],'Gunmetal',head)
- for x in [-.05,0,.05]:box('Respirator',(x,-.13,.198),(.02,.035,.012),'Titanium',head,.003)
+ box('Lower respirator',(0,-.126,.227),(.14,.052,.031),'Fabric',head,.015)
+ for x in [-.043,0,.043]:box('Respirator valve',(x,-.126,.247),(.019,.026,.012),'Titanium',head,.003)
  for x in [-1,1]:
   cyl('Comms',(x*.19,.02,0),.063,.047,'Titanium',head,'X');cyl('Comms light',(x*.219,.02,0),.033,.012,'CyanLight',head,'X')
  cyl('Antenna',(.2,.18,-.05),.012,.17,'Titanium',head);uv('Antenna tip',(.2,.27,-.05),(.022,.022,.022),'AmberLight',head)
- box('Pelvis',(0,-.015,0),(.32,.2,.23),'Gunmetal',hips,.055)
+ box('Pelvis',(0,-.015,0),(.32,.2,.23),'Fabric',hips,.055)
+ box('Utility belt',(0,.037,.024),(.39,.075,.29),'Obsidian',hips,.026)
+ box('Belt buckle',(0,.037,.176),(.076,.061,.025),'Titanium',hips,.01)
+ for side in [-1,1]:
+  box('Ammo pouch',(side*.165,-.039,.152),(.106,.14,.075),'Fabric',hips,.018)
+  box('Pouch flap',(side*.165,.018,.193),(.097,.038,.018),color,hips,.008)
+  beam('Chest harness',(side*.2,.2,.228),(side*.15,-.13,.198),.019,'Fabric',body)
+  box('Pack side pouch',(side*.216,.001,-.147),(.13,.22,.15),'Fabric',body,.025)
+  for j in range(3):box('Magazine rib',(side*.224,-.059+j*.051,-.228),(.07,.019,.015),'Titanium',body,.003)
  limbs=[]
  for side,x in [('L',-.19),('R',.19)]:
   leg=group('UpperLeg'+side,hips,(x,-.075,0));cyl('Hip rotary',(0,0,0),.09,.17,'Titanium',leg,'X');armor('Tapered thigh',(0,0,0),[(-.33,.15,.18,.02),(-.17,.2,.23,.025),(-.035,.18,.2,0)],color,leg)
@@ -144,9 +156,10 @@ def fighter(color):
   armor('Shin shell',(0,0,.04),[(-.32,.155,.17,0),(-.15,.19,.2,.005),(-.04,.16,.18,0)],color,shin);box('Shin light',(0,-.15,.117),(.036,.15,.013),'CyanLight',shin,.007)
   box('Boot',(0,-.39,.065),(.22,.14,.34),'Obsidian',shin,.045);box('Toe cap',(0,-.37,.191),(.21,.09,.11),'Titanium',shin,.025)
   arm=group('UpperArm'+side,body,(x*1.8,.18,0));uv('Shoulder actuator',(0,0,0),(.105,.105,.105),'Titanium',arm)
-  armor('Swept shoulder pauldron',(0,0,0),[(-.13,.2,.23,.015),(.045,.29,.31,0),(.12,.21,.23,-.025)],color,arm);box('Shoulder rank',(0,.134,-.015),(.13,.022,.085),'Ivory',arm,.007);box('Bicep',(0,-.18,.015),(.15,.24,.16),'Gunmetal',arm,.04)
+  armor('Swept shoulder pauldron',(0,0,0),[(-.13,.2,.23,.015),(.045,.29,.31,0),(.12,.21,.23,-.025)],color,arm);box('Shoulder rank',(0,.134,-.015),(.13,.022,.085),'Ivory',arm,.007);uv('Suit bicep',(0,-.17,.015),(.085,.15,.085),'Fabric',arm);armor('Bicep guard',(0,-.15,.069),[(-.09,.115,.085,0),(.065,.15,.09,0)],color,arm)
   fore=group('Forearm'+side,arm,(0,-.3,.015));uv('Elbow',(0,0,0),(.075,.075,.075),'Titanium',fore)
-  box('Forearm armor',(0,-.1,.115),(.16,.17,.27),color,fore,.04);box('Glove',(0,-.14,.275),(.12,.105,.14),'Obsidian',fore,.025)
+  box('Forearm armor',(0,-.1,.115),(.16,.17,.27),color,fore,.04);box('Glove',(0,-.14,.275),(.12,.105,.14),'Fabric',fore,.025)
+  for digit in [-.04,-.013,.013,.04]:box('Armored finger',(digit,-.144,.345),(.021,.075,.026),'Gunmetal',fore,.006)
   box('Wrist light',(0,-.004,.14),(.065,.015,.095),'CyanLight',fore,.005)
   limbs.append((leg,shin,arm,fore))
  rifle=weapon(limbs[1][3],(0,-.11,.33))
@@ -157,6 +170,8 @@ def fighter(color):
    base=o.location.copy();keys=[]
    for f in [1,1+length//4,1+length//2,1+3*length//4,1+length]:
     t=(f-1)/length;rot=[0,0,0];loc=base.copy()
+    if o.name.startswith('UpperArm'):rot[0]=-.95
+    if o.name.startswith('Forearm'):rot[0]=.95
     if clip=='Idle':
      if o==hips:loc.z+=math.sin(t*math.tau)*.012
      if o==head:rot[2]=math.sin(t*math.tau)*.07
@@ -164,10 +179,10 @@ def fighter(color):
      phase=1 if o.name.endswith('L') else -1
      if o.name.startswith('UpperLeg'):rot[0]=math.sin(t*math.tau)*.65*phase
      if o.name.startswith('LowerLeg'):rot[0]=max(0,math.sin(t*math.tau)*phase)*.85
-     if o.name.startswith('UpperArm'):rot[0]=math.sin(t*math.tau)*.2*-phase
+     if o.name.startswith('UpperArm'):rot[0]+=math.sin(t*math.tau)*.1*-phase
      if o==hips:loc.z+=abs(math.sin(t*math.tau))*.055;rot[0]=-.1
     elif clip=='Shoot':
-     if o.name=='UpperArmR':rot[0]=math.sin(t*math.pi)*.17
+     if o.name=='UpperArmR':rot[0]+=math.sin(t*math.pi)*.1
      if o==hips:loc.y+=math.sin(t*math.pi)*.035
     elif clip=='Death':
      if o==hips:rot[0]=-t*1.42;loc.z-=t*.64
@@ -225,20 +240,7 @@ def kart(color):
    for a in range(6):
     ang=a*math.tau/6;beam('Spoke',(side*.14,.04*math.cos(ang),.04*math.sin(ang)),(side*.14,.133*math.cos(ang),.133*math.sin(ang)),.017,'Titanium',wheel)
   beam('Suspension',(x*.6,.28,z),(x,.29,z),.045,'Titanium',g)
- driver=group('Driver',g,(0,.67,-.15));uv('Racing suit',(0,.08,0),(.21,.29,.15),color,driver)
- for x in [-.085,.085]:box('Harness',(x,.08,.146),(.05,.35,.025),'Yellow',driver,.005)
- head=group('DriverHead',driver,(0,.38,.005));uv('Helmet',(0,.025,0),(.24,.24,.218),color,head,32)
- armor('Helmet crown stripe',(0,0,0),[(-.19,.09,.07,.085),(-.06,.1,.17,.215),(.08,.105,.15,.235),(.19,.09,.07,.18)],'Ivory',head,True)
- for side in [-1,1]:
-  box('Helmet rear vent',(side*.095,.012,-.206),(.087,.043,.024),'Obsidian',head,.012)
-  slash((side*.09,-.051,-.218),(.055,.017,.019),'CyanLight',head,side*.35)
- uv('Dark visor',(0,.032,.143),(.2,.107,.112),'Glass',head,24);box('Visor trim',(0,.118,.215),(.27,.017,.018),'Ivory',head,.005)
- for side in [-1,1]:slash((side*.083,.038,.252),(.095,.023,.014),'CyanLight',head,side*.14)
- armor('Helmet chin',(0,-.113,.149),[(-.044,.22,.09,0),(.021,.27,.13,0)],'Ivory',head)
- for x in [-.22,.22]:cyl('Helmet hinge',(x,.02,.012),.053,.028,color,head,'X')
- for x in [-1,1]:
-  beam('Driver arm',(x*.17,.13,.01),(x*.25,-.04,.28),.073,color,driver);uv('Driving glove',(x*.25,-.04,.3),(.075,.065,.07),'Rubber',driver)
-  beam('Driver leg',(x*.1,-.15,.06),(x*.13,-.22,.44),.08,color,driver)
+ group('DriverSocket',g,(0,.67,-.15))
  torus('SteeringWheel',(0,.64,.21),.21,.024,'Rubber',g,'Z');beam('Steering column',(0,.48,.27),(0,.64,.21),.026,'Titanium',g)
  export('kart-'+color.lower()+'.glb');render('kart-'+color.lower(),(3.3,2.3,4),(0,.65,0),4.3)
  if color=='Azure':render('kart-rear',(3,2.1,-4),(0,.65,0),4.3)
@@ -363,7 +365,7 @@ def manifest():
  for p in sorted(OUT.glob('*.glb')):
   data=p.read_bytes();length,kind=struct.unpack_from('<II',data,12);doc=json.loads(data[20:20+length]);tris=sum(doc['accessors'][q['indices']]['count']//3 for m in doc.get('meshes',[]) for q in m['primitives'])
   files[p.name]={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'triangles':tris,'nodes':[x.get('name') for x in doc.get('nodes',[])],'animations':[x.get('name') for x in doc.get('animations',[])],'meshes':len(doc.get('meshes',[])),'materials':len(doc.get('materials',[]))}
- previews={p.name:{'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'width':struct.unpack_from('>I',p.read_bytes(),16)[0],'height':struct.unpack_from('>I',p.read_bytes(),20)[0]} for p in sorted(OUT.glob('*-preview.png'))}
+ previews={p.name:{'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'width':struct.unpack_from('>I',p.read_bytes(),16)[0],'height':struct.unpack_from('>I',p.read_bytes(),20)[0]} for p in sorted(OUT.glob('*.png'))}
  (OUT/'manifest.json').write_text(json.dumps({'version':1,'units':'metres','up':'+Y','forward':'+Z','texture_max_px':0,'files':files,'previews':previews},indent=2)+'\n')
  print(json.dumps({k:{x:v[x] for x in ['bytes','triangles','animations','meshes']} for k,v in files.items()},indent=2))
  assert sum(f['bytes'] for f in files.values())+sum(f['bytes'] for f in previews.values())<20*1024**2

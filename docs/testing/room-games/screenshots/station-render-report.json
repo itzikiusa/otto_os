@@ -5,20 +5,20 @@
     "name": "Orbital Station"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 63.08243727598566,
-  "frames": 1212,
-  "drawCalls": 255,
-  "triangles": 236924,
-  "frameMs": 1.9478926922376845,
+  "fps": 60.23102310231023,
+  "frames": 501,
+  "drawCalls": 369,
+  "triangles": 262996,
+  "frameMs": 1.1341469948941116,
   "camera": {
-    "x": -13.736429763753124,
-    "y": 2.5999999999999996,
-    "z": -14.638110125898693
+    "x": -15.96787974313157,
+    "y": 2.5999999997900627,
+    "z": -17.303786557973705
   },
   "cameraDirection": {
-    "x": 0.5954625724327521,
-    "y": -0.09755257770331832,
-    "z": 0.7974382856467372
+    "x": 0.5637829192835451,
+    "y": -0.09747845076712104,
+    "z": 0.820150456660341
   },
   "errors": [],
   "assets": [
@@ -44,6 +44,10 @@
     },
     {
       "path": "/room-games/rifle.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/adventure-kit.glb",
       "status": 200
     }
   ]

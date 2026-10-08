@@ -67,7 +67,8 @@ function kartBot(s:GameState,id:number,dt:number):GameInput {
  const desiredSpeed=Math.abs(delta)>0.7?10:Math.abs(delta)>0.35?15:23*t.throttle;
  input.moveZ=p.speed>desiredSpeed?0:1;
  input.drift=s.config.difficulty!=='easy'&&Math.abs(delta)>0.3&&Math.abs(delta)<1&&p.speed>10;
- input.item=p.item==='boost'?Math.abs(delta)<0.2:distance(p,s.players[1-id])<15;
+ input.item=p.item==='boost'?Math.abs(delta)<0.2:p.item==='shield'?p.shield<10:p.item==='seeker'?true:distance(p,s.players[1-id])<15;
+ input.jump=!p.grounded&&p.airTime>.2;
  input.reset=p.offTrackTime>2.5;
  p.botInput=input;return input;
 }

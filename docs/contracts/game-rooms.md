@@ -63,8 +63,8 @@ generation or round change. Data is JSON, with snapshot max 16 KiB, guest input
 max 1 KiB, result max 4 KiB, measured serialized. Snapshot/input data must be
 objects. Client simulation validates its input shape before using it. The server
 validates envelope, sender role, round/generation, connection identity, sequence,
-size and rate, but does not interpret game physics. Host and guest character/camera
-preferences are local; game/map configuration is immutable for the room.
+size and rate, but does not interpret game physics. Host and guest camera preferences are local; selected racing characters travel
+with player input and are reflected in authoritative snapshots; game/map configuration is immutable for the room.
 
 Snapshot/input events echo command fields to the peer only. Finish broadcasts
 `{type:"finished",round,generation,result}` and the new state. On reconnect a
@@ -90,3 +90,25 @@ The bundled kart snapshot includes `players[].steering` (finite number), the
 authoritative eased steering input. The client validates it before rendering;
 participants should reload together after upgrading the game client. Rendering
 smoothing stays local and does not modify authoritative positions or scores.
+
+
+## Bundled simulation payload additions
+
+Inputs retain all movement/fire booleans and angles. Optional `weapon` is 0
+(no change), 1 (rifle), 2 (scatter), or 3 (rail); optional `character` is
+`fox|panda|rabbit|robot`. Unknown selections are rejected. `item` uses the held
+racing item, or triggers the shooter dash.
+
+Player snapshots include `character`, `weapon`, `shield`, `damageTime`,
+`dashCooldown`, `airTime`, `trick`, `launchCooldown`, and `underwater`. Heights
+are authoritative, including submerged road surfaces and airborne flight.
+`checkpoint` must be an integer within the active course route. The finite
+`rng` integer accepts the full unsigned 32-bit range.
+
+`projectiles` is bounded to eight seeker records, each containing
+`id,owner,target,x,y,z,life`; owner and target are player IDs 0 or 1. Racing items
+are `boost|pulse|shield|seeker|null`. New event kinds are
+`launch|land|trick|shield|dash`. Shooter `pickupTimers` follows the arena's health
+and shield pickup order; kart timers follow course item boxes. The relay's
+16 KiB snapshot and 1 KiB input limits are unchanged. Both browsers must reload
+when moving between versions of the bundled simulation.

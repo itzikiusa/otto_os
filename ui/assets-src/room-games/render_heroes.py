@@ -8,6 +8,14 @@ def load(name):
  before=set(bpy.context.scene.objects);bpy.ops.import_scene.gltf(filepath=str(A.OUT/name));new=set(bpy.context.scene.objects)-before
  return [o for o in new if o.parent is None]
 def clear():A.reset()
+def kart_with_driver(color,kind):
+ kart=load('kart-'+color+'.glb')[0]
+ roots=load('drivers.glb');driver=next(o for o in roots if o.name=='Driver'+kind)
+ for root in roots:
+  if root!=driver:
+   for child in list(root.children_recursive):bpy.data.objects.remove(child,do_unlink=True)
+   bpy.data.objects.remove(root,do_unlink=True)
+ socket=next(o for o in kart.children_recursive if o.name.startswith('DriverSocket'));driver.parent=socket;driver.location=(0,0,0);return kart
 def kit():return {o.name:o for o in load('environment-kit.glb')}
 def remove_unused(objs,used):
  for n,o in objs.items():
@@ -47,7 +55,7 @@ for z in range(-12,13,3):A.box('Lane marker',(0,.022,z),(.1,.008,1.2),'Ivory',be
 place(k['RaceGantry'],(0,0,-7));place(k['TrackBarrier'],(-4.2,0,-3),1,math.pi/2);clone(k['TrackBarrier'],(4.2,0,-3),1,math.pi/2)
 place(k['PalmTree'],(-5,0,-5),1.2);clone(k['PalmTree'],(5,0,-4),1.3);clone(k['PalmTree'],(-5,0,3),1.1)
 place(k['CoastalRock'],(5,0,2));clone(k['CoastalRock'],(-5,0,-2),1.3)
-place(load('kart-azure.glb')[0],(-1.1,.02,1.1),1.1,-.13);place(load('kart-ember.glb')[0],(1.25,.02,-1.1),1.1,.11)
+place(kart_with_driver('azure','Fox'),(-1.1,.02,1.1),1.1,-.13);place(kart_with_driver('ember','Panda'),(1.25,.02,-1.1),1.1,.11)
 hero('kart-preview',(7.8,5.7,10),(0,.8,0),11.8)
 
 A.manifest()

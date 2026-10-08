@@ -2,7 +2,8 @@
 
 All assets in `ui/public/room-games/` and the accompanying preview renders are
 original procedural artwork authored for this repository by
-`ui/assets-src/room-games/build_assets.py`. The scripts are the source assets.
+`ui/assets-src/room-games/build_assets.py` and `build_roster.py`. The scripts
+are the source assets.
 No external mesh, image, animation, logo, or character design was incorporated.
 No downloaded archives or third-party license obligations are present.
 
@@ -15,5 +16,5 @@ Blender's software license does not restrict use of the generated artwork.
 Material colors and meshes require no external images. SHA-256 hashes and byte
 sizes for the shipped GLBs are recorded in `ui/public/room-games/manifest.json`.
 
-The original sci-fi robots and racing pilots are independent designs. No
+The original sci-fi soldiers and animal/robot racing drivers are independent designs. No
 licensed game characters, car brands, or game franchise marks are used.

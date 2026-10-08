@@ -1,11 +1,12 @@
 # Rooms Arcade original art
 
 A compact, cohesive hard-surface art kit for Arena Duel and Circuit Clash. The
-fighters are original autonomous arena robots; the kart drivers are original
-helmeted pilots. These are intentionally stylized small-web-game assets, not a
+fighters are original armored arena soldiers; the kart drivers are original
+fox, panda, rabbit and robot characters. These are intentionally stylized small-web-game assets, not a
 claim of AAA production scale.
 
-Every shipped mesh and material is authored by `build_assets.py` in Blender.
+Every shipped mesh and material is authored by `build_assets.py` and
+`build_roster.py` in Blender.
 There are no downloaded source meshes, texture dependencies, or paid assets.
 The forms combine sculpted shells, beveled armor panels, recessed vents,
 mechanical joints, wheel spokes, engine components, emissive accents, and
@@ -18,12 +19,13 @@ Run from the repository root with Blender 5.2:
 
 ```sh
 /Applications/Blender.app/Contents/MacOS/Blender --background --python ui/assets-src/room-games/build_assets.py
+/Applications/Blender.app/Contents/MacOS/Blender --background --python ui/assets-src/room-games/build_roster.py
 /Applications/Blender.app/Contents/MacOS/Blender --background --python ui/assets-src/room-games/validate_assets.py
 /Applications/Blender.app/Contents/MacOS/Blender --background --python ui/assets-src/room-games/render_heroes.py
 ```
 
 The first command creates six GLBs, the hash manifest, and front, rear, and environment source previews.
-The second re-imports each GLB, checks finite mesh bounds, asset roots, clip
+The roster command adds two libraries and four portraits. The validation command re-imports each GLB, checks finite mesh bounds, asset roots, clip
 names, zero texture dependencies and the 20 MiB geometry budget, and writes
 `validation.json`. The last renders the two chooser images **from shipped
 GLBs**, so the hero artwork represents the actual geometry. The pipeline uses
@@ -53,8 +55,8 @@ surfaces must agree with the simulation's collision and route definitions.
 
 Blender imports and hero/source renders were verified. GPU performance, native
 pointer lock, gameplay collisions, and networking belong to runtime validation.
-The robot uses rigid articulated object animation rather than a deforming skin.
-The karts expose wheel and head pivots for runtime animation, with no baked clip.
+The fighter uses rigid articulated object animation rather than a deforming skin.
+The karts expose wheel pivots and a driver socket for runtime animation, with no baked clip.
 
 ## Visual revision 2
 
@@ -77,3 +79,19 @@ Before/after references: `previews/before/fighter-azure.png` versus
 `previews/kart-azure.png`. Rear detail is visible in `previews/fighter-rear.png`
 and `previews/kart-rear.png`. Renderer composition and camera work are separate
 from the asset revision; white collision proxies must not cover the artwork.
+
+
+## Character and adventure expansion
+
+`build_roster.py` creates four original, expressive drivers with separate head
+pivots and transparent chooser portraits, plus the country/underwater scenery
+library. Karts export a `DriverSocket` and no baked driver. The roster is one
+shared GLB, under 1.5 MiB. To render seated attachment checks after both scripts:
+
+```sh
+/Applications/Blender.app/Contents/MacOS/Blender --background --python-expr "import sys;sys.path.insert(0,'ui/assets-src/room-games');import build_roster as R;R.kart_previews()"
+```
+
+The fighter revision adds a visible human face, tactical undersuit, utility
+belt, ammunition pouches, pack side pockets, chest harness, articulated gloves,
+and a low-ready gun pose. Idle, Run, Shoot and Death remain compatible.

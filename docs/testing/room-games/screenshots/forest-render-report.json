@@ -5,20 +5,20 @@
     "name": "Fernwood Rally"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 58.517555266579976,
-  "frames": 590,
-  "drawCalls": 193,
-  "triangles": 250312,
-  "frameMs": 1.6444704630322489,
+  "fps": 59.35696619950536,
+  "frames": 430,
+  "drawCalls": 245,
+  "triangles": 200734,
+  "frameMs": 1.072573959291658,
   "camera": {
-    "x": 15.788942983642514,
-    "y": 3.45,
-    "z": -45.51989162977097
+    "x": 6.6327092156714125,
+    "y": 3.8394330433771393,
+    "z": -49.722815520923405
   },
   "cameraDirection": {
-    "x": 0.9397531615468742,
-    "y": -0.2042941655536683,
-    "z": 0.27409467211783817
+    "x": 0.9764337981665946,
+    "y": -0.20429416555366825,
+    "z": 0.06957680445873039
   },
   "errors": [],
   "assets": [
@@ -31,6 +31,22 @@
       "status": 200
     },
     {
+      "path": "/room-games/driver-fox.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/driver-rabbit.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/driver-panda.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/driver-robot.png",
+      "status": 200
+    },
+    {
       "path": "/room-games/environment-kit.glb",
       "status": 200
     },
@@ -40,6 +56,14 @@
     },
     {
       "path": "/room-games/kart-ember.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/drivers.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/adventure-kit.glb",
       "status": 200
     }
   ]

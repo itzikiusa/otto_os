@@ -7,7 +7,7 @@ export function inputFromKeys(keys: ReadonlySet<string>, yaw: number, pitch: num
   let moveX = Number(keys.has('KeyD') || keys.has('ArrowRight')) - Number(keys.has('KeyA') || keys.has('ArrowLeft'));
   let moveZ = Number(keys.has('KeyW') || keys.has('ArrowUp')) - Number(keys.has('KeyS') || keys.has('ArrowDown'));
   const length = Math.max(1, Math.hypot(moveX, moveZ)); moveX /= length; moveZ /= length;
-  return {moveX, moveZ, yaw, pitch: clampPitch(pitch), fire, reload: keys.has('KeyR'), jump: keys.has('Space'), sprint: keys.has('ShiftLeft') || keys.has('ShiftRight'), drift: keys.has('Space'), item: keys.has('KeyE'), reset: keys.has('KeyR')};
+  return {moveX, moveZ, yaw, pitch: clampPitch(pitch), fire, weapon: keys.has('Digit1')?1:keys.has('Digit2')?2:keys.has('Digit3')?3:0, reload: keys.has('KeyR'), jump: keys.has('Space'), sprint: keys.has('ShiftLeft') || keys.has('ShiftRight'), drift: keys.has('Space'), item: keys.has('KeyE'), reset: keys.has('KeyR')};
 }
 
 /** Canvas-scoped controls. Losing focus releases every held input immediately. */
@@ -48,7 +48,7 @@ export class GameControls {
     canvas.addEventListener('keydown', e => {
       if (e.code === 'KeyV' && !e.repeat) { e.preventDefault(); toggleCamera?.(); return; }
       if (e.code === 'Escape') { this.release(); return; }
-      if (!['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','ShiftLeft','ShiftRight','KeyE','KeyR'].includes(e.code)) return;
+      if (!['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','ShiftLeft','ShiftRight','KeyE','KeyR','Digit1','Digit2','Digit3'].includes(e.code)) return;
       e.preventDefault(); this.active = true; this.changed(true); this.keys.add(e.code);
     }, {signal});
     window.addEventListener('keyup', e => this.keys.delete(e.code), {signal});
