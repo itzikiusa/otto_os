@@ -1549,7 +1549,7 @@ async fn refine(
     // SAME object, so no persist can regress the row.
     let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
     let turn_run = VaultDocsRun {
-        id: otto_core::new_id().to_string(),
+        id: turn_id.clone(),
         ws_id: ws_id.clone(),
         vault_id,
         kind: "refine".into(),
@@ -1580,7 +1580,6 @@ async fn refine(
         started_at: chrono::Utc::now().to_rfc3339(),
         finished_at: None,
     };
-    let turn_id = turn_run.id.clone();
     if let Err(e) = repo.upsert(&run_row(&turn_run)).await {
         warn!("vault_docs: persist refine turn {turn_id}: {e}");
     }
