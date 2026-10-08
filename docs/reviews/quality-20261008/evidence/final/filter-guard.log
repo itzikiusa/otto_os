@@ -1,0 +1,127 @@
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `otto-server` (test "it") generated 1 warning
+warning: `ottod` (bin "ottod") generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+   12  [default] (package(otto-usage) & binary(e2e))
+    5  [default] (package(otto-server) & binary(it) & test(/^k8s_monitor_clickhouse::/))
+    3  [default] (package(otto-server) & binary(it) & test(/^k8s_backfill_budget::/))
+    4  [default] package(otto-server) & binary(it) & test(/^runtime_lag::/)
+    1  [default] (package(otto-automation) & test(/^goal_loop::goal_loop_tests::until_flag_wakes_on_ring_and_backstops_a_silent_store$/))
+    1  [default] (package(otto-automation) & test(/^goal_loop_commands::tests::cancellation_kills_verification_descendants$/))
+    1  [default] (package(otto-swarm) & test(/^runtime::wake::tests::a_poke_wakes_the_coordinator_after_the_min_gap$/))
+    1  [default] (package(otto-state) & test(/maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed$/))
+    1  [default] (package(otto-keychain) & test(/control::tests::locked_keychain_times_out_instead_of_blocking$/))
+   68  [default] package(otto-pty)
+  279  [default] package(otto-sessions)
+   40  [default] package(otto-sandbox)
+   58  [default] package(otto-automation)
+   51  [default] package(otto-swarm)
+   39  [default] package(otto-agent-run)

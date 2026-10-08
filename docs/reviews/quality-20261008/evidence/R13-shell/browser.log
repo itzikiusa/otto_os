@@ -1,0 +1,69 @@
+[WebServer] (node:41568) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-OikTbH OTTO_PORT=17873
+2026-10-07T23:40:03.600517Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-OikTbH)
+2026-10-07T23:40:03.851083Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-OikTbH/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:40:03.856335Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-OikTbH/clickhouse, port 58880)
+2026-10-07T23:40:03.860236Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:40:03.860778Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:40:03.860816Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:40:03.860908Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:40:03.861119Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:40:03.861173Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:40:03.861259Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:40:03.861278Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:40:03.863157Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:40:03.946616Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:40:03.954646Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:40:03.954764Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:40:03.954801Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:40:03.954836Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:40:03.954886Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:40:03.959659Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:40:03.959713Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:40:03.959734Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:40:03.959759Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:40:03.959776Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:40:03.959821Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:40:03.959946Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:40:03.974862Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:40:03.985365Z  INFO otto_server::boot::recovery: boot: post-listen work done in 124 ms (plugins=118)
+2026-10-07T23:40:04.019079Z  INFO ottod: listening on http://127.0.0.1:17873
+2026-10-07T23:40:04.019293Z  INFO ottod: alt loopback lane on http://localhost:17873 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:40:04.019365Z  INFO otto_server::boot: boot: ready in 418 ms (db_compact=0 db_open=245 maintenance=2 modules=10 restore=0 recovery=159)
+[e2e] test daemon ready (pid 41570); root onboarded.
+
+Running 14 tests using 1 worker
+
+2026-10-07T23:40:04.261914Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-OikTbH/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:40:04.263948Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:40:04.263965Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:40:04.264520Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:40:04.264562Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+2026-10-07T23:40:04.272013Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+(node:41647) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 2:40:04 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   1 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:29:1 › initial School loading and failed data use truthful load states and Retry (1.4s)
+[WebServer] 2:40:06 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   2 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:57:3 › no-WebGL list retains overflow sessions and menus at 1440px (826ms)
+[WebServer] 2:40:07 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   3 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:57:3 › no-WebGL list retains overflow sessions and menus at 390px (885ms)
+[WebServer] 2:40:07 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   4 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:94:1 › complete classroom list pages over one hundred rows and clamps after refresh (928ms)
+[WebServer] 2:40:08 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   5 [desktop-browser] › e2e/desktop-home-classrooms-regressions.spec.ts:121:1 › failed School refresh retains the loaded list and exposes Retry until recovery (770ms)
+(node:41996) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   6 [desktop-browser] › e2e/desktop-modal-focus-resize.spec.ts:5:1 › open workspace modal keeps its draft and focus when the desktop floating bar unmounts (1.7s)
+  ✓   7 [desktop-browser] › e2e/desktop-snip.spec.ts:59:1 › upload auto-copies the original to the clipboard sink (109ms)
+  ✓   8 [desktop-browser] › e2e/desktop-snip.spec.ts:65:1 › editor draws box + arrow + text and auto-copies the annotated PNG (1.9s)
+  ✓   9 [desktop-browser] › e2e/desktop-snip.spec.ts:104:1 › undo/redo, color choice, select + delete (944ms)
+  ✓  10 [desktop-browser] › e2e/desktop-snip.spec.ts:140:1 › copy endpoint prefers annotated; list + delete round-trip (108ms)
+  ✓  11 [desktop-browser] › e2e/desktop-snip.spec.ts:163:1 › deleted snip renders the missing state in the editor (339ms)
+  ✓  12 [desktop-browser] › e2e/desktop-snip.spec.ts:168:1 › sidebar: Connections is a plain row without an open-connections list (478ms)
+  ✓  13 [desktop-browser] › e2e/desktop-workbench.spec.ts:81:1 › create → type → format → preview → history restore (3.6s)
+  ✓  14 [desktop-browser] › e2e/desktop-workbench.spec.ts:138:1 › Send to → Database — Run on… opens prefilled with the brand sweep (969ms)
+
+  14 passed (17.1s)

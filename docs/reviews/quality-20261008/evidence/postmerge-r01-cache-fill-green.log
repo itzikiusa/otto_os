@@ -1,0 +1,75 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.95s
+     Running unittests src/lib.rs (target/debug/deps/otto_rbac-05d9feda91087da8)
+
+running 67 tests
+test passwords::tests::password_policy ... ok
+test cache::tests::disabled_cache_is_always_miss ... ok
+test cache::tests::expired_entry_is_a_miss ... ok
+test cache::tests::evict_single_removes_entry ... ok
+test cache::tests::grants_invalidator_impl_delegates_to_evict_user ... ok
+test cache::tests::hit_and_miss ... ok
+test cache::tests::unrelated_revocation_does_not_discard_a_valid_pending_fill ... ok
+test cache::tests::evict_user_removes_all_tokens_for_that_user ... ok
+test cache::tests::process_wide_eviction_reaches_every_live_cache ... ok
+test cache::tests::repeated_expiry_refresh_keeps_reverse_index_bounded ... ok
+test cache::tests::fill_older_than_bounded_invalidation_history_is_not_cached ... ok
+test cache::tests::revocation_while_lookup_is_pending_cannot_repopulate_the_cache ... ok
+test cache::tests::live_entries_are_bounded_and_latest_context_remains_usable ... ok
+test cache::tests::distinct_expired_tokens_do_not_accumulate_for_process_lifetime ... ok
+test tokens::tests::generate_otp_is_six_digits ... ok
+test cache::tests::lazy_expiry_removes_reverse_index_without_waiting_for_capacity ... ok
+test passwords::tests::roundtrip ... ok
+test passwords::tests::bounded_verify_runs_off_thread_and_matches ... ok
+test tokens::tests::boot_sweep_expires_managed_session_tokens_only ... ok
+test tokens::tests::cached_revoked_api_token_rejected_immediately ... ok
+test tokens::tests::impersonation_rejects_disabled_target ... ok
+test tokens::tests::api_token_lifecycle_mint_list_auth_revoke ... ok
+test tokens::tests::cached_login_token_served_from_cache_on_repeat ... ok
+test tokens::tests::impersonation_token_is_never_cached_revoke_is_instant ... ok
+test tokens::tests::expired_otp_cannot_be_verified ... ok
+test tokens::tests::cached_revoke_all_for_user_evicts_user_tokens ... ok
+test tokens::tests::impersonation_token_expires ... ok
+test tokens::tests::cached_revoked_login_token_rejected_immediately ... ok
+test tokens::tests::impersonation_token_resolves_real_and_effective ... ok
+test tokens::tests::lapsed_otp_share_is_listed_dormant_and_extend_is_capped ... ok
+test tokens::tests::boot_sweep_expires_pre_cutover_legacy_label_tokens ... ok
+test tokens::tests::expired_share_token_fails_auth ... ok
+test tokens::tests::api_token_revoke_is_owner_scoped ... ok
+test tokens::tests::boot_sweep_spares_sessions_that_survived_the_restart ... ok
+test tokens::tests::list_shares_for_session_lists_live_only ... ok
+test tokens::tests::managed_session_token_rejects_deleted_session_even_after_authentication ... ok
+test tokens::tests::legacy_mcp_token_is_unrestricted ... ok
+test tokens::tests::managed_session_tokens_revoke_across_restart_without_touching_personal_tokens ... ok
+test tokens::tests::multiple_mcp_tokens_per_user_coexist ... ok
+test tokens::tests::mcp_token_scope_round_trips_through_authenticate ... ok
+test tokens::tests::managed_token_origin_distinguishes_agent_calls_from_personal_tokens ... ok
+test tokens::tests::revoke_all_for_user_clears_shares_too ... ok
+test tokens::tests::revoke_all_for_user_invalidates_every_token ... ok
+test tokens::tests::otp_verify_succeeds_once_then_is_single_use ... ok
+test tokens::tests::purge_expired_drops_only_long_expired_non_share_rows ... ok
+test tokens::tests::revoke_mcp_tokens_leaves_scoped_tokens_alone ... ok
+test tokens::tests::otp_share_is_pending_until_verified ... ok
+test tokens::tests::plain_share_is_never_otp_pending ... ok
+test tokens::tests::otp_share_window_clamps_to_12h ... ok
+test tokens::tests::revoke_share_is_owner_scoped ... ok
+test tokens::tests::revoked_share_token_fails_auth ... ok
+test tokens::tests::root_owned_share_does_not_grant_root ... ok
+test tokens::tests::rotate_mcp_token_unknown_id_is_none ... ok
+test tokens::tests::share_token_carries_editor_scope ... ok
+test tokens::tests::rotate_mcp_token_rotates_only_the_selected_token ... ok
+test tokens::tests::session_token_lifecycle ... ok
+test tokens::tests::share_token_authenticates_with_viewer_scope ... ok
+test tokens::tests::share_token_is_never_cached_revoke_is_instant ... ok
+test tokens::tests::uncached_revokes_evict_the_shared_authenticator_cache ... ok
+test tokens::tests::share_token_ttl_is_clamped ... ok
+test tokens::tests::share_token_rejects_admin_role ... ok
+test tokens::tests::token_inventory_distinguishes_durable_ownership_from_legacy_label_candidates ... ok
+test tokens::tests::share_token_ttl_is_fixed_not_sliding ... ok
+test tokens::tests::vault_reviewer_token_is_server_bound_and_read_only ... ok
+test tokens::tests::vault_reviewer_token_fails_closed_when_persisted_scope_is_missing ... ok
+test tokens::tests::verified_otp_share_repends_after_window ... ok
+test tokens::tests::wrong_otps_burn_the_code_after_the_cap ... ok
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.54s

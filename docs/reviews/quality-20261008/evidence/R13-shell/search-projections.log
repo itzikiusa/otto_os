@@ -1,0 +1,10 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.36s
+     Running unittests src/lib.rs (target/debug/deps/otto_state-b408ed1d6f830c13)
+
+running 2 tests
+test search::tests::every_projection_is_valid_and_empty_for_a_new_database ... ok
+10k rows Unicode late-match search: 21.843209ms
+test search::tests::bounded_unicode_search_reaches_matches_after_many_nonmatches ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 425 filtered out; finished in 0.74s

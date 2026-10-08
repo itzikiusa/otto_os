@@ -1,0 +1,148 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.03s
+     Running unittests src/lib.rs (target/debug/deps/otto_channels-6162d955698b9ad8)
+
+running 123 tests
+test bridge::conv_lock_tests::an_edit_without_a_live_session_is_not_forwarded ... ok
+test attach_guard::tests::sensitive_names ... ok
+test attach_guard::tests::protected_dirs_win_even_inside_a_root ... ok
+test attach_guard::tests::refuses_secrets_and_paths_outside_roots ... ok
+test attach_guard::tests::allows_files_under_cwd_tmp_and_artifact_dirs ... ok
+test attach_guard::tests::home_or_root_cwd_is_not_a_root ... ok
+test admission::tests::injected_handles_share_limits_and_unrelated_fixtures_are_isolated ... ok
+test admission::tests::backlog_is_bounded_and_rejection_capacity_never_becomes_work ... ok
+test admission::tests::stopping_a_full_conversation_uses_bounded_reserved_capacity ... ok
+test bridge::tests::allowed_users_gate ... ok
+test bridge::tests::agent_paste_input_uses_bracketed_paste_without_submit_key ... ok
+test bridge::tests::agent_paste_input_cannot_break_out_of_the_paste ... ok
+test bridge::tests::an_edit_is_marked_for_the_agent ... ok
+test bridge::tests::detached_session_no_longer_matches_its_conversation ... ok
+test bridge::tests::conversation_match_uses_the_meta_stamped_at_creation ... ok
+test bridge::tests::alive_means_not_exited_and_not_archived ... ok
+test bridge::tests::a_blank_allow_list_admits_nobody_unless_opened ... ok
+test bridge::conv_lock_tests::transports_with_the_same_chat_id_have_distinct_sessions_and_locks ... ok
+test bridge::tests::session_title_uses_first_line_trimmed_and_truncated ... ok
+test bridge::tests::user_text_cannot_forge_otto_markers ... ok
+test bridge::conv_lock_tests::idle_locks_are_pruned ... ok
+test attach_guard::tests::vet_follows_symlinks_and_checks_links ... ok
+test health::tests::a_listener_walks_connecting_connected_reconnecting ... ok
+test health::tests::a_superseded_listener_cannot_overwrite_its_replacement ... ok
+test email::tests::rejects_a_malformed_recipient_address ... ok
+test health::tests::long_reasons_are_clipped ... ok
+test email::tests::rejects_a_malformed_sender_address ... ok
+test http::tests::a_listener_token_can_only_be_enabled_once ... ok
+test improve_notify::tests::applied_memory_edit_is_described_as_memory ... ok
+test improve_notify::tests::applied_skill_edit_formats_one_line ... ok
+test improve_notify::tests::budget_recovered_is_silent ... ok
+test improve_notify::tests::budget_exceeded_routes_correctly ... ok
+test admission::tests::cancelled_work_releases_capacity_and_evicted_identity_counts ... ok
+test improve_notify::tests::finished_run_with_no_changes_is_silent ... ok
+test health::tests::waiting_conflict_snapshot_and_remove ... ok
+test improve_notify::tests::insight_ready_has_no_workspace ... ok
+test improve_notify::tests::non_improvement_events_are_ignored ... ok
+test improve_notify::tests::finished_run_summarizes_counts ... ok
+test improve_notify::tests::pending_edit_asks_for_approval ... ok
+test health::tests::rejected_senders_are_listed_deduped_and_capped ... ok
+test improve_notify::tests::review_done_routes_to_review_key ... ok
+test improve_notify::tests::review_queued_is_silent ... ok
+test improve_notify::tests::swarm_active_is_silent ... ok
+test improve_notify::tests::swarm_done_routes_to_swarm_key ... ok
+test manager::tests::generation_signature_changes_when_integration_is_updated ... ok
+test manager::tests::an_unreadable_token_is_not_ready_then_resolves_once_readable ... ok
+test mirror::tests::a_stalled_turn_re_arms_on_new_tool_activity ... ok
+test mirror::tests::a_silent_turn_stalls_after_the_timeout ... ok
+test mirror::tests::classify_send_error_matches_telegram_descriptions ... ok
+test email::tests::builds_a_plaintext_message ... ok
+test email::tests::builds_multipart_with_attachment ... ok
+test mirror::tests::classify_send_error_matches_slack_error_codes ... ok
+test mirror::tests::extract_send_blocks_parses_marked_replies ... ok
+test mirror::tests::extract_file_paths_parses_marked_attachments ... ok
+test mirror::tests::feed_health_backs_off_on_rate_limit ... ok
+test mirror::tests::feed_health_trips_after_max_consecutive_failures ... ok
+test mirror::tests::feed_health_trips_on_permanent_error ... ok
+test mirror::tests::render_feed_short_is_verbatim ... ok
+test mirror::tests::render_tool_line_plain_step_is_just_the_display ... ok
+test mirror::tests::render_tool_line_terminal_indents_on_plain_channel ... ok
+test email::tests::transport_builds_for_valid_host ... ok
+test mirror::tests::render_tool_line_terminal_uses_fenced_block_on_slack ... ok
+test mirror::tests::render_feed_trims_oldest_to_fit_budget ... ok
+test mirror::tests::retry_after_hint_reads_the_adapter_wording ... ok
+test mirror::tests::status_header_cycles_through_phrases ... ok
+test mirror::tests::strip_file_directives_removes_markup_keeps_prose ... ok
+test secrets_redact::tests::authorization_headers_are_redacted ... ok
+test secrets_redact::tests::core_shapes_and_pem_are_redacted ... ok
+test secrets_redact::tests::emails_kept_only_when_asked ... ok
+test secrets_redact::tests::env_assignments_and_password_flags_are_redacted ... ok
+test secrets_redact::tests::url_userinfo_is_redacted ... ok
+test secrets_redact::tests::prose_and_plain_commands_are_untouched ... ok
+test slack::tests::content_subtypes_are_forwarded ... ok
+test bridge::conv_lock_tests::new_conversation_cannot_recover_the_old_session_during_detachment ... FAILED
+test slack::tests::dedup_window_evicts_oldest_not_everything ... ok
+test slack::tests::an_unfurl_is_not_a_user_edit_and_dedups_onto_the_original ... ok
+test slack::tests::membership_subtypes_are_skipped ... ok
+test slack::tests::rejected_app_tokens_are_reported_as_failing_with_a_fix ... ok
+test slack::tests::retry_after_is_parsed_and_capped ... ok
+test telegram::tests::captions_are_read_and_bare_files_are_flagged ... ok
+test telegram::tests::failed_admission_retains_suffix_and_retry_does_not_duplicate_prefix ... ok
+test slack::tests::sweep_removes_only_stale_slack_attachments ... ok
+test telegram::tests::long_poll_request_timeout_exceeds_poll_interval ... ok
+test telegram::tests::http_clients_build ... ok
+test telegram::tests::new_generation_waits_for_previous_poller ... ok
+test mirror::tests::a_rate_limited_final_reply_is_re_posted ... ok
+test telegram::tests::offsets_persist_across_generations_and_only_advance ... ok
+test telegram::tests::markdown_parse_error_400_falls_back_to_plain_text ... ok
+test telegram::tests::non_2xx_error_keeps_description_and_status ... ok
+test transcript::tests::abbreviate_home_does_not_mangle_sibling_prefix ... ok
+test transcript::tests::abbreviate_home_handles_exact_home_and_no_match_and_empty ... ok
+test transcript::tests::abbreviate_home_replaces_every_occurrence_in_a_command ... ok
+test mirror::tests::retries_are_bounded_and_only_for_rate_limits ... ok
+test transcript::tests::abbreviate_home_replaces_prefix_with_tilde ... ok
+test transcript::tests::complete_lines_leaves_a_partial_trailing_line_unconsumed ... ok
+test transcript::tests::bash_call_becomes_terminal_label_plus_code_block_preview ... ok
+test transcript::tests::final_event_still_parses ... ok
+test telegram::tests::replies_are_sent_even_without_the_replied_message ... ok
+test transcript::tests::line_at_or_after_compares_the_jsonl_timestamp ... ok
+test transcript::tests::non_path_tools_are_unchanged ... ok
+test telegram::tests::poll_cancelled_mid_request_does_not_dispatch ... ok
+test transcript::tests::poll_delay_backs_off_only_between_turns ... ok
+test transcript::tests::read_summary_abbreviates_home ... ok
+test transcript::tests::terminal_preview_caps_long_multiline_commands ... ok
+test webhook::tests::blank_callback_url_is_treated_as_none ... ok
+test webhook::tests::channel_is_webhook ... ok
+test webhook::tests::no_callback_url_sends_are_noops ... ok
+test webhook::tests::ssrf_guard_blocks_loopback_callback ... ok
+test health::tests::a_repeated_wait_keeps_its_since ... ok
+test transcript::tests::history_start_skips_only_lines_that_cannot_be_at_or_after_since ... ok
+test admission::tests::many_conversations_share_integration_and_global_limits ... ok
+test slack::tests::rejected_work_is_acknowledged_only_after_a_delivered_notice ... ok
+test bridge::conv_lock_tests::a_slow_conversation_does_not_block_another ... ok
+test bridge::conv_lock_tests::turns_on_one_session_run_one_at_a_time_in_arrival_order ... ok
+test bridge::conv_lock_tests::a_queued_message_gets_one_notice ... ok
+test bridge::conv_lock_tests::a_turn_without_a_final_releases_on_idle ... ok
+test bridge::conv_lock_tests::separately_constructed_bridges_share_injected_capacity_only ... ok
+test mirror::tests::a_turn_hold_waits_for_the_final ... ok
+test telegram::tests::a_held_open_poll_ends_on_cancel ... ok
+test mirror::tests::status_wakes_park_between_turns ... ok
+test transcript::tests::reattached_tail_skips_history_and_waits_for_whole_lines ... ok
+test mirror::tests::typing_loop_parks_between_turns_and_resumes_on_begin_turn ... ok
+test transcript::tests::idle_tailer_backs_off_and_wakes_on_a_new_turn ... ok
+
+failures:
+
+---- bridge::conv_lock_tests::new_conversation_cannot_recover_the_old_session_during_detachment stdout ----
+
+thread 'bridge::conv_lock_tests::new_conversation_cannot_recover_the_old_session_during_detachment' (3553583) panicked at crates/otto-channels/src/bridge.rs:1496:13:
+routing entered before metadata was detached
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bridge::conv_lock_tests::new_conversation_cannot_recover_the_old_session_during_detachment
+
+test result: FAILED. 122 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s
+
+error: test failed, to rerun pass `-p otto-channels --lib`

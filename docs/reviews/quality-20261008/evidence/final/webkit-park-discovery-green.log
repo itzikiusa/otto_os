@@ -1,0 +1,5 @@
+Listing tests:
+  [desktop-webkit] › desktop-terminal-park-redraw.spec.ts:98:1 › a passing pane size never reflows the TUI screen or reaches the PTY
+  [desktop-webkit] › desktop-terminal-park-redraw.spec.ts:113:1 › switching away and back with a passing size on return keeps the parked TUI intact
+  [desktop-webkit] › desktop-terminal-park-redraw.spec.ts:144:1 › Redraw terminal rebuilds a garbled screen from a fresh snapshot
+Total: 3 tests in 1 file

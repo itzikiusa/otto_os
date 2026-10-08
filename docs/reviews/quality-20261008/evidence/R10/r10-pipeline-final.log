@@ -1,0 +1,18 @@
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.53s
+     Running tests/pipeline_e2e.rs (target/debug/deps/pipeline_e2e-9eebebde2c5d378b)
+
+running 11 tests
+test missing_or_invalid_saved_credentials_never_start_a_transport ... ok
+test governed_calls_reuse_one_pooled_client ... ok
+test sweep_is_lazy_for_unused_stdio_servers ... ok
+test delegated_configure_cannot_attach_or_repoint_native_mcp_credentials ... ok
+test http_filters_servers_tools_configuration_and_guessed_actions ... ok
+test full_governance_flow ... ok
+test resource_denial_blocks_even_readonly_tool_and_dry_run ... ok
+test discover_labels_risk_and_health_probes ... ok
+test patching_secret_env_preserves_omitted_secret_headers ... ok
+test allowlist_and_policy_deny ... ok
+test governance_changes_while_credentials_are_loading_prevent_execution ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.43s

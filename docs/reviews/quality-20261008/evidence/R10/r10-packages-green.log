@@ -1,0 +1,259 @@
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.91s
+     Running unittests src/lib.rs (target/debug/deps/otto_channels-6162d955698b9ad8)
+
+running 114 tests
+test bridge::conv_lock_tests::an_edit_without_a_live_session_is_not_forwarded ... ok
+test attach_guard::tests::sensitive_names ... ok
+test bridge::tests::a_blank_allow_list_admits_nobody_unless_opened ... ok
+test attach_guard::tests::allows_files_under_cwd_tmp_and_artifact_dirs ... ok
+test attach_guard::tests::refuses_secrets_and_paths_outside_roots ... ok
+test attach_guard::tests::protected_dirs_win_even_inside_a_root ... ok
+test bridge::conv_lock_tests::transports_with_the_same_chat_id_have_distinct_sessions_and_locks ... ok
+test bridge::tests::agent_paste_input_uses_bracketed_paste_without_submit_key ... ok
+test bridge::tests::agent_paste_input_cannot_break_out_of_the_paste ... ok
+test bridge::tests::alive_means_not_exited_and_not_archived ... ok
+test bridge::tests::allowed_users_gate ... ok
+test attach_guard::tests::home_or_root_cwd_is_not_a_root ... ok
+test bridge::tests::an_edit_is_marked_for_the_agent ... ok
+test bridge::tests::conversation_match_uses_the_meta_stamped_at_creation ... ok
+test bridge::tests::detached_session_no_longer_matches_its_conversation ... ok
+test bridge::tests::session_title_uses_first_line_trimmed_and_truncated ... ok
+test bridge::tests::user_text_cannot_forge_otto_markers ... ok
+test email::tests::builds_a_plaintext_message ... ok
+test email::tests::rejects_a_malformed_recipient_address ... ok
+test email::tests::builds_multipart_with_attachment ... ok
+test email::tests::rejects_a_malformed_sender_address ... ok
+test health::tests::a_listener_walks_connecting_connected_reconnecting ... ok
+test email::tests::transport_builds_for_valid_host ... ok
+test health::tests::a_superseded_listener_cannot_overwrite_its_replacement ... ok
+test health::tests::long_reasons_are_clipped ... ok
+test bridge::conv_lock_tests::idle_locks_are_pruned ... ok
+test health::tests::waiting_conflict_snapshot_and_remove ... ok
+test http::tests::a_listener_token_can_only_be_enabled_once ... ok
+test health::tests::rejected_senders_are_listed_deduped_and_capped ... ok
+test improve_notify::tests::applied_memory_edit_is_described_as_memory ... ok
+test improve_notify::tests::applied_skill_edit_formats_one_line ... ok
+test improve_notify::tests::budget_exceeded_routes_correctly ... ok
+test improve_notify::tests::budget_recovered_is_silent ... ok
+test improve_notify::tests::finished_run_summarizes_counts ... ok
+test improve_notify::tests::finished_run_with_no_changes_is_silent ... ok
+test improve_notify::tests::insight_ready_has_no_workspace ... ok
+test improve_notify::tests::non_improvement_events_are_ignored ... ok
+test improve_notify::tests::pending_edit_asks_for_approval ... ok
+test improve_notify::tests::review_done_routes_to_review_key ... ok
+test improve_notify::tests::review_queued_is_silent ... ok
+test improve_notify::tests::swarm_active_is_silent ... ok
+test improve_notify::tests::swarm_done_routes_to_swarm_key ... ok
+test attach_guard::tests::vet_follows_symlinks_and_checks_links ... ok
+test manager::tests::an_unreadable_token_is_not_ready_then_resolves_once_readable ... ok
+test manager::tests::generation_signature_changes_when_integration_is_updated ... ok
+test mirror::tests::a_silent_turn_stalls_after_the_timeout ... ok
+test mirror::tests::a_stalled_turn_re_arms_on_new_tool_activity ... ok
+test mirror::tests::classify_send_error_matches_slack_error_codes ... ok
+test mirror::tests::classify_send_error_matches_telegram_descriptions ... ok
+test mirror::tests::extract_file_paths_parses_marked_attachments ... ok
+test mirror::tests::extract_send_blocks_parses_marked_replies ... ok
+test mirror::tests::feed_health_backs_off_on_rate_limit ... ok
+test mirror::tests::feed_health_trips_after_max_consecutive_failures ... ok
+test mirror::tests::feed_health_trips_on_permanent_error ... ok
+test mirror::tests::render_feed_short_is_verbatim ... ok
+test mirror::tests::render_tool_line_plain_step_is_just_the_display ... ok
+test mirror::tests::render_tool_line_terminal_indents_on_plain_channel ... ok
+test mirror::tests::render_tool_line_terminal_uses_fenced_block_on_slack ... ok
+test mirror::tests::render_feed_trims_oldest_to_fit_budget ... ok
+test mirror::tests::retry_after_hint_reads_the_adapter_wording ... ok
+test mirror::tests::status_header_cycles_through_phrases ... ok
+test mirror::tests::strip_file_directives_removes_markup_keeps_prose ... ok
+test secrets_redact::tests::authorization_headers_are_redacted ... ok
+test secrets_redact::tests::core_shapes_and_pem_are_redacted ... ok
+test secrets_redact::tests::emails_kept_only_when_asked ... ok
+test secrets_redact::tests::env_assignments_and_password_flags_are_redacted ... ok
+test secrets_redact::tests::prose_and_plain_commands_are_untouched ... ok
+test secrets_redact::tests::url_userinfo_is_redacted ... ok
+test slack::tests::an_unfurl_is_not_a_user_edit_and_dedups_onto_the_original ... ok
+test slack::tests::content_subtypes_are_forwarded ... ok
+test slack::tests::dedup_window_evicts_oldest_not_everything ... ok
+test slack::tests::membership_subtypes_are_skipped ... ok
+test slack::tests::rejected_app_tokens_are_reported_as_failing_with_a_fix ... ok
+test slack::tests::retry_after_is_parsed_and_capped ... ok
+test telegram::tests::captions_are_read_and_bare_files_are_flagged ... ok
+test telegram::tests::long_poll_request_timeout_exceeds_poll_interval ... ok
+test telegram::tests::http_clients_build ... ok
+test telegram::tests::new_generation_waits_for_previous_poller ... ok
+test telegram::tests::offsets_persist_across_generations_and_only_advance ... ok
+test slack::tests::sweep_removes_only_stale_slack_attachments ... ok
+test transcript::tests::abbreviate_home_does_not_mangle_sibling_prefix ... ok
+test transcript::tests::abbreviate_home_handles_exact_home_and_no_match_and_empty ... ok
+test transcript::tests::abbreviate_home_replaces_every_occurrence_in_a_command ... ok
+test transcript::tests::abbreviate_home_replaces_prefix_with_tilde ... ok
+test transcript::tests::bash_call_becomes_terminal_label_plus_code_block_preview ... ok
+test telegram::tests::markdown_parse_error_400_falls_back_to_plain_text ... ok
+test transcript::tests::complete_lines_leaves_a_partial_trailing_line_unconsumed ... ok
+test telegram::tests::replies_are_sent_even_without_the_replied_message ... ok
+test transcript::tests::final_event_still_parses ... ok
+test transcript::tests::line_at_or_after_compares_the_jsonl_timestamp ... ok
+test transcript::tests::non_path_tools_are_unchanged ... ok
+test telegram::tests::non_2xx_error_keeps_description_and_status ... ok
+test telegram::tests::poll_cancelled_mid_request_does_not_dispatch ... ok
+test transcript::tests::poll_delay_backs_off_only_between_turns ... ok
+test transcript::tests::read_summary_abbreviates_home ... ok
+test transcript::tests::terminal_preview_caps_long_multiline_commands ... ok
+test webhook::tests::blank_callback_url_is_treated_as_none ... ok
+test webhook::tests::channel_is_webhook ... ok
+test webhook::tests::no_callback_url_sends_are_noops ... ok
+test webhook::tests::ssrf_guard_blocks_loopback_callback ... ok
+test mirror::tests::a_rate_limited_final_reply_is_re_posted ... ok
+test mirror::tests::retries_are_bounded_and_only_for_rate_limits ... ok
+test health::tests::a_repeated_wait_keeps_its_since ... ok
+test transcript::tests::history_start_skips_only_lines_that_cannot_be_at_or_after_since ... ok
+test bridge::conv_lock_tests::a_slow_conversation_does_not_block_another ... ok
+test bridge::conv_lock_tests::turns_on_one_session_run_one_at_a_time_in_arrival_order ... ok
+test bridge::conv_lock_tests::a_queued_message_gets_one_notice ... ok
+test bridge::conv_lock_tests::a_turn_without_a_final_releases_on_idle ... ok
+test mirror::tests::a_turn_hold_waits_for_the_final ... ok
+test telegram::tests::a_held_open_poll_ends_on_cancel ... ok
+test mirror::tests::status_wakes_park_between_turns ... ok
+test transcript::tests::reattached_tail_skips_history_and_waits_for_whole_lines ... ok
+test mirror::tests::typing_loop_parks_between_turns_and_resumes_on_begin_turn ... ok
+test transcript::tests::idle_tailer_backs_off_and_wakes_on_a_new_turn ... ok
+
+test result: ok. 114 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.71s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_mcp-e371d0faf72a1824)
+
+running 102 tests
+test auto_approve::tests::no_rules_no_auto_approval ... ok
+test auto_approve::tests::most_specific_rule_is_the_one_recorded ... ok
+test auto_approve::tests::tool_and_category_rules_cover ... ok
+test auto_approve::tests::irreversible_needs_a_per_tool_rule_with_the_second_toggle ... ok
+test auto_approve::tests::disabled_and_unknown_rules_never_cover ... ok
+test auto_approve::tests::audit_reason_names_the_policy ... ok
+test auto_approve::tests::scope_must_match_the_call ... ok
+test client::tests::network_configuration_reaches_stdio_servers_but_credentials_do_not ... ok
+test client::tests::redirects_stay_on_the_origin ... ok
+test client::tests::pick_response_prefers_matching_id_then_any_response ... ok
+test client::tests::sse_notification_before_result_returns_the_result ... ok
+test client::tests::http_sse_response_after_notification_end_to_end ... ok
+test client::tests::stdio_server_request_with_colliding_id_is_answered_not_returned ... ok
+test client::tests::a_server_request_on_the_stream_is_answered_while_it_is_open ... ok
+test client::tests::stdio_servers_inherit_only_the_base_environment ... ok
+test client::tests::newline_free_response_stops_at_cap ... ok
+test outward::tests::a_dot_segment_cannot_traverse_to_another_route ... ok
+test outward::tests::an_update_keeps_every_field_it_did_not_send ... ok
+test outward::tests::api_execute_rejects_brace_overrides_in_route_for ... ok
+test outward::tests::approval_gate_honours_the_per_tool_exemption ... ok
+test outward::tests::assistant_memory_tools_present_classified_and_routed ... ok
+test outward::tests::api_client_tools_present_classified_and_routed ... ok
+test outward::tests::classification_lists_reference_real_tools ... ok
+test outward::tests::confluence_page_tools_route_and_are_tiered ... ok
+test outward::tests::confluence_page_urls_and_transition_names_resolve ... ok
+test outward::tests::aws_k8s_tools_present_and_classified ... ok
+test outward::tests::dangerous_detail_surfaces_api_targets ... ok
+test outward::tests::dangerous_detail_surfaces_cadence_and_destination ... ok
+test outward::tests::dangerous_detail_surfaces_console_targets ... ok
+test outward::tests::dangerous_detail_surfaces_new_tool_targets ... ok
+test outward::tests::create_tool_is_marked_mutating ... ok
+test outward::tests::design_writes_are_approval_gated_and_route_to_the_design_api ... ok
+test outward::tests::design_tools_are_default_on_reads_and_route_to_the_design_api ... ok
+test outward::tests::exempt_list_is_validated_normalized_and_pruned ... ok
+test outward::tests::git_tools_take_a_friendly_repo_ref_and_list_repos_spans_workspaces ... ok
+test outward::tests::every_spec_is_well_formed_and_classified ... ok
+test outward::tests::initialize_negotiates_to_a_supported_protocol_version ... ok
+test outward::tests::headline_features_present_and_governed ... ok
+test outward::tests::internal_reviewer_scope_does_not_depend_on_outward_server_toggle ... ok
+test outward::tests::long_running_tools_get_a_longer_self_call_budget ... ok
+test outward::tests::pick_vault_workspace_prefers_writable_for_mutating_tools ... ok
+test outward::tests::new_discovery_and_git_tools_route_and_classify ... ok
+test outward::tests::pin_verdict_denies_what_it_cannot_verify ... ok
+test outward::tests::pr_number_aliases_and_strings_normalize_before_hashing ... ok
+test outward::tests::query_db_readonly_sql_guard_lives_in_route_for ... ok
+test outward::tests::room_tools_are_default_enabled_and_route ... ok
+test outward::tests::route_for_maps_aws_console ... ok
+test outward::tests::route_for_maps_k8s_console ... ok
+test outward::tests::route_for_maps_workflows_and_brokers ... ok
+test outward::tests::route_for_rejects_missing_args_and_unknown_tool ... ok
+test outward::tests::route_for_maps_git_issues_swarm_memory_usage ... ok
+test outward::tests::run_workflow_forwards_review_mode ... ok
+test client::tests::fresh_transport_rechecks_after_initialize_before_tool_delivery ... ok
+test outward::tests::scheduled_task_tools_are_registered ... ok
+test outward::tests::ui_error_envelope_shape ... ok
+test outward::tests::self_call_errors_keep_the_whole_actionable_message ... ok
+test outward::tests::ui_tools_are_classified ... ok
+test client::tests::notifications_share_the_response_budget ... ok
+test outward::tests::ui_tools_from_a_session_skip_only_the_master_switch ... ok
+test outward::tests::write_tools_are_dangerous_reads_are_default_enabled ... ok
+test outward::tests::ui_tools_are_default_on_and_survive_an_old_saved_list ... ok
+test outward::ui_commands::tests::catalog_problems_catch_each_rule ... ok
+test outward::tests::self_improvement_tools_present_classified_and_routed ... ok
+test outward::ui_commands::tests::mutating_follows_risk ... ok
+test outward::tests::vault_tools_do_not_require_workspace_id ... ok
+test outward::ui_commands::tests::pane_key_matches_the_ui ... ok
+test outward::ui_commands::tests::phase_one_commands_exist ... ok
+test outward::ui_commands::tests::embedded_catalog_parses_and_is_valid ... ok
+test outward::ui_commands::tests::unknown_fields_in_the_file_are_rejected ... ok
+test outward::ui_commands::tests::validate_args_enforces_the_schema ... ok
+test outward::ui_commands::tests::specs_mirror_the_catalog ... ok
+test policy::tests::deny_wins_over_low_priority_allow ... ok
+test policy::tests::glob_helper ... ok
+test policy::tests::min_injection_matches_at_or_above ... ok
+test policy::tests::most_restrictive_wins_among_matches ... ok
+test client::tests::stdio_health_initializes ... ok
+test policy::tests::no_rules_allows ... ok
+test policy::tests::require_approval_for_glob ... ok
+test risk::tests::delete_keyword_is_dangerous_even_without_annotations ... ok
+test risk::tests::destructive_hint_is_dangerous ... ok
+test risk::tests::fetch_keyword_is_medium_injection ... ok
+test risk::tests::open_world_hint_is_high_injection ... ok
+test risk::tests::read_only_hint_is_read_low ... ok
+test risk::tests::unlabeled_fails_closed_write_medium ... ok
+test client::tests::stdio_call_tool ... ok
+test service::tests::canonical_hash_is_key_order_independent ... ok
+test service::tests::sweep_probes_only_recently_used_servers ... ok
+test client::tests::stdio_list_tools ... ok
+test client::tests::concurrent_ops_do_not_serialize ... ok
+test client::tests::a_concurrent_call_reuses_the_busy_session_instead_of_spawning ... ok
+test client::tests::stdio_session_is_reused_across_ops ... ok
+test client::tests::a_cross_host_redirect_does_not_forward_the_secret_header ... ok
+test client::tests::chunked_http_and_sse_stop_at_cap_before_the_stream_ends ... ok
+test client::tests::a_dead_parked_session_is_replaced_once ... ok
+test client::tests::queued_call_rechecks_authorization_after_admission ... ok
+test client::tests::concurrent_burst_keeps_two_server_processes ... ok
+test client::tests::slow_parallel_calls_keep_a_pool_of_two_sessions ... ok
+test service::batch_tests::recheck_deny_rewrites_the_pre_exec_row_not_a_second_row ... ok
+test service::batch_tests::dropped_armed_audit_guard_finalizes_the_row_as_failed ... ok
+test service::batch_tests::legacy_visible_tools_cost_a_fixed_handful_of_statements ... ok
+test service::batch_tests::enforced_batch_verdicts_equal_the_single_checks ... ok
+test service::batch_tests::an_executed_outbound_call_stays_within_its_statement_budget ... ok
+
+test result: ok. 102 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.44s
+
+     Running tests/pipeline_e2e.rs (target/debug/deps/pipeline_e2e-d713713743d319ba)
+
+running 11 tests
+test full_governance_flow ... ok
+test resource_denial_blocks_even_readonly_tool_and_dry_run ... ok
+test patching_secret_env_preserves_omitted_secret_headers ... ok
+test governed_calls_reuse_one_pooled_client ... ok
+test sweep_is_lazy_for_unused_stdio_servers ... ok
+test missing_or_invalid_saved_credentials_never_start_a_transport ... ok
+test allowlist_and_policy_deny ... ok
+test delegated_configure_cannot_attach_or_repoint_native_mcp_credentials ... ok
+test discover_labels_risk_and_health_probes ... ok
+test http_filters_servers_tools_configuration_and_guessed_actions ... ok
+test governance_changes_while_credentials_are_loading_prevent_execution ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.51s
+
+   Doc-tests otto_channels
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests otto_mcp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

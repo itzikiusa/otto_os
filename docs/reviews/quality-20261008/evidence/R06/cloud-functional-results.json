@@ -1,0 +1,583 @@
+{
+  "config": {
+    "argv": [
+      "/Users/itziklavon/.hermes/node/bin/node",
+      "/Users/itziklavon/otto_os/ui/node_modules/.bin/playwright",
+      "test",
+      "e2e/desktop-ux-r4-cloud.spec.ts",
+      "--project=desktop-browser",
+      "--workers=1",
+      "--grep",
+      "Athena phone|EKS successful|S3 pending|SQS |AWS setup|CloudWatch multi|Kubernetes log failure|Fleet Requests and monitor overview composition (native-light|native-dark|warm-light-phone)",
+      "--output=e2e/.artifacts-r06"
+    ],
+    "configFile": "/Users/itziklavon/otto_os/ui/playwright.config.ts",
+    "rootDir": "/Users/itziklavon/otto_os/ui/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": true,
+    "globalSetup": "/Users/itziklavon/otto_os/ui/e2e/global-setup.ts",
+    "globalTeardown": "/Users/itziklavon/otto_os/ui/e2e/global-teardown.ts",
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/e2e/.artifacts-r06",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-portrait",
+        "name": "iphone-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/e2e/.artifacts-r06",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-landscape",
+        "name": "iphone-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/e2e/.artifacts-r06",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-portrait",
+        "name": "ipad-portrait",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/e2e/.artifacts-r06",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "ipad-landscape",
+        "name": "ipad-landscape",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/e2e/.artifacts-r06",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "iphone-se",
+        "name": "iphone-se",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/e2e/.artifacts-r06",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-browser",
+        "name": "desktop-browser",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-.*\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      },
+      {
+        "outputDir": "/Users/itziklavon/otto_os/ui/e2e/.artifacts-r06",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "desktop-webkit",
+        "name": "desktop-webkit",
+        "testDir": "/Users/itziklavon/otto_os/ui/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "/desktop-.*perf.*\\.spec\\.ts/"
+        ],
+        "timeout": 45000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "list",
+        null
+      ],
+      [
+        "html",
+        {
+          "open": "never",
+          "outputFolder": "e2e/.report-r06"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "e2e/.results-r06.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 1,
+    "webServer": {
+      "command": "npm run dev -- --port 5266 --strictPort",
+      "url": "http://localhost:5266",
+      "reuseExistingServer": true,
+      "timeout": 90000
+    }
+  },
+  "suites": [
+    {
+      "title": "desktop-ux-r4-cloud.spec.ts",
+      "file": "desktop-ux-r4-cloud.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "Athena phone cancel, query failure and subsequent successful results",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 3966,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:18:48.906Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-d5b3c53eadb692852483",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 188,
+          "column": 1
+        },
+        {
+          "title": "EKS successful synthetic import navigates to the imported cluster",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 4936,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:18:52.966Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-cfe0ecc14a5dbe16344d",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 205,
+          "column": 1
+        },
+        {
+          "title": "S3 pending download cancels and a subsequent download succeeds",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1973,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:18:57.909Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-5ad9332b55667e73c16d",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 216,
+          "column": 1
+        },
+        {
+          "title": "Fleet Requests and monitor overview composition native-light",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2067,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:18:59.893Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-5aa9d15e4ca196e40054",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 240,
+          "column": 3
+        },
+        {
+          "title": "Fleet Requests and monitor overview composition native-dark",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1884,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:19:01.967Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-84c7f4c92cf6773d645d",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 240,
+          "column": 3
+        },
+        {
+          "title": "Fleet Requests and monitor overview composition warm-light-phone",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1266,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:19:03.858Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-ad7fcbdd48c9d54fa483",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 240,
+          "column": 3
+        },
+        {
+          "title": "SQS queue drafts stay with their queue during a pending send",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2263,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:19:05.130Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-c1f85de64409da069ee6",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 286,
+          "column": 1
+        },
+        {
+          "title": "SQS redrive and typed purge submit the confirmed synthetic queue",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2582,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:19:07.400Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-c3f695fd3be9257a13d8",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 310,
+          "column": 1
+        },
+        {
+          "title": "AWS setup test failure can retry without losing the account details",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2407,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:19:09.990Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-6ab106c213973f75b0e0",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 325,
+          "column": 1
+        },
+        {
+          "title": "CloudWatch multi-series survives switching resources and range keys work",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2192,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:19:12.419Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-f2cdfc9a6662307f4c4d",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 339,
+          "column": 1
+        },
+        {
+          "title": "Kubernetes log failure retries then follow reconnect preserves complete lines",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 90000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "desktop-browser",
+              "projectName": "desktop-browser",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2005,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-07T22:19:14.620Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "edf27d00bbb43a56b2b9-8c8f7b25983a5a68497d",
+          "file": "desktop-ux-r4-cloud.spec.ts",
+          "line": 358,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-07T22:18:47.545Z",
+    "duration": 29224.134000000002,
+    "expected": 11,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

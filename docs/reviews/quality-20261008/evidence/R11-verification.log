@@ -1,0 +1,417 @@
+
+=== /tmp/r11-memory-count-red.log ===
+   Compiling futures-util v0.3.34
+   Compiling hyper v1.11.1
+   Compiling idna v1.1.0
+   Compiling tokio-rustls v0.26.6
+   Compiling tokio-util v0.7.19
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling url v2.5.8
+   Compiling publicsuffix v2.3.0
+   Compiling sqlx-core v0.9.0
+   Compiling cookie_store v0.22.1
+   Compiling hyper-util v0.1.21
+   Compiling tower v0.5.3
+   Compiling futures-executor v0.3.34
+   Compiling tokio-tungstenite v0.29.0
+   Compiling tower-http v0.6.11
+   Compiling hyper-rustls v0.27.10
+   Compiling axum v0.8.9
+   Compiling sqlx-sqlite v0.9.0
+   Compiling reqwest v0.13.5
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.41s
+     Running tests/integrity.rs (target/debug/deps/integrity-41f79e70a2a0d0bb)
+
+running 1 test
+test search_bounds_untrusted_result_counts_before_arithmetic_and_fetch ... FAILED
+
+failures:
+
+---- search_bounds_untrusted_result_counts_before_arithmetic_and_fetch stdout ----
+
+thread 'search_bounds_untrusted_result_counts_before_arithmetic_and_fetch' (3520800) panicked at crates/otto-memory/tests/integrity.rs:508:9:
+assertion `left == right` failed: requested k=201
+  left: 201
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    search_bounds_untrusted_result_counts_before_arithmetic_and_fetch
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.25s
+
+error: test failed, to rerun pass `-p otto-memory --test integrity`
+
+=== /tmp/r11-memory-sharing-red.log ===
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+     Running tests/sharing.rs (target/debug/deps/sharing-7bbe40c99e773cb9)
+
+running 3 tests
+test dedup_never_returns_or_reactivates_another_users_private_row ... FAILED
+test malformed_visibility_is_rejected_instead_of_becoming_shared ... FAILED
+test private_memory_is_hidden_from_other_members ... ok
+
+failures:
+
+---- dedup_never_returns_or_reactivates_another_users_private_row stdout ----
+
+thread 'dedup_never_returns_or_reactivates_another_users_private_row' (3522001) panicked at crates/otto-memory/tests/sharing.rs:81:5:
+assertion failed: svc.save(&ws, "bob", vec![mk("shared", "same known content")]).await.is_err()
+
+---- malformed_visibility_is_rejected_instead_of_becoming_shared stdout ----
+
+thread 'malformed_visibility_is_rejected_instead_of_becoming_shared' (3522002) panicked at crates/otto-memory/tests/sharing.rs:92:5:
+assertion failed: svc.save(&ws, "alice",
+            vec![mk("Private", "private-intended note")]).await.is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    dedup_never_returns_or_reactivates_another_users_private_row
+    malformed_visibility_is_rejected_instead_of_becoming_shared
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.52s
+
+error: test failed, to rerun pass `-p otto-memory --test sharing`
+
+=== /tmp/r11-memory-routes-red.log ===
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.49s
+     Running tests/needle.rs (target/debug/deps/needle-c05b207fed246e03)
+
+running 1 test
+test private_rows_are_not_mutable_or_discoverable_through_graph_routes ... FAILED
+
+failures:
+
+---- private_rows_are_not_mutable_or_discoverable_through_graph_routes stdout ----
+
+thread 'private_rows_are_not_mutable_or_discoverable_through_graph_routes' (3524445) panicked at crates/otto-memory/tests/needle.rs:299:9:
+assertion `left == right` failed: PATCH private
+  left: 200
+ right: 404
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    private_rows_are_not_mutable_or_discoverable_through_graph_routes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p otto-memory --test needle`
+
+=== /tmp/r11-scope-existing-binary-red.log ===
+
+running 2 tests
+test vault_docs_agent::refine_scope_tests::refine_binding_and_detach_are_scoped_to_workspace_and_user ... FAILED
+test vault_docs_agent::refine_scope_tests::governance_requires_visibility_before_private_memory_mutation ... FAILED
+
+failures:
+
+---- vault_docs_agent::refine_scope_tests::refine_binding_and_detach_are_scoped_to_workspace_and_user stdout ----
+
+thread 'vault_docs_agent::refine_scope_tests::refine_binding_and_detach_are_scoped_to_workspace_and_user' (3547709) panicked at crates/otto-server/src/../tests/unit/vault_refine_scope.rs:28:5:
+another user must not inherit Alice's conversation
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- vault_docs_agent::refine_scope_tests::governance_requires_visibility_before_private_memory_mutation stdout ----
+
+thread 'vault_docs_agent::refine_scope_tests::governance_requires_visibility_before_private_memory_mutation' (3547708) panicked at crates/otto-server/src/../tests/unit/vault_refine_scope.rs:67:9:
+assertion `left == right` failed: governance route 01M4CATW3MA4Q5Q0RZTE2EMAG9/state
+  left: 200
+ right: 404
+
+
+failures:
+    vault_docs_agent::refine_scope_tests::governance_requires_visibility_before_private_memory_mutation
+    vault_docs_agent::refine_scope_tests::refine_binding_and_detach_are_scoped_to_workspace_and_user
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 947 filtered out; finished in 0.81s
+
+
+=== /tmp/r11-private-export-red.log ===
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.01s
+     Running tests/vault.rs (target/debug/deps/vault-2e0a7158d162d406)
+
+running 1 test
+test automatic_shared_vault_export_omits_private_memories ... FAILED
+
+failures:
+
+---- automatic_shared_vault_export_omits_private_memories stdout ----
+
+thread 'automatic_shared_vault_export_omits_private_memories' (3582883) panicked at crates/otto-memory/tests/vault.rs:141:5:
+assertion `left == right` failed: only shared memories belong in the shareable write-through folder
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    automatic_shared_vault_export_omits_private_memories
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p otto-memory --test vault`
+
+=== /tmp/r11-private-export-green.log ===
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.36s
+     Running tests/vault.rs (target/debug/deps/vault-2e0a7158d162d406)
+
+running 4 tests
+test markdown_round_trips ... ok
+test save_writes_an_obsidian_note ... ok
+test automatic_shared_vault_export_omits_private_memories ... ok
+test reindex_shared_vault_makes_it_searchable ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.64s
+
+
+=== /tmp/r11-watch-red.log ===
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling reqwest v0.13.5
+   Compiling ignore v0.4.33
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.25s
+     Running unittests src/lib.rs (target/debug/deps/otto_vault-c2348bb54255b898)
+
+running 1 test
+test watch::tests::continuous_events_do_not_starve_index_refresh ... FAILED
+
+failures:
+
+---- watch::tests::continuous_events_do_not_starve_index_refresh stdout ----
+
+thread 'watch::tests::continuous_events_do_not_starve_index_refresh' (3531224) panicked at crates/otto-vault/src/watch.rs:281:9:
+continuous events must publish a bounded burst before waiting for silence
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    watch::tests::continuous_events_do_not_starve_index_refresh
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 78 filtered out; finished in 1.72s
+
+error: test failed, to rerun pass `-p otto-vault --lib`
+
+=== /tmp/r11-watch-overflow-red.log ===
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.28s
+     Running unittests src/lib.rs (target/debug/deps/otto_vault-c2348bb54255b898)
+
+running 1 test
+test watch::tests::overflow_published_after_queue_drain_still_wakes_consumer ... FAILED
+
+failures:
+
+---- watch::tests::overflow_published_after_queue_drain_still_wakes_consumer stdout ----
+
+thread 'watch::tests::overflow_published_after_queue_drain_still_wakes_consumer' (3623385) panicked at crates/otto-vault/src/watch.rs:359:9:
+late overflow must schedule a new batch even when no more filesystem events arrive
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    watch::tests::overflow_published_after_queue_drain_still_wakes_consumer
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 79 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p otto-vault --lib`
+
+=== /tmp/r11-watch-final-green.log ===
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.21s
+     Running unittests src/lib.rs (target/debug/deps/otto_vault-c2348bb54255b898)
+
+running 3 tests
+test watch::tests::hidden_and_outside_paths_are_not_indexable ... ok
+test watch::tests::overflow_published_after_queue_drain_still_wakes_consumer ... ok
+test watch::tests::continuous_events_do_not_starve_index_refresh ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.71s
+
+
+=== /tmp/r11-server-green-retry.log ===
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-assistant v0.2.0 (/Users/itziklavon/otto_os/crates/otto-assistant)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 30s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 36 tests
+test vault_docs_agent::tests::cap_chars_is_char_boundary_safe ... ok
+test vault_docs_agent::tests::okf_block_inlines_skill_for_non_claude ... ok
+test vault_docs_agent::tests::retry_terminates_an_inflight_turn_before_signalling_but_keeps_failed_session_live ... ok
+test vault_docs_agent::tests::multi_writer_prompt_confines_to_its_draft_dir ... ok
+test vault_docs_agent::tests::refine_prompt_first_turn_inlines_capped_content ... ok
+test vault_docs_agent::tests::parse_results_is_tolerant ... ok
+test vault_docs_agent::tests::review_prompt_carries_method_focus_evidence_and_result_contract ... ok
+test vault_docs_agent::tests::review_findings_parser_rejects_malformed_or_unproven_output ... ok
+test vault_docs_agent::tests::review_findings_parser_accepts_empty_and_source_backed_arrays ... ok
+test vault_docs_agent::tests::orphan_drafts_move_to_trash_with_collision_suffix ... ok
+test vault_docs_agent::tests::interrupted_sweep_flips_only_non_terminal_states ... ok
+test vault_docs_agent::refine_scope_tests::detached_refine_callbacks_cannot_resurrect_reset_or_replace_new_turn ... ok
+test vault_docs_agent::tests::errored_writer_waits_only_while_a_peer_is_still_moving ... ok
+test vault_docs_agent::tests::retry_handler_state_composition_flags_only_the_requested_error_slot ... ok
+test vault_docs_agent::tests::review_round_driver_maps_clean_revision_exhaustion_and_partial_failure ... ok
+test vault_docs_agent::tests::run_state_transitions_respect_terminal_states ... ok
+test vault_docs_agent::tests::skills_block_renders_on_non_okf_vaults_too ... ok
+test vault_docs_agent::tests::review_round_decision_requires_same_round_clean_and_honors_cap ... ok
+test vault_docs_agent::tests::review_round_driver_fans_out_fresh_reviewers_and_persists_visible_states ... ok
+test vault_docs_agent::tests::review_request_validation_is_actionable ... ok
+test vault_docs_agent::tests::single_writer_prompt_targets_finals_and_results_file ... ok
+test vault_docs_agent::tests::targeted_failed_slot_retry_preserves_completed_peers_and_round_findings ... ok
+test vault_docs_agent::tests::review_request_defaults_method_and_iterations ... ok
+test vault_docs_agent::tests::review_revision_prompt_carries_findings_and_changed_path_results_contract ... ok
+test vault_docs_agent::tests::target_dir_normalizes_and_rejects_traversal ... ok
+test vault_docs_agent::tests::written_fallback_diffs_under_target_dir_only ... ok
+test vault_docs_agent::tests::staged_package_guidance_is_provider_specific ... ok
+test vault_docs_agent::tests::payload_without_kind_or_note_path_still_deserializes_as_docs ... ok
+test vault_docs_agent::tests::partial_staging_inlines_only_failed_packages ... ok
+test vault_docs_agent::tests::summarizer_prompt_inlines_drafts_under_the_cap ... ok
+test vault_docs_agent::tests::malformed_reviewer_output_is_not_clean_and_consumes_targeted_retry ... ok
+test vault_docs_agent::tests::review_loop_exhausts_exactly_at_user_iteration_limit ... ok
+test vault_docs_agent::tests::review_loop_runs_dirty_revision_then_all_reviewers_clean ... ok
+test vault_docs_agent::tests::interrupted_recovery_persists_flat_and_nested_review_states ... ok
+test vault_docs_agent::refine_scope_tests::refine_binding_and_detach_are_scoped_to_workspace_and_user ... ok
+test vault_docs_agent::refine_scope_tests::governance_requires_visibility_before_private_memory_mutation ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 914 filtered out; finished in 1.32s
+
+
+=== /tmp/r11-webhook-existing-binary-green.log ===
+
+running 3 tests
+test routes::channel_webhook::tests::ct_eq_matches_only_identical_keys ... ok
+test routes::channel_webhook::tests::extract_key_prefers_custom_header_then_bearer ... ok
+test routes::channel_webhook::tests::a_full_webhook_conversation_is_retryable_without_starting_more_work ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 947 filtered out; finished in 0.02s
+
+
+=== /tmp/r11-clippy.log ===
+    Checking crossbeam-utils v0.8.23
+    Checking tower v0.5.3
+    Checking hyper-util v0.1.21
+    Checking otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+    Checking sha1 v0.11.0
+    Checking tokio-tungstenite v0.29.0
+    Checking uuid v1.27.0
+    Checking fsevent-sys v4.1.0
+    Checking objc2-io-kit v0.3.2
+    Checking serde_yaml v0.9.34+deprecated
+    Checking notify v8.2.0
+    Checking otto-transcript v0.2.0 (/Users/itziklavon/otto_os/crates/otto-transcript)
+    Checking crossbeam-queue v0.3.14
+    Checking crossbeam-epoch v0.9.21
+    Checking sysinfo v0.39.6
+    Checking tower-http v0.6.11
+    Checking hyper-rustls v0.27.10
+    Checking axum v0.8.9
+    Checking sqlx-core v0.9.0
+    Checking crossbeam-deque v0.8.8
+    Checking reqwest v0.13.5
+    Checking ignore v0.4.33
+    Checking sqlx-sqlite v0.9.0
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+    Checking sqlx v0.9.0
+    Checking otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Checking otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+    Checking otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+    Checking otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+    Checking otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+    Checking otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.91s
+
+=== /tmp/r11-watch-final-clippy.log ===
+    Checking otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.76s
+
+=== /tmp/r11-scale-10k.log ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running unittests src/lib.rs (target/debug/deps/otto_vault-c2348bb54255b898)
+
+running 1 test
+[vault-scale n=10000] cold index 1.487079708s; worst switcher=15ms search=0ms open=0ms; 10 status=14ms
+test engine::performance_tests::scale_10k_notes_hot_reads_within_budget ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 2.92s
+
+
+=== /tmp/r11-scale-50k.log ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/otto_vault-c2348bb54255b898)
+
+running 1 test
+test engine::performance_tests::revision_listing_at_50k_revisions_reads_only_the_path_index ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 12.12s
+
+
+=== /tmp/r11-all-vault-ui-final.log (final lines) ===
+  duration_ms: 0.356166
+  type: 'test'
+  ...
+# Subtest: a stale collapsed branch refreshes preserved open descendants on reopening
+ok 60 - a stale collapsed branch refreshes preserved open descendants on reopening
+  ---
+  duration_ms: 0.176
+  type: 'test'
+  ...
+1..60
+# tests 60
+# suites 0
+# pass 60
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2041.491209
+
+=== /tmp/r11-browser-scale-final.log (final lines) ===
+2026-10-07T23:31:04.899180Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-4Ojy5B/clickhouse (binary /usr/local/bin/clickhouse)
+
+Running 3 tests using 1 worker
+
+2026-10-07T23:31:04.901663Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:31:04.908868Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-07T23:31:04.973036Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:31:04.973784Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:31:04.973831Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:25749) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[vault-scale] unchanged rescan of 10000 notes: 87 ms
+[vault-scale] p95 switcher=17.1 search=2.5 open=1.8 ms
+  ✓  1 [desktop-browser] › e2e/desktop-vault-scale-perf.spec.ts:38:1 › switcher, search and note open stay under p95 budgets at 10k notes (656ms)
+  ✓  2 [desktop-browser] › e2e/desktop-vault-scale-perf.spec.ts:62:1 › status polls do not rescan an unchanged vault; an external edit is picked up (431ms)
+  ✓  3 [desktop-browser] › e2e/desktop-vault-scale-perf.spec.ts:84:1 › editor autosaves coalesce into one history revision (194ms)
+
+  3 passed (5.8s)
+
+=== /tmp/r11-ui-check-final.log (final lines) ===
+
+> ui@0.2.0 check
+> node scripts/ui-guards.mjs && svelte-check --tsconfig ./tsconfig.app.json --fail-on-warnings && node node_modules/typescript7/bin/tsc -p tsconfig.node.json && node node_modules/typescript7/bin/tsc -p tsconfig.e2e.json && node node_modules/typescript7/bin/tsc -p tsconfig.unit.json
+
+ui-guards: ok (1042 files; no native dialogs, no undefined CSS vars, no ratchet regressions)
+Loading svelte-check in workspace: /Users/itziklavon/otto_os/ui
+Getting Svelte diagnostics...
+
+svelte-check found 0 errors and 0 warnings

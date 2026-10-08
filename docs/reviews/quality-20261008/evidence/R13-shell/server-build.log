@@ -1,0 +1,55 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-issues v0.2.0 (/Users/itziklavon/otto_os/crates/otto-issues)
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+   Compiling otto-brokers v0.2.0 (/Users/itziklavon/otto_os/crates/otto-brokers)
+   Compiling otto-workgraph v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workgraph)
+   Compiling otto-connections v0.2.0 (/Users/itziklavon/otto_os/crates/otto-connections)
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+   Compiling otto-k8s v0.2.0 (/Users/itziklavon/otto_os/crates/otto-k8s)
+   Compiling otto-aws v0.2.0 (/Users/itziklavon/otto_os/crates/otto-aws)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+   Compiling otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+   Compiling otto-assistant v0.2.0 (/Users/itziklavon/otto_os/crates/otto-assistant)
+   Compiling otto-insights v0.2.0 (/Users/itziklavon/otto_os/crates/otto-insights)
+   Compiling otto-review v0.2.0 (/Users/itziklavon/otto_os/crates/otto-review)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+   Compiling otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+   Compiling otto-workflows v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workflows)
+   Compiling otto-automation v0.2.0 (/Users/itziklavon/otto_os/crates/otto-automation)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+warning: field `admission` is never read
+   --> crates/otto-server/src/design_blender.rs:191:5
+    |
+189 | pub struct DesignJobs {
+    |            ---------- field in this struct
+190 |     jobs: Mutex<HashMap<Id, RenderJob>>,
+191 |     admission: otto_core::cancel_signal::InFlightSet,
+    |     ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `0` is never read
+   --> crates/otto-server/src/mockup_assist.rs:259:20
+    |
+259 | struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    |        ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |        |
+    |        field in this struct
+    |
+    = help: consider removing this field
+
+warning: `otto-server` (lib) generated 2 warnings
+warning: `otto-server` (lib test) generated 2 warnings (2 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 52s
+  Executable unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)

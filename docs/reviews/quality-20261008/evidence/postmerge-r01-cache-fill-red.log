@@ -1,0 +1,40 @@
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.93s
+     Running unittests src/lib.rs (target/debug/deps/otto_rbac-05d9feda91087da8)
+
+running 11 tests
+test cache::tests::disabled_cache_is_always_miss ... ok
+test cache::tests::unrelated_revocation_does_not_discard_a_valid_pending_fill ... ok
+test cache::tests::hit_and_miss ... ok
+test cache::tests::grants_invalidator_impl_delegates_to_evict_user ... ok
+test cache::tests::expired_entry_is_a_miss ... ok
+test cache::tests::evict_user_removes_all_tokens_for_that_user ... ok
+test cache::tests::evict_single_removes_entry ... ok
+test cache::tests::process_wide_eviction_reaches_every_live_cache ... ok
+test cache::tests::revocation_while_lookup_is_pending_cannot_repopulate_the_cache ... FAILED
+test cache::tests::repeated_expiry_refresh_keeps_reverse_index_bounded ... ok
+test cache::tests::distinct_expired_tokens_do_not_accumulate_for_process_lifetime ... FAILED
+
+failures:
+
+---- cache::tests::revocation_while_lookup_is_pending_cannot_repopulate_the_cache stdout ----
+
+thread 'cache::tests::revocation_while_lookup_is_pending_cannot_repopulate_the_cache' (3499834) panicked at crates/otto-rbac/src/cache.rs:459:13:
+revocation must survive a delayed lookup result
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cache::tests::distinct_expired_tokens_do_not_accumulate_for_process_lifetime stdout ----
+
+thread 'cache::tests::distinct_expired_tokens_do_not_accumulate_for_process_lifetime' (3499826) panicked at crates/otto-rbac/src/cache.rs:413:9:
+4128 expired contexts retained
+
+
+failures:
+    cache::tests::distinct_expired_tokens_do_not_accumulate_for_process_lifetime
+    cache::tests::revocation_while_lookup_is_pending_cannot_repopulate_the_cache
+
+test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p otto-rbac --lib`

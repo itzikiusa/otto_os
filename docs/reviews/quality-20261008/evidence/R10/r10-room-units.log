@@ -1,0 +1,312 @@
+TAP version 13
+# Subtest: Recap unchanged completed archive polls metadata without retransferring its body
+ok 1 - Recap unchanged completed archive polls metadata without retransferring its body
+  ---
+  duration_ms: 39.54225
+  type: 'test'
+  ...
+# Subtest: Recap summary metadata alone updates without another body request
+ok 2 - Recap summary metadata alone updates without another body request
+  ---
+  duration_ms: 13.064583
+  type: 'test'
+  ...
+# Subtest: Recap append beyond an older complete page updates metadata without rereading that page
+ok 3 - Recap append beyond an older complete page updates metadata without rereading that page
+  ---
+  duration_ms: 10.236667
+  type: 'test'
+  ...
+# Subtest: Recap partial newest page appends after a missed event, then resumes cheap unchanged checks
+ok 4 - Recap partial newest page appends after a missed event, then resumes cheap unchanged checks
+  ---
+  duration_ms: 10.546416
+  type: 'test'
+  ...
+# Subtest: Recap exact page boundary exposes the next cursor without appending 101 rows or moving the page
+ok 5 - Recap exact page boundary exposes the next cursor without appending 101 rows or moving the page
+  ---
+  duration_ms: 11.470292
+  type: 'test'
+  ...
+# Subtest: Recap external draft replacement and removal remain observable after capture stops
+ok 6 - Recap external draft replacement and removal remain observable after capture stops
+  ---
+  duration_ms: 11.544167
+  type: 'test'
+  ...
+# Subtest: Recap delayed old body cannot be acknowledged as a newer draft revision
+ok 7 - Recap delayed old body cannot be acknowledged as a newer draft revision
+  ---
+  duration_ms: 7.764125
+  type: 'test'
+  ...
+# Subtest: Recap explicit refresh still reads body and a closed panel ignores pending body completion
+ok 8 - Recap explicit refresh still reads body and a closed panel ignores pending body completion
+  ---
+  duration_ms: 8.311417
+  type: 'test'
+  ...
+# Subtest: Recap revision error retains content and recovery clears error without rereading unchanged body
+ok 9 - Recap revision error retains content and recovery clears error without rereading unchanged body
+  ---
+  duration_ms: 11.523625
+  type: 'test'
+  ...
+# Subtest: Recap revision failures back off the real visible poller and recovery restores cadence
+ok 10 - Recap revision failures back off the real visible poller and recovery restores cadence
+  ---
+  duration_ms: 33.751083
+  type: 'test'
+  ...
+# (node:83372) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: membership waits for snapshot and fails closed after ten seconds of silence
+ok 11 - membership waits for snapshot and fails closed after ten seconds of silence
+  ---
+  duration_ms: 12.632375
+  type: 'test'
+  ...
+# Subtest: silence deadline resets per server frame rather than rounding to the heartbeat tick
+ok 12 - silence deadline resets per server frame rather than rounding to the heartbeat tick
+  ---
+  duration_ms: 0.311166
+  type: 'test'
+  ...
+# Subtest: a stalled WebSocket handshake reaches disconnected and retries without waiting for open
+ok 13 - a stalled WebSocket handshake reaches disconnected and retries without waiting for open
+  ---
+  duration_ms: 0.488541
+  type: 'test'
+  ...
+# Subtest: signal parser rejects oversized, malformed and unknown media envelopes
+ok 14 - signal parser rejects oversized, malformed and unknown media envelopes
+  ---
+  duration_ms: 0.72025
+  type: 'test'
+  ...
+# Subtest: ending room while screen permission is pending stops the late stream and publishes nothing
+ok 15 - ending room while screen permission is pending stops the late stream and publishes nothing
+  ---
+  duration_ms: 1.00725
+  type: 'test'
+  ...
+# Subtest: presenter permission is required before opening a screen picker
+ok 16 - presenter permission is required before opening a screen picker
+  ---
+  duration_ms: 0.119292
+  type: 'test'
+  ...
+# Subtest: late microphone capture cannot reactivate after leaving audio
+ok 17 - late microphone capture cannot reactivate after leaving audio
+  ---
+  duration_ms: 0.630333
+  type: 'test'
+  ...
+# Subtest: a host generation change invalidates a pending guest picker even if disconnect was missed
+ok 18 - a host generation change invalidates a pending guest picker even if disconnect was missed
+  ---
+  duration_ms: 0.206875
+  type: 'test'
+  ...
+# Subtest: server coordinator shutdown stops the host microphone and audio context
+ok 19 - server coordinator shutdown stops the host microphone and audio context
+  ---
+  duration_ms: 0.256458
+  type: 'test'
+  ...
+# Subtest: moderation mute then lift cannot revive a picker opened before moderation
+ok 20 - moderation mute then lift cannot revive a picker opened before moderation
+  ---
+  duration_ms: 0.572875
+  type: 'test'
+  ...
+# Subtest: recap accessor exposes only the host raw live microphone and withdraws muted audio
+ok 21 - recap accessor exposes only the host raw live microphone and withdraws muted audio
+  ---
+  duration_ms: 0.717334
+  type: 'test'
+  ...
+# Subtest: 25 screen source replacements and 25 audio rejoins reuse negotiated sender slots
+ok 22 - 25 screen source replacements and 25 audio rejoins reuse negotiated sender slots
+  ---
+  duration_ms: 19.810042
+  type: 'test'
+  ...
+# Subtest: removing a member during a pending video replacement cannot recreate its audio mix
+ok 23 - removing a member during a pending video replacement cannot recreate its audio mix
+  ---
+  duration_ms: 0.638416
+  type: 'test'
+  ...
+# Subtest: revoking a source during pending slot reuse clears the newly attached video track
+ok 24 - revoking a source during pending slot reuse clears the newly attached video track
+  ---
+  duration_ms: 0.381334
+  type: 'test'
+  ...
+# Subtest: a retained receiver stream binds new source IDs without another ontrack event
+ok 25 - a retained receiver stream binds new source IDs without another ontrack event
+  ---
+  duration_ms: 8.08025
+  type: 'test'
+  ...
+# Subtest: a binding-only publisher replacement triggers forwarding to another guest
+ok 26 - a binding-only publisher replacement triggers forwarding to another guest
+  ---
+  duration_ms: 6.954375
+  type: 'test'
+  ...
+# Subtest: offer glare still accepts ICE for the current remote generation
+ok 27 - offer glare still accepts ICE for the current remote generation
+  ---
+  duration_ms: 0.621542
+  type: 'test'
+  ...
+# Subtest: initial ignored-offer candidates are not replayed into a different accepted generation
+ok 28 - initial ignored-offer candidates are not replayed into a different accepted generation
+  ---
+  duration_ms: 0.3095
+  type: 'test'
+  ...
+# Subtest: negotiation chooses the local description after a pending remote offer changes signaling state
+ok 29 - negotiation chooses the local description after a pending remote offer changes signaling state
+  ---
+  duration_ms: 0.310292
+  type: 'test'
+  ...
+# Subtest: local preview demand never subscribes to the publisher through the server
+ok 30 - local preview demand never subscribes to the publisher through the server
+  ---
+  duration_ms: 0.153375
+  type: 'test'
+  ...
+# Subtest: revocation stops capture that resolves after the permission picker
+ok 31 - revocation stops capture that resolves after the permission picker
+  ---
+  duration_ms: 0.531708
+  type: 'test'
+  ...
+# Subtest: failed source replacement preserves the existing capture
+ok 32 - failed source replacement preserves the existing capture
+  ---
+  duration_ms: 0.179166
+  type: 'test'
+  ...
+# Subtest: revoked permission is rechecked at capture commit and concurrent pickers cannot leak
+ok 33 - revoked permission is rechecked at capture commit and concurrent pickers cannot leak
+  ---
+  duration_ms: 0.144167
+  type: 'test'
+  ...
+# Subtest: four-presenter host star stays under aggregate video ceiling with one full pin per viewer
+ok 34 - four-presenter host star stays under aggregate video ceiling with one full pin per viewer
+  ---
+  duration_ms: 0.371458
+  type: 'test'
+  ...
+# Subtest: grid budgets are shared per viewer and hidden sources stop encoding
+ok 35 - grid budgets are shared per viewer and hidden sources stop encoding
+  ---
+  duration_ms: 0.26875
+  type: 'test'
+  ...
+# Subtest: dimensions preserve aspect ratio, never upscale and invalid metadata disables transmission
+ok 36 - dimensions preserve aspect ratio, never upscale and invalid metadata disables transmission
+  ---
+  duration_ms: 0.082208
+  type: 'test'
+  ...
+# Subtest: host mixes exclude the recipient, room-muted, departed and locally muted senders
+ok 37 - host mixes exclude the recipient, room-muted, departed and locally muted senders
+  ---
+  duration_ms: 0.4645
+  type: 'test'
+  ...
+# Subtest: source geometry invalidates on resize but not intentional quality downscale
+ok 38 - source geometry invalidates on resize but not intentional quality downscale
+  ---
+  duration_ms: 0.105583
+  type: 'test'
+  ...
+# Subtest: encodes bounded mono16k PCM WAV with clamping and duration-preserving downsampling
+ok 39 - encodes bounded mono16k PCM WAV with clamping and duration-preserving downsampling
+  ---
+  duration_ms: 0.564375
+  type: 'test'
+  ...
+# Subtest: screen difference retains first/changed frames and skips small noise
+ok 40 - screen difference retains first/changed frames and skips small noise
+  ---
+  duration_ms: 0.074833
+  type: 'test'
+  ...
+# Subtest: bounded upload queue drops overflow and invalidates queued work when consent epoch changes
+ok 41 - bounded upload queue drops overflow and invalidates queued work when consent epoch changes
+  ---
+  duration_ms: 0.452
+  type: 'test'
+  ...
+# Subtest: invites require an explicit secure host and exactly one fragment capability
+ok 42 - invites require an explicit secure host and exactly one fragment capability
+  ---
+  duration_ms: 0.86075
+  type: 'test'
+  ...
+# Subtest: room sockets carry no query credential and use the room endpoint
+ok 43 - room sockets carry no query credential and use the room endpoint
+  ---
+  duration_ms: 0.071542
+  type: 'test'
+  ...
+# Subtest: pin is local and a stopped source falls back to the terminal
+ok 44 - pin is local and a stopped source falls back to the terminal
+  ---
+  duration_ms: 0.053167
+  type: 'test'
+  ...
+# Subtest: annotation positions account for letterboxing and reject the margins
+ok 45 - annotation positions account for letterboxing and reject the margins
+  ---
+  duration_ms: 0.083458
+  type: 'test'
+  ...
+# Subtest: only recognized automatic terminal reports are passive input
+ok 46 - only recognized automatic terminal reports are passive input
+  ---
+  duration_ms: 0.175959
+  type: 'test'
+  ...
+# Subtest: late annotation events cannot restore cleared or revoked marks
+ok 47 - late annotation events cannot restore cleared or revoked marks
+  ---
+  duration_ms: 0.188916
+  type: 'test'
+  ...
+# Subtest: closed Rooms view: an event bumps activity and fetches nothing
+ok 48 - closed Rooms view: an event bumps activity and fetches nothing
+  ---
+  duration_ms: 64.25975
+  type: 'test'
+  ...
+# Subtest: open view appends the event message with no GET, deduped by id
+ok 49 - open view appends the event message with no GET, deduped by id
+  ---
+  duration_ms: 19.46175
+  type: 'test'
+  ...
+# Subtest: unmount evicts all but the selected room; a resync re-reads the tail
+ok 50 - unmount evicts all but the selected room; a resync re-reads the tail
+  ---
+  duration_ms: 19.428917
+  type: 'test'
+  ...
+1..50
+# tests 50
+# suites 0
+# pass 50
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 421.158584

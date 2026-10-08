@@ -1,0 +1,8 @@
+{
+  "ui/src/modules/product/DiscoveryChat.svelte": "85ae709fe41842cb5b1ad019a2519766dd0f8725f959dffc7b228d624a59a91b",
+  "ui/src/modules/product/RefineChat.svelte": "19ba00df4a46ef61dc826c131103bdab3f1b96fa75d6990f3cf25464cce78297",
+  "ui/src/modules/design-hall/brand/BrandEditor.svelte": "c54dd59004e3384ebc5234eebbece0218d0d710240e155843f1980991d5c4b9c",
+  "ui/src/modules/design-hall/ArtifactView.svelte": "10897358b36e9c45a0e2f34c7ae6b57888908beb75588ec4f1509af12c09e4a6",
+  "ui/e2e/desktop-review16-chat-drafts.spec.ts": "1e2cd52bebf6643fc13b6efeac2941650f4a05ecf0d8d3894e808c00d7baa579",
+  "ui/e2e/desktop-design-consent.spec.ts": "202510eb55420b70ca03bb6c76cd29d290dee44dbaab5b459ff585fc77cd989c"
+}

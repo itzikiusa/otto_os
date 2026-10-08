@@ -1,0 +1,16 @@
+   Compiling otto-apiclient v0.2.0 (/Users/itziklavon/otto_os/crates/otto-apiclient)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 20s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-1a101a9211bc88ec)
+
+running 8 tests
+test state_archive::tests::imported_terminal_history_keeps_its_status ... ok
+test state_archive::tests::partial_publication_is_removed_and_manifest_rejects_unsafe_assets ... ok
+test state_archive::tests::design_blobs_are_archived_best_effort_and_restore_by_hash ... ok
+test state_archive::tests::assets_are_exclusive_and_symlinks_cannot_redirect_publish_or_rollback ... ok
+test state_archive::tests::credentials_are_removed_by_structure_and_declared_secret_names ... ok
+test state_archive::tests::invalid_foreign_keys_roll_back_every_insert_and_permissions_are_rejected ... ok
+test state_archive::tests::preview_binding_ignores_unrelated_rows_but_changes_on_import_conflict ... ok
+test state_archive::tests::cross_profile_rows_restore_with_real_constraints_and_inert_runtime ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 931 filtered out; finished in 2.94s

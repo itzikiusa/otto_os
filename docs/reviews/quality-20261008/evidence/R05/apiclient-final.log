@@ -1,0 +1,32 @@
+   Compiling otto-apiclient v0.2.0 (/Users/itziklavon/otto_os/crates/otto-apiclient)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.66s
+     Running unittests src/lib.rs (target/debug/deps/otto_apiclient-d7c3d297ff2c8046)
+
+running 25 tests
+test grpc::tests::describes_services_and_methods ... ok
+test grpc::tests::endpoint_pins_vetted_address_and_honours_allow_local ... ok
+test grpc::tests::find_method_resolves_call_path ... ok
+test grpc::tests::grpc_channel_is_dialled_once_and_redialled_after_forget ... ok
+test grpc::tests::json_skeleton_has_fields_with_defaults ... ok
+test grpc::tests::proto_pool_is_compiled_once_per_content ... ok
+test grpc::tests::reflection_deadline_covers_a_server_that_never_finishes ... ok
+test grpc::tests::reflection_proto_compiles_and_builds_request ... ok
+test grpc::tests::reflection_rejects_excessive_bytes_and_message_counts ... ok
+test grpc::tests::reflection_rejects_excessive_service_listing ... ok
+test grpc::tests::reflection_reserves_readiness_for_descriptor_rpc ... ok
+test grpc::tests::round_trips_dynamic_message_json ... ok
+test grpc::tests::stream_collector_stops_at_the_message_and_byte_caps ... ok
+test scripts::tests::crashed_script_child_is_a_script_error ... ok
+test scripts::tests::empty_script_passes_through ... ok
+test scripts::tests::hung_script_child_is_killed_at_the_timeout ... ok
+test scripts::tests::isolated_runner_falls_back_in_process ... ok
+test scripts::tests::memory_watchdog_exit_is_reported_as_a_memory_failure ... ok
+test scripts::tests::outcome_round_trips_over_the_child_protocol ... ok
+test scripts::tests::peak_rss_is_measured ... ok
+test scripts::tests::post_tests_and_extraction ... ok
+test scripts::tests::pre_mutates_request_and_vars ... ok
+test scripts::tests::runaway_loop_hits_limit ... ok
+test scripts::tests::script_child_gets_no_env_and_a_cpu_and_data_limit ... ok
+test scripts::tests::syntax_error_is_captured_not_panicking ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.50s

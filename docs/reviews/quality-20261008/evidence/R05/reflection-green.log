@@ -1,0 +1,11 @@
+   Compiling otto-apiclient v0.2.0 (/Users/itziklavon/otto_os/crates/otto-apiclient)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.08s
+     Running unittests src/lib.rs (target/debug/deps/otto_apiclient-d7c3d297ff2c8046)
+
+running 4 tests
+test grpc::tests::reflection_deadline_covers_a_server_that_never_finishes ... ok
+test grpc::tests::reflection_proto_compiles_and_builds_request ... ok
+test grpc::tests::reflection_rejects_excessive_bytes_and_message_counts ... ok
+test grpc::tests::reflection_rejects_excessive_service_listing ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 20.04s

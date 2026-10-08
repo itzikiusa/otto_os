@@ -1,0 +1,43 @@
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling smallvec v1.16.2
+   Compiling num-traits v0.2.19
+   Compiling bitflags v2.13.2
+   Compiling memchr v2.8.3
+   Compiling rustix v1.1.5
+   Compiling serde_json v1.0.151
+   Compiling syn v3.0.6
+   Compiling syn v2.0.119
+   Compiling digest v0.11.3
+   Compiling bytes v1.12.1
+   Compiling arrayvec v0.7.8
+   Compiling once_cell v1.21.4
+   Compiling log v0.4.34
+   Compiling nix v0.28.0
+   Compiling parking_lot_core v0.9.12
+   Compiling sha2 v0.11.0
+   Compiling vte v0.15.0
+   Compiling parking_lot v0.12.5
+   Compiling vt100 v0.16.2 (/Users/itziklavon/otto_os/vendor/vt100)
+   Compiling thiserror-impl v1.0.69
+   Compiling tempfile v3.27.0
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling thiserror-impl v2.0.21
+   Compiling thiserror v1.0.69
+   Compiling filedescriptor v0.8.3
+   Compiling portable-pty v0.9.0
+   Compiling tokio v1.53.1
+   Compiling thiserror v2.0.21
+   Compiling chrono v0.4.45
+   Compiling chrono-tz v0.10.4
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling otto-pty v0.2.0 (/Users/itziklavon/otto_os/crates/otto-pty)
+    Finished `release` profile [optimized] target(s) in 14.72s
+     Running unittests src/lib.rs (target/release/deps/otto_pty-aab593e60886fe4e)
+
+running 1 test
+terminal budgets: capture 32.25µs, format 3.081958ms (655946 bytes), reflow 2.134458ms, feed 67 MB/s
+test tests::perf_budgets_capture_format_reflow_feed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 1.59s

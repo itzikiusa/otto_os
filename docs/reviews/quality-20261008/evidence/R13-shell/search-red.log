@@ -1,0 +1,53 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-issues v0.2.0 (/Users/itziklavon/otto_os/crates/otto-issues)
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-brokers v0.2.0 (/Users/itziklavon/otto_os/crates/otto-brokers)
+   Compiling otto-workgraph v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workgraph)
+   Compiling otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+   Compiling otto-connections v0.2.0 (/Users/itziklavon/otto_os/crates/otto-connections)
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+   Compiling otto-aws v0.2.0 (/Users/itziklavon/otto_os/crates/otto-aws)
+   Compiling otto-k8s v0.2.0 (/Users/itziklavon/otto_os/crates/otto-k8s)
+   Compiling otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+   Compiling otto-assistant v0.2.0 (/Users/itziklavon/otto_os/crates/otto-assistant)
+   Compiling otto-review v0.2.0 (/Users/itziklavon/otto_os/crates/otto-review)
+   Compiling otto-insights v0.2.0 (/Users/itziklavon/otto_os/crates/otto-insights)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+   Compiling otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+   Compiling otto-automation v0.2.0 (/Users/itziklavon/otto_os/crates/otto-automation)
+   Compiling otto-workflows v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workflows)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 54.16s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 1 test
+test routes::search::tests::search_respects_each_sources_feature_grant ... FAILED
+
+failures:
+
+---- routes::search::tests::search_respects_each_sources_feature_grant stdout ----
+
+thread 'routes::search::tests::search_respects_each_sources_feature_grant' (3752944) panicked at crates/otto-server/src/routes/../../tests/unit/search.rs:21:5:
+Agents View cannot reveal denied Workflows metadata
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    routes::search::tests::search_respects_each_sources_feature_grant
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 956 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p otto-server --lib`

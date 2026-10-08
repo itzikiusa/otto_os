@@ -1,0 +1,460 @@
+TAP version 13
+# Subtest: save completion belongs to the initiating tab, never the newly active tab
+ok 1 - save completion belongs to the initiating tab, never the newly active tab
+  ---
+  duration_ms: 125.444917
+  type: 'test'
+  ...
+# Subtest: runtime variables are scoped to the restored workspace
+ok 2 - runtime variables are scoped to the restored workspace
+  ---
+  duration_ms: 59.353958
+  type: 'test'
+  ...
+# Subtest: cleared extras serialize explicitly, and gRPC schema/method round trip
+ok 3 - cleared extras serialize explicitly, and gRPC schema/method round trip
+  ---
+  duration_ms: 38.487708
+  type: 'test'
+  ...
+# Subtest: OAuth completion updates originating inactive tab and keeps later auth edits
+ok 4 - OAuth completion updates originating inactive tab and keeps later auth edits
+  ---
+  duration_ms: 36.409209
+  type: 'test'
+  ...
+# Subtest: cancel during asynchronous pre-script prevents HTTP and clears sending
+ok 5 - cancel during asynchronous pre-script prevents HTTP and clears sending
+  ---
+  duration_ms: 36.182625
+  type: 'test'
+  ...
+# Subtest: closing the initiating tab cancels a pending pre-script
+ok 6 - closing the initiating tab cancels a pending pre-script
+  ---
+  duration_ms: 33.304375
+  type: 'test'
+  ...
+# Subtest: replaced execution ignores late pre-script even with the same tab identity
+ok 7 - replaced execution ignores late pre-script even with the same tab identity
+  ---
+  duration_ms: 33.388084
+  type: 'test'
+  ...
+# Subtest: environment stays with the execution snapshot while pre-script is pending
+ok 8 - environment stays with the execution snapshot while pre-script is pending
+  ---
+  duration_ms: 32.033542
+  type: 'test'
+  ...
+# Subtest: curl import cannot land in a different workspace after parsing
+ok 9 - curl import cannot land in a different workspace after parsing
+  ---
+  duration_ms: 37.240875
+  type: 'test'
+  ...
+# Subtest: file import retains its workspace while the file is being read
+ok 10 - file import retains its workspace while the file is being read
+  ---
+  duration_ms: 34.367584
+  type: 'test'
+  ...
+# Subtest: an automation start response cannot publish into the next workspace
+ok 11 - an automation start response cannot publish into the next workspace
+  ---
+  duration_ms: 34.215584
+  type: 'test'
+  ...
+# Subtest: GraphQL introspection cannot publish another tab or edited endpoint schema
+ok 12 - GraphQL introspection cannot publish another tab or edited endpoint schema
+  ---
+  duration_ms: 67.089792
+  type: 'test'
+  ...
+# Subtest: a loaded GraphQL schema is visible only for the request that owns it
+ok 13 - a loaded GraphQL schema is visible only for the request that owns it
+  ---
+  duration_ms: 33.812583
+  type: 'test'
+  ...
+# Subtest: opening a saved request never replaces unsaved edits in the active tab
+ok 14 - opening a saved request never replaces unsaved edits in the active tab
+  ---
+  duration_ms: 33.203917
+  type: 'test'
+  ...
+# Subtest: a pristine blank tab is reused when opening a saved request
+ok 15 - a pristine blank tab is reused when opening a saved request
+  ---
+  duration_ms: 30.696041
+  type: 'test'
+  ...
+# Subtest: history replay rehydrates masked credentials from the saved request, never sends ***
+ok 16 - history replay rehydrates masked credentials from the saved request, never sends ***
+  ---
+  duration_ms: 31.946333
+  type: 'test'
+  ...
+# Subtest: automation runs poll deltas and append only the new steps
+ok 17 - automation runs poll deltas and append only the new steps
+  ---
+  duration_ms: 2030.742417
+  type: 'test'
+  ...
+# Subtest: import creates every item in order and reloads the lists once
+ok 18 - import creates every item in order and reloads the lists once
+  ---
+  duration_ms: 43.736959
+  type: 'test'
+  ...
+# Subtest: opening a saved request fetches its full row once and reuses it
+ok 19 - opening a saved request fetches its full row once and reuses it
+  ---
+  duration_ms: 31.852
+  type: 'test'
+  ...
+# Subtest: a restored tab whose saved row is not loaded yet is never repurposed
+ok 20 - a restored tab whose saved row is not loaded yet is never repurposed
+  ---
+  duration_ms: 30.644458
+  type: 'test'
+  ...
+# Subtest: a final run_progress during an in-flight delta GET is latched, not dropped
+ok 21 - a final run_progress during an in-flight delta GET is latched, not dropped
+  ---
+  duration_ms: 40.064625
+  type: 'test'
+  ...
+# Subtest: run_progress wakes are coalesced to one delta GET per 250 ms
+ok 22 - run_progress wakes are coalesced to one delta GET per 250 ms
+  ---
+  duration_ms: 831.640917
+  type: 'test'
+  ...
+# Subtest: api_client_changed patches the loaded workspace and expires others
+ok 23 - api_client_changed patches the loaded workspace and expires others
+  ---
+  duration_ms: 1539.205834
+  type: 'test'
+  ...
+# Subtest: switching tabs keeps each tab its own response
+ok 24 - switching tabs keeps each tab its own response
+  ---
+  duration_ms: 30.320458
+  type: 'test'
+  ...
+# Subtest: two tabs send concurrently; a background tab’s response is kept, never cancelled
+ok 25 - two tabs send concurrently; a background tab’s response is kept, never cancelled
+  ---
+  duration_ms: 29.561625
+  type: 'test'
+  ...
+# Subtest: cancel only stops the active tab’s send
+ok 26 - cancel only stops the active tab’s send
+  ---
+  duration_ms: 29.093667
+  type: 'test'
+  ...
+# Subtest: opening a history entry shows its stored response, flagged as from history
+ok 27 - opening a history entry shows its stored response, flagged as from history
+  ---
+  duration_ms: 31.720417
+  type: 'test'
+  ...
+# Subtest: api_history_appended refetches only a history list someone asked for (perf H1)
+ok 28 - api_history_appended refetches only a history list someone asked for (perf H1)
+  ---
+  duration_ms: 683.908542
+  type: 'test'
+  ...
+# Subtest: concurrent script writes preserve newer unrelated variables: console.log('done')
+ok 29 - concurrent script writes preserve newer unrelated variables: console.log('done')
+  ---
+  duration_ms: 29.451125
+  type: 'test'
+  ...
+# Subtest: concurrent script writes preserve newer unrelated variables: pm.variables.set('a','one')
+ok 30 - concurrent script writes preserve newer unrelated variables: pm.variables.set('a','one')
+  ---
+  duration_ms: 30.735167
+  type: 'test'
+  ...
+# Subtest: concurrent script writes preserve newer unrelated variables: pm.variables.unset('remove')
+ok 31 - concurrent script writes preserve newer unrelated variables: pm.variables.unset('remove')
+  ---
+  duration_ms: 28.726958
+  type: 'test'
+  ...
+# Subtest: loadCollections: late response cannot overwrite workspace B
+ok 32 - loadCollections: late response cannot overwrite workspace B
+  ---
+  duration_ms: 333.299875
+  type: 'test'
+  ...
+# Subtest: saveCollection: completed write returns to caller but cannot publish into workspace B
+ok 33 - saveCollection: completed write returns to caller but cannot publish into workspace B
+  ---
+  duration_ms: 333.26625
+  type: 'test'
+  ...
+# Subtest: loadCollections: late response cannot overwrite a new A visit
+ok 34 - loadCollections: late response cannot overwrite a new A visit
+  ---
+  duration_ms: 485.626542
+  type: 'test'
+  ...
+# Subtest: saveCollection: completed write returns to caller but cannot publish into a new A visit
+ok 35 - saveCollection: completed write returns to caller but cannot publish into a new A visit
+  ---
+  duration_ms: 482.505625
+  type: 'test'
+  ...
+# Subtest: saveCollection: stale failure does not toast over the new workspace
+ok 36 - saveCollection: stale failure does not toast over the new workspace
+  ---
+  duration_ms: 333.14125
+  type: 'test'
+  ...
+# Subtest: loadEnvironments: late response cannot overwrite workspace B
+ok 37 - loadEnvironments: late response cannot overwrite workspace B
+  ---
+  duration_ms: 332.071667
+  type: 'test'
+  ...
+# Subtest: saveEnvironment: completed write returns to caller but cannot publish into workspace B
+ok 38 - saveEnvironment: completed write returns to caller but cannot publish into workspace B
+  ---
+  duration_ms: 333.176958
+  type: 'test'
+  ...
+# Subtest: loadEnvironments: late response cannot overwrite a new A visit
+ok 39 - loadEnvironments: late response cannot overwrite a new A visit
+  ---
+  duration_ms: 485.071625
+  type: 'test'
+  ...
+# Subtest: saveEnvironment: completed write returns to caller but cannot publish into a new A visit
+ok 40 - saveEnvironment: completed write returns to caller but cannot publish into a new A visit
+  ---
+  duration_ms: 495.553292
+  type: 'test'
+  ...
+# Subtest: saveEnvironment: stale failure does not toast over the new workspace
+ok 41 - saveEnvironment: stale failure does not toast over the new workspace
+  ---
+  duration_ms: 333.016583
+  type: 'test'
+  ...
+# Subtest: loadAutomations: late response cannot overwrite workspace B
+ok 42 - loadAutomations: late response cannot overwrite workspace B
+  ---
+  duration_ms: 346.22875
+  type: 'test'
+  ...
+# Subtest: saveAutomation: completed write returns to caller but cannot publish into workspace B
+ok 43 - saveAutomation: completed write returns to caller but cannot publish into workspace B
+  ---
+  duration_ms: 335.215417
+  type: 'test'
+  ...
+# Subtest: loadAutomations: late response cannot overwrite a new A visit
+ok 44 - loadAutomations: late response cannot overwrite a new A visit
+  ---
+  duration_ms: 487.795209
+  type: 'test'
+  ...
+# Subtest: saveAutomation: completed write returns to caller but cannot publish into a new A visit
+ok 45 - saveAutomation: completed write returns to caller but cannot publish into a new A visit
+  ---
+  duration_ms: 485.183333
+  type: 'test'
+  ...
+# Subtest: saveAutomation: stale failure does not toast over the new workspace
+ok 46 - saveAutomation: stale failure does not toast over the new workspace
+  ---
+  duration_ms: 333.828459
+  type: 'test'
+  ...
+# Subtest: loadCollections: stale error cannot mark a successfully loaded empty workspace as failed
+ok 47 - loadCollections: stale error cannot mark a successfully loaded empty workspace as failed
+  ---
+  duration_ms: 347.486791
+  type: 'test'
+  ...
+# Subtest: loadRequests: stale error cannot mark a successfully loaded empty workspace as failed
+ok 48 - loadRequests: stale error cannot mark a successfully loaded empty workspace as failed
+  ---
+  duration_ms: 335.878291
+  type: 'test'
+  ...
+# Subtest: loadEnvironments: stale error cannot mark a successfully loaded empty workspace as failed
+ok 49 - loadEnvironments: stale error cannot mark a successfully loaded empty workspace as failed
+  ---
+  duration_ms: 336.813834
+  type: 'test'
+  ...
+# Subtest: late activation cannot clear the new workspace active environment or change its next Send
+ok 50 - late activation cannot clear the new workspace active environment or change its next Send
+  ---
+  duration_ms: 336.081958
+  type: 'test'
+  ...
+# Subtest: loadAll: old A success cannot overwrite the fresh A visit after A-B-A
+ok 51 - loadAll: old A success cannot overwrite the fresh A visit after A-B-A
+  ---
+  duration_ms: 331.662417
+  type: 'test'
+  ...
+# Subtest: loadAll: obsolete A failure cannot clear the loading state of a newer A visit
+ok 52 - loadAll: obsolete A failure cannot clear the loading state of a newer A visit
+  ---
+  duration_ms: 374.393542
+  type: 'test'
+  ...
+# Subtest: lists stay pending until this workspace settles once — a refetch never re-enters "not loaded"
+ok 53 - lists stay pending until this workspace settles once — a refetch never re-enters "not loaded"
+  ---
+  duration_ms: 335.938958
+  type: 'test'
+  ...
+# Subtest: GraphQL variables: blank → {}, object passes, bad JSON names the line
+ok 54 - GraphQL variables: blank → {}, object passes, bad JSON names the line
+  ---
+  duration_ms: 1.389916
+  type: 'test'
+  ...
+# Subtest: history direct and event invalidations share one snapshot, including duplicate event during fetch
+ok 55 - history direct and event invalidations share one snapshot, including duplicate event during fetch
+  ---
+  duration_ms: 0.717166
+  type: 'test'
+  ...
+# Subtest: history append after fetch began produces exactly one necessary followup
+ok 56 - history append after fetch began produces exactly one necessary followup
+  ---
+  duration_ms: 0.124792
+  type: 'test'
+  ...
+# Subtest: history workspace replacement aborts and ignores old response
+ok 57 - history workspace replacement aborts and ignores old response
+  ---
+  duration_ms: 0.428541
+  type: 'test'
+  ...
+# Subtest: history detail cannot overwrite another selection, workspace, tab or edited draft
+ok 58 - history detail cannot overwrite another selection, workspace, tab or edited draft
+  ---
+  duration_ms: 0.193
+  type: 'test'
+  ...
+# Subtest: detail failure preserves draft and clears only its own pending state
+ok 59 - detail failure preserves draft and clears only its own pending state
+  ---
+  duration_ms: 0.107084
+  type: 'test'
+  ...
+# Subtest: late callbacks from a replaced socket cannot mutate current stream
+ok 60 - late callbacks from a replaced socket cannot mutate current stream
+  ---
+  duration_ms: 45.349958
+  type: 'test'
+  ...
+# Subtest: switching request tabs closes the previous relay and clears its console
+ok 61 - switching request tabs closes the previous relay and clears its console
+  ---
+  duration_ms: 13.44975
+  type: 'test'
+  ...
+# Subtest: stream console retains a bounded tail and counts discarded messages
+ok 62 - stream console retains a bounded tail and counts discarded messages
+  ---
+  duration_ms: 16.818334
+  type: 'test'
+  ...
+# Subtest: a message burst updates the console once per animation frame
+ok 63 - a message burst updates the console once per animation frame
+  ---
+  duration_ms: 12.171708
+  type: 'test'
+  ...
+# Subtest: abort terminates pending worker and ignores late messages
+ok 64 - abort terminates pending worker and ignores late messages
+  ---
+  duration_ms: 46.268875
+  type: 'test'
+  ...
+# Subtest: elapsed deadline terminates a script that never replies
+ok 65 - elapsed deadline terminates a script that never replies
+  ---
+  duration_ms: 23.104375
+  type: 'test'
+  ...
+# Subtest: oversized input rejects before any worker message
+ok 66 - oversized input rejects before any worker message
+  ---
+  duration_ms: 10.307958
+  type: 'test'
+  ...
+# Subtest: postMessage clone failure terminates and settles exactly once
+ok 67 - postMessage clone failure terminates and settles exactly once
+  ---
+  duration_ms: 9.421916
+  type: 'test'
+  ...
+# Subtest: messageerror terminates and success cleans its worker
+ok 68 - messageerror terminates and success cleans its worker
+  ---
+  duration_ms: 18.002875
+  type: 'test'
+  ...
+# Subtest: already aborted script creates no worker
+ok 69 - already aborted script creates no worker
+  ---
+  duration_ms: 5.8705
+  type: 'test'
+  ...
+# Subtest: pre-script keeps pm request/header and variable behavior
+ok 70 - pre-script keeps pm request/header and variable behavior
+  ---
+  duration_ms: 0.908209
+  type: 'test'
+  ...
+# Subtest: console bursts stop retaining entries at the script output budget
+ok 71 - console bursts stop retaining entries at the script output budget
+  ---
+  duration_ms: 0.354208
+  type: 'test'
+  ...
+# Subtest: oversized log text is rejected before retention
+ok 72 - oversized log text is rejected before retention
+  ---
+  duration_ms: 0.1
+  type: 'test'
+  ...
+# Subtest: post-script test bursts share bounded output collection
+ok 73 - post-script test bursts share bounded output collection
+  ---
+  duration_ms: 1.065875
+  type: 'test'
+  ...
+# Subtest: post-script keeps passed and failed pm tests plus chaining
+ok 74 - post-script keeps passed and failed pm tests plus chaining
+  ---
+  duration_ms: 0.166375
+  type: 'test'
+  ...
+# Subtest: write set records explicit same-value writes and unsets but not reads
+ok 75 - write set records explicit same-value writes and unsets but not reads
+  ---
+  duration_ms: 0.108875
+  type: 'test'
+  ...
+1..75
+# tests 75
+# suites 0
+# pass 75
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 14747.046584

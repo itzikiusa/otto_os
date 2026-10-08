@@ -1,0 +1,135 @@
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde_core v1.0.229
+   Compiling tracing v0.1.44
+   Compiling futures-util v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling anyhow v1.0.104
+   Compiling memchr v2.8.3
+   Compiling rustls v0.23.45
+   Compiling either v1.18.0
+   Compiling num_threads v0.1.7
+   Compiling rustc-hash v2.1.3
+   Compiling phf_macros v0.14.0
+   Compiling toml_edit v0.25.15+spec-1.1.0
+   Compiling logos-codegen v0.15.1
+   Compiling miette-derive v7.6.0
+   Compiling pin-project-internal v1.1.13
+   Compiling yoke v0.8.3
+   Compiling h2 v0.4.19
+   Compiling time v0.3.55
+   Compiling itertools v0.14.0
+   Compiling boa_string v0.22.0
+   Compiling strum v0.28.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling aho-corasick v1.1.5
+   Compiling proc-macro-crate v3.5.0
+   Compiling tower v0.5.3
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling prost-derive v0.14.4
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling hyper v1.11.1
+   Compiling regex-automata v0.4.18
+   Compiling phf v0.14.0
+   Compiling boa_gc v0.22.0
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling tokio-rustls v0.26.6
+   Compiling icu_provider v2.3.1
+   Compiling boa_interner v0.22.0
+   Compiling num-bigint v0.5.1
+   Compiling hyper-util v0.1.21
+   Compiling cookie v0.18.2
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling miette v7.6.0
+   Compiling icu_locale_fallback v2.3.0
+   Compiling idna_adapter v1.2.2
+   Compiling logos-codegen v0.16.1
+   Compiling pin-project v1.1.13
+   Compiling idna v1.1.0
+   Compiling logos-derive v0.15.1
+   Compiling event-listener v5.4.2
+   Compiling equator-macro v0.4.2
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde-value v0.7.0
+   Compiling chrono v0.4.45
+   Compiling icu_calendar v2.3.0
+   Compiling url v2.5.8
+   Compiling publicsuffix v2.3.0
+   Compiling logos v0.15.1
+   Compiling event-listener-strategy v0.5.4
+   Compiling hyper-rustls v0.27.10
+   Compiling prost v0.14.4
+   Compiling boa_ast v0.22.0
+   Compiling num_enum_derive v0.7.6
+   Compiling rustls-platform-verifier v0.7.1
+   Compiling tower-http v0.6.11
+   Compiling cookie_store v0.22.1
+   Compiling timezone_provider v0.2.6
+   Compiling axum-core v0.5.6
+   Compiling prost-types v0.14.4
+   Compiling dynify-macros v0.1.2
+   Compiling futures-concurrency v7.7.1
+   Compiling protox-parse v0.9.0
+   Compiling equator v0.4.2
+   Compiling axum v0.8.9
+   Compiling itertools v0.15.0
+   Compiling aligned-vec v0.6.4
+   Compiling boa_parser v0.22.0
+   Compiling temporal_rs v0.2.6
+   Compiling reqwest v0.13.5
+   Compiling chrono-tz v0.10.4
+   Compiling async-channel v2.5.0
+   Compiling float16 v0.1.7
+   Compiling hyper-timeout v0.5.2
+   Compiling tokio-stream v0.1.19
+   Compiling num_enum v0.7.6
+   Compiling otto-netguard v0.2.0 (/Users/itziklavon/otto_os/crates/otto-netguard)
+   Compiling dynify v0.1.2
+   Compiling tonic v0.14.6
+   Compiling logos-derive v0.16.1
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling logos v0.16.1
+   Compiling prost-reflect v0.16.5
+   Compiling boa_engine v0.22.0
+   Compiling protox v0.9.1
+   Compiling otto-apiclient v0.2.0 (/Users/itziklavon/otto_os/crates/otto-apiclient)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.51s
+     Running unittests src/lib.rs (target/debug/deps/otto_apiclient-d7c3d297ff2c8046)
+
+running 4 tests
+test grpc::tests::reflection_deadline_covers_a_server_that_never_finishes ... FAILED
+test grpc::tests::reflection_proto_compiles_and_builds_request ... ok
+test grpc::tests::reflection_rejects_excessive_bytes_and_message_counts ... FAILED
+test grpc::tests::reflection_rejects_excessive_service_listing ... FAILED
+
+failures:
+
+---- grpc::tests::reflection_deadline_covers_a_server_that_never_finishes stdout ----
+
+thread 'grpc::tests::reflection_deadline_covers_a_server_that_never_finishes' (2938232) panicked at crates/otto-apiclient/src/grpc.rs:1047:14:
+reflection must have its own deadline: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- grpc::tests::reflection_rejects_excessive_bytes_and_message_counts stdout ----
+
+thread 'grpc::tests::reflection_rejects_excessive_bytes_and_message_counts' (2939766) panicked at crates/otto-apiclient/src/grpc.rs:1096:13:
+upstream: server returned no services (reflection may be disabled)
+
+---- grpc::tests::reflection_rejects_excessive_service_listing stdout ----
+
+thread 'grpc::tests::reflection_rejects_excessive_service_listing' (2939767) panicked at /Users/itziklavon/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tower-0.5.3/src/buffer/service.rs:122:23:
+`send_item` called without first calling `poll_reserve`
+
+
+failures:
+    grpc::tests::reflection_deadline_covers_a_server_that_never_finishes
+    grpc::tests::reflection_rejects_excessive_bytes_and_message_counts
+    grpc::tests::reflection_rejects_excessive_service_listing
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 20 filtered out; finished in 22.04s
+
+error: test failed, to rerun pass `-p otto-apiclient --lib`

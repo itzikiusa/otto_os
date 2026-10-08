@@ -1,0 +1,21 @@
+{
+  "captured_utc": "2026-10-08T00:06:34.111807+00:00",
+  "base": "a0bd718b9fbc008d72c164ce643a24ed78e6368c",
+  "kind": "uncommitted source review checkpoint, not a test certification",
+  "sha256": {
+    "crates/otto-rbac/src/cache.rs": "93fc250b69c3e5949253a36e4703a323f89c7a50554a001e2be86a063261c6cb",
+    "crates/otto-rbac/src/tokens.rs": "e545d5b297d2559c3f4c5f7d7bb28ae73b1afcdb9973ce38649fbdaec9f2c5af",
+    "crates/otto-dbviewer/src/drivers/redis/framing.rs": "8110304ec00078472b6eefc85f9c9869582431f33f96d923ee7f5dd63d26df93",
+    "crates/otto-dbviewer/src/drivers/redis/transport.rs": "51b2b9de4355e0be3f226f91ce62e4ad39229396963fa01536acff4fa17aae62",
+    "crates/otto-dbviewer/src/drivers/redis/tls.rs": "eff41b4aada49c732bb538e4239e6510e83e9ea75cdcd707ed8b8b2ae73d83cf",
+    "crates/otto-mcp/src/service_preflight.rs": "30a66cbc84265f3150b4fecea1a2d9847da6e18e3916fc05a96858711cc8bae9",
+    "crates/otto-mcp/src/client.rs": "0a74e572284bb031bf7c5687a97a83dcf991a18a2b209cb0909f0f8b5f3c1a1e",
+    "crates/otto-server/src/routes/search.rs": "211e944ce4d70012cb30e46e6e77de4e484c3995ff60565dae996342651feda1",
+    "crates/otto-state/src/search.rs": "a51d840577fa6cbf0f50ea832b2836df47657e31ea22a273cf536f56f2f3ef79",
+    "crates/otto-state/migrations/0181_assistant_thread_paging_index.sql": "164fe0982dc04034ed2b21157c4d61dc4e126a9f6dd6c5d8cda87017bffe49a6",
+    "crates/otto-git/src/push.rs": "141df1c1419dc5582755f3d87632440342a819d8556a45edc9fbde0952da6cbe",
+    "crates/otto-server/src/run_service.rs": "eeddd102a12c101fec25265fb652dc82fe97277a0074a40a531b95012cca4348",
+    "scripts/ci-apt-install.py": "2558101bc750aa1adfdca05f47850b846eeb18344dcb6c8f5b3fe6c14abc6f6f",
+    ".github/workflows/ci.yml": "b3b45f8ef972fdabd6bc149b08ecbf15b462fb6592753bb2d5cfe421733672f6"
+  }
+}

@@ -1,0 +1,220 @@
+TAP version 13
+# Subtest: failed schedule refresh preserves known cadence and exposes a recoverable error
+ok 1 - failed schedule refresh preserves known cadence and exposes a recoverable error
+  ---
+  duration_ms: 77.393125
+  type: 'test'
+  ...
+# Subtest: stale schedule failure cannot finish or replace the newer loading state
+ok 2 - stale schedule failure cannot finish or replace the newer loading state
+  ---
+  duration_ms: 25.359333
+  type: 'test'
+  ...
+# Subtest: agent list detail fanout is bounded and obsolete queued work is skipped
+ok 3 - agent list detail fanout is bounded and obsolete queued work is skipped
+  ---
+  duration_ms: 28.0545
+  type: 'test'
+  ...
+# Subtest: loadSchedules: A then B preserves independent agent results
+ok 4 - loadSchedules: A then B preserves independent agent results
+  ---
+  duration_ms: 80.014792
+  type: 'test'
+  ...
+# Subtest: loadSchedules: B then A preserves independent agent results
+ok 5 - loadSchedules: B then A preserves independent agent results
+  ---
+  duration_ms: 23.168209
+  type: 'test'
+  ...
+# Subtest: loadSchedules: newer same-agent result survives stale success
+ok 6 - loadSchedules: newer same-agent result survives stale success
+  ---
+  duration_ms: 19.578833
+  type: 'test'
+  ...
+# Subtest: loadSchedules: newer same-agent result survives stale failure
+ok 7 - loadSchedules: newer same-agent result survives stale failure
+  ---
+  duration_ms: 15.942417
+  type: 'test'
+  ...
+# Subtest: loadRuns: A then B preserves independent agent results
+ok 8 - loadRuns: A then B preserves independent agent results
+  ---
+  duration_ms: 17.346125
+  type: 'test'
+  ...
+# Subtest: loadRuns: B then A preserves independent agent results
+ok 9 - loadRuns: B then A preserves independent agent results
+  ---
+  duration_ms: 14.350708
+  type: 'test'
+  ...
+# Subtest: loadRuns: newer same-agent result survives stale success
+ok 10 - loadRuns: newer same-agent result survives stale success
+  ---
+  duration_ms: 11.921875
+  type: 'test'
+  ...
+# Subtest: loadRuns: newer same-agent result survives stale failure
+ok 11 - loadRuns: newer same-agent result survives stale failure
+  ---
+  duration_ms: 13.619875
+  type: 'test'
+  ...
+# Subtest: Proof filter replacement ignores old success and its loading completion
+ok 12 - Proof filter replacement ignores old success and its loading completion
+  ---
+  duration_ms: 9.748708
+  type: 'test'
+  ...
+# Subtest: Proof filter replacement ignores old failure and its loading completion
+ok 13 - Proof filter replacement ignores old failure and its loading completion
+  ---
+  duration_ms: 7.6665
+  type: 'test'
+  ...
+# Subtest: Proof workspace A-B-A rejects the first A response and retains final cursor
+ok 14 - Proof workspace A-B-A rejects the first A response and retains final cursor
+  ---
+  duration_ms: 9.043
+  type: 'test'
+  ...
+# Subtest: Proof old load-more success cannot publish across filter change
+ok 15 - Proof old load-more success cannot publish across filter change
+  ---
+  duration_ms: 6.23425
+  type: 'test'
+  ...
+# Subtest: Proof old load-more failure cannot publish across filter change
+ok 16 - Proof old load-more failure cannot publish across filter change
+  ---
+  duration_ms: 6.261
+  type: 'test'
+  ...
+# Subtest: Proof close invalidates pending detail success
+ok 17 - Proof close invalidates pending detail success
+  ---
+  duration_ms: 6.016792
+  type: 'test'
+  ...
+# Subtest: Proof close invalidates pending detail failure
+ok 18 - Proof close invalidates pending detail failure
+  ---
+  duration_ms: 7.615916
+  type: 'test'
+  ...
+# Subtest: Proof detail completion cannot clear an active list spinner
+ok 19 - Proof detail completion cannot clear an active list spinner
+  ---
+  duration_ms: 5.954333
+  type: 'test'
+  ...
+# Subtest: Insights queued latest model drains after schedule success
+ok 20 - Insights queued latest model drains after schedule success
+  ---
+  duration_ms: 5.136959
+  type: 'test'
+  ...
+# Subtest: Insights queued latest model drains after schedule failure
+ok 21 - Insights queued latest model drains after schedule failure
+  ---
+  duration_ms: 2.907167
+  type: 'test'
+  ...
+# Subtest: Insights failed queued model stays retryable after successful schedule save
+ok 22 - Insights failed queued model stays retryable after successful schedule save
+  ---
+  duration_ms: 3.002125
+  type: 'test'
+  ...
+# Subtest: Insights provider reset cancels an older debounced model from the prior provider
+ok 23 - Insights provider reset cancels an older debounced model from the prior provider
+  ---
+  duration_ms: 2.461042
+  type: 'test'
+  ...
+# Subtest: Insights rejected provider preserves its model when rejection is before debounce
+ok 24 - Insights rejected provider preserves its model when rejection is before debounce
+  ---
+  duration_ms: 2.562042
+  type: 'test'
+  ...
+# Subtest: Insights rejected provider preserves its model when rejection is after debounce
+ok 25 - Insights rejected provider preserves its model when rejection is after debounce
+  ---
+  duration_ms: 2.785292
+  type: 'test'
+  ...
+# Subtest: Insights Retry debounce state compiles without a nonreactive update warning
+ok 26 - Insights Retry debounce state compiles without a nonreactive update warning
+  ---
+  duration_ms: 48.117667
+  type: 'test'
+  ...
+# Subtest: PAT mint keeps the uncopied secret through repeated submit and clipboard failure until Done
+ok 27 - PAT mint keeps the uncopied secret through repeated submit and clipboard failure until Done
+  ---
+  duration_ms: 4.14225
+  type: 'test'
+  ...
+# Subtest: AccountPicker exposes pending lookup and an in-place retry without losing drafts or explicit account
+ok 28 - AccountPicker exposes pending lookup and an in-place retry without losing drafts or explicit account
+  ---
+  duration_ms: 4.095084
+  type: 'test'
+  ...
+# Subtest: AccountPicker provider change and unmount reject obsolete lookup publication
+ok 29 - AccountPicker provider change and unmount reject obsolete lookup publication
+  ---
+  duration_ms: 6.019208
+  type: 'test'
+  ...
+# Subtest: personal agent list A-B-A keeps newer rows after stale success
+ok 30 - personal agent list A-B-A keeps newer rows after stale success
+  ---
+  duration_ms: 12.50025
+  type: 'test'
+  ...
+# Subtest: personal agent list A-B-A keeps newer rows after stale failure
+ok 31 - personal agent list A-B-A keeps newer rows after stale failure
+  ---
+  duration_ms: 10.718708
+  type: 'test'
+  ...
+# Subtest: personal agent old completion does not clear a newer loading state
+ok 32 - personal agent old completion does not clear a newer loading state
+  ---
+  duration_ms: 12.852625
+  type: 'test'
+  ...
+# Subtest: closed Rooms view: an event bumps activity and fetches nothing
+ok 33 - closed Rooms view: an event bumps activity and fetches nothing
+  ---
+  duration_ms: 77.594542
+  type: 'test'
+  ...
+# Subtest: open view appends the event message with no GET, deduped by id
+ok 34 - open view appends the event message with no GET, deduped by id
+  ---
+  duration_ms: 25.913791
+  type: 'test'
+  ...
+# Subtest: unmount evicts all but the selected room; a resync re-reads the tail
+ok 35 - unmount evicts all but the selected room; a resync re-reads the tail
+  ---
+  duration_ms: 24.457792
+  type: 'test'
+  ...
+1..35
+# tests 35
+# suites 0
+# pass 35
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 727.665458

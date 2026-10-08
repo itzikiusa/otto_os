@@ -1,0 +1,2716 @@
+
+===== r14-metrics-red.log =====
+TAP version 13
+# Subtest: weekendOf converts a workweek into weekend days
+ok 1 - weekendOf converts a workweek into weekend days
+  ---
+  duration_ms: 0.8025
+  type: 'test'
+  ...
+# Subtest: offDaySet expands inclusive time-off ranges
+ok 2 - offDaySet expands inclusive time-off ranges
+  ---
+  duration_ms: 0.159792
+  type: 'test'
+  ...
+# Subtest: computeMetrics: capacity uses time off, design not tracked stays null, rework excluded from scope
+ok 3 - computeMetrics: capacity uses time off, design not tracked stays null, rework excluded from scope
+  ---
+  duration_ms: 16.23125
+  type: 'test'
+  ...
+# Subtest: attachPhases: reachability deploy, phaseTags keep repo, activity from raw corpus, links lookup
+ok 4 - attachPhases: reachability deploy, phaseTags keep repo, activity from raw corpus, links lookup
+  ---
+  duration_ms: 0.760083
+  type: 'test'
+  ...
+# Subtest: attachPhases: lead override clips to the effective window, labels dev and flags mismatch
+ok 5 - attachPhases: lead override clips to the effective window, labels dev and flags mismatch
+  ---
+  duration_ms: 0.167375
+  type: 'test'
+  ...
+# Subtest: attachPhases: design sub-tasks are excluded from child_dev_days
+ok 6 - attachPhases: design sub-tasks are excluded from child_dev_days
+  ---
+  duration_ms: 0.512875
+  type: 'test'
+  ...
+# Subtest: phase guardrails: canonical phase_<name>_weak when n<5 or coverage<0.5; banner id is the code
+ok 7 - phase guardrails: canonical phase_<name>_weak when n<5 or coverage<0.5; banner id is the code
+  ---
+  duration_ms: 0.918791
+  type: 'test'
+  ...
+# Subtest: contract: every exported flow.js / prs.js metric function appears in computeMetrics output
+ok 8 - contract: every exported flow.js / prs.js metric function appears in computeMetrics output
+  ---
+  duration_ms: 1.41175
+  type: 'test'
+  ...
+# Subtest: rework: rate_all vs rate_strong (0..1), counts by signal, truncation flag
+ok 9 - rework: rate_all vs rate_strong (0..1), counts by signal, truncation flag
+  ---
+  duration_ms: 1.147875
+  type: 'test'
+  ...
+# Subtest: one eligible population: cycleTimeByPhase n equals phaseSummary population
+ok 10 - one eligible population: cycleTimeByPhase n equals phaseSummary population
+  ---
+  duration_ms: 1.128708
+  type: 'test'
+  ...
+# Subtest: activityOf includes PR review events and substantive sub-task commits
+ok 11 - activityOf includes PR review events and substantive sub-task commits
+  ---
+  duration_ms: 0.178625
+  type: 'test'
+  ...
+# Subtest: doraConfig: failure window from side, min_n and hotfix patterns from config, weekend from workweek
+ok 12 - doraConfig: failure window from side, min_n and hotfix patterns from config, weekend from workweek
+  ---
+  duration_ms: 0.217958
+  type: 'test'
+  ...
+# Subtest: computeMetrics: a Fri/Sat weekend (Sun–Thu workweek) changes DORA lead time
+ok 13 - computeMetrics: a Fri/Sat weekend (Sun–Thu workweek) changes DORA lead time
+  ---
+  duration_ms: 1.903083
+  type: 'test'
+  ...
+# Subtest: estimate accuracy contract: corpus identity and effective estimate reach the correction action
+ok 14 - estimate accuracy contract: corpus identity and effective estimate reach the correction action
+  ---
+  duration_ms: 0.349084
+  type: 'test'
+  ...
+# Subtest: flow adapter preserves measured review wait and QA phases for efficiency
+not ok 15 - flow adapter preserves measured review wait and QA phases for efficiency
+  ---
+  duration_ms: 0.976583
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/examples/plugins/team-performance/test/metrics.test.js:201:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      {
+    +   coding: 3,
+    -   coding: 2,
+        deployment: 1,
+        design: null,
+        dev: 3,
+    +   in_review: null,
+    +   qa_rework: null,
+    +   qa_wait: null,
+    -   in_review: 1,
+    -   qa_rework: 1,
+    -   qa_wait: 2,
+        review: 5,
+    +   review_pickup: null,
+    -   review_pickup: 4,
+        rework: null
+      }
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    design: ~
+    coding: 2
+    dev: 3
+    review_pickup: 4
+    in_review: 1
+    review: 5
+    qa_wait: 2
+    qa_rework: 1
+    deployment: 1
+    rework: ~
+  actual:
+    design: ~
+    coding: 3
+    dev: 3
+    review_pickup: ~
+    in_review: ~
+    review: 5
+    qa_wait: ~
+    qa_rework: ~
+    deployment: 1
+    rework: ~
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (/Users/itziklavon/otto_os/examples/plugins/team-performance/test/metrics.test.js:211:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..15
+# tests 15
+# suites 0
+# pass 14
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 78.598
+
+===== r14-metrics-green.log =====
+TAP version 13
+# Subtest: weekendOf converts a workweek into weekend days
+ok 1 - weekendOf converts a workweek into weekend days
+  ---
+  duration_ms: 0.807292
+  type: 'test'
+  ...
+# Subtest: offDaySet expands inclusive time-off ranges
+ok 2 - offDaySet expands inclusive time-off ranges
+  ---
+  duration_ms: 0.141
+  type: 'test'
+  ...
+# Subtest: computeMetrics: capacity uses time off, design not tracked stays null, rework excluded from scope
+ok 3 - computeMetrics: capacity uses time off, design not tracked stays null, rework excluded from scope
+  ---
+  duration_ms: 15.437458
+  type: 'test'
+  ...
+# Subtest: attachPhases: reachability deploy, phaseTags keep repo, activity from raw corpus, links lookup
+ok 4 - attachPhases: reachability deploy, phaseTags keep repo, activity from raw corpus, links lookup
+  ---
+  duration_ms: 0.832125
+  type: 'test'
+  ...
+# Subtest: attachPhases: lead override clips to the effective window, labels dev and flags mismatch
+ok 5 - attachPhases: lead override clips to the effective window, labels dev and flags mismatch
+  ---
+  duration_ms: 0.191167
+  type: 'test'
+  ...
+# Subtest: attachPhases: design sub-tasks are excluded from child_dev_days
+ok 6 - attachPhases: design sub-tasks are excluded from child_dev_days
+  ---
+  duration_ms: 0.572959
+  type: 'test'
+  ...
+# Subtest: phase guardrails: canonical phase_<name>_weak when n<5 or coverage<0.5; banner id is the code
+ok 7 - phase guardrails: canonical phase_<name>_weak when n<5 or coverage<0.5; banner id is the code
+  ---
+  duration_ms: 1.063375
+  type: 'test'
+  ...
+# Subtest: contract: every exported flow.js / prs.js metric function appears in computeMetrics output
+ok 8 - contract: every exported flow.js / prs.js metric function appears in computeMetrics output
+  ---
+  duration_ms: 1.619167
+  type: 'test'
+  ...
+# Subtest: rework: rate_all vs rate_strong (0..1), counts by signal, truncation flag
+ok 9 - rework: rate_all vs rate_strong (0..1), counts by signal, truncation flag
+  ---
+  duration_ms: 1.362417
+  type: 'test'
+  ...
+# Subtest: one eligible population: cycleTimeByPhase n equals phaseSummary population
+ok 10 - one eligible population: cycleTimeByPhase n equals phaseSummary population
+  ---
+  duration_ms: 1.266375
+  type: 'test'
+  ...
+# Subtest: activityOf includes PR review events and substantive sub-task commits
+ok 11 - activityOf includes PR review events and substantive sub-task commits
+  ---
+  duration_ms: 0.196459
+  type: 'test'
+  ...
+# Subtest: doraConfig: failure window from side, min_n and hotfix patterns from config, weekend from workweek
+ok 12 - doraConfig: failure window from side, min_n and hotfix patterns from config, weekend from workweek
+  ---
+  duration_ms: 0.071458
+  type: 'test'
+  ...
+# Subtest: computeMetrics: a Fri/Sat weekend (Sun–Thu workweek) changes DORA lead time
+ok 13 - computeMetrics: a Fri/Sat weekend (Sun–Thu workweek) changes DORA lead time
+  ---
+  duration_ms: 1.654708
+  type: 'test'
+  ...
+# Subtest: estimate accuracy contract: corpus identity and effective estimate reach the correction action
+ok 14 - estimate accuracy contract: corpus identity and effective estimate reach the correction action
+  ---
+  duration_ms: 0.338959
+  type: 'test'
+  ...
+# Subtest: flow adapter preserves measured review wait and QA phases for efficiency
+ok 15 - flow adapter preserves measured review wait and QA phases for efficiency
+  ---
+  duration_ms: 0.149333
+  type: 'test'
+  ...
+1..15
+# tests 15
+# suites 0
+# pass 15
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 80.203417
+
+===== r14-team-performance-node26.log =====
+✔ businessDays: within one workday is fractional (12.70825ms)
+✔ businessDays: span across a weekend excludes it (0.164708ms)
+✔ businessDays: exact Mon..Sat midnight week = 5.0 (0.10525ms)
+✔ businessDays: Sun–Thu workweek counts Sunday, excludes Friday (0.055417ms)
+✔ businessDays: zero and negative spans are 0 (0.068542ms)
+✔ addBusinessDays: lands on a workday, skipping the weekend (0.174541ms)
+✔ addBusinessDays: zero days returns start (or next workday from weekend) (0.052791ms)
+✔ classifyStatus: defaults (0.265208ms)
+✔ classifyStatus: "Design Review" is design (design wins over review) (0.050292ms)
+✔ classifyStatus: explicit map overrides defaults (case-insensitive) (0.081125ms)
+✔ classifyStatus: unknown active-looking status defaults to implementation (0.046ms)
+✔ buildIntervals: no changelog -> single open interval in created status (0.092542ms)
+✔ buildIntervals: transitions produce contiguous intervals; initial from fromString (0.418833ms)
+✔ buildIntervals: out-of-order histories are sorted (0.052042ms)
+✔ analyzeIssue: completed story numbers are exact (0.74525ms)
+✔ analyzeIssue: flags no_code / no_estimate / skipped_design (0.135125ms)
+✔ analyzeIssue: reopened + late_merge flags (0.295375ms)
+✔ analyzeIssue: attribution goes to the assignee at done, not the current one (0.139333ms)
+✔ analyzeIssue: done_at falls back to last done-transition without resolutiondate (0.166542ms)
+✔ analyzeIssue: open issue has null done/cycle and open intervals (0.2235ms)
+✔ baselines: bucket stats + fallback chain + min-n (0.898375ms)
+✔ baselines: too-small corpus -> null lookup (0.067417ms)
+✔ verdict boundaries: 0.8 and 1.25 are inclusive on-track edges (0.056666ms)
+✔ assigneeFactor: median ratio, clamped, needs 3 samples (0.184ms)
+✔ predict: open task gets scaled range; in-progress projects a workday finish (0.236084ms)
+✔ predict: no baseline -> null (0.035041ms)
+✔ suggestGoals: slow dev steps 10% toward team p50; fast dev keeps own median (0.106542ms)
+✔ suggestGoals: zero medians never suggest an unsaveable 0 target (0.07275ms)
+✔ goalProgress: direction-aware semantics (0.06725ms)
+✔ assigneeStats: medians, mape, wip and trend (0.955542ms)
+✔ deriveGit: fixes and deploy-wait segments (deploy starts where fixing ends) (0.129625ms)
+✔ deriveGit: merged but Jira still open -> done_by_git_only; unmerged code flagged (117.807083ms)
+✔ deriveGit: stale Jira timing without git signal is excluded from stats (0.144166ms)
+✔ overrides: outlier excludes; manual time re-includes at the entered value (0.059334ms)
+✔ routine detection: repeated version-bump summaries cluster; AI flag also counts (0.085666ms)
+✔ author matcher: display name, reversed name, email, alias (0.217208ms)
+✔ contributorCredits: commit-share split; assignee fallback when nobody matches (0.106333ms)
+✔ assigneeStats: weighted throughput uses AI estimates and splits multi-dev credit (0.343416ms)
+✔ scopeMetrics + evalScopeGoals: fix rate, deploy lead, direction-aware goals (0.211542ms)
+✔ enrichHierarchy: dev sub-tasks roll up; design sub-tasks paint the parent design phase (0.195083ms)
+✔ makeCanonical: chains resolve, cycles break, merged stats fold together (0.156792ms)
+✔ assigneeStats: period window filters samples; monthly buckets fill (0.173084ms)
+✔ pace/efficiency are size-weighted: one big miss outweighs many tiny accurate tasks (0.245833ms)
+✔ zero_time: bulk-closed done tasks with no git signal are excluded (manual cures) (0.147666ms)
+✔ design sub-task detected anywhere in the summary (0.040667ms)
+✔ feature pseudo-records credit weighted throughput to matched authors only (0.301417ms)
+✔ resurrected ancients: multi-year effective cycles are excluded even with git timing (5.301ms)
+✔ v0.7: post-merge fix time is NOT folded into the actual (stops at QA); lead partial override and manual still apply (0.216584ms)
+✔ v0.7: QA counts only when commits kept landing during QA (0.263375ms)
+✔ v0.7: rework charge-back moves time between tickets (0.033416ms)
+✔ dev_days: In Progress + Code Review only; git stretches fill status gaps (0.094208ms)
+✔ QA cap: long idle QA is capped; commits during QA lift the cap (0.209417ms)
+✔ ancient span with sane active status time measures at active days, not the span (5.398208ms)
+✔ 550 idle days in an active status is still timing garbage (stale) (1.239709ms)
+✔ estimateBasis: inflation index adjusts the pace trend (0.296125ms)
+✔ rework charge-back applies on the git and legacy branches too (0.048291ms)
+✔ manual time is never adjusted by rework; guardrail rework_manual_skip emitted (0.11975ms)
+✔ devDaysBasis: one denominator for rework rate and investment (0.118875ms)
+✔ time engine: UTC+3 Fri/Sat weekend + one vacation day excluded from actual; phases agree (7.659375ms)
+✔ time engine: legacy workweek array keeps UTC semantics; addBusinessDays skips time off (0.117291ms)
+✔ devDaysBasis: substantive sub-task credited to credited_to, parent points counted once (0.073417ms)
+✔ layout @390px light: themed, no horizontal scroll, menus clamped, no native dialogs (5617.615416ms)
+✔ layout @390px dark: themed, no horizontal scroll, menus clamped, no native dialogs (2619.985042ms)
+✔ layout @1280px light: themed, no horizontal scroll, menus clamped, no native dialogs (2592.179875ms)
+✔ layout @1280px dark: themed, no horizontal scroll, menus clamped, no native dialogs (2615.086208ms)
+✔ Settings → time off persists through Save (185.916833ms)
+✔ Estimates → Correct persists an estimate override (266.174042ms)
+✔ quality: nested overlay owns Escape, focus and inertness (150.83025ms)
+✔ quality: settings drafts survive refresh, scope/tab switches and edits during Save (270.638084ms)
+✔ quality: newest scope response owns metrics including stale failures (101.590791ms)
+✔ quality: unreachable scan status shows stale progress and Retry recovers (153.281ms)
+✔ quality: late account projects and people cannot overwrite current account (220.039458ms)
+✔ quality edge: popover above modal traps Tab in its active layer (96.140084ms)
+✔ quality edge: settings keep account drafts and failed saves; scoped maps save together (266.351459ms)
+✔ quality review: edits during post-save people refresh survive the next render (229.719583ms)
+✔ quality review: edits during post-save overview refresh survive the next render (228.178125ms)
+✔ quality visual closure @390px light: report, nested Download and scan recovery (2618.795375ms)
+✔ quality visual closure @390px dark: report, nested Download and scan recovery (2613.404459ms)
+✔ quality visual closure @1280px light: report, nested Download and scan recovery (2617.633291ms)
+✔ quality visual closure @1280px dark: report, nested Download and scan recovery (2627.21825ms)
+✔ quality: report opening owns focus while its HTML is still loading (188.037417ms)
+✔ quality populated report @390px light: hierarchy, accessible data and keyboard navigation (383.71475ms)
+✔ quality populated report @390px dark: hierarchy, accessible data and keyboard navigation (345.684584ms)
+✔ quality populated report @1280px light: hierarchy, accessible data and keyboard navigation (342.366083ms)
+✔ quality populated report @1280px dark: hierarchy, accessible data and keyboard navigation (348.411542ms)
+✔ quality: Jira Stop aborts active I/O without retrying (10.221875ms)
+✔ 20-day month with 5 days off → capacity 15 (2.10225ms)
+✔ per-capacity throughput divides by 15, not 20 (0.309125ms)
+✔ weekend inside a vacation is not double-subtracted (0.10775ms)
+✔ holidays and time off outside the window (0.104875ms)
+✔ teamCapacity sums people (0.164166ms)
+✔ perCapacity: zero denominator → null (0.09925ms)
+✔ ratio() matches known WCAG values (0.945084ms)
+✔ dark: text tokens reach 4.5:1 on every surface (0.756167ms)
+✔ dark: category (chart) colours reach 3:1 against every surface (0.148792ms)
+﹣ dark: light-theme --cat-2 is the deepened amber (0.049959ms) # SKIP
+✔ dark: white text on the solid accent (primary buttons) reaches 4.5:1 (0.075875ms)
+✔ dark: direct bar labels (--bg on phase colours) reach 3:1 (bold, non-text-critical: value repeated in <desc> and table) (0.072917ms)
+✔ light: text tokens reach 4.5:1 on every surface (0.474417ms)
+✔ light: category (chart) colours reach 3:1 against every surface (0.107292ms)
+✔ light: light-theme --cat-2 is the deepened amber (0.074958ms)
+✔ light: white text on the solid accent (primary buttons) reaches 4.5:1 (0.095208ms)
+✔ light: direct bar labels (--bg on phase colours) reach 3:1 (bold, non-text-critical: value repeated in <desc> and table) (0.057833ms)
+✔ doraMetrics: exact values on the deterministic fixture (12.690791ms)
+✔ bandFor: every cutoff boundary (0.091084ms)
+✔ two repos: by_repo and per_week (0.162791ms)
+✔ deploys dedupe by repo + tagged sha: same commit collapses, different commits same day do not (0.164167ms)
+✔ null repo / missing sha: each tag name is its own deploy (0.107583ms)
+✔ failure window edge: hotfix at exactly 7d counts, 7d+1ms does not (0.195ms)
+✔ hotfix in another repo does not fail this repo (0.090791ms)
+✔ chained hotfixes collapse into one incident (0.115ms)
+✔ MTTR from bug detection to the bug's own deploy in the same repo (0.17675ms)
+✔ PR lead time: first commit → first tag containing the merge sha (0.208459ms)
+✔ zero deploys → not_available, no band, never 0/NaN (0.136167ms)
+✔ legacy object form is still accepted (0.187708ms)
+✔ hotfix kind comes from hotfix_tag_patterns, or a tagKind callback (0.177583ms)
+✔ PR lead time: earliest tag containing the merge sha (O(1) index), repo-scoped, coverage reported (0.196375ms)
+✔ Fri/Sat weekend changes lead time vs Sat/Sun (0.120375ms)
+✔ new DORA metrics: hotfix rate, batch size, time to first commit, detect vs restore, open incidents, capacity weeks (0.245708ms)
+✔ contentHash: stable — title change re-estimates, description/points edits do not (0.513709ms)
+✔ ruler change re-estimates everything; first estimate is kept (0.134459ms)
+✔ selectTargets: window filter, cache hits skipped, hash mismatch re-selected (0.137541ms)
+✔ parseBatch: lenient extraction, validation, clamping (0.403625ms)
+✔ runEstimation: caches results, splits batches across workers, falls back on worker failure (503.373125ms)
+✔ medianReconcile: median days + majority routine across workers (0.207084ms)
+✔ runEstimation consensus: every worker sizes each task; summarizer reconciles (0.362167ms)
+✔ runEstimation consensus: no summarizer → deterministic median of workers (0.1195ms)
+✔ changeFingerprint invalidates the cache as the diff grows; prompt embeds evidence (0.122458ms)
+✔ custom rubric overrides the default lines (0.138458ms)
+✔ older prompt-version estimates are re-selected (0.146542ms)
+✔ featurePrompt lists every child and asks for the epic key (0.126625ms)
+✔ runFeatureEstimation: median consensus, stable key, re-ask on new child, cached not re-asked (0.451042ms)
+✔ runFeatureEstimation: failing worker falls back to the others; all failing leaves cache untouched (0.153958ms)
+✔ batchPrompt corrections: original → corrected, capped, JSON-escaped, absent when none (0.1825ms)
+✔ createDebouncedSaver: coalesces touches, flush writes once at the end (52.008584ms)
+✔ runEstimation persistTo writes the cache atomically at job end (1.867917ms)
+✔ quality: stopping feature estimates retains completed work and dispatches no next worker (0.358166ms)
+✔ throughputPerWeek: counts and weights, excluding scope_excluded (1.714791ms)
+✔ wip and agingWip (0.257209ms)
+✔ contextSwitching: mean distinct keys per person-day (0.164042ms)
+✔ investmentMix by type / epic / label (0.20025ms)
+✔ unplannedShare: bug, highest priority, interrupt (0.1455ms)
+✔ estimateAccuracy histogram and ±25% (0.225ms)
+✔ cycleTimeByPhase: medians, design not tracked is null not 0 (0.314375ms)
+✔ zero denominators give null (0.146ms)
+✔ phaseValues reads phasesFor() output; null stays null (0.401833ms)
+✔ cycleTimeByPhase: deployed_at ends elapsed; unknown start is uncovered, never 0 (0.14675ms)
+✔ flowEfficiency = (coding + in_review + qa_rework) / elapsed (0.124208ms)
+✔ focusShare: days with <= 1 key over active days (0.129125ms)
+✔ escapeRate: bugs pointing back at items delivered in the window (0.213291ms)
+✔ sprintPlanning: planned at start vs done at end, mid-sprint adds = creep (0.24675ms)
+✔ reworkRateByPerson: share reworked + rework days per dev day (0.122375ms)
+✔ investmentByEpic rows with summaries, no_epic + top unlinked tickets (6.046917ms)
+✔ unplannedShare lists tickets; estimateAccuracy guardrail under 10 samples (0.268375ms)
+✔ estimate accuracy contract: correction candidates and chart bins share the eligible population (0.134042ms)
+✔ estimate accuracy contract: candidates are bounded and ties deterministic; empty data is explicit (0.116416ms)
+warning: You appear to have cloned an empty repository.
+✔ buildIndex: merged feature is done at the merge event (subject carries the key) (79.831417ms)
+✔ buildIndex: release-branch commits after done are fixes; deploy tag dates the prod release (64.269166ms)
+✔ buildIndex: authorship is per non-merge commit (multi-dev) (67.934583ms)
+✔ buildIndex: unmerged branch -> first commit only, no done (64.207ms)
+✔ buildIndex: main-only commit is not delivered when develop is the target (62.439ms)
+✔ buildIndex: direct develop commit (no PR) is its own delivery (64.591666ms)
+✔ featureIndex: keyless merged branch becomes a git-only feature with authors + deploy tag (62.88225ms)
+✔ featureIndex: keyed feature branches carry their jira keys (excluded from the keyless view) (61.005667ms)
+✔ branchOfMerge: recognizes Bitbucket/GitHub/plain merges, ignores merge-backs (0.216ms)
+✔ buildIndex: depth 0 walks the full history (49.061584ms)
+✔ placeholder keys (ABC-0000 style) become per-author unscoped fix work, not issues (99.64475ms)
+✔ feature repos: direct-to-master commits become per-author repo activity (169.990625ms)
+✔ buildIndex: a stray commit long after delivery is NOT a fix (fix window) (133.278208ms)
+✔ isDeployTag: case-insensitive CONTAINS of deployed / hf / hotfix; tagKind (0.153542ms)
+✔ deployTagPatterns: legacy single key merged, defaults when absent (0.0735ms)
+✔ deploy tags: exact matches in a fixture repo, hf tag sets deployed_at (230.25525ms)
+✔ resolveTarget: origin/develop beats a stale local develop; age is recorded (183.541709ms)
+✔ deploy: partial commit in tag N, final commit in tag N+2 → deployed_at is N+2; contains populated (190.825208ms)
+✔ deploy: a late tag on an old commit is ordered by creatordate, not commit date (143.39425ms)
+✔ deploy: custom hotfix pattern list + hf word boundary (100.286458ms)
+✔ deploy: bare remote — origin/develop past a stale local develop; remote merge scanned and deployed (392.030416ms)
+✔ quality: deploy ranges persist across workers and invalidate changed earlier tags (952.538ms)
+✔ healthy scope → [] (0.858125ms)
+✔ guardrail low_n (0.181708ms)
+✔ guardrail no_pr_data (0.064667ms)
+✔ guardrail design_not_tracked_share (0.055667ms)
+✔ guardrail low_estimate_coverage (0.063917ms)
+✔ guardrail no_git_evidence (0.052167ms)
+✔ guardrail stale_target_ref (0.047834ms)
+✔ guardrail unmapped_authors (0.04625ms)
+✔ guardrail low_capacity (0.070042ms)
+✔ guardrail no_deploy_tags (0.117ms)
+✔ severity escalation and ordering (6.599458ms)
+✔ badgeFor: direct and scope-wide hits (0.161458ms)
+✔ canonicalize: stable tile ids, dedupe keeps worst severity, scope-wide tiles (0.559959ms)
+✔ property: every metric with n < min_n has a matching guardrail (15.011458ms)
+✔ tileOf maps metric keys onto tile prefixes (0.085917ms)
+✔ contract: every numeric leaf of a sparse metrics object is guarded or whitelisted (1.736208ms)
+✔ contract: every covering tile actually raises a guard on the sparse fixture (1.126417ms)
+✔ contract: a new unguarded numeric key fails (0.394125ms)
+✔ contract: every tile/metric key the module names resolves to a guard (0.520083ms)
+✔ contract: real computeMetrics output on a tiny scope is fully covered (19.0295ms)
+✔ guardFor: short inline reasons per family (0.223208ms)
+✔ guardFor: a healthy scope reads ok (0.375083ms)
+✔ evaluate: pr_cache_partial, jira_rework_low_confidence, hf_only_tags (0.148458ms)
+✔ link: "is caused by" (raw Jira issuelinks) → high, origin found (1.1575ms)
+✔ link: "fixes" outward → high (0.196917ms)
+✔ link: reverse "causes" on the origin counts via reverseLinks (0.143333ms)
+✔ link: "relates to" alone is low confidence and NOT rework (0.092792ms)
+✔ relates + follow-up keyword → medium rework (0.101459ms)
+✔ title_ref: summary names another ticket → medium; + keyword → high (0.228ms)
+✔ title_keyword alone (no origin) → low, not rework (0.082041ms)
+✔ negative: version-only mention ("JDK-17", "UTF-8") is not a reference (0.078625ms)
+✔ negative: own key and parent key in the title are not rework (0.499334ms)
+✔ reopened: self rework, origin is the ticket itself (0.152792ms)
+✔ bug_after_delivery: bug within window that blame-overlaps the origin → high (0.124916ms)
+✔ negative: bug outside the window, or without blame overlap, or a story with blame only (0.105917ms)
+✔ applyRework: charges actual to origin, marks scope_excluded, inputs untouched (0.281416ms)
+✔ applyRework: already blame-charged time is not charged twice (0.0825ms)
+✔ weighted throughput excludes a rework ticket's estimate (0.078209ms)
+✔ reworkRate = rework / (dev + rework) (0.116084ms)
+✔ classifyRework table: strong "is caused by" link (0.091625ms)
+✔ classifyRework table: "fixes" link (0.034083ms)
+✔ classifyRework table: title names key + "fix for" (0.02575ms)
+✔ classifyRework table: title names key only (0.0265ms)
+✔ classifyRework table: relates-to + follow-up keyword (in window) (0.026ms)
+✔ classifyRework table: cross-project origin named in title (0.025042ms)
+✔ classifyRework table: rework ticket that is a sub-task of another story (0.02825ms)
+✔ classifyRework table: bug in window with blame overlap (0.030917ms)
+✔ classifyRework table: NEG: "missing" in title without any reference (0.024458ms)
+✔ classifyRework table: NEG: relates-to an older ticket outside the window (0.032666ms)
+✔ classifyRework table: NEG: bug long after delivery (blame only) (0.021333ms)
+✔ classifyRework table: NEG: sub-task naming its own parent (0.020333ms)
+✔ deliveredScope excludes every rework ticket's estimate (incl. a rework sub-task) (0.125ms)
+✔ applyRework: chain A←B←C is order-independent and conserves the team total (0.165875ms)
+✔ applyRework: a manual-time side is never adjusted, flagged instead (0.078209ms)
+✔ bug window is configurable (config.bug_window_days) and exposed as meta (0.129791ms)
+✔ weekendOf converts a workweek into weekend days (0.770916ms)
+✔ offDaySet expands inclusive time-off ranges (0.1045ms)
+✔ computeMetrics: capacity uses time off, design not tracked stays null, rework excluded from scope (15.004875ms)
+✔ attachPhases: reachability deploy, phaseTags keep repo, activity from raw corpus, links lookup (0.563041ms)
+✔ attachPhases: lead override clips to the effective window, labels dev and flags mismatch (0.167208ms)
+✔ attachPhases: design sub-tasks are excluded from child_dev_days (0.181333ms)
+✔ phase guardrails: canonical phase_<name>_weak when n<5 or coverage<0.5; banner id is the code (0.635167ms)
+✔ contract: every exported flow.js / prs.js metric function appears in computeMetrics output (1.22275ms)
+✔ rework: rate_all vs rate_strong (0..1), counts by signal, truncation flag (1.027958ms)
+✔ one eligible population: cycleTimeByPhase n equals phaseSummary population (0.594084ms)
+✔ activityOf includes PR review events and substantive sub-task commits (0.176459ms)
+✔ doraConfig: failure window from side, min_n and hotfix patterns from config, weekend from workweek (0.075167ms)
+✔ computeMetrics: a Fri/Sat weekend (Sun–Thu workweek) changes DORA lead time (0.87875ms)
+✔ estimate accuracy contract: corpus identity and effective estimate reach the correction action (0.455416ms)
+✔ flow adapter preserves measured review wait and QA phases for efficiency (0.117125ms)
+✔ calls are spaced at least minIntervalMs apart (0.929041ms)
+✔ 429 with Retry-After: 3 waits 3s before retrying (0.179458ms)
+✔ repeated 429 backs off exponentially, capped, then gives up (0.175708ms)
+✔ 5xx gets a limited retry budget (0.105459ms)
+✔ network errors retry then rethrow; queue keeps serving (0.243375ms)
+✔ parseRetryAfter handles seconds and HTTP dates (0.689542ms)
+✔ one pacer keeps >= 2000ms between every call across two repos (11.111083ms)
+✔ persistent 429 exhausting retries fails the sync and leaves the cursor unchanged (1.634834ms)
+✔ corrupt cache file is recovered as empty and logged (0.990583ms)
+✔ updated_on newer than the cursor refetches detail; an unchanged second run makes zero detail calls (1.934417ms)
+✔ quality: abort interrupts backoff and prevents queued dispatch (0.312667ms)
+✔ quality edge: cancelled account exits a shared queue behind another active account (0.114958ms)
+✔ design: no evidence → null + not_tracked (never a fake 0) (12.11425ms)
+✔ design: a spike sub-task gives its exact working days (0.442125ms)
+✔ design: status time; pre-dev activity = distinct workdays outside backlog (0.364708ms)
+✔ design: overlapping windows are unioned and clipped before the first dev status (0.119375ms)
+✔ design: linked item timing via lookup; no timing → null + evidence_without_timing (0.1925ms)
+✔ review: PR opened Mon, reviewed Tue, merged Wed → pickup 1, in_review 1, total 2 (0.303792ms)
+✔ review: per-PR — union of windows, median pickup, unmerged counted apart, gap fill per PR window (0.186708ms)
+✔ review: no PR falls back to Code Review status; nothing → nulls (0.088542ms)
+✔ deploy: reachability (deployed_at) is primary; done_git_at without a PR (0.248333ms)
+✔ deploy: fallback only with a tag of the SAME repo; otherwise not_deployed (0.36675ms)
+✔ deploy tag rule: phases and gitscan give identical results (0.167958ms)
+✔ status classes: anchored backlog, reopen = dev, deploy_wait (0.069417ms)
+✔ dev: To-Do / backlog time is excluded (0.074625ms)
+✔ dev: commit days outside status windows fill gaps (0.148166ms)
+✔ qa: threshold met → commit days are rework, remainder wait; never the whole interval (0.205625ms)
+✔ qa: threshold judged across ALL QA windows — QA→Dev→QA bounce with 1+1 days meets min=2 (0.119291ms)
+✔ qa: weekend and personal days off never count as QA commit days (0.146041ms)
+✔ review: author commits after first review → review_rework (dev), rest stays in_review (0.236458ms)
+✔ qa / rework: no QA stage or no blame → null with a reason (never a fake 0) (0.046417ms)
+✔ tz: 23:30 local in UTC+3 lands on the local day (QA distinct days) (0.213125ms)
+✔ rework passthrough and phaseSummary: n/coverage over non-null, coverage is a 0..1 fraction (0.262209ms)
+✔ sync through the mock daemon: paced, 429 honoured, cached; second sync is incremental and survives a new client (14.831875ms)
+✔ mapRepoPaths maps local paths to daemon repo ids (0.3705ms)
+✔ derivePrMetrics: opened Mon 10:00, approved Tue 10:00, merged Wed 10:00 (0.284708ms)
+✔ business days skip the weekend; unreviewed + review depth (0.080625ms)
+✔ prFlowSummary: percentiles with n, null when empty (0.354459ms)
+✔ extractKeys pulls generic keys from branch and title (0.04675ms)
+✔ normalizePr keeps reviewer ids, approvals, comment authors, commit timestamps and a normalized state (0.137833ms)
+✔ derivePrMetrics: coding, cycle, comments, reviewers, post-review commits, rounds, merged without approval (0.09675ms)
+✔ prFlowSummary: new distributions, by_person with capacity rates, review load (0.248375ms)
+✔ prSummaryByKey is compact and carries no raw text (0.163875ms)
+✔ prIngestStatus explains every empty state (0.556875ms)
+✔ sizeBucket table: boundaries and unknown size (0.065791ms)
+✔ review_depth is null when the diff has 0 changed lines; size bucket null when size unknown (0.051333ms)
+✔ a failed commits/diff sub-call marks the PR partial, it is refetched next run and counted (3.461875ms)
+✔ prByPerson accepts a capacity people map (0.1295ms)
+✔ PR hours are derived from day values (×24) (7.978792ms)
+✔ trend covers prior periods + current; masked trend is numeric only (0.888125ms)
+✔ improved / declined from KPI deltas honour `better` (0.199417ms)
+✔ outliers: dev days, rework, estimate miss, jira rework (0.133292ms)
+✔ rework pairs use charged days or apportion the origin days by lines (0.118167ms)
+✔ dora failures get a title; deploy tags are filtered to the period and hotfix-flagged (0.107167ms)
+✔ blind spots come from guardrails (0.091167ms)
+✔ masking drops titles and aliases persons stably (0.168292ms)
+✔ deterministic: same input → identical output (0.179167ms)
+✔ assignee file hint is sha256(assignee).slice(0,12) (0.362ms)
+✔ model: every section key is present, even from empty input (12.418875ms)
+✔ model: null design stays null (not 0) and renders as "not tracked" (5.838ms)
+✔ model: kpi delta vs compare, ratio keeps capacity (2.883667ms)
+✔ render: unmasked keys link to jiraBase/browse/KEY (2.949792ms)
+✔ render: masked output has no links and no planted names or keys (8.553708ms)
+✔ render: masked render of a re-hydrated (JSON) model still drops keys from narrative (2.752583ms)
+✔ render: self-contained, a single nonce script, deterministic apart from the nonce (4.708792ms)
+✔ render: charts are accessible with title/desc and a table fallback (2.372791ms)
+✔ render: script-breaking strings in data are neutralised (2.6385ms)
+✔ model: comments endpoint must be a same-origin path, otherwise read-only (0.317917ms)
+✔ model: derived guardrails flag weak inputs (0.639083ms)
+✔ model: no all-null new section when the source data is present (4.845167ms)
+✔ render: fixed phase colours, direct segment labels, data in <desc> (3.159959ms)
+✔ guardrails: section pills by prefix, info severity mapped, derived small-sample rules (4.147334ms)
+✔ dev report: Goals section + team-context pill on DORA and PR flow (7.524125ms)
+✔ toc + anchors: every rendered section is in the sticky TOC with a link anchor (4.354791ms)
+✔ masking: every new section is masked (names, keys, epic titles) (7.208167ms)
+✔ leak check: a planted key in the narrative is caught unmasked and scrubbed when masked (8.331583ms)
+✔ XSS: hostile strings in every new field are escaped (3.796667ms)
+✔ comments: host-rendered with counts; at as epoch ms, numeric string or ISO (4.003125ms)
+✔ palette: single source — no hex colour in report.css; light/dark/print generated (0.460708ms)
+✔ jira base: https only (0.169667ms)
+✔ DORA bands follow the published thresholds (0.038417ms)
+✔ empty input still renders every always-on section without throwing (0.501459ms)
+✔ changes: improved / declined derived from KPIs with a prior and a direction (2.964042ms)
+✔ DORA: deploy tag list (hotfix detected by name, newest first, tickets linked) (2.434458ms)
+✔ PR flow: merge row on the strip and a slow-PR table with ticket anchors (2.697291ms)
+✔ comment anchors: every tile is section:metric, ticket rows are t:key, counts shown (4.454667ms)
+✔ masked: anchors scrubbed, free-text note shown, no real key in any attribute (8.044875ms)
+✔ security: </script><script> in the title cannot open a second script (1.890709ms)
+✔ security: jira_base must be a credential-free https origin (11.736292ms)
+✔ security: a fresh nonce per render, matching the CSP and the only script tag (9.33875ms)
+✔ security: <img src=x onerror=1> in EVERY string field reaches no unescaped sink (3.4625ms)
+✔ security: ids and anchors pass through esc() (2.4235ms)
+✔ charts: a chart without its table fallback is refused (0.305ms)
+✔ charts: sparkline is aria-hidden with an sr-only trend line (0.150708ms)
+✔ report.css: hchart stacks label over bar at 600px or below (0.1955ms)
+✔ reportfeed shapes: phases_by_period rows, hotfix flag, PR size alias, top-level improved/declined (0.197583ms)
+✔ rework: exact blame charges, self-rewrite excluded, older code not rework (219.678625ms)
+✔ rework: recent_days narrows the window without re-blaming (cache reused) (223.308166ms)
+✔ rework: only mainline + release refs, cherry-picks deduped by patch-id (297.339541ms)
+✔ rework: resolveOptions precedence argv > input > config > default (0.23525ms)
+✔ rework: charge survives git mv + edit, per-author lines and by_key lists (137.85925ms)
+✔ rework: byKeyLists builds both directions (0.161417ms)
+✔ the dead HTML post-filter is gone (reports are rendered by the escaping template) (0.394625ms)
+✔ fenceUntrusted neutralizes lookalikes and caps length (0.244417ms)
+✔ maskDeep replaces every name, nested arrays included, whole-word only (0.976542ms)
+✔ leakCheck finds a planted name and key (1.718208ms)
+✔ leakCheck scans inline JSON / entity-escaped text and summaries (0.944875ms)
+✔ maskedLeaks fails closed (0.944084ms)
+✔ jiraOrigin: https origins only (0.545375ms)
+✔ validAnchor allowlist and scrubComment (1.249459ms)
+✔ validAnchor: tile and ticket-row anchors (one colon), nothing selector-breaking (0.125125ms)
+✔ newNonce: unique, base64-alphanumeric, long enough (0.941208ms)
+✔ isDeliveredScope: truth table (0.46725ms)
+✔ creditedOwner: substantive sub-task → credited_to; otherwise assignee (0.084167ms)
+✔ weekendOf: complement of the workweek; default Sat/Sun (0.359ms)
+✔ hits on same mtimes, misses after a touch (2.221041ms)
+✔ LRU eviction and invalidate(prefix) (0.581ms)
+✔ getAsync: one in-flight rebuild per key, stale-while-revalidate for concurrent callers (24.533333ms)
+✔ default LRU holds 4 scopes; memo keyed by day-bucketed windows (0.441375ms)
+✔ store: writeJsonAtomicAsync round-trips and concurrent writers never collide (4.037583ms)
+✔ file cache: reuses parse while mtime unchanged, shared across scope rebuilds (2.050917ms)
+✔ file cache: size cap evicts LRU and never retains oversize files (2.101042ms)
+✔ memoizeView: once per scope+key, dies with the scope, gzip body cached (4.2315ms)
+✔ acceptsGzip parses Accept-Encoding (0.212334ms)
+✔ all-time view window: empty stored scope has zero bounded capacity window (230.227125ms)
+✔ accounts + projects come from host API and Jira (7.612375ms)
+✔ overview before any scan is 404 (0.646208ms)
+✔ scan 409s while running, then completes (2049.685083ms)
+✔ overview: assignees, baselines, open predictions, flags (5.964458ms)
+✔ assignee view: per-task actuals vs baseline, verdicts, evidence intervals, goals (3.301041ms)
+✔ goals PUT round-trips and overrides the suggestion (2.475667ms)
+✔ config: invalid rejected; status-map change recomputes locally (no Jira refetch) (13.904375ms)
+✔ incremental rescan refetches only the touched issue (618.195833ms)
+[sidecar] scan: issue TP-4 failed: 400 from /rest/api/3/issue/TP-4?expand=changelog&fields=summary%2Cdescription%2Cissuetype%2Cstatus%2Cassignee%2Ccreated%2Cresolutiondate%2Cupdated%2Ctimeoriginalestimate%2Cparent%2Clabels%2Cissuelinks%2Cpriority%2Ccustomfield_10016: {"errorMessages":["injected failure"]}
+✔ a failed issue fetch is retried on the next scan (not lost to the watermark) (1229.557375ms)
+✔ statuses endpoint exposes the map defaults (1.32475ms)
+✔ AI coach builds an enriched prompt and returns the agent text (1.424875ms)
+[sidecar] request failed: Error: no scan yet
+    at coach (/Users/itziklavon/otto_os/examples/plugins/team-performance/server.js:2634:21)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async Server.<anonymous> (/Users/itziklavon/otto_os/examples/plugins/team-performance/server.js:3124:29)
+✔ errors never leak details (0.773459ms)
+✔ people: registry seeded from scan; PUT round-trips roles/aliases/inclusion (6.327458ms)
+✔ people/seed pulls assignable users from Jira (people picker before first scan) (1.365333ms)
+✔ override: mark outlier excludes the story; manual time re-includes it (16.088459ms)
+✔ scope goals: PUT team + role goals, overview evaluates them directionally (5.343042ms)
+✔ 3-level estimates flow into tasks (AI estimate -> per-dev -> actual) (1.920334ms)
+✔ feature repos: opt-in scan extracts keyless git features with estimates (517.740166ms)
+✔ scan accepts an assignee scope (per-dev fetch) and records it (513.305167ms)
+✔ since param windows the stats (old completions leave) (5.332834ms)
+✔ people merge folds two accounts into one person (5.439708ms)
+✔ report: generate per quarter, saved to the hub, html retrievable (154.56375ms)
+✔ story exclude/include override removes it from every stat (16.118666ms)
+✔ unscoped fix commits (TP-0000) surface per person (546.341959ms)
+✔ auto-scan cron repeats the last scan params (isolated sidecar, fast tick) (4076.031791ms)
+✔ estimate override: corrects the agnostic estimate everywhere + feeds future prompts (16.339ms)
+✔ team report: month scope, masked, saved to the hub (157.744167ms)
+✔ editable prompts: rubric/instructions/report_instructions round-trip; defaults exposed (4.785875ms)
+✔ fix inclusion resolves through applyOverrides (auto + explicit + partial) (16.756667ms)
+✔ combined report: team overview + a section per developer, maskable (154.5825ms)
+✔ report already-running returns the job to attach to (not a 409); active endpoint lists it (112.910667ms)
+✔ PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardrails, cursor, comments (isolated sidecar) (18514.825ms)
+✔ quality: Stop preserves completed issues, stops dispatch and permits restart (1337.650125ms)
+✔ all-time view window: old tickets reach accuracy and flow with matching person denominators (316.4295ms)
+✔ checklist sub-task (same person, no substance) rolls up, is not credited (11.555708ms)
+✔ same person WITH substance under a timed story is still a checklist (0.148292ms)
+✔ B's real sub-task under A's story is credited to B and kept out of the rollup (0.438709ms)
+✔ other person but no substance (tiny checklist) rolls up (0.107167ms)
+✔ story with no own timing adopts its sub-task's timing (0.126667ms)
+✔ overlapping checklist intervals are a union, not a sum (0.117209ms)
+✔ design sub-task feeds the design phase, never the dev rollup (0.111ms)
+✔ unionIntervals merges touching and nested ranges (0.066167ms)
+✔ commit days are LOCAL days in the configured zone (0.230292ms)
+✔ creditedSubtasks lists real sub-task work per person; parent excludes it (0.253292ms)
+✔ design vocabulary matches phases.js (0.069417ms)
+✔ design sub-tasks use the shared phases.js vocabulary (0.106167ms)
+✔ substantive sub-task under an UNASSIGNED story is credited to the sub-task owner (0.073084ms)
+✔ sub-task with story points is not double-counted (0.108209ms)
+✔ tag cache bounds retained entry count and UTF-8 serialized bytes across reload (195.043667ms)
+✔ corrupt and future cache versions cold-start without failing indexing (1.233625ms)
+✔ resolver: color-mix with transparent / black / a colour, and var() fallbacks (1.38275ms)
+✔ generated theme: required tokens in every theme × scheme, all colours resolved (0.621875ms)
+✔ parity: lib/theme.js is exactly what tokens.css generates today (2.627208ms)
+✔ parity: raw tokens.css values survive (light/dark tones, native surfaces, solids) (0.289417ms)
+✔ report.css fallback block copies the generated light palette and scale (0.228ms)
+✔ contrast: generated solids carry their contrast colour at >= 4.5:1 (0.131875ms)
+✔ dayKey: 23:30 local in UTC+3 stays on the local day (10.92625ms)
+✔ isWorkday: default Sat/Sun vs configurable Fri/Sat (0.133333ms)
+✔ businessDaysTz: weekends, off days and partial days (0.266167ms)
+✔ distinctDays: local days, deduped and sorted (0.786042ms)
+✔ ui/ has files to guard (0.473083ms)
+✔ no native confirm/alert/prompt in ui/ (1.373834ms)
+✔ no font size below 11px in ui/ (0.246292ms)
+✔ no hex colours outside the app.css fallback block (0.441375ms)
+✔ fallback block defines complete light and dark token sets (0.207541ms)
+✔ the guards themselves catch violations (0.26675ms)
+✔ report/ has assets to guard (0.053ms)
+✔ no native confirm/alert/prompt in report/*.js (0.168917ms)
+✔ no font size below 11px in report/ (0.088708ms)
+✔ report/*.js has no hex colours (tokens only) (0.091625ms)
+✔ report/report.css has no hex outside its tp:fallback block (0.089083ms)
+✔ PHASE_COLORS is the fixed, exported phase map (1.424625ms)
+✔ stackedBars: direct labels only on wide segments, every value in <desc>, list twin (0.916709ms)
+✔ toasts: errors stay at least 8s (0.422083ms)
+✔ index.html sets data-theme before the stylesheet and shows a visible Period label (0.051166ms)
+✔ app.css: local-only tokens are tp-prefixed and the type scale follows Otto (0.219708ms)
+✔ fallback tokens match Otto tokens.css (native dark/light, status tones, cat-1..6, solids, Pro Dark, Warm) (0.900709ms)
+✔ app.css: KPI values use --fs-hero, only weights 500/600, and every token used in ui/ is defined (0.507166ms)
+✔ app.css: modal-time inert, drawer, guardrail hatch and prose-link underline rules exist (0.119708ms)
+✔ guardFor looks guardrails up by canonical metric id, never by message text (0.689959ms)
+✔ overview shows the guardrail banner and per-tile guardrail badges (3.204583ms)
+✔ DORA deploy frequency "Not available" carries patterns/repos/branch + Settings action and no band (0.243334ms)
+✔ flow phases: thin phases read "not tracked" (hatched) with design / QA coverage notes (0.787667ms)
+✔ coverage is a 0..1 share; a value above 1 reads ">100%" with a warning, never rescaled (0.154ms)
+✔ PR section: unavailable → reason + Settings; running → paced progress; idle → Scan now (0.169917ms)
+✔ PR section states: error + Retry, then loaded empty state (1.758208ms)
+(node:1614) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ investment: epic rows carry summary + Jira key; "no epic" is explained (0.86325ms)
+✔ people rows show capacity (business − off = capacity) beside each rate, plus a row guardrail (0.386ms)
+✔ people view: not-a-productivity-score note, capacity column, credited sub-tasks (1.35525ms)
+✔ person phase cells: null days read "not tracked", never 0 (0.128167ms)
+✔ quality tiles show CFR as "N of M deploys" (0.162875ms)
+✔ reports: masking badge is consistent and comments render (0.097208ms)
+✔ reports list: empty, error + Retry, loaded with Regenerate/Delete (0.984208ms)
+✔ below 600px charts open "Show as table" by default (0.216583ms)
+✔ (1) no 0..100 guessing anywhere in ui/: share01 and "> 1 ? v / 100" are gone (0.583125ms)
+✔ (1)+(2) a share above 1 renders ">100%" with a bad guardrail, dimmed + reason inline (0.205708ms)
+✔ (2) guardFor matches canonical ids, tiles[] and envelope weak_reasons; bad → hatched tile with reason (0.113292ms)
+✔ (2) Investment, PR and Quality sections carry guardrail badges (1.0325ms)
+✔ (3) report masking: on by default for team/combined, off only for one person from their page (0.16ms)
+✔ (4) calibration rows carry an info() each; inflation > 1.1 makes adjusted pace the headline (0.210625ms)
+✔ (5) rework empty state names the sources that ran, or says "not checked yet", with Scan/Settings (0.128459ms)
+✔ (5) hygiene flags get human labels and open a drawer of tickets (0.123292ms)
+✔ (6) People has a sub-task count column; person page section is "Sub-tasks with real work" (0.111167ms)
+✔ (7) deep links: route parses and builds tab/person/period; tile values with tickets are drawer buttons (0.565458ms)
+✔ (8) second-tier signal tiles render; capacity-normalised deploys show capacity context (0.307ms)
+✔ (8) per-person rates carry capacity context (people rows + person PR tile) (0.085875ms)
+✔ (10) a11y: sort glyphs aria-hidden, scrollable table region, sparkline sr text, NT + unestimated markers (0.303667ms)
+✔ (10) a modal makes main + toolbar inert and restores them on close (0.2405ms)
+✔ (9) applyTheme input: every host variable is copied and the missing surfaces are derived (0.250459ms)
+✔ (9) layout: no inline layout styles in reports/settings; rv-* and form-actions classes exist (0.344ms)
+✔ quality review: weak tiles keep full reasons in a collapsed native disclosure (0.058792ms)
+✔ projectKey / accountId (0.594625ms)
+✔ jqlString escapes quotes and backslashes (0.118708ms)
+✔ repoPath (0.415542ms)
+✔ readBodyCapped caps size (1.768041ms)
+✔ all-time view window: earliest record activity includes its whole UTC capacity day (0.722875ms)
+✔ all-time view window: owned commit and deployment dates bound records without Jira creation (0.133292ms)
+✔ all-time view window: invalid, absent and future activity never creates an epoch window (0.093542ms)
+✔ all-time view window: unrelated global side caches cannot expand a selected or empty scope (0.081667ms)
+✔ all-time view window: matching global keys and repo tag names do not prove account ownership (0.086125ms)
+ℹ tests 493
+ℹ suites 0
+ℹ pass 492
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 69201.913791
+
+===== r14-skills-red.log =====
+TAP version 13
+# Subtest: file deletion confirmation keeps the skill shown in the question
+not ok 1 - file deletion confirmation keeps the skill shown in the question
+  ---
+  duration_ms: 26.22225
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:7:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    true !== false
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:16:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: save completing after selecting another skill cannot replace its body or files
+not ok 2 - save completing after selecting another skill cannot replace its body or files
+  ---
+  duration_ms: 18.282166
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:19:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:28:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: review stop confirmation never targets a newly selected review
+not ok 3 - review stop confirmation never targets a newly selected review
+  ---
+  duration_ms: 8.418583
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:31:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    true !== false
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:39:48)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: review fixer completion cannot replace a newly selected review
+not ok 4 - review fixer completion cannot replace a newly selected review
+  ---
+  duration_ms: 20.492208
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:42:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + 'original'
+    - 'replacement'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'replacement'
+  actual: 'original'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:51:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace
+not ok 5 - skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace
+  ---
+  duration_ms: 17.446916
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:55:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:65:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace
+not ok 6 - skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace
+  ---
+  duration_ms: 4.564833
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:55:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:65:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 0
+# fail 6
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 350.296667
+
+===== r14-skills-detail-red.log =====
+TAP version 13
+# Subtest: file deletion confirmation keeps the skill shown in the question
+ok 1 - file deletion confirmation keeps the skill shown in the question
+  ---
+  duration_ms: 28.226709
+  type: 'test'
+  ...
+# Subtest: save completing after selecting another skill cannot replace its body or files
+ok 2 - save completing after selecting another skill cannot replace its body or files
+  ---
+  duration_ms: 6.922875
+  type: 'test'
+  ...
+# Subtest: review stop confirmation never targets a newly selected review
+ok 3 - review stop confirmation never targets a newly selected review
+  ---
+  duration_ms: 7.517834
+  type: 'test'
+  ...
+# Subtest: review fixer completion cannot replace a newly selected review
+ok 4 - review fixer completion cannot replace a newly selected review
+  ---
+  duration_ms: 6.902208
+  type: 'test'
+  ...
+# Subtest: skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace
+ok 5 - skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace
+  ---
+  duration_ms: 3.979792
+  type: 'test'
+  ...
+# Subtest: skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace
+ok 6 - skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace
+  ---
+  duration_ms: 4.772708
+  type: 'test'
+  ...
+# Subtest: library replacement and removal cannot switch targets while confirmation is open
+not ok 7 - library replacement and removal cannot switch targets while confirmation is open
+  ---
+  duration_ms: 5.35325
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:69:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    install
+
+    true !== false
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:80:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: provider comparison cannot cache old text under a different selected skill
+not ok 8 - provider comparison cannot cache old text under a different selected skill
+  ---
+  duration_ms: 5.178
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:84:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:92:65)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: unchanged save acknowledges only submitted text while newer typing stays dirty
+ok 9 - unchanged save acknowledges only submitted text while newer typing stays dirty
+  ---
+  duration_ms: 7.935208
+  type: 'test'
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 7
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 332.646875
+
+===== r14-skills-matrix-red.log =====
+TAP version 13
+# Subtest: file deletion confirmation keeps the skill shown in the question
+ok 1 - file deletion confirmation keeps the skill shown in the question
+  ---
+  duration_ms: 30.303459
+  type: 'test'
+  ...
+# Subtest: save completing after selecting another skill cannot replace its body or files
+ok 2 - save completing after selecting another skill cannot replace its body or files
+  ---
+  duration_ms: 6.644584
+  type: 'test'
+  ...
+# Subtest: review stop confirmation never targets a newly selected review
+ok 3 - review stop confirmation never targets a newly selected review
+  ---
+  duration_ms: 8.051125
+  type: 'test'
+  ...
+# Subtest: review fixer completion cannot replace a newly selected review
+ok 4 - review fixer completion cannot replace a newly selected review
+  ---
+  duration_ms: 6.335583
+  type: 'test'
+  ...
+# Subtest: skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace
+ok 5 - skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace
+  ---
+  duration_ms: 4.894042
+  type: 'test'
+  ...
+# Subtest: skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace
+ok 6 - skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace
+  ---
+  duration_ms: 4.308208
+  type: 'test'
+  ...
+# Subtest: library replacement and removal cannot switch targets while confirmation is open
+ok 7 - library replacement and removal cannot switch targets while confirmation is open
+  ---
+  duration_ms: 11.318792
+  type: 'test'
+  ...
+# Subtest: provider comparison cannot cache old text under a different selected skill
+ok 8 - provider comparison cannot cache old text under a different selected skill
+  ---
+  duration_ms: 8.289667
+  type: 'test'
+  ...
+# Subtest: unchanged save acknowledges only submitted text while newer typing stays dirty
+ok 9 - unchanged save acknowledges only submitted text while newer typing stays dirty
+  ---
+  duration_ms: 4.06825
+  type: 'test'
+  ...
+# Subtest: GoldenTasksView list completion keeps workspace ownership
+not ok 10 - GoldenTasksView list completion keeps workspace ownership
+  ---
+  duration_ms: 3.735792
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:108:4'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:114:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: MatrixView list completion keeps workspace ownership
+not ok 11 - MatrixView list completion keeps workspace ownership
+  ---
+  duration_ms: 3.54025
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:108:4'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:114:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: matrix stop confirmation cannot cancel the next matrix
+not ok 12 - matrix stop confirmation cannot cancel the next matrix
+  ---
+  duration_ms: 5.111583
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:117:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    true !== false
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:124:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: creating golden task after workspace switch cannot close the new form or publish old task
+not ok 13 - creating golden task after workspace switch cannot close the new form or publish old task
+  ---
+  duration_ms: 5.944042
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:127:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    1 !== 0
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/skillsOwnership.test.ts:134:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 9
+# fail 4
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 357.361417
+
+===== r14-node26-skills.log =====
+✔ file deletion confirmation keeps the skill shown in the question (27.863417ms)
+✔ save completing after selecting another skill cannot replace its body or files (4.370041ms)
+✔ review stop confirmation never targets a newly selected review (5.023625ms)
+✔ review fixer completion cannot replace a newly selected review (3.716ms)
+✔ skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace (3.630333ms)
+✔ skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace (3.2985ms)
+✔ library replacement and removal cannot switch targets while confirmation is open (7.877292ms)
+✔ provider comparison cannot cache old text under a different selected skill (3.689583ms)
+✔ unchanged save acknowledges only submitted text while newer typing stays dirty (3.0515ms)
+✔ GoldenTasksView list completion keeps workspace ownership (2.978416ms)
+✔ MatrixView list completion keeps workspace ownership (2.776667ms)
+✔ matrix stop confirmation cannot cancel the next matrix (2.596042ms)
+✔ creating golden task after workspace switch cannot close the new form or publish old task (2.445958ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 357.3145
+
+===== r14-skills-browser.log =====
+[WebServer] (node:95705) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VNVkvx OTTO_PORT=7914
+2026-10-07T23:51:25.946409Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VNVkvx)
+2026-10-07T23:51:26.209775Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VNVkvx/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:51:26.255749Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VNVkvx/clickhouse, port 61022)
+2026-10-07T23:51:26.293074Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:51:26.301710Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:51:26.302865Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:51:26.303170Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:51:26.307058Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:51:26.307168Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:51:26.309623Z  INFO otto_server::boot::recovery: boot: post-listen work done in 12 ms (plugins=0)
+2026-10-07T23:51:26.309719Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:51:26.309775Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:51:26.348350Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:51:26.413805Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:51:26.414413Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:51:26.414443Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:51:26.414829Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:51:26.415337Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:51:26.417170Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:51:26.417814Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:51:26.417844Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:51:26.417863Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:51:26.417884Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:51:26.417928Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:51:26.419789Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:51:26.420042Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:51:26.420876Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:51:26.503077Z  INFO ottod: listening on http://127.0.0.1:7914
+2026-10-07T23:51:26.503294Z  INFO ottod: alt loopback lane on http://localhost:7914 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:51:26.503644Z  INFO otto_server::boot: boot: ready in 552 ms (db_compact=4 db_open=243 maintenance=6 modules=79 restore=7 recovery=209)
+[e2e] test daemon ready (pid 95777); root onboarded.
+2026-10-07T23:51:26.651832Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-VNVkvx/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:51:26.653996Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:51:26.660999Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+
+Running 5 tests using 1 worker
+
+2026-10-07T23:51:26.724332Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:51:26.725371Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:51:26.725417Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:95831) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [desktop-browser] › e2e/desktop-skills-lab.spec.ts:34:1 › API: library skill CRUD — create, multi-file edit, delete (22ms)
+  ✓  2 [desktop-browser] › e2e/desktop-skills-lab.spec.ts:95:1 › API: static skill review completes with a deterministic report (264ms)
+  ✓  3 [desktop-browser] › e2e/desktop-skills-lab.spec.ts:124:1 › API: provider-skills endpoint is live and well-shaped (67ms)
+  ✓  4 [desktop-browser] › e2e/desktop-skills-lab.spec.ts:139:1 › UI: Skills Lab tabs, skills browser, and preserved evaluator (2.8s)
+  ✘  5 [desktop-browser] › e2e/desktop-skills-ownership.spec.ts:7:1 › saving one skill cannot overwrite the next skill after navigation (11.4s)
+
+
+  1) [desktop-browser] › e2e/desktop-skills-ownership.spec.ts:7:1 › saving one skill cannot overwrite the next skill after navigation
+
+    Error: expect(locator).toContainText(expected) failed
+
+    Locator: getByTestId('skill-editor').locator('.cm-content')
+    Expected substring: "Original instructions for r14-current"
+    Received string:    "# Submitted original skill"
+    Timeout: 10000ms
+
+    Call log:
+      - Expect "toContainText" getByTestId('skill-editor').locator('.cm-content') with timeout 10000ms
+      - waiting for getByTestId('skill-editor').locator('.cm-content')
+        24 × locator resolved to <div translate="no" role="textbox" autocorrect="off" spellcheck="false" class="cm-content" autocapitalize="off" aria-multiline="true" contenteditable="true" data-language="markdown" writingsuggestions="false">…</div>
+           - unexpected value "# Submitted original skill"
+
+
+      34 |   await page.getByRole('dialog').getByRole('button',{name:'Discard',exact:true}).click();
+      35 |   await expect(page.getByTestId('skill-name')).toHaveText('r14-current');
+    > 36 |   await expect(editor).toContainText('Original instructions for r14-current');
+         |                        ^
+      37 |   const response=page.waitForResponse(r=>r.url().endsWith('/library/skills/r14-original/file')&&r.request().method()==='PUT');
+      38 |   release();await(await response).finished();
+      39 |   await page.evaluate(()=>new Promise<void>(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r()))));
+        at /Users/itziklavon/otto_os/ui/e2e/desktop-skills-ownership.spec.ts:36:24
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/desktop-skills-ownership-s-918d8-next-skill-after-navigation-desktop-browser/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/desktop-skills-ownership-s-918d8-next-skill-after-navigation-desktop-browser/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/desktop-skills-ownership-s-918d8-next-skill-after-navigation-desktop-browser/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/desktop-skills-ownership-s-918d8-next-skill-after-navigation-desktop-browser/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  1 failed
+    [desktop-browser] › e2e/desktop-skills-ownership.spec.ts:7:1 › saving one skill cannot overwrite the next skill after navigation
+  4 passed (17.2s)
+
+===== r14-skills-browser-green.log =====
+[WebServer] (node:97027) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-UBn9Yh OTTO_PORT=7914
+2026-10-07T23:52:06.681458Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-UBn9Yh)
+2026-10-07T23:52:06.919194Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-UBn9Yh/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:52:06.924753Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-UBn9Yh/clickhouse, port 61153)
+2026-10-07T23:52:06.927469Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:52:06.929785Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:52:06.929838Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:52:06.929856Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:52:06.929960Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:52:06.929996Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:52:06.930083Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:52:06.930099Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:52:06.931939Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:52:06.932982Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:52:06.933023Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:52:06.933037Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:52:06.933053Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:52:06.933076Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:52:06.936182Z  INFO otto_server::boot::recovery: boot: post-listen work done in 6 ms (plugins=0)
+2026-10-07T23:52:06.982959Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:52:06.983026Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:52:06.983046Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:52:06.983065Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:52:06.983077Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:52:06.983119Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:52:06.983234Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:52:07.005263Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:52:07.017759Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:52:07.041951Z  INFO ottod: listening on http://127.0.0.1:7914
+2026-10-07T23:52:07.044370Z  INFO ottod: alt loopback lane on http://localhost:7914 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:52:07.044429Z  INFO otto_server::boot: boot: ready in 362 ms (db_compact=0 db_open=232 maintenance=2 modules=9 restore=0 recovery=116)
+[e2e] test daemon ready (pid 97070); root onboarded.
+
+Running 1 test using 1 worker
+
+2026-10-07T23:52:07.317984Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-UBn9Yh/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:52:07.319631Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:52:07.326624Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-07T23:52:07.388922Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:52:07.389453Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:52:07.389504Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:97152) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [desktop-browser] › e2e/desktop-skills-ownership.spec.ts:7:1 › saving one skill cannot overwrite the next skill after navigation (2.9s)
+
+  1 passed (4.9s)
+
+===== r14-usage-ui-red.log =====
+✖ failed report refresh cannot export a previous window as the current report (61.324917ms)
+✖ a report awaiting replacement cannot export the prior session scope (13.685791ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 0
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 355.327625
+
+✖ failing tests:
+
+test at unit/usageReportOwnership.test.ts:13:1
+✖ failed report refresh cannot export a previous window as the current report (61.324917ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+
+  + {
+  +   days: 30,
+  +   otto_only: true
+  + }
+  - null
+
+      at TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/usageReportOwnership.test.ts:18:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { days: 30, otto_only: true },
+    expected: null,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at unit/usageReportOwnership.test.ts:21:1
+✖ a report awaiting replacement cannot export the prior session scope (13.685791ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+  false !== true
+
+      at TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/usageReportOwnership.test.ts:30:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+===== r14-usage-skills-ui-green.log =====
+✔ file deletion confirmation keeps the skill shown in the question (29.525125ms)
+✔ save completing after selecting another skill cannot replace its body or files (5.061083ms)
+✔ review stop confirmation never targets a newly selected review (5.682375ms)
+✔ review fixer completion cannot replace a newly selected review (4.817625ms)
+✔ skills-eval/SkillsEvalPage: a late workspace list cannot publish into the new workspace (4.579791ms)
+✔ skills-lab/SkillReviewPanel: a late workspace list cannot publish into the new workspace (3.322208ms)
+✔ library replacement and removal cannot switch targets while confirmation is open (8.192416ms)
+✔ provider comparison cannot cache old text under a different selected skill (3.54575ms)
+✔ unchanged save acknowledges only submitted text while newer typing stays dirty (2.222666ms)
+✔ GoldenTasksView list completion keeps workspace ownership (3.291875ms)
+✔ MatrixView list completion keeps workspace ownership (4.311041ms)
+✔ matrix stop confirmation cannot cancel the next matrix (2.377833ms)
+✔ creating golden task after workspace switch cannot close the new form or publish old task (2.173542ms)
+✔ failed report refresh cannot export a previous window as the current report (56.522542ms)
+✔ a report awaiting replacement cannot export the prior session scope (13.639375ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 343.091584
+
+===== r14-skill-package-evals.log =====
+PASS good-focused-skill
+PASS bad-bloated-skill
+PASS bad-conflicting-skill
+PASS bad-no-examples-skill
+PASS bad-script-risk-skill
+
+5/5 evals passed
+
+===== r14-state-usage-red.log =====
+   Compiling hyper v1.11.1
+   Compiling tower v0.5.3
+   Compiling serde_urlencoded v0.7.1
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling sqlx-core v0.9.0
+   Compiling cookie_store v0.22.1
+   Compiling otto-transcript v0.2.0 (/Users/itziklavon/otto_os/crates/otto-transcript)
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.21
+   Compiling sqlx-sqlite v0.9.0
+   Compiling hyper-rustls v0.27.10
+   Compiling reqwest v0.13.5
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.95s
+────────────
+ Nextest run ID fb1e65fc-1902-4d62-a822-2591812a0e69 with nextest profile: ci
+    Starting 2 tests across 2 binaries (474 tests skipped)
+        FAIL [   0.011s] (1/2) otto-usage engine::scope_tests::last_known_rollups_do_not_retain_every_requested_window
+  stdout ───
+
+    running 1 test
+    test engine::scope_tests::last_known_rollups_do_not_retain_every_requested_window ... FAILED
+
+    failures:
+
+    failures:
+        engine::scope_tests::last_known_rollups_do_not_retain_every_requested_window
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'engine::scope_tests::last_known_rollups_do_not_retain_every_requested_window' (3874272) panicked at crates/otto-usage/src/engine.rs:2636:9:
+    requested windows must not retain unbounded copies of session history
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 1 test still running
+        FAIL [   0.215s] (2/2) otto-state skill_reviews::tests::fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews
+  stdout ───
+
+    running 1 test
+    test skill_reviews::tests::fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews ... FAILED
+
+    failures:
+
+    failures:
+        skill_reviews::tests::fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 426 filtered out; finished in 0.21s
+
+  stderr ───
+
+    thread 'skill_reviews::tests::fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews' (3874271) panicked at crates/otto-state/src/skill_reviews.rs:240:9:
+    running review cannot admit a fixer
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.218s] 2 tests run: 0 passed, 2 failed, 474 skipped
+        FAIL [   0.011s] (1/2) otto-usage engine::scope_tests::last_known_rollups_do_not_retain_every_requested_window
+        FAIL [   0.215s] (2/2) otto-state skill_reviews::tests::fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews
+error: test run failed
+
+===== r14-leaf-round2.log =====
+   Compiling sqlx-core v0.9.0
+   Compiling tree-sitter v0.27.0
+   Compiling tree-sitter-rust v0.24.2
+   Compiling tree-sitter-python v0.25.0
+   Compiling tree-sitter-javascript v0.25.0
+   Compiling tree-sitter-go v0.25.0
+   Compiling tree-sitter-typescript v0.23.2
+   Compiling otto-transcript v0.2.0 (/Users/itziklavon/otto_os/crates/otto-transcript)
+   Compiling sqlx-sqlite v0.9.0
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.64s
+────────────
+ Nextest run ID ad30f950-ff0f-48dd-8e55-6f629c02f4fa with nextest profile: ci
+    Starting 4 tests across 3 binaries (491 tests skipped)
+        FAIL [   0.009s] (1/4) otto-skills http::tests::consecutive_backups_never_reuse_the_same_directory
+  stdout ───
+
+    running 1 test
+    test http::tests::consecutive_backups_never_reuse_the_same_directory ... FAILED
+
+    failures:
+
+    failures:
+        http::tests::consecutive_backups_never_reuse_the_same_directory
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'http::tests::consecutive_backups_never_reuse_the_same_directory' (3889501) panicked at crates/otto-skills/src/http.rs:456:9:
+    assertion `left != right` failed: a later install must not overwrite the earlier safety copy
+      left: "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpEIcHXm/skills-backup/grill-1791417608"
+     right: "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/.tmpEIcHXm/skills-backup/grill-1791417608"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 3 tests still running
+        PASS [   0.011s] (2/4) otto-usage engine::scope_tests::last_known_rollups_do_not_retain_every_requested_window
+        PASS [   0.012s] (3/4) otto-usage engine::scope_tests::parked_rollups_expire_when_the_calendar_window_moves
+        PASS [   0.223s] (4/4) otto-state skill_reviews::tests::fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews
+────────────
+     Summary [   0.225s] 4 tests run: 3 passed, 1 failed, 491 skipped
+        FAIL [   0.009s] (1/4) otto-skills http::tests::consecutive_backups_never_reuse_the_same_directory
+error: test run failed
+
+===== r14-plugin-red.log =====
+
+running 1 test
+
+thread 'plugins::proxy_timeout_tests::oversized_plugin_responses_are_rejected_before_publication' (3809949) panicked at crates/otto-server/src/plugins.rs:1070:17:
+assertion `left == right` failed: chunked=false, size=17
+  left: 201
+ right: 502
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test plugins::proxy_timeout_tests::oversized_plugin_responses_are_rejected_before_publication ... FAILED
+
+failures:
+
+failures:
+    plugins::proxy_timeout_tests::oversized_plugin_responses_are_rejected_before_publication
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 960 filtered out; finished in 0.00s
+
+
+===== r14-eval-red.log =====
+
+running 1 test
+
+thread 'skill_eval::tests::golden_task_from_another_workspace_is_rejected_before_creating_eval' (3809951) panicked at crates/otto-server/src/skill_eval.rs:3112:9:
+cross-workspace task must fail at admission
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test skill_eval::tests::golden_task_from_another_workspace_is_rejected_before_creating_eval ... FAILED
+
+failures:
+
+failures:
+    skill_eval::tests::golden_task_from_another_workspace_is_rejected_before_creating_eval
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 960 filtered out; finished in 0.22s
+
+
+===== r14-static-unicode-red.log =====
+
+thread 'main' (3906527) panicked at /tmp/r14-static-unicode.rs:8:30:
+end byte index 46 is not a char boundary; it is inside '€' (bytes 45..48 of string)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+===== r14-combined-green.log =====
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-issues v0.2.0 (/Users/itziklavon/otto_os/crates/otto-issues)
+   Compiling otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+   Compiling otto-workgraph v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workgraph)
+   Compiling otto-brokers v0.2.0 (/Users/itziklavon/otto_os/crates/otto-brokers)
+   Compiling otto-connections v0.2.0 (/Users/itziklavon/otto_os/crates/otto-connections)
+   Compiling otto-mcp v0.2.0 (/Users/itziklavon/otto_os/crates/otto-mcp)
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+   Compiling otto-aws v0.2.0 (/Users/itziklavon/otto_os/crates/otto-aws)
+   Compiling otto-k8s v0.2.0 (/Users/itziklavon/otto_os/crates/otto-k8s)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-vault v0.2.0 (/Users/itziklavon/otto_os/crates/otto-vault)
+   Compiling otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+   Compiling otto-assistant v0.2.0 (/Users/itziklavon/otto_os/crates/otto-assistant)
+   Compiling otto-insights v0.2.0 (/Users/itziklavon/otto_os/crates/otto-insights)
+   Compiling otto-review v0.2.0 (/Users/itziklavon/otto_os/crates/otto-review)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+   Compiling otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+   Compiling otto-automation v0.2.0 (/Users/itziklavon/otto_os/crates/otto-automation)
+   Compiling otto-workflows v0.2.0 (/Users/itziklavon/otto_os/crates/otto-workflows)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 29s
+────────────
+ Nextest run ID e2cd9bd9-e6ec-4d5b-bd3d-290820eb12bb with nextest profile: ci
+    Starting 876 tests across 7 binaries (903 tests skipped)
+        PASS [   0.016s] (  1/876) otto-design blobs::tests::refuses_non_sha_names
+        PASS [   0.016s] (  2/876) otto-design brand::contrast::tests::a_mid_grey_on_a_mid_grey_ink_warns
+        PASS [   0.019s] (  3/876) otto-design blobs::tests::put_is_content_addressed_and_idempotent
+        PASS [   0.009s] (  4/876) otto-design brand::contrast::tests::ink_falls_back_to_the_darkest_colour_then_black
+        PASS [   0.008s] (  5/876) otto-design brand::contrast::tests::known_ratios
+        PASS [   0.009s] (  6/876) otto-design brand::contrast::tests::levels
+        PASS [   0.008s] (  7/876) otto-design brand::contrast::tests::report_covers_white_ink_and_every_pair
+        PASS [   0.008s] (  8/876) otto-design brand::doc::tests::a_full_kit_and_the_default_doc_validate
+        PASS [   0.009s] (  9/876) otto-design brand::doc::tests::bad_tokens_are_reported_by_path
+        PASS [   0.008s] ( 10/876) otto-design brand::doc::tests::helpers
+        PASS [   0.009s] ( 11/876) otto-design brand::doc::tests::css_names_are_kebab_and_type_styles_expand
+        PASS [   0.009s] ( 12/876) otto-design brand::doc::tests::model_normalizes_and_flattens
+        PASS [   0.009s] ( 13/876) otto-design brand::doc::tests::model_skips_what_does_not_validate
+        PASS [   0.009s] ( 14/876) otto-design brand::doc::tests::too_many_tokens_are_refused
+        PASS [   0.008s] ( 15/876) otto-design brand::export::tests::an_empty_kit_exports_valid_empty_blocks
+        PASS [   0.009s] ( 16/876) otto-design brand::export::tests::css_uses_the_contract_names
+        PASS [   0.009s] ( 17/876) otto-design brand::export::tests::dtcg_is_typed_and_carries_the_rest_as_extensions
+        PASS [   0.009s] ( 18/876) otto-design brand::export::tests::formats_and_slugs
+        PASS [   0.009s] ( 19/876) otto-design brand::export::tests::tailwind_uses_theme_namespaces
+        PASS [   0.009s] ( 20/876) otto-design brand::extract::tests::logos_embed_and_text_has_tokens_and_voice
+        PASS [   0.009s] ( 21/876) otto-design brand::extract::tests::malformed_and_non_json_are_reported_not_fatal
+        PASS [   0.011s] ( 22/876) otto-design brand::impact::tests::consumers_see_only_what_they_reference_unless_whole_kit
+        PASS [   0.010s] ( 23/876) otto-design brand::impact::tests::diff_reports_changed_added_removed
+        PASS [   0.010s] ( 24/876) otto-design brand::impact::tests::studio_counts_sort_by_count_then_name
+        PASS [   0.010s] ( 25/876) otto-design brand::impact::tests::token_refs_cover_both_reference_forms
+        PASS [   0.009s] ( 26/876) otto-design cite::tests::markers_need_a_pure_bracket_group
+        PASS [   0.125s] ( 27/876) otto-design blobs::tests::gc_guard_waits_for_in_flight_references_across_aliases
+        PASS [   0.010s] ( 28/876) otto-design cite::tests::nothing_offered_means_nothing_verifies
+        PASS [   0.009s] ( 29/876) otto-design cite::tests::verify_keeps_offered_drops_the_rest
+        PASS [   0.008s] ( 30/876) otto-design diff::tests::json_diff_matches_objects_by_id_and_is_bounded
+        PASS [   0.009s] ( 31/876) otto-design diff::tests::text_and_binary_summaries_carry_no_content
+        PASS [   0.008s] ( 32/876) otto-design extract::tests::binaries_and_garbage_never_panic
+        PASS [   0.008s] ( 33/876) otto-design extract::tests::html_src_embeds_href_references_and_text_is_visible_only
+        PASS [   0.008s] ( 34/876) otto-design extract::tests::mermaid_click_lines_describe_with_their_node
+        PASS [   0.009s] ( 35/876) otto-design extract::tests::node_ids_cover_json_and_html
+        PASS [   0.009s] ( 36/876) otto-design extract::tests::otto_canvas_indexes_its_inner_source
+        PASS [   0.008s] ( 37/876) otto-design extract::tests::scene3d_gltf_embeds_legacy_attachment_and_indexes_names
+        PASS [   0.008s] ( 38/876) otto-design extract::tests::scene3d_v2_links_models_and_brand_and_indexes_tokens_and_views
+        PASS [   0.008s] ( 39/876) otto-design extract::tests::site_blocks_use_key_based_rels_and_report_malformed
+        PASS [   0.009s] ( 40/876) otto-design format::tests::default_content_is_valid_for_every_non_binary_format
+        PASS [   0.009s] ( 41/876) otto-design format::tests::event_content_skips_binaries_and_oversized_payloads
+        PASS [   0.008s] ( 42/876) otto-design format::tests::every_format_is_unique_and_homed_in_a_real_studio
+        PASS [   0.010s] ( 43/876) otto-design format::tests::validate_checks_shape_per_encoding
+        PASS [   0.009s] ( 44/876) otto-design graph::tests::depth_below_measures_the_longest_chain_and_saturates
+        PASS [   0.008s] ( 45/876) otto-design graph::tests::reaches_finds_paths_and_detects_would_be_cycles
+        PASS [   0.238s] ( 46/876) otto-design brand::http::tests::saves_are_validated_and_exports_render
+        PASS [   0.242s] ( 47/876) otto-design brand::http::tests::impact_lists_consumers_and_what_a_change_reaches
+        PASS [   0.225s] ( 48/876) otto-design http::tests::auto_tidy_toggle_is_root_only
+        PASS [   0.232s] ( 49/876) otto-design http::tests::artifact_list_pages_by_cursor_and_carries_story_ids
+        PASS [   0.235s] ( 50/876) otto-design http::tests::bulk_links_read_many_artifacts_in_one_call
+        PASS [   0.233s] ( 51/876) otto-design http::tests::conditional_gets_answer_304_and_versions_are_immutable
+        PASS [   0.238s] ( 52/876) otto-design http::tests::project_artifact_content_version_roundtrip
+        PASS [   0.233s] ( 53/876) otto-design http::tests::rendered_thumbnails_are_sniffed_capped_and_never_bump_updated_at
+        PASS [   0.233s] ( 54/876) otto-design http::tests::restore_recommits_an_old_version_server_side
+        PASS [   0.355s] ( 55/876) otto-design http::tests::put_content_4mb_never_blocks_a_worker
+        PASS [   0.010s] ( 56/876) otto-design import::tests::classifies_design_attachments_and_titles
+        PASS [   0.235s] ( 57/876) otto-design http::tests::restored_reference_added_and_forked_signals_need_their_key
+        PASS [   0.234s] ( 58/876) otto-design http::tests::sha_keyed_thumbnails_cache_forever_and_replaced_ones_are_gcd
+        PASS [   0.235s] ( 59/876) otto-design http::tests::workspace_rbac_links_and_signals
+        PASS [   0.009s] ( 60/876) otto-design learn::tests::edits_reject_reasons_and_a11y_fixes_aggregate
+        PASS [   0.009s] ( 61/876) otto-design learn::tests::one_artifact_or_a_losing_direction_is_not_a_team_rule
+        PASS [   0.009s] ( 62/876) otto-design learn::tests::repeated_variant_choices_become_a_ready_preference
+        PASS [   0.009s] ( 63/876) otto-design learn::tests::slugs_and_properties_normalize
+        PASS [   0.008s] ( 64/876) otto-design retention::tests::due_runs_at_most_once_a_day_and_never_when_off
+        PASS [   0.008s] ( 65/876) otto-design retention::tests::protected_and_head_are_never_candidates
+        PASS [   0.242s] ( 66/876) otto-design import::tests::import_is_idempotent_links_stories_and_syncs_changes
+        PASS [   0.008s] ( 67/876) otto-design retention::tests::scheduler_config_follows_the_toggle_unless_env_forces_it
+        PASS [   0.009s] ( 68/876) otto-design retention::tests::squashes_autosaves_per_window_and_keeps_everything_else
+        PASS [   0.235s] ( 69/876) otto-design import::tests::stamp_source_preserves_metadata_approved_after_its_snapshot
+        PASS [   0.233s] ( 70/876) otto-design service::tests::aliased_metadata_patches_preserve_independent_acknowledged_edits
+        PASS [   0.237s] ( 71/876) otto-design service::tests::approve_notifies_follow_approved_consumers_and_signals_flow
+        PASS [   0.241s] ( 72/876) otto-design service::tests::aliased_service_instances_serialize_commit_publication
+        PASS [   0.241s] ( 73/876) otto-design service::tests::big_saves_index_and_meta_updates_reuse_the_indexed_body
+        PASS [   0.233s] ( 74/876) otto-design service::tests::create_save_dedup_conflict_and_working_copy
+        PASS [   0.234s] ( 75/876) otto-design service::tests::extracted_and_explicit_links_share_cycle_validation_ownership
+        PASS [   0.238s] ( 76/876) otto-design service::tests::fork_story_link_search_and_opt_in_prune
+        PASS [   0.240s] ( 77/876) otto-design service::tests::hard_delete_gcs_its_blobs_but_keeps_shared_ones
+        PASS [   0.010s] ( 78/876) otto-design service::tests::pure_helpers_bound_and_clean_inputs
+        PASS [   0.237s] ( 79/876) otto-design service::tests::links_extract_on_save_report_broken_and_reject_cycles
+        PASS [   0.232s] ( 80/876) otto-design service::tests::opposing_explicit_links_cannot_both_pass_cycle_validation
+        PASS [   0.244s] ( 81/876) otto-design service::tests::scheduled_prune_skips_recent_history_and_gcs_old_autosaves
+        PASS [   0.437s] ( 82/876) otto-design service::tests::metadata_and_approval_share_canonical_publication_boundary
+        PASS [   0.232s] ( 83/876) otto-design service::tests::stale_artifact_snapshot_cannot_deduplicate_over_a_new_head
+        PASS [   0.010s] ( 84/876) otto-design site::export::tests::previews_inline_the_css_and_keep_links_inside_the_route
+        PASS [   0.229s] ( 85/876) otto-design service::tests::thumbnail_stale_snapshot_does_not_skip_requested_restore_or_gc
+        PASS [   0.008s] ( 86/876) otto-design site::extract::tests::embeds_brand_images_and_provenance_are_linked_to_their_section
+        PASS [   0.009s] ( 87/876) otto-design site::export::tests::the_static_site_has_pages_one_stylesheet_with_tokens_assets_and_the_manifest
+        PASS [   0.009s] ( 88/876) otto-design site::http::tests::images_are_sniffed_and_query_values_sanitized
+        PASS [   0.009s] ( 89/876) otto-design site::extract::tests::malformed_references_are_reported_and_garbage_never_panics
+        PASS [   0.236s] ( 90/876) otto-design service::tests::update_meta_thumbnail_replacement_gcs_the_old_blob
+        PASS [   0.334s] ( 91/876) otto-design service::tests::thumbnail_waits_for_metadata_publication_through_alias_root
+        PASS [   0.010s] ( 92/876) otto-design site::render::tests::copy_is_escaped_and_links_are_sanitized
+        PASS [   0.010s] ( 93/876) otto-design site::render::tests::documents_have_a_title_lang_and_the_stylesheet
+        PASS [   0.234s] ( 94/876) otto-design site::http::tests::invalid_site_documents_are_refused_on_save
+        PASS [   0.010s] ( 95/876) otto-design site::render::tests::embeds_render_the_poster_or_a_stand_in
+        PASS [   0.243s] ( 96/876) otto-design site::http::tests::local_publish_and_preview_render_pages_inside_the_route
+        PASS [   0.010s] ( 97/876) otto-design site::render::tests::every_block_renders_a_scoped_section_without_scripts
+        PASS [   0.009s] ( 98/876) otto-design site::render::tests::sections_carry_tone_spacing_motion_and_breakpoint_classes
+        PASS [   0.009s] ( 99/876) otto-design site::schema::tests::catalog_names_are_unique_and_media_slots_use_known_blocks
+        PASS [   0.008s] (100/876) otto-design site::schema::tests::parse_is_lenient_on_missing_fields_and_collects_rendered_refs
+        PASS [   0.009s] (101/876) otto-design site::theme::tests::a_v1_kit_becomes_brand_vars_and_bound_slots
+        PASS [   0.009s] (102/876) otto-design site::theme::tests::colour_math_and_sanitizing
+        PASS [   0.009s] (103/876) otto-design site::theme::tests::backgrounds_resolve_to_vars_with_a_tone
+        PASS [   0.008s] (104/876) otto-design site::theme::tests::no_kit_means_defaults_and_legacy_kits_still_read
+        PASS [   0.008s] (105/876) otto-design site::validate::tests::loose_documents_other_tools_write_still_save
+        PASS [   0.008s] (106/876) otto-design site::validate::tests::scheme_and_data_image_helpers
+        PASS [   0.008s] (107/876) otto-design site::validate::tests::structure_ids_blocks_and_enums_are_checked
+        PASS [   0.009s] (108/876) otto-design site::validate::tests::the_stored_default_and_a_real_page_are_valid
+        PASS [   0.008s] (109/876) otto-design site::zip::tests::a_written_archive_reads_back_byte_for_byte
+        PASS [   0.009s] (110/876) otto-design site::validate::tests::unsafe_urls_are_refused_with_their_path
+        PASS [   0.008s] (111/876) otto-design site::zip::tests::crc32_matches_the_standard_check_value
+        PASS [   0.008s] (112/876) otto-design site::zip::tests::dos_timestamps_pack_fields
+        PASS [   0.244s] (113/876) otto-design site::http::tests::zip_export_ships_pages_one_stylesheet_with_tokens_and_records_a_pinned_publish
+        PASS [   0.231s] (114/876) otto-design store::tests::artifacts_and_versions_carry_resolved_people
+        PASS [   0.232s] (115/876) otto-design store::tests::commit_moves_head_and_guards_the_base_version
+        PASS [   0.010s] (116/876) otto-design store::tests::fts_match_quotes_terms_and_prefixes_the_last
+        PASS [   0.232s] (117/876) otto-design store::tests::artifacts_carry_their_creating_session_title
+        PASS [   0.232s] (118/876) otto-design store::tests::filters_workspaces_and_searches_with_fts
+        PASS [   0.232s] (119/876) otto-design store::tests::legacy_design_index_gets_its_map_built_and_deduplicated
+        PASS [   0.232s] (120/876) otto-design store::tests::links_in_out_adjacency_and_hard_delete_marks_backlinks_broken
+        PASS [   0.234s] (121/876) otto-design store::tests::fts_writes_go_through_the_rowid_map
+        PASS [   0.234s] (122/876) otto-design store::tests::protected_versions_cover_head_approved_pins_publishes_and_signals
+        PASS [   0.231s] (123/876) otto-design store::tests::rows_carry_story_ids_and_page_by_cursor
+        PASS [   0.235s] (124/876) otto-design store::tests::reference_counts_batch_matches_the_single_count
+        PASS [   0.234s] (125/876) otto-design store::tests::render_adjacency_never_returns_an_incomplete_cycle_check
+        PASS [   0.007s] (126/876) otto-design uri::tests::parses_every_selector_and_node
+        PASS [   0.009s] (127/876) otto-design uri::tests::rejects_malformed_references
+        PASS [   0.010s] (128/876) otto-design uri::tests::scan_finds_references_in_free_text
+        PASS [   0.010s] (129/876) otto-design uri::tests::scan_is_safe_on_multibyte_text_and_bounded
+        PASS [   0.231s] (130/876) otto-design store::tests::scan_fallback_keeps_the_rowid_map_consistent
+        PASS [   0.009s] (131/876) otto-design variants::tests::branch_names_round_trip_and_reject_main
+        PASS [   0.227s] (132/876) otto-design store::tests::stale_map_row_never_touches_another_artifact
+        PASS [   0.229s] (133/876) otto-design store::tests::source_key_is_unique_for_idempotent_import
+        PASS [   0.016s] (134/876) otto-product analysis::tests::story_start_lock_is_per_story
+        PASS [   0.018s] (135/876) otto-product analysis::tests::fanout_caps_providers_and_total_agents
+        PASS [   0.009s] (136/876) otto-product chat::tests::canvas_doc_from_mermaid_action
+        PASS [   0.013s] (137/876) otto-product analysis::tests::supervised_runner_panic_runs_the_crash_hook
+        PASS [   0.009s] (138/876) otto-product chat::tests::canvas_doc_from_nodes_action_synthesizes_mermaid
+        PASS [   0.009s] (139/876) otto-product chat::tests::context_includes_version_mockup_and_discovery
+        PASS [   0.232s] (140/876) otto-design variants::tests::accept_refuses_a_moved_head_unless_forced
+        PASS [   0.009s] (141/876) otto-product chat::tests::context_respects_budget
+        PASS [   0.009s] (142/876) otto-product chat::tests::prompt_has_sentinel_and_actions_contract
+        PASS [   0.009s] (143/876) otto-product chat::tests::split_actions_extracts_array_and_prose
+        PASS [   0.009s] (144/876) otto-product chat::tests::split_actions_no_block_keeps_prose
+        PASS [   0.008s] (145/876) otto-product design_format::tests::legacy_formats_keep_kind_mockup
+        PASS [   0.009s] (146/876) otto-product design_format::tests::mime_ext_and_names_are_consistent
+        PASS [   0.009s] (147/876) otto-product design_format::tests::parses_the_four_formats_case_insensitively
+        PASS [   0.010s] (148/876) otto-product design_format::tests::stubs_render_before_the_agent_commits
+        PASS [   0.009s] (149/876) otto-product design_format::tests::unknown_format_is_invalid_not_html
+        PASS [   0.010s] (150/876) otto-product design_scene3d::tests::blender_script_golden
+        PASS [   0.009s] (151/876) otto-product design_scene3d::tests::gltf_objects_export_as_named_empties_not_paths
+        PASS [   0.009s] (152/876) otto-product design_scene3d::tests::python_literals_are_escaped
+        PASS [   0.009s] (153/876) otto-product design_scene3d::tests::rejects_unknown_types_bad_numbers_and_unsafe_ids
+        PASS [   0.011s] (154/876) otto-product design_scene3d::tests::rejects_oversized_documents
+        PASS [   0.010s] (155/876) otto-product design_scene3d::tests::v2_blender_export_falls_back_for_tokens_and_hides_srcs
+        PASS [   0.009s] (156/876) otto-product design_scene3d::tests::v2_documents_validate_and_v1_stays_readable
+        PASS [   0.010s] (157/876) otto-product design_scene3d::tests::v2_rejects_bad_tokens_uris_states_and_ranges
+        PASS [   0.008s] (158/876) otto-product design_scene3d::tests::validates_the_spec_example_and_the_empty_scene
+        PASS [   0.008s] (159/876) otto-product extract::tests::analysis_summary_classifies_bullets
+        PASS [   0.009s] (160/876) otto-product extract::tests::answered_question_becomes_qa
+        PASS [   0.008s] (161/876) otto-product extract::tests::unanswered_question_is_skipped
+        PASS [   0.232s] (162/876) otto-design variants::tests::variants_never_move_head_and_accept_fast_forwards_main
+        PASS [   0.234s] (163/876) otto-product http::tests::create_and_list_learning
+        PASS [   0.233s] (164/876) otto-product http::tests::flat_patch_learning
+        PASS [   0.238s] (165/876) otto-product http::tests::children_route_files_a_doc_under_the_epic
+        PASS [   0.226s] (166/876) otto-product http::tests::get_story_detail_flat
+        PASS [   0.230s] (167/876) otto-product http::tests::list_stories_empty
+        PASS [   0.234s] (168/876) otto-product http::tests::patch_moves_marks_and_detaches_with_one_level_guard
+        PASS [   0.234s] (169/876) otto-product http::tests::publish_as_story_rejects_non_owner_account
+        PASS [   0.234s] (170/876) otto-product http::tests::reviewed_confluence_missing_review
+        PASS [   0.233s] (171/876) otto-product http::tests::reviewed_confluence_new_version
+        PASS [   0.235s] (172/876) otto-product http::tests::reviewed_confluence_reference
+        PASS [   0.235s] (173/876) otto-product http::tests::reviewed_confluence_same_version_body
+        PASS [   0.233s] (174/876) otto-product http::tests::reviewed_confluence_title
+        PASS [   0.237s] (175/876) otto-product http::tests::reviewed_confluence_unchanged_payload
+        PASS [   0.232s] (176/876) otto-product http::tests::reviewed_jira_missing_review
+        PASS [   0.232s] (177/876) otto-product http::tests::reviewed_jira_new_version
+        PASS [   0.234s] (178/876) otto-product http::tests::reviewed_jira_reference
+        PASS [   0.233s] (179/876) otto-product http::tests::reviewed_jira_title
+        PASS [   0.236s] (180/876) otto-product http::tests::reviewed_jira_same_version_body
+        PASS [   0.234s] (181/876) otto-product http::tests::reviewed_jira_unchanged_payload
+        PASS [   0.234s] (182/876) otto-product http::tests::transcript_legacy_list_keeps_full_body_compatibility
+        PASS [   0.231s] (183/876) otto-product http::tests::transcript_summary_cursor_survives_timestamp_ties_and_new_imports
+        PASS [   0.011s] (184/876) otto-product media::csp_tests::active_attachment_types_are_sandboxed
+        PASS [   0.251s] (185/876) otto-product http::tests::transcript_search_reaches_old_collapsed_body_with_literal_unicode_counts
+        PASS [   0.011s] (186/876) otto-product media::tests::base_updated_at_guard
+        PASS [   0.261s] (187/876) otto-product http::tests::transcript_summary_page_excludes_100_large_bodies
+        PASS [   0.010s] (188/876) otto-product media::tests::design_mimes_are_allowed_sniffed_and_kind_design
+        PASS [   0.009s] (189/876) otto-product media::tests::ext_matches_mime
+        PASS [   0.010s] (190/876) otto-product media::tests::event_content_is_source_for_text_and_null_for_binaries
+        PASS [   0.228s] (191/876) otto-product http::tests::transcript_summary_search_and_detail_authorize_owning_story
+        PASS [   0.009s] (192/876) otto-product media::tests::path_within_allows_contained
+        PASS [   0.009s] (193/876) otto-product media::tests::path_within_blocks_escape
+        PASS [   0.009s] (194/876) otto-product media::tests::rejects_disallowed_mime
+        PASS [   0.009s] (195/876) otto-product media::tests::sniff_binary_and_text_types
+        PASS [   0.009s] (196/876) otto-product media::tests::sanitize_strips_path_components
+        PASS [   0.009s] (197/876) otto-product media::tests::sniff_detects_png_mismatch
+        PASS [   0.046s] (198/876) otto-product media::tests::content_put_guards
+        PASS [   0.009s] (199/876) otto-product refine::tests::parse_extracts_reply_and_updated_body
+        PASS [   0.009s] (200/876) otto-product refine::tests::parse_malformed_preserves_reply_no_update
+        PASS [   0.008s] (201/876) otto-product refine::tests::parse_null_updated_is_none
+        PASS [   0.009s] (202/876) otto-product refine::tests::prompt_includes_history_story_and_discovery_context
+        PASS [   0.009s] (203/876) otto-product run::tests::augment_with_out_path_appends_write_instruction_and_path
+        PASS [   0.009s] (204/876) otto-product run::tests::autonomy_directive_instructs_no_questions_and_assumptions
+        PASS [   0.009s] (205/876) otto-product run::tests::build_analysis_prompt_includes_context_path_reference
+        PASS [   0.009s] (206/876) otto-product run::tests::build_analysis_prompt_includes_output_contract_marker
+        PASS [   0.009s] (207/876) otto-product run::tests::build_analysis_prompt_includes_prior_summary_when_given
+        PASS [   0.009s] (208/876) otto-product run::tests::build_analysis_prompt_includes_skill_body
+        PASS [   0.008s] (209/876) otto-product run::tests::build_analysis_prompt_omits_prior_summary_section_when_none
+        PASS [   0.008s] (210/876) otto-product run::tests::build_plan_prompt_includes_context_path_reference
+        PASS [   0.008s] (211/876) otto-product run::tests::build_rewrite_prompt_includes_body_markdown_contract_marker
+        PASS [   0.009s] (212/876) otto-product run::tests::build_plan_prompt_includes_plan_contract_marker
+        PASS [   0.009s] (213/876) otto-product run::tests::build_plan_summarizer_prompt_includes_candidates_and_consolidate_contract
+        PASS [   0.009s] (214/876) otto-product run::tests::build_rewrite_prompt_includes_context_path_reference
+        PASS [   0.010s] (215/876) otto-product run::tests::build_tests_prompt_includes_context_path_reference
+        PASS [   0.010s] (216/876) otto-product run::tests::build_rewrite_prompt_includes_writer_skill_body
+        PASS [   0.010s] (217/876) otto-product run::tests::build_summarizer_prompt_includes_consolidate_dedupe_and_questions_schema
+        PASS [   0.010s] (218/876) otto-product run::tests::build_tests_prompt_includes_skill_body_verbatim
+        PASS [   0.009s] (219/876) otto-product run::tests::build_tests_prompt_includes_testcases_contract_marker
+        PASS [   0.009s] (220/876) otto-product run::tests::build_tests_prompt_skill_body_mentions_happy_and_coverage_guidance
+        PASS [   0.009s] (221/876) otto-product run::tests::extract_json_block_empty_string_returns_none
+        PASS [   0.009s] (222/876) otto-product run::tests::extract_json_block_fence_wins_over_prose_brace
+        PASS [   0.009s] (223/876) otto-product run::tests::extract_json_block_finds_json_in_fence
+        PASS [   0.009s] (224/876) otto-product run::tests::extract_json_block_finds_bare_object
+        PASS [   0.009s] (225/876) otto-product run::tests::extract_json_block_nested_json_balanced
+        PASS [   0.010s] (226/876) otto-product run::tests::extract_json_block_returns_none_for_prose
+        PASS [   0.010s] (227/876) otto-product run::tests::narrative_from_clarifications_contains_answered_question
+        PASS [   0.010s] (228/876) otto-product run::tests::narrative_from_clarifications_contains_note_body
+        PASS [   0.010s] (229/876) otto-product run::tests::narrative_from_tests_contains_story_title
+        PASS [   0.010s] (230/876) otto-product run::tests::narrative_from_tests_flags_nonempty_review_note
+        PASS [   0.009s] (231/876) otto-product run::tests::session_cwd_passes_real_path_through_unchanged
+        PASS [   0.009s] (232/876) otto-product run::tests::narrative_from_tests_highlights_changes_requested_case
+        PASS [   0.010s] (233/876) otto-product run::tests::session_cwd_rewrites_shared_temp_fallback_to_existing_child
+        PASS [   0.009s] (234/876) otto-product run::tests::session_cwd_two_calls_yield_distinct_dirs
+        PASS [   0.009s] (235/876) otto-product run::tests::summary_findings_parses_summarizer_schema
+        PASS [   0.008s] (236/876) otto-product service::cwd_tests::root_home_and_missing_cwds_are_rejected
+        PASS [   0.010s] (237/876) otto-product service::cwd_tests::workspace_temp_and_git_cwds_are_accepted
+        PASS [   0.039s] (238/876) otto-product run::tests::session_cwd_uses_a_stable_swept_root
+        PASS [   0.229s] (239/876) otto-product service::tests::authorize_account_id_owner_root_ok_stranger_forbidden
+        PASS [   0.230s] (240/876) otto-product service::tests::authorize_story_account_guards_bound_credential
+        PASS [   0.228s] (241/876) otto-product service::tests::build_agent_context_includes_transcript_body
+        PASS [   0.010s] (242/876) otto-product service::tests::build_questions_comment_formats_correctly
+        PASS [   0.234s] (243/876) otto-product service::tests::build_inject_bundle_assembles_content_and_excludes_discarded_questions
+        PASS [   0.231s] (244/876) otto-product service::tests::create_draft_makes_draft_story_and_version
+        PASS [   0.234s] (245/876) otto-product service::tests::import_story_creates_story_version_event_with_adf_body
+        PASS [   0.010s] (246/876) otto-product service::tests::raw_page_version_reads_import_and_publish_rows
+        PASS [   0.236s] (247/876) otto-product service::tests::post_questions_posts_combined_comment_and_updates_status
+        PASS [   0.234s] (248/876) otto-product service::tests::publish_as_story_rebinds_draft_story_to_jira
+        PASS [   0.010s] (249/876) otto-product service::tests::render_testcases_markdown_groups_by_category_and_renders_steps
+        PASS [   0.010s] (250/876) otto-product service::tests::render_testcases_markdown_tolerates_malformed_steps_json
+        PASS [   0.231s] (251/876) otto-product service::tests::record_import_stores_story_version_event_without_network
+        PASS [   0.232s] (252/876) otto-product service::tests::refresh_story_adds_version_when_body_changes
+        PASS [   0.234s] (253/876) otto-product service::tests::refresh_story_no_new_version_when_body_unchanged
+        PASS [   0.010s] (254/876) otto-product service::tests::watch_cursor_roundtrip_handles_same_timestamp_ties
+        PASS [   0.010s] (255/876) otto-product studio_turn::tests::cancelling_a_turn_releases_its_conversation
+        PASS [   0.010s] (256/876) otto-product studio_turn::tests::duplicate_turns_are_rejected_until_the_owner_finishes
+        PASS [   0.009s] (257/876) otto-product studio_turn::tests::independent_workspaces_and_conversation_types_do_not_block_each_other
+        PASS [   0.010s] (258/876) otto-product swarm::tests::brief_includes_discovery_framing_and_abs_attachment_paths
+        PASS [   0.009s] (259/876) otto-product swarm::tests::derived_status_any_error_wins
+        PASS [   0.009s] (260/876) otto-product swarm::tests::derived_status_all_done
+        PASS [   0.009s] (261/876) otto-product swarm::tests::derived_status_mixed_keeps_persisted
+        PASS [   0.009s] (262/876) otto-product swarm::tests::ignores_h1_and_keeps_h2_h4
+        PASS [   0.009s] (263/876) otto-product swarm::tests::empty_plan_yields_no_tasks
+        PASS [   0.009s] (264/876) otto-product swarm::tests::parses_task_headings_with_bodies
+        PASS [   0.009s] (265/876) otto-product swarm::tests::strips_various_task_prefixes
+        PASS [   0.010s] (266/876) otto-product watcher::admission_tests::admission_is_bounded_and_duplicate_free
+        PASS [   0.232s] (267/876) otto-product service::tests::update_draft_body_edits_in_place_and_syncs_title
+        PASS [   0.009s] (268/876) otto-product watcher::admission_tests::admitted_story_cannot_queue_a_second_poll
+        PASS [   0.009s] (269/876) otto-product watcher::admission_tests::dropping_supervisor_cancels_its_polls_and_releases_claims
+        PASS [   0.009s] (270/876) otto-product watcher::admission_tests::saturated_rounds_progress_through_all_due_stories
+        PASS [   0.009s] (271/876) otto-product watcher::tests::build_reconcile_prompt_empty_questions_shows_none
+        PASS [   0.009s] (272/876) otto-product watcher::tests::build_reconcile_prompt_fences_comments_as_untrusted_data
+        PASS [   0.008s] (273/876) otto-product watcher::tests::build_reconcile_prompt_includes_question_id_and_text
+        PASS [   0.008s] (274/876) otto-product watcher::tests::build_reconcile_prompt_includes_new_comments_text
+        PASS [   0.009s] (275/876) otto-product watcher::tests::build_reconcile_prompt_includes_recommended_next_step_contract_marker
+        PASS [   0.009s] (276/876) otto-product watcher::tests::watcher_reconcile_uses_the_untrusted_runner
+        PASS [   0.235s] (277/876) otto-server agent_session::resume_ownership_tests::foreign_workspace_cannot_resume_live_or_persisted_session
+        PASS [   0.235s] (278/876) otto-server agent_session::resume_ownership_tests::owner_can_resume_live_and_persisted_sessions
+        PASS [   0.240s] (279/876) otto-server agent_session::resume_ownership_tests::absent_binding_retains_fresh_session_fallback
+        PASS [   0.241s] (280/876) otto-server agent_session::resume_ownership_tests::foreign_user_cannot_resume_live_or_persisted_session
+        PASS [   0.013s] (281/876) otto-server design_blender::tests::parses_blender_version_line
+        PASS [   0.014s] (282/876) otto-server design_blender::tests::job_registry_prunes_expired_finished_jobs
+        PASS [   0.012s] (283/876) otto-server design_blender::tests::render_admission_covers_preparation_before_the_job_is_recorded
+        PASS [   0.013s] (284/876) otto-server design_blender::tests::registry_tracks_in_flight_per_attachment_and_caps_permits
+        PASS [   0.013s] (285/876) otto-server design_blender::tests::render_command_is_headless_with_out_dir_after_separator
+        PASS [   0.014s] (286/876) otto-server eval_lab_routes::tests::matrix_shape_bounds_and_unique_labels
+        PASS [   0.233s] (287/876) otto-server eval_score::tests::errored_or_failed_retry_replaces_previously_passed_review_evidence
+        PASS [   0.013s] (288/876) otto-server lsp::framing::tests::accepts_fragmented_frames_empty_body_and_clean_eof
+        PASS [   0.013s] (289/876) otto-server lsp::framing::tests::bounds_header_line_and_total_headers
+        PASS [   0.014s] (290/876) otto-server lsp::framing::tests::rejects_duplicate_length_and_truncated_headers
+        PASS [   0.322s] (291/876) otto-server design_blender::tests::detect_cache_serves_within_ttl
+        PASS [   0.320s] (292/876) otto-server design_blender::tests::detect_reports_not_installed_cleanly_when_absent
+        PASS [   0.014s] (293/876) otto-server lsp::framing::tests::rejects_oversized_body_before_reading_or_allocating_it
+        PASS [   0.014s] (294/876) otto-server mockup_assist::tests::dropped_request_aborts_the_live_file_poll
+        PASS [   0.015s] (295/876) otto-server mockup_assist::tests::capped_read_refuses_non_utf8_and_missing
+        PASS [   0.012s] (296/876) otto-server mockup_assist::tests::excalidraw_and_scene3d_prompts_carry_their_schemas
+        PASS [   0.013s] (297/876) otto-server mockup_assist::tests::extract_fenced_html_and_mermaid
+        PASS [   0.013s] (298/876) otto-server mockup_assist::tests::failed_storage_write_cannot_report_success
+        PASS [   0.012s] (299/876) otto-server mockup_assist::tests::html_prompt_has_sentinel_file_and_rules
+        PASS [   0.012s] (300/876) otto-server mockup_assist::tests::mermaid_prompt_points_at_mmd_file
+        PASS [   0.012s] (301/876) otto-server mockup_assist::tests::ownership_rejects_overlap_and_releases_after_failure
+        PASS [   0.014s] (302/876) otto-server mockup_assist::tests::resolve_prefers_edited_file_then_reply
+        PASS [   0.013s] (303/876) otto-server mockup_assist::tests::unknown_format_is_rejected_not_defaulted
+        PASS [   0.014s] (304/876) otto-server plugins::proxy_timeout_tests::a_live_plugin_is_relayed
+        PASS [   0.014s] (305/876) otto-server plugins::proxy_timeout_tests::oversized_plugin_responses_are_rejected_before_publication
+        PASS [   0.230s] (306/876) otto-server plugins::proxy_timeout_tests::replacing_enabled_plugin_stops_old_process_and_disables_rotated_token
+        PASS [   0.233s] (307/876) otto-server routes::search::tests::search_respects_each_sources_feature_grant
+        PASS [   0.013s] (308/876) otto-server routes::telemetry::tests::ingestion_rejects_dynamic_names_and_routes_atomically
+        PASS [   0.014s] (309/876) otto-server routes::telemetry::tests::producer_contract_accepts_mixed_batch_and_rejects_private_names
+        PASS [   0.012s] (310/876) otto-server routes::usage::scope_tests::root_sees_everything_others_only_their_sessions
+        PASS [   0.014s] (311/876) otto-server routes::usage::session_usage_tests::filter_keeps_only_visible_sessions
+        PASS [   0.317s] (312/876) otto-server plugins::proxy_timeout_tests::a_hung_plugin_gets_504_after_the_deadline
+        PASS [   0.233s] (313/876) otto-server run_service::run_pr_proof_tests::open_pr_rechecks_live_proof_instead_of_cached_run_status
+        PASS [   0.014s] (314/876) otto-server skill_eval::tests::best_iter_prefers_high_score_then_latest
+        PASS [   0.012s] (315/876) otto-server skill_eval::tests::cap_impl_diff_backs_off_to_a_char_boundary
+        PASS [   0.233s] (316/876) otto-server run_service::tests::cancel_stops_only_the_runs_own_stage_sessions
+        PASS [   0.012s] (317/876) otto-server skill_eval::tests::diff_marks_changes
+        PASS [   0.014s] (318/876) otto-server skill_eval::tests::diff_trims_common_ends_and_caps_the_lcs
+        PASS [   0.232s] (319/876) otto-server skill_eval::tests::cleanup_preserves_score_only_user_paths_with_a_similar_temp_prefix
+        PASS [   0.013s] (320/876) otto-server skill_eval::tests::parse_findings_tolerant
+        PASS [   0.012s] (321/876) otto-server skill_eval::tests::parse_improvement_object
+        PASS [   0.232s] (322/876) otto-server skill_eval::tests::golden_task_from_another_workspace_is_rejected_before_creating_eval
+        PASS [   0.013s] (323/876) otto-server skill_eval::tests::retry_admission_cancellation_and_cleanup_keep_attempt_identity
+        PASS [   0.541s] (324/876) otto-server run_service::run_pr_proof_tests::open_pr_rejects_changed_worktree_and_changed_commit_without_mutating_either
+        PASS [   0.013s] (325/876) otto-server skill_eval::tests::sanitize_makes_safe_names
+        PASS [   0.014s] (326/876) otto-server skill_eval::tests::score_subtracts_by_severity
+        PASS [   0.013s] (327/876) otto-server skill_review::staging_tests::copy_skill_tree_skips_symlinks
+        PASS [   0.015s] (328/876) otto-server skill_review::staging_tests::copy_skill_tree_strips_local_artifacts_at_every_depth
+        PASS [   0.013s] (329/876) otto-server skill_review::staging_tests::ignored_entries_cover_env_variants_but_not_lookalikes
+        PASS [   0.015s] (330/876) otto-server skill_review::staging_tests::prune_ignored_never_reaches_through_a_symlinked_dir
+        PASS [   0.014s] (331/876) otto-server skill_review::staging_tests::prune_ignored_strips_a_staged_tree_in_place
+        PASS [   0.234s] (332/876) otto-server skill_eval::tests::promotion_ignores_cached_pass_when_live_proof_is_missing_or_foreign
+        PASS [   0.013s] (333/876) otto-server skill_review::staging_tests::static_proximity_handles_multibyte_window_edges
+        PASS [   0.015s] (334/876) otto-server skill_review::static_tests::api_route_fragments_are_not_paths
+        PASS [   0.026s] (335/876) otto-server skill_review::static_tests::bad_bloated_do_not_publish
+        PASS [   0.020s] (336/876) otto-server skill_review::static_tests::bad_conflicts_do_not_publish
+        PASS [   0.236s] (337/876) otto-server skill_review::staging_tests::real_skill_dir_rejects_traversal_and_bundled_and_resolves_library_skills
+        PASS [   0.234s] (338/876) otto-server skill_review::staging_tests::stage_target_copies_a_library_skill_without_secrets
+        PASS [   0.019s] (339/876) otto-server skill_review::static_tests::bad_no_examples_ready_with_fixes
+        PASS [   0.014s] (340/876) otto-server skill_review::static_tests::cited_reference_that_exists_is_not_flagged
+        PASS [   1.460s] (341/876) otto-server eval_score::tests::cancelled_scoring_kills_command_and_never_starts_lint
+        PASS [   0.017s] (342/876) otto-server skill_review::static_tests::dead_absolute_path_in_prose_is_flagged
+        PASS [   0.019s] (343/876) otto-server skill_review::static_tests::cited_reference_that_is_absent_is_high
+        PASS [   0.034s] (344/876) otto-server skill_review::static_tests::bad_script_risk_do_not_publish
+        PASS [   0.015s] (345/876) otto-server skill_review::static_tests::missing_skill_md_is_critical
+        PASS [   0.014s] (346/876) otto-server skill_review::static_tests::paths_inside_code_fences_are_ignored
+        PASS [   0.016s] (347/876) otto-server skill_review::static_tests::directives_with_reasons_do_not_fire
+        PASS [   0.021s] (348/876) otto-server skill_review::static_tests::good_focused_is_ready
+        PASS [   0.014s] (349/876) otto-server skill_review::static_tests::placeholder_and_url_paths_are_ignored
+        PASS [   0.014s] (350/876) otto-server skill_review::static_tests::prohibition_heavy_fires_low_without_moving_the_score
+        PASS [   0.015s] (351/876) otto-server telemetry::tests::aborted_request_is_recorded_as_cancelled
+        PASS [   0.013s] (352/876) otto-server telemetry::tests::context_rejects_zero_ids_extra_data_and_versions
+        PASS [   0.010s] (353/876) otto-skills http::tests::consecutive_backups_never_reuse_the_same_directory
+        PASS [   0.012s] (354/876) otto-server telemetry::tests::workspace_routes_keep_the_feature_component
+        PASS [   0.013s] (355/876) otto-server telemetry::tests::long_polls_and_upgrades_are_not_timed
+        PASS [   0.010s] (356/876) otto-skills http::tests::prune_backups_keeps_newest_n_for_that_skill_only
+        PASS [   0.017s] (357/876) otto-skills product::tests::seed_writes_full_dir_tree_and_version_marker
+        PASS [   0.017s] (358/876) otto-skills product::tests::second_seed_is_noop_when_marker_matches
+        PASS [   0.008s] (359/876) otto-skills product::tests::skill_body_known_and_unknown
+        PASS [   0.008s] (360/876) otto-skills tests::bundled_development_commit_pr_skills_present
+        PASS [   0.009s] (361/876) otto-skills tests::bundled_review_skills_are_well_formed
+        PASS [   0.040s] (362/876) otto-skills http::tests::install_many_skips_up_to_date_skills
+        PASS [   0.016s] (363/876) otto-skills tests::bundled_skill_tree_materializes_all_files
+        PASS [   0.008s] (364/876) otto-skills tests::bundled_skill_tree_rejects_symlink_destination
+        PASS [   0.009s] (365/876) otto-skills tests::bundled_skill_tree_preserves_executable_scripts
+        PASS [   0.008s] (366/876) otto-skills tests::frontmatter_parses_scalars
+        PASS [   0.009s] (367/876) otto-skills tests::install_and_state_round_trip
+        PASS [   0.007s] (368/876) otto-skills tests::okf_authoring_bundles_hard_static_enforcement
+        PASS [   0.008s] (369/876) otto-skills tests::install_commit_message_skill_round_trip
+        PASS [   0.007s] (370/876) otto-skills tests::reviewer_skills_are_complete_packages
+        PASS [   0.008s] (371/876) otto-skills tests::skill_spec_metadata_semver_drives_bundled_version
+        PASS [   0.008s] (372/876) otto-skills tests::skills_reviewer_is_bundled_and_readable
+        PASS [   0.247s] (373/876) otto-state activity::tests::summary_for_user_empty_when_no_own_sessions
+        PASS [   0.247s] (374/876) otto-state activity::tests::summary_for_user_excludes_other_users_sessions
+        PASS [   0.251s] (375/876) otto-state activity::tests::replace_tasks_merges_user_rows_and_keeps_ids_stable
+        PASS [   0.381s] (376/876) otto-state activity::tests::prune_trail_keeps_newest_per_session_index_driven
+        PASS [   0.232s] (377/876) otto-state activity::tests::upsert_task_by_ext_id
+        PASS [   0.233s] (378/876) otto-state activity::tests::workspace_summary_reports_latest_trail_per_session
+        PASS [   0.232s] (379/876) otto-state activity::tests::workspace_summary_returns_all_sessions
+        PASS [   0.231s] (380/876) otto-state activity::tests::workspace_summary_trail_skips_hidden_sessions
+        PASS [   0.233s] (381/876) otto-state api_client::tests::automation_crud
+        PASS [   0.234s] (382/876) otto-state api_client::tests::collection_and_request_crud
+        PASS [   0.233s] (383/876) otto-state api_client::tests::environment_secret_keys_round_trip
+        PASS [   0.228s] (384/876) otto-state api_client::tests::environment_single_active
+        PASS [   0.229s] (385/876) otto-state api_client::tests::get_history_round_trips
+        PASS [   0.230s] (386/876) otto-state api_client::tests::history_insert_list_clear
+        PASS [   0.230s] (387/876) otto-state api_client::tests::history_filter_by_q_status_source_and_request_id
+        PASS [   0.011s] (388/876) otto-state api_client::tests::history_summary_backfill_preserves_original_bytes_and_filter_types
+        PASS [   0.302s] (389/876) otto-state api_client::tests::history_summaries_do_not_transfer_bodies_and_preserve_detail
+        PASS [   0.231s] (390/876) otto-state api_client::tests::history_summary_metadata_tracks_direct_legacy_writes_and_malformed_json
+        PASS [   0.234s] (391/876) otto-state api_client::tests::known_host_urls_selects_human_requests_and_runs
+        PASS [   0.231s] (392/876) otto-state api_client::tests::prune_history_caps_rows_and_age_per_workspace
+        PASS [   0.011s] (393/876) otto-state api_runs::tests::legacy_inline_runs_stay_readable
+        PASS [   0.012s] (394/876) otto-state api_runs::tests::prune_runs_is_opt_in_and_keeps_the_newest_finished
+        PASS [   0.011s] (395/876) otto-state api_runs::tests::reports_are_workspace_scoped_and_restart_retains_completed_steps
+        PASS [   0.088s] (396/876) otto-state api_runs::tests::thousand_step_run_writes_linear_bytes_and_reads_deltas
+        PASS [   0.235s] (397/876) otto-state api_client::tests::request_extras_round_trip
+        PASS [   0.234s] (398/876) otto-state api_client::tests::request_summaries_match_full_rows_and_insert_needs_no_readback
+        PASS [   0.234s] (399/876) otto-state api_client::tests::storage_stats_count_rows_and_bytes
+        PASS [   0.238s] (400/876) otto-state assistant::tests::a_space_slot_moves_to_the_newest_claim
+        PASS [   0.235s] (401/876) otto-state assistant::tests::another_users_thread_is_not_found
+        PASS [   0.233s] (402/876) otto-state assistant::tests::cancellation_cannot_be_revived_by_a_late_completion
+        PASS [   0.231s] (403/876) otto-state assistant::tests::due_reminders_are_claimed_once
+        PASS [   0.235s] (404/876) otto-state assistant::tests::indexed_turns_are_idempotent_and_page_oldest_first
+        PASS [   0.232s] (405/876) otto-state assistant::tests::needs_you_queue_counts_and_clears
+        PASS [   0.229s] (406/876) otto-state assistant::tests::routing_upserts_and_grants_are_per_principal
+        PASS [   0.242s] (407/876) otto-state assistant::tests::thread_history_first_page_is_bounded
+        PASS [   0.277s] (408/876) otto-state assistant::tests::thread_history_pages_are_complete_stable_and_indexed
+        PASS [   0.230s] (409/876) otto-state aws_accounts::tests::crud_roundtrip
+        PASS [   0.226s] (410/876) otto-state broker_clusters::tests::crud_round_trip
+        PASS [   0.224s] (411/876) otto-state broker_ops::tests::lag_alert_crud
+        PASS [   0.223s] (412/876) otto-state broker_ops::tests::replay_evidence_roundtrip
+        PASS [   0.010s] (413/876) otto-state browser_credentials::tests::match_domain_exact
+        PASS [   0.226s] (414/876) otto-state browser::tests::annotations_key_on_url_and_survive_tab_delete
+        PASS [   0.010s] (415/876) otto-state browser_credentials::tests::match_domain_rejects_unrelated_and_reverse
+        PASS [   0.010s] (416/876) otto-state browser_credentials::tests::match_domain_subdomain
+        PASS [   0.227s] (417/876) otto-state browser::tests::tab_crud_roundtrip
+        PASS [   0.226s] (418/876) otto-state browser_credentials::tests::crud_roundtrip_and_never_serializes_a_secret
+        PASS [   0.227s] (419/876) otto-state browser_credentials::tests::unique_constraint_on_workspace_domain_username
+        PASS [   0.230s] (420/876) otto-state canvas::tests::add_ref_is_idempotent_lists_and_removes
+        PASS [   0.230s] (421/876) otto-state canvas::tests::create_get_list_update_delete_roundtrip
+        PASS [   0.224s] (422/876) otto-state canvas::tests::deleting_a_scene_cascades_its_refs
+        PASS [   0.009s] (423/876) otto-state canvas::tests::inline_and_ref_scans_need_no_parse
+        PASS [   0.227s] (424/876) otto-state canvas::tests::failed_delete_leaves_the_scene_whole
+        PASS [   0.243s] (425/876) otto-state canvas::tests::excalidraw_images_are_stored_once_and_rehydrated_on_restore
+        PASS [   0.228s] (426/876) otto-state canvas::tests::format_column_follows_the_document_and_summary_skips_it
+        PASS [   0.225s] (427/876) otto-state canvas::tests::list_versions_reads_columns_not_documents
+        PASS [   0.230s] (428/876) otto-state canvas::tests::live_only_file_is_collected_once_the_doc_drops_it
+        PASS [   0.247s] (429/876) otto-state canvas::tests::pruning_versions_garbage_collects_unreferenced_files
+        PASS [   0.244s] (430/876) otto-state canvas::tests::versions_snapshot_dedupe_throttle_prune_and_cascade
+        PASS [   0.299s] (431/876) otto-state canvas::tests::live_doc_externalizes_images_and_ref_saves_stay_small
+        PASS [   0.234s] (432/876) otto-state connection_sections::tests::create_list_reorder_rename_delete
+        PASS [   0.231s] (433/876) otto-state connections::tests::environment_and_read_only_round_trip
+        PASS [   0.230s] (434/876) otto-state connections::tests::list_skips_rows_with_unknown_kind
+        PASS [   0.225s] (435/876) otto-state connections::tests::list_visible_for_excludes_others_connections
+        PASS [   0.228s] (436/876) otto-state connections::tests::list_visible_for_shows_own_connections
+        PASS [   0.229s] (437/876) otto-state connections::tests::list_visible_shows_all_setting_off
+        PASS [   0.230s] (438/876) otto-state connections::tests::postgres_kind_round_trips
+        PASS [   0.254s] (439/876) otto-state database_changes::tests::cancellation_before_send_is_terminal_after_restart
+        PASS [   0.251s] (440/876) otto-state database_changes::tests::cancellation_cannot_be_overwritten_by_late_success
+        PASS [   0.246s] (441/876) otto-state database_changes::tests::credentials_targets_and_executor_are_hash_bound
+        PASS [   0.257s] (442/876) otto-state database_changes::tests::crash_before_send_releases_unsent_targets_without_replay
+        PASS [   0.252s] (443/876) otto-state database_changes::tests::duplicate_and_competing_claims_are_atomic_and_unknown_keeps_lock
+        PASS [   0.253s] (444/876) otto-state database_changes::tests::independent_approval_cannot_be_bypassed_by_impersonation
+        PASS [   0.254s] (445/876) otto-state database_changes::tests::recovery_never_requeues_sent_sql
+        PASS [   0.010s] (446/876) otto-state db::tests::backups_dir_is_created_owner_only
+        PASS [   0.277s] (447/876) otto-state database_changes::tests::partial_rollout_preserves_completed_target_and_stops_unstarted_target
+        PASS [   0.277s] (448/876) otto-state database_changes::tests::revision_erases_approval_and_stale_claim_fails
+        PASS [   0.253s] (449/876) otto-state database_changes::tests::uncertain_single_target_can_be_reconciled_as_partially_applied
+        PASS [   0.010s] (450/876) otto-state db::tests::pending_versions_lists_unapplied_embedded_in_order
+        PASS [   0.011s] (451/876) otto-state db::tests::repair_is_noop_on_post_renumber_db
+        PASS [   0.011s] (452/876) otto-state db::tests::repair_is_noop_when_migrations_table_absent
+        PASS [   0.014s] (453/876) otto-state db::tests::repair_moves_branch_numbered_rows_in_either_population
+        PASS [   0.010s] (454/876) otto-state db::tests::repair_renumbers_bricked_vault_rows_and_is_idempotent
+        PASS [   0.009s] (455/876) otto-state db::tests::snapshot_retention_keeps_the_newest_by_stamp
+        PASS [   0.265s] (456/876) otto-state db::tests::open_tolerates_versions_applied_by_a_newer_build
+        PASS [   0.009s] (457/876) otto-state db::tests::unknown_applied_versions_are_the_newer_builds
+        PASS [   0.287s] (458/876) otto-state db::tests::open_snapshots_only_when_migrations_are_pending
+        PASS [   0.252s] (459/876) otto-state db::tests::partials_are_swept_and_backups_dir_is_private_without_pending_migrations
+        PASS [   0.227s] (460/876) otto-state db_explorer::tests::history_unfiltered_sees_all
+        PASS [   0.229s] (461/876) otto-state db_explorer::tests::history_list_previews_big_statements_and_get_returns_full_text
+        PASS [   0.224s] (462/876) otto-state db_explorer::tests::history_user_a_invisible_to_user_b
+        PASS [   0.283s] (463/876) otto-state db::tests::snapshots_are_owner_only_and_partials_are_swept
+        PASS [   0.224s] (464/876) otto-state db_explorer::tests::history_user_id_is_recorded
+        PASS [   0.224s] (465/876) otto-state db_explorer::tests::history_user_b_sees_own_rows
+        PASS [   0.227s] (466/876) otto-state db_explorer::tests::saved_queries_unfiltered_sees_all
+        PASS [   0.229s] (467/876) otto-state db_explorer::tests::saved_queries_user_a_invisible_to_user_b
+        PASS [   0.230s] (468/876) otto-state db_explorer::tests::saved_queries_user_b_sees_own
+        PASS [   0.232s] (469/876) otto-state db_explorer::tests::update_saved_patches_name_and_statement_independently
+        PASS [   0.230s] (470/876) otto-state email_senders::tests::cascades_on_user_delete
+        PASS [   0.228s] (471/876) otto-state email_senders::tests::get_missing_is_none
+        PASS [   0.231s] (472/876) otto-state email_senders::tests::set_verified_records_timestamp
+        PASS [   0.230s] (473/876) otto-state email_senders::tests::upsert_replaces_and_resets_verification
+        PASS [   0.229s] (474/876) otto-state email_senders::tests::upsert_then_get_roundtrips_without_password
+        PASS [   0.233s] (475/876) otto-state eval_lab::tests::golden_crud_and_repo_filter
+        PASS [   0.229s] (476/876) otto-state eval_lab::tests::matrix_create_get_list
+        PASS [   0.228s] (477/876) otto-state eval_lab::tests::regression_dedupe_by_source_iter
+        PASS [   0.227s] (478/876) otto-state finding_events::tests::append_and_list_timeline
+        PASS [   0.230s] (479/876) otto-state git::tests::create_repo_same_path_returns_existing_row
+        PASS [   0.229s] (480/876) otto-state git::tests::create_without_expiry_is_none
+        PASS [   0.232s] (481/876) otto-state git::tests::list_all_repos_spans_workspaces_ordered_by_name
+        PASS [   0.231s] (482/876) otto-state git::tests::proof_config_defaults_and_roundtrips
+        PASS [   0.229s] (483/876) otto-state git::tests::token_expiry_round_trips_through_create_update_and_set
+        PASS [   0.231s] (484/876) otto-state goal_loops::tests::controller_runtime_write_needs_a_running_loop
+        PASS [   0.230s] (485/876) otto-state goal_loops::tests::create_get_and_iterations_roundtrip
+        PASS [   0.009s] (486/876) otto-state goal_loops::tests::interrupted_window_stops_at_the_last_sign_of_life
+        PASS [   0.229s] (487/876) otto-state goal_loops::tests::fail_running_leaves_user_paused_loops_alone
+        PASS [   0.226s] (488/876) otto-state goal_loops::tests::fail_running_returns_and_flips_rows
+        PASS [   0.227s] (489/876) otto-state goal_loops::tests::ledger_and_role_slots_survive_reload_without_moving_executors
+        PASS [   0.227s] (490/876) otto-state goal_loops::tests::pause_never_overwrites_finalize_or_double_banks
+        PASS [   0.230s] (491/876) otto-state goal_loops::tests::summary_detail_keeps_only_the_newest_bodies
+        PASS [   0.231s] (492/876) otto-state grants::tests::a_fill_racing_an_invalidation_is_not_cached
+        PASS [   0.230s] (493/876) otto-state grants::tests::cached_repo_answers_every_feature_from_one_load
+        PASS [   0.229s] (494/876) otto-state grants::tests::grants_for_returns_all
+        PASS [   0.231s] (495/876) otto-state grants::tests::no_row_means_none
+        PASS [   0.226s] (496/876) otto-state grants::tests::root_is_admin_everywhere_without_rows
+        PASS [   0.233s] (497/876) otto-state grants::tests::root_never_touches_the_cache_and_uncached_repo_is_unchanged
+        PASS [   0.229s] (498/876) otto-state grants::tests::set_and_read_grants
+        PASS [   0.233s] (499/876) otto-state grants::tests::set_grants_evicts_so_a_revocation_is_immediate
+        PASS [   0.233s] (500/876) otto-state grants::tests::set_grants_replaces_atomically
+        PASS [   0.231s] (501/876) otto-state history_page::tests::cwd_filter_is_literal_and_does_not_match_siblings
+        PASS [   0.231s] (502/876) otto-state history_page::tests::disk_claims_span_providers_and_nonadmins_never_see_unclaimed_files
+        PASS [   0.229s] (503/876) otto-state history_page::tests::equal_timestamp_pages_are_lossless
+        PASS [   0.248s] (504/876) otto-state history_page::tests::metadata_candidates_are_bounded_before_resolution_and_owner_scoped
+        PASS [   0.010s] (505/876) otto-state k8s_clusters::tests::source_parse_roundtrip
+        PASS [   0.009s] (506/876) otto-state k8s_clusters::tests::wire_shape_omits_empty_optionals
+        PASS [   0.227s] (507/876) otto-state improvements::tests::orphaned_running_runs_fail_at_boot
+        PASS [   0.228s] (508/876) otto-state issues::tests::issue_token_expiry_round_trips
+        PASS [   0.228s] (509/876) otto-state k8s_clusters::tests::crud_roundtrip_keeps_color_inside_params
+        PASS [   0.227s] (510/876) otto-state k8s_monitor::tests::cascade_with_cluster
+        PASS [   0.225s] (511/876) otto-state k8s_monitor::tests::keep_snapshot_updates_status_but_not_the_snapshot
+        PASS [   0.229s] (512/876) otto-state k8s_monitor::tests::config_roundtrip_and_enabled_filter
+        PASS [   0.009s] (513/876) otto-state maintenance::tests::auto_compaction_trigger
+        PASS [   0.224s] (514/876) otto-state k8s_monitor::tests::meta_read_skips_the_snapshot_and_str_upsert_stores_it_verbatim
+        PASS [   0.045s] (515/876) otto-state maintenance::tests::boot_seeds_planner_stats_and_compacts_small_fragmented_db
+        PASS [   0.055s] (516/876) otto-state maintenance::tests::compact_converts_to_incremental_and_frees_pages
+        PASS [   0.226s] (517/876) otto-state k8s_monitor::tests::status_roundtrip_and_delete
+        PASS [   0.218s] (518/876) otto-state k8s_pod_actions::tests::upsert_list_delete_roundtrip_and_cascade
+        PASS [   0.060s] (519/876) otto-state maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed
+        PASS [   0.010s] (520/876) otto-state maintenance::tests::offline_estimate_scales_with_live_data
+        PASS [   0.010s] (521/876) otto-state mcp_audit::tests::padded_payload_keeps_its_tail_visible
+        PASS [   0.010s] (522/876) otto-state mcp_audit::tests::cap_args_json_truncates_long_strings_only
+        PASS [   0.031s] (523/876) otto-state mcp_audit::tests::whole_document_is_byte_capped_with_both_ends
+        PASS [   0.073s] (524/876) otto-state maintenance::tests::unconfirmed_swap_rolls_back_and_request_overrides_failure
+        PASS [   0.223s] (525/876) otto-state mcp_audit::tests::record_and_read_back
+        PASS [   0.227s] (526/876) otto-state mcp_auto_approve::tests::crud_and_applicable_scoping
+        PASS [   0.227s] (527/876) otto-state mcp_auto_approve::tests::migration_imports_the_legacy_exempt_list
+        PASS [   0.227s] (528/876) otto-state mcp_auto_approve::tests::workspace_delete_cascades_its_rules
+        PASS [   0.230s] (529/876) otto-state mcp_control::tests::a_retried_call_reuses_its_pending_approval
+        PASS [   0.228s] (530/876) otto-state mcp_control::tests::allowlist_deny_beats_allow
+        PASS [   0.230s] (531/876) otto-state mcp_control::tests::approval_changes_reach_the_hook
+        PASS [   0.233s] (532/876) otto-state mcp_control::tests::approval_single_use_and_args_binding
+        PASS [   0.232s] (533/876) otto-state mcp_control::tests::registry_create_and_augmented_cols
+        PASS [   0.231s] (534/876) otto-state mcp_control::tests::requester_may_decide_an_approval_their_own_agent_raised
+        PASS [   0.230s] (535/876) otto-state mcp_control::tests::simultaneous_approval_decisions_have_one_winner
+        PASS [   0.232s] (536/876) otto-state mcp_control::tests::workspace_less_otto_rows_are_only_the_callers_own
+        PASS [   0.232s] (537/876) otto-state memory::fts_map_tests::legacy_index_gets_its_map_built_and_deduplicated
+        PASS [   0.236s] (538/876) otto-state mcp_servers::tests::create_list_update_enabled_delete
+        PASS [   0.234s] (539/876) otto-state memory::fts_map_tests::transient_fts_failure_is_an_error_not_unavailable
+        PASS [   0.232s] (540/876) otto-state memory::fts_map_tests::upsert_and_remove_go_through_the_rowid_map
+        PASS [   0.224s] (541/876) otto-state name_themes::tests::custom_theme_crud
+        PASS [   0.228s] (542/876) otto-state name_themes::tests::active_theme_upsert
+        PASS [   0.228s] (543/876) otto-state notifications::tests::bulk_read_and_dismiss_are_one_statement_and_owned
+        PASS [   0.229s] (544/876) otto-state notifications::tests::dedupe_is_per_owner_and_refresh_resets_read
+        PASS [   0.230s] (545/876) otto-state notifications::tests::hot_queries_use_indexes
+        PASS [   0.230s] (546/876) otto-state notifications::tests::list_scopes_and_orders_newest_first
+        PASS [   0.231s] (547/876) otto-state notifications::tests::unread_and_mutations_respect_ownership
+        PASS [   0.232s] (548/876) otto-state personal_agents::tests::agent_crud_roundtrip
+        PASS [   0.236s] (549/876) otto-state personal_agents::tests::autonomy_permissions_modes_and_reset_round_trip
+        PASS [   0.232s] (550/876) otto-state personal_agents::tests::failed_run_keeps_its_live_session
+        PASS [   0.232s] (551/876) otto-state personal_agents::tests::feed_projection_cuts_the_summary_in_sql
+        PASS [   0.456s] (552/876) otto-state personal_agents::tests::autonomy_is_cached_and_invalidated_on_save_and_delete
+        PASS [   0.233s] (553/876) otto-state personal_agents::tests::notification_baseline_requires_successful_delivery
+        PASS [   0.235s] (554/876) otto-state personal_agents::tests::proactive_counts_are_one_query_for_any_n
+        PASS [   0.233s] (555/876) otto-state personal_agents::tests::room_activity_is_denormalized_and_recountable
+        PASS [   0.232s] (556/876) otto-state personal_agents::tests::room_reads_use_the_rowid_index
+        PASS [   0.238s] (557/876) otto-state personal_agents::tests::rooms_membership_and_messages
+        PASS [   0.234s] (558/876) otto-state personal_agents::tests::runs_finish_prune_reap
+        PASS [   0.233s] (559/876) otto-state personal_agents::tests::schedule_create_retry_after_lost_response_is_idempotent
+        PASS [   0.233s] (560/876) otto-state personal_agents::tests::schedule_scan_is_two_queries_for_any_n
+        PASS [   0.232s] (561/876) otto-state personal_agents::tests::schedules_are_armed_at_creation_and_rearmable
+        PASS [   0.231s] (562/876) otto-state personal_agents::tests::schedules_have_independent_cursors
+        PASS [   0.011s] (563/876) otto-state pool::tests::op_count_counts_statements_and_transactions_across_clones
+        PASS [   0.230s] (564/876) otto-state personal_agents::tests::user_context_compare_and_swap_preserves_concurrent_edits
+        PASS [   0.244s] (565/876) otto-state pool::tests::acquire_begin_is_immediate
+        PASS [   0.010s] (566/876) otto-state pool::tests::routes_only_plain_reads_to_the_reader
+        PASS [   0.250s] (567/876) otto-state pool::tests::begin_read_is_a_snapshot_that_never_blocks_writers
+        PASS [   0.314s] (568/876) otto-state pool::tests::reads_do_not_queue_behind_a_held_write_lock
+        PASS [   0.378s] (569/876) otto-state pool::tests::racing_read_then_write_transactions_both_commit
+        PASS [   0.225s] (570/876) otto-state product::tests::add_version_auto_increments_version_no
+        PASS [   0.253s] (571/876) otto-state pool::tests::split_pool_routes_reads_and_writes
+        PASS [   0.229s] (572/876) otto-state product::tests::analysis_agent_session_id_round_trips
+        PASS [   0.229s] (573/876) otto-state product::tests::approve_run_testcases_flips_only_that_runs_draft_cases
+        PASS [   0.230s] (574/876) otto-state product::tests::children_are_filed_under_their_epic_and_patchable
+        PASS [   0.231s] (575/876) otto-state product::tests::create_and_get_story_round_trips_all_fields
+        PASS [   0.230s] (576/876) otto-state product::tests::create_story_defaults_to_top_level_story
+        PASS [   0.232s] (577/876) otto-state product::tests::create_transcript_get_list_round_trip
+        PASS [   0.233s] (578/876) otto-state product::tests::delete_parent_reparents_children_and_removes_attachment_rows
+        PASS [   0.231s] (579/876) otto-state product::tests::delete_story_removes_story_and_versions
+        PASS [   0.232s] (580/876) otto-state product::tests::delete_story_removes_transcripts
+        PASS [   0.229s] (581/876) otto-state product::tests::delete_transcript_removes_only_target
+        PASS [   0.232s] (582/876) otto-state product::tests::list_learnings_active_only_excludes_inactive
+        PASS [   0.230s] (583/876) otto-state product::tests::list_stories_is_global_across_workspaces
+        PASS [   0.234s] (584/876) otto-state product::tests::revision_summary_backfill_and_updates_preserve_slim_semantics
+        PASS [   0.230s] (585/876) otto-state product::tests::update_question_patches_status_and_answer_leaves_text_unchanged
+        PASS [   0.229s] (586/876) otto-state product::tests::update_story_sets_tags_and_get_story_returns_them
+        PASS [   0.227s] (587/876) otto-state product::tests::update_version_body_changes_title_and_body
+        PASS [   0.228s] (588/876) otto-state product::tests::version_lists_ship_slim_raw_json
+        PASS [   0.227s] (589/876) otto-state product_attachments::tests::create_get_list_update_delete_roundtrip
+        PASS [   0.230s] (590/876) otto-state product_chat::tests::chat_message_roundtrip
+        PASS [   0.225s] (591/876) otto-state product_discovery::tests::create_get_list_report_status_roundtrip
+        PASS [   0.227s] (592/876) otto-state product_mockup::tests::create_list_update_delete_roundtrip
+        PASS [   0.233s] (593/876) otto-state product_refinement::tests::thread_and_message_roundtrip
+        PASS [   0.231s] (594/876) otto-state proof::proof_perf_tests::proof_archive_stale_session_packs_is_opt_in_and_self_heals
+        PASS [   0.249s] (595/876) otto-state proof::proof_perf_tests::proof_5k_packs_page_and_scoped_summary_within_budget
+        PASS [   0.244s] (596/876) otto-state proof::proof_perf_tests::proof_legacy_inline_media_migrates_safely
+        PASS [   0.231s] (597/876) otto-state proof::proof_perf_tests::proof_list_packs_pages_by_keyset
+        PASS [   0.240s] (598/876) otto-state proof::proof_perf_tests::proof_media_file_store_dedupes_and_gcs
+        PASS [   0.230s] (599/876) otto-state proof::proof_perf_tests::proof_meta_and_preview_projections_trim_content
+        PASS [   0.225s] (600/876) otto-state proof::proof_perf_tests::proof_snapshot_listing_is_meta_only
+        PASS [   0.262s] (601/876) otto-state provider_accounts::tests::subscription_profiles_are_owner_scoped_and_do_not_store_credentials
+        PASS [   0.231s] (602/876) otto-state provider_models::tests::delete_and_list_all_grouping
+        PASS [   0.227s] (603/876) otto-state provider_models::tests::empty_batch_rejected_last_good_kept
+        PASS [   0.230s] (604/876) otto-state provider_models::tests::manual_shadows_fetched_duplicate
+        PASS [   0.010s] (605/876) otto-state resource_access::live_policy_tests::live_policy_read_routes_to_a_reader_connection
+        PASS [   0.228s] (606/876) otto-state provider_models::tests::upsert_replaces_fetched_preserves_manual_and_order
+        PASS [   0.230s] (607/876) otto-state repo_rules::tests::create_list_toggle_delete
+        PASS [   0.228s] (608/876) otto-state resource_access::live_policy_tests::live_policy_is_not_found_for_a_missing_resource
+        PASS [   0.010s] (609/876) otto-state retention::runs::tests::run_history_is_opt_in_with_a_floor
+        PASS [   0.229s] (610/876) otto-state retention::runs::tests::default_policy_keeps_run_history
+        PASS [   0.234s] (611/876) otto-state retention::runs::tests::otto_runs_only_terminal_old_and_unproven
+        PASS [   0.232s] (612/876) otto-state retention::runs::tests::swarm_messages_age_out_and_finished_loops_keep_last_iteration
+        PASS [   0.229s] (613/876) otto-state retention::runs::tests::swarm_runs_roll_into_spend_before_pruning
+        PASS [   0.009s] (614/876) otto-state retention::tests::policy_defaults_merge_and_floors
+        PASS [   0.234s] (615/876) otto-state retention::tests::age_windows_for_audit_tables_and_disable_switch
+        PASS [   0.230s] (616/876) otto-state retention::tests::dedupe_migration_keeps_earliest_artifact_added
+        PASS [   0.238s] (617/876) otto-state retention::tests::notifications_age_windows_and_row_cap
+        PASS [   0.010s] (618/876) otto-state review_findings::tests::anchor_prefers_distinctive_line_text_then_title
+        PASS [   0.235s] (619/876) otto-state retention::tests::review_artifacts_pruned_only_for_finished_old_reviews
+        PASS [   0.009s] (620/876) otto-state review_findings::tests::finding_state_round_trip
+        PASS [   0.010s] (621/876) otto-state review_findings::tests::fingerprint_differs_on_different_path
+        PASS [   0.009s] (622/876) otto-state review_findings::tests::fingerprint_differs_on_different_pr
+        PASS [   0.010s] (623/876) otto-state review_findings::tests::fingerprint_is_stable_across_identical_inputs
+        PASS [   0.009s] (624/876) otto-state review_findings::tests::fingerprint_normalises_case_and_whitespace
+        PASS [   0.234s] (625/876) otto-state retention::tests::room_messages_capped_per_room
+        PASS [   0.239s] (626/876) otto-state retention::tests::work_events_keep_newest_per_item_and_young_rows
+        PASS [   0.229s] (627/876) otto-state review_findings::tests::branch_scoped_resolution_leaves_other_branches_findings_open
+        PASS [   0.230s] (628/876) otto-state review_findings::tests::legacy_fingerprint_is_matched_and_rekeyed
+        PASS [   0.233s] (629/876) otto-state review_findings::tests::local_review_findings_dedup_across_local_runs
+        PASS [   0.010s] (630/876) otto-state review_findings::tests::unknown_state_parses_to_none
+        PASS [   0.230s] (631/876) otto-state review_findings::tests::scoped_resolution_only_touches_reviewed_paths
+        PASS [   0.229s] (632/876) otto-state review_findings::tests::set_fields_patches_artifacts_only
+        PASS [   0.229s] (633/876) otto-state review_findings::tests::set_status_rejects_illegal_transition
+        PASS [   0.229s] (634/876) otto-state review_findings::tests::upsert_enriches_and_dedups_then_workflow_status_survives
+        PASS [   0.228s] (635/876) otto-state review_proof_packs::tests::create_and_list_snapshots
+        PASS [   0.229s] (636/876) otto-state review_proof_packs::tests::proof_exports_keep_everything_unless_pruned_on_request
+        PASS [   0.231s] (637/876) otto-state reviews::tests::agent_prompts_and_diff_round_trip_and_cleanup
+        PASS [   0.230s] (638/876) otto-state reviews::tests::comment_post_claim_is_exclusive_and_releasable
+        PASS [   0.233s] (639/876) otto-state reviews::tests::edit_unposted_comment_respects_state_guards
+        PASS [   0.231s] (640/876) otto-state reviews::tests::run_context_round_trips_and_upserts
+        PASS [   0.229s] (641/876) otto-state reviews::tests::set_agent_at_updates_one_row_without_clobbering_siblings
+        PASS [   0.230s] (642/876) otto-state reviews::tests::set_status_cancelled_round_trips
+        PASS [   0.232s] (643/876) otto-state reviews::tests::summarizer_completion_cannot_overwrite_cancelled_review
+        PASS [   0.232s] (644/876) otto-state reviews::tests::summary_fallback_derives_from_agents_json
+        PASS [   0.231s] (645/876) otto-state reviews::tests::try_begin_rerun_is_exclusive
+        PASS [   0.236s] (646/876) otto-state runs::tests::cas_blocks_stale_transition
+        PASS [   0.232s] (647/876) otto-state runs::tests::create_get_roundtrip
+        PASS [   0.233s] (648/876) otto-state runs::tests::find_awaiting_only_matches_awaiting
+        PASS [   0.236s] (649/876) otto-state runs::tests::resumable_vs_interrupted_partition
+        PASS [   0.232s] (650/876) otto-state runs::tests::set_error_never_overwrites_a_terminal_status
+        PASS [   0.230s] (651/876) otto-state runs::tests::set_fields_and_events
+        PASS [   0.230s] (652/876) otto-state saved_views::tests::create_list_delete
+        PASS [   0.227s] (653/876) otto-state saved_views::tests::list_isolated_by_workspace
+        PASS [   0.229s] (654/876) otto-state scheduled_tasks::tests::create_get_list
+        PASS [   0.229s] (655/876) otto-state scheduled_tasks::tests::delete_cascades_runs
+        PASS [   0.230s] (656/876) otto-state scheduled_tasks::tests::finish_without_session_keeps_the_live_one
+        PASS [   0.231s] (657/876) otto-state scheduled_tasks::tests::list_enabled_excludes_disabled
+        PASS [   0.231s] (658/876) otto-state scheduled_tasks::tests::notification_baseline_does_not_hide_failed_delivery
+        PASS [   0.234s] (659/876) otto-state scheduled_tasks::tests::notification_baseline_is_bound_to_the_admitted_destination
+        PASS [   0.235s] (660/876) otto-state scheduled_tasks::tests::prune_keeps_recent_and_returns_paths
+        PASS [   0.233s] (661/876) otto-state scheduled_tasks::tests::quality_admission_snapshot_preserves_nonzero_epochs_and_original_content
+        PASS [   0.234s] (662/876) otto-state scheduled_tasks::tests::quality_invalid_admission_snapshots_are_rejected_without_current_task_fallback
+        PASS [   0.234s] (663/876) otto-state scheduled_tasks::tests::quality_old_insert_read_finish_paths_remain_compatible_with_snapshot_schema
+        PASS [   0.232s] (664/876) otto-state scheduled_tasks::tests::quality_prune_preserves_reports_still_owned_by_retained_runs
+        PASS [   0.231s] (665/876) otto-state scheduled_tasks::tests::quality_report_ownership_lookup_does_not_scan_run_history
+        PASS [   0.232s] (666/876) otto-state scheduled_tasks::tests::reap_flips_running_to_error
+        PASS [   0.234s] (667/876) otto-state scheduled_tasks::tests::review5_scheduled_admission_consumed_snapshot_cannot_replay_before_settlement
+        PASS [   0.232s] (668/876) otto-state scheduled_tasks::tests::review5_scheduled_admission_insert_failure_rolls_back_claim
+        PASS [   0.233s] (669/876) otto-state scheduled_tasks::tests::runs_create_finish_list
+        PASS [   0.233s] (670/876) otto-state scheduled_tasks::tests::set_runtime_persists_cursor
+        PASS [   0.236s] (671/876) otto-state scheduled_tasks::tests::tasks_are_armed_at_creation_and_rearmable
+        PASS [   0.234s] (672/876) otto-state scheduled_tasks::tests::tick_scan_is_one_query_for_any_n
+        PASS [   0.236s] (673/876) otto-state scheduled_tasks::tests::update_changes_fields_and_clears_skill
+        PASS [   0.234s] (674/876) otto-state search::tests::every_projection_is_valid_and_empty_for_a_new_database
+        PASS [   0.256s] (675/876) otto-state sessions::tests::foreground_filter_matches_is_foreground_agent
+        PASS [   0.241s] (676/876) otto-state sessions::tests::foreground_list_uses_the_source_index
+        PASS [   0.410s] (677/876) otto-state search::tests::bounded_unicode_search_reaches_matches_after_many_nonmatches
+        PASS [   0.237s] (678/876) otto-state sessions::tests::idle_channel_sessions_query_filters_correctly
+        PASS [   0.229s] (679/876) otto-state sessions::tests::list_all_returns_every_session_across_owners_and_workspaces
+        PASS [   0.231s] (680/876) otto-state sessions::tests::list_by_workspace_for_user_filters_by_owner
+        PASS [   0.237s] (681/876) otto-state sessions::tests::list_filtered_spans_workspaces_and_pages_newest_first
+        PASS [   0.352s] (682/876) otto-state sessions::tests::list_filtered_matches_the_old_rust_filter
+        PASS [   0.236s] (683/876) otto-state sessions::tests::list_live_by_meta_filters_in_sql
+        PASS [   0.232s] (684/876) otto-state sessions::tests::list_usage_attribution_returns_all_sessions_unfiltered
+        PASS [   0.232s] (685/876) otto-state sessions::tests::list_usage_labels_projects_source_without_meta_decode
+        PASS [   0.232s] (686/876) otto-state sessions::tests::mark_dormant_except_keeps_last_active_and_skips_dormant_rows
+        PASS [   0.232s] (687/876) otto-state sessions::tests::merge_meta_is_atomic_and_preserves_other_keys
+        PASS [   0.231s] (688/876) otto-state sessions::tests::prunable_agent_sessions_query_filters_correctly
+        PASS [   0.230s] (689/876) otto-state sessions::tests::replacing_saved_delivery_is_one_atomic_update
+        PASS [   0.249s] (690/876) otto-state sessions::tests::quality_auto_archive_pages_are_bounded_complete_and_covering
+        PASS [   0.232s] (691/876) otto-state sessions::tests::source_column_tracks_meta_edits
+        PASS [   0.233s] (692/876) otto-state sessions::tests::title_candidates_are_the_sql_side_of_title_eligible
+        PASS [   0.010s] (693/876) otto-state settings::tests::otto_mcp_enabled_precedence
+        PASS [   0.010s] (694/876) otto-state settings::tests::pr_draft_model_falls_back_to_the_fast_default
+        PASS [   0.229s] (695/876) otto-state sessions::tests::unarchived_cwds_under_lists_only_live_children
+        PASS [   0.228s] (696/876) otto-state sessions::tests::update_status_keep_activity_leaves_last_active
+        PASS [   0.227s] (697/876) otto-state settings::tests::get_cached_serves_repeats_and_sees_in_process_writes_at_once
+        PASS [   0.227s] (698/876) otto-state skill_evals::tests::retry_invalidates_scores_and_completion_cannot_overwrite_cancellation
+        PASS [   0.231s] (699/876) otto-state skill_evals::tests::run_iteration_round_trip_and_atomic_agent_update
+        PASS [   0.231s] (700/876) otto-state skill_evals::tests::scoring_human_and_matrix_dims_round_trip
+        PASS [   0.230s] (701/876) otto-state skill_evals::tests::summaries_page_by_keyset_and_filter_by_skill
+        PASS [   0.232s] (702/876) otto-state skill_reviews::tests::fixer_admission_is_atomic_and_rejects_cancelled_or_missing_reviews
+        PASS [   0.229s] (703/876) otto-state skill_reviews::tests::round_trip_static_agents_summary
+        PASS [   0.232s] (704/876) otto-state swarm::tests::agent_edit_carries_schedule_cursor
+        PASS [   0.230s] (705/876) otto-state swarm::tests::agent_schedule_null_clears_absent_keeps
+        PASS [   0.233s] (706/876) otto-state swarm::tests::budget_run_queries_and_attempt_numbering
+        PASS [   0.232s] (707/876) otto-state swarm::tests::bump_task_attempt_increments
+        PASS [   0.232s] (708/876) otto-state swarm::tests::busy_agents_and_task_status_counts
+        PASS [   0.235s] (709/876) otto-state swarm::tests::claim_task_is_first_writer_wins_and_keeps_an_assignee
+        PASS [   0.234s] (710/876) otto-state swarm::tests::fail_running_only_hits_non_terminal_runs
+        PASS [   0.232s] (711/876) otto-state swarm::tests::fail_running_refunds_interrupted_attempt
+        PASS [   0.233s] (712/876) otto-state swarm::tests::fail_running_requeues_stranded_in_progress_tasks
+        PASS [   0.233s] (713/876) otto-state swarm::tests::hot_swarm_queries_use_indexes
+        PASS [   0.233s] (714/876) otto-state swarm::tests::link_story_if_unlinked_is_first_writer_wins
+        PASS [   0.239s] (715/876) otto-state swarm::tests::lite_runs_and_latest_task_sessions
+        PASS [   0.228s] (716/876) otto-state swarm::tests::ready_tasks_picks_up_todo_excludes_backlog
+        PASS [   0.231s] (717/876) otto-state swarm::tests::ready_tasks_respects_dependencies
+        PASS [   0.230s] (718/876) otto-state swarm::tests::refund_task_attempt_never_goes_negative
+        PASS [   0.231s] (719/876) otto-state swarm::tests::replace_standing_goals_swaps_the_set
+        PASS [   0.231s] (720/876) otto-state swarm::tests::reservation_serializes_competing_producers_and_stop
+        PASS [   0.232s] (721/876) otto-state swarm::tests::scheduled_reservation_never_reverts_a_concurrent_edit
+        PASS [   0.233s] (722/876) otto-state swarm::tests::set_task_status_if_is_a_compare_and_set
+        PASS [   0.232s] (723/876) otto-state swarm::tests::status_manages_runtime_anchor_and_pause_reason
+        PASS [   0.230s] (724/876) otto-state swarm::tests::stop_active_runs_with_reason_marks_only_in_flight_runs
+        PASS [   0.231s] (725/876) otto-state swarm::tests::swarm_budget_columns_roundtrip
+        PASS [   0.233s] (726/876) otto-state swarm::tests::swarm_spend_sums_cost_and_counts_runs
+        PASS [   0.230s] (727/876) otto-state swarm::tests::update_project_maps_story_unique_violation_to_conflict
+        PASS [   0.231s] (728/876) otto-state swarm::tests::update_run_if_status_is_a_compare_and_set
+        PASS [   0.231s] (729/876) otto-state transcript_index::tests::upsert_get_list_retain
+        PASS [   0.227s] (730/876) otto-state users::tests::first_root_insert_is_conditional_on_an_empty_table
+        PASS [   0.228s] (731/876) otto-state users::tests::first_root_refused_once_any_user_exists
+        PASS [   0.226s] (732/876) otto-state vault_docs_runs::tests::list_is_per_vault_newest_first_with_limit
+        PASS [   0.224s] (733/876) otto-state vault_docs_runs::tests::unfinished_means_running_summarizing_reviewing_or_revising
+        PASS [   0.227s] (734/876) otto-state vault_docs_runs::tests::upsert_get_and_state_refresh
+        PASS [   0.227s] (735/876) otto-state workbench::tests::assets_dedupe_per_owner
+        PASS [   0.225s] (736/876) otto-state workbench::tests::autosaves_coalesce_within_a_burst_and_keep_latest
+        PASS [   0.227s] (737/876) otto-state workbench::tests::checkpoint_forces_a_new_revision_and_noop_saves_record_nothing
+        PASS [   0.263s] (738/876) otto-state workbench::tests::concurrent_autosaves_serialize_without_loss
+        PASS [   0.010s] (739/876) otto-state workbench::tests::line_diff_is_minimal_and_numbered
+        PASS [   0.229s] (740/876) otto-state workbench::tests::docs_are_scoped_per_owner_and_workspace
+        PASS [   0.231s] (741/876) otto-state workbench::tests::identical_checkpoint_seals_the_autosave_burst
+        PASS [   0.232s] (742/876) otto-state workbench::tests::if_hash_refuses_a_stale_content_write_even_within_a_coalesced_burst
+        PASS [   0.017s] (743/876) otto-state workflow_progress::progress_write_tests::memoized_node_summary_is_node_summary_and_small
+        PASS [   0.035s] (744/876) otto-state workflow_progress::progress_write_tests::progress_write_matches_the_whole_run_projection
+        PASS [   0.010s] (745/876) otto-state workflow_progress::review_association_tests::lightweight_projection_retains_review_association
+        PASS [   0.229s] (746/876) otto-state workbench::tests::restore_revision_appends_and_shares_the_blob
+        PASS [   0.230s] (747/876) otto-state workbench::tests::retention_never_touches_workbench_history
+        PASS [   0.229s] (748/876) otto-state workbench::tests::trash_restore_and_permanent_delete
+        PASS [   0.233s] (749/876) otto-state workflow_progress::tests::absent_checkpoint_detail_is_not_found
+        PASS [   0.229s] (750/876) otto-state workflow_progress::tests::checkpoint_pages_survive_updates_append_and_raw_derived_order_hints
+        PASS [   0.231s] (751/876) otto-state workflow_progress::tests::invalid_recovery_json_is_never_replaced_by_empty_projection
+        PASS [   0.226s] (752/876) otto-state workflow_progress::tests::progress_write_rewrites_the_row_once
+        PASS [   0.009s] (753/876) otto-state workflow_triggers::tests::bad_spec_falls_back_to_empty_object
+        PASS [   0.227s] (754/876) otto-state workflow_progress::tests::raw_insert_and_update_repair_exact_bodies_before_conditional_poll
+        PASS [   0.010s] (755/876) otto-state workflow_triggers::tests::default_enabled_is_true
+        PASS [   0.010s] (756/876) otto-state workflow_triggers::tests::rearms_only_on_resume_or_schedule_key_change
+        PASS [   0.226s] (757/876) otto-state workflow_progress::tests::run_head_matches_the_full_run_without_parsing_bodies
+        PASS [   0.227s] (758/876) otto-state workflow_triggers::tests::create_accepts_every_trigger_kind_including_chat
+        PASS [   0.229s] (759/876) otto-state workflow_triggers::tests::review4_retimed_once_rearms_without_trusting_client_cursor
+        PASS [   0.226s] (760/876) otto-state workflow_triggers::tests::schedule_scan_is_one_query_for_any_n
+        PASS [   0.696s] (761/876) otto-state workflow_progress::tests::large_checkpoint_bodies_are_absent_from_progress_and_unchanged_poll
+        PASS [   0.223s] (762/876) otto-state workflow_triggers::tests::trigger_cursor_is_server_owned
+        PASS [   0.222s] (763/876) otto-state workflow_triggers::tests::triggers_are_armed_at_creation_and_on_resume_or_reschedule
+        PASS [   0.221s] (764/876) otto-state workflows::tests::create_run_records_the_starter
+        PASS [   0.267s] (765/876) otto-state workflows::tests::admit_run_if_idle_admits_exactly_one_concurrent_run
+        PASS [   0.226s] (766/876) otto-state workflows::tests::delete_refuses_live_runs_and_missing_run_reads_canceled
+        PASS [   0.236s] (767/876) otto-state workflows::tests::find_active_run_for_chat_prefers_exact_thread
+        PASS [   0.228s] (768/876) otto-state workflows::tests::find_by_name_is_scoped_to_the_workspace
+        PASS [   0.227s] (769/876) otto-state workflows::tests::instructions_round_trip_and_version_snapshot
+        PASS [   0.227s] (770/876) otto-state workflows::tests::lifecycle_cas_never_undoes_a_cancel
+        PASS [   0.255s] (771/876) otto-state workflows::tests::prune_runs_keeps_newest_young_active_and_referenced
+        PASS [   0.223s] (772/876) otto-state workflows::tests::queued_run_ids_are_fifo_by_creation
+        PASS [   0.225s] (773/876) otto-state workflows::tests::queued_run_pins_the_definition_before_execution
+        PASS [   0.224s] (774/876) otto-state workflows::tests::reopen_run_only_reopens_finished_runs
+        PASS [   0.228s] (775/876) otto-state workflows::tests::request_cancel_keeps_the_engines_node_states
+        PASS [   0.229s] (776/876) otto-state workflows::tests::resume_budget_skips_approval_reentry_and_resets_on_retry
+        PASS [   0.230s] (777/876) otto-state workflows::tests::retry_scope_is_atomic_and_active_retry_cannot_reset_checkpoints
+        PASS [   0.228s] (778/876) otto-state workflows::tests::review4_snapshot_conflict_rolls_back_the_complete_publication
+        PASS [   0.231s] (779/876) otto-state workflows::tests::run_records_version_and_proof_pack
+        PASS [   0.232s] (780/876) otto-state workflows::tests::startup_reap_fails_started_runs_but_keeps_the_queue
+        PASS [   0.452s] (781/876) otto-state workflows::tests::review4_interleaved_publication_matches_live_and_run_definition
+        PASS [   0.230s] (782/876) otto-state workflows::tests::status_reads_never_load_the_run_body_and_cancel_is_announced
+        PASS [   0.232s] (783/876) otto-state workflows::tests::terminal_update_clears_a_stale_approval_pause
+        PASS [   0.232s] (784/876) otto-state workflows::tests::update_run_bumps_a_monotonic_rev
+        PASS [   0.228s] (785/876) otto-state workflows::tests::update_run_progress_never_resurrects_a_canceled_run
+        PASS [   0.234s] (786/876) otto-state workflows::tests::versioning_snapshot_bump_restore_roundtrip
+        PASS [   0.010s] (787/876) otto-state workgraph::tests::enum_roundtrip
+        PASS [   0.233s] (788/876) otto-state workgraph::tests::add_artifact_dedupes_null_refs
+        PASS [   0.231s] (789/876) otto-state workgraph::tests::approval_flow_and_summary
+        PASS [   0.009s] (790/876) otto-state workgraph::tests::status_normalization
+        PASS [   0.233s] (791/876) otto-state workgraph::tests::edges_events_artifacts_and_graph
+        PASS [   0.232s] (792/876) otto-state workgraph::tests::migration_0126_collapses_null_ref_duplicates
+        PASS [   0.239s] (793/876) otto-state workgraph::tests::unchanged_upsert_does_not_touch_updated_at
+        PASS [   0.333s] (794/876) otto-state workgraph::tests::graph_grouped_approvals_and_indexed_plans
+        PASS [   0.235s] (795/876) otto-state workgraph::tests::upsert_is_idempotent_and_tracks_status
+        PASS [   0.018s] (796/876) otto-telemetry collector::recovery_tests::collector_resource_identity_covers_stop_exit_cancel_and_pid_reuse
+        PASS [   0.010s] (797/876) otto-telemetry collector::recovery_tests::ownership_lock_excludes_concurrent_starts_and_releases_on_drop
+        PASS [   0.009s] (798/876) otto-telemetry collector::recovery_tests::relative_config_arguments_cannot_claim_managed_ownership
+        PASS [   0.009s] (799/876) otto-telemetry context::tests::uninstrumented_work_keeps_value_and_error
+        PASS [   0.012s] (800/876) otto-telemetry tests::canceled_pending_export_is_accounted_without_claiming_acceptance
+        PASS [   0.009s] (801/876) otto-telemetry tests::cancelled_and_unset_spans_stay_distinguishable
+        PASS [   0.009s] (802/876) otto-telemetry tests::cancelled_export_requeues_unsent_points
+        PASS [   0.010s] (803/876) otto-telemetry tests::collector_exporter_stats_parse_failures_and_queue_depth
+        PASS [   0.009s] (804/876) otto-telemetry tests::config_requires_finite_bounded_thresholds
+        PASS [   0.029s] (805/876) otto-telemetry tests::consent_disable_clears_bounded_queue_without_starting_collector
+        PASS [   0.234s] (806/876) otto-state workspaces::tests::ensure_scratch_is_idempotent_and_heals
+        PASS [   0.012s] (807/876) otto-telemetry tests::dismissed_suggestions_and_daily_schedule_survive_restart
+        PASS [   0.009s] (808/876) otto-telemetry tests::drain_settlement_never_claims_unconfirmed_exports
+        PASS [   0.012s] (809/876) otto-telemetry tests::enable_persists_a_stable_first_analysis_deadline
+        PASS [   0.009s] (810/876) otto-telemetry tests::flush_waits_for_the_interval_and_wakes_only_when_urgent
+        PASS [   0.009s] (811/876) otto-telemetry tests::nanoseconds_accept_decimal_string
+        PASS [   0.010s] (812/876) otto-telemetry tests::opt_out_during_profile_setup_cannot_launch_sample
+        PASS [   0.009s] (813/876) otto-telemetry tests::otlp_is_standard_json_and_does_not_export_error_bodies
+        PASS [   0.010s] (814/876) otto-telemetry tests::profile_redacts_paths_addresses_and_headers
+        PASS [   0.228s] (815/876) otto-state workspaces::tests::list_user_variants_omit_scratch_but_list_all_includes_it
+        PASS [   0.009s] (816/876) otto-telemetry tests::ranking_excludes_fast_high_volume_operations
+        PASS [   0.009s] (817/876) otto-telemetry tests::ranking_uses_self_time_and_collapses_shared_traces
+        PASS [   0.010s] (818/876) otto-telemetry tests::resource_samples_collapse_to_bounded_per_minute_maxima
+        PASS [   0.012s] (819/876) otto-telemetry tests::resource_sample_from_revoked_consent_cannot_publish_after_reenable
+        PASS [   0.009s] (820/876) otto-telemetry tests::slow_query_filters_before_limiting
+        PASS [   0.009s] (821/876) otto-telemetry tests::span_rejects_content_and_invalid_numbers
+        PASS [   0.223s] (822/876) otto-state workspaces::tests::role_of_gives_editor_on_scratch_to_non_member_and_admin_to_root
+        PASS [   0.009s] (823/876) otto-telemetry tests::trace_drilldown_is_bounded_by_the_trace_id_lookup
+        PASS [   0.009s] (824/876) otto-telemetry tests::spikes_require_sustained_cpu_or_an_abrupt_memory_increase
+        PASS [   0.010s] (825/876) otto-usage budget_dedup::tests::clear_resets_all_alerts
+        PASS [   0.010s] (826/876) otto-usage budget_dedup::tests::budget_check_skips_until_usage_config_or_day_changes
+        PASS [   0.009s] (827/876) otto-usage budget_dedup::tests::independent_keys_do_not_interfere
+        PASS [   0.009s] (828/876) otto-usage budget_dedup::tests::first_crossing_emits_exceeded_once
+        PASS [   0.009s] (829/876) otto-usage budget_dedup::tests::no_crossing_never_emits
+        PASS [   0.009s] (830/876) otto-usage budget_dedup::tests::re_crossing_after_recovery_emits_again
+        PASS [   0.037s] (831/876) otto-telemetry tests::verified_digest_cache_is_keyed_by_file_identity
+        PASS [   0.009s] (832/876) otto-usage budget_dedup::tests::recovery_emits_once_then_stops
+        PASS [   0.009s] (833/876) otto-usage ccusage::tests::args_use_compact_dates
+        PASS [   0.009s] (834/876) otto-usage ccusage::tests::diff_lines_models_up_and_flags_untracked_ones
+        PASS [   0.009s] (835/876) otto-usage ccusage::tests::parse_daily_flattens_model_breakdowns
+        PASS [   0.009s] (836/876) otto-usage clickhouse::tests::config_xml_well_formed_and_escaped
+        PASS [   0.008s] (837/876) otto-usage clickhouse::tests::ensure_default_metadata_noop_for_fresh_dir
+        PASS [   0.009s] (838/876) otto-usage clickhouse::tests::ensure_default_metadata_synthesizes_from_symlink
+        PASS [   0.009s] (839/876) otto-usage clickhouse::tests::free_port_is_loopback
+        PASS [   0.014s] (840/876) otto-usage clickhouse::tests::exec_rejects_truncated_success_response
+        PASS [   0.008s] (841/876) otto-usage clickhouse::tests::parse_status_pid_works
+        PASS [   0.009s] (842/876) otto-usage clickhouse::tests::server_config_logs_to_console_not_files
+        PASS [   0.008s] (843/876) otto-usage clickhouse::tests::split_statements_basic
+        PASS [   0.008s] (844/876) otto-usage clickhouse::tests::split_statements_ignores_semicolon_in_line_comment
+        PASS [   0.008s] (845/876) otto-usage clickhouse::tests::summary_header_read_rows
+        PASS [   0.008s] (846/876) otto-usage clickhouse::tests::urlencode_reserved
+        PASS [   0.008s] (847/876) otto-usage clickhouse::tests::xml_escape_specials
+        PASS [   0.008s] (848/876) otto-usage engine::ch_string_tests::escapes_backslash_and_quote
+        PASS [   0.008s] (849/876) otto-usage engine::rollup_tests::summary_rollups_reaggregate_the_single_scan
+        PASS [   0.008s] (850/876) otto-usage engine::scope_tests::json_u64_accepts_quoted_integers
+        PASS [   0.008s] (851/876) otto-usage engine::scope_tests::last_known_rollups_do_not_retain_every_requested_window
+        PASS [   0.023s] (852/876) otto-usage engine::scope_tests::heal_watcher_reacts_to_a_raise_without_polling
+        PASS [   0.009s] (853/876) otto-usage engine::scope_tests::model_rollups_group_by_model
+        PASS [   0.009s] (854/876) otto-usage engine::scope_tests::monthly_rollup_groups_days_by_month
+        PASS [   0.009s] (855/876) otto-usage engine::scope_tests::scope_filter_narrows_to_listed_sessions
+        PASS [   0.010s] (856/876) otto-usage engine::scope_tests::summary_without_engine_is_empty_not_error
+        PASS [   0.010s] (857/876) otto-usage engine::scope_tests::parked_rollups_expire_when_the_calendar_window_moves
+        PASS [   0.009s] (858/876) otto-usage engine::writer_policy_tests::flush_and_wait_acks_an_empty_writer
+        PASS [   0.009s] (859/876) otto-usage engine::scope_tests::top_sessions_orders_and_caps_the_totals
+        PASS [   0.010s] (860/876) otto-usage engine::writer_policy_tests::parked_writer_never_serializes_until_overdue
+        PASS [   0.012s] (861/876) otto-usage engine::writer_policy_tests::parked_server_defers_until_overdue_or_final
+        PASS [   0.009s] (862/876) otto-usage engine::writer_policy_tests::unstamped_events_get_the_record_time
+        PASS [   0.007s] (863/876) otto-usage pricing::tests::cache_tokens_are_priced
+        PASS [   0.008s] (864/876) otto-usage pricing::tests::codex_and_mini_tiers_still_resolve
+        PASS [   0.008s] (865/876) otto-usage pricing::tests::current_models_match_published_prices
+        PASS [   0.008s] (866/876) otto-usage pricing::tests::fable_5_resolves_to_flagship_tier
+        PASS [   0.008s] (867/876) otto-usage pricing::tests::legacy_opus_and_haiku_cards
+        PASS [   0.009s] (868/876) otto-usage pricing::tests::opus_rates_are_current_and_order_of_magnitude
+        PASS [   0.009s] (869/876) otto-usage pricing::tests::opus_costs_more_than_sonnet_more_than_haiku
+        PASS [   0.009s] (870/876) otto-usage pricing::tests::sonnet_and_haiku_rates
+        PASS [   0.009s] (871/876) otto-usage pricing::tests::unknown_model_hits_nonzero_fallback
+        PASS [   0.008s] (872/876) otto-usage schema::tests::alter_ttl_skips_the_materialize_rewrite
+        PASS [   0.008s] (873/876) otto-usage schema::tests::parse_ttl_days_reads_engine_full
+        PASS [   0.009s] (874/876) otto-usage schema::tests::repartition_copies_into_a_partitioned_twin_then_swaps
+        PASS [   1.133s] (875/876) otto-usage engine::writer_policy_tests::failed_flush_is_not_retried_per_event
+        PASS [   6.538s] (876/876) otto-telemetry tests::resource_sampling_continues_while_export_worker_is_blocked
+────────────
+     Summary [  36.649s] 876 tests run: 876 passed, 903 skipped
+
+===== r14-dora-red.log =====
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-40ef81efd24da1fa)
+
+running 1 test
+
+thread 'routes::decoder_tests::malformed_percent_sequences_with_unicode_never_panic' (3904524) panicked at src/routes.rs:117:49:
+end byte index 3 is not a char boundary; it is inside '€' (bytes 1..4 of string)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test routes::decoder_tests::malformed_percent_sequences_with_unicode_never_panic ... FAILED
+
+failures:
+
+failures:
+    routes::decoder_tests::malformed_percent_sequences_with_unicode_never_panic
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+
+===== r14-dora-identity-red.log =====
+   Compiling dora-metrics v0.1.0 (/Users/itziklavon/otto_os/examples/plugins/dora-metrics)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src/lib.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-40ef81efd24da1fa)
+
+running 1 test
+
+thread 'metrics::tests::same_display_names_and_stage_gaps_do_not_cross_repository_identity' (3916884) panicked at src/metrics.rs:565:9:
+display labels are not repository identity
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test metrics::tests::same_display_names_and_stage_gaps_do_not_cross_repository_identity ... FAILED
+
+failures:
+
+failures:
+    metrics::tests::same_display_names_and_stage_gaps_do_not_cross_repository_identity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+
+===== r14-dora-green.log =====
+   Compiling dora-metrics v0.1.0 (/Users/itziklavon/otto_os/examples/plugins/dora-metrics)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Running unittests src/lib.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-40ef81efd24da1fa)
+
+running 31 tests
+test metrics::tests::report_at_50k_commits ... ignored, isolated 50k-history measurement
+test metrics::tests::percentile_interpolates ... ok
+test config::tests::partial_json_fills_defaults ... ok
+test config::tests::validate_rejects_bad_values ... ok
+test metrics::tests::deploy_tag_pattern_matching ... ok
+test metrics::tests::tier_boundaries ... ok
+test metrics::tests::classify_order_and_custom_prefixes ... ok
+test routes::decoder_tests::malformed_percent_sequences_with_unicode_never_panic ... ok
+test suggest::tests::bottleneck_release_to_deploy ... ok
+test metrics::tests::week_start_is_epoch_aligned_monday ... ok
+test suggest::tests::irregular_cadence_rule ... ok
+test suggest::tests::cfr_thresholds ... ok
+test suggest::tests::long_tail_rule_needs_four_leads ... ok
+test suggest::tests::ordered_critical_first ... ok
+test suggest::tests::quiet_elite_dataset_yields_nothing ... ok
+test suggest::tests::tier_gap_severities ... ok
+test suggest::tests::batch_size_rule ... ok
+test suggest::tests::no_deploys_is_critical ... ok
+test metrics::tests::compute_custom_deploy_pattern ... ok
+test config::tests::load_defaults_on_missing_and_corrupt ... ok
+test metrics::tests::compute_multi_repo_labels ... ok
+test suggest::tests::unrecovered_and_unshipped_rules ... ok
+test suggest::tests::weekday_clustering_rule ... ok
+test metrics::tests::compute_no_deploys_all_null_tiers ... ok
+test metrics::tests::compute_deltas_vs_previous_window ... ok
+test metrics::tests::compute_all_repos_isolated_pairing ... ok
+test metrics::tests::same_display_names_and_stage_gaps_do_not_cross_repository_identity ... ok
+test metrics::tests::compute_mttr_recovery ... ok
+test metrics::tests::compute_core_scenario ... ok
+test config::tests::save_load_round_trip ... ok
+test metrics::tests::indexed_pairing_matches_exhaustive_oracle_including_equal_timestamps ... ok
+
+test result: ok. 30 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-ba2b46b6c601b8b1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fixture_repo.rs (examples/plugins/dora-metrics/target/debug/deps/fixture_repo-295e28b867899c99)
+
+running 1 test
+test fixture_repo_end_to_end ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+   Doc-tests dora_metrics
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+===== r14-dora-clippy.log =====
+    Checking itoa v1.0.18
+    Checking bytes v1.12.1
+    Checking log v0.4.34
+    Checking memchr v2.8.3
+    Checking base64 v0.23.1
+    Checking chunked_transfer v1.5.0
+    Checking ascii v1.1.0
+    Checking utf8-zero v0.8.1
+    Checking percent-encoding v2.3.2
+    Checking httpdate v1.0.3
+    Checking serde_core v1.0.229
+    Checking httparse v1.10.1
+    Checking zmij v1.0.23
+    Checking tiny_http v0.12.0
+    Checking http v1.5.0
+    Checking ureq-proto v0.6.4
+    Checking serde_json v1.0.151
+    Checking serde v1.0.229
+    Checking ureq v3.4.2
+    Checking dora-metrics v0.1.0 (/Users/itziklavon/otto_os/examples/plugins/dora-metrics)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.41s
+
+===== r14-dora-scale.log =====
+   Compiling dora-metrics v0.1.0 (/Users/itziklavon/otto_os/examples/plugins/dora-metrics)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running unittests src/lib.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-40ef81efd24da1fa)
+
+running 1 test
+50k report elapsed=79.477667ms
+test metrics::tests::report_at_50k_commits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.09s
+
+     Running unittests src/main.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-ba2b46b6c601b8b1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fixture_repo.rs (examples/plugins/dora-metrics/target/debug/deps/fixture_repo-295e28b867899c99)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+===== r14-dora-final.log =====
+   Compiling dora-metrics v0.1.0 (/Users/itziklavon/otto_os/examples/plugins/dora-metrics)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-40ef81efd24da1fa)
+
+running 31 tests
+test config::tests::partial_json_fills_defaults ... ok
+test config::tests::validate_rejects_bad_values ... ok
+test metrics::tests::classify_order_and_custom_prefixes ... ok
+test metrics::tests::report_at_50k_commits ... ignored, isolated 50k-history measurement
+test metrics::tests::deploy_tag_pattern_matching ... ok
+test metrics::tests::percentile_interpolates ... ok
+test config::tests::load_defaults_on_missing_and_corrupt ... ok
+test metrics::tests::tier_boundaries ... ok
+test metrics::tests::week_start_is_epoch_aligned_monday ... ok
+test metrics::tests::compute_no_deploys_all_null_tiers ... ok
+test routes::decoder_tests::malformed_percent_sequences_with_unicode_never_panic ... ok
+test config::tests::save_load_round_trip ... ok
+test suggest::tests::bottleneck_release_to_deploy ... ok
+test suggest::tests::batch_size_rule ... ok
+test metrics::tests::compute_multi_repo_labels ... ok
+test metrics::tests::compute_custom_deploy_pattern ... ok
+test suggest::tests::cfr_thresholds ... ok
+test suggest::tests::irregular_cadence_rule ... ok
+test metrics::tests::compute_all_repos_isolated_pairing ... ok
+test metrics::tests::compute_deltas_vs_previous_window ... ok
+test metrics::tests::same_display_names_and_stage_gaps_do_not_cross_repository_identity ... ok
+test suggest::tests::long_tail_rule_needs_four_leads ... ok
+test suggest::tests::no_deploys_is_critical ... ok
+test metrics::tests::compute_mttr_recovery ... ok
+test suggest::tests::ordered_critical_first ... ok
+test suggest::tests::quiet_elite_dataset_yields_nothing ... ok
+test metrics::tests::compute_core_scenario ... ok
+test suggest::tests::tier_gap_severities ... ok
+test suggest::tests::unrecovered_and_unshipped_rules ... ok
+test suggest::tests::weekday_clustering_rule ... ok
+test metrics::tests::indexed_pairing_matches_exhaustive_oracle_including_equal_timestamps ... ok
+
+test result: ok. 30 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (examples/plugins/dora-metrics/target/debug/deps/dora_metrics-ba2b46b6c601b8b1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fixture_repo.rs (examples/plugins/dora-metrics/target/debug/deps/fixture_repo-295e28b867899c99)
+
+running 1 test
+test fixture_repo_end_to_end ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+   Doc-tests dora_metrics
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+===== r14-dora-final-clippy.log =====
+    Checking dora-metrics v0.1.0 (/Users/itziklavon/otto_os/examples/plugins/dora-metrics)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s

@@ -1,0 +1,942 @@
+{
+  "base": "a0bd718b9fbc008d72c164ce643a24ed78e6368c",
+  "note": "Owned domain snapshot; source review depth is described separately in report, hashes do not imply every line audited.",
+  "files": [
+    {
+      "path": "crates/otto-canvas/Cargo.toml",
+      "sha256": "0c0f4a8b0c98f551b4398bf9b8e7593fb5507694b9fffc4623203a74363c45f2"
+    },
+    {
+      "path": "crates/otto-canvas/src/assist.rs",
+      "sha256": "e4ec404405795891683114876462942a3d16971c2d9f57e65dfa3c4b14685288"
+    },
+    {
+      "path": "crates/otto-canvas/src/assist_ctx.rs",
+      "sha256": "193baa96042c493c829bcab8abf04b938a07031d56b904830e23034948dec9a9"
+    },
+    {
+      "path": "crates/otto-canvas/src/assist_regressions.rs",
+      "sha256": "04e516a86356e6d5c2297b5e418e3c21ea79218476b39932f54102ebec5463b0"
+    },
+    {
+      "path": "crates/otto-canvas/src/http.rs",
+      "sha256": "1a0424f318f78f7ef27fe537e9c2b9e91b6036fbdb23ff47911d01f20f978e44"
+    },
+    {
+      "path": "crates/otto-canvas/src/lib.rs",
+      "sha256": "cc881d793a1092fc1daa9210f116245dcfc73a04591e7162dd027e432dd4132f"
+    },
+    {
+      "path": "crates/otto-canvas/src/types.rs",
+      "sha256": "84c60a81025108eda9c1cab9779fc379b54a614836684573d30c68c6a1826c26"
+    },
+    {
+      "path": "crates/otto-design-assist/Cargo.toml",
+      "sha256": "9d1a5bd92273efdbdd220766cacc43695ebb153084cab2a9b672d2b17ca1998c"
+    },
+    {
+      "path": "crates/otto-design-assist/src/ctx.rs",
+      "sha256": "f75d950bfb8e233938e425a31935ec3e37557f4edf1a5fd453c21f20606551a4"
+    },
+    {
+      "path": "crates/otto-design-assist/src/lib.rs",
+      "sha256": "dcc5f2ba8d7ade7f37e5244810d7785426e9a0a7906101cbf127edf70c83fd15"
+    },
+    {
+      "path": "crates/otto-design/Cargo.toml",
+      "sha256": "7de3b1c28a88afec71624a019da791629dc2907a382f3c529ae92dcd528a5093"
+    },
+    {
+      "path": "crates/otto-design/clippy.toml",
+      "sha256": "2db6178192df0b85d33541cb8c94fe5cb315f09abdb049a13f29047ad77aecf8"
+    },
+    {
+      "path": "crates/otto-design/src/blobs.rs",
+      "sha256": "6ec56bf6daae362b3acb5a456f9230308d0eaaf290633f3bc1d559f75e13816f"
+    },
+    {
+      "path": "crates/otto-design/src/brand/contrast.rs",
+      "sha256": "273b5ea7af889ebb81694a426a390fbdb160b6ba8373e55de03ce86cfd50d07a"
+    },
+    {
+      "path": "crates/otto-design/src/brand/doc.rs",
+      "sha256": "74a68719a3cef996df673b97ad1402e586f7e70ffb0fb0b872f9aeed8c56889b"
+    },
+    {
+      "path": "crates/otto-design/src/brand/export.rs",
+      "sha256": "aecdb18ab59cbbdbd5e085ad76349860c5dbeb921c174de8c5f03108d8ab911a"
+    },
+    {
+      "path": "crates/otto-design/src/brand/extract.rs",
+      "sha256": "287d62b85c936e149dc0c441d1341e923b7b7386135d8d5653ddebbe5a62f291"
+    },
+    {
+      "path": "crates/otto-design/src/brand/http.rs",
+      "sha256": "bd70a155e92b2866b4d78f721e33824aa939b4f0bf6a4708ff23dda6d9ffc85d"
+    },
+    {
+      "path": "crates/otto-design/src/brand/impact.rs",
+      "sha256": "4537907527159a4498a3568f12c6f0f728475762e192215dcdaa3adcf14dfdd6"
+    },
+    {
+      "path": "crates/otto-design/src/brand/mod.rs",
+      "sha256": "dae993e1f4636ccb7deb3122756461ab2700ebf2c76dba2be0aa35b89c5da8fc"
+    },
+    {
+      "path": "crates/otto-design/src/cite.rs",
+      "sha256": "7d2334b27d67e914e2d17aedf88689b6585688fd844257a1cf68bc0157e99115"
+    },
+    {
+      "path": "crates/otto-design/src/diff.rs",
+      "sha256": "33d82243ece12bede075d40c1bfe34817a9cb451706d663db363969bdaa5c55b"
+    },
+    {
+      "path": "crates/otto-design/src/extract.rs",
+      "sha256": "981d3cc7b77afc29865ed1b58b3c6538eda66003c0b43c9df6b28d6e8f4296d8"
+    },
+    {
+      "path": "crates/otto-design/src/format.rs",
+      "sha256": "97acab556f52fdd69a5c9f9e212e3dbd7e6c88f4b109a6252f7eafaab2d73045"
+    },
+    {
+      "path": "crates/otto-design/src/graph.rs",
+      "sha256": "35058f34fcfb856a901bf879906dc1eec5e41beda53533c785517c020e986062"
+    },
+    {
+      "path": "crates/otto-design/src/http.rs",
+      "sha256": "28ebe54011193dda784eeba17ff3e1d9bd70e555bbd7263cc57f5f0b3456b456"
+    },
+    {
+      "path": "crates/otto-design/src/import.rs",
+      "sha256": "02427c6b1d130ee3a92e9256561b6a946a98631b0dce6de46571e72af8a3283a"
+    },
+    {
+      "path": "crates/otto-design/src/learn.rs",
+      "sha256": "dbff7e97832c3e172ec874b8a5ee9b1ff6c83731495718a73d76d4aa99edd921"
+    },
+    {
+      "path": "crates/otto-design/src/lib.rs",
+      "sha256": "5023658f62232e75e2e76322b8ca8a7b5c0954f8b7d899cbf8ff86515ba992fd"
+    },
+    {
+      "path": "crates/otto-design/src/retention.rs",
+      "sha256": "6b9c1ebd98446ddd477eaeeba047bc15ab25a9b0a370a154620086371d82bddd"
+    },
+    {
+      "path": "crates/otto-design/src/service.rs",
+      "sha256": "20090d2127ecd1693d5d678c13f57104884bfa052ebc3b909b5ba8909b1dfdb5"
+    },
+    {
+      "path": "crates/otto-design/src/site/export.rs",
+      "sha256": "5f4e408f12486557265a851c8509022186771dba1896a25bcad96728b71c0c1e"
+    },
+    {
+      "path": "crates/otto-design/src/site/extract.rs",
+      "sha256": "6d4508872a3766e8078e91f1913c88bfa52a33a81b75e9dff33ce4a3501158d4"
+    },
+    {
+      "path": "crates/otto-design/src/site/http.rs",
+      "sha256": "c85b5165ff9e7b787d173088fcea33a076b1f8aa26860e0f8899030caa7589f4"
+    },
+    {
+      "path": "crates/otto-design/src/site/mod.rs",
+      "sha256": "c5188fdfd16ed2da56a509024963cae97d775b37ea5f9e8f547fa6b12e404bae"
+    },
+    {
+      "path": "crates/otto-design/src/site/render.rs",
+      "sha256": "e23ababb9d0c8f880cb7a87f19ce0d02b7d4db797bace79141314d54893794ae"
+    },
+    {
+      "path": "crates/otto-design/src/site/schema.rs",
+      "sha256": "020364bd994b28603d683c58f3ed06ef9995619cc2002e732f1a70feb0175ce7"
+    },
+    {
+      "path": "crates/otto-design/src/site/site.css",
+      "sha256": "8b3ccae5f8d646e9e4b0903a55611b9dc32a7f3eeb091ec43a71927368b0bcbb"
+    },
+    {
+      "path": "crates/otto-design/src/site/theme.rs",
+      "sha256": "7e65d1ac83c408105963af5d9ebc0fbf42c6b46a7f7f3cb183680d9d95a36006"
+    },
+    {
+      "path": "crates/otto-design/src/site/validate.rs",
+      "sha256": "5037cf8367d07f374a8d0c140be2c712bc18aedae7139f9b2d461ff42d647567"
+    },
+    {
+      "path": "crates/otto-design/src/site/zip.rs",
+      "sha256": "8d1823e2b61b6621a31f3d5490f252737496392582f2baf5682f29b21a7aa37e"
+    },
+    {
+      "path": "crates/otto-design/src/store.rs",
+      "sha256": "f3b6fa0cd0a7c2fc50ac190323c9d87f0c3e9dde90f736e7d6948b2373abd267"
+    },
+    {
+      "path": "crates/otto-design/src/types.rs",
+      "sha256": "af662425cb73a7b7119335e905441ab93f0dc2b681cb1d1454c382d068472ecf"
+    },
+    {
+      "path": "crates/otto-design/src/uri.rs",
+      "sha256": "d7207e0b1a19852169f8b3c0f9b117e4eeae5819c8638dcf9a95f524b6f120ff"
+    },
+    {
+      "path": "crates/otto-design/src/variants.rs",
+      "sha256": "37ada9f810b1ec9a18a243c4b29837e0ea4ed85089bc31c88c8b76a1bfc5f0d9"
+    },
+    {
+      "path": "crates/otto-product/.DS_Store",
+      "sha256": "51c31c358365fe78c37520205f03d21d5ad187d88276780cfdd6521b42800816"
+    },
+    {
+      "path": "crates/otto-product/Cargo.toml",
+      "sha256": "f3860e26b1084c88670a09c7e8c864378b51bfef0bb133791c75e2c508321b01"
+    },
+    {
+      "path": "crates/otto-product/assets/.DS_Store",
+      "sha256": "b63c52cda19a9371c68fce22f4f4c193abc24fb4c2cf150760ce91809b28914b"
+    },
+    {
+      "path": "crates/otto-product/clippy.toml",
+      "sha256": "c40c2582feb102c57fc5e08a2e834588fbd313e573f4f7b7aa508a9b0d2ed63a"
+    },
+    {
+      "path": "crates/otto-product/src/analysis.rs",
+      "sha256": "f3ff86971d35d0be8c722cc54626a7e2d2f50d5d31fe75328401c3005d4cf1fe"
+    },
+    {
+      "path": "crates/otto-product/src/chat.rs",
+      "sha256": "ecb05df450c9a9cfb12f7a3dac925ba5205a76fbafb95c24377032313a76fd5d"
+    },
+    {
+      "path": "crates/otto-product/src/design_format.rs",
+      "sha256": "1ba9647a80cbe729e3129511ae26b445d0d9d34acf048da58eb39d0c2bd416d9"
+    },
+    {
+      "path": "crates/otto-product/src/design_scene3d.rs",
+      "sha256": "a422ed548bdd9df02c68e3c86245fe383a1f02f590ab61ff6e07b7aece5ee681"
+    },
+    {
+      "path": "crates/otto-product/src/extract.rs",
+      "sha256": "3248a9dab6a18a536202f8e6df275be276eea73a92aaac5d2ee5644c38937e29"
+    },
+    {
+      "path": "crates/otto-product/src/host.rs",
+      "sha256": "66aaf89ed4d0f28da493c1ab7e74fb861fcc89ea4dc5f00939d937761adcf5ba"
+    },
+    {
+      "path": "crates/otto-product/src/http.rs",
+      "sha256": "7c9e779bfcad96d4b43e0c91af0e1260129c38754d349d34d04148fc171396d8"
+    },
+    {
+      "path": "crates/otto-product/src/lib.rs",
+      "sha256": "5e98a12d6903598d385c8052b0dc55cdcabddd883eda4a331f37f4482783857c"
+    },
+    {
+      "path": "crates/otto-product/src/media.rs",
+      "sha256": "03030bb739f4e67af0c310e7a695e8b22f2097a489b417e7e7545871bd29fafe"
+    },
+    {
+      "path": "crates/otto-product/src/memory_facade.rs",
+      "sha256": "492aad5eed88427658e01f8edbeaf0677c260affeb30fca50fe2b71a0ffb3531"
+    },
+    {
+      "path": "crates/otto-product/src/refine.rs",
+      "sha256": "0794514c0e2d899f28be87bd9bb72d8b8e1ce909ce81bdee27ae74b133205ad5"
+    },
+    {
+      "path": "crates/otto-product/src/run.rs",
+      "sha256": "80f01d0452c80815e0b6ad51e7f92f6dac121d97cccbb30fb5d4e526f9663432"
+    },
+    {
+      "path": "crates/otto-product/src/service.rs",
+      "sha256": "6cfae9c900235d77fdc81f5231bbe5a31fc4820a5beafa5a3bb2d82093143ce2"
+    },
+    {
+      "path": "crates/otto-product/src/studio_turn.rs",
+      "sha256": "4f87d7993681cc34dfc68e114b2af5ef057f2a86e23b8ec9497fad730a6f7ce2"
+    },
+    {
+      "path": "crates/otto-product/src/swarm.rs",
+      "sha256": "112c5f04967c9782322bc69166c855d98856deb0a87247959d545d092fad8400"
+    },
+    {
+      "path": "crates/otto-product/src/types.rs",
+      "sha256": "69ad631123597e783101f527339de755d1d28e2e458a63cd1ed88102756dea4a"
+    },
+    {
+      "path": "crates/otto-product/src/watcher.rs",
+      "sha256": "658a4de776d16631fa3566429b4fe78fe2f73bbfb7801684074c13b940857f33"
+    },
+    {
+      "path": "crates/otto-product/tests/memory_ingest.rs",
+      "sha256": "c159a808dd3833e8ca5a6335ef6f488796b125f4a587ac17a3b3e35378985e24"
+    },
+    {
+      "path": "crates/otto-server/src/agent_session.rs",
+      "sha256": "a81b61efc40020896ef567719504bc6fc4d12758a3fb927971a921b1f78e9ff3"
+    },
+    {
+      "path": "crates/otto-server/src/canvas_refs.rs",
+      "sha256": "34669d8b7535ba094a12f4944a5c69d62342204c51bf09d89014693425ba182e"
+    },
+    {
+      "path": "crates/otto-server/src/design_blender.rs",
+      "sha256": "372d570bdc58b0978e84f5b7b02a9da4e27b9886a841fbc70c1808ef1fb5448b"
+    },
+    {
+      "path": "crates/otto-server/src/design_format.rs",
+      "sha256": "6e044e945427ec9ad29385ad8e3ffd6a60d2217626be912dbc3ed76d622a30b0"
+    },
+    {
+      "path": "crates/otto-server/src/design_hall.rs",
+      "sha256": "aa71449ee502cd3ff54493455e0e2298d12e418d4892119248bb2d6592ad899b"
+    },
+    {
+      "path": "crates/otto-server/src/design_scene3d.rs",
+      "sha256": "319735d43a6a9b5505de7d153a0da127ec918dbac7ac9c8e3df7efa9862579d3"
+    },
+    {
+      "path": "crates/otto-server/src/mockup_assist.rs",
+      "sha256": "c2cd373f7284c3d383ca85a00eb10f68c7ea1b7b767e39b601a974e229abb355"
+    },
+    {
+      "path": "crates/otto-server/src/modules.rs",
+      "sha256": "4422796c4a8046e2961b64e044f967de17fe116fbb99479a8480c76d7d085da7"
+    },
+    {
+      "path": "crates/otto-server/src/product_host.rs",
+      "sha256": "131bcb2b27db3d4225f0b3d5f7fedc42652fc9960ab4bf5d72121a84acd4e869"
+    },
+    {
+      "path": "crates/otto-server/tests/unit/assist_resume_ownership.rs",
+      "sha256": "b88125ae732ae29c8aac06e8a2a7996efbe0a847948f95441c001b294315b387"
+    },
+    {
+      "path": "ui/src/modules/canvas/CanvasPage.svelte",
+      "sha256": "749be156a079d43472c486129412df53b98b471d9e89ec86ee51c28175755862"
+    },
+    {
+      "path": "ui/src/modules/canvas/ConversationPanel.svelte",
+      "sha256": "2df213fa97fe2a43e0fd1788e2e0df90d9839b9acbd52a4b654fa9c240dc2fa5"
+    },
+    {
+      "path": "ui/src/modules/canvas/D2Canvas.svelte",
+      "sha256": "a11da8b238c636402f0d40686b4cc2d8618f796c88908755d5569bc3474f0dda"
+    },
+    {
+      "path": "ui/src/modules/canvas/ExcalidrawCanvas.svelte",
+      "sha256": "d50d77db10f03ea1e4a5cd6dba7901c6a6f119928fb05504d8585ed9208d999c"
+    },
+    {
+      "path": "ui/src/modules/canvas/MermaidCanvas.svelte",
+      "sha256": "a989f2dba6083ef8e4087d0ef32f4efcc558fe20e4153b212522a8cf3356d407"
+    },
+    {
+      "path": "ui/src/modules/canvas/SceneList.svelte",
+      "sha256": "33c3b4631df6396e4a282318e3702e7a82badeb42b0f8cfcd115dd89f0f4f4c2"
+    },
+    {
+      "path": "ui/src/modules/canvas/agentUndo.ts",
+      "sha256": "734c9f9817c67ab9cab9e3cf607198f44748e323b55ad8daa6c0f8f21f7ffd4c"
+    },
+    {
+      "path": "ui/src/modules/canvas/canvasFileCache.ts",
+      "sha256": "1d592f154a07857dbb7dbb76eb2bcfedb7686903548da7b927ce4cb8d1af8e23"
+    },
+    {
+      "path": "ui/src/modules/canvas/canvasFileRefs.ts",
+      "sha256": "72751fd5fd164a41c58c659d1e419f0e5374f0b53e1125b998a2de98345bfa91"
+    },
+    {
+      "path": "ui/src/modules/canvas/canvasFiles.ts",
+      "sha256": "8d99a509e142938654a53399c9b98b059d0fd4442437d60b063fac5b7c63c412"
+    },
+    {
+      "path": "ui/src/modules/canvas/d2-frame.ts",
+      "sha256": "d03eea0f35c78b4db2f515c46805bf4301732189a8e67612f3c168d087c1b8a4"
+    },
+    {
+      "path": "ui/src/modules/canvas/d2.ts",
+      "sha256": "4c79ade9cabda5c847e19c3821960479af3b34b9776993b98713c3529bdbd4bd"
+    },
+    {
+      "path": "ui/src/modules/canvas/excalidraw-build.ts",
+      "sha256": "a52928352fc0496abae48c0031a6b09fcad5dd4817b1dd9bb16f53f1ea6d8f4f"
+    },
+    {
+      "path": "ui/src/modules/canvas/export.ts",
+      "sha256": "2176b076c8c0cb2fd2f53c4daea69ef9a54fcab2f23b26c541e9d86dfdffb3e8"
+    },
+    {
+      "path": "ui/src/modules/canvas/mermaid.ts",
+      "sha256": "554abaea47c7a2474daae07e05424978a68839edcd5f45d966ff2035905741bc"
+    },
+    {
+      "path": "ui/src/modules/canvas/panKeys.ts",
+      "sha256": "f9f452d1cd2a19e562f512c7db932400a8bd0da6423367439a7e0c00a8e69b17"
+    },
+    {
+      "path": "ui/src/modules/canvas/renderQueue.ts",
+      "sha256": "5ede7cfad249412c373d2d29c39d7732370bf720bde133028a6ccb96963e0458"
+    },
+    {
+      "path": "ui/src/modules/canvas/scene.ts",
+      "sha256": "b70ef7d0724ec01b09fc883d6723d47c454a60b689858f800a239132c3bcbf91"
+    },
+    {
+      "path": "ui/src/modules/canvas/svgSanitize.ts",
+      "sha256": "77d5486f6d26caaee27b57324fc52f0e96a17a58045ded5114ca5c92b8432753"
+    },
+    {
+      "path": "ui/src/modules/canvas/types.ts",
+      "sha256": "ed26f323923113e4fce10c74ac25193964cbd19892a10ea49d74b7d501850e0a"
+    },
+    {
+      "path": "ui/src/modules/design-hall/ArtifactCard.svelte",
+      "sha256": "34b4931808bbab67705aa6b0393b4eb731227cf34c7994ba52882f33baf66b0c"
+    },
+    {
+      "path": "ui/src/modules/design-hall/ArtifactStage.svelte",
+      "sha256": "c16a2c72f1f82e37b01b769f6f6333f14e089fd86937e4adf94f8f46963ebbbd"
+    },
+    {
+      "path": "ui/src/modules/design-hall/ArtifactThumb.svelte",
+      "sha256": "28571c71b302a259bd4cd88d784014e9d760f366dc77725bbf9a86d9e58bb97a"
+    },
+    {
+      "path": "ui/src/modules/design-hall/ArtifactView.svelte",
+      "sha256": "e617fa3dc21a05409db005aaca7650d0dd93d5e279d57b6a790303bdd134cd2b"
+    },
+    {
+      "path": "ui/src/modules/design-hall/BrandKitPage.svelte",
+      "sha256": "7564a19bcff567334560e90eef86d3a2c160345fc877ee14bbb76585405a160c"
+    },
+    {
+      "path": "ui/src/modules/design-hall/CollectionView.svelte",
+      "sha256": "a7d3a2fd079f1ee0b5f484474e7160c351ecf02e3c555f4b1dad284cd67b9885"
+    },
+    {
+      "path": "ui/src/modules/design-hall/CompareModal.svelte",
+      "sha256": "5ad0db345b86c94573268f6bdbbed9691ed3504a6457eb0d83ae80ac409de9aa"
+    },
+    {
+      "path": "ui/src/modules/design-hall/DesignGraphStrip.svelte",
+      "sha256": "34fadb7d251624928c92630bf5da310de3cd1b998719a483e255230354cc98d8"
+    },
+    {
+      "path": "ui/src/modules/design-hall/DesignHallPage.svelte",
+      "sha256": "317bd677e1e21727898c0245b62e05e51e71d1f97e08eae67ed73039c9ab3366"
+    },
+    {
+      "path": "ui/src/modules/design-hall/LearnedCard.svelte",
+      "sha256": "bf3c55f0e843a913938bfd929a38418ba8f052ce5fc179ddb6f0406166a27942"
+    },
+    {
+      "path": "ui/src/modules/design-hall/LearnedPage.svelte",
+      "sha256": "81b0299355c43beada2d4ad4bb1157e4b5d6bc30d51ef1fe80c1329a06ccaf51"
+    },
+    {
+      "path": "ui/src/modules/design-hall/LinkedToProduct.svelte",
+      "sha256": "23ad28ad8f0f96279c84334c37b3a0acddd0f51b7188b3bc37734f13f8f2929d"
+    },
+    {
+      "path": "ui/src/modules/design-hall/LinksPanel.svelte",
+      "sha256": "237250684ec0851e9458dac0c0c606fa61932adb64a56b56d4907f1d6e353b84"
+    },
+    {
+      "path": "ui/src/modules/design-hall/Lobby.svelte",
+      "sha256": "e3a92b7ffba3b2ab110b125423ce88ffac270dbddac7148a17c1c98fe0099238"
+    },
+    {
+      "path": "ui/src/modules/design-hall/NewDesignModal.svelte",
+      "sha256": "097f7a037a37b59791153a4aed76bcd70caa97995d722b8a8024f20ed109f221"
+    },
+    {
+      "path": "ui/src/modules/design-hall/ProjectCard.svelte",
+      "sha256": "9d9806bfbcbe62ffeae4ced199a47fd72244697def4111bfe1e1b25d1da76ef8"
+    },
+    {
+      "path": "ui/src/modules/design-hall/ReferencesPanel.svelte",
+      "sha256": "9b1744c3723039a7cb4a3221e5deadde27845f3e58508714ef583a4a2df5fcfe"
+    },
+    {
+      "path": "ui/src/modules/design-hall/SpatialView.svelte",
+      "sha256": "3e5d67a36f1683b26f242b0e9b5bed7d7f5e711fa6e6fe0c606a8aa3b0938f14"
+    },
+    {
+      "path": "ui/src/modules/design-hall/StatusPill.svelte",
+      "sha256": "b8bc5b9d8af604a00fc4ff64a229608f060967e9a59ccb85f19831cb86ed5bbf"
+    },
+    {
+      "path": "ui/src/modules/design-hall/StudioBadge.svelte",
+      "sha256": "ee01a3ae7a5bb9dc51ddd5e4d218170e3e03cadab2e6de5c03b1d36a8f7af3b8"
+    },
+    {
+      "path": "ui/src/modules/design-hall/VersionStrip.svelte",
+      "sha256": "e3b1aa5144cd3298875f3ab3a5e674710aeaf7b74bba173f42c58dfaf632420b"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/EvidencePane.svelte",
+      "sha256": "eb385c6fc3bb67622b8304e49464b58020e8024b77e6639f0f113a4487beb3e6"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/OttoPanel.svelte",
+      "sha256": "14b2250a8e3f04562b10a13f49f7acd9b095cf4cbb2f9d17e1dd83f1f46b505f"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/TurnMessage.svelte",
+      "sha256": "9c55481f24ce37411f66342e23a1f75676e22ed567ecfaffa0780086e1b11f56"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/VariantsTray.svelte",
+      "sha256": "c2687b47e57e45d9a8459834639b2726b8ad8957f1af59ec0175a666c3a4d5d2"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/api.ts",
+      "sha256": "52375c2cc1a6abdc3efc2985e0b47677a8240bdda040226993b1de0140cb9a9c"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/asks.svelte.ts",
+      "sha256": "c20ac19390b6010558e1171ee4e46f4e534a278242b191c8681dead00fa9ba09"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/handoff.ts",
+      "sha256": "92e021d4f9fc0710bf661f018194807b36f68560df12dc614d8077de77c92b0b"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/model.ts",
+      "sha256": "58052c6c24a1486bf07a6879c07ce123fb514b642a977d66b92993542f483a78"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/ruleActions.ts",
+      "sha256": "2e4ae5ea41a88bd94b94c56db07320dc7985eec3b418e87cb66c3167e3e0d269"
+    },
+    {
+      "path": "ui/src/modules/design-hall/assist/run.ts",
+      "sha256": "16d4948cfd55d83cbfa4ca3c01ae38745ff732afb0e49aa24d9ece0f82a78c21"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/AppliedPreview.svelte",
+      "sha256": "edb3092014eae87c3df24cb0b14b3828f9ad6ecd4b1cd7d081a139ae52ece349"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/BrandEditor.svelte",
+      "sha256": "2d131c35b8be8913591dbb597a4a8c0f56120c0d876ff559be1802c0fd8f24aa"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/ColorsSection.svelte",
+      "sha256": "da51a62cdea35afb5138b9454872a767dfb1486e0d1c9208ef7682674dc5c4e0"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/ImpactModal.svelte",
+      "sha256": "2240b6a2ef8a8afc84ff6f63eae88a341a03a3f9241f1a140e260e2beb05f439"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/LogosSection.svelte",
+      "sha256": "28a1a7b3b1680bddc186ddf8e7e812df05406777bb255216a0a9354b714eb1bf"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/NewKitModal.svelte",
+      "sha256": "c36ab7e2ab1490640e7ff197c202711df9122523d28a1aae8d976f91be5c853d"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/ProseSection.svelte",
+      "sha256": "6f7bc27698ea53612453568fe73d3012d20398aeaf23c66e29c9d8ae79279195"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/SpaceSection.svelte",
+      "sha256": "24c36a16e608865cfb35be46898eeaf737e42b3acaccb1292f497e6dd2d9fe8e"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/TypeSection.svelte",
+      "sha256": "b8535c303b5ecc10277cfaff5684b20760343e36298a7b12a7f38c7b51ac543d"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/UsedIn.svelte",
+      "sha256": "e9a8932e3fd02808bb4c09499868d3396e92c1cdb4a20da32d732d7767f328fd"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/api.ts",
+      "sha256": "fd2d94140d7c250082ee3da99a8678b4fa3ae26fd682c8833b008a736e10b74e"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/edit.ts",
+      "sha256": "11f9f50e96950e45c8430d02ee44586dec803e239989012aa47789e1abf3d5d3"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/starters.ts",
+      "sha256": "1ac6bf6b9e6e98b305fe92f1e1db8d7fe8e185683bf028ea0aed31631d4874d7"
+    },
+    {
+      "path": "ui/src/modules/design-hall/brand/tokens.ts",
+      "sha256": "05b2006e1c3a4d6dc50f0ca808d80b3899a21e0f2ca357d9f76c10c5740bed4a"
+    },
+    {
+      "path": "ui/src/modules/design-hall/create.ts",
+      "sha256": "3e30f7224cd649984232f255c6026ce1d67febd8cd4024b44960a98610eeb76a"
+    },
+    {
+      "path": "ui/src/modules/design-hall/library.svelte.ts",
+      "sha256": "ce55e3540ce86928896a6f6c6f159fd7a133677cc5c7a7c829635b5c62d45745"
+    },
+    {
+      "path": "ui/src/modules/design-hall/model.ts",
+      "sha256": "58f30dcf10270ac10aed893edc5f7e9844471a0a359d2b1ab3837578fe39f55a"
+    },
+    {
+      "path": "ui/src/modules/design-hall/nav.ts",
+      "sha256": "2b8e4c6ced67a0e3289dba256c26e4edc3bda2319e373eae56bf54d90e67268f"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/Inspector.svelte",
+      "sha256": "6b8c3bbc9caa5e413a2494f57564fb4fa417c20e0e2b205016067c21aa975d92"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/LeftPanel.svelte",
+      "sha256": "2f19f4aca233c4777daa88a8571b869154306c2938774e068b93664e465ef5a9"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/PreviewModal.svelte",
+      "sha256": "59944d6bd2ca0b9bdc6b52d643020a87d13f9d6fff19aa4a67645ea0df072cca"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/PublishModal.svelte",
+      "sha256": "8ccf3b36902f66d60f08a037d08c55794c7baac26cf40d5c9ab4b1619d354d8b"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/SiteCanvas.svelte",
+      "sha256": "0b6b435b13432ed577ff26a2c2bf2f3c73dc16eb15c9ba10b5b7a9207027adbe"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/SiteStudio.svelte",
+      "sha256": "a43962d31060b37ffc78c7cb89b10ac9b7dc96a050862f7130fc729d7da48a02"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/TemplatePicker.svelte",
+      "sha256": "bd8cbc2db246ab3a4baa35a4092e5c7e8e36535223143d2c90f1227914a3b826"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/assist.ts",
+      "sha256": "1292786a0bae0f3992388271d577225fe3f7215b509418ece4f9309fa26d4077"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/audit.ts",
+      "sha256": "0e2e005b91d303a4db2670cbaf7100774869fb7258db5ef661bbd5e503aa742b"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/catalog.ts",
+      "sha256": "425af12c3d5dd63783b60d1d577850c80629f5ef63605144e18b1e68a56db956"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/icons.ts",
+      "sha256": "499500e4ef929efcda3e8ea869b3d66b81510b839128816cf7bd1a13a9b266ca"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/ops.ts",
+      "sha256": "8d2479799d6d874babf53b7dd47f85e208cc2dd77fbc16ddc72852e34326b5ea"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/render.ts",
+      "sha256": "83fd498bffd64665f0640c501602159ed9931b747ca2848e7066c40f3395c71e"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/site.css",
+      "sha256": "8b3ccae5f8d646e9e4b0903a55611b9dc32a7f3eeb091ec43a71927368b0bcbb"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/templates.ts",
+      "sha256": "6793d5b0053a44fa37663bafc8408270e84d42906c5d482a86ee8e885d50ad0d"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/theme.ts",
+      "sha256": "962117023e105941f95dbdcb53d113399b840f646ba8fc3ec39514ff857716a3"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/types.ts",
+      "sha256": "26b4d1c31512812eb3320324d12d13c43b8d5f5cbb5506d34726b2b6ec24385e"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/engine/validate.ts",
+      "sha256": "5793f425bb0ccd3b4c6225401124c80decefa503218b88a509ad61eb32e644e1"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/selection.svelte.ts",
+      "sha256": "3ea0a2cc3ead0c6f72eb3ca8bcdf9755276eff34cd236c7eeca6f1f9c59d6431"
+    },
+    {
+      "path": "ui/src/modules/design-hall/site/siteApi.ts",
+      "sha256": "f729a2670eece39c266c0258f0fa39268a6fa9d63c133d24c43f9b111f435d6f"
+    },
+    {
+      "path": "ui/src/modules/design-hall/studio3d/GenerateModal.svelte",
+      "sha256": "49633bb5a5532d5d413a63ba1a58dcf6fa40db29db01f2c229ea78da90ff6597"
+    },
+    {
+      "path": "ui/src/modules/design-hall/studio3d/StatesBar.svelte",
+      "sha256": "b1331fa227c7956556efe71051f8c9d45e96ec04af0b84060e8ff0b53db539e9"
+    },
+    {
+      "path": "ui/src/modules/design-hall/studio3d/Studio3D.svelte",
+      "sha256": "15678db2e2f74550d13694afe2e108051885fe5726a63405c023b357ea1b4b73"
+    },
+    {
+      "path": "ui/src/modules/design-hall/studio3d/embed.ts",
+      "sha256": "e2b70bcf2603a39448c7eae1706a02d91bb489ebbb1b56e835ae3fc963a9c954"
+    },
+    {
+      "path": "ui/src/modules/design-hall/studio3d/providers.ts",
+      "sha256": "7e73124679b52689fdfa8eaf5d05cd1c8506c42fd05c3d512d22d5933ac14eff"
+    },
+    {
+      "path": "ui/src/modules/design-hall/studio3d/sources.ts",
+      "sha256": "28f943068d74343aaa937f5270325fbb244f3abd40ffef9edd8d24f4d4598b50"
+    },
+    {
+      "path": "ui/src/modules/design-hall/tabKeys.ts",
+      "sha256": "0c7bc35ae1630651c5a3c6ac2e9dbe17cf497b395207f91054b3e37294f95bbb"
+    },
+    {
+      "path": "ui/src/modules/product/ActionCard.svelte",
+      "sha256": "30ff239bfa3ded00fec94625ca900482bc4e371dee4332cb3dd59efb00e18f64"
+    },
+    {
+      "path": "ui/src/modules/product/AnalysisTab.svelte",
+      "sha256": "b1af79f81577628201da87f84c7491e664f0898c9e9fb95a28087db19c23a36c"
+    },
+    {
+      "path": "ui/src/modules/product/AttachmentsPanel.svelte",
+      "sha256": "eb7a9270c9705755ae4e2056a846807a9d885a53923f4b935f8326a38f1c1638"
+    },
+    {
+      "path": "ui/src/modules/product/ChatTab.svelte",
+      "sha256": "15f3fd31a133dceb4c116b8497e03577cb6ae1c2b7b7c4cff84a62a2d2fdcbd1"
+    },
+    {
+      "path": "ui/src/modules/product/ChildrenBoard.svelte",
+      "sha256": "6653bbaeba52c233a0f19438d5a907ee8066fd22d85bfb1ffa633900e00df0fa"
+    },
+    {
+      "path": "ui/src/modules/product/DiscoveryChat.svelte",
+      "sha256": "1fa8ff4333abeec2b46005ac90c42f8caec07a082fe8b57bd070e6ef211ce8a4"
+    },
+    {
+      "path": "ui/src/modules/product/DiscoveryTab.svelte",
+      "sha256": "8fd76141ce8e60865f00af9c3043d7f642645a0e5dd5637e26d068c7c678c276"
+    },
+    {
+      "path": "ui/src/modules/product/HistoryTab.svelte",
+      "sha256": "5ace839f6d60fe59921d34055a919ef32f15a42e2204c44bae8d2d68f5f4299b"
+    },
+    {
+      "path": "ui/src/modules/product/ImportDialog.svelte",
+      "sha256": "1c0aa12d971f0b955ca28dfdbe45a83dec63944de0f0c25ad92702574df26acc"
+    },
+    {
+      "path": "ui/src/modules/product/InjectTab.svelte",
+      "sha256": "1e8b45bc1a5918234854f8ab3fc3c4554dcc716f6af9794a5151e5f7bfddcdfe"
+    },
+    {
+      "path": "ui/src/modules/product/LearningsView.svelte",
+      "sha256": "fae853b2b75e5449e8f4b5808b8ec259581c42fae2184cca4b8b05a88de10611"
+    },
+    {
+      "path": "ui/src/modules/product/LinkedCanvases.svelte",
+      "sha256": "9c130bda85e630ba8575bed063427034dcda0d68c9b461867a6723af6a44a38e"
+    },
+    {
+      "path": "ui/src/modules/product/MockupAnnotations.svelte",
+      "sha256": "37300395ea97b0b3a6dcbd4aa8de327564f506b656cb6c83ed896159c3f721eb"
+    },
+    {
+      "path": "ui/src/modules/product/MockupAssistPanel.svelte",
+      "sha256": "8a3505fcab211282025585ec00edeaaaee0067e9e83bfe77dd0eec03071efe91"
+    },
+    {
+      "path": "ui/src/modules/product/MockupLivePreview.svelte",
+      "sha256": "4fb2ce510ff4de08aaf5e16f3d86cb0a5941d19639c72106523a22dbab85f102"
+    },
+    {
+      "path": "ui/src/modules/product/MockupViewer.svelte",
+      "sha256": "accc6d6abf2e407bd297b411994f59d28e7e704776c3a6ead10568ff6c672f2d"
+    },
+    {
+      "path": "ui/src/modules/product/MockupsTab.svelte",
+      "sha256": "aa944e56705fd12ddc176cd1aed047d32741045a970812b9578db5d57cf92fbf"
+    },
+    {
+      "path": "ui/src/modules/product/NotesTab.svelte",
+      "sha256": "592817bb0767d813b4517565e5c952fad24b51ff78ed12d928a9aa70b53fa68c"
+    },
+    {
+      "path": "ui/src/modules/product/OverviewTab.svelte",
+      "sha256": "bc466eb4c1f9af8bb22c8a32b6a3ae6164ca1f4139fdb0e317a4aad09d494ab6"
+    },
+    {
+      "path": "ui/src/modules/product/PlanTab.svelte",
+      "sha256": "4686e45db2fa11a7a1efa123c5c7354836afc96645001dd3e38456047cb5899c"
+    },
+    {
+      "path": "ui/src/modules/product/ProductPage.svelte",
+      "sha256": "385bc4a578d038a0ac3b06d37d35f1eaeb68d9e141bd456d8444e1931b460260"
+    },
+    {
+      "path": "ui/src/modules/product/PublishDialog.svelte",
+      "sha256": "504596c5acac8bfd229d45be9fcdcb9700cdb2f14bae61e448f4b16eb9877f76"
+    },
+    {
+      "path": "ui/src/modules/product/QuestionsTab.svelte",
+      "sha256": "bc538456cb710a1b7c778a33a784949f3c207b994e99443346ba7eae90c4ff1f"
+    },
+    {
+      "path": "ui/src/modules/product/RefineChat.svelte",
+      "sha256": "1cfc4630c3a4574275d9071a861402ae595109992f808358ebf8e357c10c98b0"
+    },
+    {
+      "path": "ui/src/modules/product/RefineTab.svelte",
+      "sha256": "077596d539128cdb9c4712006b3b3c68284e0cf885302428341b5b656b5ba10d"
+    },
+    {
+      "path": "ui/src/modules/product/RewriteTab.svelte",
+      "sha256": "eb47eb8ddbcad1dacc6499fecc13fcd740891731cef100f2a70a17a9953e8318"
+    },
+    {
+      "path": "ui/src/modules/product/SourceSearch.svelte",
+      "sha256": "56ae3e422685485f6fa6cd6aca67666354788789dd44fd0646d5fd54118bcfc5"
+    },
+    {
+      "path": "ui/src/modules/product/SwarmLinkCard.svelte",
+      "sha256": "7b277c799fcb21d9897a0b5c78740e35309c75ac9086ed61c4d0de97e4ddc125"
+    },
+    {
+      "path": "ui/src/modules/product/TestCasesTab.svelte",
+      "sha256": "5f93cfca3e6d56d58d1a499be61405a39c4315e95876dc8e40d3f2208ffb5608"
+    },
+    {
+      "path": "ui/src/modules/product/design/DesignArena.svelte",
+      "sha256": "82da4dbb55aec4225b012b4cfd54a7a4b06eafc845497a7260d3c56bbcfa96db"
+    },
+    {
+      "path": "ui/src/modules/product/design/DesignBoard.svelte",
+      "sha256": "5d056fe759010454a0c9c7b8377329b467c8dac20e63fd58aaed86af8c091aea"
+    },
+    {
+      "path": "ui/src/modules/product/design/DeviceFrame.svelte",
+      "sha256": "fa080b6da171372113d0f128ead1b5b7d5741c15672954252b3e31cc8aad5ab1"
+    },
+    {
+      "path": "ui/src/modules/product/design/exporters.ts",
+      "sha256": "e66e69f96b6df1b4ce0b49049f77ce91ee58eecb1d5b20d8ccb4c6f72fb56515"
+    },
+    {
+      "path": "ui/src/modules/product/design/format.ts",
+      "sha256": "4fe589aff5bcae799e49cff77c99b7e6869deb84cab4ee5fcacea16b1f7e3e11"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/Hierarchy.svelte",
+      "sha256": "4a5db6e37d64ee9a7c5e98874fc733b87a642f8fd726070af789895a2feaee1c"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/Inspector.svelte",
+      "sha256": "e4b7d5e3baa4473d24fd033d8a2c6b59c9ed82e170c9f6de21f25f6fcba29ef6"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/NumberDrag.svelte",
+      "sha256": "89bfbe78cf5fb5188c29fe7c24435ccaa7134b1f9c14204412c9185415e03033"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/Scene3DViewport.svelte",
+      "sha256": "e7974b16dd8f54ffdb522c8eb16ceb90f105a6ade79d00785a857e169216917b"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/build.ts",
+      "sha256": "49fa4458b2d69fceded4fe6371d43e7c41cdbb87b161cf93090d60a2e824c899"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/environment.ts",
+      "sha256": "0b4cc6637c1659ed393190306dac0e8780a8aba2e678cacd77f5f5519220db0b"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/exportGlb.ts",
+      "sha256": "49808858548e43b5489714b9e27b732831bf030926f17522ca99dfaf078bb7e2"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/index.ts",
+      "sha256": "89b71554f9f9e6306b36e59c9337ae580aca7617943ee2f055ac56dc6a0121a2"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/ops.ts",
+      "sha256": "7835b664c2f8ce06a2313857c5e4c74f0e50e41f139cc38b491b05c9626d9303"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/optimize.ts",
+      "sha256": "955f9f3f351bc6bf06881b6a0fed87922ffdf74ef9765257e1e4e9f04d40fed1"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/presets.ts",
+      "sha256": "77d5968ef502e01e44054b08e788ae4776ff341f378699b301f2cbf33db80752"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/states.ts",
+      "sha256": "ea8441cda6c6618757b7a71ed94c63a18b43f094fb074b6040e8ce965351d0fd"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/tokens.ts",
+      "sha256": "771158da3ea17940c0340bdd7960a6856ccda81bc8fb4f5204c8a81d4f838053"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/types.ts",
+      "sha256": "1f92e172c348385a7c5e9fef75ee11c9aaa71e25dd3aa72e73dbfb1d8723b064"
+    },
+    {
+      "path": "ui/src/modules/product/design/scene3d/validate.ts",
+      "sha256": "47de8ca81e17627fb56958e4f23da280dad55b85205bac13251217249c9fb08c"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates.ts",
+      "sha256": "80c0cb4f71e35bd261fb27bc8e89127a1cc52f47a4527d220640a1b53f1f61f1"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates/dashboard.html",
+      "sha256": "d464cfe339f5e95f161cbe755c08c8048a26c4bc367f8507e1fbc36f7b9da66e"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates/game-level-blockout.scene3d.json",
+      "sha256": "31e553b3ce7c8ba4ab40203a356a006ac7f7f0bca5b1a7250ff284c5b116ad00"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates/landing-page.html",
+      "sha256": "e5954e6b14febd6d6d40bfefdb2cb6392631b122cf64c51b4565799892d1ca49"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates/mobile-app-screen.html",
+      "sha256": "4286e556cc960a169848d13057defa26d886c06b58c6ab49e447e299109bce46"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates/product-shot.scene3d.json",
+      "sha256": "7332f4a55728918bbcaed89fa8c37c9dd85f57a418b03121e5fe86543120e470"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates/user-flow.mmd",
+      "sha256": "93c1a28ad87fe75dd3d9cdb42e6a79b10941c52b80766af778d908b22efd058e"
+    },
+    {
+      "path": "ui/src/modules/product/design/templates/wireframe-board.excalidraw",
+      "sha256": "4dbcd2b824d175e3b9f8200120dd9d8b17896fba7bf10f9e8ad1a6e1a3ec87bb"
+    },
+    {
+      "path": "ui/src/modules/product/draftSeed.ts",
+      "sha256": "262b0e179c87762a1cd83a575ed5c9018a9a4d61394a4ec62bd8bbaa2a7ab61a"
+    },
+    {
+      "path": "ui/src/modules/product/plan_parse.ts",
+      "sha256": "ecbd21c5d63c36abd4c1b0c4dd3959d1359b1d02d00233255c97df9d1070af2b"
+    },
+    {
+      "path": "ui/src/modules/product/types.ts",
+      "sha256": "a1ce74e30443f4cb0765ed82ac736b1d3a19553cb081681a04843b2918c72f33"
+    },
+    {
+      "path": "ui/src/modules/product/ui/ListPane.svelte",
+      "sha256": "a0374512fb1bb27ef2ea70174c064563f9c25ceb8a95491b876d4a5b826962cc"
+    }
+  ]
+}

@@ -1,0 +1,1542 @@
+
+===== /tmp/r12-canvas-red.log =====
+   Compiling sqlx-core v0.9.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.50s
+     Running unittests src/lib.rs (target/debug/deps/otto_canvas-ea8b43849892e625)
+
+running 6 tests
+
+thread 'assist::regressions::scratch_write_failure_does_not_admit_an_agent_turn' (3653847) panicked at crates/otto-canvas/src/assist_regressions.rs:25:5:
+assertion failed: prepare_scene_file(&id, &missing, "source").await.is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'assist::regressions::rejected_turn_cannot_overwrite_active_agent_file' (3653846) panicked at crates/otto-canvas/src/assist_regressions.rs:16:5:
+assertion `left == right` failed
+  left: "stale stored source"
+ right: "agent work in progress"
+test assist::regressions::rejected_turn_cannot_overwrite_active_agent_file ... FAILED
+test assist::regressions::scratch_write_failure_does_not_admit_an_agent_turn ... FAILED
+
+thread 'assist::regressions::agent_file_read_enforces_scene_byte_budget' (3653842) panicked at crates/otto-canvas/src/assist_regressions.rs:155:5:
+assertion failed: matches!(result, Err(Error::PayloadTooLarge(_)))
+test assist::regressions::agent_file_read_enforces_scene_byte_budget ... FAILED
+
+thread 'assist::regressions::rejected_database_write_never_reports_unpersisted_success' (3653845) panicked at crates/otto-canvas/src/assist_regressions.rs:76:5:
+failed commit must not be broadcast as a successful document
+test assist::regressions::concurrent_manual_source_edit_wins_with_explanation ... ok
+test assist::regressions::rejected_database_write_never_reports_unpersisted_success ... FAILED
+
+thread 'assist::regressions::metadata_conflict_preserves_fresh_document_fields' (3653844) panicked at crates/otto-canvas/src/assist_regressions.rs:111:5:
+assertion `left == right` failed: agent source must merge onto the fresh metadata
+  left: Number(1)
+ right: 77
+test assist::regressions::metadata_conflict_preserves_fresh_document_fields ... FAILED
+
+failures:
+
+failures:
+    assist::regressions::agent_file_read_enforces_scene_byte_budget
+    assist::regressions::metadata_conflict_preserves_fresh_document_fields
+    assist::regressions::rejected_database_write_never_reports_unpersisted_success
+    assist::regressions::rejected_turn_cannot_overwrite_active_agent_file
+    assist::regressions::scratch_write_failure_does_not_admit_an_agent_turn
+
+test result: FAILED. 1 passed; 5 failed; 0 ignored; 0 measured; 22 filtered out; finished in 1.47s
+
+error: test failed, to rerun pass `-p otto-canvas --lib`
+
+===== /tmp/r12-watcher-red.log =====
+   Compiling serde_json v1.0.151
+   Compiling tokio-util v0.7.19
+   Compiling tower v0.5.3
+   Compiling tokio-tungstenite v0.29.0
+   Compiling ignore v0.4.33
+   Compiling lettre v0.11.23
+   Compiling deadpool v0.12.3
+   Compiling tower-http v0.6.11
+   Compiling h2 v0.4.19
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling sqlx-core v0.9.0
+   Compiling cookie_store v0.22.1
+   Compiling otto-transcript v0.2.0 (/Users/itziklavon/otto_os/crates/otto-transcript)
+   Compiling assert-json-diff v2.0.2
+   Compiling tree-sitter v0.27.0
+   Compiling sqlx-sqlite v0.9.0
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.21
+   Compiling sqlx-macros-core v0.9.0
+   Compiling hyper-rustls v0.27.10
+   Compiling axum v0.8.9
+   Compiling wiremock v0.6.5
+   Compiling reqwest v0.13.5
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-netguard v0.2.0 (/Users/itziklavon/otto_os/crates/otto-netguard)
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling otto-pty v0.2.0 (/Users/itziklavon/otto_os/crates/otto-pty)
+   Compiling otto-ssh v0.2.0 (/Users/itziklavon/otto_os/crates/otto-ssh)
+   Compiling otto-orchestrator v0.2.0 (/Users/itziklavon/otto_os/crates/otto-orchestrator)
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-issues v0.2.0 (/Users/itziklavon/otto_os/crates/otto-issues)
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+   Compiling otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+   Compiling otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.71s
+     Running unittests src/lib.rs (target/debug/deps/otto_product-3dc7a21a736f3447)
+
+running 3 tests
+
+thread 'watcher::admission_tests::admitted_story_cannot_queue_a_second_poll' (3665663) panicked at crates/otto-product/src/watcher.rs:711:9:
+assertion failed: !polls.try_spawn("story", std::future::pending())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'watcher::admission_tests::dropping_supervisor_cancels_its_polls_and_releases_claims' (3665664) panicked at crates/otto-product/src/watcher.rs:723:9:
+assertion failed: ownership.claim("story").is_none()
+
+thread 'watcher::admission_tests::admission_is_bounded_and_duplicate_free' (3665662) panicked at crates/otto-product/src/watcher.rs:702:9:
+assertion `left == right` failed
+  left: 1000
+ right: 4
+test watcher::admission_tests::admitted_story_cannot_queue_a_second_poll ... FAILED
+test watcher::admission_tests::dropping_supervisor_cancels_its_polls_and_releases_claims ... FAILED
+test watcher::admission_tests::admission_is_bounded_and_duplicate_free ... FAILED
+
+failures:
+
+failures:
+    watcher::admission_tests::admission_is_bounded_and_duplicate_free
+    watcher::admission_tests::admitted_story_cannot_queue_a_second_poll
+    watcher::admission_tests::dropping_supervisor_cancels_its_polls_and_releases_claims
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p otto-product --lib`
+
+===== /tmp/r12-retention-red.log =====
+   Compiling sqlx-core v0.9.0
+   Compiling axum v0.8.9
+   Compiling reqwest v0.13.5
+   Compiling tree-sitter v0.27.0
+   Compiling otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+   Compiling sqlx-sqlite v0.9.0
+   Compiling otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+   Compiling otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+   Compiling otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+   Compiling otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+   Compiling otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+   Compiling otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.96s
+     Running unittests src/lib.rs (target/debug/deps/otto_design_assist-e7e109cad54e7f9f)
+
+running 1 test
+
+thread 'retention_regressions::histories_are_bounded_and_active_turns_survive' (3671738) panicked at crates/otto-design-assist/src/lib.rs:3202:9:
+assertion `left == right` failed
+  left: 1025
+ right: 257
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test retention_regressions::histories_are_bounded_and_active_turns_survive ... FAILED
+
+failures:
+
+failures:
+    retention_regressions::histories_are_bounded_and_active_turns_survive
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p otto-design-assist --lib`
+
+===== /tmp/r12-rust-green.log =====
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.66s
+     Running unittests src/lib.rs (target/debug/deps/otto_canvas-c121b4b37934b35c)
+
+running 28 tests
+test assist::tests::large_source_is_not_inlined_in_prompt ... ok
+test assist::tests::current_source_prefers_doc_then_base ... ok
+test assist::tests::excalidraw_prompt_points_at_json_file ... ok
+test assist::tests::base_and_format_defaults ... ok
+test assist::tests::d2_prompt_points_at_d2_file ... ok
+test assist::tests::parse_excalidraw_elements ... ok
+test assist::tests::parse_prefers_d2_fence ... ok
+test assist::tests::build_doc_keeps_existing_extras ... ok
+test assist::tests::parse_prefers_mermaid_fence ... ok
+test assist::tests::parse_unstructured_keeps_note ... ok
+test assist::tests::prompt_has_sentinel_and_file ... ok
+test assist::tests::result_for_routes_by_format ... ok
+test assist::tests::scene_busy_slot_is_exclusive_and_released_on_drop ... ok
+test assist::tests::abort_on_drop_stops_the_task ... ok
+test assist::tests::merge_restores_kept_elements_without_duplicates ... ok
+test assist::regressions::scratch_write_failure_does_not_admit_an_agent_turn ... ok
+test assist::tests::stop_flags_only_the_running_turn ... ok
+test http::tests::doc_is_kept_as_raw_text_without_reserialising ... ok
+test assist::tests::split_merge_passthrough_for_plain_or_invalid_sources ... ok
+test assist::tests::split_hides_inexpressible_elements_and_files ... ok
+test http::tests::null_or_missing_doc_leaves_the_document_unchanged ... ok
+test assist::regressions::rejected_turn_cannot_overwrite_active_agent_file ... ok
+test http::tests::large_bodies_parse_off_runtime_and_bad_json_or_type_is_rejected ... ok
+test assist::tests::resolve_prefers_edited_file_then_reply ... ok
+test assist::regressions::agent_file_read_enforces_scene_byte_budget ... ok
+test assist::regressions::rejected_database_write_never_reports_unpersisted_success ... ok
+test assist::regressions::concurrent_manual_source_edit_wins_with_explanation ... ok
+test assist::regressions::metadata_conflict_preserves_fresh_document_fields ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_design-38c83e8346d9aa6a)
+
+running 133 tests
+test brand::contrast::tests::levels ... ok
+test brand::contrast::tests::known_ratios ... ok
+test brand::doc::tests::too_many_tokens_are_refused ... ok
+test brand::export::tests::an_empty_kit_exports_valid_empty_blocks ... ok
+test brand::doc::tests::a_full_kit_and_the_default_doc_validate ... ok
+test brand::doc::tests::helpers ... ok
+test brand::contrast::tests::ink_falls_back_to_the_darkest_colour_then_black ... ok
+test brand::doc::tests::bad_tokens_are_reported_by_path ... ok
+test brand::contrast::tests::report_covers_white_ink_and_every_pair ... ok
+test brand::export::tests::formats_and_slugs ... ok
+test brand::contrast::tests::a_mid_grey_on_a_mid_grey_ink_warns ... ok
+test brand::export::tests::css_uses_the_contract_names ... ok
+test brand::export::tests::tailwind_uses_theme_namespaces ... ok
+test brand::doc::tests::css_names_are_kebab_and_type_styles_expand ... ok
+test brand::doc::tests::model_skips_what_does_not_validate ... ok
+test blobs::tests::refuses_non_sha_names ... ok
+test brand::extract::tests::malformed_and_non_json_are_reported_not_fatal ... ok
+test brand::doc::tests::model_normalizes_and_flattens ... ok
+test brand::extract::tests::logos_embed_and_text_has_tokens_and_voice ... ok
+test brand::impact::tests::diff_reports_changed_added_removed ... ok
+test brand::impact::tests::studio_counts_sort_by_count_then_name ... ok
+test extract::tests::binaries_and_garbage_never_panic ... ok
+test extract::tests::mermaid_click_lines_describe_with_their_node ... ok
+test extract::tests::otto_canvas_indexes_its_inner_source ... ok
+test extract::tests::scene3d_gltf_embeds_legacy_attachment_and_indexes_names ... ok
+test extract::tests::node_ids_cover_json_and_html ... ok
+test extract::tests::html_src_embeds_href_references_and_text_is_visible_only ... ok
+test extract::tests::site_blocks_use_key_based_rels_and_report_malformed ... ok
+test format::tests::event_content_skips_binaries_and_oversized_payloads ... ok
+test cite::tests::markers_need_a_pure_bracket_group ... ok
+test brand::export::tests::dtcg_is_typed_and_carries_the_rest_as_extensions ... ok
+test cite::tests::nothing_offered_means_nothing_verifies ... ok
+test cite::tests::verify_keeps_offered_drops_the_rest ... ok
+test format::tests::every_format_is_unique_and_homed_in_a_real_studio ... ok
+test diff::tests::text_and_binary_summaries_carry_no_content ... ok
+test extract::tests::scene3d_v2_links_models_and_brand_and_indexes_tokens_and_views ... ok
+test graph::tests::reaches_finds_paths_and_detects_would_be_cycles ... ok
+test diff::tests::json_diff_matches_objects_by_id_and_is_bounded ... ok
+test graph::tests::depth_below_measures_the_longest_chain_and_saturates ... ok
+test brand::impact::tests::token_refs_cover_both_reference_forms ... ok
+test format::tests::default_content_is_valid_for_every_non_binary_format ... ok
+test brand::impact::tests::consumers_see_only_what_they_reference_unless_whole_kit ... ok
+test format::tests::validate_checks_shape_per_encoding ... ok
+test import::tests::classifies_design_attachments_and_titles ... ok
+test blobs::tests::put_is_content_addressed_and_idempotent ... ok
+test blobs::tests::gc_guard_waits_for_in_flight_references_across_aliases ... ok
+test learn::tests::edits_reject_reasons_and_a11y_fixes_aggregate ... ok
+test learn::tests::one_artifact_or_a_losing_direction_is_not_a_team_rule ... ok
+test learn::tests::repeated_variant_choices_become_a_ready_preference ... ok
+test learn::tests::slugs_and_properties_normalize ... ok
+test retention::tests::due_runs_at_most_once_a_day_and_never_when_off ... ok
+test retention::tests::protected_and_head_are_never_candidates ... ok
+test retention::tests::scheduler_config_follows_the_toggle_unless_env_forces_it ... ok
+test retention::tests::squashes_autosaves_per_window_and_keeps_everything_else ... ok
+test http::tests::restored_reference_added_and_forked_signals_need_their_key ... ok
+test brand::http::tests::saves_are_validated_and_exports_render ... ok
+test import::tests::import_is_idempotent_links_stories_and_syncs_changes ... ok
+test http::tests::auto_tidy_toggle_is_root_only ... ok
+test http::tests::project_artifact_content_version_roundtrip ... ok
+test http::tests::put_content_4mb_never_blocks_a_worker ... ok
+test http::tests::restore_recommits_an_old_version_server_side ... ok
+test http::tests::conditional_gets_answer_304_and_versions_are_immutable ... ok
+test http::tests::artifact_list_pages_by_cursor_and_carries_story_ids ... ok
+test service::tests::pure_helpers_bound_and_clean_inputs ... ok
+test brand::http::tests::impact_lists_consumers_and_what_a_change_reaches ... ok
+test http::tests::sha_keyed_thumbnails_cache_forever_and_replaced_ones_are_gcd ... ok
+test import::tests::stamp_source_preserves_metadata_approved_after_its_snapshot ... ok
+test service::tests::aliased_metadata_patches_preserve_independent_acknowledged_edits ... ok
+test http::tests::rendered_thumbnails_are_sniffed_capped_and_never_bump_updated_at ... ok
+test site::export::tests::previews_inline_the_css_and_keep_links_inside_the_route ... ok
+test site::export::tests::the_static_site_has_pages_one_stylesheet_with_tokens_assets_and_the_manifest ... ok
+test site::extract::tests::embeds_brand_images_and_provenance_are_linked_to_their_section ... ok
+test site::extract::tests::malformed_references_are_reported_and_garbage_never_panics ... ok
+test site::http::tests::images_are_sniffed_and_query_values_sanitized ... ok
+test http::tests::workspace_rbac_links_and_signals ... ok
+test http::tests::bulk_links_read_many_artifacts_in_one_call ... ok
+test service::tests::links_extract_on_save_report_broken_and_reject_cycles ... ok
+test site::render::tests::copy_is_escaped_and_links_are_sanitized ... ok
+test site::render::tests::documents_have_a_title_lang_and_the_stylesheet ... ok
+test site::render::tests::embeds_render_the_poster_or_a_stand_in ... ok
+test site::render::tests::every_block_renders_a_scoped_section_without_scripts ... ok
+test site::render::tests::sections_carry_tone_spacing_motion_and_breakpoint_classes ... ok
+test site::schema::tests::catalog_names_are_unique_and_media_slots_use_known_blocks ... ok
+test site::schema::tests::parse_is_lenient_on_missing_fields_and_collects_rendered_refs ... ok
+test site::theme::tests::a_v1_kit_becomes_brand_vars_and_bound_slots ... ok
+test site::theme::tests::backgrounds_resolve_to_vars_with_a_tone ... ok
+test site::theme::tests::colour_math_and_sanitizing ... ok
+test site::theme::tests::no_kit_means_defaults_and_legacy_kits_still_read ... ok
+test site::validate::tests::loose_documents_other_tools_write_still_save ... ok
+test site::validate::tests::scheme_and_data_image_helpers ... ok
+test site::validate::tests::structure_ids_blocks_and_enums_are_checked ... ok
+test site::validate::tests::the_stored_default_and_a_real_page_are_valid ... ok
+test site::validate::tests::unsafe_urls_are_refused_with_their_path ... ok
+test site::zip::tests::a_written_archive_reads_back_byte_for_byte ... ok
+test site::zip::tests::crc32_matches_the_standard_check_value ... ok
+test site::zip::tests::dos_timestamps_pack_fields ... ok
+test service::tests::fork_story_link_search_and_opt_in_prune ... ok
+test service::tests::aliased_service_instances_serialize_commit_publication ... ok
+test service::tests::scheduled_prune_skips_recent_history_and_gcs_old_autosaves ... ok
+test service::tests::approve_notifies_follow_approved_consumers_and_signals_flow ... ok
+test store::tests::fts_match_quotes_terms_and_prefixes_the_last ... ok
+test store::tests::fts_replace_bench ... ignored
+test service::tests::thumbnail_stale_snapshot_does_not_skip_requested_restore_or_gc ... ok
+test service::tests::metadata_and_approval_share_canonical_publication_boundary ... ok
+test service::tests::stale_artifact_snapshot_cannot_deduplicate_over_a_new_head ... ok
+test service::tests::hard_delete_gcs_its_blobs_but_keeps_shared_ones ... ok
+test service::tests::create_save_dedup_conflict_and_working_copy ... ok
+test service::tests::big_saves_index_and_meta_updates_reuse_the_indexed_body ... ok
+test service::tests::thumbnail_waits_for_metadata_publication_through_alias_root ... ok
+test site::http::tests::invalid_site_documents_are_refused_on_save ... ok
+test site::http::tests::zip_export_ships_pages_one_stylesheet_with_tokens_and_records_a_pinned_publish ... ok
+test uri::tests::parses_every_selector_and_node ... ok
+test uri::tests::rejects_malformed_references ... ok
+test uri::tests::scan_finds_references_in_free_text ... ok
+test uri::tests::scan_is_safe_on_multibyte_text_and_bounded ... ok
+test service::tests::update_meta_thumbnail_replacement_gcs_the_old_blob ... ok
+test variants::tests::branch_names_round_trip_and_reject_main ... ok
+test site::http::tests::local_publish_and_preview_render_pages_inside_the_route ... ok
+test store::tests::protected_versions_cover_head_approved_pins_publishes_and_signals ... ok
+test store::tests::legacy_design_index_gets_its_map_built_and_deduplicated ... ok
+test store::tests::artifacts_carry_their_creating_session_title ... ok
+test store::tests::fts_writes_go_through_the_rowid_map ... ok
+test store::tests::commit_moves_head_and_guards_the_base_version ... ok
+test store::tests::links_in_out_adjacency_and_hard_delete_marks_backlinks_broken ... ok
+test store::tests::filters_workspaces_and_searches_with_fts ... ok
+test store::tests::source_key_is_unique_for_idempotent_import ... ok
+test store::tests::artifacts_and_versions_carry_resolved_people ... ok
+test variants::tests::accept_refuses_a_moved_head_unless_forced ... ok
+test store::tests::rows_carry_story_ids_and_page_by_cursor ... ok
+test store::tests::scan_fallback_keeps_the_rowid_map_consistent ... ok
+test variants::tests::variants_never_move_head_and_accept_fast_forwards_main ... ok
+test store::tests::stale_map_row_never_touches_another_artifact ... ok
+test store::tests::reference_counts_batch_matches_the_single_count ... ok
+
+test result: ok. 132 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 25.67s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_design_assist-fdaece3abed208aa)
+
+running 12 tests
+test tests::modes_parse_and_critique_never_edits ... ok
+test tests::fences_summaries_terms_and_refs ... ok
+test tests::learning_mode_and_stored_session ... ok
+test tests::documents_are_validated_per_format ... ok
+test tests::adapters_pick_the_agent_file_per_format ... ok
+test tests::findings_are_bounded_objects ... ok
+test tests::registry_holds_one_run_per_artifact_and_releases_on_drop ... ok
+test tests::provenance_records_offered_cited_and_stays_bounded ... ok
+test tests::prompt_carries_sentinel_file_refs_rules_and_direction ... ok
+test tests::brief_is_deterministic_bounded_and_numbered ... ok
+test tests::only_png_thumbnails_are_handed_to_agents ... ok
+test retention_regressions::histories_are_bounded_and_active_turns_survive ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_product-3dc7a21a736f3447)
+
+running 139 tests
+test design_format::tests::legacy_formats_keep_kind_mockup ... ok
+test design_format::tests::parses_the_four_formats_case_insensitively ... ok
+test chat::tests::prompt_has_sentinel_and_actions_contract ... ok
+test design_format::tests::mime_ext_and_names_are_consistent ... ok
+test chat::tests::split_actions_no_block_keeps_prose ... ok
+test chat::tests::canvas_doc_from_mermaid_action ... ok
+test design_scene3d::tests::python_literals_are_escaped ... ok
+test chat::tests::context_includes_version_mockup_and_discovery ... ok
+test chat::tests::context_respects_budget ... ok
+test chat::tests::split_actions_extracts_array_and_prose ... ok
+test design_format::tests::unknown_format_is_invalid_not_html ... ok
+test chat::tests::canvas_doc_from_nodes_action_synthesizes_mermaid ... ok
+test extract::tests::unanswered_question_is_skipped ... ok
+test extract::tests::analysis_summary_classifies_bullets ... ok
+test extract::tests::answered_question_becomes_qa ... ok
+test analysis::tests::story_start_lock_is_per_story ... ok
+test design_format::tests::stubs_render_before_the_agent_commits ... ok
+test analysis::tests::fanout_caps_providers_and_total_agents ... ok
+test design_scene3d::tests::v2_blender_export_falls_back_for_tokens_and_hides_srcs ... ok
+test design_scene3d::tests::blender_script_golden ... ok
+test design_scene3d::tests::gltf_objects_export_as_named_empties_not_paths ... ok
+test design_scene3d::tests::validates_the_spec_example_and_the_empty_scene ... ok
+test design_scene3d::tests::v2_documents_validate_and_v1_stays_readable ... ok
+test design_scene3d::tests::rejects_unknown_types_bad_numbers_and_unsafe_ids ... ok
+test design_scene3d::tests::v2_rejects_bad_tokens_uris_states_and_ranges ... ok
+test analysis::tests::supervised_runner_panic_runs_the_crash_hook ... ok
+test design_scene3d::tests::rejects_oversized_documents ... ok
+test http::tests::children_route_files_a_doc_under_the_epic ... ok
+test http::tests::reviewed_confluence_reference ... ok
+test http::tests::reviewed_confluence_missing_review ... ok
+test http::tests::patch_moves_marks_and_detaches_with_one_level_guard ... ok
+test http::tests::list_stories_empty ... ok
+test http::tests::create_and_list_learning ... ok
+test http::tests::reviewed_confluence_new_version ... ok
+test http::tests::reviewed_confluence_same_version_body ... ok
+test http::tests::reviewed_jira_reference ... ok
+test media::csp_tests::active_attachment_types_are_sandboxed ... ok
+test media::tests::base_updated_at_guard ... ok
+test media::tests::content_put_guards ... ok
+test media::tests::design_mimes_are_allowed_sniffed_and_kind_design ... ok
+test media::tests::event_content_is_source_for_text_and_null_for_binaries ... ok
+test media::tests::ext_matches_mime ... ok
+test media::tests::path_within_allows_contained ... ok
+test media::tests::path_within_blocks_escape ... ok
+test media::tests::rejects_disallowed_mime ... ok
+test media::tests::sanitize_strips_path_components ... ok
+test media::tests::sniff_binary_and_text_types ... ok
+test media::tests::sniff_detects_png_mismatch ... ok
+test refine::tests::parse_extracts_reply_and_updated_body ... ok
+test refine::tests::parse_malformed_preserves_reply_no_update ... ok
+test refine::tests::parse_null_updated_is_none ... ok
+test refine::tests::prompt_includes_history_story_and_discovery_context ... ok
+test run::tests::augment_with_out_path_appends_write_instruction_and_path ... ok
+test run::tests::autonomy_directive_instructs_no_questions_and_assumptions ... ok
+test run::tests::build_analysis_prompt_includes_context_path_reference ... ok
+test run::tests::build_analysis_prompt_includes_output_contract_marker ... ok
+test run::tests::build_analysis_prompt_includes_prior_summary_when_given ... ok
+test run::tests::build_analysis_prompt_includes_skill_body ... ok
+test run::tests::build_analysis_prompt_omits_prior_summary_section_when_none ... ok
+test run::tests::build_plan_prompt_includes_context_path_reference ... ok
+test run::tests::build_plan_prompt_includes_plan_contract_marker ... ok
+test run::tests::build_plan_summarizer_prompt_includes_candidates_and_consolidate_contract ... ok
+test run::tests::build_rewrite_prompt_includes_body_markdown_contract_marker ... ok
+test run::tests::build_rewrite_prompt_includes_context_path_reference ... ok
+test run::tests::build_rewrite_prompt_includes_writer_skill_body ... ok
+test run::tests::build_summarizer_prompt_includes_consolidate_dedupe_and_questions_schema ... ok
+test run::tests::build_tests_prompt_includes_context_path_reference ... ok
+test run::tests::build_tests_prompt_includes_skill_body_verbatim ... ok
+test run::tests::build_tests_prompt_includes_testcases_contract_marker ... ok
+test run::tests::build_tests_prompt_skill_body_mentions_happy_and_coverage_guidance ... ok
+test run::tests::extract_json_block_empty_string_returns_none ... ok
+test run::tests::extract_json_block_fence_wins_over_prose_brace ... ok
+test run::tests::extract_json_block_finds_bare_object ... ok
+test run::tests::extract_json_block_finds_json_in_fence ... ok
+test run::tests::extract_json_block_nested_json_balanced ... ok
+test run::tests::extract_json_block_returns_none_for_prose ... ok
+test run::tests::narrative_from_clarifications_contains_answered_question ... ok
+test run::tests::narrative_from_clarifications_contains_note_body ... ok
+test run::tests::narrative_from_tests_contains_story_title ... ok
+test run::tests::narrative_from_tests_flags_nonempty_review_note ... ok
+test run::tests::narrative_from_tests_highlights_changes_requested_case ... ok
+test run::tests::session_cwd_passes_real_path_through_unchanged ... ok
+test run::tests::session_cwd_rewrites_shared_temp_fallback_to_existing_child ... ok
+test run::tests::session_cwd_two_calls_yield_distinct_dirs ... ok
+test run::tests::session_cwd_uses_a_stable_swept_root ... ok
+test run::tests::summary_findings_parses_summarizer_schema ... ok
+test service::cwd_tests::root_home_and_missing_cwds_are_rejected ... ok
+test service::cwd_tests::workspace_temp_and_git_cwds_are_accepted ... ok
+test http::tests::reviewed_confluence_title ... ok
+test http::tests::reviewed_confluence_unchanged_payload ... ok
+test http::tests::get_story_detail_flat ... ok
+test http::tests::reviewed_jira_new_version ... ok
+test service::tests::build_questions_comment_formats_correctly ... ok
+test http::tests::reviewed_jira_missing_review ... ok
+test http::tests::publish_as_story_rejects_non_owner_account ... ok
+test http::tests::flat_patch_learning ... ok
+test http::tests::reviewed_jira_same_version_body ... ok
+test service::tests::raw_page_version_reads_import_and_publish_rows ... ok
+test http::tests::reviewed_jira_title ... ok
+test http::tests::transcript_legacy_list_keeps_full_body_compatibility ... ok
+test http::tests::reviewed_jira_unchanged_payload ... ok
+test service::tests::render_testcases_markdown_groups_by_category_and_renders_steps ... ok
+test service::tests::render_testcases_markdown_tolerates_malformed_steps_json ... ok
+test http::tests::transcript_search_reaches_old_collapsed_body_with_literal_unicode_counts ... ok
+test service::tests::watch_cursor_roundtrip_handles_same_timestamp_ties ... ok
+test swarm::tests::brief_includes_discovery_framing_and_abs_attachment_paths ... ok
+test swarm::tests::derived_status_all_done ... ok
+test swarm::tests::derived_status_any_error_wins ... ok
+test swarm::tests::derived_status_mixed_keeps_persisted ... ok
+test swarm::tests::empty_plan_yields_no_tasks ... ok
+test swarm::tests::ignores_h1_and_keeps_h2_h4 ... ok
+test swarm::tests::parses_task_headings_with_bodies ... ok
+test swarm::tests::strips_various_task_prefixes ... ok
+test watcher::admission_tests::admission_is_bounded_and_duplicate_free ... ok
+test watcher::admission_tests::admitted_story_cannot_queue_a_second_poll ... ok
+test watcher::admission_tests::dropping_supervisor_cancels_its_polls_and_releases_claims ... ok
+test watcher::admission_tests::saturated_rounds_progress_through_all_due_stories ... ok
+test watcher::tests::build_reconcile_prompt_empty_questions_shows_none ... ok
+test watcher::tests::build_reconcile_prompt_fences_comments_as_untrusted_data ... ok
+test watcher::tests::build_reconcile_prompt_includes_new_comments_text ... ok
+test watcher::tests::build_reconcile_prompt_includes_question_id_and_text ... ok
+test watcher::tests::build_reconcile_prompt_includes_recommended_next_step_contract_marker ... ok
+test watcher::tests::real_cli_untrusted_reconcile_smoke ... ignored, needs an authenticated claude CLI
+test watcher::tests::watcher_reconcile_uses_the_untrusted_runner ... ok
+test http::tests::transcript_summary_page_excludes_100_large_bodies ... ok
+test service::tests::authorize_story_account_guards_bound_credential ... ok
+test http::tests::transcript_summary_cursor_survives_timestamp_ties_and_new_imports ... ok
+test service::tests::authorize_account_id_owner_root_ok_stranger_forbidden ... ok
+test http::tests::transcript_summary_search_and_detail_authorize_owning_story ... ok
+test service::tests::build_inject_bundle_assembles_content_and_excludes_discarded_questions ... ok
+test service::tests::build_agent_context_includes_transcript_body ... ok
+test service::tests::create_draft_makes_draft_story_and_version ... ok
+test service::tests::post_questions_posts_combined_comment_and_updates_status ... ok
+test service::tests::publish_as_story_rebinds_draft_story_to_jira ... ok
+test service::tests::import_story_creates_story_version_event_with_adf_body ... ok
+test service::tests::record_import_stores_story_version_event_without_network ... ok
+test service::tests::update_draft_body_edits_in_place_and_syncs_title ... ok
+test service::tests::refresh_story_no_new_version_when_body_unchanged ... ok
+test service::tests::refresh_story_adds_version_when_body_changes ... ok
+
+test result: ok. 138 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 19.42s
+
+
+===== /tmp/r12-graph-red.log =====
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.80s
+     Running unittests src/lib.rs (target/debug/deps/otto_canvas-c121b4b37934b35c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_design-38c83e8346d9aa6a)
+
+running 1 test
+
+thread 'store::tests::render_adjacency_never_returns_an_incomplete_cycle_check' (3685726) panicked at crates/otto-design/src/store.rs:2286:9:
+partial graph must not certify absence of a cycle
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test store::tests::render_adjacency_never_returns_an_incomplete_cycle_check ... FAILED
+
+failures:
+
+failures:
+    store::tests::render_adjacency_never_returns_an_incomplete_cycle_check
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 133 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p otto-design --lib`
+
+===== /tmp/r12-graph-green.log =====
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+   Compiling otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+   Compiling otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.87s
+     Running unittests src/lib.rs (target/debug/deps/otto_canvas-c121b4b37934b35c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_design-38c83e8346d9aa6a)
+
+running 1 test
+test store::tests::render_adjacency_never_returns_an_incomplete_cycle_check ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out; finished in 0.21s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_design_assist-fdaece3abed208aa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/otto_product-3dc7a21a736f3447)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.00s
+
+
+===== /tmp/r12-clippy.log =====
+    Checking serde_json v1.0.151
+    Checking tokio-util v0.7.19
+    Checking tower v0.5.3
+   Compiling sqlx-core v0.9.0
+    Checking tokio-tungstenite v0.29.0
+    Checking regex-automata v0.4.18
+   Compiling tree-sitter v0.27.0
+    Checking zlib-rs v0.6.8
+    Checking zopfli v0.8.3
+    Checking tree-sitter-rust v0.24.2
+    Checking tree-sitter-javascript v0.25.0
+    Checking tree-sitter-typescript v0.23.2
+    Checking tree-sitter-python v0.25.0
+    Checking tree-sitter-go v0.25.0
+    Checking lettre v0.11.23
+    Checking deadpool v0.12.3
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.19
+    Checking otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+    Checking cookie_store v0.22.1
+    Checking otto-transcript v0.2.0 (/Users/itziklavon/otto_os/crates/otto-transcript)
+    Checking assert-json-diff v2.0.2
+    Checking flate2 v1.1.10
+    Checking globset v0.4.20
+    Checking regex v1.13.1
+   Compiling sqlx-sqlite v0.9.0
+    Checking zip v8.6.0
+    Checking ignore v0.4.33
+   Compiling sqlx-macros-core v0.9.0
+    Checking hyper v1.11.1
+    Checking hyper-util v0.1.21
+   Compiling sqlx-macros v0.9.0
+    Checking axum v0.8.9
+    Checking hyper-rustls v0.27.10
+    Checking wiremock v0.6.5
+    Checking sqlx v0.9.0
+    Checking reqwest v0.13.5
+    Checking otto-netguard v0.2.0 (/Users/itziklavon/otto_os/crates/otto-netguard)
+    Checking otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Checking otto-usage v0.2.0 (/Users/itziklavon/otto_os/crates/otto-usage)
+    Checking otto-pty v0.2.0 (/Users/itziklavon/otto_os/crates/otto-pty)
+    Checking otto-ssh v0.2.0 (/Users/itziklavon/otto_os/crates/otto-ssh)
+    Checking otto-orchestrator v0.2.0 (/Users/itziklavon/otto_os/crates/otto-orchestrator)
+    Checking otto-telemetry v0.2.0 (/Users/itziklavon/otto_os/crates/otto-telemetry)
+    Checking otto-git v0.2.0 (/Users/itziklavon/otto_os/crates/otto-git)
+    Checking otto-rbac v0.2.0 (/Users/itziklavon/otto_os/crates/otto-rbac)
+    Checking otto-context v0.2.0 (/Users/itziklavon/otto_os/crates/otto-context)
+    Checking otto-memory v0.2.0 (/Users/itziklavon/otto_os/crates/otto-memory)
+    Checking otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+    Checking otto-issues v0.2.0 (/Users/itziklavon/otto_os/crates/otto-issues)
+    Checking otto-canvas v0.2.0 (/Users/itziklavon/otto_os/crates/otto-canvas)
+    Checking otto-skills v0.2.0 (/Users/itziklavon/otto_os/crates/otto-skills)
+    Checking otto-sessions v0.2.0 (/Users/itziklavon/otto_os/crates/otto-sessions)
+    Checking otto-improve v0.2.0 (/Users/itziklavon/otto_os/crates/otto-improve)
+    Checking otto-agent-run v0.2.0 (/Users/itziklavon/otto_os/crates/otto-agent-run)
+    Checking otto-channels v0.2.0 (/Users/itziklavon/otto_os/crates/otto-channels)
+    Checking otto-design-assist v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design-assist)
+    Checking otto-swarm v0.2.0 (/Users/itziklavon/otto_os/crates/otto-swarm)
+    Checking otto-product v0.2.0 (/Users/itziklavon/otto_os/crates/otto-product)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.11s
+
+===== /tmp/r12-ui-regressions-green.log =====
+TAP version 13
+# Subtest: ArtifactView approves the version shown in the confirmation despite live updates
+ok 1 - ArtifactView approves the version shown in the confirmation despite live updates
+  ---
+  duration_ms: 39.474167
+  type: 'test'
+  ...
+# Subtest: brand/BrandEditor approves the version shown in the confirmation despite live updates
+ok 2 - brand/BrandEditor approves the version shown in the confirmation despite live updates
+  ---
+  duration_ms: 8.990292
+  type: 'test'
+  ...
+# Subtest: project renameProject keeps the confirmed project across route changes
+ok 3 - project renameProject keeps the confirmed project across route changes
+  ---
+  duration_ms: 4.646625
+  type: 'test'
+  ...
+# Subtest: project archiveProject keeps the confirmed project across route changes
+ok 4 - project archiveProject keeps the confirmed project across route changes
+  ---
+  duration_ms: 4.013625
+  type: 'test'
+  ...
+# Subtest: Product sendToSwarm does not act after its confirmed story is replaced
+ok 5 - Product sendToSwarm does not act after its confirmed story is replaced
+  ---
+  duration_ms: 5.063708
+  type: 'test'
+  ...
+# Subtest: Product regenerate does not act after its confirmed story is replaced
+ok 6 - Product regenerate does not act after its confirmed story is replaced
+  ---
+  duration_ms: 3.22075
+  type: 'test'
+  ...
+# Subtest: Product question posting does not follow a changed story after consent
+ok 7 - Product question posting does not follow a changed story after consent
+  ---
+  duration_ms: 5.247625
+  type: 'test'
+  ...
+# Subtest: DiscoveryChat late load cannot replace the newly selected conversation
+ok 8 - DiscoveryChat late load cannot replace the newly selected conversation
+  ---
+  duration_ms: 30.709542
+  type: 'test'
+  ...
+# Subtest: DiscoveryChat late failed send preserves both conversations' drafts
+ok 9 - DiscoveryChat late failed send preserves both conversations' drafts
+  ---
+  duration_ms: 7.503459
+  type: 'test'
+  ...
+# Subtest: DiscoveryChat late successful send cannot append A messages to B
+ok 10 - DiscoveryChat late successful send cannot append A messages to B
+  ---
+  duration_ms: 7.072916
+  type: 'test'
+  ...
+# Subtest: RefineChat late load cannot replace the newly selected conversation
+ok 11 - RefineChat late load cannot replace the newly selected conversation
+  ---
+  duration_ms: 4.495459
+  type: 'test'
+  ...
+# Subtest: RefineChat late failed send preserves both conversations' drafts
+ok 12 - RefineChat late failed send preserves both conversations' drafts
+  ---
+  duration_ms: 5.163541
+  type: 'test'
+  ...
+# Subtest: RefineChat late successful send cannot append A messages to B
+ok 13 - RefineChat late successful send cannot append A messages to B
+  ---
+  duration_ms: 3.868541
+  type: 'test'
+  ...
+# Subtest: site brand @latest resolves the same version as export
+ok 14 - site brand @latest resolves the same version as export
+  ---
+  duration_ms: 52.350833
+  type: 'test'
+  ...
+# Subtest: site brand @approved resolves the same version as export
+ok 15 - site brand @approved resolves the same version as export
+  ---
+  duration_ms: 13.851375
+  type: 'test'
+  ...
+# Subtest: site brand @v3 resolves the same version as export
+ok 16 - site brand @v3 resolves the same version as export
+  ---
+  duration_ms: 9.724458
+  type: 'test'
+  ...
+# Subtest: brand content beyond inline cap loads the exact resolved version
+ok 17 - brand content beyond inline cap loads the exact resolved version
+  ---
+  duration_ms: 8.272542
+  type: 'test'
+  ...
+1..17
+# tests 17
+# suites 0
+# pass 17
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 328.165375
+
+===== /tmp/r12-ui-check-final.log =====
+
+> ui@0.2.0 check
+> node scripts/ui-guards.mjs && svelte-check --tsconfig ./tsconfig.app.json --fail-on-warnings && node node_modules/typescript7/bin/tsc -p tsconfig.node.json && node node_modules/typescript7/bin/tsc -p tsconfig.e2e.json && node node_modules/typescript7/bin/tsc -p tsconfig.unit.json
+
+ui-guards: ok (1042 files; no native dialogs, no undefined CSS vars, no ratchet regressions)
+Loading svelte-check in workspace: /Users/itziklavon/otto_os/ui
+Getting Svelte diagnostics...
+
+svelte-check found 0 errors and 0 warnings
+
+===== /tmp/r12-browser-consent.log =====
+[WebServer] (node:27242) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hbugAH OTTO_PORT=17872
+2026-10-07T23:31:53.164404Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hbugAH)
+2026-10-07T23:31:53.405868Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hbugAH/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:31:53.411320Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hbugAH/clickhouse, port 57671)
+2026-10-07T23:31:53.413965Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:31:53.414481Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:31:53.414527Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:31:53.414544Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:31:53.414635Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:31:53.414665Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:31:53.414751Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:31:53.414764Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:31:53.416181Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:31:53.468641Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:31:53.468717Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:31:53.468737Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:31:53.468756Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:31:53.468798Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:31:53.471994Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:31:53.472247Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:31:53.472853Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:31:53.472878Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:31:53.472897Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:31:53.472910Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:31:53.472947Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:31:53.473057Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:31:53.481300Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:31:53.497564Z  INFO otto_server::boot::recovery: boot: post-listen work done in 83 ms (plugins=77)
+2026-10-07T23:31:53.531899Z  INFO ottod: listening on http://127.0.0.1:17872
+2026-10-07T23:31:53.532118Z  INFO ottod: alt loopback lane on http://localhost:17872 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:31:53.532170Z  INFO otto_server::boot: boot: ready in 367 ms (db_compact=0 db_open=236 maintenance=2 modules=9 restore=0 recovery=118)
+[e2e] test daemon ready (pid 27243); root onboarded.
+
+Running 2 tests using 1 worker
+
+2026-10-07T23:31:53.803662Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-hbugAH/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:31:53.805217Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:31:53.811549Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-07T23:31:53.882091Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:31:53.882564Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:31:53.882608Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:27340) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 [desktop-browser] › e2e/desktop-design-consent.spec.ts:8:3 › design approval stays on the version shown before a live update (2.7s)
+  ✓  2 [desktop-browser] › e2e/desktop-design-consent.spec.ts:8:3 › brand kit approval stays on the version shown before a live update (1.4s)
+
+  2 passed (5.7s)
+
+===== /tmp/r12-browser-functional.log =====
+[WebServer] (node:32061) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-Rsm4C3 OTTO_PORT=17872
+2026-10-07T23:34:38.936779Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-Rsm4C3)
+2026-10-07T23:34:39.202137Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-Rsm4C3/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:34:39.249225Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-Rsm4C3/clickhouse, port 58021)
+2026-10-07T23:34:39.285389Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:34:39.293640Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:34:39.295376Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:34:39.295742Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:34:39.299475Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:34:39.299572Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:34:39.301378Z  INFO otto_server::boot::recovery: boot: post-listen work done in 11 ms (plugins=0)
+2026-10-07T23:34:39.302440Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:34:39.302461Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:34:39.337787Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:34:39.402658Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:34:39.403184Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:34:39.403211Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:34:39.403653Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:34:39.404165Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:34:39.404887Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:34:39.405122Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:34:39.405817Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:34:39.405839Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:34:39.405861Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:34:39.405877Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:34:39.405926Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:34:39.407271Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:34:39.412597Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:34:39.489228Z  INFO ottod: listening on http://127.0.0.1:17872
+2026-10-07T23:34:39.489414Z  INFO ottod: alt loopback lane on http://localhost:17872 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:34:39.489831Z  INFO otto_server::boot: boot: ready in 548 ms (db_compact=4 db_open=245 maintenance=6 modules=79 restore=7 recovery=203)
+[e2e] test daemon ready (pid 32120); root onboarded.
+2026-10-07T23:34:39.644078Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-Rsm4C3/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:34:39.646189Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:34:39.652482Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-07T23:34:39.709474Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:34:39.715346Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:34:39.715416Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+
+Running 17 tests using 1 worker
+
+(node:32175) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [desktop-browser] › e2e/desktop-brand-kit.spec.ts:89:1 › a kit shows colours with contrast, the live preview and where it is used (2.5s)
+  ✓   2 [desktop-browser] › e2e/desktop-brand-kit.spec.ts:112:1 › a new primary previews its impact, saves as v2 and rolls out on approve (2.2s)
+  ✓   3 [desktop-browser] › e2e/desktop-brand-kit.spec.ts:151:1 › an invalid hex blocks saving and names the problem (583ms)
+  ✓   4 [desktop-browser] › e2e/desktop-brand-kit.spec.ts:161:1 › the Brand Kit page opens the latest kit and creates new ones from a starter (1.1s)
+[WebServer] 2:34:46 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓   5 [desktop-browser] › e2e/desktop-canvas-versions.spec.ts:15:1 › Canvas accepts large saves and restores a previous version (2.1s)
+  ✓   6 [desktop-browser] › e2e/desktop-design-hall.spec.ts:63:1 › the lobby shows every studio and its menus stay inside the viewport (1.1s)
+  ✓   7 [desktop-browser] › e2e/desktop-design-hall.spec.ts:99:1 › create → edit → new version → compare → restore (2.0s)
+  ✓   8 [desktop-browser] › e2e/desktop-design-hall.spec.ts:155:1 › a link added here shows up as "Used in" on the other design (1.3s)
+  ✓   9 [desktop-browser] › e2e/desktop-design-hall.spec.ts:179:1 › references search finds designs in the team library (2.0s)
+  ✓  10 [desktop-browser] › e2e/desktop-design-hall.spec.ts:198:1 › a project page loads its own designs from the server (not the lobby library) (667ms)
+[WebServer] 2:34:56 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[WebServer] 2:34:58 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  11 [desktop-browser] › e2e/desktop-product-edit.spec.ts:187:1 › product: manually edit Jira story title and description (4.4s)
+[WebServer] 2:35:00 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  12 [desktop-browser] › e2e/desktop-product-edit.spec.ts:280:1 › product: canceled keyboard tab change restores the selected tab focus (1.8s)
+[WebServer] 2:35:02 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+[WebServer] 2:35:03 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  13 [desktop-browser] › e2e/desktop-product-edit.spec.ts:295:1 › product: saved local draft body survives the real detail endpoint and reload (2.9s)
+  ✓  14 [desktop-browser] › e2e/desktop-site-studio.spec.ts:82:1 › a blank site starts from a template and saves as a new version (739ms)
+  ✓  15 [desktop-browser] › e2e/desktop-site-studio.spec.ts:97:1 › edit a section from the inspector and in place; toolbars stay on screen (1.2s)
+  ✓  16 [desktop-browser] › e2e/desktop-site-studio.spec.ts:140:1 › the block library inserts a section (723ms)
+  ✓  17 [desktop-browser] › e2e/desktop-site-studio.spec.ts:152:1 › zip export and local preview are recorded with a pinned set (131ms)
+
+  17 passed (30.1s)
+
+===== /tmp/r12-chat-browser.log =====
+[WebServer] (node:35360) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-xdBMFt OTTO_PORT=17872
+2026-10-07T23:36:31.639158Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-xdBMFt)
+2026-10-07T23:36:31.878433Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-xdBMFt/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:36:31.883558Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-xdBMFt/clickhouse, port 58450)
+2026-10-07T23:36:31.885781Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:36:31.886254Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:36:31.886302Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:36:31.886316Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:36:31.886426Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:36:31.886449Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:36:31.886524Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:36:31.886533Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:36:31.887441Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:36:31.978357Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:36:31.978447Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:36:31.978462Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:36:31.978477Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:36:31.978503Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:36:31.981147Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:36:31.981202Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:36:31.981216Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:36:31.981227Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:36:31.981239Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:36:31.981270Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:36:31.981383Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:36:31.993558Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:36:32.011623Z  INFO otto_server::boot::recovery: boot: post-listen work done in 125 ms (plugins=118)
+2026-10-07T23:36:32.040652Z  INFO ottod: listening on http://127.0.0.1:17872
+2026-10-07T23:36:32.093933Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:36:32.101060Z  INFO ottod: alt loopback lane on http://localhost:17872 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:36:32.101132Z  INFO otto_server::boot: boot: ready in 461 ms (db_compact=0 db_open=234 maintenance=2 modules=8 restore=0 recovery=215)
+[e2e] test daemon ready (pid 35361); root onboarded.
+
+Running 1 test using 1 worker
+
+2026-10-07T23:36:32.276483Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-xdBMFt/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:36:32.278000Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:36:32.284417Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-07T23:36:32.284419Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:36:32.284684Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:36:32.284715Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:35458) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] 2:36:32 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  1 [desktop-browser] › e2e/desktop-product-chat-ownership.spec.ts:6:1 › Discovery chat keeps drafts and late failed replies with their conversation (4.1s)
+
+  1 passed (5.6s)
+
+===== /tmp/r12-consent-red.log =====
+TAP version 13
+# Subtest: ArtifactView approves the version shown in the confirmation despite live updates
+not ok 1 - ArtifactView approves the version shown in the confirmation despite live updates
+  ---
+  duration_ms: 40.732917
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:7:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+        [
+          'A',
+    +     'v2'
+    -     'v1'
+        ]
+      ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0:
+      0: 'A'
+      1: 'v1'
+  actual:
+    0:
+      0: 'A'
+      1: 'v2'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:21:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: brand/BrandEditor approves the version shown in the confirmation despite live updates
+not ok 2 - brand/BrandEditor approves the version shown in the confirmation despite live updates
+  ---
+  duration_ms: 9.032833
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:7:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+        [
+          'A',
+    +     'v2'
+    -     'v1'
+        ]
+      ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0:
+      0: 'A'
+      1: 'v1'
+  actual:
+    0:
+      0: 'A'
+      1: 'v2'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:21:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: project renameProject keeps the confirmed project across route changes
+not ok 3 - project renameProject keeps the confirmed project across route changes
+  ---
+  duration_ms: 4.572375
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:27:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    'B' !== 'A'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'A'
+  actual: 'B'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:38:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: project archiveProject keeps the confirmed project across route changes
+not ok 4 - project archiveProject keeps the confirmed project across route changes
+  ---
+  duration_ms: 3.743833
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:27:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    'B' !== 'A'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'A'
+  actual: 'B'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:38:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 0
+# fail 4
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 307.973375
+
+===== /tmp/r12-site-red.log =====
+TAP version 13
+# Subtest: site brand @latest resolves the same version as export
+not ok 1 - site brand @latest resolves the same version as export
+  ---
+  duration_ms: 53.96775
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/siteResolution.test.ts:6:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+    +   'v1-id'
+    -   'v2-id'
+      ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: 'v2-id'
+  actual:
+    0: 'v1-id'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/siteResolution.test.ts:17:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: site brand @approved resolves the same version as export
+ok 2 - site brand @approved resolves the same version as export
+  ---
+  duration_ms: 14.284834
+  type: 'test'
+  ...
+# Subtest: site brand @v3 resolves the same version as export
+ok 3 - site brand @v3 resolves the same version as export
+  ---
+  duration_ms: 10.404208
+  type: 'test'
+  ...
+# Subtest: brand content beyond inline cap loads the exact resolved version
+not ok 4 - brand content beyond inline cap loads the exact resolved version
+  ---
+  duration_ms: 9.21375
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/siteResolution.test.ts:22:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+
+    0 !== 1
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 1
+  actual: 0
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/siteResolution.test.ts:32:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 2
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 343.449792
+
+===== /tmp/r12-chat-red.log =====
+TAP version 13
+# Subtest: DiscoveryChat late load cannot replace the newly selected conversation
+not ok 1 - DiscoveryChat late load cannot replace the newly selected conversation
+  ---
+  duration_ms: 30.549667
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:23:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + 'A-message'
+    - 'B-message'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'B-message'
+  actual: 'A-message'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:27:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: DiscoveryChat late failed send preserves both conversations' drafts
+not ok 2 - DiscoveryChat late failed send preserves both conversations' drafts
+  ---
+  duration_ms: 7.172709
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:29:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + 'Draft A'
+    - 'Draft B'
+             ^
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'Draft B'
+  actual: 'Draft A'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:33:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: DiscoveryChat late successful send cannot append A messages to B
+not ok 3 - DiscoveryChat late successful send cannot append A messages to B
+  ---
+  duration_ms: 5.556625
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:37:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+        'B-message',
+    +   'A-user',
+    +   'A-agent'
+      ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: 'B-message'
+  actual:
+    0: 'B-message'
+    1: 'A-user'
+    2: 'A-agent'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:41:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: RefineChat late load cannot replace the newly selected conversation
+not ok 4 - RefineChat late load cannot replace the newly selected conversation
+  ---
+  duration_ms: 4.882125
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:23:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + 'A-message'
+    - 'B-message'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'B-message'
+  actual: 'A-message'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:27:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: RefineChat late failed send preserves both conversations' drafts
+not ok 5 - RefineChat late failed send preserves both conversations' drafts
+  ---
+  duration_ms: 3.929209
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:29:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + 'Draft A'
+    - 'Draft B'
+             ^
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'Draft B'
+  actual: 'Draft A'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:33:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: RefineChat late successful send cannot append A messages to B
+not ok 6 - RefineChat late successful send cannot append A messages to B
+  ---
+  duration_ms: 3.174875
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:37:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+        'B-message',
+    +   'A-user',
+    +   'A-agent'
+      ]
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: 'B-message'
+  actual:
+    0: 'B-message'
+    1: 'A-user'
+    2: 'A-agent'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/productChatOwnership.test.ts:41:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 0
+# fail 6
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 302.851625
+
+===== /tmp/r12-question-red.log =====
+TAP version 13
+# Subtest: ArtifactView approves the version shown in the confirmation despite live updates
+ok 1 - ArtifactView approves the version shown in the confirmation despite live updates
+  ---
+  duration_ms: 44.027458
+  type: 'test'
+  ...
+# Subtest: brand/BrandEditor approves the version shown in the confirmation despite live updates
+ok 2 - brand/BrandEditor approves the version shown in the confirmation despite live updates
+  ---
+  duration_ms: 10.176541
+  type: 'test'
+  ...
+# Subtest: project renameProject keeps the confirmed project across route changes
+ok 3 - project renameProject keeps the confirmed project across route changes
+  ---
+  duration_ms: 8.543375
+  type: 'test'
+  ...
+# Subtest: project archiveProject keeps the confirmed project across route changes
+ok 4 - project archiveProject keeps the confirmed project across route changes
+  ---
+  duration_ms: 4.041042
+  type: 'test'
+  ...
+# Subtest: Product sendToSwarm does not act after its confirmed story is replaced
+ok 5 - Product sendToSwarm does not act after its confirmed story is replaced
+  ---
+  duration_ms: 5.59625
+  type: 'test'
+  ...
+# Subtest: Product regenerate does not act after its confirmed story is replaced
+ok 6 - Product regenerate does not act after its confirmed story is replaced
+  ---
+  duration_ms: 4.023167
+  type: 'test'
+  ...
+# Subtest: Product question posting does not follow a changed story after consent
+not ok 7 - Product question posting does not follow a changed story after consent
+  ---
+  duration_ms: 5.020417
+  type: 'test'
+  location: '/Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:58:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+    + [
+    +   'posted'
+    + ]
+    - []
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+    0: 'posted'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/itziklavon/otto_os/ui/unit/designConsent.test.ts:68:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 6
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 345.721
+
+===== /tmp/r12-scale-browser.log =====
+[WebServer] (node:89255) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-8gKbrx OTTO_PORT=17872
+2026-10-07T23:47:34.396099Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-8gKbrx)
+2026-10-07T23:47:34.648756Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-8gKbrx/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-07T23:47:34.693281Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-8gKbrx/clickhouse, port 60481)
+2026-10-07T23:47:34.741160Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-07T23:47:34.750079Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-07T23:47:34.751129Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-07T23:47:34.751449Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-07T23:47:34.754856Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-07T23:47:34.754945Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-07T23:47:34.758542Z  INFO otto_server::boot::recovery: boot: post-listen work done in 13 ms (plugins=2)
+2026-10-07T23:47:34.758643Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-07T23:47:34.758667Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-07T23:47:34.834150Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-07T23:47:34.898238Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-07T23:47:34.898538Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+2026-10-07T23:47:34.898799Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-07T23:47:34.898820Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-07T23:47:34.899181Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-07T23:47:34.899482Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-07T23:47:34.902146Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-07T23:47:34.902524Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-07T23:47:34.902550Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-07T23:47:34.902571Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-07T23:47:34.902585Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-07T23:47:34.902624Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-07T23:47:34.903611Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-07T23:47:34.903904Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-07T23:47:34.983467Z  INFO ottod: listening on http://127.0.0.1:17872
+2026-10-07T23:47:34.983668Z  INFO ottod: alt loopback lane on http://localhost:17872 ([::1] + 127.0.0.1 both held)
+2026-10-07T23:47:34.984088Z  INFO otto_server::boot: boot: ready in 583 ms (db_compact=4 db_open=233 maintenance=6 modules=89 restore=7 recovery=241)
+[e2e] test daemon ready (pid 89299); root onboarded.
+2026-10-07T23:47:35.084078Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-8gKbrx/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-07T23:47:35.086070Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-07T23:47:35.092570Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-07T23:47:35.108860Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-07T23:47:35.109492Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-07T23:47:35.109534Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+
+Running 6 tests using 1 worker
+
+(node:89353) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+canvas 5 MB PUT ms: 12, 13, 16, 16, 21
+  ✓  1 [desktop-browser] › e2e/desktop-canvas-scale-perf.spec.ts:26:1 › 5 MB canvas scene: save and history stay under budget (573ms)
+canvas ref autosave bytes: 329, 329, 329, 329, 329; ms: 2, 2, 1, 1, 1
+  ✓  2 [desktop-browser] › e2e/desktop-canvas-scale-perf.spec.ts:73:1 › 3 MB image board: editor reads refs and autosaves stay under 200 KB (153ms)
+[design-scale] seeded 2000 artifacts in 3447 ms
+[design-scale] p95 first=4.6 next=4.2 ms
+  ✓  3 [desktop-browser] › e2e/desktop-design-hall-scale-perf.spec.ts:55:1 › collection first page and keyset pages stay under p95 150 ms at 2k artifacts (196ms)
+[design-scale] 4 MB PUT ms: 99, 99, 95, 95, 95
+  ✓  4 [desktop-browser] › e2e/desktop-design-hall-scale-perf.spec.ts:81:1 › a 4 MB content save stays under budget (488ms)
+[design-scale] storage gauge 10 ms, 2006 versions
+  ✓  5 [desktop-browser] › e2e/desktop-design-hall-scale-perf.spec.ts:99:1 › the storage gauge (auto-tidy dry run) answers fast and auto-tidy stays off (11ms)
+[WebServer] 2:47:41 AM [vite] (client) [console.warn] Service Worker registration blocked by Playwright
+  ✓  6 [desktop-browser] › e2e/desktop-product-chat-ownership.spec.ts:6:1 › Discovery chat keeps drafts and late failed replies with their conversation (4.2s)
+
+  6 passed (12.8s)
+
+===== /tmp/r12-mockup-red.log =====
+
+running 10 tests
+test mockup_assist::tests::html_prompt_has_sentinel_file_and_rules ... ok
+test mockup_assist::tests::mermaid_prompt_points_at_mmd_file ... ok
+test mockup_assist::tests::extract_fenced_html_and_mermaid ... ok
+test mockup_assist::tests::unknown_format_is_rejected_not_defaulted ... ok
+test mockup_assist::tests::excalidraw_and_scene3d_prompts_carry_their_schemas ... ok
+
+thread 'mockup_assist::tests::ownership_rejects_overlap_and_releases_after_failure' (3809778) panicked at crates/otto-server/src/mockup_assist.rs:697:9:
+assertion failed: claim_mockup(&id).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mockup_assist::tests::ownership_rejects_overlap_and_releases_after_failure ... FAILED
+
+thread 'mockup_assist::tests::failed_storage_write_cannot_report_success' (3809775) panicked at crates/otto-server/src/mockup_assist.rs:705:9:
+assertion failed: write_source(&dir.path().join("absent/file"), b"new source").await.is_err()
+test mockup_assist::tests::failed_storage_write_cannot_report_success ... FAILED
+test mockup_assist::tests::capped_read_refuses_non_utf8_and_missing ... ok
+test mockup_assist::tests::resolve_prefers_edited_file_then_reply ... ok
+
+thread 'mockup_assist::tests::dropped_request_aborts_the_live_file_poll' (3809772) panicked at crates/otto-server/src/mockup_assist.rs:721:9:
+assertion failed: tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.is_ok()
+test mockup_assist::tests::dropped_request_aborts_the_live_file_poll ... FAILED
+
+failures:
+
+failures:
+    mockup_assist::tests::dropped_request_aborts_the_live_file_poll
+    mockup_assist::tests::failed_storage_write_cannot_report_success
+    mockup_assist::tests::ownership_rejects_overlap_and_releases_after_failure
+
+test result: FAILED. 7 passed; 3 failed; 0 ignored; 0 measured; 951 filtered out; finished in 1.01s
+
+
+===== /tmp/r12-blender-red.log =====
+
+running 1 test
+
+thread 'design_blender::tests::render_admission_covers_preparation_before_the_job_is_recorded' (3809946) panicked at crates/otto-server/src/design_blender.rs:600:9:
+assertion failed: claim_render(&reg, "artifact").is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test design_blender::tests::render_admission_covers_preparation_before_the_job_is_recorded ... FAILED
+
+failures:
+
+failures:
+    design_blender::tests::render_admission_covers_preparation_before_the_job_is_recorded
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 960 filtered out; finished in 0.00s
+
+
+===== /tmp/r13-ui-check-node26.log =====
+
+> ui@0.2.0 check
+> node scripts/ui-guards.mjs && svelte-check --tsconfig ./tsconfig.app.json --fail-on-warnings && node node_modules/typescript7/bin/tsc -p tsconfig.node.json && node node_modules/typescript7/bin/tsc -p tsconfig.e2e.json && node node_modules/typescript7/bin/tsc -p tsconfig.unit.json
+
+ui-guards: ok (1042 files; no native dialogs, no undefined CSS vars, no ratchet regressions)
+Loading svelte-check in workspace: /Users/itziklavon/otto_os/ui
+Getting Svelte diagnostics...
+
+svelte-check found 0 errors and 0 warnings
+
+===== /tmp/r12-cycle-red-r14.log =====
+   Compiling otto-core v0.2.0 (/Users/itziklavon/otto_os/crates/otto-core)
+   Compiling sqlx-core v0.9.0
+   Compiling axum v0.8.9
+   Compiling sqlx-sqlite v0.9.0
+   Compiling sqlx-macros-core v0.9.0
+   Compiling sqlx-macros v0.9.0
+   Compiling sqlx v0.9.0
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+   Compiling otto-design v0.2.0 (/Users/itziklavon/otto_os/crates/otto-design)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.26s
+     Running unittests src/lib.rs (target/debug/deps/otto_design-3dc90d2b2e9fcec8)
+
+running 2 tests
+
+thread 'service::tests::opposing_explicit_links_cannot_both_pass_cycle_validation' (3896123) panicked at crates/otto-design/src/service.rs:1978:9:
+assertion `left == right` failed: opposing concurrent edges must not both be committed: Ok(DesignLink { id: "01M4CD0EY0WB1B3M9C2T6H58BF", src_artifact_id: "01M4CD0EXVK0T8TVH7RZ2B3BV1", src_version_id: None, src_node: None, dst_kind: "artifact", dst_id: "01M4CD0EXYV46JES9DSR64YN0T", dst_node: None, rel: "embeds", policy: "follow_approved", pinned_version_id: None, origin: "explicit", broken: false, meta: Object {}, created_by: "u1", created_at: 2026-10-08T00:01:02.400009Z }), Ok(DesignLink { id: "01M4CD0EY0XHXN394718Z7VZHM", src_artifact_id: "01M4CD0EXYV46JES9DSR64YN0T", src_version_id: None, src_node: None, dst_kind: "artifact", dst_id: "01M4CD0EXVK0T8TVH7RZ2B3BV1", dst_node: None, rel: "embeds", policy: "follow_approved", pinned_version_id: None, origin: "explicit", broken: false, meta: Object {}, created_by: "u1", created_at: 2026-10-08T00:01:02.400054Z })
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test service::tests::opposing_explicit_links_cannot_both_pass_cycle_validation ... FAILED
+test service::tests::extracted_and_explicit_links_share_cycle_validation_ownership ... ok
+
+failures:
+
+failures:
+    service::tests::opposing_explicit_links_cannot_both_pass_cycle_validation
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.63s
+
+error: test failed, to rerun pass `-p otto-design --lib`

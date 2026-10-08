@@ -1,0 +1,48 @@
+   Compiling otto-dbviewer v0.2.0 (/Users/itziklavon/otto_os/crates/otto-dbviewer)
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 50.16s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-1a101a9211bc88ec)
+
+running 40 tests
+test routes::api_client::tests::a_timeout_names_the_requests_own_limit ... ok
+test routes::api_client::tests::agent_callers_are_recognised_for_new_host_confirmation ... ok
+test routes::api_client::tests::an_invalid_tunnel_proxy_fails_instead_of_going_direct ... ok
+test routes::api_client::tests::apply_extras_settings_maps_onto_exec ... ok
+test routes::api_client::tests::attach_body_ships_only_what_the_viewer_needs ... ok
+test routes::api_client::tests::build_overview_filters_and_masks ... ok
+test routes::api_client::tests::caller_source_reads_session_header ... ok
+test routes::api_client::tests::check_override_vars_rejects_braces ... ok
+test routes::api_client::tests::cookie_jars_are_per_user_within_a_workspace ... ok
+test routes::api_client::tests::cookie_jars_are_workspace_isolated ... ok
+test routes::api_client::tests::enabled_kv_filters_disabled_and_empty ... ok
+test routes::api_client::tests::env_secret_probe_sees_nested_and_ignores_replaced_keys ... ok
+test routes::api_client::tests::execute_with_env_secret_never_reads_full_request_rows ... ok
+test routes::api_client::tests::extraction_misses_are_reported_and_headers_status_extract ... ok
+test routes::api_client::tests::history_rows_keep_only_a_body_preview ... ok
+test routes::api_client::tests::history_summary_query_limits_keep_existing_contract ... ok
+test routes::api_client::tests::idle_cookie_jars_are_swept_unless_held ... ok
+test routes::api_client::tests::invalid_graphql_variables_fail_saved_and_automation_replay ... ok
+test routes::api_client::tests::known_hosts_collects_human_requests_and_history ... ok
+test routes::api_client::tests::merged_auth_for_update_keeps_when_absent ... ok
+test routes::api_client::tests::net_guard_blocks_internal_addresses ... ok
+test routes::api_client::tests::net_guard_check_url_rejects_loopback_and_schemes ... ok
+test routes::api_client::tests::non_ascii_response_headers_are_kept ... ok
+test routes::api_client::tests::oauth_errors_prefer_the_endpoint_message_and_bound_the_excerpt ... ok
+test routes::api_client::tests::oauth_secrets_bind_to_the_saved_token_endpoint ... ok
+test routes::api_client::tests::overriding_a_variable_does_not_rebind_secrets ... ok
+test routes::api_client::tests::renaming_a_secret_moves_its_keychain_value ... ok
+test routes::api_client::tests::repeated_request_headers_are_all_sent ... ok
+test routes::api_client::tests::request_writes_emit_api_client_changed ... ok
+test routes::api_client::tests::resolve_exec_auth_resolves_own_and_rejects_foreign ... ok
+test routes::api_client::tests::safe_methods_need_no_confirm ... ok
+test routes::api_client::tests::script_variable_unset_survives_server_replay ... ok
+test routes::api_client::tests::secrets_stay_bound_to_their_hosts ... ok
+test routes::api_client::tests::secure_all_sweeps_and_is_idempotent ... ok
+test routes::api_client::tests::shape_agent_caps_body_and_drops_base64 ... ok
+test routes::api_client::tests::shape_request_agent_redacts_auth_headers_and_body ... ok
+test routes::api_client::tests::stamp_agent_merges_into_existing_extras ... ok
+test routes::api_client::tests::substitute_replaces_known_and_keeps_unknown ... ok
+test routes::api_client::tests::timeouts_report_the_limit_that_applied ... ok
+test routes::api_client::tests::unresolved_placeholders_are_found_where_the_step_would_send_them ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 899 filtered out; finished in 1.69s
