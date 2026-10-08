@@ -91,3 +91,26 @@ revision and reviewer prompts; another assertion rejects paths embedded in user
 content. Both new tests and all 40 tests in the Vault agent test module pass.
 Full workspace clippy and the production build pass after this correction.
 The two full named Vault browser specs also pass: 10 tests, no retries or skips.
+
+## CI fixture isolation follow-up
+
+The corrected Vault browser cases passed in the next CI run. That run exposed
+three existing browser fixture issues outside the recovery implementation:
+
+- Notification fixtures mocked HTTP but still accepted live notices from other
+  tests. Three injected notices reproduced the exact expected-60/received-63
+  failure. Reusing event isolation preserves the exact-count assertion and
+  passes unrelated events through. All five notification tests pass.
+- The D2 recovery test sampled host time after starting its browser clock. An
+  injected scheduling delay reproduced `Cannot fast-forward to the past`.
+  Fixed virtual timestamps pass with the same delay and in six final focused
+  runs, preserving recovery assertions and the production timeout.
+- The School trace showed successful clicks/session opening amid cumulative
+  software-rendering delays, including a 35-second screenshot. Only that
+  interaction journey uses DPR 0.5 now, preserving its CSS viewport, motion,
+  screenshot, actions, assertions and timeout. The renderer honors that DPR;
+  other visual journeys retain their original resolution. The named test passes.
+  The timeout did not reproduce locally, and no runtime speedup is claimed.
+
+All three changes are test-only. UI checks report zero errors/warnings, E2E
+TypeScript passes, and full workspace clippy passes before the follow-up push.

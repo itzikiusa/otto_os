@@ -258,7 +258,10 @@ test('Canvas same-scene reopen keeps the newer draft when an older save resolves
 test('D2 timed-out transport is disposed and the next queued render recovers', async ({ page }) => {
   const compiling = new Set<string>();
   await page.exposeFunction('d2CompileRequested', (source: string) => { compiling.add(source); });
-  await page.clock.install();
+  // Use one virtual timeline: sampling host Date after navigation can already
+  // be behind the browser clock when pauseAt arrives on a busy CI worker.
+  const pausedAt = new Date('2026-01-01T01:00:00Z');
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
   await page.route('**/node_modules/@terrastruct/d2/dist/browser/index.js*', route => route.fulfill({
     contentType: 'text/javascript', body: `
       let loads = 0;
@@ -286,7 +289,7 @@ test('D2 timed-out transport is disposed and the next queued render recovers', a
     `,
   }));
   await page.goto('/');
-  await page.clock.pauseAt(new Date());
+  await page.clock.pauseAt(pausedAt);
   const pending = page.evaluate(async () => {
     const path = '/src/modules/canvas/d2.ts';
     const { renderD2, parseD2 } = await import(path);
