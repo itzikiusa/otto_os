@@ -158,6 +158,21 @@ pub trait VerifyOps: Send + Sync {
 pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> VerifySummary {
     let mut summary = VerifySummary::default();
     for goal in &goals {
+        if ops.cancelled() {
+            summary.cancelled = true;
+            return summary;
+        }
+        if matches!(
+            goal.status.as_str(),
+            "passed" | "warned" | "unmet" | "error"
+        ) {
+            summary.blocked |= goal.blocking && matches!(goal.status.as_str(), "unmet" | "error");
+            summary.results.push(GoalResult {
+                goal_id: goal.id.clone(),
+                status: goal.status.clone(),
+            });
+            continue;
+        }
         // Resume from persisted iterations so a restart continues mid-sequence.
         let mut iterations = goal.iterations;
         let mut scrutiny = (iterations + 1) as u32;
@@ -166,7 +181,12 @@ pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> Ver
                 summary.cancelled = true;
                 return summary;
             }
-            let Some(v) = ops.verify_goal(goal, scrutiny).await else {
+            let verdict = ops.verify_goal(goal, scrutiny).await;
+            if ops.cancelled() {
+                summary.cancelled = true;
+                return summary;
+            }
+            let Some(v) = verdict else {
                 ops.record(goal, "error", iterations, None).await;
                 if goal.blocking {
                     summary.blocked = true;
@@ -205,7 +225,12 @@ pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> Ver
                         summary.blocked = true;
                         break "unmet";
                     }
-                    match ops.request_fix(goal, &v).await {
+                    let fixed = ops.request_fix(goal, &v).await;
+                    if ops.cancelled() {
+                        summary.cancelled = true;
+                        return summary;
+                    }
+                    match fixed {
                         FixOutcome::Completed => {
                             iterations += 1;
                             scrutiny += 1;
@@ -230,7 +255,10 @@ pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> Ver
     summary.cancelled = ops.cancelled();
     // Required verification errors block too; advisory errors remain nonblocking.
     if !summary.cancelled && !summary.blocked {
-        summary.merge_status = Some(ops.merge_back().await);
+        let status = ops.merge_back().await;
+        summary.cancelled = status == "cancelled" || ops.cancelled();
+        summary.blocked = !matches!(status.as_str(), "merged" | "up_to_date");
+        summary.merge_status = Some(status);
     }
     summary
 }
@@ -270,11 +298,18 @@ pub fn is_verifying(task_id: &str) -> bool {
 /// Stop every in-flight verification for a swarm (Abort): flag + kill sessions.
 pub async fn stop_swarm(ctx: &SwarmRt, swarm_id: &str) {
     let handles: Vec<CancelState> = {
-        let map = registry().lock().unwrap();
-        map.values()
-            .filter(|h| h.swarm_id == swarm_id)
-            .map(|h| h.cancel.clone())
-            .collect()
+        let mut map = registry().lock().unwrap();
+        let mut handles = Vec::new();
+        map.retain(|_, h| {
+            if h.swarm_id == swarm_id {
+                h.cancel.signal();
+                handles.push(h.cancel.clone());
+                false
+            } else {
+                true
+            }
+        });
+        handles
     };
     for cs in handles {
         cs.signal();
@@ -282,17 +317,27 @@ pub async fn stop_swarm(ctx: &SwarmRt, swarm_id: &str) {
     }
 }
 
+/// Invalidate the current verification before a task edit or deletion. The
+/// watcher observes the signal and closes any active session.
+pub(crate) fn invalidate_task(task_id: &str) {
+    if let Some(handle) = registry().lock().unwrap().get(task_id) {
+        // Keep the dev's branch reserved until the old runner has drained.
+        handle.cancel.signal();
+    }
+}
+
 /// Stop a single task's verification.
 pub async fn stop_task(ctx: &SwarmRt, task_id: &str) {
-    let cs = registry()
-        .lock()
-        .unwrap()
-        .get(task_id)
-        .map(|h| h.cancel.clone());
+    let Ok(task) = ctx.swarm_repo().get_task(&task_id.to_string()).await else {
+        return;
+    };
+    let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
+    let cs = registry().lock().unwrap().remove(task_id).map(|h| h.cancel);
     if let Some(cs) = cs {
         cs.signal();
         cs.kill_tracked(ctx).await;
     }
+    let _ = ctx.swarm_repo().stop_verification_runs(&task.id).await;
     // The controller returns on `cancelled` without touching the status (the
     // swarm-abort path owns it there) — so an operator Stop must settle the
     // task itself, or it sits in `verifying` forever and the next coordinator
@@ -324,10 +369,16 @@ pub async fn stop_task(ctx: &SwarmRt, task_id: &str) {
 }
 
 /// RAII guard: removes the registry entry when the controller exits (incl. panic).
-struct RegistryGuard(String);
+struct RegistryGuard(String, CancelState);
 impl Drop for RegistryGuard {
     fn drop(&mut self) {
-        registry().lock().unwrap().remove(&self.0);
+        let mut map = registry().lock().unwrap();
+        if map
+            .get(&self.0)
+            .is_some_and(|h| h.cancel.same_generation(&self.1))
+        {
+            map.remove(&self.0);
+        }
     }
 }
 
@@ -531,6 +582,10 @@ pub struct SwarmVerifyOps {
 #[async_trait]
 impl VerifyOps for SwarmVerifyOps {
     async fn verify_goal(&self, goal: &SwarmGoal, scrutiny: u32) -> Option<Verdict> {
+        if !self.current().await || self.over_budget().await {
+            self.cancel.signal();
+            return None;
+        }
         let prompt = verify_prompt(goal, &self.integration_branch, scrutiny);
         let title = format!(
             "Verify: {} · {}",
@@ -591,6 +646,10 @@ impl VerifyOps for SwarmVerifyOps {
     }
 
     async fn merge_back(&self) -> String {
+        let _operation = crate::runtime::engine::operation_guard(&self.swarm.id).await;
+        if !self.current().await {
+            return "cancelled".into();
+        }
         let outcome = crate::runtime::merge::merge_task_branch(
             &self.ctx,
             &self.swarm,
@@ -673,6 +732,10 @@ impl VerifyOps for SwarmVerifyOps {
     }
 
     async fn record(&self, goal: &SwarmGoal, status: &str, iterations: i64, v: Option<&Verdict>) {
+        let _operation = crate::runtime::engine::operation_guard(&self.swarm.id).await;
+        if !self.current().await {
+            return;
+        }
         let _ = self
             .ctx
             .swarm_repo()
@@ -690,6 +753,10 @@ impl VerifyOps for SwarmVerifyOps {
     }
 
     async fn record_iterations(&self, goal: &SwarmGoal, iterations: i64) {
+        let _operation = crate::runtime::engine::operation_guard(&self.swarm.id).await;
+        if !self.current().await {
+            return;
+        }
         let _ = self
             .ctx
             .swarm_repo()
@@ -770,6 +837,20 @@ impl VerifyOps for SwarmVerifyOps {
 }
 
 impl SwarmVerifyOps {
+    async fn current(&self) -> bool {
+        if self.cancel.cancelled() {
+            return false;
+        }
+        let task = self.ctx.swarm_repo().get_task(&self.task.id).await;
+        let swarm = self.ctx.swarm_repo().get_swarm(&self.swarm.id).await;
+        let current = matches!(task, Ok(t) if t.status == "verifying" && t.assignee_agent_id.as_deref() == Some(self.dev.id.as_str()))
+            && matches!(swarm, Ok(s) if s.status == "active");
+        if !current {
+            self.cancel.signal();
+        }
+        current
+    }
+
     async fn emit_goal(&self, goal_id: &str) {
         if let Ok(g) = self.ctx.swarm_repo().get_goal(&goal_id.to_string()).await {
             let _ = self.ctx.events().send(Event::SwarmGoalUpdated {
@@ -807,19 +888,16 @@ pub fn start_verification(ctx: &SwarmRt, task: SwarmTask, dev_agent_id: String) 
     }
     let ctx = ctx.clone();
     tokio::spawn(async move {
-        let _guard = RegistryGuard(task.id.clone());
-        if let Err(e) = run_controller(&ctx, &task, &dev_agent_id, cancel).await {
+        let _guard = RegistryGuard(task.id.clone(), cancel.clone());
+        if let Err(e) = run_controller(&ctx, &task, &dev_agent_id, cancel.clone()).await {
             tracing::warn!(task = %task.id, "swarm verification controller error: {e}");
-            // Don't strand the task in `verifying`.
+            let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
+            if cancel.cancelled() {
+                return;
+            }
             let _ = ctx
                 .swarm_repo()
-                .update_task(
-                    &task.id,
-                    TaskPatch {
-                        status: Some("blocked".into()),
-                        ..Default::default()
-                    },
-                )
+                .set_task_status_if(&task.id, &["verifying"], "blocked")
                 .await;
             crate::runtime::engine::emit_task_pub(&ctx, &task.id).await;
         }
@@ -844,40 +922,31 @@ async fn run_controller(
     // The dev's worktree + branch (already created during the dev's turn).
     let cwd_info =
         crate::runtime::workspace::ensure_cwd_info(ctx, &swarm, &dev, Some(&project)).await?;
-    let (agent_branch, integration_branch) =
-        match (cwd_info.branch.clone(), cwd_info.integration_branch.clone()) {
-            (Some(b), Some(i)) => (b, i),
-            _ => {
-                // No worktree (scratch/repo mode) — nothing to verify-and-merge; just complete.
-                repo.update_task(
-                    &task.id,
-                    TaskPatch {
-                        status: Some("done".into()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-                crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
-                crate::runtime::engine::complete_parent_if_done(ctx, task).await;
+    let (agent_branch, integration_branch) = match (
+        cwd_info.branch.clone(),
+        cwd_info.integration_branch.clone(),
+    ) {
+        (Some(b), Some(i)) => (b, i),
+        _ => {
+            // No worktree (scratch/repo mode) — nothing to verify-and-merge; just complete.
+            let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
+            if cancel.cancelled()
+                || !matches!(repo.get_swarm(&task.swarm_id).await, Ok(s) if s.status == "active")
+            {
                 return Ok(());
             }
-        };
+            if repo
+                .set_task_status_if(&task.id, &["verifying"], "done")
+                .await?
+            {
+                crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
+                crate::runtime::engine::complete_parent_if_done(ctx, task).await;
+            }
+            return Ok(());
+        }
+    };
 
     let goals = assemble_task_goals(ctx, task).await;
-    if goals.is_empty() {
-        repo.update_task(
-            &task.id,
-            TaskPatch {
-                status: Some("done".into()),
-                ..Default::default()
-            },
-        )
-        .await?;
-        crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
-        crate::runtime::engine::complete_parent_if_done(ctx, task).await;
-        return Ok(());
-    }
-
     let user = User {
         id: swarm.created_by.clone(),
         username: "swarm".into(),
@@ -913,6 +982,10 @@ async fn run_controller(
     } else {
         "done"
     };
+    let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
+    if !ops.current().await {
+        return Ok(());
+    }
     // CAS from `verifying` (S4-07): the operator may have cancelled the task
     // or moved it back to To do during a multi-minute verify/fix/merge — that
     // choice wins; no `done`, no summary post, no parent completion.
@@ -974,6 +1047,11 @@ async fn run_controller(
 /// (e.g. after a daemon restart) so they aren't stranded (review B2). The trigger
 /// persists the dev as the task's `assignee_agent_id`, so recovery reads it there.
 pub async fn recover(ctx: &SwarmRt, swarm_id: &str) {
+    let _operation = crate::runtime::engine::operation_guard(swarm_id).await;
+    if !matches!(ctx.swarm_repo().get_swarm(&swarm_id.to_string()).await, Ok(s) if s.status == "active")
+    {
+        return;
+    }
     let tasks = ctx
         .swarm_repo()
         .list_tasks_for_swarm(&swarm_id.to_string())
@@ -1151,6 +1229,7 @@ mod tests {
         cancel_after_first_verify: bool,
         cancel: AtomicBool,
         over_budget: bool,
+        merge_status: String,
         log: StdMutex<Vec<String>>,
         scrutiny: StdMutex<Vec<(String, u32)>>,
     }
@@ -1162,6 +1241,7 @@ mod tests {
                 cancel_after_first_verify: false,
                 cancel: AtomicBool::new(false),
                 over_budget: false,
+                merge_status: "merged".into(),
                 log: StdMutex::new(Vec::new()),
                 scrutiny: StdMutex::new(Vec::new()),
             }
@@ -1194,7 +1274,7 @@ mod tests {
         }
         async fn merge_back(&self) -> String {
             self.log.lock().unwrap().push("merge".into());
-            "merged".into()
+            self.merge_status.clone()
         }
         async fn record(&self, g: &SwarmGoal, status: &str, iterations: i64, _v: Option<&Verdict>) {
             self.log
@@ -1221,6 +1301,115 @@ mod tests {
         async fn over_budget(&self) -> bool {
             self.over_budget
         }
+    }
+
+    #[tokio::test]
+    async fn task_status_edit_cancels_its_verifier() {
+        let repo = otto_state::SwarmRepo::new(otto_state::db::test_pool().await);
+        let task = repo
+            .create_task(otto_state::swarm::NewTask {
+                project_id: "p".into(),
+                swarm_id: "s".into(),
+                workspace_id: "w".into(),
+                title: "verify".into(),
+                description: String::new(),
+                assignee_agent_id: None,
+                status: "verifying".into(),
+                priority: "medium".into(),
+                parent_task_id: None,
+                depends_on: json!([]),
+                labels: json!([]),
+                order_idx: 0,
+                created_by: "u".into(),
+            })
+            .await
+            .unwrap();
+        let cancel = CancelState::detached();
+        registry().lock().unwrap().insert(
+            task.id.clone(),
+            Handle {
+                cancel: cancel.clone(),
+                dev_agent_id: "dev".into(),
+                swarm_id: "s".into(),
+            },
+        );
+        let _guard = RegistryGuard(task.id.clone(), cancel.clone());
+        let service = crate::service::SwarmService::new(repo);
+        service
+            .update_task(
+                &task.id,
+                serde_json::from_value(json!({"status":"cancelled"})).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            cancel.cancelled(),
+            "editing a verifying task must suppress its pending merge"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_skips_completed_goals() {
+        let mut passed = goal("passed", true, 3);
+        passed.status = "passed".into();
+        let mut warned = goal("warned", true, 3);
+        warned.status = "warned".into();
+        let ops = MockOps::new(FixOutcome::Completed).script("pending", vec![vd(true, true)]);
+        let summary = run_verification(vec![passed, warned, goal("pending", true, 3)], &ops).await;
+        assert!(!summary.blocked);
+        assert_eq!(
+            summary
+                .results
+                .iter()
+                .map(|r| r.status.as_str())
+                .collect::<Vec<_>>(),
+            vec!["passed", "warned", "passed"]
+        );
+        assert_eq!(
+            ops.scrutiny.lock().unwrap().clone(),
+            vec![("pending".into(), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_merge_blocks_completion() {
+        for status in ["error", "conflicts", "skipped"] {
+            let mut ops = MockOps::new(FixOutcome::Completed).script("g", vec![vd(true, true)]);
+            ops.merge_status = status.into();
+            let summary = run_verification(vec![goal("g", true, 3)], &ops).await;
+            assert!(
+                summary.blocked,
+                "merge status {status} cannot complete the task"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_verdict_does_not_settle_or_fix_goal() {
+        let mut ops = MockOps::new(FixOutcome::Completed).script("g", vec![vd(false, true)]);
+        ops.cancel_after_first_verify = true;
+        let summary = run_verification(vec![goal("g", true, 3)], &ops).await;
+        assert!(summary.cancelled);
+        assert_eq!(ops.logged(), vec!["verify:g:1"]);
+    }
+
+    #[test]
+    fn old_controller_cleanup_keeps_replacement_registered() {
+        let id = "replacement-controller-test".to_string();
+        let old = CancelState::detached();
+        let replacement = CancelState::detached();
+        registry().lock().unwrap().insert(
+            id.clone(),
+            Handle {
+                cancel: replacement.clone(),
+                dev_agent_id: "dev".into(),
+                swarm_id: "swarm".into(),
+            },
+        );
+        drop(RegistryGuard(id.clone(), old));
+        assert!(is_verifying(&id));
+        drop(RegistryGuard(id.clone(), replacement));
+        assert!(!is_verifying(&id));
     }
 
     #[test]

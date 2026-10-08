@@ -545,7 +545,13 @@ async fn task_notice(
 /// workflow run it handed off to (both recorded on the run row as they
 /// started). The execution future itself was already dropped by the caller.
 async fn stop_run(ctx: &impl AutomationCtx, run_id: &str) -> ExecFailure {
-    let row = ctx.scheduled_tasks().get_run(run_id).await.ok();
+    let row = match ctx.scheduled_tasks().cancel_handoff(run_id).await {
+        Ok(row) => Some(row),
+        Err(error) => {
+            warn!(run = %run_id, "scheduled task stop: persist cancellation: {error}");
+            ctx.scheduled_tasks().get_run(run_id).await.ok()
+        }
+    };
     let session_id = row.as_ref().and_then(|r| r.session_id.clone());
     let workflow_run_id = row.as_ref().and_then(|r| r.workflow_run_id.clone());
     if let Some(sid) = &session_id {
@@ -843,6 +849,7 @@ async fn run_one_agent_session(
         WAITING_IDLE,
         STUCK_IDLE,
         Some(|t| !t.trim().is_empty()),
+        None,
         |_st| async {},
     )
     .await
@@ -1098,12 +1105,13 @@ async fn execute_workflow(
     // a workflow still busy with an earlier run (started by a trigger, a
     // manual run, or another task) is not stacked — this occurrence is
     // recorded `skipped`, quietly.
-    // The check and the insert are one write transaction (`admit_run_if_idle`):
-    // a separate has_active_run → create_run let a trigger admit between them.
+    // Admission, overlap checking and the durable parent link share one write
+    // transaction; Stop either fences admission or cancels its linked child.
     let ws = ctx.workspaces().get(&task.workspace_id).await?;
     let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
-    let Some(run) = repo
-        .admit_run_if_idle(&workflow.id, &workflow.workspace_id, &input, None)
+    let Some(run) = ctx
+        .scheduled_tasks()
+        .admit_workflow_handoff(sched_run_id, &workflow.id, &workflow.workspace_id, &input)
         .await?
     else {
         return Err(ExecFailure {
@@ -1115,12 +1123,8 @@ async fn execute_workflow(
         });
     };
     let run_id = run.id.clone();
-    // Linked at once: the run row can open it while it runs, and a Stop
-    // cancels it.
-    let _ = ctx
-        .scheduled_tasks()
-        .set_run_workflow_run(sched_run_id, &run_id)
-        .await;
+    // The durable parent link committed with admission. Stop cannot miss this
+    // child even if cancellation drops this future before spawn.
     ctx.spawn_workflow_run(
         ws.clone(),
         workflow.clone(),

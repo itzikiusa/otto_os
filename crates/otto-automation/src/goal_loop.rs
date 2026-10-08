@@ -144,6 +144,17 @@ const EXECUTOR_STUCK_IDLE: Duration = Duration::from_secs(180);
 const EXECUTOR_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 /// Absolute controller-lifetime backstop, regardless of config.
 const HARD_CAP: Duration = Duration::from_secs(4 * 60 * 60);
+const CLEANUP_GRACE: Duration = Duration::from_secs(10);
+
+fn remaining_runtime(loop_: &GoalLoop) -> Duration {
+    Duration::from_secs(
+        loop_
+            .limits
+            .max_runtime_secs
+            .saturating_sub(loop_.elapsed_secs_at(Utc::now())),
+    )
+    .min(HARD_CAP)
+}
 
 // --- Lifecycle -------------------------------------------------------------
 
@@ -294,6 +305,9 @@ pub async fn retry_executor(
     let mut ledger = loop_.ledger.clone();
     ledger.verifications.clear();
     ledger.review_passed = false;
+    // Persist before work so a pause/crash after executor completion cannot
+    // lose the continuation and dispatch the whole fleet again.
+    ledger.resume_evaluation_iteration = Some(iter_idx);
     ctx.goal_loops_repo().set_ledger(loop_id, &ledger).await?;
     // Old acceptance applies to old work. A retry must earn a fresh evaluation.
     ctx.goal_loops_repo()
@@ -326,18 +340,30 @@ pub async fn retry_executor(
     .await;
     let ctx2 = ctx.clone();
     tokio::spawn(async move {
-        let _ = run_executor(
-            &ctx2,
-            &loop_,
-            &iter.id,
-            iter_idx,
-            agent_index,
-            &exec,
-            &wt,
-            &prompt,
-            Some(&handle.interrupted),
+        let budget = ctx2
+            .goal_loops_repo()
+            .get(&loop_.id)
+            .await
+            .map(|current| remaining_runtime(&current))
+            .unwrap_or(Duration::ZERO);
+        let expired = within_budget(
+            run_executor(
+                &ctx2,
+                &loop_,
+                &iter.id,
+                iter_idx,
+                agent_index,
+                &exec,
+                &wt,
+                &prompt,
+                Some(&handle.interrupted),
+            ),
+            budget,
+            &handle.interrupted,
+            CLEANUP_GRACE,
         )
-        .await;
+        .await
+        .is_err();
         let operation = ctx2.goal_loops().operation(&loop_.id);
         let _guard = operation.lock().await;
         if is_current(&ctx2, &loop_.id, &handle) {
@@ -352,6 +378,15 @@ pub async fn retry_executor(
                 .await;
             } else if handle.paused.load(Ordering::Relaxed) {
                 cleanup_executor_sessions(&ctx2, &loop_.workspace_id, &loop_.id).await;
+            } else if expired {
+                finalize(
+                    &ctx2,
+                    &loop_.id,
+                    GoalLoopStatus::Exhausted,
+                    Some("time cap reached"),
+                    None,
+                )
+                .await;
             } else {
                 block(
                     &ctx2,
@@ -378,6 +413,46 @@ pub async fn retry_executor(
 // --- Controller ------------------------------------------------------------
 
 async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
+    let budget = match ctx.goal_loops_repo().get(&loop_id).await {
+        Ok(loop_) => remaining_runtime(&loop_),
+        Err(_) => {
+            deregister(&ctx, &loop_id, &handle);
+            return;
+        }
+    };
+    let expired = within_budget(
+        controller_inner(ctx.clone(), loop_id.clone(), handle.clone()),
+        budget,
+        &handle.interrupted,
+        CLEANUP_GRACE,
+    )
+    .await
+    .is_err();
+    if expired && is_current(&ctx, &loop_id, &handle) {
+        if handle.cancel.load(Ordering::Relaxed) {
+            finalize(
+                &ctx,
+                &loop_id,
+                GoalLoopStatus::Stopped,
+                Some("stopped by user"),
+                None,
+            )
+            .await;
+        } else if !handle.paused.load(Ordering::Relaxed) {
+            finalize(
+                &ctx,
+                &loop_id,
+                GoalLoopStatus::Exhausted,
+                Some("time cap reached"),
+                None,
+            )
+            .await;
+        }
+        deregister(&ctx, &loop_id, &handle);
+    }
+}
+
+async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
     let started = Instant::now();
     // Resume continuity: seed prior evaluation from the last iteration if any.
     let mut prior_eval: Option<GoalLoopEvaluation> = ctx
@@ -413,6 +488,10 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
             deregister(&ctx, &loop_id, &handle);
             return;
         }
+        // The deadline wrapper owns settlement after cooperative cleanup.
+        if handle.interrupted.load(Ordering::Relaxed) {
+            return;
+        }
         if started.elapsed() >= HARD_CAP {
             finalize(
                 &ctx,
@@ -438,21 +517,10 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
         let ws = loop_.workspace_id.clone();
         let limits = loop_.limits.clone();
 
-        // Human acceptance finishes the existing iteration without re-running
-        // executors or spending another iteration. Verification still has its
+        // Human acceptance or an explicit executor retry resumes evaluation
+        // of this iteration without another fleet or another iteration. Verification still has its
         // phase/runtime deadline and command checks run again.
-        let verification_only = prior_eval.as_ref().is_some_and(|e| {
-            e.criteria
-                .iter()
-                .any(|c| c.evidence == "Awaiting human verification")
-                && loop_.definition.acceptance_criteria.iter().all(|c| {
-                    if c.verify_kind == "human" {
-                        loop_.ledger.verification(c).is_some()
-                    } else {
-                        e.criteria.iter().any(|v| v.id == c.id && v.met)
-                    }
-                })
-        });
+        let verification_only = evaluation_only(&loop_, prior_eval.as_ref());
 
         // ---- HARD-LIMIT GATE (before starting an iteration) ----
         if !verification_only && loop_.iterations_started >= limits.max_iterations {
@@ -485,7 +553,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
             return;
         }
 
-        // ---- new iteration (or final human verification of the current one) ----
+        // ---- new iteration (or pending evaluation of the current one) ----
         let context_in = loop_.context_digest.clone();
         let created = if verification_only {
             ctx.goal_loops_repo()
@@ -495,6 +563,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
             // Any further executor work invalidates approvals of the earlier state.
             loop_.ledger.verifications.clear();
             loop_.ledger.review_passed = false;
+            loop_.ledger.resume_evaluation_iteration = None;
             let _ = ctx
                 .goal_loops_repo()
                 .set_ledger(&loop_id, &loop_.ledger)
@@ -703,6 +772,8 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
             continue;
         }
         prior_eval = Some(eval.clone());
+        // Keep the continuation through completion review; clear it only when
+        // the next action can legitimately start a new work iteration.
 
         // ---- DECISION ----
         let all_met = !eval.criteria.is_empty() && eval.criteria.iter().all(|c| c.met);
@@ -712,6 +783,9 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
             // status. Always attached — this is the "no done without evidence" record.
             let proof_status =
                 assemble_goal_loop_proof(&ctx, &loop_, &eval, &verify_caps, &wt).await;
+            if stop_requested(&handle) {
+                continue;
+            }
 
             // Teeth (opt-in via OTTO_PROOF_REQUIRE_GOAL_LOOP): refuse to finalize
             // "achieved" without a passing machine-checked test, including the
@@ -735,6 +809,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
                         "Reported done without passing test evidence — continuing to gather proof."
                             .into(),
                 });
+                clear_evaluation_continuation(&ctx, &loop_id).await;
                 continue;
             }
 
@@ -766,6 +841,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
                     continue;
                 }
                 if !ledger.review_passed {
+                    clear_evaluation_continuation(&ctx, &loop_id).await;
                     block(&ctx, &loop_id, "Completion review has unresolved findings. Inspect the review evidence before resuming.").await;
                     deregister(&ctx, &loop_id, &handle);
                     return;
@@ -786,6 +862,7 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
             deregister(&ctx, &loop_id, &handle);
             return;
         }
+        clear_evaluation_continuation(&ctx, &loop_id).await;
         if eval.verdict == "blocked" {
             let summary = format!("Blocked — needs input. {}", eval.feedback);
             // Bank the active window and stop ticking; resume requires user action.
@@ -812,8 +889,68 @@ async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
     }
 }
 
+/// Whether the current iteration can be evaluated without another executor fleet.
+fn evaluation_only(loop_: &GoalLoop, prior_eval: Option<&GoalLoopEvaluation>) -> bool {
+    if loop_.current_iteration > 0
+        && loop_.ledger.resume_evaluation_iteration == Some(loop_.current_iteration)
+    {
+        return true;
+    }
+    prior_eval.is_some_and(|e| {
+        e.criteria
+            .iter()
+            .any(|c| c.evidence == "Awaiting human verification")
+            && loop_.definition.acceptance_criteria.iter().all(|c| {
+                if c.verify_kind == "human" {
+                    loop_.ledger.verification(c).is_some()
+                } else {
+                    e.criteria.iter().any(|v| v.id == c.id && v.met)
+                }
+            })
+    })
+}
+
+/// Await owned work within its remaining active-runtime budget. Expiry signals
+/// cooperative cleanup before the caller settles the parent.
+async fn within_budget<T>(
+    work: impl std::future::Future<Output = T>,
+    budget: Duration,
+    interrupted: &AtomicBool,
+    cleanup_grace: Duration,
+) -> std::result::Result<T, ()> {
+    if budget.is_zero() {
+        interrupted.store(true, Ordering::Relaxed);
+        ring_flags();
+        return Err(());
+    }
+    tokio::pin!(work);
+    tokio::select! {
+        biased;
+        _ = tokio::time::sleep(budget) => {}
+        result = &mut work => return Ok(result),
+    }
+    interrupted.store(true, Ordering::Relaxed);
+    ring_flags();
+    // Keep polling the owner so it can stop its exact child before dropping
+    // it. A broken cleanup path cannot hold the controller open forever.
+    let _ = tokio::time::timeout(cleanup_grace, &mut work).await;
+    Err(())
+}
+
+async fn clear_evaluation_continuation(ctx: &impl AutomationCtx, id: &Id) {
+    let _ = ctx
+        .goal_loops_repo()
+        .edit_ledger(id, |ledger| {
+            ledger.resume_evaluation_iteration = None;
+            Ok(())
+        })
+        .await;
+}
+
 fn stop_requested(handle: &LoopHandle) -> bool {
-    handle.cancel.load(Ordering::Relaxed) || handle.paused.load(Ordering::Relaxed)
+    handle.interrupted.load(Ordering::Relaxed)
+        || handle.cancel.load(Ordering::Relaxed)
+        || handle.paused.load(Ordering::Relaxed)
 }
 
 /// True when `handle` is still the registry's current controller for this loop
@@ -924,6 +1061,14 @@ async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) {
 
 /// List + kill all executor sessions tagged for this loop.
 pub async fn cleanup_executor_sessions(ctx: &impl AutomationCtx, ws_id: &Id, loop_id: &Id) {
+    let _ = tokio::time::timeout(
+        CLEANUP_GRACE,
+        cleanup_executor_sessions_inner(ctx, ws_id, loop_id),
+    )
+    .await;
+}
+
+async fn cleanup_executor_sessions_inner(ctx: &impl AutomationCtx, ws_id: &Id, loop_id: &Id) {
     let sessions = match ctx.manager().list_by_workspace(ws_id).await {
         Ok(s) => s,
         Err(_) => return,
@@ -1391,6 +1536,11 @@ fn prompt_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
     ))
 }
 
+fn valid_executor_result(text: &str) -> bool {
+    serde_json::from_str::<crate::goal_loop_parse::ExecutorResult>(text)
+        .is_ok_and(|result| !result.summary.trim().is_empty())
+}
+
 /// Run one executor with bounded recovery; persists its live state throughout.
 /// Returns a short result summary for the evaluator/digester.
 #[allow(clippy::too_many_arguments)]
@@ -1454,6 +1604,58 @@ async fn run_executor(
     }
 }
 
+/// Exact session ownership spans creation, publication and the whole attempt.
+/// The mutex closes the send/receive gap: whichever side observes cancellation
+/// takes responsibility for stopping the session, even before it was published.
+struct ExecutorLease {
+    manager: Arc<otto_sessions::SessionManager>,
+    ownership: Arc<Mutex<(bool, Option<Id>)>>,
+}
+
+impl ExecutorLease {
+    fn new(manager: Arc<otto_sessions::SessionManager>) -> Self {
+        Self {
+            manager,
+            ownership: Arc::new(Mutex::new((false, None))),
+        }
+    }
+
+    fn close(&self) -> Option<Id> {
+        let mut owner = self.ownership.lock().unwrap();
+        owner.0 = true;
+        owner.1.take()
+    }
+
+    async fn stop(&self) {
+        let id = {
+            let mut owner = self.ownership.lock().unwrap();
+            owner.0 = true;
+            owner.1.clone()
+        };
+        if let Some(id) = id {
+            // Retain ownership until cleanup finishes: if the outer controller
+            // drops this await, Drop still stops this exact session.
+            if matches!(
+                tokio::time::timeout(CLEANUP_GRACE, self.manager.kill_session(&id)).await,
+                Ok(Ok(()))
+            ) {
+                self.ownership.lock().unwrap().1.take();
+            }
+        }
+    }
+}
+
+impl Drop for ExecutorLease {
+    fn drop(&mut self) {
+        if let Some(id) = self.close() {
+            let manager = self.manager.clone();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(CLEANUP_GRACE, manager.kill_session(&id)).await;
+            });
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_executor_attempt(
     ctx: &impl AutomationCtx,
@@ -1467,6 +1669,41 @@ async fn run_executor_attempt(
     out_path: &std::path::Path,
     timeout: Duration,
     cancel: Option<&Arc<AtomicBool>>,
+) -> RunOutcome {
+    let lease = ExecutorLease::new(ctx.manager().clone());
+    let mut outcome = tokio::select! {
+        biased;
+        _ = async {
+            match cancel {
+                Some(flag) => until_flag(|| flag.load(Ordering::Relaxed)).await,
+                None => std::future::pending::<()>().await,
+            }
+        } => RunOutcome::failed(None, FailReason::Stopped),
+        result = tokio::time::timeout(timeout, run_executor_attempt_inner(
+            ctx, loop_, iter_id, idx, exec_index, exec, cwd, prompt, out_path, timeout, cancel, &lease,
+        )) => result.unwrap_or_else(|_| RunOutcome::failed(None, FailReason::Timeout)),
+    };
+    if outcome.session_id.is_none() {
+        outcome.session_id = lease.ownership.lock().unwrap().1.clone();
+    }
+    lease.stop().await;
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_executor_attempt_inner(
+    ctx: &impl AutomationCtx,
+    loop_: &GoalLoop,
+    iter_id: &Id,
+    idx: u32,
+    exec_index: usize,
+    exec: &GoalLoopAgentCfg,
+    cwd: &str,
+    prompt: &str,
+    out_path: &std::path::Path,
+    timeout: Duration,
+    cancel: Option<&Arc<AtomicBool>>,
+    lease: &ExecutorLease,
 ) -> RunOutcome {
     // A blank executor provider resolves to the workspace/global default agent
     // (not a bare hardcoded "claude"), honoring Settings → Providers.
@@ -1512,16 +1749,32 @@ async fn run_executor_attempt(
             return RunOutcome::failed(None, FailReason::CreateFailed);
         }
     };
-    let session = match ctx
-        .manager()
-        .create(&ws, &loop_.created_by, req, None)
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("goal-loop: create executor session: {e}");
-            return RunOutcome::failed(None, FailReason::CreateFailed);
+    // Creation can outlive cancellation inside SessionManager. Its task owns
+    // the shared lease and may only publish a live session while that lease is
+    // open; late completion kills the exact session without dispatching work.
+    let manager = ctx.manager().clone();
+    let creator = loop_.created_by.clone();
+    let ownership = lease.ownership.clone();
+    let create = tokio::spawn(async move {
+        let session = manager.create(&ws, &creator, req, None).await?;
+        let accepted = {
+            let mut owner = ownership.lock().unwrap();
+            if owner.0 {
+                false
+            } else {
+                owner.1 = Some(session.id.clone());
+                true
+            }
+        };
+        if !accepted {
+            let _ = tokio::time::timeout(CLEANUP_GRACE, manager.kill_session(&session.id)).await;
+            return Err(Error::Conflict("executor creation canceled".into()));
         }
+        Ok(session)
+    });
+    let session = match create.await {
+        Ok(Ok(session)) => session,
+        _ => return RunOutcome::failed(None, FailReason::CreateFailed),
     };
     let sid = session.id.clone();
     persist_agent(
@@ -1569,6 +1822,7 @@ async fn run_executor_attempt(
             EXECUTOR_STUCK_IDLE,
             // The out-file is the executor's only result channel.
             None,
+            Some(valid_executor_result),
             |st| {
                 let ctx = ctx.clone();
                 let exec = exec.clone();
@@ -1673,6 +1927,124 @@ fn executor_error_note(reason: Option<FailReason>) -> String {
 #[cfg(test)]
 mod goal_loop_tests {
     use super::*;
+    fn recovery_goal(ledger: serde_json::Value) -> GoalLoop {
+        serde_json::from_value(serde_json::json!({
+            "id":"g", "workspace_id":"w", "name":"Goal", "repo_path":"/tmp/isolated",
+            "definition":{"title":"Goal","acceptance_criteria":[]},
+            "config":otto_core::domain::GoalLoopConfig::default(),
+            "limits":{"max_iterations":1,"max_runtime_secs":3600,"per_phase_timeout_secs":60,"max_attempts_per_executor":1},
+            "status":"blocked", "phase":"done", "iterations_started":1, "current_iteration":1,
+            "progress_pct":0, "elapsed_secs":0, "cost_usd":0, "created_by":"u",
+            "ledger":ledger, "created_at":Utc::now(), "updated_at":Utc::now()
+        })).unwrap()
+    }
+
+    #[test]
+    fn recovery_executor_completion_requires_nonempty_summary() {
+        assert!(!valid_executor_result("{}"));
+        assert!(!valid_executor_result(r#"{"summary":"  "}"#));
+        assert!(!valid_executor_result(r#"{"summary":"partial"#));
+        assert!(valid_executor_result(
+            r#"{"summary":"finished","changed_files":[],"blockers":[]}"#
+        ));
+    }
+
+    #[test]
+    fn recovery_retry_resumes_evaluation_at_iteration_cap() {
+        let goal = recovery_goal(serde_json::json!({"resume_evaluation_iteration":1}));
+        assert!(goal.iterations_started >= goal.limits.max_iterations);
+        assert!(evaluation_only(&goal, Some(&fallback_eval("executor retried; fresh evaluation required"))),
+            "a successful manual retry must evaluate this iteration without another fleet or iteration");
+    }
+
+    #[test]
+    fn recovery_stale_continuation_cannot_skip_new_iteration() {
+        let goal = recovery_goal(serde_json::json!({"resume_evaluation_iteration":2}));
+        assert!(!evaluation_only(&goal, None));
+        assert!(!evaluation_only(
+            &recovery_goal(serde_json::json!({})),
+            None
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_active_work_stops_at_runtime_budget_and_cleans_up() {
+        let interrupted = AtomicBool::new(false);
+        let cleaned = AtomicBool::new(false);
+        let work = async {
+            until_flag(|| interrupted.load(Ordering::Relaxed)).await;
+            cleaned.store(true, Ordering::Relaxed);
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(300),
+            within_budget(
+                work,
+                Duration::from_millis(10),
+                &interrupted,
+                Duration::from_millis(30),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Ok(Err(()))),
+            "active work must not extend the absolute deadline"
+        );
+        assert!(
+            cleaned.load(Ordering::Relaxed),
+            "deadline must allow cooperative cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_exhausted_budget_never_starts_more_work() {
+        let interrupted = AtomicBool::new(false);
+        let started = AtomicBool::new(false);
+        let result = within_budget(
+            async {
+                started.store(true, Ordering::Relaxed);
+            },
+            Duration::ZERO,
+            &interrupted,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!started.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn recovery_completion_does_not_interrupt_later_phases() {
+        let interrupted = AtomicBool::new(false);
+        assert_eq!(
+            within_budget(
+                async { 42 },
+                Duration::from_secs(1),
+                &interrupted,
+                Duration::from_millis(20)
+            )
+            .await,
+            Ok(42)
+        );
+        assert!(!interrupted.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn recovery_uncooperative_work_cannot_hold_cleanup_open() {
+        let interrupted = AtomicBool::new(false);
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(300),
+            within_budget(
+                std::future::pending::<()>(),
+                Duration::from_millis(10),
+                &interrupted,
+                Duration::from_millis(20),
+            ),
+        )
+        .await;
+        assert!(matches!(outcome, Ok(Err(()))));
+        assert!(interrupted.load(Ordering::Relaxed));
+    }
+
     /// Perf W8: a raised flag + ring wakes the waiter at once (no 25–100 ms
     /// poll), an already-raised flag resolves immediately, and a store that
     /// forgot to ring is still caught by the FLAG_SAFETY re-check.

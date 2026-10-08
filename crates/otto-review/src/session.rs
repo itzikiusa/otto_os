@@ -162,8 +162,9 @@ pub fn augment_prompt(base_prompt: &str, findings_path: &str) -> String {
     format!(
         "{base_prompt}\n\n---\nWhen you have finished reviewing, write your findings as a JSON \
          array (the exact schema described above) to this absolute file path, overwriting any \
-         existing content:\n\n{findings_path}\n\nWrite ONLY the JSON array to that file (no prose, \
-         no markdown fence). Writing the file is the last thing you do."
+         existing content:\n\n{findings_path}\n\nWrite ONLY the JSON array (no prose, \
+         no markdown fence). Write the complete array to a sibling temporary file, then \
+         atomically rename it to the path above as your final action."
     )
 }
 
@@ -573,6 +574,7 @@ pub async fn run_agent_session(
     // a partial result, whatever mode produced it.
     let guard = WatchGuard {
         pending_aware: true,
+        result_ok: Some(|text| parse_findings_array(text).is_some()),
         lens_files: lens_slugs
             .iter()
             .map(|slug| {

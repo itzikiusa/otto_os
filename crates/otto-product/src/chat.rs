@@ -273,8 +273,8 @@ pub async fn send_message<C: ProductStudioHost>(
             ctx.session_stuck_idle(),
         )
         .await?;
-    // Link the session on the first turn so later turns resume it.
-    if chat.session_id.is_none() {
+    // The host may replace a deleted session; the next turn must resume its actual ID.
+    if session_link_changed(chat.session_id.as_ref(), &sid) {
         ctx.discovery_chat_repo().set_session(&cid, &sid).await?;
     }
 
@@ -296,6 +296,10 @@ pub async fn send_message<C: ProductStudioHost>(
         user_message,
         agent_message,
     }))
+}
+
+fn session_link_changed(previous: Option<&Id>, actual: &Id) -> bool {
+    previous != Some(actual)
 }
 
 /// `POST /product/discovery-chats/{cid}/apply` — apply ONE proposed action
@@ -755,6 +759,16 @@ mod tests {
             meta_json: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn discovery_relinks_a_replacement_session() {
+        assert!(session_link_changed(
+            Some(&"deleted".into()),
+            &"replacement".into()
+        ));
+        assert!(session_link_changed(None, &"first".into()));
+        assert!(!session_link_changed(Some(&"same".into()), &"same".into()));
     }
 
     #[test]

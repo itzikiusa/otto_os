@@ -689,7 +689,16 @@ async fn poll_review(ctx: &ServerCtx, review_id: &Id, budget: Duration) -> Resul
     )
     .await;
     let status = ctx.reviews_store.review_status(review_id).await.ok();
-    review_outcome(status, budget)?;
+    if let Err(error) = review_outcome(status, budget) {
+        // The parent owns this review. A deadline must retire its children
+        // before failure becomes visible to a caller which can retry the run.
+        if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+            if let Ok(repo) = ctx.git_store.get_repo(&review.repo_id).await {
+                crate::modules::cancel_running_review(ctx, &review, &repo.workspace_id).await;
+            }
+        }
+        return Err(error);
+    }
     Ok(crate::modules::review_findings_counts(ctx, review_id).await)
 }
 
@@ -873,6 +882,7 @@ async fn fail(ctx: &ServerCtx, run: &OttoRun, err: &str) {
         })
         .await;
     if let Ok(fresh) = ctx.runs.get(&run.id).await {
+        crate::run_service::stop_owned_work(ctx, &fresh).await;
         emit(ctx, &fresh);
         project(ctx, &fresh).await;
         post_origin(ctx, &fresh, &format!("❌ Run failed: {err}")).await;
@@ -999,6 +1009,109 @@ mod tests {
             review_id: id.into(),
             status: "done".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn expired_review_wait_stops_its_child_before_returning_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("u", "x", "U", false)
+            .await
+            .unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let ws = ctx.workspaces.create("w", &path, &user.id).await.unwrap();
+        let repo = ctx
+            .git_store
+            .create_repo(otto_state::git::NewRepo {
+                workspace_id: ws.id,
+                name: "r".into(),
+                path,
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+        let review = ctx.reviews_store.create_review(&repo.id, 0).await.unwrap();
+        assert!(super::poll_review(&ctx, &review.id, Duration::ZERO)
+            .await
+            .is_err());
+        assert_eq!(
+            ctx.reviews_store.review_status(&review.id).await.unwrap(),
+            otto_core::domain::ReviewStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_failed_parent_retires_its_running_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("u", "x", "U", false)
+            .await
+            .unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let ws = ctx.workspaces.create("w", &path, &user.id).await.unwrap();
+        let repo = ctx
+            .git_store
+            .create_repo(otto_state::git::NewRepo {
+                workspace_id: ws.id.clone(),
+                name: "r".into(),
+                path,
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+        let review = ctx.reviews_store.create_review(&repo.id, 0).await.unwrap();
+        let run = ctx
+            .runs
+            .create(otto_state::runs::NewRun {
+                workspace_id: ws.id,
+                title: "failed parent".into(),
+                source_kind: otto_core::run::SourceKind::Channel,
+                source_ref: "test".into(),
+                source_url: None,
+                goal: "test".into(),
+                mode: Default::default(),
+                provider: "codex".into(),
+                model: String::new(),
+                repo_id: Some(repo.id),
+                origin_kind: otto_core::run::RunOrigin::Ui,
+                origin_chat: None,
+                origin_thread: None,
+                origin_user: None,
+                callback_url: None,
+                auto_open_pr: false,
+                context_summary: None,
+                created_by: user.id,
+            })
+            .await
+            .unwrap();
+        ctx.runs
+            .set_fields(
+                &run.id,
+                &otto_state::runs::RunPatch {
+                    review_id: Some(review.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        ctx.runs
+            .set_error(&run.id, "previous deadline")
+            .await
+            .unwrap();
+        let cancelled = crate::run_service::cancel(&ctx, &run.id).await.unwrap();
+        assert_eq!(cancelled.status, otto_core::run::RunStatus::Failed);
+        assert_eq!(
+            ctx.reviews_store.review_status(&review.id).await.unwrap(),
+            otto_core::domain::ReviewStatus::Cancelled
+        );
     }
 
     // O4: the review wait re-reads status on its own event, not on a 2 s tick.

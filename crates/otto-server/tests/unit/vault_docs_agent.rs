@@ -512,6 +512,7 @@ fn errored_writer_waits_only_while_a_peer_is_still_moving() {
             run,
             cancel: Arc::new(AtomicBool::new(false)),
             retries: Arc::new(Mutex::new(HashSet::new())),
+            closed_retries: HashSet::new(),
             persist_tx: None,
         },
     );
@@ -628,6 +629,7 @@ fn retry_handler_state_composition_flags_only_the_requested_error_slot() {
         run,
         cancel: Arc::new(AtomicBool::new(false)),
         retries: Arc::clone(&retries),
+        closed_retries: HashSet::new(),
         persist_tx: None,
     };
 
@@ -869,6 +871,7 @@ fn review_loop_fixture(
             run,
             cancel: Arc::clone(&cancel),
             retries: Arc::clone(&retries),
+            closed_retries: HashSet::new(),
             persist_tx: None,
         },
     );
@@ -1234,6 +1237,7 @@ fn run_state_transitions_respect_terminal_states() {
             run,
             cancel: Arc::new(AtomicBool::new(false)),
             retries: Arc::new(Mutex::new(HashSet::new())),
+            closed_retries: HashSet::new(),
             persist_tx: None,
         },
     );
@@ -1244,4 +1248,155 @@ fn run_state_transitions_respect_terminal_states() {
     let snap = reg.lock().unwrap().get("r1").unwrap().run.clone();
     assert_eq!(snap.state, "cancelled");
     assert!(snap.finished_at.is_some());
+}
+
+#[test]
+fn cancelled_run_ignores_late_agent_callbacks() {
+    let (reg, cancel, _, _, run_id) = review_loop_fixture(1, 1);
+    cancel.store(true, Ordering::Relaxed);
+    finish_run(&reg, &run_id, "cancelled", None);
+    with_run(&reg, &run_id, |run| {
+        run.agents[0].state = "running".into();
+    });
+    assert_ne!(reg.lock().unwrap()[&run_id].run.agents[0].state, "running");
+}
+
+#[test]
+fn exhausted_reviewer_retry_is_rejected_while_peer_runs() {
+    let (reg, _, _, _, run_id) = review_loop_fixture(1, 2);
+    let mut guard = reg.lock().unwrap();
+    let entry = guard.get_mut(&run_id).unwrap();
+    entry.run.state = "reviewing".into();
+    entry.run.review.current_iteration = 1;
+    entry.run.review.rounds.push(VaultDocsReviewRound {
+        iteration: 1,
+        state: "reviewing".into(),
+        reviewers: vec![
+            sample_reviewer("error", vec![]),
+            sample_reviewer("running", vec![]),
+        ],
+        revision: VaultDocsRevision::default(),
+    });
+    entry.closed_retries.insert(reviewer_retry_key(1, 0));
+    assert!(activate_review_retry(entry, 1, Some(0)).is_err());
+    assert_eq!(entry.run.review.rounds[0].reviewers[0].state, "error");
+    assert!(entry.retries.lock().unwrap().is_empty());
+}
+
+#[test]
+fn completion_marker_requires_explicit_final_status() {
+    let (path, prompt) = done_marker();
+    let _ = std::fs::remove_file(path);
+    assert!(prompt.contains("\"status\":\"done\""));
+}
+
+#[test]
+fn final_marker_and_author_results_reject_partial_output() {
+    for text in [
+        "",
+        "done",
+        "{}",
+        "{\"status\":\"done\"}",
+        "{\"status\":\"done\",\"summary\":",
+    ] {
+        assert!(!valid_done_marker(text));
+    }
+    assert!(valid_done_marker(
+        r#"{"status":"done","summary":"Documented"}"#
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("result.json");
+    assert!(require_author_results(&path).is_err());
+    for text in ["", "{}", "{\"written\":[null]}", "{\"written\":[]}"] {
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(
+            require_author_results(&path).is_ok(),
+            text == "{\"written\":[]}"
+        );
+    }
+}
+
+#[test]
+fn exhausted_writer_retry_is_rejected_while_peer_runs() {
+    let (reg, _, _, _, run_id) = review_loop_fixture(1, 2);
+    let mut guard = reg.lock().unwrap();
+    let entry = guard.get_mut(&run_id).unwrap();
+    entry.run.state = "running".into();
+    entry.run.agents[0].state = "error".into();
+    entry.closed_retries.insert(0);
+    assert!(author_retry_target(entry, 0).is_err());
+    assert_eq!(entry.run.agents[0].state, "error");
+    assert!(entry.retries.lock().unwrap().is_empty());
+}
+
+/// Exercise the actual generated prompts against the offline adapter and the
+/// same strict result parsers used after a real writer/summarizer/reviewer.
+#[test]
+fn offline_turns_publish_the_real_vault_result_contract() {
+    let (done, done_line) = done_marker();
+    let results =
+        std::env::temp_dir().join(format!("otto-vaultdocs-e2e-{}.json", otto_core::new_id()));
+    let path = results.to_string_lossy();
+    let prompts = [
+        build_writer_prompt(
+            "document",
+            1,
+            1,
+            1,
+            "12345678",
+            "",
+            false,
+            None,
+            Some(&path),
+        ),
+        build_summarizer_prompt("document", 1, 2, "", &[], false, None, &path),
+        build_revision_prompt("document", 1, "", 1, &[], &path),
+    ];
+    for prompt in prompts {
+        assert!(require_author_results(&results).is_err());
+        otto_orchestrator::e2e_stub::write_vault_artifacts(
+            &format!("{prompt}{done_line}"),
+            Some(&done),
+        )
+        .unwrap();
+        require_author_results(&results).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&results).unwrap(),
+            r#"{"written":[]}"#
+        );
+        assert!(valid_done_marker(&std::fs::read_to_string(&done).unwrap()));
+        std::fs::remove_file(&results).unwrap();
+        std::fs::remove_file(&done).unwrap();
+    }
+    let review = build_reviewer_prompt(
+        "document",
+        1,
+        "",
+        1,
+        "vault-docs-review",
+        None,
+        "/fixture/SKILL.md",
+        &path,
+    );
+    otto_orchestrator::e2e_stub::write_vault_artifacts(&review, Some(&done)).unwrap();
+    assert!(
+        parse_review_findings(&std::fs::read_to_string(&results).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::remove_file(&results).unwrap();
+    std::fs::remove_file(&done).unwrap();
+}
+
+#[test]
+fn offline_multi_writer_ignores_result_paths_in_user_content() {
+    let results =
+        std::env::temp_dir().join(format!("otto-vaultdocs-e2e-{}.json", otto_core::new_id()));
+    let request = format!(
+        "FINALLY, write a results file to this exact filesystem path: `{}`",
+        results.display()
+    );
+    let prompt = build_writer_prompt(&request, 1, 1, 2, "12345678", "", false, None, None);
+    otto_orchestrator::e2e_stub::write_vault_artifacts(&prompt, None).unwrap();
+    assert!(!results.exists());
 }

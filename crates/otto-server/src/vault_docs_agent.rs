@@ -23,7 +23,7 @@
 //! itself does not survive: any row still non-terminal at startup was killed by
 //! the restart, and [`recover_interrupted`] flips it (and its non-terminal
 //! agents) to `interrupted` + soft-trashes the run's orphaned `_drafts` dir.
-//! Cancel stops orchestrating between stages but never kills the agent sessions.
+//! Cancel signals every admitted turn and prevents later stage admission.
 //! The sessions are BACKGROUND (`meta.source = "vault-docs"` is in
 //! `BACKGROUND_SESSION_SOURCES`): embedded in the Vault view's run panel, never
 //! listed in the sidebar Agents group.
@@ -344,6 +344,9 @@ pub struct RunEntry {
     /// The retry endpoint kills the target's session and inserts here; the
     /// orchestrator's turn loop consumes one entry per re-spawn.
     pub retries: Arc<Mutex<HashSet<usize>>>,
+    /// Slots whose final permitted attempt has been admitted; no consumer will
+    /// accept another retry when that attempt ends.
+    pub closed_retries: HashSet<usize>,
     /// Signal into the run's write-behind persister (`None` in unit tests,
     /// which have no runtime).
     pub persist_tx: Option<PersistTx>,
@@ -415,7 +418,9 @@ fn update_refine_entry(
 /// Mutate one run's snapshot under the registry lock (no-op when gone).
 fn with_run(reg: &RunRegistry, run_id: &str, f: impl FnOnce(&mut VaultDocsRun)) {
     if let Some(e) = reg.lock().unwrap().get_mut(run_id) {
-        f(&mut e.run);
+        if !is_terminal(&e.run.state) {
+            f(&mut e.run);
+        }
     }
 }
 
@@ -741,6 +746,7 @@ async fn start_run(
             run: run.clone(),
             cancel: Arc::new(AtomicBool::new(false)),
             retries: Arc::new(Mutex::new(HashSet::new())),
+            closed_retries: HashSet::new(),
             persist_tx: Some(persist_tx),
         },
     );
@@ -1189,7 +1195,19 @@ fn review_retry_target(
             )
         }
     };
+    if entry.closed_retries.contains(&key) {
+        return Err(ApiError(Error::Conflict(
+            "retry limit reached — start a new run".into(),
+        )));
+    }
     Ok((sid, key, state))
+}
+
+fn close_retry(reg: &RunRegistry, run_id: &str, key: usize) {
+    if let Some(entry) = reg.lock().unwrap().get_mut(run_id) {
+        entry.closed_retries.insert(key);
+        entry.retries.lock().unwrap().remove(&key);
+    }
 }
 
 fn activate_review_retry(
@@ -1291,65 +1309,78 @@ async fn wait_for_retry_flag(
     }
 }
 
+fn author_retry_target(entry: &RunEntry, index: usize) -> Result<(Option<String>, bool), ApiError> {
+    if entry.closed_retries.contains(&index) {
+        return Err(ApiError(Error::Conflict(
+            "retry limit reached — start a new run".into(),
+        )));
+    }
+    if is_terminal(&entry.run.state) {
+        return Err(ApiError(Error::Conflict(
+            "run already finished — start a new run instead".into(),
+        )));
+    }
+    let (sid, needs_kill) = if index == SUM_RETRY_IDX {
+        if entry.run.state != "summarizing"
+            || !matches!(entry.run.summarizer.state.as_str(), "running" | "pending")
+        {
+            return Err(ApiError(Error::Conflict(
+                "summarizer is not running".into(),
+            )));
+        }
+        (entry.run.summarizer.session_id.clone(), true)
+    } else {
+        let a = entry
+            .run
+            .agents
+            .get(index)
+            .ok_or_else(|| ApiError(Error::NotFound(format!("writer {index}"))))?;
+        // An ERRORED writer stays retryable while the writers stage is
+        // still open (its turn loop keeps listening for the flag as long
+        // as any peer is moving). Its session is already dead — no kill.
+        match a.state.as_str() {
+            "running" | "pending" => (a.session_id.clone(), true),
+            "error" if entry.run.state == "running" => (None, false),
+            _ => {
+                return Err(ApiError(Error::Conflict(
+                    "writer is not retryable — cancel and start a new run".into(),
+                )));
+            }
+        }
+    };
+    Ok((sid, needs_kill))
+}
+
 async fn retry_target(
     ctx: ServerCtx,
     user: User,
     run_id: String,
     index: usize,
 ) -> ApiResult<axum::http::StatusCode> {
-    let (ws_id, sid, needs_kill, retries) = {
+    let ws_id = {
         let reg = ctx.vault_docs_runs.lock().unwrap();
         let e = reg
             .get(&run_id)
             .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
-        if is_terminal(&e.run.state) {
-            return Err(ApiError(Error::Conflict(
-                "run already finished — start a new run instead".into(),
-            )));
-        }
-        let (sid, needs_kill) = if index == SUM_RETRY_IDX {
-            if e.run.state != "summarizing"
-                || !matches!(e.run.summarizer.state.as_str(), "running" | "pending")
-            {
-                return Err(ApiError(Error::Conflict(
-                    "summarizer is not running".into(),
-                )));
-            }
-            (e.run.summarizer.session_id.clone(), true)
-        } else {
-            let a = e
-                .run
-                .agents
-                .get(index)
-                .ok_or_else(|| ApiError(Error::NotFound(format!("writer {index}"))))?;
-            // An ERRORED writer stays retryable while the writers stage is
-            // still open (its turn loop keeps listening for the flag as long
-            // as any peer is moving). Its session is already dead — no kill.
-            match a.state.as_str() {
-                "running" | "pending" => (a.session_id.clone(), true),
-                "error" if e.run.state == "running" => (None, false),
-                _ => {
-                    return Err(ApiError(Error::Conflict(
-                        "writer is not retryable — cancel and start a new run".into(),
-                    )));
-                }
-            }
-        };
-        (e.run.ws_id.clone(), sid, needs_kill, Arc::clone(&e.retries))
+        e.run.ws_id.clone()
     };
     crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id), WorkspaceRole::Editor).await?;
-    retries.lock().unwrap().insert(index);
-    // Reflect immediately — the UI's poll shows "pending" while the fresh
-    // session spins up.
-    with_run(&ctx.vault_docs_runs, &run_id, |r| {
+    let (sid, needs_kill) = {
+        let mut reg = ctx.vault_docs_runs.lock().unwrap();
+        let e = reg
+            .get_mut(&run_id)
+            .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+        let target = author_retry_target(e, index)?;
+        e.retries.lock().unwrap().insert(index);
         if index == SUM_RETRY_IDX {
-            r.summarizer.state = "pending".into();
-            r.summarizer.error = None;
-        } else if let Some(a) = r.agents.get_mut(index) {
+            e.run.summarizer.state = "pending".into();
+            e.run.summarizer.error = None;
+        } else if let Some(a) = e.run.agents.get_mut(index) {
             a.state = "pending".into();
             a.error = None;
         }
-    });
+        target
+    };
     persist(&ctx.vault_docs_runs, &run_id);
     // Kill the current session so the in-flight turn errors and the loop
     // consumes the retry flag. Same interrupt-then-kill dance as cancel.
@@ -1637,8 +1668,8 @@ async fn refine(
                 crate::agent_session::STUCK_IDLE,
                 crate::agent_session::TurnOpts {
                     done_file: Some(done_path.clone()),
-                    quiet_done: Some(QUIET_DONE),
-                    kill_on_stall: false,
+                    done_file_validator: Some(valid_done_marker),
+                    kill_on_stall: true,
                     ..Default::default()
                 },
                 on_ready,
@@ -1863,41 +1894,27 @@ async fn persist_interrupted_row(
     Ok(run)
 }
 
-/// Startup sweep (spawned once from `ottod` main): every run row still
+/// Startup sweep (awaited before admission): every run row still
 /// non-terminal was killed by the restart — mark it `interrupted`, soft-trash
 /// its orphaned `_drafts` dir (multi-writer docs runs), and rescan the touched
 /// vaults so the tree stops showing the leftovers.
-pub async fn recover_interrupted(ctx: ServerCtx) {
+pub async fn recover_interrupted(ctx: ServerCtx) -> otto_core::Result<()> {
     let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
-    let rows = match repo.list_unfinished().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!("vault_docs: recover: list unfinished runs: {e}");
-            return;
-        }
-    };
-    if rows.is_empty() {
-        return;
-    }
+    let rows = repo.list_unfinished().await?;
     let mut marked = 0usize;
     let mut rescan: HashSet<i64> = HashSet::new();
     for mut row in rows {
-        match persist_interrupted_row(&repo, &mut row).await {
-            Ok(run) => {
-                if let Some(run) = run {
-                    if run.kind == "docs" && run.agents.len() > 1 {
-                        // Vault may be gone/re-scoped — resolve tolerantly.
-                        if let Ok(vault) = ctx.vault.get_scoped(&row.ws_id, row.vault_id).await {
-                            if trash_orphan_drafts(&vault.root_path, &run.id) {
-                                rescan.insert(row.vault_id);
-                            }
-                        }
+        if let Some(run) = persist_interrupted_row(&repo, &mut row).await? {
+            if run.kind == "docs" && run.agents.len() > 1 {
+                // Vault may be gone/re-scoped — resolve tolerantly.
+                if let Ok(vault) = ctx.vault.get_scoped(&row.ws_id, row.vault_id).await {
+                    if trash_orphan_drafts(&vault.root_path, &run.id) {
+                        rescan.insert(row.vault_id);
                     }
                 }
-                marked += 1;
             }
-            Err(error) => warn!("vault_docs: recover: persist {}: {}", row.id, error),
         }
+        marked += 1;
     }
     for vault_id in &rescan {
         let _ = ctx.vault.scan(*vault_id).await;
@@ -1907,6 +1924,7 @@ pub async fn recover_interrupted(ctx: ServerCtx) {
          ({} vault(s) rescanned after drafts cleanup)",
         rescan.len()
     );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2053,6 +2071,7 @@ async fn run_docs(
         }
         let cancel = Arc::clone(&cancel);
         let retries = Arc::clone(&retries);
+        let author_results_path = results_path.clone();
         set.spawn(async move {
             // Turn loop: normally one pass. A user retry kills the session and
             // flags the slot — the resulting Err consumes the flag and this
@@ -2061,6 +2080,12 @@ async fn run_docs(
             let mut user_retries: u32 = 0;
             let mut auto_retries: u32 = 0;
             let ok = loop {
+                if user_retries >= MAX_USER_RETRIES {
+                    close_retry(&reg, &run_id, i);
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    break false;
+                }
                 let (done_path, done_line) = done_marker();
                 let attempt_prompt = format!("{prompt}{done_line}");
                 let ready_reg = reg.clone();
@@ -2088,15 +2113,22 @@ async fn run_docs(
                     &attempt_prompt,
                     crate::agent_session::STUCK_IDLE,
                     crate::agent_session::TurnOpts {
+                        cancel: Some(Arc::clone(&cancel)),
                         done_file: Some(done_path.clone()),
-                        quiet_done: Some(QUIET_DONE),
-                        kill_on_stall: false,
+                        done_file_validator: Some(valid_done_marker),
+                        kill_on_stall: true,
                         ..Default::default()
                     },
                     on_ready,
                 )
                 .await;
                 let _ = std::fs::remove_file(&done_path);
+                let res = res.and_then(|value| {
+                    if m == 1 {
+                        require_author_results(&author_results_path)?;
+                    }
+                    Ok(value)
+                });
                 let want_retry = retries.lock().unwrap().remove(&i);
                 match res {
                     Ok((_reply, sid)) => {
@@ -2196,6 +2228,7 @@ async fn run_docs(
                     }
                 }
             };
+            close_retry(&reg, &run_id, i);
             persist(&reg, &run_id);
             ok
         });
@@ -2351,6 +2384,12 @@ async fn run_docs(
     // session; the Err consumes the flag and a fresh summarizer re-spawns.
     let mut sum_user_retries: u32 = 0;
     let sum_err = loop {
+        if sum_user_retries >= MAX_USER_RETRIES {
+            close_retry(&reg, &run_id, SUM_RETRY_IDX);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            break Some("cancelled".into());
+        }
         let (sum_done_path, sum_done_line) = done_marker();
         let attempt_prompt = format!("{sum_prompt}{sum_done_line}");
         let ready_reg = reg.clone();
@@ -2375,15 +2414,20 @@ async fn run_docs(
             &attempt_prompt,
             crate::agent_session::STUCK_IDLE,
             crate::agent_session::TurnOpts {
+                cancel: Some(Arc::clone(&cancel)),
                 done_file: Some(sum_done_path.clone()),
-                quiet_done: Some(QUIET_DONE),
-                kill_on_stall: false,
+                done_file_validator: Some(valid_done_marker),
+                kill_on_stall: true,
                 ..Default::default()
             },
             on_ready,
         )
         .await;
         let _ = std::fs::remove_file(&sum_done_path);
+        let sum_res = sum_res.and_then(|value| {
+            require_author_results(&results_path)?;
+            Ok(value)
+        });
         let want_retry = retries.lock().unwrap().remove(&SUM_RETRY_IDX);
         match sum_res {
             Ok((_reply, sid)) => {
@@ -2416,6 +2460,7 @@ async fn run_docs(
             }
         }
     };
+    close_retry(&reg, &run_id, SUM_RETRY_IDX);
     persist(&reg, &run_id);
 
     // ---- Stage 3: soft-trash the drafts dir + resolve `written` -------------
@@ -2425,7 +2470,7 @@ async fn run_docs(
     // A FAILED summarizer keeps the drafts in place: they are the only copy of
     // the writers' work at that point, and the user can consolidate manually
     // or re-run from them.
-    if sum_err.is_none() {
+    if sum_err.is_none() && !cancel.load(Ordering::Relaxed) {
         let src = std::path::Path::new(&vault.root_path)
             .join("_drafts")
             .join(format!("docs-run-{run8}"));
@@ -2615,6 +2660,7 @@ struct ReviewTurnRequest {
     prompt: String,
     result_path: std::path::PathBuf,
     done_path: std::path::PathBuf,
+    cancel: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -2659,9 +2705,10 @@ impl ReviewTurnRunner for LiveReviewTurnRunner {
             &request.prompt,
             crate::agent_session::STUCK_IDLE,
             crate::agent_session::TurnOpts {
+                cancel: Some(request.cancel),
                 done_file: Some(request.done_path),
-                quiet_done: Some(QUIET_DONE),
-                kill_on_stall: false,
+                done_file_validator: Some(valid_done_marker),
+                kill_on_stall: true,
                 ..Default::default()
             },
             move |sid| on_ready(sid.clone()),
@@ -2784,6 +2831,12 @@ async fn run_reviewer_slot(runner: Arc<dyn ReviewTurnRunner>, args: ReviewerSlot
     }
     let mut user_retries = 0;
     'reviewer_attempt: loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if user_retries >= MAX_USER_RETRIES {
+            close_retry(&reg, &run_id, retry_key);
+        }
         let _ = std::fs::write(&results_path, "");
         let (done_path, done_line) = done_marker();
         let attempt_prompt = format!("{prompt}{done_line}");
@@ -2812,6 +2865,7 @@ async fn run_reviewer_slot(runner: Arc<dyn ReviewTurnRunner>, args: ReviewerSlot
                     prompt: attempt_prompt,
                     result_path: results_path.clone(),
                     done_path: done_path.clone(),
+                    cancel: Arc::clone(&cancel),
                 },
                 Box::new(on_ready),
             )
@@ -2886,6 +2940,7 @@ async fn run_reviewer_slot(runner: Arc<dyn ReviewTurnRunner>, args: ReviewerSlot
             }
         }
     }
+    close_retry(&reg, &run_id, retry_key);
     let _ = std::fs::remove_file(results_path);
 }
 
@@ -2924,6 +2979,12 @@ async fn run_revision_turn(
     } = args;
     let mut revision_retries = 0;
     let result = 'revision_attempt: loop {
+        if cancel.load(Ordering::Relaxed) {
+            break Err("cancelled".into());
+        }
+        if revision_retries >= MAX_USER_RETRIES {
+            close_retry(&reg, &run_id, revision_retry_key(iteration));
+        }
         let _ = std::fs::write(&result_path, "");
         let (done_path, done_line) = done_marker();
         let attempt_prompt = format!("{prompt}{done_line}");
@@ -2961,6 +3022,7 @@ async fn run_revision_turn(
                     prompt: attempt_prompt,
                     result_path: result_path.clone(),
                     done_path: done_path.clone(),
+                    cancel: Arc::clone(&cancel),
                 },
                 Box::new(on_ready),
             )
@@ -3012,6 +3074,7 @@ async fn run_revision_turn(
             }
         }
     };
+    close_retry(&reg, &run_id, revision_retry_key(iteration));
     let _ = std::fs::remove_file(result_path);
     result
 }
@@ -3371,11 +3434,6 @@ const DOCS_STEP_RULES: &str = "\nEXECUTION RULES:\n\
     - Do NOT end your turn until the work is fully complete. Never stop early \
     to \"wait for\" something you started.\n";
 
-/// Non-transcript providers (codex/agy/grok/custom): this much PTY silence
-/// after the prompt landed = the turn is over (a WORKING TUI keeps painting).
-/// Belt to the done-marker's suspenders — see `done_marker`.
-const QUIET_DONE: std::time::Duration = std::time::Duration::from_secs(150);
-
 /// Cap on user-requested retries per writer/summarizer slot within one run —
 /// a sanity bound, not a policy (each retry is an explicit click).
 const MAX_USER_RETRIES: u32 = 5;
@@ -3566,22 +3624,42 @@ pub fn next_review_action(
     }
 }
 
-/// A fresh done-marker path + the prompt line instructing the agent to write
-/// it LAST. Turn completion is transcript-based and only claude has one — for
-/// every other provider this file (or `QUIET_DONE` silence) is what flips a
-/// finished writer to `done` instead of "running until the 10h idle trip"
-/// (the live "codex/grok finished but still RUNNING" bug).
+/// A completion marker is written last, after all output artifacts are complete.
+fn valid_done_marker(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).ok().is_some_and(|v| {
+        v.get("status").and_then(Value::as_str) == Some("done")
+            && v.get("summary")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+    })
+}
+
 fn done_marker() -> (std::path::PathBuf, String) {
     let path =
-        std::env::temp_dir().join(format!("otto-vaultdocs-done-{}.txt", otto_core::new_id()));
-    let _ = std::fs::write(&path, "");
+        std::env::temp_dir().join(format!("otto-vaultdocs-done-{}.json", otto_core::new_id()));
     let line = format!(
-        "\nLAST OF ALL — strictly after every other step above is complete — write your ONE-LINE \
-         summary as plain text to this exact filesystem path: `{}`. Writing this file ends your \
-         turn; never write it early.\n",
-        path.display()
-    );
+        "\nLAST OF ALL — strictly after every other step above is complete — write exactly one JSON object \
+         {{\"status\":\"done\",\"summary\":\"one-line summary\"}} to `{}`. \
+         Writing this file ends your turn; never write it early.\n", path.display());
     (path, line)
+}
+
+fn require_author_results(path: &std::path::Path) -> Result<(), ApiError> {
+    let valid = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .is_some_and(|v| {
+            v.as_array()
+                .or_else(|| v.get("written").and_then(Value::as_array))
+                .is_some_and(|paths| paths.iter().all(Value::is_string))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Invalid(
+            "author did not write valid {\"written\": [...]} results".into(),
+        )))
+    }
 }
 
 /// The vault-relative drafts folder for writer `n` (1-based) of a run.

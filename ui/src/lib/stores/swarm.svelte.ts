@@ -83,6 +83,7 @@ class SwarmStore {
   boardLoading = $state(false);
   boardError: string | null = $state(null);
   private boardRequest = 0;
+  private runsRequest = 0;
   presets: SwarmPreset[] = $state([]);
   graph: SwarmGraph | null = $state(null);
   selectedProjectId: string | null = $state(null);
@@ -662,6 +663,10 @@ class SwarmStore {
 
   async loadRuns(filters: RunFilters): Promise<void> {
     if (!this.wsId) return;
+    const workspace = this.wsId;
+    const swarmId = this.detail?.id;
+    const request = ++this.runsRequest;
+    const current = () => this.wsId === workspace && this.detail?.id === swarmId && request === this.runsRequest;
     const q = new URLSearchParams();
     if (filters.swarm_id) q.set('swarm_id', filters.swarm_id);
     if (filters.project_id) q.set('project_id', filters.project_id);
@@ -675,18 +680,24 @@ class SwarmStore {
       const list = await api.get<SwarmRun[]>(
         `/workspaces/${this.wsId}/swarm/runs?${q.toString()}`,
       );
+      if (!current()) return;
       this.runs = list.length > MAX_RUNS ? list.slice(0, MAX_RUNS) : list;
       this.runsError = null;
     } catch (e) {
       // Keep the previous list: a failed refresh must not read as "No runs yet".
-      this.runsError = loadErrorText(e);
+      if (current()) this.runsError = loadErrorText(e);
     } finally {
-      this.runsLoading = false;
+      if (current()) this.runsLoading = false;
     }
   }
 
   async stopRun(rid: string): Promise<void> {
+    const workspace = this.wsId;
+    const swarmId = this.detail?.id;
     const updated = await api.post<SwarmRun>(`/swarm/runs/${rid}/stop`);
+    if (workspace !== this.wsId || swarmId !== this.detail?.id) return;
+    ++this.runsRequest;
+    this.runsLoading = false;
     this.runs = this.runs.map((r) => (r.id === rid ? updated : r));
   }
 

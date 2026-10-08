@@ -35,7 +35,7 @@ use chrono::{DateTime, Utc};
 use otto_core::event::Event;
 use otto_core::{Error, Result};
 use otto_state::{
-    AgentAutonomy, AgentRoomsRepo, FinishAgentRun, NewAgentRun, PersonalAgent, PersonalAgentRun,
+    AgentAutonomy, AgentRoomsRepo, FinishAgentRun, PersonalAgent, PersonalAgentRun,
     PersonalAgentSchedule, PersonalAgentsRepo, StandingGoal,
 };
 use tokio::sync::Semaphore;
@@ -521,7 +521,9 @@ pub async fn run_agent<C: AssistantCtx>(
             // Advance the cursor on a setup error too (S4-25c): otherwise the
             // schedule stays due and re-fires every 60 s tick for as long as
             // the error persists.
-            advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+            if !matches!(&e, Error::Conflict(_)) {
+                advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+            }
             return Err(e);
         }
     };
@@ -673,7 +675,7 @@ pub async fn spawn_proactive_run<C: AssistantCtx>(
     agent: &PersonalAgent,
     goal_id: &str,
 ) -> Result<PersonalAgentRun> {
-    let mut cfg = repo(ctx).autonomy(&agent.id).await?;
+    let cfg = repo(ctx).autonomy(&agent.id).await?;
     let Some(goal) = cfg.goals.iter().find(|g| g.id == goal_id).cloned() else {
         return Err(Error::NotFound(format!("standing goal {goal_id}")));
     };
@@ -684,10 +686,6 @@ pub async fn spawn_proactive_run<C: AssistantCtx>(
     };
     let plan = RunPlan::proactive(goal.clone(), cfg.proactive.max_minutes);
     let (run, cancel) = open_agent_run(ctx, agent, None, "proactive", &plan).await?;
-    if let Some(g) = cfg.goals.iter_mut().find(|g| g.id == goal_id) {
-        g.last_run_at = Some(Utc::now().to_rfc3339());
-    }
-    let _ = repo(ctx).save_autonomy(&agent.id, &cfg).await;
     let (ctx2, agent2, run_id) = (ctx.clone(), agent.clone(), run.id.clone());
     let directive = proactive_directive(&goal.text);
     tokio::spawn(async move {
@@ -718,14 +716,11 @@ async fn open_agent_run<C: AssistantCtx>(
     let id = otto_core::new_id();
     let cancel = run_cancels().register(&id);
     let run = repo(ctx)
-        .create_run_configured(
+        .admit_captured_run(
             &id,
-            NewAgentRun {
-                agent_id: agent.id.clone(),
-                schedule_id: schedule.map(|s| s.id.clone()),
-                workspace_id: agent.workspace_id.clone(),
-                trigger: trigger.to_string(),
-            },
+            agent,
+            schedule,
+            trigger,
             plan.mode,
             plan.read_only,
             plan.goal.as_ref().map(|g| g.id.as_str()),
@@ -950,21 +945,8 @@ async fn advance_cursor<C: AssistantCtx>(
     let Some(s) = schedule else { return };
     let next = C::cadence_next_run(&s.schedule, now, &s.timezone).map(|d| d.to_rfc3339());
     let _ = repo(ctx)
-        .set_schedule_runtime(&s.id, Some(&now.to_rfc3339()), next.as_deref())
+        .settle_captured_schedule(s, &now.to_rfc3339(), next.as_deref())
         .await;
-    // A `once` schedule is spent after its one run: disable it so the list
-    // shows it as done instead of "enabled, never again due".
-    if is_one_shot(&s.schedule) {
-        let _ = repo(ctx)
-            .update_schedule(
-                &s.id,
-                otto_state::AgentSchedulePatch {
-                    enabled: Some(false),
-                    ..Default::default()
-                },
-            )
-            .await;
-    }
 }
 
 /// True for a `{cadence:"once"}` schedule (fires one run, then disables).
@@ -1142,6 +1124,7 @@ mod tests {
     fn render_identity_has_soul_and_memory_sections() {
         let now = chrono::Utc::now().to_rfc3339();
         let agent = PersonalAgent {
+            admission_generation: 0,
             id: "a1".into(),
             workspace_id: "w".into(),
             name: "Recap".into(),

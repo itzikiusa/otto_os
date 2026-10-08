@@ -15,7 +15,8 @@ import { openPage, expectFullyInViewport } from './helpers';
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Serve N unread notices so the badge shows and the panel list overflows. */
-async function mockNotices(page: Page, n: number): Promise<void> {
+async function mockNotices(page: Page, n: number): Promise<NoticeStream> {
+  const stream = await isolateNoticeStream(page);
   const notices = Array.from({ length: n }, (_, i) => ({
     id: `n${i}`,
     created_at: new Date(Date.now() - i * 60_000).toISOString(),
@@ -37,6 +38,7 @@ async function mockNotices(page: Page, n: number): Promise<void> {
   await page.route(/\/api\/v1\/notifications\/read-all$/, (route) =>
     route.fulfill({ status: 204, body: '' }),
   );
+  return stream;
 }
 
 async function setRail(page: Page, expanded: boolean): Promise<void> {
@@ -50,13 +52,36 @@ async function setRail(page: Page, expanded: boolean): Promise<void> {
 }
 
 test('bell sits in the Navigator and module pages keep no right gutter', async ({ page }) => {
-  await mockNotices(page, 60);
+  const stream = await mockNotices(page, 60);
   await setRail(page, true);
   await openPage(page, 'git');
 
   await expect(page.locator('.bell-anchor')).toHaveCount(0);
   const bell = page.locator('.navigator .nav-head').getByRole('button', { name: 'Notifications' });
   await expect(bell).toBeVisible();
+  await expect(bell.locator('.count-bubble')).toHaveText('60');
+
+  // Exercise the same server-frame filter used for the shared daemon. A
+  // following unrelated event is an ordering barrier: it must reach the real
+  // browser event bus before asserting the exact mocked count again.
+  await page.evaluate(async () => {
+    const path = '/src/lib/live.ts';
+    const { appLive } = await import(/* @vite-ignore */ path);
+    const off = appLive.on(['fixture_notice_barrier'], () => {
+      document.documentElement.dataset.noticeBarrier = 'received';
+      off();
+    });
+  });
+  await expect.poll(() => stream.connected).toBe(true);
+  for (let i = 0; i < 3; i++) {
+    stream.inject({ type: 'notification', notice: {
+      id: `parallel-notice-${i}`, created_at: new Date().toISOString(), read: false,
+      kind: 'system', severity: 'info', title: `Unrelated parallel notice ${i}`,
+      body: 'A different test created this notice.', source_key: null, action: null,
+    } });
+  }
+  stream.inject({ type: 'fixture_notice_barrier' });
+  await expect(page.locator('html')).toHaveAttribute('data-notice-barrier', 'received');
   await expect(bell.locator('.count-bubble')).toHaveText('60');
 
   // The content pane is not padded on the right for a bell anymore.
@@ -120,15 +145,29 @@ type MockNotice = {
  *  other specs on the shared daemon raise notices in parallel, and their live
  *  ingest added rows to a panel these tests mock exactly (unread "3" vs "2",
  *  S12-304). Everything else on the stream still flows. */
-async function isolateNoticeStream(page: Page): Promise<void> {
+interface NoticeStream {
+  readonly connected: boolean;
+  inject(event: unknown): void;
+}
+
+async function isolateNoticeStream(page: Page): Promise<NoticeStream> {
+  let receive: ((message: string | Buffer) => void) | undefined;
   await page.routeWebSocket(/\/ws\/events/, (ws) => {
     const server = ws.connectToServer();
     ws.onMessage((m) => server.send(m));
-    server.onMessage((m) => {
+    receive = (m) => {
       if (typeof m === 'string' && /"type"\s*:\s*"notification"/.test(m)) return;
       ws.send(m);
-    });
+    };
+    server.onMessage(receive);
   });
+  return {
+    get connected() { return receive !== undefined; },
+    inject(event) {
+      if (!receive) throw new Error('notification fixture event stream is not connected');
+      receive(JSON.stringify(event));
+    },
+  };
 }
 
 /** Serve exactly `notices`; every mutation succeeds. Returns the read hit log. */

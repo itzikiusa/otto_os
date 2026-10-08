@@ -102,13 +102,14 @@ impl AutomationCtx for ServerCtx {
         waiting_idle: Duration,
         stuck_idle: Duration,
         transcript_ok: Option<fn(&str) -> bool>,
+        result_ok: Option<fn(&str) -> bool>,
         on_status: F,
     ) -> au::RunOutcome
     where
         F: FnMut(au::WatchStatus) -> Fut + Send,
         Fut: Future<Output = ()> + Send,
     {
-        ar::watch_for_result(
+        ar::watch_for_result_guarded(
             &self.manager,
             sid,
             provider,
@@ -119,7 +120,12 @@ impl AutomationCtx for ServerCtx {
             waiting_idle,
             stuck_idle,
             transcript_ok,
+            ar::WatchGuard {
+                result_ok,
+                ..Default::default()
+            },
             on_status,
+            |_| async {},
         )
         .await
     }

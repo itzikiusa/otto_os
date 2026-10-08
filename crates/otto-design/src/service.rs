@@ -354,6 +354,19 @@ impl DesignService {
         Some(dir.join("work").join(spec.file_name))
     }
 
+    /// Serialize restoration of editable mirrors with artifact publication.
+    /// Callers must reload the artifact/head after acquiring this guard and
+    /// hold it until every mirror is written; do not call a commit while held.
+    pub async fn lock_working_copy(
+        &self,
+        artifact_id: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        Ok(commit_lock(self.root(), artifact_id)
+            .await?
+            .lock_owned()
+            .await)
+    }
+
     // -- reads ----------------------------------------------------------------
 
     /// A version's bytes (the version must belong to `a`).

@@ -72,6 +72,38 @@ impl WorkspacesRepo {
         row_to_workspace(&r)
     }
 
+    /// Atomically merge a feature's settings onto the latest workspace snapshot.
+    /// The synchronous edit runs under the write transaction, so concurrent
+    /// feature saves cannot overwrite each other's fields or runtime cursors.
+    pub async fn edit_settings<T>(
+        &self,
+        id: &Id,
+        edit: impl FnOnce(&mut serde_json::Value) -> T,
+    ) -> Result<T> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("edit workspace settings"))?;
+        let raw: String = sqlx::query_scalar("SELECT settings_json FROM workspaces WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("workspace settings"))?;
+        let mut settings = json(&raw)?;
+        let result = edit(&mut settings);
+        sqlx::query("UPDATE workspaces SET settings_json = ? WHERE id = ?")
+            .bind(settings.to_string())
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("save workspace settings"))?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit workspace settings"))?;
+        Ok(result)
+    }
+
     /// Make sure the system-owned scratch workspace (`SCRATCH_WORKSPACE_ID`)
     /// exists and is healthy: insert it when missing, then pin `name` +
     /// `root_path` and un-archive it (heals a renamed/moved/archived row —

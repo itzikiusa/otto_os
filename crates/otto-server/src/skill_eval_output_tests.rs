@@ -655,3 +655,21 @@ async fn rating_storage_failure_does_not_keep_a_stale_publishable_score() {
         assert!(iteration_gate(&ctx, &recovered, &recovered.iterations[0]).await.allowed);
     }
 }
+
+#[test]
+fn skill_eval_attempt_paths_are_unique() {
+    assert_ne!(
+        output_path(&"eval".into(), 1, "validator-retry"),
+        output_path(&"eval".into(), 1, "validator-retry")
+    );
+}
+
+#[test]
+fn failed_implementation_cannot_produce_a_validation_summary() {
+    let failed = AgentOutcome {
+        session_id: None,
+        text: String::new(),
+        errored: true,
+    };
+    assert!(implementation_summary(&failed).is_err());
+}

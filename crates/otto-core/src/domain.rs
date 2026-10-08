@@ -1621,6 +1621,10 @@ pub struct GoalQuestion {
 /// Structured durable handoff alongside the narrative digest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GoalLoopLedger {
+    /// Re-evaluate this existing iteration after explicit executor retry. Kept
+    /// through pause/restart until its evaluation/digest/review decision settles.
+    #[serde(default)]
+    pub resume_evaluation_iteration: Option<u32>,
     #[serde(default)]
     pub verifications: Vec<GoalHumanVerification>,
     #[serde(default)]

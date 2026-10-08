@@ -10,18 +10,52 @@ use std::future::Future;
 pub async fn execute<F, Fut>(
     repo: &WorkflowsRepo,
     run_id: &Id,
-    mut checkpoint: WorkflowCheckpoint,
+    checkpoint: WorkflowCheckpoint,
     policy: &RetryPolicy,
     restart_safe: bool,
-    mut action: F,
+    action: F,
 ) -> Result<(Value, Vec<String>)>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(Value, Vec<String>)>>,
 {
+    execute_observed(
+        repo,
+        run_id,
+        checkpoint,
+        policy,
+        restart_safe,
+        action,
+        |_| {},
+    )
+    .await
+}
+
+/// As `execute`, publishing each attempt and retry before starting more work.
+pub async fn execute_observed<F, Fut, O>(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    mut checkpoint: WorkflowCheckpoint,
+    policy: &RetryPolicy,
+    restart_safe: bool,
+    mut action: F,
+    mut observe: O,
+) -> Result<(Value, Vec<String>)>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(Value, Vec<String>)>>,
+    O: FnMut(String),
+{
     if let Some(previous) = repo.checkpoint(run_id, &checkpoint.node_id).await? {
         checkpoint = previous;
-        if checkpoint.status == NodeStatus::Success {
+        if checkpoint.status == NodeStatus::Success
+            || (checkpoint.status == NodeStatus::Error
+                && checkpoint
+                    .output
+                    .as_ref()
+                    .and_then(crate::retry::outcome_error)
+                    .is_some())
+        {
             return Ok((
                 checkpoint.output.unwrap_or(Value::Null),
                 vec![format!(
@@ -51,16 +85,36 @@ where
         }
     }
     let policy = policy.clamped();
+    let mut attempt_limit = policy.max_attempts + 1;
+    if checkpoint
+        .error
+        .as_deref()
+        .and_then(crate::retry::retry_class)
+        .is_some()
+        && policy.max_attempts > 0
+    {
+        attempt_limit = attempt_limit.max(5);
+    }
     loop {
         checkpoint.status = NodeStatus::Running;
+        checkpoint.output = None;
+        checkpoint.error = None;
         checkpoint.attempts += 1;
         checkpoint.updated_at = chrono::Utc::now();
         repo.save_checkpoint(run_id, &checkpoint).await?;
+        observe(format!(
+            "{} — attempt {}/{} (iteration {})",
+            checkpoint.name, checkpoint.attempts, attempt_limit, checkpoint.iteration
+        ));
         match action().await {
             Ok((output, mut logs)) => {
-                checkpoint.status = NodeStatus::Success;
+                checkpoint.error = crate::retry::outcome_error(&output).map(str::to_owned);
+                checkpoint.status = if checkpoint.error.is_some() {
+                    NodeStatus::Error
+                } else {
+                    NodeStatus::Success
+                };
                 checkpoint.output = Some(output.clone());
-                checkpoint.error = None;
                 logs.push(format!(
                     "✓ checkpoint saved after attempt {}",
                     checkpoint.attempts
@@ -92,7 +146,7 @@ where
                         .factor
                         .powi(checkpoint.attempts.saturating_sub(1) as i32))
                 .min(60_000.0) as u64;
-                let Some((delay, _, reason)) = crate::retry::retry_backoff(
+                let Some((delay, max_eff, reason)) = crate::retry::retry_backoff(
                     &error.to_string(),
                     &policy,
                     checkpoint.attempts,
@@ -101,10 +155,18 @@ where
                 ) else {
                     return Err(error);
                 };
-                checkpoint
-                    .logs
-                    .push(format!("Retry in {}ms: {reason}", delay));
+                attempt_limit = max_eff + 1;
+                let retry = format!(
+                    "{} — ↻ retry {}/{} in {}ms (iteration {}; {reason})",
+                    checkpoint.name,
+                    checkpoint.attempts + 1,
+                    max_eff + 1,
+                    delay,
+                    checkpoint.iteration
+                );
+                checkpoint.logs.push(retry.clone());
                 repo.save_checkpoint(run_id, &checkpoint).await?;
+                observe(retry);
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
         }
@@ -174,6 +236,43 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
         (dir, repo, run.id, cp)
+    }
+
+    #[tokio::test]
+    async fn semantic_gate_failure_is_durable_and_never_reexecuted() {
+        let (_dir, repo, run_id, mut cp) = fixture().await;
+        cp.kind = "review_run".into();
+        let calls = AtomicUsize::new(0);
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            backoff_ms: 1,
+            factor: 1.0,
+        };
+        for _ in 0..2 {
+            let (out, _) = execute(&repo, &run_id, cp.clone(), &policy, true, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok((
+                    json!({"review_id":"finished-review", "passed":false,
+                    "_workflow_error":"review did not meet required coverage"}),
+                    vec![],
+                ))
+            })
+            .await
+            .unwrap();
+            assert_eq!(out["review_id"], "finished-review");
+        }
+        let saved = repo
+            .checkpoint(&run_id, &cp.node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, NodeStatus::Error);
+        assert_eq!(saved.attempts, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            saved.error.as_deref(),
+            Some("review did not meet required coverage")
+        );
     }
 
     #[tokio::test]

@@ -192,9 +192,7 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
         .await;
     drop(poll);
     let (raw, sid) = turn?;
-    if scene.session_id.is_none() {
-        let _ = ctx.canvas_repo().set_session(&scene.id, &sid).await;
-    }
+    remember_session(ctx.canvas_repo(), &scene, &sid).await;
     if busy.stopped() {
         // Stopped (S4-20): commit nothing. Put the backing file back to the
         // pre-turn view (a resumed session must not build on the half-written
@@ -331,6 +329,16 @@ async fn commit_assist_doc(
         };
     }
     Ok(committed_doc)
+}
+
+async fn remember_session(
+    repo: &otto_state::CanvasRepo,
+    scene: &otto_state::CanvasScene,
+    sid: &Id,
+) {
+    if scene.session_id.as_ref() != Some(sid) {
+        let _ = repo.set_session(&scene.id, sid).await;
+    }
 }
 
 /// `POST /canvas/assist/preview` — generate blocks with no scene (the Discovery-

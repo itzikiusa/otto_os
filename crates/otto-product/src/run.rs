@@ -258,8 +258,9 @@ impl SessionAppearance {
 /// Append the "write your JSON to this file" instruction to a built prompt.
 pub fn augment_with_out_path(base_prompt: &str, out_path: &str) -> String {
     format!(
-        "{base_prompt}\n\n---\nWhen done, write your result as JSON to this file (overwrite it), \
-         and write ONLY the JSON (no prose): {out_path}"
+        "{base_prompt}\n\n---\nWhen done, write ONLY your complete result JSON (no prose) \
+         to a sibling temporary file beside {out_path}. Then atomically rename that file \
+         to {out_path} as your LAST action. Never write partial output to the final path."
     )
 }
 
@@ -588,6 +589,12 @@ pub async fn run_analysis<C: ProductRunHost>(
                 }
             };
             let agent_id = agent.id.clone();
+            let _owner = crate::agent_attempt::drain(&agent_id).await;
+            if !ctx.product_repo().get_analysis_agent(&agent_id).await
+                .is_ok_and(|row| row.status == "running") {
+                return LensOutcome { name: spec.name.clone(), provider: spec.provider.clone(),
+                    findings_json: None, findings: None, errored: true };
+            }
 
             // Resolve skill body: library first, then bundled, then empty.
             let skill_body = ctx
@@ -761,7 +768,21 @@ pub async fn run_analysis<C: ProductRunHost>(
         .await
         .ok();
 
-    let summary: Option<SummaryFindings> = if successful.is_empty() {
+    let _summary_owner = match summarizer_agent.as_ref() {
+        Some(agent) => Some(crate::agent_attempt::drain(&agent.id).await),
+        None => None,
+    };
+    let summary_stopped = match summarizer_agent.as_ref() {
+        Some(agent) => !ctx
+            .product_repo()
+            .get_analysis_agent(&agent.id)
+            .await
+            .is_ok_and(|row| row.status == "running"),
+        None => false,
+    };
+    let summary: Option<SummaryFindings> = if summary_stopped {
+        None
+    } else if successful.is_empty() {
         // No lens produced findings → nothing to consolidate. Don't leave the
         // summarizer row stuck in "running" (it would show as a perpetual
         // spinner with no openable session).
@@ -1051,6 +1072,20 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
     analysis_id: Id,
     agent_id: Id,
 ) {
+    let Ok(owner) = crate::agent_attempt::claim(&agent_id) else {
+        return;
+    };
+    retry_analysis_agent_owned(ctx, ws, user_id, analysis_id, agent_id, owner).await;
+}
+
+pub(crate) async fn retry_analysis_agent_owned<C: ProductRunHost>(
+    ctx: C,
+    ws: otto_core::domain::Workspace,
+    user_id: Id,
+    analysis_id: Id,
+    agent_id: Id,
+    _owner: tokio::sync::OwnedMutexGuard<()>,
+) {
     // 1. Load the agent row.
     let agent = match ctx.product_repo().get_analysis_agent(&agent_id).await {
         Ok(a) => a,
@@ -1192,7 +1227,10 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
     // route-param confinement as the context file above.
     let out_path = match otto_core::paths::confine_join(
         &std::env::temp_dir(),
-        &format!("otto-product-{analysis_id}-retry-{agent_id}.json"),
+        &format!(
+            "otto-product-{analysis_id}-retry-{agent_id}-{}.json",
+            uuid::Uuid::new_v4()
+        ),
     ) {
         Some(p) => p,
         None => {
@@ -2847,6 +2885,14 @@ mod tests {
     // -----------------------------------------------------------------------
     // session_cwd — per-session cwd attribution
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn output_contract_publishes_complete_json_atomically_last() {
+        let prompt = augment_with_out_path("task", "/tmp/result.json");
+        assert!(prompt.contains("sibling temporary file"));
+        assert!(prompt.contains("atomically rename"));
+        assert!(prompt.contains("LAST action"));
+    }
 
     #[test]
     fn session_cwd_passes_real_path_through_unchanged() {

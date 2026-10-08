@@ -101,10 +101,11 @@
   // ── Polling ────────────────────────────────────────────────────────────────────
   let pollTimer: Poller | null = null;
   const POLL_INTERVAL_MS = 3000;
-  const POLL_MAX_MS = 120_000;
-  let pollStartedAt = 0;
+  let viewGeneration = 0;
+  let readSequence = 0;
 
   function clearPoll(): void {
+    ++viewGeneration;
     if (pollTimer !== null) {
       pollTimer.stop();
       pollTimer = null;
@@ -117,13 +118,13 @@
 
   async function pollOnce(): Promise<void> {
     if (!activeId) return;
-    if (Date.now() - pollStartedAt > POLL_MAX_MS) {
-      clearPoll();
-      toasts.warn('Analysis timed out', 'No result appeared within 2 minutes.');
-      return;
-    }
+    const id = activeId;
+    const generation = viewGeneration;
+    const request = ++readSequence;
+    const owned = product.captureSelection();
     try {
-      const detail = await product.getAnalysis(activeId);
+      const detail = await product.getAnalysis(id);
+      if (!owned() || generation !== viewGeneration || id !== activeId || request !== readSequence) return;
       activeDetail = detail;
       if (isTerminal(detail.analysis.status)) clearPoll();
     } catch (e) {
@@ -134,7 +135,6 @@
   function startPolling(id: string): void {
     clearPoll();
     activeId = id;
-    pollStartedAt = Date.now();
     // Immediate first poll, then a settle-then-schedule chain: `product_changed`
     // (onSectionChange, below) settles it; 15 s safety net while events flow,
     // POLL_INTERVAL_MS while the event socket is down.
@@ -174,6 +174,7 @@
     untrack(() => {
       activeDetail = null;
       activeId = null;
+      running = false;
       historyLoaded = false;
       collapsed = {};
       clearPoll();
@@ -219,6 +220,8 @@
       name: l.label,
       providers: lensProviders[l.skill],
     }));
+    const owned = product.captureSelection();
+    const generation = viewGeneration;
     running = true;
     try {
       const trimmedFocus = focusText.trim() || undefined;
@@ -227,11 +230,11 @@
         summarizer_provider: summarizerProvider || defaultAgentProvider(),
         focus: trimmedFocus,
       });
-      startPolling(analysis.id);
+      if (owned() && generation === viewGeneration) startPolling(analysis.id);
     } catch (e) {
-      toastError('Couldn’t start the analysis', e);
+      if (owned()) toastError('Couldn’t start the analysis', e);
     } finally {
-      running = false;
+      if (owned()) running = false;
     }
   }
 
@@ -242,8 +245,10 @@
     loadingHistory = true;
     historyError = null;
     const sid = product.selectedId;
+    const owned = product.captureSelection();
     try {
       await product.loadAnalyses();
+      if (!owned()) return;
       historyLoaded = true;
       // Open on the latest run, not on an empty "select a past run" pane.
       if (!activeId && product.selectedId === sid && product.analyses.length > 0) {
@@ -251,9 +256,9 @@
         void selectHistory(latest);
       }
     } catch (e) {
-      historyError = loadErrorText(e);
+      if (owned()) historyError = loadErrorText(e);
     } finally {
-      loadingHistory = false;
+      if (owned()) loadingHistory = false;
     }
   }
 
@@ -261,11 +266,18 @@
     if (a.id === activeId) return;
     clearPoll();
     activeId = a.id;
+    activeDetail = null;
+    const generation = viewGeneration;
+    const request = ++readSequence;
+    const owned = product.captureSelection();
+    const current = () => owned() && generation === viewGeneration && activeId === a.id && request === readSequence;
     try {
-      activeDetail = await product.getAnalysis(a.id);
-      if (!isTerminal(activeDetail.analysis.status)) startPolling(a.id);
+      const detail = await product.getAnalysis(a.id);
+      if (!current()) return;
+      activeDetail = detail;
+      if (!isTerminal(detail.analysis.status)) startPolling(a.id);
     } catch (e) {
-      toastError('Couldn’t load analysis', e);
+      if (current()) toastError('Couldn’t load analysis', e);
     }
   }
 
@@ -290,11 +302,13 @@
     const next = new Set(retryingAgents);
     next.add(agentId);
     retryingAgents = next;
+    const owned = product.captureSelection();
+    const generation = viewGeneration;
     try {
       await product.retryAgent(analysisId, agentId);
       toasts.info(`Re-running ${agentName}…`);
       // Resume polling so results refresh automatically.
-      if (analysisId) startPolling(analysisId);
+      if (owned() && generation === viewGeneration && analysisId === activeId) startPolling(analysisId);
     } catch (e) {
       toastError('Couldn’t retry the analysis', e);
     } finally {

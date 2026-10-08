@@ -626,6 +626,88 @@ impl ScheduledTasksRepo {
         Ok(())
     }
 
+    /// Admit and link a child in one write transaction. Cancellation takes the
+    /// same lock, so it either fences admission or observes and cancels the child.
+    pub async fn admit_workflow_handoff(
+        &self,
+        run_id: &str,
+        workflow_id: &otto_core::Id,
+        workspace_id: &otto_core::Id,
+        input: &Value,
+    ) -> Result<Option<otto_core::workflows::WorkflowRun>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin scheduled workflow handoff"))?;
+        let eligible: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM scheduled_task_runs WHERE id = ? AND workspace_id = ? AND status = 'running' AND workflow_run_id IS NULL)")
+            .bind(run_id).bind(workspace_id).fetch_one(&mut *tx).await
+            .map_err(dberr("check scheduled workflow parent"))?;
+        if !eligible {
+            return Err(otto_core::Error::Conflict(
+                "scheduled run is stopped or already handed off".into(),
+            ));
+        }
+        let busy: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE workflow_id = ? AND status IN ('pending','running'))")
+            .bind(workflow_id).fetch_one(&mut *tx).await
+            .map_err(dberr("check scheduled workflow overlap"))?;
+        if busy {
+            return Ok(None);
+        }
+        let child =
+            crate::WorkflowsRepo::insert_run(&mut tx, workflow_id, workspace_id, input, None)
+                .await?;
+        sqlx::query("UPDATE scheduled_task_runs SET workflow_run_id = ? WHERE id = ?")
+            .bind(&child.id)
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("link scheduled workflow child"))?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit scheduled workflow handoff"))?;
+        Ok(Some(child))
+    }
+
+    /// Cancel the parent and its admitted workflow together. A crash after
+    /// this commit cannot leave a pending child for boot recovery to launch.
+    pub async fn cancel_handoff(&self, run_id: &str) -> Result<ScheduledTaskRun> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin scheduled workflow cancellation"))?;
+        sqlx::query("UPDATE scheduled_task_runs SET status = 'canceled', finished_at = ? WHERE id = ? AND status = 'running'")
+            .bind(fmt(Utc::now())).bind(run_id).execute(&mut *tx).await
+            .map_err(dberr("fence scheduled workflow parent"))?;
+        let row = sqlx::query("SELECT * FROM scheduled_task_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("read canceled scheduled run"))?;
+        let run = row_to_run(&row)?;
+        let mut canceled_child = None;
+        if run.status == "canceled" {
+            if let Some(child) = &run.workflow_run_id {
+                if crate::WorkflowsRepo::cancel_in_transaction(&mut tx, child)
+                    .await?
+                    .is_some()
+                {
+                    canceled_child = Some(child.clone());
+                }
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(dberr("commit scheduled workflow cancellation"))?;
+        if let Some(child) = canceled_child {
+            crate::workflows::announce_cancel(&child);
+        }
+        Ok(run)
+    }
+
     /// Link the workflow run a hand-off launched as soon as it exists (the run
     /// row can open it while it runs; a Stop cancels it).
     pub async fn set_run_workflow_run(&self, run_id: &str, workflow_run_id: &str) -> Result<()> {
@@ -805,6 +887,119 @@ mod tests {
             destination: json!({"type":"none"}),
             created_by: Some("u1".into()),
             ..NewScheduledTask::defaults(ws.into(), name.into())
+        }
+    }
+
+    async fn workflow_parent() -> (
+        DbPool,
+        ScheduledTasksRepo,
+        ScheduledTaskRun,
+        otto_core::workflows::Workflow,
+    ) {
+        let p = pool().await;
+        seed_ws(&p, "handoff-ws").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let task = repo
+            .create(NewScheduledTask::defaults(
+                "handoff-ws".into(),
+                "handoff".into(),
+            ))
+            .await
+            .unwrap();
+        let run = repo.admit_run(&task, "manual").await.unwrap();
+        let user = crate::UsersRepo::new(p.clone())
+            .create("handoff-user", "hash", "User", false)
+            .await
+            .unwrap();
+        let wf = crate::WorkflowsRepo::new(p.clone())
+            .create(
+                &task.workspace_id,
+                "child",
+                "",
+                "",
+                &Default::default(),
+                &user.id,
+            )
+            .await
+            .unwrap();
+        (p, repo, run, wf)
+    }
+
+    #[tokio::test]
+    async fn recovery_handoff_link_failure_leaves_no_orphan_child() {
+        let (p, repo, parent, wf) = workflow_parent().await;
+        sqlx::query("CREATE TRIGGER reject_handoff BEFORE UPDATE OF workflow_run_id ON scheduled_task_runs BEGIN SELECT RAISE(ABORT, 'link failed'); END").execute(&p).await.unwrap();
+        assert!(repo
+            .admit_workflow_handoff(&parent.id, &wf.id, &wf.workspace_id, &Value::Null)
+            .await
+            .is_err());
+        let children: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_runs")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(
+            children, 0,
+            "failed parent linkage must roll back child admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_handoff_cancel_fences_late_admission() {
+        let (p, repo, parent, wf) = workflow_parent().await;
+        repo.cancel_handoff(&parent.id).await.unwrap();
+        assert!(repo
+            .admit_workflow_handoff(&parent.id, &wf.id, &wf.workspace_id, &Value::Null)
+            .await
+            .is_err());
+        let children: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_runs")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(children, 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_handoff_cancel_observes_admitted_child() {
+        let (p, repo, parent, wf) = workflow_parent().await;
+        let child = repo
+            .admit_workflow_handoff(&parent.id, &wf.id, &wf.workspace_id, &Value::Null)
+            .await
+            .unwrap()
+            .unwrap();
+        let stopped = repo.cancel_handoff(&parent.id).await.unwrap();
+        assert_eq!(stopped.status, "canceled");
+        assert_eq!(stopped.workflow_run_id.as_deref(), Some(child.id.as_str()));
+        let child = crate::WorkflowsRepo::new(p)
+            .get_run(&child.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            child.status,
+            otto_core::workflows::RunStatus::Canceled,
+            "restart must not revive a stopped parent child"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_handoff_admission_racing_cancel_never_leaves_live_child() {
+        let (p, repo, parent, wf) = workflow_parent().await;
+        let (admitted, canceled) = tokio::join!(
+            repo.admit_workflow_handoff(&parent.id, &wf.id, &wf.workspace_id, &Value::Null),
+            repo.cancel_handoff(&parent.id),
+        );
+        assert_eq!(canceled.unwrap().status, "canceled");
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workflow_runs WHERE status IN ('pending','running')",
+        )
+        .fetch_one(&p)
+        .await
+        .unwrap();
+        assert_eq!(live, 0);
+        if let Ok(Some(child)) = admitted {
+            assert_eq!(
+                repo.get_run(&parent.id).await.unwrap().workflow_run_id,
+                Some(child.id)
+            );
         }
     }
 

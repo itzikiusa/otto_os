@@ -77,10 +77,13 @@ pub struct ClaudeScan {
     /// the Agents tab a sub-agent's duration. Ids whose notification line had no
     /// parseable timestamp are absent.
     pub notified_at: BTreeMap<String, SystemTime>,
-    /// `claude_pty::last_user_text` verbatim: the latest typed user prompt
-    /// (sidechain lines included, like the whole-file helper) — what the
+    /// The latest typed parent user prompt (sidechains excluded) — what the
     /// submit-confirm loop matches its prompt slice against.
     pub last_user_text: Option<String>,
+    /// Number of parent user prompts, used to confirm a newly submitted turn.
+    pub user_turns: usize,
+    /// Completed assistant turns before the latest parent prompt (not its reply).
+    pub completed_before_last_user: usize,
 }
 
 /// Live phase of a step's agent turn (drives the log lines + `activity`).
@@ -256,17 +259,18 @@ impl ClaudeScanState {
             return;
         };
         // `transcript_api_error` semantics: the FIRST api-error line wins, and
-        // it is checked before the sidechain filter (it never had one).
+        // Parent prompt boundaries are counted after the sidechain filter.
         if s.api_error.is_none() {
             s.api_error = api_error_text(&v);
-        }
-        // `last_user_text` semantics: also checked before the sidechain filter.
-        if let Some(t) = user_prompt_text(&v) {
-            s.last_user_text = Some(t);
         }
         // Legacy in-file sub-agent lines: never a parent turn, never a task.
         if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
             return;
+        }
+        if let Some(t) = user_prompt_text(&v) {
+            s.last_user_text = Some(t);
+            s.user_turns += 1;
+            s.completed_before_last_user = s.completed_turns;
         }
         let ts = v
             .get("timestamp")
@@ -1010,7 +1014,7 @@ pub fn verdict(
         .map(str::to_string);
 
     // Providers with no transcript at all (agy/custom): the handoff file is the
-    // only positive signal; otherwise the caller's `quiet_done` channel decides.
+    // only positive signal; silence alone never completes a turn.
     if claude.is_none() && codex.is_none() {
         return match handoff_text {
             Some(t) => Verdict::Complete {
@@ -1463,6 +1467,24 @@ mod tests {
 
     fn same_scan(a: &ClaudeScan, b: &ClaudeScan) -> bool {
         format!("{a:?}") == format!("{b:?}")
+    }
+
+    #[test]
+    fn prompt_boundary_keeps_a_reply_completed_before_confirmation() {
+        let scan = scan_claude(concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"repeat this\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"repeat this\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"new\"}]}}\n"
+        ));
+        assert_eq!(
+            scan.user_turns, 2,
+            "an identical new prompt still has its own boundary"
+        );
+        assert_eq!(scan.completed_before_last_user, 1);
+        assert_eq!(scan.completed_turns, 2);
+        assert!(scan.completed_turns > scan.completed_before_last_user);
+        assert_eq!(scan.last_turn_text.as_deref(), Some("new"));
     }
 
     #[test]

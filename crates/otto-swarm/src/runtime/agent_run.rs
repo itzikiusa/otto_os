@@ -47,6 +47,9 @@ impl CancelState {
     pub fn cancelled(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
     }
+    pub(crate) fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.flag, &other.flag)
+    }
     fn track(&self, sid: &Id) {
         self.sessions.lock().unwrap().push(sid.clone());
     }
@@ -168,6 +171,9 @@ pub async fn run_swarm_agent(
         .unwrap_or_else(|_| cwd.to_string());
     let cwd: &str = &cwd_canon;
     let operation = crate::runtime::engine::operation_guard(swarm_id).await;
+    if cancel.cancelled() {
+        return (None, String::new());
+    }
     let run = match ctx
         .swarm_repo()
         .reserve_run(
@@ -180,7 +186,7 @@ pub async fn run_swarm_agent(
                 kind: kind.to_string(),
                 trigger: "manual".to_string(),
             },
-            true,
+            !matches!(kind, "verify" | "fix"),
         )
         .await
     {
@@ -381,20 +387,33 @@ pub async fn run_swarm_agent(
                 emit_run(ctx, &rid).await;
             })
         };
-        let outcome = ctx
-            .watch_for_result(
-                &sid,
-                provider,
-                session.provider_session_id.as_deref(),
-                cwd,
-                out_path.as_path() as &Path,
-                SWARM_RUN_TIMEOUT,
-                ctx.pty_timings().waiting_idle,
-                SWARM_STUCK_IDLE,
-                Some(transcript_ok),
-                on_status,
-            )
-            .await;
+        let watch = ctx.watch_for_result(
+            &sid,
+            provider,
+            session.provider_session_id.as_deref(),
+            cwd,
+            out_path.as_path() as &Path,
+            SWARM_RUN_TIMEOUT,
+            ctx.pty_timings().waiting_idle,
+            SWARM_STUCK_IDLE,
+            Some(transcript_ok),
+            on_status,
+        );
+        let outcome = tokio::select! {
+            outcome = watch => outcome,
+            _ = async {
+                while !cancel.cancelled() { tokio::time::sleep(Duration::from_millis(100)).await; }
+            } => {
+                let _ = ctx.manager().kill_session(&sid).await;
+                last_reason = Some(FailReason::Stopped);
+                break;
+            }
+        };
+        if cancel.cancelled() {
+            let _ = ctx.manager().kill_session(&sid).await;
+            last_reason = Some(FailReason::Stopped);
+            break;
+        }
 
         if let Some(raw) = outcome.raw {
             // Best-effort per-turn token/cost backfill so verify/fix spend counts
@@ -432,6 +451,7 @@ pub async fn run_swarm_agent(
     } else {
         "error"
     };
+    cancel.kill_tracked(ctx).await;
     let err = last_reason.map(|r| r.as_str().to_string());
     let _ = set_run(ctx, &run_id, status, err, true).await;
     (None, run_id)

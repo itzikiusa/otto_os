@@ -167,6 +167,7 @@ impl Fixture {
 
     async fn execute(&self, node: &WorkflowNode, input: Value) -> Result<Value> {
         let env = RunEnv {
+            budget: budget::ActiveBudget::new(RUN_WALL_CLOCK_TIMEOUT),
             run_id: self.run.id.clone(),
             wf_name: "Publish review".into(),
             run_cwd: self._dir.path().to_string_lossy().into(),

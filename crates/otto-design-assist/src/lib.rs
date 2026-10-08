@@ -87,8 +87,6 @@ const POLL: Duration = Duration::from_millis(900);
 const TURN_CAP: Duration = Duration::from_secs(20 * 60);
 /// No-output idle trip for one turn.
 const STUCK_AFTER: Duration = Duration::from_secs(10 * 60);
-/// Non-transcript providers (codex …): this much PTY silence ends the turn.
-const QUIET_DONE: Duration = Duration::from_secs(150);
 /// How long `POST …/assist` waits for the session to go live before answering
 /// (the turn keeps running either way; completion arrives over WS).
 const READY_WAIT: Duration = Duration::from_secs(20);
@@ -1732,33 +1730,45 @@ fn spawn_live_poll<C: DesignAssistCtx>(job: &TurnJob<C>) -> tokio::task::JoinHan
     })
 }
 
-/// Restore the on-disk copies of a MAIN turn to the base document (after a
-/// failed / invalid / critique turn), so the working copy keeps mirroring
-/// the head.
-async fn restore_base<C: DesignAssistCtx>(job: &TurnJob<C>) {
+/// Restore the current published head after a failed, invalid, or critique
+/// turn. A user's save during the turn must win over the captured base.
+async fn restore_current_head<C: DesignAssistCtx>(job: &TurnJob<C>) {
     if job.branch != Branch::Main {
         return;
     }
-    if let Some(wf) = &job.work_file {
-        let _ = tokio::fs::write(wf, &job.base_doc).await;
-    }
-    if job.adapter.canvas_inner.is_some() {
-        let _ = tokio::fs::write(&job.agent_path, &job.base_source).await;
+    if let Err(error) = restore_document(
+        &job.ctx.design(),
+        &job.artifact,
+        &job.adapter,
+        job.work_file.as_deref(),
+        &job.agent_path,
+    )
+    .await
+    {
+        tracing::warn!(artifact = %job.artifact.id, "restore design working head: {error}");
     }
 }
 
-/// Write `head` (the artifact's current head bytes) to the working copy and
-/// the agent's file — [`restore_base`] for a head that moved during the turn.
-async fn mirror_head<C: DesignAssistCtx>(job: &TurnJob<C>, head: &[u8]) {
-    if job.branch != Branch::Main {
-        return;
+async fn restore_document(
+    svc: &DesignService,
+    artifact: &DesignArtifact,
+    adapter: &Adapter,
+    work_file: Option<&FsPath>,
+    agent_path: &FsPath,
+) -> otto_core::Result<()> {
+    let io = |e: std::io::Error| Error::Internal(format!("restore design working copy: {e}"));
+    let _publication = svc.lock_working_copy(&artifact.id).await?;
+    let fresh = svc.store().require_artifact(&artifact.id).await?;
+    let (_, head) = svc.head_content(&fresh).await?;
+    if let Some(wf) = work_file {
+        tokio::fs::write(wf, &head).await.map_err(io)?;
     }
-    if let Some(wf) = &job.work_file {
-        let _ = tokio::fs::write(wf, head).await;
+    if adapter.canvas_inner.is_some() {
+        tokio::fs::write(agent_path, adapter.agent_source(&head))
+            .await
+            .map_err(io)?;
     }
-    if job.adapter.canvas_inner.is_some() {
-        let _ = tokio::fs::write(&job.agent_path, job.adapter.agent_source(head)).await;
-    }
+    Ok(())
 }
 
 /// Run one turn to completion and return its final state (also stored in the
@@ -1827,7 +1837,7 @@ async fn run_job<C: DesignAssistCtx>(mut job: TurnJob<C>) -> DesignAssistTurn {
                 prompt: &prompt,
                 stuck_after: STUCK_AFTER,
                 done_file: Some(done_path.clone()),
-                quiet_done: Some(QUIET_DONE),
+                quiet_done: None,
             },
             on_ready,
         ),
@@ -1879,7 +1889,7 @@ async fn run_job<C: DesignAssistCtx>(mut job: TurnJob<C>) -> DesignAssistTurn {
     let outcome = match result {
         Ok((reply, sid)) => finalize(&svc, &job, &reply, &sid).await,
         Err(e) => {
-            restore_base(&job).await;
+            restore_current_head(&job).await;
             Outcome::failed(e)
         }
     };
@@ -1977,7 +1987,7 @@ async fn finalize<C: DesignAssistCtx>(
     };
 
     if !job.mode.edits() {
-        restore_base(job).await;
+        restore_current_head(job).await;
         return out;
     }
 
@@ -1989,7 +1999,7 @@ async fn finalize<C: DesignAssistCtx>(
             match String::from_utf8(b) {
                 Ok(s) => Some(s),
                 Err(_) => {
-                    restore_base(job).await;
+                    restore_current_head(job).await;
                     return Outcome {
                         status: "failed",
                         error: Some("the agent wrote a non-UTF-8 file".into()),
@@ -2011,7 +2021,7 @@ async fn finalize<C: DesignAssistCtx>(
     }) {
         Ok(d) => d,
         Err(e) => {
-            restore_base(job).await;
+            restore_current_head(job).await;
             return Outcome {
                 status: "failed",
                 error: Some(format!(
@@ -2112,9 +2122,7 @@ async fn finalize<C: DesignAssistCtx>(
                     // human's version back so the editor and the next turn
                     // start from it, not from the side-lined draft.
                     if variant.is_ok() {
-                        if let Ok((_, head)) = svc.head_content(&fresh).await {
-                            mirror_head(job, &head).await;
-                        }
+                        restore_current_head(job).await;
                     }
                     variant
                 }
@@ -2125,7 +2133,7 @@ async fn finalize<C: DesignAssistCtx>(
     let (version, created) = match committed {
         Ok(v) => v,
         Err(e) => {
-            restore_base(job).await;
+            restore_current_head(job).await;
             return Outcome {
                 status: "failed",
                 error: Some(e.to_string()),
@@ -2854,6 +2862,64 @@ pub async fn extract_learned<C: DesignAssistCtx>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_turn_restore_preserves_a_newer_human_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = DesignService::new(otto_state::db::test_pool().await, dir.path(), None);
+        let base = br#"{"format":"mermaid","source":"graph TD; A-->B"}"#;
+        let latest = br#"{"format":"mermaid","source":"graph TD; Human-->Save"}"#;
+        let artifact = svc
+            .create_artifact(otto_design::service::CreateInput {
+                workspace_id: "w".into(),
+                project_id: None,
+                studio: None,
+                format: "otto-canvas".into(),
+                title: "Recovery".into(),
+                tags: vec![],
+                meta: json!({}),
+                content: Some(base.to_vec()),
+                story_id: None,
+                derived_from: None,
+                created_by: "u".into(),
+                author: Author::user("u"),
+                message: None,
+                source: None,
+                created_at: None,
+                version_kind: None,
+                validate: true,
+            })
+            .await
+            .unwrap()
+            .artifact;
+        svc.commit_bytes(
+            &artifact,
+            latest.to_vec(),
+            SaveOpts {
+                base: artifact.head_version_id.clone(),
+                kind: "autosave".into(),
+                author: Author::user("u"),
+                message: String::new(),
+                provenance: json!({}),
+                force: false,
+                validate: true,
+                change: "content",
+            },
+        )
+        .await
+        .unwrap();
+        let adapter = adapter_for("otto-canvas", base).unwrap();
+        let agent = dir.path().join("canvas.mmd");
+        let work = svc.work_file(&artifact).unwrap();
+        restore_document(&svc, &artifact, &adapter, Some(&work), &agent)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&work).await.unwrap(), latest);
+        assert_eq!(
+            tokio::fs::read_to_string(&agent).await.unwrap(),
+            "graph TD; Human-->Save"
+        );
+    }
 
     fn offered(n: usize) -> Vec<OfferedRef> {
         (1..=n)

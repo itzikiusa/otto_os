@@ -846,6 +846,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn recovery_retry_continuation_survives_ledger_edits_and_restart() {
+        let repo = GoalLoopsRepo::new(mem_pool().await);
+        let goal = repo.create(new_loop()).await.unwrap();
+        let ledger: GoalLoopLedger = serde_json::from_value(serde_json::json!({
+            "resume_evaluation_iteration": 1
+        }))
+        .unwrap();
+        repo.set_ledger(&goal.id, &ledger).await.unwrap();
+        repo.edit_ledger(&goal.id, |ledger| {
+            ledger.next_action = "Evaluate retried work".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        repo.mark_running(&goal.id, Utc::now()).await.unwrap();
+        repo.fail_running("restart").await.unwrap();
+        let recovered = repo.get(&goal.id).await.unwrap();
+        assert_eq!(recovered.status, GoalLoopStatus::Paused);
+        assert_eq!(
+            serde_json::to_value(recovered.ledger).unwrap()["resume_evaluation_iteration"],
+            1
+        );
+    }
+
     /// B6: the summary detail blanks older iterations' bodies (the newest
     /// keeps them), and one iteration reads back in full.
     #[tokio::test]

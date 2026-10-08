@@ -242,23 +242,39 @@ pub fn period_key(kind: Kind, start: NaiveDate, end: NaiveDate) -> String {
     format!("{}:{}_{}", kind.word(), ymd(start), ymd(end))
 }
 
-/// Whether the period `[start, end]` for `kind` already has a report.
-///
-/// Mirrors the skill's `already_generated`: the period is treated as **done**
-/// when ANY of its expected artifacts is present — the rolling `index.json`
-/// `series` has a row for this `period_key`, OR the period's `report-*.html`
-/// exists, OR its `metrics-*.json` exists. (The brief says "treat presence as
-/// done"; checking all three is the most permissive de-dup so the scheduler
-/// never re-runs a period the skill already covered.)
+/// Legacy reports require both a published HTML report and its index entry.
+/// New runs also publish a final completion manifest, keeping interrupted
+/// collection/rendering attempts eligible for catch-up after a restart.
 pub fn period_done(dir: &Path, kind: Kind, start: NaiveDate, end: NaiveDate) -> bool {
     let key = period_key(kind, start, end);
-    if index_has_period(dir, &key) {
-        return true;
+    let Some((base, stem)) = artifact_stem(dir, &key) else {
+        return false;
+    };
+    if !index_has_period(dir, &key) || !base.join(format!("report-{stem}.html")).is_file() {
+        return false;
     }
-    let kind_dir = dir.join(kind.word());
-    let stem = format!("{}-{}_{}", kind.word(), ymd(start), ymd(end));
-    kind_dir.join(format!("report-{stem}.html")).exists()
-        || kind_dir.join(format!("metrics-{stem}.json")).exists()
+    let manifest = base.join(format!("completion-{stem}.json"));
+    if !manifest.exists() {
+        return true; // Reports generated before the completion handshake.
+    }
+    completion_manifest(&manifest).is_some_and(|m| m["complete"] == true)
+        && base.join(format!("summary-{stem}.md")).is_file()
+        && base.join(format!("metrics-{stem}.json")).is_file()
+}
+
+fn artifact_stem(dir: &Path, key: &str) -> Option<(PathBuf, String)> {
+    let (kind, range) = key.split_once(':')?;
+    let kind = Kind::from_period(kind)?;
+    let filename = format!("report-{}-{range}.html", kind.word());
+    let (start, end) = parse_period_from_filename(&filename, kind.word())?;
+    Some((
+        dir.join(kind.word()),
+        format!("{}-{start}_{end}", kind.word()),
+    ))
+}
+
+fn completion_manifest(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
 /// Read `<insights>/index.json` and report whether its `series` array contains
@@ -660,12 +676,27 @@ async fn run_alive<C: InsightsCtx>(ctx: &C, dir: &Path, run: &ActiveRun) -> bool
     if !session_live {
         return false;
     }
-    let (d, k) = (dir.to_path_buf(), run.report_key.clone());
-    let now_rev = ctx::blocking(move || report_status(&d, &k, false))
-        .await
-        .ok()
-        .and_then(|s| s.html_revision);
-    now_rev == run.report_revision
+    let (d, run) = (dir.to_path_buf(), run.clone());
+    !ctx::blocking(move || run_completed(&d, &run)).await
+}
+
+fn run_completed(dir: &Path, run: &ActiveRun) -> bool {
+    let Some((base, stem)) = artifact_stem(dir, &run.report_key) else {
+        return false;
+    };
+    let Some(manifest) = completion_manifest(&base.join(format!("completion-{stem}.json"))) else {
+        return false;
+    };
+    manifest["complete"] == true
+        && manifest["run_id"].as_str() == Some(run.run_id.as_str())
+        && index_has_period(dir, &run.report_key)
+        && [
+            format!("report-{stem}.html"),
+            format!("summary-{stem}.md"),
+            format!("metrics-{stem}.json"),
+        ]
+        .iter()
+        .all(|name| base.join(name).is_file())
 }
 
 /// Poll until the run session `id` is archived (or gone), at most
@@ -717,6 +748,8 @@ async fn live_runs<C: InsightsCtx>(ctx: &C, dir: &Path) -> Vec<ActiveRun> {
 pub enum RunMode {
     Manual,
     Scheduled,
+    /// Finish artifacts left by an interrupted attempt, even if HTML already exists.
+    Recovery,
 }
 
 /// Build the headless prompt that drives the `insights` skill for one period.
@@ -738,17 +771,19 @@ pub fn build_run_prompt(
          and store all three artifacts (report HTML, summary markdown, metrics \
          JSON) plus update index.json. The report is for the period that ended; \
          do not ask the user any questions — run it end-to-end and stop when the \
-         report is written. {existing}",
+         all artifacts are written. {existing}",
         period = kind.period(),
         offset = offset,
         as_of = as_of,
-        force = if mode == RunMode::Manual {
+        force = if mode != RunMode::Scheduled {
             " --force"
         } else {
             ""
         },
         existing = if mode == RunMode::Manual {
             "The user explicitly requested generation: replace this period's report even if it already exists. Retain --force for every collection step."
+        } else if mode == RunMode::Recovery {
+            "The previous attempt was interrupted. Retain --force for every collection step and finish ALL artifacts and index.action_ledger even if HTML already exists."
         } else {
             "If the period was already generated, note that and stop."
         },
@@ -908,7 +943,20 @@ pub async fn run_insights<C: InsightsCtx>(
 
     let collector = materialize_collector(&insights_dir(ctx))
         .map_err(|e| otto_core::Error::Internal(format!("prepare insights collector: {e}")))?;
-    let prompt = build_run_prompt(kind, offset, as_of, &collector, mode);
+    let (artifact_dir, stem) = artifact_stem(&dir, &report_key)
+        .ok_or_else(|| otto_core::Error::Invalid("invalid insights report key".into()))?;
+    let manifest_path = artifact_dir.join(format!("completion-{stem}.json"));
+    let mode = if mode == RunMode::Scheduled
+        && (manifest_path.exists()
+            || index_has_period(&dir, &report_key)
+            || artifact_dir.join(format!("metrics-{stem}.json")).exists()
+            || artifact_dir.join(format!("report-{stem}.html")).exists())
+    {
+        RunMode::Recovery
+    } else {
+        mode
+    };
+    let mut prompt = build_run_prompt(kind, offset, as_of, &collector, mode);
     let mut meta = serde_json::json!({ "source": "insights" });
     if !cfg.model.trim().is_empty() {
         meta["model"] = serde_json::json!(cfg.model.trim());
@@ -931,6 +979,34 @@ pub async fn run_insights<C: InsightsCtx>(
     {
         // Swap the reservation for the real run (same period slot).
         let mut registry = ACTIVE_RUNS.lock().await;
+        if registry.live(&dir, &report_key, |_| true).map(|r| r.run_id) != Some(pending_id.clone())
+        {
+            drop(registry);
+            let _ = ctx.manager().archive(&sid).await;
+            return Err(otto_core::Error::Conflict(
+                "insights admission expired; retry the run".into(),
+            ));
+        }
+        // Fence this period before dispatch. A crash or failed submission now
+        // leaves a pending manifest, so catch-up must finish the partial report.
+        let (path, id) = (manifest_path.clone(), sid.clone());
+        let prepared = ctx::blocking(move || -> std::io::Result<()> {
+            std::fs::create_dir_all(path.parent().expect("manifest parent"))?;
+            let temp = path.with_extension("json.pending.tmp");
+            std::fs::write(
+                &temp,
+                serde_json::json!({"run_id":id,"complete":false}).to_string(),
+            )?;
+            std::fs::rename(temp, path)
+        })
+        .await;
+        if let Err(error) = prepared {
+            drop(registry);
+            let _ = ctx.manager().archive(&sid).await;
+            return Err(otto_core::Error::Internal(format!(
+                "prepare insights completion: {error}"
+            )));
+        }
         registry.remove_run(&dir, &pending_id);
         registry.register(
             &dir,
@@ -943,6 +1019,18 @@ pub async fn run_insights<C: InsightsCtx>(
         );
         unreserve.2 = true;
     }
+
+    let manifest_final =
+        serde_json::to_string(&manifest_path.to_string_lossy()).unwrap_or_default();
+    let manifest_temp =
+        serde_json::to_string(&format!("{}.tmp", manifest_path.display())).unwrap_or_default();
+    let completion = serde_json::json!({"run_id":sid,"complete":true});
+    prompt.push_str(&format!(
+        "\n\nAfter ALL report HTML, summary markdown, metrics JSON, index.json and index.action_ledger \
+         updates are complete and closed, write exactly {completion} to {manifest_temp}. \
+         Your LAST action must be an atomic rename from {manifest_temp} to {manifest_final}, \
+         replacing its pending manifest. Never write directly to the final manifest."
+    ));
 
     // Inject the prompt once the TUI has drawn + settled, then let it run
     // headlessly (no result-file watch — the skill writes its own artifacts).
@@ -1774,40 +1862,109 @@ mod tests {
     }
 
     #[test]
-    fn period_done_detects_html_metrics_and_index() {
+    fn recovery_period_done_requires_index_and_html_not_collection_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let s = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
         let e = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
-
-        // Nothing on disk → not done.
-        assert!(!period_done(root, Kind::Week, s, e));
-
-        // A report HTML → done.
         let weekly = root.join("weekly");
+        std::fs::create_dir_all(&weekly).unwrap();
+        std::fs::write(weekly.join("metrics-weekly-20260610_20260616.json"), "{}").unwrap();
+        assert!(
+            !period_done(root, Kind::Week, s, e),
+            "metrics alone are unfinished"
+        );
+        std::fs::write(
+            root.join("index.json"),
+            r#"{"series":[{"period_key":"weekly:20260610_20260616"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            !period_done(root, Kind::Week, s, e),
+            "collector index plus metrics is unfinished"
+        );
+        std::fs::write(
+            weekly.join("report-weekly-20260610_20260616.html"),
+            "<html>complete</html>",
+        )
+        .unwrap();
+        assert!(
+            period_done(root, Kind::Week, s, e),
+            "legacy committed reports remain complete"
+        );
+        std::fs::remove_file(root.join("index.json")).unwrap();
+        assert!(
+            !period_done(root, Kind::Week, s, e),
+            "HTML without its index is unfinished"
+        );
+    }
+
+    #[test]
+    fn recovery_html_publication_is_not_final_agent_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "weekly:20260610_20260616";
+        let active = run("test-session", key);
+        let weekly = dir.path().join("weekly");
         std::fs::create_dir_all(&weekly).unwrap();
         std::fs::write(
             weekly.join("report-weekly-20260610_20260616.html"),
-            "<html>",
+            "<html>report</html>",
         )
         .unwrap();
-        assert!(period_done(root, Kind::Week, s, e));
-
-        // Different period still not done.
-        let s2 = NaiveDate::from_ymd_opt(2026, 6, 3).unwrap();
-        let e2 = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
-        assert!(!period_done(root, Kind::Week, s2, e2));
-
-        // ... but an index.json row marks it done.
         std::fs::write(
-            root.join("index.json"),
-            serde_json::json!({
-                "series": [{ "period_key": "weekly:20260603_20260609" }]
-            })
-            .to_string(),
+            dir.path().join("index.json"),
+            format!(r#"{{"series":[{{"period_key":"{key}"}}]}}"#),
         )
         .unwrap();
-        assert!(period_done(root, Kind::Week, s2, e2));
+        assert!(
+            !run_completed(dir.path(), &active),
+            "the agent still owes summary/action ledger"
+        );
+        std::fs::write(
+            weekly.join("summary-weekly-20260610_20260616.md"),
+            "Actions",
+        )
+        .unwrap();
+        std::fs::write(
+            weekly.join("completion-weekly-20260610_20260616.json"),
+            r#"{"run_id":"test-session","complete":true}"#,
+        )
+        .unwrap();
+        assert!(
+            !run_completed(dir.path(), &active),
+            "metrics is also required"
+        );
+        std::fs::write(weekly.join("metrics-weekly-20260610_20260616.json"), "{}").unwrap();
+        assert!(run_completed(dir.path(), &active));
+        assert!(
+            !run_completed(dir.path(), &run("replacement-session", key)),
+            "a prior run cannot complete a replacement"
+        );
+    }
+
+    #[test]
+    fn recovery_pending_manifest_keeps_interrupted_period_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        let e = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
+        let weekly = dir.path().join("weekly");
+        std::fs::create_dir_all(&weekly).unwrap();
+        std::fs::write(
+            weekly.join("report-weekly-20260610_20260616.html"),
+            "report",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("index.json"),
+            r#"{"series":[{"period_key":"weekly:20260610_20260616"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            weekly.join("completion-weekly-20260610_20260616.json"),
+            r#"{"run_id":"interrupted","complete":false}"#,
+        )
+        .unwrap();
+        assert!(!period_done(dir.path(), Kind::Week, s, e));
     }
 
     #[test]

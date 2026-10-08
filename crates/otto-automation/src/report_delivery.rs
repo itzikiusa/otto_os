@@ -97,9 +97,11 @@ pub fn report_hash_matches(stored: &str, report: &str) -> bool {
 /// fallback handled by the watcher).
 pub fn augment_report_prompt(base: &str, out_path: &str) -> String {
     format!(
-        "{base}\n\n---\nWhen you have finished, write your COMPLETE Markdown report (and nothing \
-         else) to this absolute file path, overwriting any existing content:\n\n{out_path}\n\n\
-         Writing that file is the last thing you do."
+        "{base}\n\n---\nWhen you have finished ALL work, write your COMPLETE Markdown report \
+         (and nothing else) to the sibling temporary file:\n\n{out_path}.tmp\n\n\
+         Close that file, then publish it with an atomic rename to the absolute final path \
+         {out_path}, replacing any existing file. Never write directly to the final path. \
+         The atomic rename is your LAST action; do no further work after publishing."
     )
 }
 
@@ -283,7 +285,15 @@ pub async fn deliver_webhook(url: &str, text: &str, filename: &str, bytes: &[u8]
 
 #[cfg(test)]
 mod tests {
-    use super::{report_hash, report_hash_matches};
+    use super::{augment_report_prompt, report_hash, report_hash_matches};
+
+    #[test]
+    fn recovery_report_prompt_publishes_atomically_as_last_action() {
+        let prompt = augment_report_prompt("do the work", "/tmp/report.md");
+        assert!(prompt.contains("/tmp/report.md.tmp"));
+        assert!(prompt.contains("atomic rename"));
+        assert!(prompt.contains("LAST action"));
+    }
 
     /// S3-11: the persisted notify-on-change hash is a fixed algorithm — this
     /// exact value must never change across toolchains — and whitespace-only

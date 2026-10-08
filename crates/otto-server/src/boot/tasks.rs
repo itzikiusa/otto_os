@@ -79,9 +79,7 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
 
     start_notices(ctx);
     bg.keep(start_conversation_view(ctx));
-    spawn_product_orphan_reaper(ctx);
     start_design_hall_and_proof_media(ctx);
-    spawn_vault_docs_recovery(ctx);
     bg.keep(start_insights_scheduler(ctx));
     if let Some(h) = start_cli_update_scheduler(ctx) {
         bg.keep(h);
@@ -602,15 +600,6 @@ fn start_conversation_view(ctx: &ServerCtx) -> impl Send + 'static {
     nudge
 }
 
-/// Orphan reaper: auto-resume analysis agents stranded by a restart. Runs
-/// once at startup; any analysis agent still 'running'/'waiting' has no
-/// surviving task, so it is re-run (capped) or marked errored + notified.
-fn spawn_product_orphan_reaper(ctx: &ServerCtx) {
-    tokio::spawn(otto_product::run::reap_orphaned_agents_on_startup(
-        ctx.clone(),
-    ));
-}
-
 /// Design Hall: FTS index + idempotent legacy import (background). Mirrors
 /// Product-arena design attachments and Canvas scenes into the design graph
 /// (graph rows only; the legacy rows/files are never touched) and re-syncs a
@@ -619,13 +608,6 @@ fn spawn_product_orphan_reaper(ctx: &ServerCtx) {
 fn start_design_hall_and_proof_media(ctx: &ServerCtx) {
     crate::design_hall::spawn_startup_import(ctx);
     crate::proof::spawn_media_maintenance(ctx.proof_repo.clone());
-}
-
-/// Vault docs-runs recovery: this restart killed any in-flight run. Flip
-/// still-non-terminal persisted runs to 'interrupted' and soft-trash their
-/// orphaned `_drafts/docs-run-*` dirs (multi-writer runs only).
-fn spawn_vault_docs_recovery(ctx: &ServerCtx) {
-    tokio::spawn(crate::vault_docs_agent::recover_interrupted(ctx.clone()));
 }
 
 // -- Schedulers -----------------------------------------------------------
@@ -663,15 +645,6 @@ fn start_cli_update_scheduler(ctx: &ServerCtx) -> Option<impl Send + 'static> {
 /// block its agent's one-turn-at-a-time gate, so fail them BEFORE restarting
 /// any coordinator (mirrors the review/skill-eval recovery).
 async fn start_swarm(ctx: &ServerCtx) -> impl Send + 'static {
-    match ctx
-        .swarm_repo
-        .fail_running("Interrupted by a daemon restart — the coordinator will re-run the task.")
-        .await
-    {
-        Ok(n) if n > 0 => tracing::info!("swarm recovery: marked {n} orphaned run(s) as stopped"),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("swarm recovery: {e}"),
-    }
     let scheduler = otto_swarm::runtime::scheduler::start(ctx.swarm_rt());
     match ctx.swarm_repo.list_all_active_swarms().await {
         Ok(active) => {
@@ -734,14 +707,13 @@ fn start_workgraph_projector(ctx: &ServerCtx) -> impl Send + 'static {
 /// the workflow/swarm recovery, this is awaited). Then fire due recurring
 /// jobs (interval/daily/weekly/cron) with bounded concurrency.
 async fn start_scheduled_tasks(ctx: &ServerCtx) -> impl Send + 'static {
-    crate::scheduled_tasks_scheduler::reap_interrupted(ctx).await;
     let h = crate::scheduled_tasks_scheduler::start(ctx.clone());
     tracing::info!("scheduled tasks scheduler started");
     h
 }
 
 /// Personal Agents: fires every enabled schedule of every enabled personal
-/// agent (per-schedule cursor), reaps interrupted runs on startup, and bounds
+/// agent (per-schedule cursor), after awaited startup recovery, and bounds
 /// concurrency.
 fn start_personal_agents(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::personal_agents_scheduler::start(ctx.clone());

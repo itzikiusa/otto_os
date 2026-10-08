@@ -183,6 +183,11 @@ test('kids live: idle kids get up and wander, the headmaster walks over and insp
   expect(seen.has(ids.printer)).toBe(false);
 });
 
+test.describe('Screen navigation', () => {
+  // Preserve the CSS viewport, animation and real canvas interactions while
+  // drawing one quarter as many pixels. Full-resolution asset/visual journeys
+  // above stay separate: SwiftShader capture stalled this flow for 35 s in CI.
+  test.use({ deviceScaleFactor: 0.5 });
 test('click a kid → its card; look at its screen; open the session', async ({ page }) => {
   await boot(page);
   await enterOurRoom(page);
@@ -195,6 +200,7 @@ test('click a kid → its card; look at its screen; open the session', async ({ 
   await box(page).locator('.stage').screenshot({ path: test.info().outputPath('school-screen.png') });
   await card(page).getByRole('button', { name: 'Open session' }).click();
   await expect(page).toHaveURL(new RegExp(`#/agents/${ids.printer}$`));
+});
 });
 
 test('kick out: confirm, the kid walks out of the door, the session is deleted', async ({ page }) => {

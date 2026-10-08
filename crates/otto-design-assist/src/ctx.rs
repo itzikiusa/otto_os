@@ -44,7 +44,7 @@ pub struct AgentTurn<'a> {
     pub stuck_after: Duration,
     /// Completion marker file: the turn is done once it holds non-empty text.
     pub done_file: Option<PathBuf>,
-    /// Quiet fallback for non-transcript providers (PTY silence = done).
+    /// Legacy compatibility field; silence is never accepted as completion.
     pub quiet_done: Option<Duration>,
 }
 

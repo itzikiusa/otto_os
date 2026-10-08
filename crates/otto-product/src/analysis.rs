@@ -671,13 +671,32 @@ pub async fn retry_analysis_agent<C: ProductStudioHost>(
         .await
         .map_err(ApiError)?;
 
-    // Spawn background retry; errors are isolated inside retry_analysis_agent.
-    tokio::spawn(crate::run::retry_analysis_agent(
+    // Reserve ownership before spawning, including the caller's final DB writes.
+    let owner = crate::agent_attempt::claim(&agent_id).map_err(ApiError)?;
+    let agent = ctx
+        .product_repo()
+        .get_analysis_agent(&agent_id)
+        .await
+        .map_err(ApiError)?;
+    if agent.analysis_id != aid {
+        return Err(ApiError(Error::NotFound(format!(
+            "analysis agent {agent_id}"
+        ))));
+    }
+    // A freshly inserted original lens can be visible before it claims ownership.
+    // Stop it first; retries never queue behind a currently running attempt.
+    if matches!(agent.status.as_str(), "running" | "waiting" | "pending") {
+        return Err(ApiError(Error::Conflict(
+            "stop the active analysis agent before retrying".into(),
+        )));
+    }
+    tokio::spawn(crate::run::retry_analysis_agent_owned(
         ctx.clone(),
         ws,
         user.id.clone(),
         aid,
         agent_id,
+        owner,
     ));
 
     Ok(StatusCode::ACCEPTED)
@@ -724,6 +743,22 @@ pub async fn stop_analysis_agent<C: ProductStudioHost>(
     // Signal the in-flight recovery loop FIRST so the kill below is seen as
     // intentional (no auto-retry).
     crate::run::signal_cancel(ctx.agent_cancels(), &agent_id);
+
+    // A finishing attempt may still be publishing its last result. Drain it
+    // before the terminal Stop write and hold ownership against a new Retry.
+    let _owner = crate::agent_attempt::stop(ctx.agent_cancels(), &agent_id, || async {
+        if let Ok(current) = ctx.product_repo().get_analysis_agent(&agent_id).await {
+            if let Some(sid) = current.session_id.as_ref() {
+                let _ = ctx.kill_session(sid).await;
+            }
+        }
+    })
+    .await;
+    let agent = ctx
+        .product_repo()
+        .get_analysis_agent(&agent_id)
+        .await
+        .map_err(ApiError)?;
 
     // Kill the current live session, if any.
     if let Some(sid) = agent.session_id.as_ref() {
