@@ -255,7 +255,7 @@ impl LiveSession {
             }
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<CdpEvent>();
+        let (tx, rx) = mpsc::channel::<CdpEvent>(super::conn::QUEUE_MESSAGES);
         conn.route(&sid, tx);
         let now = Instant::now();
         let session = Arc::new(Self {
@@ -1542,10 +1542,7 @@ impl LiveSession {
             }
             "Inspector.targetCrashed" => self.on_target_gone(true),
             "Fetch.requestPaused" => {
-                let proc = self.proc.clone();
-                let params = ev.params.clone();
-                let via = Some(self.sid.clone());
-                tokio::spawn(async move { proc.on_paused(params, via).await });
+                self.proc.on_paused(ev);
             }
             _ => {}
         }
@@ -1599,7 +1596,7 @@ impl LiveSession {
     }
 }
 
-async fn session_loop(me: Weak<LiveSession>, mut rx: mpsc::UnboundedReceiver<CdpEvent>) {
+async fn session_loop(me: Weak<LiveSession>, mut rx: mpsc::Receiver<CdpEvent>) {
     while let Some(ev) = rx.recv().await {
         let Some(s) = me.upgrade() else { return };
         s.on_event(ev).await;

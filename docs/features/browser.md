@@ -385,6 +385,14 @@ rebinding are covered too); downloads are refused or quarantined; sessions are
 private to their owner (plus workspace Admins and root); navigations, session
 open/close and control changes are audited.
 
+**Under heavy load.** The daemon bounds CDP command/event queues by count and
+byte charge, limits unanswered commands, admits at most 64 request checks per
+Chromium process, and caps the shared proxy at 128 connections. An excess request
+or socket is refused. A CDP queue overload closes that browser connection and
+marks its sessions crashed, so reopen the tab after the load subsides. Pending
+commands fail promptly; proxy shutdown also closes accepted sockets. The API
+contract lists the exact limits.
+
 **Manual checklist** (needs a real Chromium — set `OTTO_CHROME_BIN` or pin the
 sha256 and run the install):
 

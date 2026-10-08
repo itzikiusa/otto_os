@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 const VER: u8 = 5;
 const CMD_CONNECT: u8 = 1;
@@ -28,6 +28,7 @@ const REP_CMD_UNSUPPORTED: u8 = 7;
 const REP_ATYP_UNSUPPORTED: u8 = 8;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONNECTIONS: usize = 128;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The target of one CONNECT.
@@ -37,7 +38,7 @@ pub enum Target {
     Domain(String, u16),
 }
 
-/// Running proxy; dropping it stops the accept loop.
+/// Running proxy; dropping it stops acceptance and all accepted socket tasks.
 pub struct GuardProxy {
     port: u16,
     task: JoinHandle<()>,
@@ -49,17 +50,24 @@ impl GuardProxy {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
         let task = tokio::spawn(async move {
+            // Dropping the accept task also aborts every accepted socket task.
+            let mut connections = JoinSet::new();
             loop {
-                let Ok((stream, peer)) = listener.accept().await else {
+                let accepted = tokio::select! {
+                    biased;
+                    Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((stream, peer)) = accepted else {
                     // EMFILE & co: back off instead of spinning.
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
                 // Loopback listener; refuse anything else defensively.
-                if !peer.ip().is_loopback() {
+                if !peer.ip().is_loopback() || connections.len() >= MAX_CONNECTIONS {
                     continue;
                 }
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     let _ = serve(stream).await;
                 });
             }
@@ -93,9 +101,9 @@ async fn serve(mut client: TcpStream) -> std::io::Result<()> {
         Ok(Ok(t)) => t,
         _ => return Ok(()),
     };
-    let addrs = match vet(&target).await {
-        Ok(a) => a,
-        Err(_) => {
+    let addrs = match tokio::time::timeout(CONNECT_TIMEOUT, vet(&target)).await {
+        Ok(Ok(a)) => a,
+        _ => {
             reply(&mut client, REP_NOT_ALLOWED).await?;
             return Ok(());
         }
@@ -282,5 +290,67 @@ mod tests {
         assert_eq!(&resp[..2], &[5, 0]);
         assert_eq!(resp[3], REP_NOT_ALLOWED);
         assert!(proxy.chrome_args()[0].contains(&proxy.port().to_string()));
+    }
+    #[tokio::test]
+    async fn dropping_proxy_cancels_accepted_handshakes() {
+        let proxy = GuardProxy::start().await.unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", proxy.port()))
+            .await
+            .unwrap();
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut accepted = [0; 2];
+        client.read_exact(&mut accepted).await.unwrap();
+        assert_eq!(accepted, [5, 0]);
+        drop(proxy);
+        let mut byte = [0];
+        let result = tokio::time::timeout(Duration::from_secs(1), client.read(&mut byte)).await;
+        assert!(
+            matches!(result, Ok(Ok(0)) | Ok(Err(_))),
+            "accepted sockets must close with their proxy owner: {result:?}"
+        );
+    }
+    #[tokio::test]
+    async fn repeated_connection_saturation_rejects_excess_and_reclaims_slots() {
+        let started = std::time::Instant::now();
+        let proxy = GuardProxy::start().await.unwrap();
+        for _ in 0..8 {
+            let mut held = Vec::new();
+            for _ in 0..MAX_CONNECTIONS {
+                // A previous round's task cleanup may still be scheduled.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    let mut client = TcpStream::connect(("127.0.0.1", proxy.port()))
+                        .await
+                        .unwrap();
+                    let mut response = [0; 2];
+                    if client.write_all(&[5, 1, 0]).await.is_ok()
+                        && client.read_exact(&mut response).await.is_ok()
+                    {
+                        assert_eq!(response, [5, 0]);
+                        held.push(client);
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "released sockets did not reclaim capacity"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }
+            let mut excess = TcpStream::connect(("127.0.0.1", proxy.port()))
+                .await
+                .unwrap();
+            let mut byte = [0];
+            let result = tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte)).await;
+            assert!(
+                matches!(result, Ok(Ok(0)) | Ok(Err(_))),
+                "excess socket must be rejected: {result:?}"
+            );
+            drop(held);
+        }
+        println!(
+            "8 proxy saturation/recovery rounds (1,024 admitted sockets) in {:?}",
+            started.elapsed()
+        );
     }
 }

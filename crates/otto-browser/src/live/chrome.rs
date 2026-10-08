@@ -88,7 +88,7 @@ pub fn chrome_args(spec: &LaunchSpec) -> Vec<String> {
 pub struct Launched {
     pub child: Child,
     pub conn: Arc<CdpConn>,
-    pub browser_events: mpsc::UnboundedReceiver<CdpEvent>,
+    pub browser_events: mpsc::Receiver<CdpEvent>,
 }
 
 /// Spawn Chromium with CDP on fds 3 (browser reads) and 4 (browser writes).

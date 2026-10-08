@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::cdp::CdpError;
@@ -27,16 +27,22 @@ pub const MAX_MESSAGE_BYTES: usize = 96 * 1024 * 1024;
 /// Default per-command timeout.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Count and conservative byte charges both bound each transport direction.
+/// Events share one budget across all page routes and browser-level events.
+pub const QUEUE_MESSAGES: usize = 256;
+const QUEUE_BYTES: usize = 32 * 1024 * 1024;
+
 /// A CDP event.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CdpEvent {
     pub method: String,
     pub params: Value,
     pub session_id: Option<String>,
+    _charge: OwnedSemaphorePermit,
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, CdpError>>>>>;
-type Routes = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<CdpEvent>>>>;
+type Routes = Arc<Mutex<HashMap<String, mpsc::Sender<CdpEvent>>>>;
 
 struct PendingCall<'a> {
     pending: &'a Pending,
@@ -55,7 +61,9 @@ pub struct CdpConn {
     next_id: AtomicU64,
     pending: Pending,
     routes: Routes,
-    out: mpsc::UnboundedSender<Vec<u8>>,
+    out: mpsc::Sender<(Vec<u8>, OwnedSemaphorePermit)>,
+    out_budget: Arc<Semaphore>,
+    closed_tx: watch::Sender<bool>,
     closed: Arc<AtomicBool>,
     closed_rx: watch::Receiver<bool>,
     reader: JoinHandle<()>,
@@ -65,21 +73,23 @@ pub struct CdpConn {
 impl CdpConn {
     /// Start the reader/writer tasks. Returns the connection and the receiver
     /// of browser-level events (and of events for sessions nobody routed).
-    pub fn start<R, W>(read: R, write: W) -> (Arc<Self>, mpsc::UnboundedReceiver<CdpEvent>)
+    pub fn start<R, W>(read: R, write: W) -> (Arc<Self>, mpsc::Receiver<CdpEvent>)
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (browser_tx, browser_rx) = mpsc::unbounded_channel::<CdpEvent>();
+        let (out_tx, mut out_rx) = mpsc::channel::<(Vec<u8>, OwnedSemaphorePermit)>(QUEUE_MESSAGES);
+        let (browser_tx, browser_rx) = mpsc::channel::<CdpEvent>(QUEUE_MESSAGES);
+        let event_budget = Arc::new(Semaphore::new(QUEUE_BYTES));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
         let (closed_tx, closed_rx) = watch::channel(false);
 
+        let writer_closed = closed_tx.clone();
         let mut write = write;
         let writer = tokio::spawn(async move {
-            while let Some(mut msg) = out_rx.recv().await {
+            while let Some((mut msg, _charge)) = out_rx.recv().await {
                 msg.push(0);
                 if write.write_all(&msg).await.is_err() {
                     break;
@@ -88,38 +98,45 @@ impl CdpConn {
                     break;
                 }
             }
+            let _ = writer_closed.send(true);
         });
 
         let pending_r = pending.clone();
         let routes_r = routes.clone();
         let closed_r = closed.clone();
+        let reader_closed = closed_tx.clone();
+        let mut stop = closed_rx.clone();
+        let stop_writer = writer.abort_handle();
         let reader = tokio::spawn(async move {
             let mut buf_reader = BufReader::with_capacity(1 << 16, read);
             let mut buf: Vec<u8> = Vec::new();
             loop {
                 buf.clear();
-                match read_message(&mut buf_reader, &mut buf).await {
+                let read = tokio::select! {
+                    biased;
+                    _ = stop.changed() => break,
+                    result = read_message(&mut buf_reader, &mut buf) => result,
+                };
+                match read {
                     Ok(true) => {}
                     Ok(false) | Err(_) => break,
                 }
                 let Ok(v) = serde_json::from_slice::<Value>(&buf) else {
                     continue;
                 };
-                dispatch(v, &pending_r, &routes_r, &browser_tx);
+                if !dispatch(
+                    v,
+                    buf.len(),
+                    &event_budget,
+                    &pending_r,
+                    &routes_r,
+                    &browser_tx,
+                ) {
+                    break; // Critical events cannot be dropped: fail the connection closed.
+                }
             }
-            // EOF / error: the browser is gone. Fail every waiter.
-            closed_r.store(true, Ordering::SeqCst);
-            let waiters: Vec<_> = pending_r
-                .lock()
-                .map(|mut p| p.drain().map(|(_, tx)| tx).collect())
-                .unwrap_or_default();
-            for tx in waiters {
-                let _ = tx.send(Err(CdpError::Closed));
-            }
-            if let Ok(mut r) = routes_r.lock() {
-                r.clear(); // drops the senders → session loops see the end
-            }
-            let _ = closed_tx.send(true);
+            stop_writer.abort();
+            close_transport(&closed_r, &reader_closed, &pending_r, &routes_r);
         });
 
         (
@@ -128,6 +145,8 @@ impl CdpConn {
                 pending,
                 routes,
                 out: out_tx,
+                out_budget: Arc::new(Semaphore::new(QUEUE_BYTES)),
+                closed_tx,
                 closed,
                 closed_rx,
                 reader,
@@ -152,7 +171,7 @@ impl CdpConn {
     }
 
     /// Route every event carrying `session_id` to `tx` from now on.
-    pub fn route(&self, session_id: &str, tx: mpsc::UnboundedSender<CdpEvent>) {
+    pub fn route(&self, session_id: &str, tx: mpsc::Sender<CdpEvent>) {
         if let Ok(mut r) = self.routes.lock() {
             r.insert(session_id.to_string(), tx);
         }
@@ -187,6 +206,16 @@ impl CdpConn {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         if let Ok(mut p) = self.pending.lock() {
+            if self.is_closed() {
+                return Err(CdpError::Closed);
+            }
+            // Output can drain while the browser stops answering. Bound the
+            // reply waiters independently of the serialized command queue.
+            if p.len() >= QUEUE_MESSAGES {
+                return Err(CdpError::Protocol(
+                    "browser command capacity exceeded; retry shortly".into(),
+                ));
+            }
             p.insert(id, tx);
         }
         // An HTTP/socket caller can disappear before a reply or timeout.
@@ -196,7 +225,7 @@ impl CdpConn {
             id,
         };
         let frame = build_command(id, method, params, session_id);
-        if self.out.send(frame).is_err() {
+        if !self.enqueue(frame) {
             self.forget(id);
             return Err(CdpError::Closed);
         }
@@ -214,7 +243,23 @@ impl CdpConn {
     /// reply is dropped when it arrives.
     pub fn send(&self, method: &str, params: Value, session_id: Option<&str>) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let _ = self.out.send(build_command(id, method, params, session_id));
+        if !self.is_closed() {
+            self.enqueue(build_command(id, method, params, session_id));
+        }
+    }
+
+    fn enqueue(&self, frame: Vec<u8>) -> bool {
+        let charge = frame.len().saturating_add(64);
+        let permit = u32::try_from(charge)
+            .ok()
+            .and_then(|n| self.out_budget.clone().try_acquire_many_owned(n).ok());
+        if let Some(permit) = permit {
+            if self.out.try_send((frame, permit)).is_ok() {
+                return true;
+            }
+        }
+        self.shutdown();
+        false
     }
 
     fn forget(&self, id: u64) {
@@ -227,8 +272,26 @@ impl CdpConn {
     pub fn shutdown(&self) {
         self.reader.abort();
         self.writer.abort();
-        self.closed.store(true, Ordering::SeqCst);
+        close_transport(&self.closed, &self.closed_tx, &self.pending, &self.routes);
     }
+}
+
+fn close_transport(
+    closed: &AtomicBool,
+    signal: &watch::Sender<bool>,
+    pending: &Pending,
+    routes: &Routes,
+) {
+    closed.store(true, Ordering::SeqCst);
+    if let Ok(mut p) = pending.lock() {
+        for (_, tx) in p.drain() {
+            let _ = tx.send(Err(CdpError::Closed));
+        }
+    }
+    if let Ok(mut r) = routes.lock() {
+        r.clear();
+    }
+    signal.send_replace(true);
 }
 
 impl Drop for CdpConn {
@@ -259,6 +322,9 @@ async fn read_message<R: AsyncRead + Unpin>(
             return Ok(false);
         }
         if let Some(pos) = available.iter().position(|b| *b == 0) {
+            if buf.len().saturating_add(pos) > MAX_MESSAGE_BYTES {
+                return Err(std::io::Error::other("cdp message too large"));
+            }
             buf.extend_from_slice(&available[..pos]);
             r.consume(pos + 1);
             return Ok(true);
@@ -273,11 +339,13 @@ async fn read_message<R: AsyncRead + Unpin>(
 }
 
 fn dispatch(
-    v: Value,
+    mut v: Value,
+    wire_bytes: usize,
+    budget: &Arc<Semaphore>,
     pending: &Pending,
     routes: &Routes,
-    browser_tx: &mpsc::UnboundedSender<CdpEvent>,
-) {
+    browser_tx: &mpsc::Sender<CdpEvent>,
+) -> bool {
     if let Some(id) = v.get("id").and_then(Value::as_u64) {
         let tx = pending.lock().ok().and_then(|mut p| p.remove(&id));
         if let Some(tx) = tx {
@@ -287,29 +355,37 @@ fn dispatch(
             };
             let _ = tx.send(result);
         }
-        return;
+        return true;
     }
     let Some(method) = v.get("method").and_then(Value::as_str) else {
-        return;
+        return true;
+    };
+    let method = method.to_string();
+    let charge = wire_bytes.saturating_mul(4).saturating_add(512);
+    let Some(permit) = u32::try_from(charge)
+        .ok()
+        .and_then(|n| budget.clone().try_acquire_many_owned(n).ok())
+    else {
+        return false;
     };
     let session_id = v
         .get("sessionId")
         .and_then(Value::as_str)
         .map(str::to_string);
     let ev = CdpEvent {
-        method: method.to_string(),
-        params: v.get("params").cloned().unwrap_or(Value::Null),
+        method,
+        params: v.get_mut("params").map(Value::take).unwrap_or(Value::Null),
+        _charge: permit,
         session_id: session_id.clone(),
     };
     if let Some(sid) = &session_id {
         let route = routes.lock().ok().and_then(|r| r.get(sid).cloned());
         if let Some(tx) = route {
             // A closed receiver means the session is gone: drop its late events.
-            let _ = tx.send(ev);
-            return;
+            return !matches!(tx.try_send(ev), Err(mpsc::error::TrySendError::Full(_)));
         }
     }
-    let _ = browser_tx.send(ev);
+    browser_tx.try_send(ev).is_ok()
 }
 
 #[cfg(test)]
@@ -338,7 +414,7 @@ mod tests {
         let (mut their_r, mut their_w) = tokio::io::split(theirs);
         let (conn, mut browser_events) = CdpConn::start(our_r, our_w);
 
-        let (tx, mut session_events) = mpsc::unbounded_channel();
+        let (tx, mut session_events) = mpsc::channel(QUEUE_MESSAGES);
         conn.route("S1", tx);
 
         let c2 = conn.clone();
@@ -439,5 +515,161 @@ mod tests {
         call.abort();
         assert!(call.await.unwrap_err().is_cancelled());
         assert!(conn.pending.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn output_flood_closes_connection_instead_of_retaining_commands() {
+        let (ours, _stalled_browser) = tokio::io::duplex(64);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _events) = CdpConn::start(read, write);
+        for _ in 0..4096 {
+            conn.send(
+                "Input.insertText",
+                json!({"text": "x".repeat(256)}),
+                Some("S"),
+            );
+        }
+        assert!(
+            conn.is_closed(),
+            "stalled output must have bounded admission"
+        );
+        tokio::time::timeout(Duration::from_secs(1), conn.closed())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_flood_closes_connection_and_fails_pending_calls() {
+        let (ours, mut browser) = tokio::io::duplex(1 << 16);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _stalled_events) = CdpConn::start(read, write);
+        let caller = conn.clone();
+        let pending =
+            tokio::spawn(async move { caller.call("Page.reload", json!({}), None).await });
+        let _ = read_frame(&mut browser).await;
+        for _ in 0..4096 {
+            if browser
+                .write_all(b"{\"method\":\"Fetch.requestPaused\",\"params\":{}}\0")
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), conn.closed())
+                .await
+                .is_ok(),
+            "stalled event consumer must terminate the transport at its bound"
+        );
+        assert!(matches!(pending.await.unwrap(), Err(CdpError::Closed)));
+    }
+    #[tokio::test]
+    async fn unanswered_calls_have_bounded_admission_even_when_output_drains() {
+        let (ours, mut browser) = tokio::io::duplex(1 << 16);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _events) = CdpConn::start(read, write);
+        let drain = tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            while browser.read(&mut buf).await.unwrap_or(0) != 0 {}
+        });
+        let mut calls = tokio::task::JoinSet::new();
+        for _ in 0..1024 {
+            let conn = conn.clone();
+            calls.spawn(async move { conn.call("Page.reload", json!({}), None).await });
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            conn.pending.lock().unwrap().len() <= 256,
+            "a draining browser that never replies must not accumulate unbounded callers"
+        );
+        calls.abort_all();
+        while calls.join_next().await.is_some() {}
+        assert!(conn.pending.lock().unwrap().is_empty());
+        conn.shutdown();
+        drain.abort();
+    }
+
+    #[tokio::test]
+    async fn event_byte_budget_closes_before_message_count_limit() {
+        let (ours, mut browser) = tokio::io::duplex(1 << 16);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _events) = CdpConn::start(read, write);
+        let mut event = serde_json::to_vec(&json!({"method": "Page.javascriptDialogOpening", "params": {"message": "x".repeat(1024 * 1024)}})).unwrap();
+        event.push(0);
+        // Sixteen events are far below the message-count bound, but their
+        // aggregate decoded-payload charge must exceed the byte bound.
+        for _ in 0..16 {
+            if browser.write_all(&event).await.is_err() {
+                break;
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), conn.closed())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_byte_budget_closes_before_message_count_limit() {
+        let (ours, _browser) = tokio::io::duplex(64);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _events) = CdpConn::start(read, write);
+        for _ in 0..40 {
+            conn.send(
+                "Input.insertText",
+                json!({"text": "x".repeat(1024 * 1024)}),
+                None,
+            );
+            if conn.is_closed() {
+                break;
+            }
+        }
+        assert!(
+            conn.is_closed(),
+            "a few large commands must also hit the byte limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn sustained_event_drain_releases_budget_and_preserves_reply_routing() {
+        let started = std::time::Instant::now();
+        let (ours, mut browser) = tokio::io::duplex(1 << 16);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, mut events) = CdpConn::start(read, write);
+        let mut event = serde_json::to_vec(
+            &json!({"method": "Target.targetInfoChanged", "params": {"title": "x".repeat(4096)}}),
+        )
+        .unwrap();
+        event.push(0);
+        // 10k real pipe events / ~40 MiB source; would exhaust the byte budget
+        // if consumer completion failed to release permits.
+        for _ in 0..100 {
+            for _ in 0..100 {
+                browser.write_all(&event).await.unwrap();
+            }
+            for _ in 0..100 {
+                drop(events.recv().await.unwrap());
+            }
+        }
+        assert!(!conn.is_closed());
+        let caller = conn.clone();
+        let call =
+            tokio::spawn(async move { caller.call("Browser.getVersion", json!({}), None).await });
+        let cmd = read_frame(&mut browser).await;
+        browser
+            .write_all(
+                format!(
+                    "{{\"id\":{},\"result\":{{\"product\":\"fixture\"}}}}\0",
+                    cmd["id"]
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(call.await.unwrap().unwrap()["product"], "fixture");
+        println!(
+            "10,000 CDP events (40 MiB) drained in {:?}; subsequent reply routed",
+            started.elapsed()
+        );
+        conn.shutdown();
     }
 }
