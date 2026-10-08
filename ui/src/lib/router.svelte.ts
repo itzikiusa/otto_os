@@ -15,6 +15,7 @@ import { dropShareToken, storeShareToken, storedShareToken } from './shareTokenS
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
+import { captureGameInvite } from '../modules/rooms/games/access';
 import { captureRoomInvite } from '../modules/rooms/room-access';
 import { activeNavId } from './sidebar';
 
@@ -58,14 +59,14 @@ function restoreLastRoute(): void {
   if (h !== '' && h !== '#/' && h !== '#') return; // explicit route wins
   const saved = lsGet(winKey(LS_LAST_ROUTE));
   // Never restore into a share route (`#/s/…` is one-time-view by design).
-  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/')) {
+  if (saved && saved.startsWith('#/') && !saved.startsWith('#/s/') && !saved.startsWith('#/room/') && !saved.startsWith('#/room-host/') && !saved.startsWith('#/game-room/')) {
     history.replaceState(null, '', saved);
   }
 }
 
 function persistLastRoute(hash: string): void {
   if (!IS_TAURI) return;
-  if (hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/')) return; // ephemeral room/share views are never sticky
+  if (hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/') || hash.startsWith('#/game-room/')) return; // ephemeral room/share views are never sticky
   lsSet(winKey(LS_LAST_ROUTE), hash);
 }
 
@@ -95,7 +96,7 @@ function ssSet(key: string, value: string): void {
 
 /** Routes never remembered as a module's resume point (one-time share/room views). */
 function ephemeralRoute(hash: string): boolean {
-  return hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/');
+  return hash.startsWith('#/s/') || hash.startsWith('#/room/') || hash.startsWith('#/room-host/') || hash.startsWith('#/game-room/');
 }
 
 /** The sidebar nav id a hash belongs to (see `activeNavId`). */
@@ -260,6 +261,14 @@ class Router {
   private read(): string[] {
     const raw = window.location.hash.replace(/^#\/?/, '');
     let parts = raw === '' ? [] : raw.split('/').map(safeDecode);
+
+    if (parts[0] === 'game-room') {
+      const match = /^game-room\/([\w-]{1,128})\?invite=([\w-]{16,512})$/.exec(raw);
+      const roomId = match?.[1] ?? (parts[1] ?? '').split('?')[0];
+      if (match) captureGameInvite(roomId, match[2]);
+      history.replaceState(null, '', `#/game-room/${encodeURIComponent(roomId)}`);
+      parts = ['game-room', roomId];
+    }
 
     if (parts[0] === 'room' && parts.length === 3) {
       const [, roomId, invite] = parts;

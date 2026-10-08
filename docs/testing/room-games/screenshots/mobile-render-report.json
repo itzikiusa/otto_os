@@ -1,0 +1,68 @@
+{
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "fps": 60.28075970272502,
+  "frames": 301,
+  "drawCalls": 366,
+  "triangles": 493838,
+  "frameMs": 1.3580021479056148,
+  "camera": {
+    "x": 1.1717343223652814,
+    "y": 3.9490791029930796,
+    "z": -42.188650115687444
+  },
+  "cameraDirection": {
+    "x": 0.978864293570651,
+    "y": -0.2042941655536683,
+    "z": 0.009412156668948677
+  },
+  "errors": [],
+  "assets": [
+    {
+      "path": "/room-games/arena-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/driver-fox.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/driver-panda.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/driver-rabbit.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/driver-robot.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/environment-kit.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-azure.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-ember.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/drivers.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/adventure-kit.glb",
+      "status": 200
+    }
+  ]
+}

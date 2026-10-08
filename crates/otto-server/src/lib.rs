@@ -69,6 +69,7 @@ pub mod resource_sessions;
 pub use otto_review::fallback as review_fallback;
 pub use otto_review::session as review_session;
 use otto_review::summarizer as review_summarizer;
+pub mod game_rooms;
 pub mod rooms;
 pub mod routes;
 pub mod run_callback;
@@ -164,7 +165,9 @@ pub fn build_router_with_assets(
     root_extras: Vec<Router>,
     assets: Option<spa::AssetLoader>,
 ) -> Router {
-    let mut protected = routes::protected_routes().merge(rooms::protected_routes());
+    let mut protected = routes::protected_routes()
+        .merge(rooms::protected_routes())
+        .merge(game_rooms::protected_routes());
     for extra in api_extras {
         protected = protected.merge(extra);
     }
@@ -193,6 +196,7 @@ pub fn build_router_with_assets(
 
     let api = routes::public_routes()
         .merge(rooms::public_routes())
+        .merge(game_rooms::public_routes())
         .merge(protected);
     let events_tx = ctx.events.clone();
     let host_guard_state = host_guard::HostGuardState::new(ctx.pool.clone());
@@ -202,6 +206,7 @@ pub fn build_router_with_assets(
         .nest("/api/v1", api)
         .route("/ws/events", get(ws_events::events_ws))
         .merge(rooms::ws_routes())
+        .merge(game_rooms::ws_routes())
         .with_state(ctx)
         .fallback(move |uri| spa::spa_fallback_with_assets(uri, assets));
 

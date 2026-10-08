@@ -1,0 +1,430 @@
+{
+  "checkedAt": "2026-10-08T17:12:41.981017+00:00",
+  "mode": "production-preview",
+  "stats": {
+    "startTime": "2026-10-08T17:06:19.779Z",
+    "duration": 352848.263,
+    "expected": 15,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "manifestSha256": "109bc4669643ad1046e759b0b8ebb0ee3fa2da59e2fcb72e960ee18a5557c1db",
+  "assets": {
+    "room-games/arena-preview.png": {
+      "bytes": 1303529,
+      "sha256": "3bbffebf5cfc18e0809c9a283623583691c6d4edeb993dfb07334b654e4e6032"
+    },
+    "room-games/kart-preview.png": {
+      "bytes": 1299137,
+      "sha256": "2d480aafb3656bddb741aebb6db0b7587dae7f0783311044bb209604dc7223df"
+    },
+    "room-games/fighter-azure.glb": {
+      "bytes": 804016,
+      "sha256": "4c19f64a38cd834068fabf6e4ec6dff24bf33afaa9540313cf87280be879e01a"
+    },
+    "room-games/fighter-ember.glb": {
+      "bytes": 807848,
+      "sha256": "2521da3483e6648e55ceff1a90d27b850a5606a62473f4c723dbfe42a3360b48"
+    },
+    "room-games/kart-ember.glb": {
+      "bytes": 989396,
+      "sha256": "cac0179092c38cdb9954dda656af932cbc9eead8902ff7f5c1a2911dc75cb409"
+    },
+    "room-games/rifle.glb": {
+      "bytes": 103732,
+      "sha256": "e562674c97810ce66d27b3d7b5d8677788ae10f96a1c7b9effbb6e2e1cee8b7a"
+    },
+    "room-games/manifest.json": {
+      "bytes": 5098,
+      "sha256": "40f189488b7645df49ac76c1ba4b76b85f52ca8fce27b8ad18bb06d7a1d0c520"
+    },
+    "room-games/kart-azure.glb": {
+      "bytes": 989388,
+      "sha256": "be73ed7e9b784b327caa34ec67235ae555b2a6ce245e4d9ad6a2368381db966d"
+    },
+    "room-games/environment-kit.glb": {
+      "bytes": 2227292,
+      "sha256": "d3ef6f2239a74b4292941d0889c745a8a27ebc33f6acffc316bf47034bcf9d0a"
+    }
+  },
+  "performance": {
+    "foundry-render-report": {
+      "map": {
+        "kind": "shooter",
+        "id": "foundry",
+        "name": "Ember Foundry"
+      },
+      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+      "fps": 60.62624916722185,
+      "frames": 865,
+      "drawCalls": 251,
+      "triangles": 242736,
+      "frameMs": 1.6306634158478746,
+      "camera": {
+        "x": -15.888730169799018,
+        "y": 2.5999999999999988,
+        "z": -14.88873016979902
+      },
+      "cameraDirection": {
+        "x": 0.7056964645761853,
+        "y": -0.0631268545814344,
+        "z": 0.7056964645761853
+      },
+      "errors": [],
+      "assets": [
+        {
+          "path": "/room-games/arena-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/environment-kit.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/fighter-azure.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/fighter-ember.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/rifle.glb",
+          "status": 200
+        }
+      ]
+    },
+    "station-render-report": {
+      "map": {
+        "kind": "shooter",
+        "id": "station",
+        "name": "Orbital Station"
+      },
+      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+      "fps": 63.08243727598566,
+      "frames": 1212,
+      "drawCalls": 255,
+      "triangles": 236924,
+      "frameMs": 1.9478926922376845,
+      "camera": {
+        "x": -13.736429763753124,
+        "y": 2.5999999999999996,
+        "z": -14.638110125898693
+      },
+      "cameraDirection": {
+        "x": 0.5954625724327521,
+        "y": -0.09755257770331832,
+        "z": 0.7974382856467372
+      },
+      "errors": [],
+      "assets": [
+        {
+          "path": "/room-games/arena-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/environment-kit.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/fighter-azure.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/fighter-ember.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/rifle.glb",
+          "status": 200
+        }
+      ]
+    },
+    "neon-render-report": {
+      "map": {
+        "kind": "kart",
+        "id": "neon",
+        "name": "Neon Overdrive"
+      },
+      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+      "fps": 60.13363028953229,
+      "frames": 707,
+      "drawCalls": 180,
+      "triangles": 2365360,
+      "frameMs": 1.2973836732336872,
+      "camera": {
+        "x": 35.1923462704785,
+        "y": 3.45,
+        "z": -46.2
+      },
+      "cameraDirection": {
+        "x": 0.9789095432779938,
+        "y": -0.20429416555366836,
+        "z": -1.1102230246251568e-16
+      },
+      "errors": [],
+      "assets": [
+        {
+          "path": "/room-games/arena-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/environment-kit.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-azure.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-ember.glb",
+          "status": 200
+        }
+      ]
+    },
+    "coast-render-report": {
+      "map": {
+        "kind": "kart",
+        "id": "coast",
+        "name": "Coral Coast"
+      },
+      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+      "fps": 59.74607916355489,
+      "frames": 506,
+      "drawCalls": 190,
+      "triangles": 354136,
+      "frameMs": 1.580691188767113,
+      "camera": {
+        "x": 22.321917756678477,
+        "y": 3.45,
+        "z": -38.74468160756188
+      },
+      "cameraDirection": {
+        "x": 0.9675264871360613,
+        "y": -0.20429416555366836,
+        "z": 0.148850228790163
+      },
+      "errors": [],
+      "assets": [
+        {
+          "path": "/room-games/arena-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/environment-kit.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-azure.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-ember.glb",
+          "status": 200
+        }
+      ]
+    },
+    "mobile-render-report": {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "fps": 53.17769130998703,
+      "frames": 388,
+      "drawCalls": 211,
+      "triangles": 366660,
+      "frameMs": 5.591504152046828,
+      "camera": {
+        "x": 0.08877805527728719,
+        "y": 3.45,
+        "z": -42.16516463854665
+      },
+      "cameraDirection": {
+        "x": 0.9675264871360613,
+        "y": -0.20429416555366836,
+        "z": 0.148850228790163
+      },
+      "errors": [],
+      "assets": [
+        {
+          "path": "/room-games/arena-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/environment-kit.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-azure.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-ember.glb",
+          "status": 200
+        }
+      ]
+    },
+    "dunes-render-report": {
+      "map": {
+        "kind": "shooter",
+        "id": "dunes",
+        "name": "Sunken Dunes"
+      },
+      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+      "fps": 59.3900481540931,
+      "frames": 587,
+      "drawCalls": 233,
+      "triangles": 77658,
+      "frameMs": 1.3255542243892715,
+      "camera": {
+        "x": -19.93934104931353,
+        "y": 2.599999999999998,
+        "z": -18.93934104931353
+      },
+      "cameraDirection": {
+        "x": 0.7056964648670546,
+        "y": -0.06312684807816285,
+        "z": 0.7056964648670551
+      },
+      "errors": [],
+      "assets": [
+        {
+          "path": "/room-games/kart-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/arena-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/environment-kit.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/fighter-azure.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/fighter-ember.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/rifle.glb",
+          "status": 200
+        }
+      ]
+    },
+    "forest-render-report": {
+      "map": {
+        "kind": "kart",
+        "id": "forest",
+        "name": "Fernwood Rally"
+      },
+      "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+      "fps": 58.517555266579976,
+      "frames": 590,
+      "drawCalls": 193,
+      "triangles": 250312,
+      "frameMs": 1.6444704630322489,
+      "camera": {
+        "x": 15.788942983642514,
+        "y": 3.45,
+        "z": -45.51989162977097
+      },
+      "cameraDirection": {
+        "x": 0.9397531615468742,
+        "y": -0.2042941655536683,
+        "z": 0.27409467211783817
+      },
+      "errors": [],
+      "assets": [
+        {
+          "path": "/room-games/arena-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-preview.png",
+          "status": 200
+        },
+        {
+          "path": "/room-games/environment-kit.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-azure.glb",
+          "status": 200
+        },
+        {
+          "path": "/room-games/kart-ember.glb",
+          "status": 200
+        }
+      ]
+    }
+  },
+  "driving": {
+    "neon-driving-continuity": {
+      "map": "neon",
+      "durationMs": 9016.3,
+      "samples": 542,
+      "maxFrameMs": 16.80000000000291,
+      "maxDisplacement": 0.2710575994548455,
+      "maxSpeedChange": 0.2635838409297766,
+      "maxTrackDistance": 17.635609043864378,
+      "maxOffTrackSeconds": 5.116666666666654,
+      "resets": [],
+      "maxCameraStep": 0.29333592184828544,
+      "errors": []
+    },
+    "forest-driving-continuity": {
+      "map": "forest",
+      "durationMs": 8999.6,
+      "samples": 539,
+      "maxFrameMs": 50,
+      "maxDisplacement": 0.7105633511020886,
+      "maxSpeedChange": 0.5560422687852533,
+      "maxTrackDistance": 17.346911333607153,
+      "maxOffTrackSeconds": 5.249999999999987,
+      "resets": [],
+      "maxCameraStep": 0.8731882030045698,
+      "errors": []
+    },
+    "coast-driving-continuity": {
+      "map": "coast",
+      "durationMs": 8999.6,
+      "samples": 541,
+      "maxFrameMs": 16.80000000000109,
+      "maxDisplacement": 0.271057599454846,
+      "maxSpeedChange": 0.2635838409297766,
+      "maxTrackDistance": 17.628744033336805,
+      "maxOffTrackSeconds": 5.116666666666654,
+      "resets": [],
+      "maxCameraStep": 0.29290589292320646,
+      "errors": []
+    }
+  },
+  "limits": [
+    "Native pointer lock is rejected by headless Chromium; real click/drag/firing and Escape fallback verified.",
+    "Short FPS sampling is approximate and took place under shared host load."
+  ]
+}

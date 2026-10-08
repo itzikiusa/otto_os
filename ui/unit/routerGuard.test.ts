@@ -1,3 +1,4 @@
+import {captureGameInvite,consumeGameInvite} from '../src/modules/rooms/games/access.ts';
 // Router leave-guards (router.guard): go(), back/forward and a direct hash
 // change all await every guard; a false keeps the route (a hash change is
 // reverted to the previous hash); replace() is never guarded.
@@ -63,6 +64,7 @@ function fixture(initialHash = '#/home', shareStore = bindShareStore(fakeSession
       './storage': { lsGet: () => null, lsSet: () => {} },
       './desktop': { isEmbedded: false },
       '../modules/rooms/room-access': { captureRoomInvite },
+      '../modules/rooms/games/access': {captureGameInvite},
       './sidebar': { activeNavId },
       './shareTokenStore': shareStore,
     },
@@ -215,9 +217,21 @@ function loadReloaded(hash: string, tab: TokenStorage) {
       './storage': { lsGet: () => null, lsSet: () => {} },
       './desktop': { isEmbedded: false },
       '../modules/rooms/room-access': { captureRoomInvite },
+      '../modules/rooms/games/access': {captureGameInvite},
       './sidebar': { activeNavId },
       './shareTokenStore': bindShareStore(tab),
     },
     { window: { location, addEventListener: () => {}, removeEventListener: () => {} }, history: { replaceState: () => {} } },
   );
 }
+
+
+test('game invite is scrubbed before history and is consumed from memory only once', async () => {
+ const f=fixture('#/game-room/game-test?invite=abcdefghijklmnopqrstuv');
+ assert.equal(f.location.hash,'#/game-room/game-test');
+ assert.equal(f.router.module,'game-room');
+ assert.equal(consumeGameInvite('game-test'),'abcdefghijklmnopqrstuv');
+ assert.equal(consumeGameInvite('game-test'),undefined);
+ f.router.go('home');await flush();f.router.back();await flush();
+ assert.equal(f.location.hash,'#/game-room/game-test');
+});

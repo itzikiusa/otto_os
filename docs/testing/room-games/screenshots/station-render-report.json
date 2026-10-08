@@ -1,0 +1,54 @@
+{
+  "map": {
+    "kind": "shooter",
+    "id": "station",
+    "name": "Orbital Station"
+  },
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+  "fps": 60.23102310231023,
+  "frames": 501,
+  "drawCalls": 369,
+  "triangles": 262996,
+  "frameMs": 1.1341469948941116,
+  "camera": {
+    "x": -15.96787974313157,
+    "y": 2.5999999997900627,
+    "z": -17.303786557973705
+  },
+  "cameraDirection": {
+    "x": 0.5637829192835451,
+    "y": -0.09747845076712104,
+    "z": 0.820150456660341
+  },
+  "errors": [],
+  "assets": [
+    {
+      "path": "/room-games/arena-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/environment-kit.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/fighter-azure.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/fighter-ember.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/rifle.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/adventure-kit.glb",
+      "status": 200
+    }
+  ]
+}

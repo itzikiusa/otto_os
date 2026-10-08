@@ -46,6 +46,8 @@ pub struct ServerCtx {
     pub manager: Arc<SessionManager>,
     /// Capability-isolated, ephemeral session rooms (never persisted to AuthRepo).
     pub rooms: Arc<crate::rooms::RoomRegistry>,
+    /// Two-player game capabilities; never persisted or shared with terminals.
+    pub game_rooms: Arc<crate::game_rooms::Registry>,
     pub workspaces: WorkspacesRepo,
     pub connections: Arc<ConnectionsService>,
     /// Native data-access layer for the DB Explorer (browse/query/schema).

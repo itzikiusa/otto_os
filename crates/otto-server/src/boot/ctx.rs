@@ -117,6 +117,7 @@ impl ServerCtx {
             plugins,
             manager,
             rooms: Default::default(),
+            game_rooms: Default::default(),
             workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
             connections: Arc::new(otto_connections::ConnectionsService::new(
                 otto_state::ConnectionsRepo::new(pool.clone()),

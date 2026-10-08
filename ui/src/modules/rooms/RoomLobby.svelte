@@ -30,6 +30,7 @@
   // ⌘K verbs while the lobby is open.
   $effect(() =>
     registry.register('rooms', [
+      { id: 'rooms.games', title: 'Play a game', group: 'Rooms', keywords: 'games shooter kart racing computer multiplayer', run: () => router.go('rooms/games') },
       { id: 'rooms.join', title: 'Join room…', group: 'Rooms', keywords: 'invite link connect session room', run: () => (joinOpen = true) },
       { id: 'rooms.recaps', title: 'Open recap archives', group: 'Rooms', keywords: 'room recap summary history', run: () => router.go('rooms/recaps') },
       ...(auth.isRoot ? [{ id: 'rooms.settings', title: 'Room connection settings…', group: 'Rooms', keywords: 'relay host server', run: () => (settingsOpen = true) }] : []),
@@ -60,7 +61,7 @@
 </script>
 <div class="rooms-page">
   <PageHeader title="Rooms" subtitle="Work together in a session">
-    {#snippet actions()}<button class="btn small" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn small" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn small primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
+    {#snippet actions()}<button class="btn small" onclick={() => router.go('rooms/games')}>Games</button><button class="btn small" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn small" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn small primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
   </PageHeader>
   <PageBody>
     {#if openError}<p role="alert">Couldn’t open the room. {openError} <button class="btn small" disabled={!!opening || !lastOpened} onclick={() => openRoom(lastOpened)}>Retry</button></p>{/if}

@@ -203,3 +203,9 @@ Synthetic local speech, screen-text and Codex tests are documented in
 [recap validation](../testing/room-recap.md). Actual multi-person microphone
 transcription quality and capture-plus-recognition performance remain acceptance
 checks on the target hardware.
+
+## Games
+
+The Rooms toolbar also opens [Room games](./room-games.md): standalone 3D shooter
+and kart matches against another person or the computer. These do not require
+a coding session and use separate game-only guest capabilities.

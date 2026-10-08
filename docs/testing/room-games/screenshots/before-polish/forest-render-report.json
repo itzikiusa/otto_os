@@ -1,0 +1,36 @@
+{
+  "map": {
+    "kind": "kart",
+    "id": "forest",
+    "name": "Fernwood Rally"
+  },
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+  "fps": 60.380479735318445,
+  "frames": 379,
+  "drawCalls": 177,
+  "triangles": 177828,
+  "frameMs": 0.6604354634325984,
+  "errors": [],
+  "assets": [
+    {
+      "path": "/room-games/arena-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/environment-kit.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-azure.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-ember.glb",
+      "status": 200
+    }
+  ]
+}
