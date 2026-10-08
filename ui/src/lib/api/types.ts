@@ -5443,7 +5443,7 @@ export interface EvalScore {
   weights: ScoreWeights;
   /** Weighted mean over the signals that ran, 0–100. */
   composite: number;
-  /** Proof pack status: missing|partial|passed|failed|waived. */
+  /** Proof status: missing|partial|passed|failed|waived; pending while a saved rating awaits evidence publication (not promotable). */
   proof_status: string;
   /** Proof done-contract score 0–100. */
   done_score: number;

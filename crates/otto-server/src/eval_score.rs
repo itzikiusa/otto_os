@@ -60,8 +60,8 @@ pub(crate) async fn publish_validation_retry(
     let updated = ctx.skill_evals_store.get_iteration(iter_id).await?;
     // The legacy iteration badge uses the same validator denominator as an
     // initial run. Incomplete validators contribute zero, never disappear.
-    if !updated.agents.is_empty() {
-        let mean = updated
+    let mean = (!updated.agents.is_empty()).then(|| {
+        updated
             .agents
             .iter()
             .map(|agent| {
@@ -72,45 +72,22 @@ pub(crate) async fn publish_validation_retry(
                 }
             })
             .sum::<f64>()
-            / updated.agents.len() as f64;
-        ctx.skill_evals_store.set_iter_score(iter_id, mean).await?;
-    }
+            / updated.agents.len() as f64
+    });
     let (scoring, pack_id) = rescore_validation(ctx, &eval, &updated, previous).await?;
     ctx.skill_evals_store
-        .set_iter_scoring(iter_id, &scoring, Some(&pack_id))
+        .publish_iter_scoring(
+            eval_id,
+            iter_id,
+            &scoring,
+            &pack_id,
+            mean,
+            "Validation retry complete",
+        )
         .await?;
     ctx.skill_evals_store
         .set_iter_status(iter_id, "done", "validation retry complete")
-        .await?;
-    refresh_best_score(ctx, eval_id, "Validation retry complete").await
-}
-
-/// Re-select the winner from persisted signals. Caller holds `update_guard`.
-pub(crate) async fn refresh_best_score(
-    ctx: &ServerCtx,
-    eval_id: &otto_core::Id,
-    reason: &str,
-) -> Result<()> {
-    let fresh = ctx.skill_evals_store.get_eval(eval_id).await?;
-    if let Some((iter, score)) = fresh
-        .iterations
-        .iter()
-        .filter_map(|it| it.scoring.as_ref().map(|score| (it.iter, score.composite)))
-        .max_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
-    {
-        ctx.skill_evals_store
-            .set_summary(
-                eval_id,
-                &format!("{reason} · best score {score:.0}"),
-                Some(iter),
-                Some(score),
-            )
-            .await?;
-        ctx.skill_evals_store
-            .set_eval_composite(eval_id, score)
-            .await?;
-    }
-    Ok(())
+        .await
 }
 
 /// A short, human title for an eval iteration's proof pack.
@@ -264,7 +241,7 @@ async fn score_iteration_inner(
         } else {
             &iter.human_rater
         };
-        let _ = proof::upsert_content_artifact(
+        proof::upsert_content_artifact(
             ctx,
             &pack,
             ProofArtifactKind::Approval,
@@ -274,7 +251,7 @@ async fn score_iteration_inner(
             json!({ "rating": r }),
             by,
         )
-        .await;
+        .await?;
     }
 
     // 6. Let the proof engine derive the authoritative status + done score.
@@ -293,7 +270,14 @@ async fn score_iteration_inner(
     };
     score.composite = compute_composite(&score);
     ctx.skill_evals_store
-        .set_iter_scoring(&iter.id, &score, Some(&pack.id))
+        .publish_iter_scoring(
+            &eval.id,
+            &iter.id,
+            &score,
+            &pack.id,
+            (eval.mode == "score_only").then_some(score.composite),
+            "Scoring complete",
+        )
         .await?;
     Ok((score, pack.id))
 }
@@ -321,7 +305,7 @@ pub async fn rescore_with_human(
     .await?;
     let body = format!("rating: {rating}/5\n{note}");
     let by = if rater.is_empty() { "otto" } else { rater };
-    let _ = proof::upsert_content_artifact(
+    proof::upsert_content_artifact(
         ctx,
         &pack,
         ProofArtifactKind::Approval,
@@ -331,7 +315,7 @@ pub async fn rescore_with_human(
         json!({ "rating": rating }),
         by,
     )
-    .await;
+    .await?;
     let refreshed = proof::recompute_and_emit(ctx, &pack.id).await?;
 
     let mut score = iter.scoring.clone().unwrap_or_default();
@@ -368,6 +352,25 @@ pub(crate) async fn rescore_validation(
     let mut score = previous.unwrap_or_default();
     score.review = review_signal(ctx, &pack, iter).await?;
     score.human = human_score(iter.human_rating, &iter.human_note, &iter.human_rater);
+    // A rating may have saved its pending snapshot but failed to write Proof.
+    // A subsequent validator retry must repair that Approval before publishing.
+    if let Some(rating) = iter.human_rating {
+        proof::upsert_content_artifact(
+            ctx,
+            &pack,
+            ProofArtifactKind::Approval,
+            "Human rating",
+            &format!("rating: {rating}/5\n{}", iter.human_note),
+            ProofArtifactStatus::Passed,
+            json!({ "rating": rating }),
+            if iter.human_rater.is_empty() {
+                "otto"
+            } else {
+                &iter.human_rater
+            },
+        )
+        .await?;
+    }
     let fresh = proof::recompute_and_emit(ctx, id).await?;
     score.proof_status = fresh.status.as_str().to_string();
     score.done_score = fresh.done_score;

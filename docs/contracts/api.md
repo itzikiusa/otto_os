@@ -1990,14 +1990,22 @@ Cancellation stops scoring commands as well as agent sessions. Deletion returns
 409 while cancellation is still settling, so a managed worktree cannot be removed
 under an active scorer. Working-directory/path score targets are never deleted.
 
-Validation retries are serialized per evaluation. Admission clears cached scores
-and marks the run running; completion refreshes review proof and composite from
+Validation retries are serialized per evaluation. Admission clears the headline,
+marks the score snapshot pending, and marks the run running. Original command/diff
+signals remain durable across daemon interruption and a later retry; completion refreshes review proof and composite from
 persisted signals without rerunning test/lint commands. Failed validators cannot
 produce passing review evidence: every requested pass must return a valid findings
 verdict, including an explicit empty array for a clean pass. Partial pass sets are
 errors and retain any findings already collected. Initial scoring and retry
 publication preserve ratings saved while commands or agents run; rating changes
-reselect the best iteration and refresh its headline. Retried iteration badges
+reselect the best iteration and refresh its headline. Rating acceptance saves the
+new human signal and preserved command/review signals atomically as a `pending`
+`scoring.proof_status` snapshot and clears the run headline. Evidence/publication
+storage errors return an error; the saved rating remains pending and is never
+eligible for promotion, even when proof is optional. Retrying the rating rebuilds
+evidence without rerunning commands. Successful publication atomically replaces
+the pending score and reselects the headline. Proof artifacts themselves remain a
+separate persistence boundary; pending snapshots are excluded from winner selection. Retried iteration badges
 include failed validators as zero in the validator mean. Promotion requires a completed iteration and
 fresh proof for that iteration/workspace. The diff endpoint is read-only (including
 the Git index), includes tracked and untracked changes, and caps output at 200 KiB

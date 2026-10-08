@@ -1684,8 +1684,25 @@ async fn run_skill_eval_core(
     let iter_composites: Vec<_> = current
         .iterations
         .iter()
-        .filter_map(|it| it.scoring.as_ref().map(|score| (it.iter, score.composite)))
+        .filter_map(|it| {
+            it.scoring
+                .as_ref()
+                .filter(|score| score.proof_status != "pending")
+                .map(|score| (it.iter, score.composite))
+        })
         .collect();
+
+    if iter_composites.is_empty()
+        && current.iterations.iter().any(|it| {
+            it.scoring
+                .as_ref()
+                .is_some_and(|score| score.proof_status == "pending")
+        })
+    {
+        return Err(Error::Conflict(
+            "rating evidence publication is pending; retry the rating".into(),
+        ));
+    }
 
     // Pick the winner by composite score (the eval-lab headline) when scoring
     // produced one, else fall back to the validator-only score.
@@ -1704,14 +1721,14 @@ async fn run_skill_eval_core(
     };
     let summary = build_summary(&resolved.name, &history, best_i, best_s);
     ctx.skill_evals_store
-        .set_summary(eval_id, &summary, Some(best_i), Some(best_s))
+        .set_scored_summary(
+            eval_id,
+            &summary,
+            best_i,
+            best_s,
+            (!iter_composites.is_empty()).then_some(best_s),
+        )
         .await?;
-    if !iter_composites.is_empty() {
-        let _ = ctx
-            .skill_evals_store
-            .set_eval_composite(eval_id, best_s)
-            .await;
-    }
     Ok(())
 }
 
@@ -1815,7 +1832,10 @@ async fn run_score_only_core(
         .get_iteration(&it.id)
         .await?
         .scoring
-        .ok_or_else(|| Error::Internal("scoring did not publish a result".into()))?;
+        .filter(|score| score.proof_status != "pending")
+        .ok_or_else(|| {
+            Error::Internal("scoring did not publish a result; retry pending rating".into())
+        })?;
     ctx.skill_evals_store
         .set_iter_score(&it.id, score.composite)
         .await?;
@@ -1829,15 +1849,12 @@ async fn run_score_only_core(
             ),
         )
         .await?;
-    ctx.skill_evals_store
-        .set_eval_composite(eval_id, score.composite)
-        .await?;
     let summary = format!(
         "score-only: composite {:.0}, proof {}",
         score.composite, score.proof_status
     );
     ctx.skill_evals_store
-        .set_summary(eval_id, &summary, Some(1), Some(score.composite))
+        .set_scored_summary(eval_id, &summary, 1, score.composite, Some(score.composite))
         .await?;
     Ok(())
 }
@@ -2584,7 +2601,12 @@ async fn iteration_gate(
     let composite = (eval.status == SkillEvalStatus::Done
         && it.status == "done"
         && it.agents.iter().all(|a| a.status == "done"))
-    .then(|| it.scoring.as_ref().map(|s| s.composite))
+    .then(|| {
+        it.scoring
+            .as_ref()
+            .filter(|s| s.proof_status != "pending")
+            .map(|s| s.composite)
+    })
     .flatten();
     // Scoring is a snapshot; promotion must use current evidence and policy.
     let proof_status = match it.proof_pack_id.as_deref() {
@@ -2833,29 +2855,32 @@ async fn rate_iteration(
         .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?
         .clone();
     let rating = req.rating.min(5);
+    let mut pending = it.scoring.clone().unwrap_or_default();
+    pending.human = otto_core::eval_score::human_score(Some(rating), &req.note, &user.id);
+    pending.composite = otto_core::eval_score::compute_composite(&pending);
+    pending.proof_status = "pending".into();
+    pending.done_score = 0;
     ctx.skill_evals_store
-        .set_iter_human(&iter_id, rating, &req.note, &user.id)
+        .begin_human_rating(&eval_id, &iter_id, &pending)
         .await
         .map_err(ApiError)?;
-    // Re-read so the rescore sees the persisted rating + prior signals.
-    let it = ctx
-        .skill_evals_store
-        .get_iteration(&iter_id)
-        .await
-        .unwrap_or(it);
-    if let Ok((score, pack_id)) =
-        crate::eval_score::rescore_with_human(&ctx, &eval, &it, rating, &req.note, &user.id).await
-    {
-        let _ = ctx
-            .skill_evals_store
-            .set_iter_scoring(&iter_id, &score, Some(&pack_id))
-            .await;
-        // Re-select the winner too: lowering the old winner (or raising a
-        // different iteration) must not leave best_score/headline stale.
-        crate::eval_score::refresh_best_score(&ctx, &eval_id, "Rating updated")
+    // The pending snapshot durably preserves non-human signals for recovery.
+    // Until Proof and the headline publish, promotion must reject this snapshot.
+    let (score, pack_id) =
+        crate::eval_score::rescore_with_human(&ctx, &eval, &it, rating, &req.note, &user.id)
             .await
             .map_err(ApiError)?;
-    }
+    ctx.skill_evals_store
+        .publish_iter_scoring(
+            &eval_id,
+            &iter_id,
+            &score,
+            &pack_id,
+            (eval.mode == "score_only").then_some(score.composite),
+            "Rating updated",
+        )
+        .await
+        .map_err(ApiError)?;
     let eval = ctx
         .skill_evals_store
         .get_eval(&eval_id)

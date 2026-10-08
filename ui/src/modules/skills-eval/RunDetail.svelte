@@ -61,6 +61,8 @@
   /** JSON of the last run the poll applied (skip identical ticks). */
   let lastPolled = '';
   let pollCount = $state(0);
+  // A read started before a rating write must not replace its newer result.
+  let scoreRevision = 0;
 
   // Expansion / busy state (keyed by stable ids).
   let openTerminals = $state<Set<string>>(new Set());
@@ -162,7 +164,8 @@
     // A poll never supersedes a load; a load (or unmount) supersedes the poll.
     const gen = seq.gen;
     const id = evalId;
-    const stale = () => seq.gen !== gen || disposed || id !== evalId;
+    const revision = scoreRevision;
+    const stale = () => seq.gen !== gen || disposed || id !== evalId || revision !== scoreRevision;
     try {
       const r = await skillsEvalApi.get(id);
       if (stale()) return;
@@ -403,18 +406,29 @@
 
   async function rate(it: EvalIteration, n: number): Promise<void> {
     if (!run || rating.has(it.id)) return;
+    const id = run.id;
+    const current = () => !disposed && id === evalId;
+    scoreRevision++;
     rating = new Set(rating).add(it.id);
     try {
-      const r = await skillsEvalApi.rate(run.id, it.id, { rating: n, note: '' });
-      run = r;
-      lastPolled = '';
-      onupdate?.(r);
+      await skillsEvalApi.rate(id, it.id, { rating: n, note: '' });
+      if (!current()) return;
+      scoreRevision++;
+      // Ratings on different iterations can finish out of order. A fresh read
+      // after each completed write keeps the report newer than response snapshots.
+      await load(id);
     } catch (e) {
-      toastError('Couldn’t save your rating', e);
+      if (!current()) return;
+      scoreRevision++;
+      toastError('Couldn’t finish updating your rating', e);
+      // The rating may be saved while score publication is pending. Refresh
+      // that durable state instead of leaving a stale successful score visible.
+      await load(id);
     } finally {
       const next = new Set(rating);
       next.delete(it.id);
       rating = next;
+      if (!disposed && id === evalId && run && isActive(run)) schedulePoll();
     }
   }
 

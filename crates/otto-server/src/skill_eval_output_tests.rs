@@ -544,3 +544,114 @@ async fn rating_reselects_best_iteration_from_current_scores() {
     assert_eq!(stored.best_score, Some(80.0));
     assert_eq!(stored.composite_score, Some(80.0));
 }
+
+#[tokio::test]
+async fn rating_storage_failure_does_not_keep_a_stale_publishable_score() {
+    let pool = otto_state::db::test_pool().await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+    let ws = ctx
+        .workspaces
+        .create("fixture", dir.path().to_str().unwrap(), &"editor".into())
+        .await
+        .unwrap();
+    let eval = ctx
+        .skill_evals_store
+        .create_eval(
+            &ws.id,
+            "skill",
+            "task",
+            "fixture",
+            1,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    let iter = ctx
+        .skill_evals_store
+        .add_iteration(&eval.id, 1, None, "skill", "body", "fixture", &[])
+        .await
+        .unwrap();
+    let user = otto_state::UsersRepo::new(pool.clone())
+        .get(&"editor".into())
+        .await
+        .unwrap();
+    let _ = rate_iteration(
+        AxPath((eval.id.clone(), iter.id.clone())),
+        State(ctx.clone()),
+        CurrentUser(user.clone()),
+        Json(RateIterationReq {
+            rating: 5,
+            note: "old".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    // Retain a real command signal across a failed rating and a later retry.
+    let mut previous = ctx
+        .skill_evals_store
+        .get_iteration(&iter.id)
+        .await
+        .unwrap()
+        .scoring
+        .unwrap();
+    previous.tests = otto_core::eval_score::signal_from_cmd(true, true, "already ran");
+    ctx.skill_evals_store
+        .set_iter_scoring(&iter.id, &previous, None)
+        .await
+        .unwrap();
+    ctx.skill_evals_store
+        .set_status(&eval.id, SkillEvalStatus::Done, None)
+        .await
+        .unwrap();
+    ctx.skill_evals_store
+        .set_iter_status(&iter.id, "done", "complete")
+        .await
+        .unwrap();
+    let mut config = default_skill_eval_config("fixture");
+    config.require_proof_pass = false;
+    config.promote_min_score = 0.0;
+    otto_state::SettingsRepo::new(pool.clone())
+        .put("skill_eval", &serde_json::to_value(config).unwrap())
+        .await
+        .unwrap();
+    for trigger in [
+        "CREATE TRIGGER reject_publication BEFORE UPDATE OF scoring_json ON skill_eval_iterations WHEN json_extract(NEW.scoring_json, '$.proof_status') != 'pending' BEGIN SELECT RAISE(ABORT, 'injected scoring failure'); END",
+        "CREATE TRIGGER reject_publication BEFORE UPDATE OF composite_score ON skill_evals WHEN NEW.composite_score IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected headline failure'); END",
+        "CREATE TRIGGER reject_publication BEFORE UPDATE ON proof_artifacts WHEN NEW.kind = 'approval' BEGIN SELECT RAISE(ABORT, 'injected approval failure'); END",
+        "CREATE TRIGGER reject_publication BEFORE UPDATE ON proof_packs BEGIN SELECT RAISE(ABORT, 'injected proof status failure'); END",
+    ] {
+        sqlx::query(trigger).execute(&pool).await.unwrap();
+        let result = rate_iteration(
+            AxPath((eval.id.clone(), iter.id.clone())), State(ctx.clone()), CurrentUser(user.clone()),
+            Json(RateIterationReq { rating: 1, note: "new".into() }),
+        ).await;
+        assert!(result.is_err(), "rating falsely reported success after storage failure: {trigger}");
+        let stored = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+        assert_eq!(stored.iterations[0].human_rating, Some(1));
+        let pending = stored.iterations[0].scoring.as_ref().unwrap();
+        assert_eq!(pending.proof_status, "pending");
+        assert_eq!(pending.human.rating, Some(1));
+        assert_eq!(serde_json::to_value(&pending.tests).unwrap(), serde_json::to_value(&previous.tests).unwrap());
+        assert!(stored.best_score.is_none());
+        assert!(stored.best_iteration.is_none());
+        assert!(stored.composite_score.is_none());
+        let gate = iteration_gate(&ctx, &stored, &stored.iterations[0]).await;
+        assert!(!gate.allowed, "pending evidence must block even without proof required");
+        assert!(!gate.require_proof);
+        sqlx::query("DROP TRIGGER reject_publication").execute(&pool).await.unwrap();
+        let _ = rate_iteration(
+            AxPath((eval.id.clone(), iter.id.clone())), State(ctx.clone()), CurrentUser(user.clone()),
+            Json(RateIterationReq { rating: 1, note: "recovered".into() }),
+        ).await.unwrap();
+        let recovered = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+        let score = recovered.iterations[0].scoring.as_ref().unwrap();
+        assert_ne!(score.proof_status, "pending");
+        assert_eq!(serde_json::to_value(&score.tests).unwrap(), serde_json::to_value(&previous.tests).unwrap());
+        assert_eq!(score.human.note, "recovered");
+        assert_eq!(recovered.best_score, Some(score.composite));
+        assert_eq!(recovered.composite_score, Some(score.composite));
+        assert!(iteration_gate(&ctx, &recovered, &recovered.iterations[0]).await.allowed);
+    }
+}
