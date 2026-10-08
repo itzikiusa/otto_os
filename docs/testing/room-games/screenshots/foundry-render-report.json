@@ -5,11 +5,21 @@
     "name": "Ember Foundry"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 60.28075970272502,
-  "frames": 386,
-  "drawCalls": 234,
-  "triangles": 148364,
-  "frameMs": 0.9424630312684145,
+  "fps": 60.62624916722185,
+  "frames": 865,
+  "drawCalls": 251,
+  "triangles": 242736,
+  "frameMs": 1.6306634158478746,
+  "camera": {
+    "x": -15.888730169799018,
+    "y": 2.5999999999999988,
+    "z": -14.88873016979902
+  },
+  "cameraDirection": {
+    "x": 0.7056964645761853,
+    "y": -0.0631268545814344,
+    "z": 0.7056964645761853
+  },
   "errors": [],
   "assets": [
     {

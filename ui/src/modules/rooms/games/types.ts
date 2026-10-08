@@ -14,7 +14,7 @@ export interface GameInput {
 }
 export interface GamePlayer extends Vec3 {
   id: number; yaw: number; pitch: number; hp: number; ammo: number; score: number;
-  speed: number; velocityY: number; grounded: boolean; moving: boolean;
+  speed: number; steering: number; velocityY: number; grounded: boolean; moving: boolean;
   cooldown: number; reloadTime: number; respawnTime: number; invulnerable: number;
   lap: number; checkpoint: number; boost: number; driftCharge: number; drifting: boolean;
   item: 'boost' | 'pulse' | null; itemCooldown: number; offTrack: boolean; offTrackTime: number;

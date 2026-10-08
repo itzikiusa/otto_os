@@ -1,0 +1,36 @@
+{
+  "map": {
+    "kind": "kart",
+    "id": "coast",
+    "name": "Coral Coast"
+  },
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+  "fps": 59.602649006622514,
+  "frames": 380,
+  "drawCalls": 192,
+  "triangles": 853530,
+  "frameMs": 0.6831748808419957,
+  "errors": [],
+  "assets": [
+    {
+      "path": "/room-games/arena-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/environment-kit.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-azure.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-ember.glb",
+      "status": 200
+    }
+  ]
+}

@@ -94,11 +94,11 @@
   .game-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:color-mix(in srgb,var(--surface) 92%,transparent);z-index:5;}
   .game-overlay h2{font-size:var(--fs-2xl);margin:0;} .game-overlay p{max-width:580px;margin:0;color:var(--text-dim);line-height:1.6;}
   .game-top-hud{position:absolute;inset-block-start:16px;inset-inline:16px;display:flex;justify-content:space-between;gap:12px;align-items:flex-start;pointer-events:none;}
-  .game-score,.game-tools,.game-bottom-hud{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-m);padding:10px 14px;}
+  .game-score,.game-tools,.game-bottom-hud{background:var(--scrim-media);color:var(--on-scrim);border:1px solid color-mix(in srgb,var(--on-scrim) 18%,transparent);border-radius:var(--radius-m);padding:10px 14px;}
   .game-score{display:flex;align-items:center;gap:14px;font-size:var(--fs-s);} .game-score strong{font-size:var(--fs-xl);} .game-score span{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .game-tools{display:flex;gap:6px;pointer-events:auto;padding:6px;}
   .game-bottom-hud{position:absolute;inset-block-end:18px;inset-inline-start:18px;display:flex;gap:24px;align-items:center;pointer-events:none;}
-  .game-bottom-hud>div{display:grid;gap:4px;min-width:75px;}.game-bottom-hud span{font-size:var(--fs-s);color:var(--text-dim);}.game-bottom-hud strong{font-size:var(--fs-xl);}.game-bottom-hud small{font-size:var(--fs-s);font-weight:normal;}
+  .game-bottom-hud>div{display:grid;gap:4px;min-width:75px;}.game-bottom-hud span{font-size:var(--fs-s);color:var(--on-scrim);opacity:.8;}.game-bottom-hud strong{font-size:var(--fs-xl);}.game-bottom-hud small{font-size:var(--fs-s);font-weight:normal;}
   progress{width:90px;height:6px;accent-color:var(--accent-solid);}.game-fps{font-variant-numeric:tabular-nums;}
   .game-countdown,.game-centre-note,.game-crosshair{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;color:var(--text);text-shadow:0 1px 3px var(--surface);}.game-countdown{font-size:clamp(60px,12vw,120px);font-weight:600;}.game-crosshair{inset:auto;transform:translate(-50%,-50%);font-size:var(--fs-2xl);color:var(--on-scrim);}.game-centre-note{font-size:var(--fs-xl);}
   .game-control-hint{position:absolute;inset-block-end:115px;inset-inline:20px;text-align:center;background:var(--surface);border-radius:var(--radius-s);padding:8px;font-size:var(--fs-s);pointer-events:none;}

@@ -22,7 +22,9 @@ respawn after two seconds with a short protective shield.
 | V or camera button | Switch first/third-person view |
 | Escape | Release mouse capture |
 
-Computer difficulty changes reaction and aiming behavior. Bots navigate arena
+Easy gives over two seconds to react after the bot acquires you, fires brief
+bursts with long pauses, moves more slowly and can miss at close range. Normal
+and Hard progressively shorten those pauses and improve tracking. Bots navigate arena
 cover; bullets and players cannot pass through it. The third-person crosshair
 projects the actual firing ray, including cover obstruction.
 
@@ -39,6 +41,10 @@ rules as human players.
 | Shift | Release a charged drift boost |
 | E | Use a collected Turbo or Pulse item |
 | R | Recover to the last checkpoint without gaining progress |
+
+Steering builds gradually, including when reversing direction. Grass and the
+end of a boost slow the kart progressively. Nearby grass does not teleport you;
+use R to recover, or automatic recovery applies far beyond the circuit.
 
 Touch devices show movement and action buttons; the shooter also has a drag-to-aim
 pad. Sound starts after an interaction and can be muted. Menu pauses a computer
@@ -70,8 +76,8 @@ period. Leaving explicitly ends the room. At most two people can join.
 ## Assets and troubleshooting
 
 All characters, vehicles and scenery are original Blender-generated assets
-with a CC0 dedication. Six GLBs total about 4 MiB; previews bring the complete
-asset folder to about 6.4 MiB. Reproducible scripts, model contracts, provenance,
+with a CC0 dedication. Six GLBs total about 5.65 MiB; previews bring the complete
+asset folder to about 8.13 MiB. Reproducible scripts, model contracts, provenance,
 and export validation live in [`ui/assets-src/room-games`](../../ui/assets-src/room-games/).
 The renderer loads only when starting a game and releases its GPU resources on exit.
 

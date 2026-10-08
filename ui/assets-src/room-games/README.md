@@ -22,7 +22,7 @@ Run from the repository root with Blender 5.2:
 /Applications/Blender.app/Contents/MacOS/Blender --background --python ui/assets-src/room-games/render_heroes.py
 ```
 
-The first command creates six GLBs, the hash manifest, and five source previews.
+The first command creates six GLBs, the hash manifest, and front, rear, and environment source previews.
 The second re-imports each GLB, checks finite mesh bounds, asset roots, clip
 names, zero texture dependencies and the 20 MiB geometry budget, and writes
 `validation.json`. The last renders the two chooser images **from shipped
@@ -39,7 +39,7 @@ the Python authoring script.
 
 Use physically based lighting, a soft hemisphere fill, a directional key and
 contact shadows. Azure/Ember are team colors; `CyanLight`, `AmberLight`, and
-`PinkLight` carry emission. Fighters are about 1.83 m high and karts 2.51 m long.
+`PinkLight` carry emission. Fighters are about 1.85 m high and karts 2.48 m long.
 Use shared geometry/material clones, and share the environment kit across all
 six environments. No texture streaming is needed.
 
@@ -55,3 +55,25 @@ Blender imports and hero/source renders were verified. GPU performance, native
 pointer lock, gameplay collisions, and networking belong to runtime validation.
 The robot uses rigid articulated object animation rather than a deforming skin.
 The karts expose wheel and head pivots for runtime animation, with no baked clip.
+
+## Visual revision 2
+
+The revised fighters use authored chamfered cross sections for a tapered chest,
+angular command helmet, expressive optic eyes, cheek guards, shoulder armor,
+thighs and calves. The vented reactor backpack reads from the chase camera.
+Karts have swept monocoque bodies, tapered sidepods, nose canards, patterned
+rubber tires, brake discs, twin-element wings, diffusers, tail lamps and helmet
+rear vents. Tiny tread blocks deliberately use simple faces rather than
+expensive bevel geometry.
+
+Paint is less metallic and more saturated to hold its identity under image
+based lighting. Ivory and foliage are darker to avoid bleaching under bright
+hemisphere lighting. Palm foliage is feathered rather than stacked spheres;
+racing barrier markings exist on both sides; the reactor uses a dark core and
+individual energy channels instead of a solid glowing cylinder.
+
+Before/after references: `previews/before/fighter-azure.png` versus
+`previews/fighter-azure.png`, and `previews/before/kart-azure.png` versus
+`previews/kart-azure.png`. Rear detail is visible in `previews/fighter-rear.png`
+and `previews/kart-rear.png`. Renderer composition and camera work are separate
+from the asset revision; white collision proxies must not cover the artwork.

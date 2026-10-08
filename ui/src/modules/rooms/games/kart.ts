@@ -9,7 +9,7 @@ export function nearestTrackPoint(point:Vec3,track:TrackMap):{point:Vec3;distanc
 function reset(s:GameState,p:GamePlayer,t:TrackMap):void {
  // Reset to the last earned checkpoint; no nearest-segment shortcut can award progress.
  const previous=(p.checkpoint+t.route.length-1)%t.route.length;const a=t.route[previous],b=t.route[p.checkpoint];
- Object.assign(p,a);p.yaw=Math.atan2(b.x-a.x,b.z-a.z);p.speed=0;p.boost=0;p.driftCharge=0;p.drifting=false;p.offTrackTime=0;p.resetCooldown=2;
+ Object.assign(p,a);p.yaw=Math.atan2(b.x-a.x,b.z-a.z);p.speed=0;p.steering=0;p.boost=0;p.driftCharge=0;p.drifting=false;p.offTrack=false;p.offTrackTime=0;p.resetCooldown=2;
 }
 export function stepKart(s:GameState,inputs:GameInput[],dt:number):void {
  const track=trackFor(s.config.map);
@@ -17,8 +17,9 @@ export function stepKart(s:GameState,inputs:GameInput[],dt:number):void {
  for(const p of s.players) {
  const i=inputs[p.id];p.itemCooldown=Math.max(0,p.itemCooldown-dt);p.resetCooldown=Math.max(0,p.resetCooldown-dt);p.boost=Math.max(0,p.boost-dt);
  if(i.reset&&p.resetCooldown===0)reset(s,p,track);
- p.offTrack=nearestTrackPoint(p,track).distance>track.width/2;
- p.offTrackTime=p.offTrack?p.offTrackTime+dt:0;if(p.offTrackTime>4)reset(s,p,track);
+ const trackDistance=nearestTrackPoint(p,track).distance;p.offTrack=trackDistance>track.width/2;
+ // Nearby grass remains drivable. Only a prolonged, distant excursion needs rescue.
+ p.offTrackTime=p.offTrack?p.offTrackTime+dt:0;if(p.offTrackTime>4&&trackDistance>track.width*3)reset(s,p,track);
  const drifting=i.drift&&Math.abs(i.moveX)>0.12&&p.speed>7&&!p.offTrack;
  if(drifting)p.driftCharge=Math.min(1.5,p.driftCharge+dt);
  if(p.drifting&&!drifting){if(p.driftCharge>0.35){p.boost=Math.max(p.boost,p.driftCharge*0.8);emit(s,'boost',p.id);}p.driftCharge=0;}
@@ -31,11 +32,16 @@ export function stepKart(s:GameState,inputs:GameInput[],dt:number):void {
  p.item=null;p.itemCooldown=1;
  }
  const maxSpeed=p.offTrack?8:p.boost>0?33:23;
- // Coasting removes speed in either direction and stops at zero.
- const acceleration=i.moveZ>0?i.moveZ*18:i.moveZ*28;
- const nextSpeed=i.moveZ===0?p.speed-clamp(p.speed,-5*dt,5*dt):p.speed+acceleration*dt;
- p.speed=clamp(nextSpeed,-6,maxSpeed);
- const grip=drifting?1.35:1;const steering=i.moveX*1.9*clamp(Math.abs(p.speed)/9,0,1)*grip;
+ // A changed speed limit is a drag target, never an instantaneous velocity clamp.
+ // Opposite throttle brakes before reversing; neutral rolls to zero without crossing it.
+ const targetSpeed=i.moveZ>0?i.moveZ*maxSpeed:i.moveZ*6;
+ const braking=p.speed*i.moveZ<0;
+ const slowing=Math.abs(p.speed)>Math.abs(targetSpeed);
+ const rate=braking?24:slowing?(p.offTrack&&Math.abs(p.speed)>8?12:i.moveZ===0?5:8):i.moveZ<0?9:16*(1-.5*clamp(p.speed/maxSpeed,0,1));
+ p.speed+=clamp(targetSpeed-p.speed,-rate*dt,rate*dt);
+ // Persist steering for smooth onset/reversal, with less yaw authority at high speed.
+ p.steering+=clamp(i.moveX-p.steering,-6*dt,6*dt);
+ const grip=drifting?1.28:1;const steering=p.steering*2.15*clamp(Math.abs(p.speed)/8,0,1)/(1+Math.abs(p.speed)/40)*grip;
  p.yaw-=steering*dt*(p.speed>=0?1:-1);p.yaw=Math.atan2(Math.sin(p.yaw),Math.cos(p.yaw));
  p.x+=Math.sin(p.yaw)*p.speed*dt;p.z+=Math.cos(p.yaw)*p.speed*dt;p.moving=Math.abs(p.speed)>0.1;
  const checkpoint=track.route[p.checkpoint];const previous=track.route[(p.checkpoint+track.route.length-1)%track.route.length];

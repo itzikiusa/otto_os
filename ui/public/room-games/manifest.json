@@ -6,9 +6,9 @@
   "texture_max_px": 0,
   "files": {
     "environment-kit.glb": {
-      "bytes": 2162352,
-      "sha256": "bf630da7ccb7cdb6488707c054f487075873f8309b986117cb98e791cd8a2918",
-      "triangles": 47552,
+      "bytes": 2227292,
+      "sha256": "d3ef6f2239a74b4292941d0889c745a8a27ebc33f6acffc316bf47034bcf9d0a",
+      "triangles": 44420,
       "nodes": [
         "Barrier_Surface",
         "Barrier",
@@ -56,9 +56,9 @@
       "materials": 19
     },
     "fighter-azure.glb": {
-      "bytes": 436084,
-      "sha256": "fa3d6634aca8036e985520d3962d9ff9fbe0c9627f9908def227e88c2be9d506",
-      "triangles": 9072,
+      "bytes": 804016,
+      "sha256": "4c19f64a38cd834068fabf6e4ec6dff24bf33afaa9540313cf87280be879e01a",
+      "triangles": 14632,
       "nodes": [
         "Pelvis",
         "Head_Surface",
@@ -94,12 +94,12 @@
         "Death"
       ],
       "meshes": 12,
-      "materials": 9
+      "materials": 10
     },
     "fighter-ember.glb": {
-      "bytes": 438428,
-      "sha256": "7a25f96725794b20fe76ed0bf3a91c625a623005ebde28f81346c1b99886f080",
-      "triangles": 9072,
+      "bytes": 807848,
+      "sha256": "2521da3483e6648e55ceff1a90d27b850a5606a62473f4c723dbfe42a3360b48",
+      "triangles": 14632,
       "nodes": [
         "Pelvis",
         "Head_Surface",
@@ -135,12 +135,12 @@
         "Death"
       ],
       "meshes": 12,
-      "materials": 10
+      "materials": 11
     },
     "kart-azure.glb": {
-      "bytes": 499216,
-      "sha256": "c982667e6ec90823cf4d6d21bcfa5a58dcb5ee41aadd78f1fe0be60753847861",
-      "triangles": 11240,
+      "bytes": 989388,
+      "sha256": "be73ed7e9b784b327caa34ec67235ae555b2a6ce245e4d9ad6a2368381db966d",
+      "triangles": 20796,
       "nodes": [
         "Driver_Surface",
         "DriverHead_Surface",
@@ -159,12 +159,12 @@
       ],
       "animations": [],
       "meshes": 7,
-      "materials": 10
+      "materials": 12
     },
     "kart-ember.glb": {
-      "bytes": 499220,
-      "sha256": "0c07970090070d67b199ba168fcea0ff6afa9ed0ba14fb7fe9b56c89b5cf41e1",
-      "triangles": 11240,
+      "bytes": 989396,
+      "sha256": "cac0179092c38cdb9954dda656af932cbc9eead8902ff7f5c1a2911dc75cb409",
+      "triangles": 20796,
       "nodes": [
         "Driver_Surface",
         "DriverHead_Surface",
@@ -183,11 +183,11 @@
       ],
       "animations": [],
       "meshes": 7,
-      "materials": 10
+      "materials": 12
     },
     "rifle.glb": {
-      "bytes": 103708,
-      "sha256": "ced2c2beb917af11d25a6462868a675a61c5e7909411d60914235de71867b12d",
+      "bytes": 103732,
+      "sha256": "e562674c97810ce66d27b3d7b5d8677788ae10f96a1c7b9effbb6e2e1cee8b7a",
       "triangles": 2124,
       "nodes": [
         "Muzzle",
@@ -201,14 +201,14 @@
   },
   "previews": {
     "arena-preview.png": {
-      "bytes": 1300467,
-      "sha256": "dbb53887e6d879f28a892a0effd0c6531b261b045843a9b05973d5cb21ba29c9",
+      "bytes": 1303529,
+      "sha256": "3bbffebf5cfc18e0809c9a283623583691c6d4edeb993dfb07334b654e4e6032",
       "width": 1280,
       "height": 720
     },
     "kart-preview.png": {
-      "bytes": 1228794,
-      "sha256": "0c88e9937336380ea5a4d3f52a53fdbc51eee5c8c0e30e23a450e23a5486537e",
+      "bytes": 1299137,
+      "sha256": "2d480aafb3656bddb741aebb6db0b7587dae7f0783311044bb209604dc7223df",
       "width": 1280,
       "height": 720
     }

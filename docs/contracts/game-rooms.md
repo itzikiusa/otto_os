@@ -85,3 +85,8 @@ match. After grace, the room closes for both members. Members who obtain a
 credential but never connect must connect within 20 seconds. No automatic guest
 replacement or host migration. Clients clear held input whenever paused or
 unfocused, and clear remote input after generation changes.
+
+The bundled kart snapshot includes `players[].steering` (finite number), the
+authoritative eased steering input. The client validates it before rendering;
+participants should reload together after upgrading the game client. Rendering
+smoothing stays local and does not modify authoritative positions or scores.

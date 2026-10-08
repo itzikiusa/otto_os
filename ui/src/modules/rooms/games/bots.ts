@@ -4,6 +4,13 @@ import { BODY_RADIUS } from './shooter.ts';
 import type { GameInput, GameState, Vec3 } from './types.ts';
 const neutral=():GameInput=>({moveX:0,moveZ:0,yaw:0,pitch:0,fire:false,reload:false,jump:false,sprint:false,drift:false,item:false,reset:false});
 const TUNING={easy:{reaction:0.32,aim:2.1,error:0.10,throttle:0.7},normal:{reaction:0.16,aim:3.7,error:0.042,throttle:0.88},hard:{reaction:0.07,aim:5.2,error:0.015,throttle:1}};
+// Combat tuning is deliberately independent of kart driving. Accuracy is a spatial
+// aim offset (metres), so Easy can miss even when a player gets close.
+const SHOOTER_TUNING={
+ easy:{reaction:0.38,aim:0.9,error:1.15,acquire:2.2,burst:0.12,cycle:3.0,pace:0.55,strafe:0.12,range:18},
+ normal:{reaction:0.2,aim:2.4,error:0.5,acquire:0.85,burst:0.45,cycle:1.8,pace:0.85,strafe:0.3,range:15},
+ hard:{reaction:0.09,aim:4.5,error:0.12,acquire:0.25,burst:0.9,cycle:1.15,pace:1,strafe:0.45,range:15},
+};
 /** Visibility graph around expanded cover corners. Bots walk the same collision geometry as humans. */
 function nextWaypoint(s:GameState,from:Vec3,to:Vec3):Vec3 {
  // Match the physical body clearance, including legal contact at its boundary.
@@ -21,24 +28,35 @@ function nextWaypoint(s:GameState,from:Vec3,to:Vec3):Vec3 {
  if(previous[1]===-1)return from;let next=1;while(previous[next]>0)next=previous[next];return nodes[next];
 }
 function shooterBot(s:GameState,id:number,dt:number):GameInput {
- const p=s.players[id],enemy=s.players[1-id],t=TUNING[s.config.difficulty];p.botThink-=dt;
- if(p.botThink>0)return p.botInput;
- p.botThink=t.reaction;
+ const p=s.players[id],enemy=s.players[1-id],t=SHOOTER_TUNING[s.config.difficulty];
+ // botTarget is the time acquisition completes, zero when no live target is seen.
+ // Keeping it in the snapshot preserves deterministic reconnects without wire changes.
+ const burstInput=():GameInput=>{
+  const engagedFor=s.elapsed-p.botTarget;
+  return {...p.botInput,fire:p.botInput.fire&&p.botTarget>0&&engagedFor>=0&&engagedFor%t.cycle<t.burst};
+ };
+ if(p.hp<=0||enemy.hp<=0){p.botTarget=0;p.botThink=0;p.botInput=neutral();return p.botInput;}
+ p.botThink-=dt;if(p.botThink>0)return burstInput();p.botThink=t.reaction;
  const desired=Math.atan2(enemy.x-p.x,enemy.z-p.z);const input=neutral();
- input.yaw=p.yaw+clamp(angleDelta(desired,p.yaw),-t.aim*t.reaction,t.aim*t.reaction)+(random(s)-0.5)*t.error;
- const d=distance(p,enemy);input.pitch=Math.atan2(enemy.y-p.y,Math.max(0.1,d))+(random(s)-0.5)*t.error*0.4;
+ const tracked=p.yaw+clamp(angleDelta(desired,p.yaw),-t.aim*t.reaction,t.aim*t.reaction);
+ const d=distance(p,enemy);
+ input.yaw=tracked+Math.atan2((random(s)*2-1)*t.error,Math.max(0.5,d));
+ input.pitch=Math.atan2(enemy.y-p.y,Math.max(0.1,d))+(random(s)-0.5)*0.025;
  const visible=lineOfSight({x:p.x,y:p.y+1.55,z:p.z},{x:enemy.x,y:enemy.y+1.1,z:enemy.z},arenaFor(s.config.map).cover);
- input.fire=visible&&enemy.hp>0&&Math.abs(angleDelta(desired,input.yaw))<0.13;
+ if(!visible)p.botTarget=0;else if(p.botTarget===0)p.botTarget=s.elapsed+t.acquire;
+ // Gate on tracking before inaccuracy; inaccurate shots must actually miss,
+ // rather than suppressing misses and firing only the accurate samples.
+ input.fire=visible&&Math.abs(angleDelta(desired,tracked))<0.2;
  input.reload=p.ammo<5;
  let worldX=0,worldZ=0;
- if(!visible||d>15){const next=nextWaypoint(s,p,enemy);const length=Math.max(0.001,distance(p,next));worldX=(next.x-p.x)/length;worldZ=(next.z-p.z)/length;}
+ if(!visible||d>t.range){const next=nextWaypoint(s,p,enemy);const length=Math.max(0.001,distance(p,next));worldX=(next.x-p.x)/length*t.pace;worldZ=(next.z-p.z)/length*t.pace;}
  else {
  if(random(s)<0.12)p.botStrafe*=-1;
- const forward=d<7?-0.5:0.05;worldX=Math.sin(desired)*forward+Math.cos(desired)*p.botStrafe*0.45;worldZ=Math.cos(desired)*forward-Math.sin(desired)*p.botStrafe*0.45;
+ const forward=d<7?-0.25:0;worldX=Math.sin(desired)*forward+Math.cos(desired)*p.botStrafe*t.strafe;worldZ=Math.cos(desired)*forward-Math.sin(desired)*p.botStrafe*t.strafe;
  }
  input.moveX=-worldX*Math.cos(input.yaw)+worldZ*Math.sin(input.yaw);input.moveZ=worldX*Math.sin(input.yaw)+worldZ*Math.cos(input.yaw);
- input.sprint=!visible;input.jump=visible&&s.config.difficulty==='hard'&&random(s)<0.05;
- p.botInput=input;return input;
+ input.sprint=!visible&&s.config.difficulty==='hard';input.jump=visible&&s.config.difficulty==='hard'&&random(s)<0.05;
+ p.botInput=input;return burstInput();
 }
 function kartBot(s:GameState,id:number,dt:number):GameInput {
  const p=s.players[id],track=trackFor(s.config.map),t=TUNING[s.config.difficulty];p.botThink-=dt;

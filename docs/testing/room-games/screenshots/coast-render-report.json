@@ -5,11 +5,21 @@
     "name": "Coral Coast"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 59.602649006622514,
-  "frames": 380,
-  "drawCalls": 192,
-  "triangles": 853530,
-  "frameMs": 0.6831748808419957,
+  "fps": 59.74607916355489,
+  "frames": 506,
+  "drawCalls": 190,
+  "triangles": 354136,
+  "frameMs": 1.580691188767113,
+  "camera": {
+    "x": 22.321917756678477,
+    "y": 3.45,
+    "z": -38.74468160756188
+  },
+  "cameraDirection": {
+    "x": 0.9675264871360613,
+    "y": -0.20429416555366836,
+    "z": 0.148850228790163
+  },
   "errors": [],
   "assets": [
     {

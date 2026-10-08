@@ -1,5 +1,5 @@
 """Original Rooms Arcade art. Blender 5.2 headless; no external dependencies."""
-import bpy, math, json, hashlib, struct, random
+import bpy, bmesh, math, json, hashlib, struct, random
 from pathlib import Path
 from mathutils import Vector
 ROOT=Path(__file__).resolve().parents[2]
@@ -19,7 +19,7 @@ def mat(n,c,metal=0,rough=.4,em=0):
  return m
 M={}
 def palette():
- for n,c,met,r,e in [('Gunmetal',(.045,.065,.095),.8,.3,0),('Obsidian',(.013,.02,.029),.3,.47,0),('Titanium',(.48,.59,.63),.85,.28,0),('Ivory',(.8,.84,.76),.3,.28,0),('Azure',(.018,.31,.57),.7,.26,0),('Ember',(.86,.12,.035),.6,.28,0),('Copper',(.47,.19,.075),.8,.32,0),('CyanLight',(.05,.82,1),.3,.2,3),('AmberLight',(1,.38,.035),.2,.3,3),('PinkLight',(.98,.055,.41),.25,.2,3),('Glass',(.013,.09,.15),.8,.15,0),('Sand',(.64,.39,.21),0,.9,0),('SandLight',(.88,.67,.39),0,.85,0),('Rock',(.32,.39,.41),0,.88,0),('Bark',(.19,.105,.047),0,.92,0),('Leaf',(.065,.34,.17),0,.82,0),('LeafLight',(.21,.51,.23),0,.8,0),('Rubber',(.016,.022,.027),0,.85,0),('Road',(.085,.1,.13),0,.95,0),('Yellow',(1,.66,.045),.2,.4,0)]:M[n]=mat(n,c,met,r,e)
+ for n,c,met,r,e in [('Gunmetal',(.045,.065,.095),.8,.3,0),('Obsidian',(.013,.02,.029),.3,.47,0),('Titanium',(.23,.3,.33),.75,.37,0),('Ivory',(.54,.61,.59),.18,.37,0),('Azure',(.008,.13,.34),.32,.32,0),('Ember',(.62,.043,.015),.27,.33,0),('Copper',(.47,.19,.075),.8,.32,0),('CyanLight',(.005,.42,.7),.1,.3,2),('AmberLight',(1,.38,.035),.2,.3,3),('PinkLight',(.98,.055,.41),.25,.2,3),('Glass',(.013,.09,.15),.8,.15,0),('Sand',(.64,.39,.21),0,.9,0),('SandLight',(.57,.38,.16),0,.92,0),('Rock',(.32,.39,.41),0,.88,0),('Bark',(.19,.105,.047),0,.92,0),('Leaf',(.014,.125,.034),0,.85,0),('LeafLight',(.048,.23,.07),0,.83,0),('Rubber',(.016,.022,.027),0,.85,0),('Road',(.085,.1,.13),0,.95,0),('Yellow',(1,.66,.045),.2,.4,0)]:M[n]=mat(n,c,met,r,e)
 def group(n,parent=None,p=(0,0,0)):
  o=bpy.data.objects.new(n,None);bpy.context.collection.objects.link(o);o.location=xyz(p);o.parent=parent;return o
 def finish(o,n,m,parent):
@@ -51,6 +51,24 @@ def torus(n,p,r,minor,m,parent=None,axis='Y'):
 def beam(n,a,b,r,m,parent):
  aa=Vector(xyz(a));bb=Vector(xyz(b));mid=(aa+bb)/2
  bpy.ops.mesh.primitive_cylinder_add(vertices=10,radius=r,depth=(bb-aa).length,location=mid);o=bpy.context.object;o.rotation_euler=(bb-aa).to_track_quat('Z','Y').to_euler();return finish(o,n,m,parent)
+def armor(n,p,sections,m,parent=None,longitudinal=False):
+ # Chamfered eight-point cross sections produce designed taper and silhouette.
+ ring=[(-1,-.65),(-.65,-1),(.65,-1),(1,-.65),(1,.65),(.65,1),(-.65,1),(-1,.65)]
+ verts=[]
+ for height,width,depth,offset in sections:
+  for a,b in ring:
+   q=(p[0]+a*width/2,p[1]+height,p[2]+b*depth/2+offset) if not longitudinal else (p[0]+a*width/2,p[1]+b*depth/2+offset,p[2]+height)
+   verts.append(xyz(q))
+ faces=[tuple(range(7,-1,-1))]
+ for j in range(len(sections)-1):
+  for i in range(8):faces.append((j*8+i,j*8+(i+1)%8,(j+1)*8+(i+1)%8,(j+1)*8+i))
+ faces.append(tuple((len(sections)-1)*8+i for i in range(8)))
+ mesh=bpy.data.meshes.new(n);mesh.from_pydata(verts,[],faces);mesh.update();bm=bmesh.new();bm.from_mesh(mesh);bmesh.ops.recalc_face_normals(bm,faces=bm.faces);bm.to_mesh(mesh);bm.free();o=bpy.data.objects.new(n,mesh);bpy.context.collection.objects.link(o)
+ bpy.context.view_layer.objects.active=o;o.select_set(True)
+ bevel=o.modifiers.new('Precision chamfers','BEVEL');bevel.width=.013;bevel.segments=2;bpy.ops.object.modifier_apply(modifier=bevel.name)
+ return finish(o,n,m,parent)
+def slash(p,s,m,parent,angle=.3):
+ o=box('Graphic slash',p,s,m,parent,.004);o.rotation_euler[1]=angle;return o
 def bolt(p,parent):return cyl('Fastener',p,.018,.012,'Titanium',parent,'Z',8)
 def panel(p,s,parent,color='Azure'):
  box('Inset panel',p,s,color,parent,.025)
@@ -89,30 +107,44 @@ def weapon(parent=None,origin=(0,0,0)):
  group('Muzzle',g,(0,.025,.58));return g
 def fighter(color):
  reset();g=group('Fighter');hips=group('Hips',g,(0,.885,0));body=group('Torso',hips,(0,.28,0))
- uv('Core',(0,.015,0),(.245,.3,.135),'Obsidian',body);box('Chest armor',(0,.08,.105),(.43,.3,.16),color,body,.075)
- panel((0,.1,.195),(.24,.13,.025),body,'Ivory');box('Reactor light',(0,.1,.219),(.105,.037,.012),'CyanLight',body,.007)
+ uv('Core',(0,.015,0),(.245,.3,.135),'Obsidian',body);armor('Swept breastplate',(0,0,.075),[(-.14,.29,.2,0),(.02,.51,.29,0),(.21,.54,.26,-.01),(.25,.35,.2,0)],color,body)
+ armor('Sternum shield',(0,.05,.224),[(-.08,.1,.025,0),(.055,.25,.035,0),(.12,.3,.025,0)],'Ivory',body);box('Reactor light',(0,.13,.25),(.11,.035,.016),'CyanLight',body,.007)
+ for side in [-1,1]:
+  slash((side*.18,.14,.211),(.13,.03,.018),'Gunmetal',body,side*.35)
+  for j in range(3):slash((side*(.195+j*.01),.01-j*.034,.225),(.055,.015,.024),'Titanium',body,side*.35)
  for x in [-1,1]:
   for i in range(3):box('Rib plating',(x*.22,-.12+i*.066,.018),(.06,.044,.22),'Gunmetal',body,.014)
- box('Abdomen',(0,-.19,.07),(.24,.16,.18),'Gunmetal',body,.035)
- box('Backpack',(0,.07,-.17),(.33,.34,.16),'Gunmetal',body,.04)
+
+ for j in range(3):armor('Articulated abdomen',(0,-.14-j*.065,.075),[(-.035,.19-j*.015,.18,0),(.035,.26-j*.025,.21,0)],'Gunmetal',body)
+ armor('Reactor backpack',(0,.07,-.18),[(-.21,.29,.15,0),(-.04,.4,.23,-.015),(.18,.33,.2,0)],color,body)
+ box('Backpack spine',(0,.045,-.31),(.09,.31,.035),'Titanium',body,.01)
+ for j in range(5):box('Backpack ventilation',(0,-.06+j*.049,-.335),(.16,.017,.021),'Obsidian',body,.003)
+ for side in [-1,1]:
+  box('Rear identifier',(side*.145,.13,-.302),(.045,.12,.021),'CyanLight',body,.006)
+  beam('Braided power feed',(side*.15,-.11,-.2),(side*.21,-.25,-.05),.025,'Copper',body)
  for x in [-.12,.12]:
   cyl('Thruster',(x,.05,-.26),.061,.24,'Titanium',body);cyl('Thruster port',(x,-.09,-.26),.043,.04,'CyanLight',body)
- head=group('Head',body,(0,.37,0));uv('Helmet shell',(0,.03,0),(.19,.225,.175),color,head,20)
- box('Visor frame',(0,.055,.139),(.33,.13,.092),'Obsidian',head,.045);box('Visor glass',(0,.064,.188),(.272,.074,.034),'Glass',head,.024)
- box('Visor illuminated brow',(0,.1,.209),(.22,.012,.012),'CyanLight',head,.003)
- box('Chin armor',(0,-.09,.135),(.2,.07,.08),'Ivory',head,.025)
+ head=group('Head',body,(0,.39,0));armor('Faceted command helmet',(0,0,0),[(-.17,.22,.2,.018),(-.1,.34,.31,0),(.1,.39,.34,-.02),(.21,.26,.24,-.035)],color,head)
+ armor('Visor frame',(0,0,.149),[(-.075,.28,.04,0),(.095,.365,.075,0),(.125,.32,.05,0)],'Obsidian',head)
+ armor('Visor glass',(0,0,.191),[(-.044,.22,.025,0),(.07,.315,.033,0),(.09,.28,.025,0)],'Glass',head)
+ for side in [-1,1]:
+  slash((side*.078,.039,.217),(.103,.024,.012),'CyanLight',head,-side*.22)
+  armor('Cheek armor',(side*.142,-.079,.14),[(-.068,.063,.072,0),(.054,.098,.092,0)],'Ivory',head)
+ armor('Helmet crest',(0,.14,-.04),[(-.025,.068,.31,0),(.06,.043,.21,-.02)],'Ivory',head)
+ armor('Chin guard',(0,-.125,.16),[(-.05,.16,.045,0),(.028,.22,.063,0)],'Gunmetal',head)
+ for x in [-.05,0,.05]:box('Respirator',(x,-.13,.198),(.02,.035,.012),'Titanium',head,.003)
  for x in [-1,1]:
   cyl('Comms',(x*.19,.02,0),.063,.047,'Titanium',head,'X');cyl('Comms light',(x*.219,.02,0),.033,.012,'CyanLight',head,'X')
  cyl('Antenna',(.2,.18,-.05),.012,.17,'Titanium',head);uv('Antenna tip',(.2,.27,-.05),(.022,.022,.022),'AmberLight',head)
  box('Pelvis',(0,-.015,0),(.32,.2,.23),'Gunmetal',hips,.055)
  limbs=[]
  for side,x in [('L',-.19),('R',.19)]:
-  leg=group('UpperLeg'+side,hips,(x,-.075,0));cyl('Hip rotary',(0,0,0),.09,.17,'Titanium',leg,'X');box('Thigh',(0,-.18,0),(.17,.28,.2),color,leg,.045)
+  leg=group('UpperLeg'+side,hips,(x,-.075,0));cyl('Hip rotary',(0,0,0),.09,.17,'Titanium',leg,'X');armor('Tapered thigh',(0,0,0),[(-.33,.15,.18,.02),(-.17,.2,.23,.025),(-.035,.18,.2,0)],color,leg)
   shin=group('LowerLeg'+side,leg,(0,-.35,0));uv('Knee actuator',(0,0,.025),(.095,.095,.105),'Obsidian',shin);box('Kneepad',(0,0,.1),(.15,.115,.06),'Ivory',shin,.025)
-  box('Shin armor',(0,-.18,.025),(.17,.27,.17),color,shin,.04);box('Shin light',(0,-.15,.117),(.036,.15,.013),'CyanLight',shin,.007)
+  armor('Shin shell',(0,0,.04),[(-.32,.155,.17,0),(-.15,.19,.2,.005),(-.04,.16,.18,0)],color,shin);box('Shin light',(0,-.15,.117),(.036,.15,.013),'CyanLight',shin,.007)
   box('Boot',(0,-.39,.065),(.22,.14,.34),'Obsidian',shin,.045);box('Toe cap',(0,-.37,.191),(.21,.09,.11),'Titanium',shin,.025)
   arm=group('UpperArm'+side,body,(x*1.8,.18,0));uv('Shoulder actuator',(0,0,0),(.105,.105,.105),'Titanium',arm)
-  box('Shoulder pauldron',(0,.025,0),(.23,.18,.27),color,arm,.055);box('Bicep',(0,-.18,.015),(.15,.24,.16),'Gunmetal',arm,.04)
+  armor('Swept shoulder pauldron',(0,0,0),[(-.13,.2,.23,.015),(.045,.29,.31,0),(.12,.21,.23,-.025)],color,arm);box('Shoulder rank',(0,.134,-.015),(.13,.022,.085),'Ivory',arm,.007);box('Bicep',(0,-.18,.015),(.15,.24,.16),'Gunmetal',arm,.04)
   fore=group('Forearm'+side,arm,(0,-.3,.015));uv('Elbow',(0,0,0),(.075,.075,.075),'Titanium',fore)
   box('Forearm armor',(0,-.1,.115),(.16,.17,.27),color,fore,.04);box('Glove',(0,-.14,.275),(.12,.105,.14),'Obsidian',fore,.025)
   box('Wrist light',(0,-.004,.14),(.065,.015,.095),'CyanLight',fore,.005)
@@ -145,19 +177,34 @@ def fighter(color):
    anim(o,clip,length,keys)
  export('fighter-'+color.lower()+'.glb')
  render('fighter-'+color.lower(),(3,2.1,4),(0,.95,0),4)
+ if color=='Azure':render('fighter-rear',(3,2,-4),(0,.95,0),4)
 def kart(color):
  reset();g=group('Kart')
  box('Carbon chassis',(0,.28,0),(1.22,.18,1.95),'Obsidian',g,.11)
- uv('Sculpted nose',(0,.43,.62),(.54,.25,.69),color,g,24);box('Nose stripe',(0,.627,.84),(.16,.026,.54),'Ivory',g,.015)
+ armor('Swept monocoque',(0,0,0),[(-.6,.92,.26,.4),(-.15,1.05,.3,.43),(.42,.83,.31,.45),(.94,.62,.22,.4),(1.23,.4,.11,.32)],color,g,True)
+ armor('Hood race stripe',(0,0,0),[(.37,.13,.013,.61),(.91,.105,.015,.516),(1.18,.08,.012,.39)],'Ivory',g,True)
+ for x in [-1,1]:
+  armor('Nose canard',(x*.49,0,0),[(.65,.18,.08,.29),(1.08,.23,.05,.29),(1.25,.12,.035,.27)],'Gunmetal',g,True)
+  box('Front running lamp',(x*.24,.4,1.055),(.14,.04,.03),'CyanLight',g,.01)
  box('Front splitter',(0,.24,1.14),(1.4,.08,.25),'Gunmetal',g,.03)
  for x in [-1,1]:
-  uv('Sidepod',(x*.54,.4,-.03),(.21,.22,.64),color,g,20)
+  armor('Sculpted sidepod',(x*.55,0,0),[(-.67,.25,.2,.39),(-.35,.35,.36,.4),(.24,.31,.28,.39),(.57,.19,.19,.35)],color,g,True)
+  box('Side sill',(x*.58,.25,-.03),(.29,.08,1.28),'Gunmetal',g,.025)
   box('Sidepod intake',(x*.55,.42,.39),(.26,.15,.05),'Obsidian',g,.025)
   for j in range(3):box('Intake fin',(x*.55,.375+j*.045,.426),(.2,.018,.015),'Titanium',g,.003)
   beam('Wing support',(x*.47,.48,-.79),(x*.47,.82,-.93),.04,'Titanium',g)
   box('Wing endplate',(x*.74,.89,-.97),(.065,.26,.45),color,g,.025)
- box('Rear aerofoil',(0,.83,-.95),(1.5,.085,.35),'Gunmetal',g,.03);box('Wing glow',(0,.88,-.91),(1.2,.013,.065),'CyanLight',g,.004)
- box('Power unit',(0,.47,-.58),(.6,.38,.38),'Gunmetal',g,.06)
+ armor('Dual element rear wing',(0,0,0),[(-1.2,1.48,.025,.92),(-1.02,1.5,.11,.83),(-.82,1.47,.055,.83)],color,g,True)
+ box('Wing upper blade',(0,.94,-1.11),(1.37,.035,.11),'Gunmetal',g,.01)
+ for x in [-.43,.43]:box('Wing stripe',(x,.899,-.965),(.13,.02,.19),'Ivory',g,.004)
+ box('Rear luminous bar',(0,.79,-1.206),(1.24,.03,.025),'CyanLight',g,.006)
+ armor('Engine housing',(0,0,0),[(-.85,.54,.28,.44),(-.6,.66,.4,.48),(-.37,.51,.35,.48)],'Gunmetal',g,True)
+ box('Rear diffuser',(0,.19,-.94),(1.25,.07,.37),'Obsidian',g,.012)
+ for x in [-.46,-.23,0,.23,.46]:box('Diffuser vane',(x,.25,-1.04),(.025,.17,.3),'Titanium',g,.008)
+ for x in [-.49,.49]:
+  box('Tail lamp housing',(x,.44,-.93),(.17,.11,.1),'Obsidian',g,.024)
+  box('Tail lamp',(x,.46,-.989),(.125,.035,.02),'PinkLight',g,.006)
+  beam('Roll cage diagonal',(x*.7,.4,-.61),(x*.6,.89,-.35),.03,'Titanium',g)
  for x in [-.18,.18]:
   cyl('Turbine',(x,.45,-.83),.115,.25,'Titanium',g,'Z');cyl('Exhaust glow',(x,.45,-.965),.083,.025,'AmberLight',g,'Z')
  for i in range(6):box('Motor cooling fin',(0,.68,-.74+i*.055),(.48,.025,.018),'Titanium',g,.003)
@@ -165,7 +212,14 @@ def kart(color):
  wheels=[]
  for tag,x,z in [('FL',-.75,.67),('FR',.75,.67),('RL',-.75,-.66),('RR',.75,-.66)]:
   wheel=group('Wheel'+tag,g,(x,.31,z));wheels.append(wheel)
-  torus('Tire',(0,0,0),.225,.088,'Rubber',wheel,'X');cyl('Alloy rim',(0,0,0),.19,.19,'Gunmetal',wheel,'X')
+  torus('Tire',(0,0,0),.225,.088,'Rubber',wheel,'X')
+  for tread in range(24):
+   a=tread*math.tau/24
+   for lane in [-1,1]:
+    o=box('Tread block',(lane*.041,.311*math.cos(a),.311*math.sin(a)),(.066,.017,.044),'Obsidian',wheel,0);o.rotation_euler[0]=a
+  for side in [-1,1]:torus('Sidewall bead',(side*.088,0,0),.246,.012,'Obsidian',wheel,'X')
+  cyl('Brake disc',(0,0,0),.163,.15,'Copper',wheel,'X')
+  cyl('Alloy rim',(0,0,0),.19,.19,'Gunmetal',wheel,'X')
   for side in [-1,1]:
    cyl('Rim lip',(side*.105,0,0),.18,.026,'Titanium',wheel,'X');cyl('Rim face',(side*.122,0,0),.14,.016,color,wheel,'X');cyl('Hub',(side*.135,0,0),.055,.025,'Titanium',wheel,'X')
    for a in range(6):
@@ -173,14 +227,21 @@ def kart(color):
   beam('Suspension',(x*.6,.28,z),(x,.29,z),.045,'Titanium',g)
  driver=group('Driver',g,(0,.67,-.15));uv('Racing suit',(0,.08,0),(.21,.29,.15),color,driver)
  for x in [-.085,.085]:box('Harness',(x,.08,.146),(.05,.35,.025),'Yellow',driver,.005)
- head=group('DriverHead',driver,(0,.37,.005));uv('Helmet',(0,.025,0),(.235,.23,.215),'Ivory',head,24)
- uv('Dark visor',(0,.032,.143),(.2,.107,.112),'Glass',head,24);box('Visor trim',(0,.118,.215),(.27,.017,.018),'CyanLight',head,.005)
+ head=group('DriverHead',driver,(0,.38,.005));uv('Helmet',(0,.025,0),(.24,.24,.218),color,head,32)
+ armor('Helmet crown stripe',(0,0,0),[(-.19,.09,.07,.085),(-.06,.1,.17,.215),(.08,.105,.15,.235),(.19,.09,.07,.18)],'Ivory',head,True)
+ for side in [-1,1]:
+  box('Helmet rear vent',(side*.095,.012,-.206),(.087,.043,.024),'Obsidian',head,.012)
+  slash((side*.09,-.051,-.218),(.055,.017,.019),'CyanLight',head,side*.35)
+ uv('Dark visor',(0,.032,.143),(.2,.107,.112),'Glass',head,24);box('Visor trim',(0,.118,.215),(.27,.017,.018),'Ivory',head,.005)
+ for side in [-1,1]:slash((side*.083,.038,.252),(.095,.023,.014),'CyanLight',head,side*.14)
+ armor('Helmet chin',(0,-.113,.149),[(-.044,.22,.09,0),(.021,.27,.13,0)],'Ivory',head)
  for x in [-.22,.22]:cyl('Helmet hinge',(x,.02,.012),.053,.028,color,head,'X')
  for x in [-1,1]:
   beam('Driver arm',(x*.17,.13,.01),(x*.25,-.04,.28),.073,color,driver);uv('Driving glove',(x*.25,-.04,.3),(.075,.065,.07),'Rubber',driver)
   beam('Driver leg',(x*.1,-.15,.06),(x*.13,-.22,.44),.08,color,driver)
  torus('SteeringWheel',(0,.64,.21),.21,.024,'Rubber',g,'Z');beam('Steering column',(0,.48,.27),(0,.64,.21),.026,'Titanium',g)
  export('kart-'+color.lower()+'.glb');render('kart-'+color.lower(),(3.3,2.3,4),(0,.65,0),4.3)
+ if color=='Azure':render('kart-rear',(3,2.1,-4),(0,.65,0),4.3)
 def rock(g,p,s,m):
  bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2,radius=1,location=xyz(p));o=bpy.context.object
  for v in o.data.vertices:v.co*=random.uniform(.82,1.15)
@@ -203,7 +264,9 @@ def env():
  g=group('StationWall');box('Bulkhead',(0,1.5,0),(4,3,.32),'Gunmetal',g,.04)
  for x in [-1.05,1.05]:panel((x,1.5,.18),(1.85,2.56,.09),g,'Ivory');box('Display',(x,1.6,.236),(1.25,.55,.025),'Glass',g,.035)
  for y in [.19,2.81]:box('Light strip',(0,y,.23),(3.7,.05,.035),'CyanLight',g,.008)
- g=group('Reactor');cyl('Reactor plinth',(0,.2,0),1.1,.4,'Gunmetal',g,verts=24);cyl('Core',(0,1.6,0),.61,2.6,'CyanLight',g,verts=24)
+ g=group('Reactor');cyl('Reactor plinth',(0,.2,0),1.1,.4,'Gunmetal',g,verts=24);cyl('Core',(0,1.6,0),.61,2.6,'Glass',g,verts=24)
+ for a in range(12):
+  t=a*math.tau/12;beam('Reactor energy channel',(.618*math.cos(t),.4,.618*math.sin(t)),(.618*math.cos(t),2.8,.618*math.sin(t)),.022,'CyanLight',g)
  for y in [.5,1.15,2,2.75]:torus('Confinement ring',(0,y,0),.78,.13,'Titanium',g)
  for a in range(6):
   t=a*math.tau/6;x,z=.84*math.cos(t),.84*math.sin(t);box('Containment pillar',(x,1.6,z),(.16,2.7,.16),'Gunmetal',g,.03)
@@ -227,10 +290,18 @@ def env():
   x=math.sin(i*.13)*.6;cone('Palm trunk',(x,.2+i*.38,0),.19-i*.007,.165-i*.007,.43,'Bark',g)
  crown=(.52,3.65,0)
  for a in range(9):
-  t=a*math.tau/9
-  for j in range(5):
-   r=.22+j*.39;y=3.74+math.sin(j*.65)*.42-j*.13
-   leaf=uv('Palm frond',(.52+math.cos(t)*r,y,math.sin(t)*r),(.42,.075,.19),'Leaf' if a%2 else 'LeafLight',g,12);leaf.rotation_euler[2]=-t
+  t=a*math.tau/9;forward=Vector((math.cos(t),0,math.sin(t)));right=Vector((-math.sin(t),0,math.cos(t)))
+  vertices=[];faces=[]
+  def center(u):return Vector((.52,3.73+.48*math.sin(u*math.pi)-u*.75,0))+forward*(u*2.25)
+  for j in range(9):
+   u=j/9;beam('Frond central rib',center(u),center((j+1)/9),.013,'LeafLight',g)
+   if j==0:continue
+   width=.46*math.sin(u*math.pi)**.5
+   for side in [-1,1]:
+    base=center(u-.035);tip=center(u+.15)+right*width*side;ridge=center(u+.045)+right*width*.45*side;ridge.y+=.075
+    points=[base,center(u+.045),tip,ridge];start=len(vertices);vertices.extend(xyz(v) for v in points)
+    faces.extend([(start,start+1,start+3),(start+1,start+2,start+3),(start+2,start,start+3)])
+  mesh=bpy.data.meshes.new('Feathered palm frond');mesh.from_pydata(vertices,[],faces);mesh.update();obj=bpy.data.objects.new('Feathered palm frond',mesh);bpy.context.collection.objects.link(obj);finish(obj,'Feathered palm frond','Leaf' if a%2 else 'LeafLight',g)
  for x in [-.15,.15]:uv('Coconut',(.52+x,3.5,.1),(.12,.16,.13),'Bark',g)
  g=group('PineTree');cyl('Trunk',(0,1.6,0),.18,3.2,'Bark',g)
  for y,r,h in [(1.3,1.3,1.5),(2,1.08,1.5),(2.75,.8,1.35),(3.35,.54,1.2)]:
@@ -261,7 +332,10 @@ def env():
  g=group('TireStack')
  for y in [.13,.36,.59]:torus('Tire',(0,y,0),.31,.12,'Rubber',g);cyl('Tire interior',(0,y,0),.2,.15,'Obsidian',g)
  g=group('TrackBarrier');box('Barrier base',(0,.12,0),(3,.24,.7),'Gunmetal',g,.04);box('Safety wall',(0,.49,0),(2.9,.72,.38),'Ivory',g,.05)
- for x in [-1.16,-.39,.39,1.16]:box('Racing stripe',(x,.5,.2),(.35,.6,.026),'Ember',g,.006)
+ for side in [-1,1]:
+  for x in [-1.16,-.39,.39,1.16]:
+   o=box('Racing stripe',(x,.5,side*.207),(.38,.59,.026),'Ember',g,.006);o.rotation_euler[1]=.22
+  box('Barrier rail',(0,.79,side*.217),(2.71,.036,.03),'Titanium',g,.006)
  g=group('BoostPad');box('Boost base',(0,.025,0),(2.4,.05,3),'Gunmetal',g,.08)
  for j in range(4):
   for sign in [-1,1]:

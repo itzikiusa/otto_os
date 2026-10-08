@@ -9,7 +9,10 @@ export function batchScenery(scene:T.Scene,moving:T.Object3D[]):void {
  scene.traverse(o=>{
   if(!(o instanceof T.Mesh)||excluded.has(o)||Array.isArray(o.material))return;
   const material=o.material;
-  if(material instanceof T.MeshStandardMaterial&&material.map)return;
+  if(material instanceof T.ShaderMaterial)return;
+  // UVs are intentionally removed only from untextured geometry. Basic
+  // signboards and any other mapped material must retain their authored UVs.
+  if(Object.values(material).some(value=>value instanceof T.Texture))return;
   const geometry=o.geometry.index?o.geometry.toNonIndexed():o.geometry.clone();geometry.applyMatrix4(o.matrixWorld);
   for(const key of Object.keys(geometry.attributes))if(key!=='position'&&key!=='normal')geometry.deleteAttribute(key);
   if(!geometry.attributes.normal)geometry.computeVertexNormals();

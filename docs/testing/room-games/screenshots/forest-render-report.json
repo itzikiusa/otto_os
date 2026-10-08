@@ -5,11 +5,21 @@
     "name": "Fernwood Rally"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 60.380479735318445,
-  "frames": 379,
-  "drawCalls": 177,
-  "triangles": 177828,
-  "frameMs": 0.6604354634325984,
+  "fps": 58.517555266579976,
+  "frames": 590,
+  "drawCalls": 193,
+  "triangles": 250312,
+  "frameMs": 1.6444704630322489,
+  "camera": {
+    "x": 15.788942983642514,
+    "y": 3.45,
+    "z": -45.51989162977097
+  },
+  "cameraDirection": {
+    "x": 0.9397531615468742,
+    "y": -0.2042941655536683,
+    "z": 0.27409467211783817
+  },
   "errors": [],
   "assets": [
     {

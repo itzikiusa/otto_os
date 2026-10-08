@@ -5,19 +5,29 @@
     "name": "Sunken Dunes"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 60.08230452674897,
-  "frames": 388,
-  "drawCalls": 217,
-  "triangles": 54460,
-  "frameMs": 0.953134386692236,
+  "fps": 59.3900481540931,
+  "frames": 587,
+  "drawCalls": 233,
+  "triangles": 77658,
+  "frameMs": 1.3255542243892715,
+  "camera": {
+    "x": -19.93934104931353,
+    "y": 2.599999999999998,
+    "z": -18.93934104931353
+  },
+  "cameraDirection": {
+    "x": 0.7056964648670546,
+    "y": -0.06312684807816285,
+    "z": 0.7056964648670551
+  },
   "errors": [],
   "assets": [
     {
-      "path": "/room-games/arena-preview.png",
+      "path": "/room-games/kart-preview.png",
       "status": 200
     },
     {
-      "path": "/room-games/kart-preview.png",
+      "path": "/room-games/arena-preview.png",
       "status": 200
     },
     {

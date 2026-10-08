@@ -4,12 +4,15 @@ import { resolve } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 import { expectNoHorizontalOverflow } from './helpers';
 import type { GameState, GameKind } from '../src/modules/rooms/games/types';
+import { TRACKS } from '../src/modules/rooms/games/maps';
+import { nearestTrackPoint } from '../src/modules/rooms/games/kart';
 
 // Real UI, assets, simulation, HTTP and WebSockets. Only the failure test aborts
 // one asset download; no API replies or game state are fabricated.
 // OTTO_E2E_SLOT=games OTTO_E2E_PORT=7898 OTTO_E2E_PW_PORT=5298 \
 // OTTO_E2E_SWEEP_ORPHANS=0 OTTO_E2E_BIN=../target/debug/ottod \
 // npx playwright test --config e2e/room-games.config.ts
+// Add OTTO_GAMES_PREVIEW=1 to validate the built ui/dist with the same real-daemon proxy.
 const evidenceDir = resolve('..', 'docs/testing/room-games/screenshots');
 const maps = [
   { kind: 'shooter', id: 'station', name: 'Orbital Station' },
@@ -19,7 +22,7 @@ const maps = [
   { kind: 'kart', id: 'forest', name: 'Fernwood Rally' },
   { kind: 'kart', id: 'neon', name: 'Neon Overdrive' },
 ] as const;
-interface RenderStats { frames: number; drawCalls: number; triangles: number; frameMs: number }
+interface RenderStats { frames: number; drawCalls: number; triangles: number; frameMs: number; camera?: { x: number; y: number; z: number } }
 interface GameDiagnostic { snapshot(): GameState; stats(): RenderStats }
 let workspace = '';
 
@@ -40,7 +43,7 @@ async function boot(page: Page, scheme: 'light' | 'dark' = 'dark') {
     localStorage.setItem('otto_scheme', scheme);
   }, { id: workspace, scheme });
   await page.goto('/#/rooms/games');
-  await expect(page.getByRole('button', { name: 'Play computer', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Play computer', exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 function observe(page: Page) {
@@ -114,6 +117,9 @@ test('phone and tablet chooser fit; touch controls drive a real kart', async ({ 
     deviceScaleFactor: 1, serviceWorkers: 'block',
   });
   const mobile = await context.newPage(), observed = observe(mobile);
+  const moduleRequests = new Set<string>();
+  let gameModuleRequests: string[] = [];
+  mobile.on('request', request => { const path = new URL(request.url()).pathname; if (path.startsWith('/src/')) moduleRequests.add(path); });
   try {
     await boot(mobile, 'light');
     for (const viewport of [{ width: 390, height: 844 }, { width: 768, height: 1024 }]) {
@@ -124,6 +130,8 @@ test('phone and tablet chooser fit; touch controls drive a real kart', async ({ 
     }
     await mobile.setViewportSize({ width: 390, height: 844 });
     await startComputer(mobile, 'kart', 'Coral Coast');
+    gameModuleRequests = [...moduleRequests];
+    expect(gameModuleRequests.filter(path => /\/(RoomPage|RoomLobby|RoomRecapsPage|Terminal)\.svelte$/.test(path)), 'cold games route must not load unrelated room or terminal modules').toEqual([]);
     const forward = mobile.getByRole('button', { name: 'Move up', exact: true });
     await expect(forward).toBeVisible();
     await expect(mobile.getByRole('button', { name: 'Drift', exact: true })).toBeVisible();
@@ -136,13 +144,25 @@ test('phone and tablet chooser fit; touch controls drive a real kart', async ({ 
       await expect.poll(async () => distance((await snapshot(mobile)).players[0], start)).toBeGreaterThan(1);
     } finally { await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); }
     await cdp.detach();
+    const renderStart = await stats(mobile), started = Date.now();
+    await mobile.waitForTimeout(1200); // ui-guards: allow — fixed window measures mobile rendering under the actual coarse-pointer layout.
+    const rendered = await stats(mobile);
+    const mobileReport = { viewport: mobile.viewportSize(), fps: (rendered.frames - renderStart.frames) * 1000 / (Date.now() - started), ...rendered, ...observed };
+    writeFileSync(resolve(evidenceDir, 'mobile-render-report.json'), JSON.stringify(mobileReport, null, 2));
     await capture(mobile, 'kart-coast-touch-phone', info);
     await mobile.getByRole('button', { name: 'Menu', exact: true }).tap();
     await expect(mobile.getByRole('button', { name: 'Resume', exact: true })).toBeVisible();
     await mobile.getByRole('button', { name: 'Leave match', exact: true }).tap();
     await expect(mobile.getByRole('button', { name: 'Play computer', exact: true })).toBeVisible();
+    await mobile.locator('.games-page').getByRole('button', { name: 'Rooms', exact: true }).tap();
+    await expect(mobile).toHaveURL(/#\/rooms$/);
+    await expect(mobile.getByRole('heading', { name: 'Rooms', exact: true })).toBeVisible({ timeout: 30_000 });
+    await capture(mobile, 'rooms-lobby-after-game-phone', info);
     expect(observed.errors).toEqual([]);
-  } finally { await context.close(); }
+  } finally {
+    await info.attach('mobile-console-and-module-requests', { body: JSON.stringify({ ...observed, gameModuleRequests, moduleRequests: [...moduleRequests] }), contentType: 'application/json' });
+    await context.close();
+  }
 });
 
 for (const map of maps) {
@@ -236,6 +256,73 @@ for (const map of maps) {
     await page.getByRole('button', { name: 'Leave match', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Play computer', exact: true })).toBeVisible();
     await expect(page.locator('.game-stage canvas')).toHaveCount(0);
+    expect(observed.errors).toEqual([]);
+  });
+}
+
+for (const map of maps.filter(map => map.kind === 'kart')) {
+  test(`kart ${map.id}: sustained steering and nearby grass remain continuous`, async ({ page }, info) => {
+    const observed = observe(page);
+    await boot(page);
+    await startComputer(page, 'kart', map.name);
+    await page.locator('.game-stage canvas').focus();
+    // This collector only reads the production diagnostic. Input comes from
+    // trusted browser keyboard events, never from changing the simulation.
+    const collecting = page.locator('.game-stage').evaluate(el => new Promise<{
+      at: number; tick: number; x: number; y: number; z: number; speed: number;
+      yaw: number; steering: number; offTrack: boolean; offTrackTime: number;
+      resetCooldown: number; camera?: { x: number; y: number; z: number };
+    }[]>(resolve => {
+      const probe = (el as HTMLDivElement & { __ottoGame: GameDiagnostic }).__ottoGame;
+      const samples: { at: number; tick: number; x: number; y: number; z: number; speed: number; yaw: number; steering: number; offTrack: boolean; offTrackTime: number; resetCooldown: number; camera?: { x: number; y: number; z: number } }[] = [];
+      const started = performance.now();
+      const read = (at: number) => {
+        const state = probe.snapshot(), player = state.players[0];
+        samples.push({ at, tick: state.tick, x: player.x, y: player.y, z: player.z, speed: player.speed, yaw: player.yaw, steering: player.steering, offTrack: player.offTrack, offTrackTime: player.offTrackTime, resetCooldown: player.resetCooldown, camera: probe.stats().camera });
+        if (at - started >= 9000) resolve(samples); else requestAnimationFrame(read);
+      };
+      requestAnimationFrame(read);
+    }));
+    await page.keyboard.down('w');
+    try {
+      await page.waitForTimeout(800); // ui-guards: allow — deliberate sustained-driving input duration.
+      await page.keyboard.down('a');
+      await page.waitForTimeout(5500); // ui-guards: allow — steer continuously onto nearby grass long enough to expose involuntary recovery.
+      await page.keyboard.up('a');
+      await page.keyboard.down('d');
+      await page.waitForTimeout(1800); // ui-guards: allow — reverse steering while acceleration remains held to expose discontinuities.
+      await page.keyboard.up('d');
+      await page.waitForTimeout(900); // ui-guards: allow — observe return to neutral steering with sustained acceleration.
+    } finally {
+      await page.keyboard.up('a'); await page.keyboard.up('d'); await page.keyboard.up('w');
+    }
+    const samples = await collecting;
+    const track = TRACKS[map.id];
+    const trackDistances = samples.map(sample => nearestTrackPoint(sample, track).distance);
+    const transitions = samples.slice(1).map((sample, i) => {
+      const previous = samples[i], dt = (sample.tick - previous.tick) / 60;
+      return { dt, displacement: distance(sample, previous), speedChange: Math.abs(sample.speed - previous.speed), reset: sample.resetCooldown > previous.resetCooldown + .1, previousTrackDistance: trackDistances[i], cameraStep: sample.camera && previous.camera ? Math.hypot(sample.camera.x - previous.camera.x, sample.camera.y - previous.camera.y, sample.camera.z - previous.camera.z) : null };
+    });
+    const report = {
+      map: map.id, durationMs: samples.at(-1)!.at - samples[0].at, samples: samples.length,
+      maxFrameMs: Math.max(...samples.slice(1).map((sample, i) => sample.at - samples[i].at)),
+      maxDisplacement: Math.max(...transitions.map(sample => sample.displacement)),
+      maxSpeedChange: Math.max(...transitions.map(sample => sample.speedChange)),
+      maxTrackDistance: Math.max(...trackDistances), maxOffTrackSeconds: Math.max(...samples.map(sample => sample.offTrackTime)),
+      resets: transitions.filter(sample => sample.reset),
+      maxCameraStep: Math.max(...transitions.map(sample => sample.cameraStep ?? 0)),
+      ...observed, frames: samples,
+    };
+    writeFileSync(resolve(evidenceDir, `${map.id}-driving-continuity.json`), JSON.stringify(report, null, 2));
+    await info.attach('driving-continuity', { body: JSON.stringify(report), contentType: 'application/json' });
+    await capture(page, `kart-${map.id}-after-sustained-driving`, info);
+    expect(samples.length).toBeGreaterThan(60);
+    expect(report.maxOffTrackSeconds, 'scenario must actually exercise nearby grass').toBeGreaterThan(2);
+    expect(report.resets.filter(reset => reset.previousTrackDistance < track.width * 3), 'no involuntary recovery near the circuit').toEqual([]);
+    expect(transitions.filter(sample => sample.displacement > 35 * sample.dt + 1.5), 'no position jumps beyond driving and collision movement').toEqual([]);
+    expect(transitions.filter(sample => sample.speedChange > 30 * sample.dt + 3), 'no abrupt terrain speed clamps').toEqual([]);
+    expect(samples.every(sample => sample.camera !== undefined), 'production camera samples are available').toBe(true);
+    expect(transitions.filter(sample => (sample.cameraStep ?? 0) > 60 * sample.dt + 1.5), 'no spontaneous follow-camera position jumps').toEqual([]);
     expect(observed.errors).toEqual([]);
   });
 }

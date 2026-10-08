@@ -6,7 +6,7 @@ import { botInput } from './bots.ts';
 export const FIXED_STEP = 1/60;
 const finished = (state:GameState):boolean => state.phase==='finished';
 export function defaultInput():GameInput { return {moveX:0,moveZ:0,yaw:0,pitch:0,fire:false,reload:false,jump:false,sprint:false,drift:false,item:false,reset:false}; }
-function player(id:number):GamePlayer { return {id,x:0,y:0,z:0,yaw:0,pitch:0,hp:100,ammo:24,score:0,speed:0,velocityY:0,grounded:true,moving:false,cooldown:0,reloadTime:0,respawnTime:0,invulnerable:1,lap:0,checkpoint:1,boost:0,driftCharge:0,drifting:false,item:null,itemCooldown:0,offTrack:false,offTrackTime:0,finishTime:null,resetCooldown:0,botThink:0,botInput:defaultInput(),botTarget:0,botStrafe:1}; }
+function player(id:number):GamePlayer { return {id,x:0,y:0,z:0,yaw:0,pitch:0,hp:100,ammo:24,score:0,speed:0,steering:0,velocityY:0,grounded:true,moving:false,cooldown:0,reloadTime:0,respawnTime:0,invulnerable:1,lap:0,checkpoint:1,boost:0,driftCharge:0,drifting:false,item:null,itemCooldown:0,offTrack:false,offTrackTime:0,finishTime:null,resetCooldown:0,botThink:0,botInput:defaultInput(),botTarget:0,botStrafe:1}; }
 export function createGame(config:GameConfig):GameState {
  const normalized={...config,map:config.kind==='shooter'?arenaFor(config.map).id:trackFor(config.map).id};
  const s:GameState={config:normalized,phase:'countdown',countdown:3,elapsed:0,remaining:180,winner:null,players:[player(0),player(1)],events:[],eventSequence:0,rng:(config.seed??72813)>>>0,accumulator:0,tick:0,pickupTimers:[]};

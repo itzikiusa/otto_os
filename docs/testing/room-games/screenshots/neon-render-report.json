@@ -5,11 +5,21 @@
     "name": "Neon Overdrive"
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
-  "fps": 59.55334987593052,
-  "frames": 377,
-  "drawCalls": 182,
-  "triangles": 1786284,
-  "frameMs": 0.7634975946664009,
+  "fps": 60.13363028953229,
+  "frames": 707,
+  "drawCalls": 180,
+  "triangles": 2365360,
+  "frameMs": 1.2973836732336872,
+  "camera": {
+    "x": 35.1923462704785,
+    "y": 3.45,
+    "z": -46.2
+  },
+  "cameraDirection": {
+    "x": 0.9789095432779938,
+    "y": -0.20429416555366836,
+    "z": -1.1102230246251568e-16
+  },
   "errors": [],
   "assets": [
     {

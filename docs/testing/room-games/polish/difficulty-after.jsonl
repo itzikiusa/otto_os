@@ -1,0 +1,15 @@
+{"scene":"open","difficulty":"easy","firstHit":6.23,"firstKill":29.23,"damage10":33.333333333333336,"damage30":91.66666666666667,"shots30":9.666666666666666,"kills30":0.6666666666666666}
+{"scene":"open","difficulty":"normal","firstHit":0.92,"firstKill":2.85,"damage10":100,"damage30":383.3333333333333,"shots30":18,"kills30":3.6666666666666665}
+{"scene":"open","difficulty":"hard","firstHit":0.27,"firstKill":0.82,"damage10":200,"damage30":600,"shots30":25.333333333333332,"kills30":6}
+{"scene":"moving","difficulty":"easy","firstHit":10.22,"firstKill":34.23,"damage10":8.333333333333334,"damage30":75,"shots30":9.666666666666666,"kills30":0.3333333333333333}
+{"scene":"moving","difficulty":"normal","firstHit":0.87,"firstKill":5.14,"damage10":100,"damage30":358.3333333333333,"shots30":24,"kills30":3.3333333333333335}
+{"scene":"moving","difficulty":"hard","firstHit":0.32,"firstKill":0.88,"damage10":200,"damage30":600,"shots30":29.333333333333332,"kills30":6}
+{"scene":"station","difficulty":"easy","firstHit":13.93,"firstKill":45.56,"damage10":0,"damage30":58.333333333333336,"shots30":5.666666666666667,"kills30":0}
+{"scene":"station","difficulty":"normal","firstHit":5.43,"firstKill":7.23,"damage10":100,"damage30":258.3333333333333,"shots30":11.333333333333334,"kills30":2}
+{"scene":"station","difficulty":"hard","firstHit":2.88,"firstKill":3.38,"damage10":200,"damage30":600,"shots30":25.666666666666668,"kills30":6}
+{"scene":"foundry","difficulty":"easy","firstHit":23.34,"firstKill":38.9,"damage10":0,"damage30":58.333333333333336,"shots30":5.666666666666667,"kills30":0.3333333333333333}
+{"scene":"foundry","difficulty":"normal","firstHit":8.03,"firstKill":9.87,"damage10":100,"damage30":300,"shots30":13.666666666666666,"kills30":3}
+{"scene":"foundry","difficulty":"hard","firstHit":4.28,"firstKill":4.78,"damage10":200,"damage30":500,"shots30":20.666666666666668,"kills30":5}
+{"scene":"dunes","difficulty":"easy","firstHit":14.33,"firstKill":38.98,"damage10":0,"damage30":58.333333333333336,"shots30":5.333333333333333,"kills30":0.3333333333333333}
+{"scene":"dunes","difficulty":"normal","firstHit":8.23,"firstKill":10.03,"damage10":75,"damage30":275,"shots30":13.666666666666666,"kills30":2.6666666666666665}
+{"scene":"dunes","difficulty":"hard","firstHit":4.38,"firstKill":4.94,"damage10":100,"damage30":500,"shots30":21.333333333333332,"kills30":5}

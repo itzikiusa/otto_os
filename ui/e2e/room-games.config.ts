@@ -20,7 +20,7 @@ export default defineConfig({
       ...(process.platform === 'darwin' ? ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] : [])] },
   },
   webServer: {
-    command: `npm run dev -- --config e2e/fixtures/rooms-live-vite.config.ts --port ${port} --strictPort`,
+    command: `npm run ${process.env.OTTO_GAMES_PREVIEW === '1' ? 'preview' : 'dev'} -- --config e2e/fixtures/rooms-live-vite.config.ts --port ${port} --strictPort`,
     url: origin, reuseExistingServer: false, timeout: 90_000,
   },
   projects: [{ name: 'room-games', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 1000 } } }],

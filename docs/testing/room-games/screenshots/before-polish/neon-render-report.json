@@ -1,0 +1,36 @@
+{
+  "map": {
+    "kind": "kart",
+    "id": "neon",
+    "name": "Neon Overdrive"
+  },
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Max, Unspecified Version)",
+  "fps": 59.55334987593052,
+  "frames": 377,
+  "drawCalls": 182,
+  "triangles": 1786284,
+  "frameMs": 0.7634975946664009,
+  "errors": [],
+  "assets": [
+    {
+      "path": "/room-games/arena-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-preview.png",
+      "status": 200
+    },
+    {
+      "path": "/room-games/environment-kit.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-azure.glb",
+      "status": 200
+    },
+    {
+      "path": "/room-games/kart-ember.glb",
+      "status": 200
+    }
+  ]
+}

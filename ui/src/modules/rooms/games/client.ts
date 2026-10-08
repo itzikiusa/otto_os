@@ -25,7 +25,7 @@ export function decodeSnapshot(value: unknown, config: GameConfig): GameState | 
   if (!record(value) || !record(value.config) || value.config.kind !== config.kind || value.config.map !== config.map || !['easy','normal','hard'].includes(String(value.config.difficulty)) || typeof value.config.vsComputer !== 'boolean') return null;
   if (!['countdown','playing','finished'].includes(String(value.phase)) || !Array.isArray(value.players) || value.players.length !== 2 || !Array.isArray(value.events) || value.events.length > 128 || !Array.isArray(value.pickupTimers) || value.pickupTimers.length > 64 || value.pickupTimers.some(n => !finite(n))) return null;
   if (!['countdown','elapsed','remaining','eventSequence','rng','accumulator','tick'].every(k => finite(value[k])) || ![null,0,1].includes(value.winner as null | number)) return null;
-  const numeric = ['x','y','z','yaw','pitch','hp','ammo','score','speed','velocityY','cooldown','reloadTime','respawnTime','invulnerable','lap','checkpoint','boost','driftCharge','itemCooldown','offTrackTime','resetCooldown','botThink','botTarget','botStrafe'];
+  const numeric = ['x','y','z','yaw','pitch','hp','ammo','score','speed','steering','velocityY','cooldown','reloadTime','respawnTime','invulnerable','lap','checkpoint','boost','driftCharge','itemCooldown','offTrackTime','resetCooldown','botThink','botTarget','botStrafe'];
   for (let i = 0; i < 2; i++) {
     const p = value.players[i];
     if (!record(p) || p.id !== i || numeric.some(k => !finite(p[k])) || ['grounded','moving','drifting','offTrack'].some(k => typeof p[k] !== 'boolean') || !decodeInput(p.botInput) || ![null,'boost','pulse'].includes(p.item as null | string) || (p.finishTime !== null && !finite(p.finishTime))) return null;
