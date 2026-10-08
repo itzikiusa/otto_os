@@ -88,7 +88,9 @@
     const iteration = iterId;
     JSON.stringify(score);
     proofRetry;
-    if (!opened || !evaluation || !iteration) return;
+    // A pending score may have a saved rating but only the previous published
+    // proof artifacts. Do not present those as evidence of the new score.
+    if (!opened || !evaluation || !iteration || score?.proof_status === 'pending') return;
     let current = true;
     untrack(() => {
       loading = true;
@@ -153,7 +155,9 @@
 
       {#if expanded}
         <div class="pack">
-          {#if loading || proofError}
+          {#if score.proof_status === 'pending'}
+            <div class="pmsg" role="status" data-testid="proof-pending-evidence">Proof evidence will be available when the score update finishes.</div>
+          {:else if loading || proofError}
             <LoadState what="the proof pack" {loading} error={proofError} empty={true} variant="compact" onretry={() => proofRetry++} />
           {:else if artifacts.length === 0}
             <div class="pmsg">No proof artifacts were captured for this iteration.</div>
