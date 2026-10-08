@@ -1737,3 +1737,7 @@ mod tests {
         assert_eq!(p["mobile"], false);
     }
 }
+
+#[cfg(test)]
+#[path = "session_chromium_tests.rs"]
+mod chromium_tests;

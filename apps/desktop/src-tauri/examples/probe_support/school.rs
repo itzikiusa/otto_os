@@ -44,6 +44,17 @@ fn layout(host: &Webview, child: &Webview, visible: bool) {
 }
 
 pub fn assert_native_lifecycle(host: &Webview, child: &Webview) {
+    let cycles = std::env::var("OTTO_NATIVE_SCHOOL_CYCLES")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .expect("school cycles must be an integer")
+        })
+        .unwrap_or(3);
+    assert!(
+        (1..=20).contains(&cycles),
+        "school cycles must be in 1..=20"
+    );
     evaluate(child, "location.hash='#/home';true");
     wait(
         child,
@@ -68,7 +79,7 @@ pub fn assert_native_lifecycle(host: &Webview, child: &Webview) {
         "window.nativeSchool=document.querySelector('.school .stage').__ottoSchool;true",
     );
     let room = state(child)["scene"]["view"].clone();
-    for cycle in 1..=3 {
+    for cycle in 1..=cycles {
         layout(host, child, false);
         std::thread::sleep(std::time::Duration::from_millis(200));
         let hidden = state(child);
@@ -79,6 +90,7 @@ pub fn assert_native_lifecycle(host: &Webview, child: &Webview) {
             "hidden native School must suspend render work"
         );
         assert_eq!(later["scene"]["view"], room);
+        assert_eq!(hidden["scene"]["camera"], later["scene"]["camera"]);
         layout(host, child, true);
         let frames = later["scene"]["frames"].as_u64().unwrap();
         wait(
@@ -166,5 +178,5 @@ pub fn assert_native_lifecycle(host: &Webview, child: &Webview) {
         true
     );
     assert_eq!(state(child)["scene"]["view"], room);
-    println!("PASS native School: real WebGL scene/assets, room transition, three native hidden/resume cycles, zero hidden frames, visible unfocused detached rendering, same scene and room after return");
+    println!("PASS native School: real WebGL scene/assets, room transition, {cycles} native hidden/resume cycles, zero hidden frames, visible unfocused detached rendering, same scene and room after return");
 }
