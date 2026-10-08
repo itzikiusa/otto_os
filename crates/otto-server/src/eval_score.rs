@@ -318,10 +318,9 @@ pub async fn rescore_with_human(
     .await?;
     let refreshed = proof::recompute_and_emit(ctx, &pack.id).await?;
 
+    // A recorded zero weight is intentional (e.g. lint-only scoring). Only an
+    // absent score needs defaults; EvalScore::default already supplies them.
     let mut score = iter.scoring.clone().unwrap_or_default();
-    if score.weights.tests == 0.0 && score.weights.review == 0.0 {
-        score.weights = ScoreWeights::default();
-    }
     score.human = human_score(Some(rating), note, rater);
     score.proof_status = refreshed.status.as_str().to_string();
     score.done_score = refreshed.done_score;

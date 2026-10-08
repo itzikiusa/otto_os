@@ -5440,6 +5440,7 @@ export interface EvalScore {
   diff: DiffScore;
   review: SignalScore;
   human: HumanScore;
+  /** Original signal weights, including intentional zeros; ratings preserve them. */
   weights: ScoreWeights;
   /** Weighted mean over the signals that ran, 0–100. */
   composite: number;

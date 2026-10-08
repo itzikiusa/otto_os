@@ -121,6 +121,59 @@ fn assert_commands(score: &EvalScore) {
 }
 
 #[tokio::test]
+async fn human_rating_preserves_explicit_zero_signal_weights() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::test_pool().await;
+    let (ctx, eval, iter, user) = fixture(&pool, dir.path()).await;
+    let current = ctx.skill_evals_store.get_iteration(&iter.id).await.unwrap();
+    let mut score = current.scoring.unwrap();
+    // This evaluation intentionally scores lint alone. Tests and the human
+    // rating are still recorded as evidence, but carry no composite weight.
+    score.weights = otto_core::domain::ScoreWeights {
+        tests: 0.0,
+        lint: 1.0,
+        diff: 0.0,
+        review: 0.0,
+        human: 0.0,
+    };
+    score.composite = otto_core::eval_score::compute_composite(&score);
+    assert_eq!(score.composite, 100.0);
+    ctx.skill_evals_store
+        .publish_iter_scoring(
+            &eval.id,
+            &iter.id,
+            &score,
+            current.proof_pack_id.as_deref().unwrap(),
+            None,
+            "custom weights",
+        )
+        .await
+        .unwrap();
+    let Json(rated) = rate_iteration(
+        AxPath((eval.id.clone(), iter.id.clone())),
+        State(ctx.clone()),
+        CurrentUser(user),
+        Json(RateIterationReq {
+            rating: 1,
+            note: "record feedback without changing the scoring policy".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let scored = rated.iterations[0].scoring.as_ref().unwrap();
+    assert_eq!(scored.human.rating, Some(1));
+    assert_eq!(
+        serde_json::to_value(&scored.weights).unwrap(),
+        serde_json::to_value(&score.weights).unwrap(),
+        "rating must not replace explicitly configured zero weights"
+    );
+    assert_commands(scored);
+    assert_eq!(scored.composite, 100.0);
+    assert_eq!(rated.best_score, Some(100.0));
+    assert_eq!(rated.composite_score, Some(100.0));
+}
+
+#[tokio::test]
 async fn dropped_rating_handler_recovers_pending_evidence_and_approval() {
     let dir = tempfile::tempdir().unwrap();
     let pool = otto_state::db::test_pool().await;

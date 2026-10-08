@@ -2000,6 +2000,7 @@ errors and retain any findings already collected. Retry completion also requires
 the final validator result to be saved before publishing its score. A result-storage failure leaves the run in `error` with its previous
 command evidence pending and the storage error visible; a later retry can recover.
 Initial scoring and retry publication preserve ratings saved while commands or agents run; rating changes
+preserve the iteration's configured signal weights (including zero weights),
 reselect the best iteration and refresh its headline. Rating acceptance saves the
 new human signal and preserved command/review signals atomically as a `pending`
 `scoring.proof_status` snapshot and clears the run headline. Evidence/publication
