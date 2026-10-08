@@ -3093,6 +3093,8 @@ async fn complete_validation_retry(
 /// Prompts retain 6000 characters; bound command output before allocating or
 /// cloning it for the at-most-16 admitted validators.
 async fn validator_diff(path: &str) -> Option<String> {
+    #[cfg(test)]
+    retry_latency_tests::before_diff(path).await;
     let (mut diff, truncated) = otto_git::LocalGit::new(path)
         .diff_text_capped(Some("HEAD"), 24_004)
         .await
@@ -3116,6 +3118,29 @@ async fn retry_validation(
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
     let retry =
         RetryLease::claim(&ctx.skill_eval_cancels, &eval_id, "validation").map_err(ApiError)?;
+    // Git preparation can consume its local-read timeout. Keep it outside the
+    // publication lock so cancellation and ratings need not wait for disk I/O.
+    // The fresh read below remains authoritative for admission and scoring.
+    if matches!(
+        eval.status,
+        SkillEvalStatus::Running | SkillEvalStatus::Cancelled
+    ) {
+        return Err(ApiError(Error::Conflict(
+            "retry requires a finished, non-cancelled evaluation".into(),
+        )));
+    }
+    let initial = eval
+        .iterations
+        .iter()
+        .find(|it| it.id == iter_id)
+        .ok_or_else(|| ApiError(Error::NotFound("iteration".into())))?;
+    if index >= initial.agents.len() {
+        return Err(ApiError(Error::NotFound("validation".into())));
+    }
+    let retry_diff = match initial.worktree_path.as_deref() {
+        Some(path) => validator_diff(path).await,
+        None => None,
+    };
     let score_guard = crate::eval_score::update_guard(&eval_id).await;
     let current = ctx
         .skill_evals_store
@@ -3174,8 +3199,6 @@ async fn retry_validation(
     pending.status = "pending".into();
     pending.note = "retrying…".into();
     let previous_scoring = it.scoring.clone();
-
-    let retry_diff = validator_diff(&worktree).await;
 
     if !ctx
         .skill_evals_store
@@ -3634,3 +3657,7 @@ mod output_tests;
 #[cfg(test)]
 #[path = "skill_eval_recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+#[path = "skill_eval_retry_latency_tests.rs"]
+mod retry_latency_tests;
