@@ -264,6 +264,8 @@ async fn run_session_turn_inner(
     //    nonexistent path, so a real session can't spawn. Return the deterministic
     //    canned reply (routed by an OTTO_TASK: sentinel in the prompt).
     if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+        otto_orchestrator::e2e_stub::write_vault_artifacts(prompt, opts.done_file.as_deref())
+            .map_err(|e| ApiError(Error::Internal(format!("offline agent artifacts: {e}"))))?;
         let reply = otto_orchestrator::e2e_stub::canned_reply(prompt);
         let sid = existing.cloned().unwrap_or_else(otto_core::new_id);
         on_ready(&sid);

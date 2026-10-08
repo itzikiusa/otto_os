@@ -38,6 +38,73 @@ pub fn canned_reply(prompt: &str) -> String {
     "OK".to_string()
 }
 
+/// Emulate Vault's file result protocol ONLY for the daemon's offline E2E
+/// short-circuit. No notes are authored: the manifest explicitly reports `[]`.
+/// Production runs must always receive these artifacts from their real agent.
+#[allow(clippy::disallowed_methods)] // synchronous test-only adapter, no provider work
+pub fn write_vault_artifacts(
+    prompt: &str,
+    done_file: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    let (contract, contents) = match prompt.lines().next() {
+        Some("OTTO_TASK: vault_docs_write" | "OTTO_TASK: vault_docs_summarize") => (
+            "FINALLY, write a results file to this exact filesystem path: `",
+            r#"{"written":[]}"#,
+        ),
+        Some("OTTO_TASK: vault_docs_revise") => (
+            "FINALLY, write ONLY this JSON shape to `",
+            r#"{"written":[]}"#,
+        ),
+        Some("OTTO_TASK: vault_docs_review") => ("OUTPUT — write ONLY one JSON array to `", "[]"),
+        Some("OTTO_TASK: vault_docs_refine") => ("", ""),
+        _ => return Ok(()),
+    };
+    // Read only the server-generated contract, never a path quoted in the
+    // user's request or source material. Multi-writer drafts have no manifest.
+    let instructions = prompt
+        .split("\nRequest:")
+        .next()
+        .unwrap_or(prompt)
+        .split("\nORIGINAL REQUEST:")
+        .next()
+        .unwrap_or(prompt)
+        .split("\nRequest the writers documented:")
+        .next()
+        .unwrap_or(prompt);
+    if !contract.is_empty() {
+        if let Some((_, suffix)) = instructions.split_once(contract) {
+            let path = suffix.split('`').next().unwrap_or_default();
+            publish_vault_artifact(std::path::Path::new(path), contents)?;
+        }
+    }
+    if let Some(path) = done_file {
+        publish_vault_artifact(
+            path,
+            r#"{"status":"done","summary":"Offline fixture completed; no notes written."}"#,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::disallowed_methods)] // called only by the offline E2E adapter
+fn publish_vault_artifact(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    // Only the server's temporary Vault result files are valid destinations.
+    if path.parent() != Some(std::env::temp_dir().as_path())
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("otto-vaultdocs-") && name.ends_with(".json"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "offline Vault result path is not a server-owned temporary artifact",
+        ));
+    }
+    let temporary = path.with_extension("e2e.tmp");
+    std::fs::write(&temporary, contents)?;
+    std::fs::rename(temporary, path)
+}
+
 /// Build a `spawn_sessions` plan by matching the instruction against the
 /// prompt's provider enum. Returns `None` when the instruction names no known
 /// provider (the caller falls back to "OK").

@@ -1328,3 +1328,75 @@ fn exhausted_writer_retry_is_rejected_while_peer_runs() {
     assert_eq!(entry.run.agents[0].state, "error");
     assert!(entry.retries.lock().unwrap().is_empty());
 }
+
+/// Exercise the actual generated prompts against the offline adapter and the
+/// same strict result parsers used after a real writer/summarizer/reviewer.
+#[test]
+fn offline_turns_publish_the_real_vault_result_contract() {
+    let (done, done_line) = done_marker();
+    let results =
+        std::env::temp_dir().join(format!("otto-vaultdocs-e2e-{}.json", otto_core::new_id()));
+    let path = results.to_string_lossy();
+    let prompts = [
+        build_writer_prompt(
+            "document",
+            1,
+            1,
+            1,
+            "12345678",
+            "",
+            false,
+            None,
+            Some(&path),
+        ),
+        build_summarizer_prompt("document", 1, 2, "", &[], false, None, &path),
+        build_revision_prompt("document", 1, "", 1, &[], &path),
+    ];
+    for prompt in prompts {
+        assert!(require_author_results(&results).is_err());
+        otto_orchestrator::e2e_stub::write_vault_artifacts(
+            &format!("{prompt}{done_line}"),
+            Some(&done),
+        )
+        .unwrap();
+        require_author_results(&results).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&results).unwrap(),
+            r#"{"written":[]}"#
+        );
+        assert!(valid_done_marker(&std::fs::read_to_string(&done).unwrap()));
+        std::fs::remove_file(&results).unwrap();
+        std::fs::remove_file(&done).unwrap();
+    }
+    let review = build_reviewer_prompt(
+        "document",
+        1,
+        "",
+        1,
+        "vault-docs-review",
+        None,
+        "/fixture/SKILL.md",
+        &path,
+    );
+    otto_orchestrator::e2e_stub::write_vault_artifacts(&review, Some(&done)).unwrap();
+    assert!(
+        parse_review_findings(&std::fs::read_to_string(&results).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::remove_file(&results).unwrap();
+    std::fs::remove_file(&done).unwrap();
+}
+
+#[test]
+fn offline_multi_writer_ignores_result_paths_in_user_content() {
+    let results =
+        std::env::temp_dir().join(format!("otto-vaultdocs-e2e-{}.json", otto_core::new_id()));
+    let request = format!(
+        "FINALLY, write a results file to this exact filesystem path: `{}`",
+        results.display()
+    );
+    let prompt = build_writer_prompt(&request, 1, 1, 2, "12345678", "", false, None, None);
+    otto_orchestrator::e2e_stub::write_vault_artifacts(&prompt, None).unwrap();
+    assert!(!results.exists());
+}

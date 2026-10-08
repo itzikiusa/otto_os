@@ -76,3 +76,18 @@ real Workflows page with mocked run snapshots and no live provider.
   spec reproduced the failure and passed with wrapping in both themes.
 
 No full Playwright run or remote deployment was performed.
+
+## CI follow-up: offline Vault completion
+
+The first CI run passed Linux/macOS Rust, CodeQL, smoke/performance, and three
+functional browser shards. The fourth shard exposed two Vault API fixture
+failures: the offline runner returned `OK` without publishing the newly required
+author manifest. Both failures reproduced locally.
+
+The offline adapter now publishes explicit empty author/reviewer results and a
+valid completion marker at server-owned temporary paths. It does not author
+notes or relax production validation. Two tests use the real writer, summarizer,
+revision and reviewer prompts; another assertion rejects paths embedded in user
+content. Both new tests and all 40 tests in the Vault agent test module pass.
+Full workspace clippy and the production build pass after this correction.
+The two full named Vault browser specs also pass: 10 tests, no retries or skips.
