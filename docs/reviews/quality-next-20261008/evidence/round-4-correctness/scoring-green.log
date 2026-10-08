@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 3 tests
+test eval_score::tests::validation_retry_keeps_the_latest_persisted_human_rating ... ok
+test eval_score::tests::errored_or_failed_retry_replaces_previously_passed_review_evidence ... ok
+test eval_score::tests::cancelled_scoring_kills_command_and_never_starts_lint ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 990 filtered out; finished in 2.68s
+

@@ -1,0 +1,83 @@
+{
+  "head": "2913a7d17c8b2b439d8ff8549768fbf64fc1808d",
+  "worktree_status": "M crates/otto-server/src/skill_eval.rs\n M crates/otto-server/src/skill_eval_recovery_tests.rs\n M crates/otto-state/src/skill_evals.rs\n M docs/contracts/api.md\n M ui/src/lib/api/types.ts\n M ui/src/modules/loops/LoopsPage.svelte\n?? docs/reviews/quality-next-20261008/evidence/round-4-correctness/\n?? docs/reviews/quality-next-20261008/evidence/round-4-design-ux/\n?? docs/reviews/quality-next-20261008/evidence/round-4-performance/\n?? docs/reviews/quality-next-20261008/rounds/round-4-correctness.md\n?? docs/reviews/quality-next-20261008/rounds/round-4-design-ux.md\n?? docs/reviews/quality-next-20261008/rounds/round-4-performance.md\n?? ui/e2e/desktop-quality-round4-loop-ux.spec.ts",
+  "node": "v26.10.0",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "machine": "Mac15,9",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "files": {
+    "target/debug/ottod": "14335b30342d5ab8603e9716620d545778a20be7c86775e65dfa1463c00f8dd9",
+    "Cargo.lock": "f5f3be3c743aed0b55edf5e40a6c5985901591396624b8be89a35df401bdb099",
+    "ui/package-lock.json": "3e9bfee88f5ddc44bab53be9df90073dcae5bf4c4f64b898a7f974ad97e26473",
+    "crates/otto-sessions/src/ws.rs": "6d34216c24bde68b51af8c400445a8cf80b95178e1677107a6b5abab5e88ee22",
+    "crates/otto-sessions/src/manager.rs": "360262a25a41f33cfa1ca56bc97ddd598026a50c92b8393a5a3bef349d44d68c",
+    "crates/otto-pty/src/lib.rs": "62d8fdd78d4e4d64b0a5fbf71c2ab17ce32639200e445504d053b5a377793c43",
+    "crates/otto-pty/src/held.rs": "b25b450bb84aa2039d82bab3147a1d4b4bb28c2171d5efb6ac3cd073cf80a806",
+    "crates/otto-pty/src/holder.rs": "0e9e9cead6841757e46be63a5301f8e264add813d86d05b1dfba2cb4f5ecb67a",
+    "crates/otto-server/src/transcript_cache.rs": "b7d4792a69f2b20c1769b3a04fe4df1afbf270449a5f5741da8bc659e5b514ab",
+    "crates/otto-server/src/transcript_tail.rs": "299fa7c38fe380948faf0392f93a72a7d69357322006afdc8937b146e1791667",
+    "crates/otto-server/src/skill_eval.rs": "e72b359d2c2b62ffa43c80331f41a2f6644c22c7b2325d80f3e813e156307639",
+    "crates/otto-state/src/skill_evals.rs": "ddef7b27ba601f34e16167618b2e2224d239a63cb751792eb3c3f0640155d365",
+    "ui/src/lib/components/Terminal.svelte": "858446d05f33e8ec16fd20fff9af57d71c5937bda2c961b33d1ec39c2fb3514c",
+    "ui/src/lib/components/termFlow.ts": "54ab339d824a817e11373392b84dcf3e3d311b2dc3cc418686cf5a93976b7f94",
+    "ui/src/lib/components/termCompactQueue.ts": "d03162660f1df17c0d2de5220ff6dd1fa0fd62558f8642295ea147e8ffa2fce3",
+    "ui/src/lib/components/termPark.ts": "7b1d879d2cf1aa9295b33ddf18b8748d4994c1a770bd9d3530c5def476891c28",
+    "ui/src/lib/stores/transcript.svelte.ts": "c0937f2cf5cc679d8a09d799f40931f840d1b05f3eebe32af046e9f6aa88fc68",
+    "ui/src/lib/stores/transcriptLifecycle.ts": "fde3f6b096127bca192ca2ffaaf6b5f6971d56953201a54254d2121603e59aa9",
+    "ui/e2e/desktop-terminal-rendered-load-perf.spec.ts": "68a5826e7a67930954b1f84a22d76d50373c343517d5ecd247f2de92e65f88e3",
+    "ui/e2e/process-resources.ts": "781e955db2a308783dcd30d35a3f2adac021f4c3b776ef3f44a82a73a45718d7",
+    "ui/e2e/global-setup.ts": "7c91a42e37b4f75a8b7dd68719d6634b5c4380f778aac45ab4824ee5ed61a8d0",
+    "ui/e2e/global-teardown.ts": "e3a11dd20fa57a4441f91c71191aca57310f615ab1e85181e8d568663c5a9421",
+    "ui/playwright.config.ts": "9ebf8f702ece971cec58b4a1188de1117540bf1045d9c18bdc05fad3d7c50484"
+  },
+  "command": "PATH=/opt/homebrew/bin:$PATH OTTO_E2E_SLOT=qualityr4perf OTTO_E2E_PORT=7896 OTTO_E2E_PW_PORT=5296 OTTO_E2E_BIN=/Users/itziklavon/otto_os/target/debug/ottod OTTO_E2E_SWEEP_ORPHANS=0 OTTO_E2E_TELEMETRY=1 OTTO_TERMINAL_LOAD_SECONDS=90 OTTO_TERMINAL_RECOVERY_SECONDS=10 npx playwright test --project=desktop-webkit --workers=1 --output=/tmp/otto-quality-r4-perf-results e2e/desktop-terminal-rendered-load-perf.spec.ts",
+  "note": "Fresh debug daemon after round-4 correctness repairs; real WebKit + Terminal + PTY. Provider command is owned cat shim, Vite development UI. No user data or 7700 mutation. Timed run under exclusive campaign lease; ordinary user apps remain running.",
+  "webkit": {
+    "revision": 2359,
+    "plist": {
+      "BuildMachineOSBuild": "25F84",
+      "CFBundleDevelopmentRegion": "English",
+      "CFBundleDocumentTypes": [
+        {
+          "CFBundleTypeExtensions": [
+            "html"
+          ],
+          "CFBundleTypeMIMETypes": [
+            "text/html"
+          ],
+          "CFBundleTypeName": "HTML",
+          "CFBundleTypeRole": "Editor"
+        }
+      ],
+      "CFBundleExecutable": "Playwright",
+      "CFBundleIconFile": "AppIcon",
+      "CFBundleIconName": "AppIcon",
+      "CFBundleIdentifier": "org.webkit.Playwright",
+      "CFBundleInfoDictionaryVersion": "6.0",
+      "CFBundleName": "Playwright",
+      "CFBundlePackageType": "APPL",
+      "CFBundleShortVersionString": "1.0",
+      "CFBundleSignature": "????",
+      "CFBundleSupportedPlatforms": [
+        "MacOSX"
+      ],
+      "CFBundleVersion": "1",
+      "DTCompiler": "com.apple.compilers.llvm.clang.1_0",
+      "DTPlatformBuild": "25F70",
+      "DTPlatformName": "macosx",
+      "DTPlatformVersion": "26.5",
+      "DTSDKBuild": "25F70",
+      "DTSDKName": "macosx26.5",
+      "DTXcode": "2650",
+      "DTXcodeBuild": "17F42",
+      "LSMinimumSystemVersion": "26.5",
+      "NSAppTransportSecurity": {
+        "NSAllowsArbitraryLoads": true
+      },
+      "NSMainNibFile": "MainMenu",
+      "NSPrincipalClass": "NSApplication",
+      "NSSupportsAutomaticGraphicsSwitching": true
+    },
+    "executable_sha256": "7ba0926c43809db8753af995978a340316fe3fddcbf9a21648fe934994ceaf9f"
+  }
+}

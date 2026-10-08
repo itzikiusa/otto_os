@@ -1,0 +1,21 @@
+   Compiling otto-server v0.2.0 (/Users/itziklavon/otto_os/crates/otto-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 37.30s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 1 test
+
+thread 'skill_eval::recovery_tests::retry_result_storage_failure_stays_pending_and_recovers' (7428225) panicked at crates/otto-server/src/skill_eval_recovery_tests.rs:744:5:
+assertion `left == right` failed: a lost validator result must not publish a completed run
+  left: Done
+ right: Error
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test skill_eval::recovery_tests::retry_result_storage_failure_stays_pending_and_recovers ... FAILED
+
+failures:
+
+failures:
+    skill_eval::recovery_tests::retry_result_storage_failure_stays_pending_and_recovers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 992 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p otto-server --lib`

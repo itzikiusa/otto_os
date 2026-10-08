@@ -1,0 +1,39 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running unittests src/lib.rs (target/debug/deps/otto_server-55b6e46b195b776d)
+
+running 32 tests
+test transcript_tail::tests::aggregate_admission_rejects_without_leaking_charge ... ok
+test routes::handover::tests::transcript_digest_handles_string_content ... ok
+test routes::handover::tests::transcript_digest_extracts_roles_and_tools ... ok
+test transcript_cache::tests::cache_charge_includes_owned_fold_metadata ... ok
+test skill_eval::output_tests::valid_clean_transcript_is_a_verdict_and_invalid_passes_do_not_score ... ok
+test routes::transcript::tests::transcript_roots_honour_env_override ... ok
+test transcript_tail::tests::live_draft_drops_timer_hint_and_tip_rows ... ok
+test transcript_tail::tests::live_draft_takes_the_region_between_echo_and_input_box ... ok
+test transcript_tail::tests::live_draft_is_empty_right_after_a_prompt_and_tolerates_no_box ... ok
+test transcript_tail::tests::oversized_initial_fold_is_rejected_before_reading_its_body ... ok
+test transcript_tail::tests::per_tail_charge_limit_is_checked_before_global_reservation ... ok
+test transcript_tail::tests::oversized_fallback_coalesces_changes_and_ignores_unchanged_files ... ok
+test transcript_tail::tests::retired_tail_cannot_remove_its_replacement ... ok
+test transcript_tail::tests::a_failed_initial_fold_releases_the_waiting_read ... ok
+test transcript_tail::tests::screen_parts_splits_input_and_status_rows ... ok
+test transcript_tail::tests::slot_guard_frees_the_registry_entry_on_drop ... ok
+test transcript_tail::tests::growing_past_live_budget_retires_to_an_explicit_refetch ... ok
+test transcript_cache::tests::unchanged_pages_reuse_one_real_file_fold ... ok
+test transcript_tail::tests::git_branch_reads_head_and_follows_worktree_gitdir ... ok
+test transcript_tail::tests::live_draft_caps_to_the_tail ... ok
+test transcript_cache::tests::sweep_releases_idle_folds_without_another_read ... ok
+test transcript_tail::tests::trim_prefers_text_and_leaves_small_deltas_alone ... ok
+test transcript_tail::tests::stepping_a_growing_file_matches_a_whole_file_fold ... ok
+test transcript_tail::tests::oversized_delta_is_trimmed_under_the_cap_and_the_tool_lookup_is_full ... ok
+test transcript_tail::tests::a_read_waits_for_the_tails_initial_fold_instead_of_folding_again ... ok
+test transcript_cache::tests::a_reader_of_the_grown_file_joins_the_running_fold ... ok
+test transcript_cache::tests::changes_during_fold_are_never_published_as_current ... ok
+test transcript_cache::tests::an_append_during_the_fold_is_served_but_not_cached ... ok
+test transcript_cache::tests::canceled_waiter_keeps_worker_permit_and_same_key_coalesces ... ok
+test transcript_cache::tests::replacement_append_and_sidecar_changes_invalidate ... ok
+test transcript_cache::tests::least_recent_ready_entries_are_evicted ... ok
+test transcript_tail::tests::r02_touch_replaces_a_changed_transcript_identity ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 961 filtered out; finished in 0.21s
+

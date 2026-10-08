@@ -1,0 +1,14 @@
+   Compiling otto-state v0.2.0 (/Users/itziklavon/otto_os/crates/otto-state)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.13s
+     Running unittests src/lib.rs (target/debug/deps/otto_state-b408ed1d6f830c13)
+
+running 6 tests
+test skill_evals::tests::interrupted_validation_retry_preserves_original_command_signals ... ok
+test skill_evals::tests::scoring_human_and_matrix_dims_round_trip ... ok
+test skill_evals::tests::retry_invalidates_scores_and_completion_cannot_overwrite_cancellation ... ok
+test skill_evals::tests::run_iteration_round_trip_and_atomic_agent_update ... ok
+test skill_evals::tests::score_publication_and_rating_admission_roll_back_on_headline_failure ... ok
+test skill_evals::tests::summaries_page_by_keyset_and_filter_by_skill ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 424 filtered out; finished in 4.36s
+

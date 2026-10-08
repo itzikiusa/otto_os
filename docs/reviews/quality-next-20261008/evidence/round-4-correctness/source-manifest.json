@@ -1,0 +1,13 @@
+{
+  "base_head": "2913a7d17c8b2b439d8ff8549768fbf64fc1808d",
+  "files": {
+    "crates/otto-server/src/skill_eval.rs": "e72b359d2c2b62ffa43c80331f41a2f6644c22c7b2325d80f3e813e156307639",
+    "crates/otto-server/src/skill_eval_recovery_tests.rs": "373da9a5a218dbefabd1f095efed9399cf5520c37104f1e6b28f5fa19ce5dc43",
+    "crates/otto-state/src/skill_evals.rs": "ddef7b27ba601f34e16167618b2e2224d239a63cb751792eb3c3f0640155d365",
+    "docs/contracts/api.md": "7354d59f47764e35dd2853a5bc78f8fb89f41c6586267f609bda3c9f63dc4648",
+    "ui/src/lib/api/types.ts": "65cfc0f9886bf973b864c1532d0a6f5f48d30e57ebbee996d6fca70c38346975",
+    "target/debug/ottod": "14335b30342d5ab8603e9716620d545778a20be7c86775e65dfa1463c00f8dd9"
+  },
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "scope": "Round 4 owned source, shared worktree; daemon includes all current Rust source"
+}

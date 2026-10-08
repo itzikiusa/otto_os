@@ -1,0 +1,438 @@
+== base: origin/main ==
+
+== data-access calls (is any inside a loop? → N+1) (file:line — HINTS, verify each) ==
+crates/otto-browser/src/lib.rs:52:/// Plain-fetch backend: a bare `reqwest` GET, readability-cleaned and
+crates/otto-browser/src/lib.rs:1011:                    let resp = if req.starts_with("GET /secret") {
+crates/otto-browser/src/live/process_burst_tests.rs:29:                    "method": "GET"
+crates/otto-browser/src/live/process_burst_tests.rs:104:        ("denied", "GET", Some(false), Duration::ZERO),
+crates/otto-browser/src/live/process_burst_tests.rs:105:        ("expired", "GET", Some(true), guard::VERDICT_TTL),
+crates/otto-browser/src/live/process_burst_tests.rs:106:        ("uncached", "GET", None, Duration::ZERO),
+crates/otto-server/src/skill_eval.rs:2635:/// `GET /skill-evaluations/{id}/promote-gate?iteration_id=…` — whether (and why)
+crates/otto-server/src/skill_eval.rs:2769:/// `GET /skill-evaluations/{id}/iterations/{iter_id}/score` — the iteration's
+crates/otto-server/src/skill_eval.rs:2790:/// `GET /skill-evaluations/{id}/iterations/{iter_id}/proof-pack` — the iteration's
+crates/otto-server/src/vault_docs_agent.rs:787:/// `GET /vault/docs-agents/runs/{run_id}` — the poll snapshot: the live
+crates/otto-server/src/vault_docs_agent.rs:942:/// `GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs?limit=` — the
+crates/otto-server/src/vault_docs_agent.rs:1531:    // so `GET refine-session` can attach the live shell while the turn runs.
+crates/otto-server/src/vault_docs_agent.rs:1699:/// `GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session?path=` —
+crates/otto-server/src/vault_docs_agent.rs:1747:/// turns — without it the very next GET/POST would resurrect the old binding.
+crates/otto-state/src/skill_evals.rs:19:/// A run's list row (`GET …/skill-evaluations?summary=1`): the headline columns
+docs/contracts/api.md:20:| GET | `/rooms` | List the owner's rooms |
+docs/contracts/api.md:24:| GET, PUT | `/room-settings` | Read/configure public origin and media connectivity |
+docs/contracts/api.md:28:| GET | `/room-recaps` | List owner-local archives |
+docs/contracts/api.md:29:| GET | `/room-recaps/{id}` | Read a paginated archive |
+docs/contracts/api.md:30:| GET | `/room-recaps/{id}/revision` | Read body-free metadata and opaque event/draft revisions |
+docs/contracts/api.md:31:| GET | `/room-recaps/{id}/export` | Export the event timeline |
+docs/contracts/api.md:32:| GET | `/room-recaps/{id}/images/{image}` | Read one archived JPEG |
+docs/contracts/api.md:37:| GET, PUT | `/room-recap-settings` | Read/configure local recognition |
+docs/contracts/api.md:38:| GET | `/room-recap-capabilities` | Check recognition and subscription readiness |
+docs/contracts/api.md:57:| 1 | GET /api/v1/health | public | — | `{"ok":true}` |
+docs/contracts/api.md:58:| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes"). Without a valid full-account bearer — a share link (verified or OTP-pending) and an MCP token do not count (S8-308) — (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes are cached 60 s (single-flight). |
+docs/contracts/api.md:62:| 6 | GET /api/v1/auth/me | member | — | `MeResp {user, real_user, impersonating}` — `user` = effective (auth target); `real_user` = token owner (= `user` for normal sessions); `impersonating: bool` |
+docs/contracts/api.md:63:| 7 | GET /api/v1/users | root | — | `User[]` |
+docs/contracts/api.md:67:| 11 | GET /api/v1/workspaces | member | — | `WorkspaceWithRole[]` (root sees all as admin) |
+docs/contracts/api.md:71:| 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
+docs/contracts/api.md:73:| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
+docs/contracts/api.md:75:| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number` + `held: bool` (the live PTY runs in a PTY holder AND `session_persistence` is on, so a daemon restart leaves it running; `false` otherwise). Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
+docs/contracts/api.md:76:| 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
+docs/contracts/api.md:78:| 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers` + `held`) |
+docs/contracts/api.md:85:| 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
+docs/contracts/api.md:93:| 30a | GET /api/v1/workspaces/{id}/connections/import/sources | ws editor | — | `SourceStatus[]` — detects MySQL Workbench / DBeaver / DataGrip / NoSQLBooster at their default macOS config paths (the daemon runs locally and reads the files itself; the user picks a tool, never a file) |
+docs/contracts/api.md:96:| 31 | GET /api/v1/git/accounts | member | — | `GitAccount[]` (own accounts only; token never present) |
+docs/contracts/api.md:100:| 34 | GET /api/v1/workspaces/{id}/repos | ws viewer | — | `Repo[]` |
+docs/contracts/api.md:104:| 37 | GET /api/v1/repos/{id}/status | ws viewer | — | RepoStatusResp. Also arms (or keeps alive) the repo's working-tree watcher, which emits `repo_status_changed` on disk changes (ws.md; `POST …/fetch` arms it too). Includes `op_in_progress` (`"merge"\|"rebase"\|"cherry_pick"\|"revert"`, absent when none), detected from the git dir's state files; conflicted files can exist without it (a conflicting stash pop). Untracked rows are capped at 5,000: past that `changes` carries the first 5,000 untracked rows (tracked/staged/conflicted rows are never capped) plus `untracked_truncated:true` and `untracked_total` (absent otherwise). Concurrent GETs for one repo share a single `git status` spawn, and a result is reused for up to 1 s while no `repo_status_changed` fired and no mutating route ran. Local git refusals across the git routes (dirty tree, unresolved index, bad ref, index.lock, …) map to 409 with git's own message; 502 is reserved for genuine remote/auth failures, and forge HTTP errors map by status (401/403 → 403 credential-rejected, 404 → 404, 405/409/422 → 409). |
+docs/contracts/api.md:105:| 38 | GET /api/v1/repos/{id}/branches | ws viewer | — | `BranchInfo[]` |
+docs/contracts/api.md:106:| 39 | GET /api/v1/repos/{id}/log?limit=50&skip=0&all=false | ws viewer | — | `CommitInfo[]` — `limit` defaults to 50 and is **uncapped**; `limit=0` means the whole reachable history (no `-n`). Page with `skip` + `limit`; ordering is stable across pages for a fixed set of refs. Also accepts `&path=<p>&follow=true&grep=<s>&author=<s>` — `path` is passed after `--` (any filename), `follow` needs exactly one path (400 otherwise), `grep`/`author` are fixed-string, case-insensitive. `until=<sha>` (4–64 hex; anything else → 400) pages TO a commit in ONE spawn: `-n` is dropped and the walk from `skip` stops right after that commit has been emitted, returning `max(limit, position + 1)` records in the same order `skip` paging would (a sha not in the walk reads to the end). The graph uses it to jump to an old ref instead of chaining 10k-commit `--skip` pages. Every git read is held to a 128 MB stdout ceiling (the process is killed there → 502 `upstream`). |
+docs/contracts/api.md:107:| 40 | GET /api/v1/repos/{id}/diff?target=worktree\|working\|staged\|commit:<sha>\|range:<a>..<b>\|range:<a>...<b>&path=&old_path=&summary=&full= | ws viewer | — | DiffResp. Option-like revs (`commit:--x`, `range:--a..b`) → 400. `range:a..b` is `git diff a..b` (tree of `a` vs tree of `b` — unchanged); `range:a...b` is branch-vs-base (`b` against the merge-base of `a` and `b`). `path=` scopes to one LITERAL file; `old_path=` (a rename's origin, from the summary) is passed with it so the rename still pairs (a lone new path comes back as an add). `summary=true`: file list only from ONE `--raw --numstat -z` pass — never a patch — every file `hunks: []`, `hunks_omitted: true`, with `status`, `old_path`, `is_binary`, `added`/`deleted` (null only for binary) and `total_added`/`total_deleted` (~40–100 KB for a 1,500-file / 100k-line commit). Non-summary responses are capped: a file over 200 KB of rendered text or 5,000 lines ⇒ `too_large: true`, `hunks_omitted: true`, `hunks: []` (counts, status, fingerprint kept); a whole-response budget of 20,000 lines / 4 MB of hunks — the first file that doesn't fit and every file after it come back `hunks_omitted: true` and the response `truncated: true`. `full=true` (only with `path=`) lifts the per-file cap to a hard 50,000 lines / 5 MB (still `too_large` beyond). Rename detection is `-M -l1000` (git's default limit, pinned: above it moves show as delete + add). Commit/range responses are memoized in the daemon (keyed by the resolved commit ids + path/old_path/mode, 64 MB LRU of serialized bodies; header `x-otto-diff-cache: hit\|miss\|off`), identical concurrent requests share one computation, and a request aborted by every caller kills its `git`. `added`/`deleted`/`status` are filled on every response (binary: null counts). `renames_incomplete: true` when git reported that rename detection was skipped (more candidates than the `-l1000` limit) — some renames then appear as a delete + an add. Internal Rust callers of `LocalGit::diff` are uncapped. |
+docs/contracts/api.md:112:| 44a | GET /api/v1/repos/{id}/push-target | ws editor | — | `PushTarget {branch, source_sha, remote, destination_ref, destination_hash, remote_sha: string|null}` — local-only snapshot for a possible force retry. `destination_hash` is SHA-256 of the resolved push URL, so credential-bearing URLs are never returned. Supports a single destination with `push.default=simple/current/upstream`; custom/multiple refspecs, mirror/multiple push URLs, and detached HEAD return 409. A failed snapshot must not offer a force retry; ordinary push is unchanged. |
+docs/contracts/api.md:116:| 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all&page=1&per_page=50 | ws viewer | — | `PrListResp {items: PrSummary[], has_more, page, per_page}` (`per_page` 1..=100) |
+docs/contracts/api.md:118:| 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
+docs/contracts/api.md:119:| 51 | GET /api/v1/repos/{id}/prs/{number}/diff?summary=&path=&old_path=&full=&rev= | ws viewer | — | DiffResp — same `summary`, `path`/`old_path`, `full`, per-file cap, response budget and `truncated` semantics as #40, computed from the provider's diff. The provider diff is fetched once and memoized per (repo, remote, PR number, git account, `rev`) for 60 s (identical concurrent fetches coalesce); `rev` is an opaque revision token — clients pass the PR's `head_sha`, so a push lands on a new key instead of serving the pre-push diff for up to a minute, so the file list, the Review tab and each lazy per-file request share ONE download; access (role + the caller's provider credential) is checked on every request before the memo. GitHub refuses the `.diff` media type past 300 files / 20k lines (406): the diff is then rebuilt from `GET /pulls/{n}/files` (paginated, ≤ 2,000 files) — every file with counts and status, hunks from its `patch`, and files GitHub sends without a patch come back `too_large: true`. **Narrow reads (Bitbucket):** unless the whole diff is already memoized, `summary=true` is answered from `GET …/pullrequests/{n}/diffstat` (paged, ≤ 20,000 files, beyond that `truncated: true`; counts are Bitbucket's `lines_added`/`lines_removed`, `is_binary` is always false) and `path=` from `GET …/pullrequests/{n}/diff?path=<path>[&path=<old_path>]` — each memoized under its own key with the same TTL — so summary-first review never downloads the whole unified diff. GitLab has no patch-free MR stat API: `/changes` is used as before, and its `overflow: true` (GitLab's own file/line limits cut the list) now sets `truncated: true`. Other provider failures surface as the usual Problem JSON (502 `upstream`). |
+docs/contracts/api.md:126:| 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
+docs/contracts/api.md:127:| 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
+docs/contracts/api.md:128:| 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
+docs/contracts/api.md:136:- GET /usage/status → UsageStatus (engine + ClickHouse health). For non-root callers
+docs/contracts/api.md:140:- GET /usage/summary?days=N&otto_only=B → UsageSummary. `days` 1–3650 (default 30),
+docs/contracts/api.md:147:- GET /usage/report?days=N&otto_only=B&sessions_limit=N&include=daily_models → UsageReport
+docs/contracts/api.md:165:- GET /usage/by-kind?days=N&otto_only=B → `FeatureUsage[]` — the same per-feature rollup
+docs/contracts/api.md:172:- GET /usage/metrics?minutes=N → `MetricPoint[]` (system CPU/RAM/load time-series).
+docs/contracts/api.md:175:- GET /usage/budgets → UsageBudgetStatus — the persisted budget config plus live status rows
+docs/contracts/api.md:322:| 59 | GET /api/v1/workspaces/{id}/swarm/swarms | ws viewer | — | `Swarm[]` |
+docs/contracts/api.md:324:| 61 | GET /api/v1/swarm/swarms/{sid} | ws viewer | — | SwarmDetail |
+docs/contracts/api.md:327:| 64 | GET /api/v1/swarm/presets | member | — | `SwarmPreset[]` |
+docs/contracts/api.md:328:| 65 | GET /api/v1/swarm/swarms/{sid}/agents | ws viewer | — | `SwarmAgent[]` |
+docs/contracts/api.md:333:| 70 | GET /api/v1/swarm/swarms/{sid}/projects | ws viewer | — | `SwarmProject[]` |
+
+== loops (scan for data-access / linear-search inside) (file:line — HINTS, verify each) ==
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:2://! OTTO_PANE_UI_CONFIG pointing to {base, token, workspace} for a throwaway
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:46:    for _ in 0..300 {
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:53:        "Timed out waiting for {script}; page={}",
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:143:            let bundle = identifier.as_ref().map(|value| value.to_string());
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:155:    for _ in 0..20 {
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:206:    let mut init=format!("window.__OTTO_PROBE_ISOLATED__=localStorage.length===0;for(const [key,value] of Object.entries({values}))localStorage.setItem(key,String(value));");
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:233:                    for view in [&host,&child]{evaluate(view,"window.liveToken=crypto.randomUUID();window.liveNode=document.querySelector('main')||document.body;window.probeDraft=document.createElement('textarea');window.probeDraft.value='never saved';window.probeDraft.dataset.probe='draft';document.body.appendChild(window.probeDraft);true");}
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:235:                    for which in ["side","main"]{
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:242:                        for view in [&host,&child]{assert_eq!(evaluate(view,"window.liveNode.isConnected&&window.probeDraft.value==='never saved'"),true);}
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:251:                    for view in [&host,&child]{evaluate(view,"window.probeDraft.remove();true");}
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:257:                    evaluate(&host,"window.probeFocusCalls=[];const nativeFocus=HTMLElement.prototype.focus;HTMLElement.prototype.focus=function(...args){window.probeFocusCalls.push({id:this.id,tag:this.tagName,label:this.getAttribute('aria-label'),text:this.textContent?.trim().slice(0,100),width:innerWidth,stack:new Error().stack});return nativeFocus.apply(this,args);};window.probeFocusEvents=[];for(const type of ['focus','blur','focusin','focusout'])document.addEventListener(type,e=>window.probeFocusEvents.push({type,id:e.target.id||'',tag:e.target.tagName||'',width:innerWidth,documentFocused:document.hasFocus()}),true);true");
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:265:                    for step in 1..=10 {
+apps/desktop/src-tauri/examples/probe_support/school.rs:32:    for _ in 0..100 {
+apps/desktop/src-tauri/examples/probe_support/school.rs:48:        .map(|value| {
+apps/desktop/src-tauri/examples/probe_support/school.rs:72:    evaluate(child, "const stage=document.querySelector('.school .stage');const door=stage.__ottoSchool.project({kind:'door',id:localStorage.getItem('otto_workspace')});const target=stage.querySelector('canvas');for(const type of ['pointerdown','pointerup'])target.dispatchEvent(new PointerEvent(type,{bubbles:true,clientX:door.x,clientY:door.y+60,pointerId:1,pointerType:'mouse',button:0}));true");
+apps/desktop/src-tauri/examples/probe_support/school.rs:82:    for cycle in 1..=cycles {
+apps/desktop/src-tauri/examples/probe_support/school.rs:155:    for sample in [&before, &after] {
+crates/otto-browser/src/lib.rs:6://! Callers are responsible for netguard-checking any user-supplied URL
+crates/otto-browser/src/lib.rs:32:/// Consecutive engine failures for a host before we stop trying it and go
+crates/otto-browser/src/lib.rs:35:/// Failed hosts are hints for fallback, not durable history. Keep long-running
+crates/otto-browser/src/lib.rs:89:    /// Test constructor: serve `body` for every URL instead of fetching.
+crates/otto-browser/src/lib.rs:154:/// before paying for a full navigation / JS render only to fail afterwards.
+crates/otto-browser/src/lib.rs:160:        .map(|_| ())
+crates/otto-browser/src/lib.rs:185:impl Default for FallbackEngine {
+crates/otto-browser/src/lib.rs:192:impl BrowserEngine for FallbackEngine {
+crates/otto-browser/src/lib.rs:254:        .map(|el| el.text().collect::<String>())
+crates/otto-browser/src/lib.rs:261:/// [`DENYLIST_THRESHOLD`] consecutive `Unavailable` failures for a host,
+crates/otto-browser/src/lib.rs:262:/// skips the primary engine for that host for [`DENYLIST_WINDOW`] after its
+crates/otto-browser/src/lib.rs:311:    /// context and up-to-30 s navigation). Concurrent callers for one key wait
+crates/otto-browser/src/lib.rs:337:            // Someone else rendered while we waited: a plain read takes any
+crates/otto-browser/src/lib.rs:342:                None => self.page(url).await.map(|page| {
+crates/otto-browser/src/lib.rs:408:                    "browser: {} unavailable for {host} ({why}); degrading to plain fetch",
+crates/otto-browser/src/lib.rs:457:    /// sensible to fall back TO for a login (a `login()` call against it
+crates/otto-browser/src/lib.rs:476:    /// | `"fallback"` | `"mock"`) — for callers (e.g. the `/browser/login`
+crates/otto-browser/src/lib.rs:478:    /// `Page`/result struct through just for this.
+crates/otto-browser/src/lib.rs:512:                .map(|(host, _)| host.clone());
+crates/otto-browser/src/lib.rs:527:/// so the sidecar (and its restart supervisor) stays alive for as long as
+crates/otto-browser/src/lib.rs:535:impl BrowserEngine for SidecarBackedEngine {
+crates/otto-browser/src/lib.rs:564:        .and_then(|u| u.host_str().map(str::to_string))
+crates/otto-browser/src/lib.rs:568:/// Match count cap for [`BrowserService::query`] — a broad/unqualified
+crates/otto-browser/src/lib.rs:617:    for el in document.select(&sel) {
+crates/otto-browser/src/lib.rs:642:impl std::io::Write for CappedBuf {
+crates/otto-browser/src/lib.rs:692:    for (i, chunk) in el.text().enumerate() {
+crates/otto-browser/src/lib.rs:710:    while cut > 0 && !s.is_char_boundary(cut) {
+crates/otto-browser/src/lib.rs:765:/// including cancellation while waiting for another render's lock.
+crates/otto-browser/src/lib.rs:772:impl Drop for PageGate<'_> {
+crates/otto-browser/src/lib.rs:786:    /// A live entry for `key` — and, with `newer_than`, only one rendered
+crates/otto-browser/src/lib.rs:819:        inner.bytes = inner.entries.values().map(|e| e.bytes).sum();
+crates/otto-browser/src/lib.rs:820:        while inner.entries.len() >= PAGE_CACHE_MAX_ENTRIES
+crates/otto-browser/src/lib.rs:827:                .map(|(k, _)| k.clone())
+crates/otto-browser/src/lib.rs:849:        // page asked for on the login host that redirected elsewhere still
+crates/otto-browser/src/lib.rs:855:        inner.bytes = inner.entries.values().map(|e| e.bytes).sum();
+crates/otto-browser/src/lib.rs:884:    impl BrowserEngine for Down {
+crates/otto-browser/src/lib.rs:899:    impl BrowserEngine for AlwaysNav {
+crates/otto-browser/src/lib.rs:916:    impl BrowserEngine for FlakyOnce {
+crates/otto-browser/src/lib.rs:953:        // Same policy for query().
+crates/otto-browser/src/lib.rs:987:    /// The 2 MB cap must be enforced while STREAMING the body, not only
+crates/otto-browser/src/lib.rs:1061:            while sent < PAGE_BYTE_CAP * 2 {
+crates/otto-browser/src/lib.rs:1150:        for ok in [
+crates/otto-browser/src/lib.rs:1161:        for bad in [
+
+== SQL: SELECT */non-sargable/leading-wildcard (full-scan risk) (file:line — HINTS, verify each) ==
+crates/otto-server/tests/foundation_integrity.rs:201:        "SELECT user_id,role FROM workspace_members WHERE workspace_id='ws' ORDER BY user_id",
+crates/otto-state/src/goal_loops.rs:179:        let row = sqlx::query("SELECT * FROM goal_loops WHERE id = ?")
+crates/otto-state/src/goal_loops.rs:195:            sqlx::query("SELECT * FROM goal_loops WHERE workspace_id = ? ORDER BY created_at DESC")
+crates/otto-state/src/goal_loops.rs:207:            sqlx::query("SELECT * FROM goal_loops WHERE status IN ('running','paused','blocked')")
+crates/otto-state/src/goal_loops.rs:229:             WHERE loop_id = ? ORDER BY idx",
+crates/otto-state/src/goal_loops.rs:241:        let rows = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? ORDER BY idx")
+crates/otto-state/src/goal_loops.rs:250:        let row = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? AND idx = ?")
+crates/otto-state/src/goal_loops.rs:599:        let row = sqlx::query("SELECT * FROM goal_loop_iterations WHERE id = ?")
+crates/otto-state/src/skill_evals.rs:647:        let rows = sqlx::query("SELECT * FROM skill_evals WHERE matrix_id = ? ORDER BY created_at")
+crates/otto-state/src/skill_evals.rs:663:        let row = sqlx::query("SELECT * FROM skill_eval_iterations WHERE id = ?")
+crates/otto-state/src/skill_evals.rs:673:        let row = sqlx::query("SELECT * FROM skill_evals WHERE id = ?")
+crates/otto-state/src/skill_evals.rs:686:            "SELECT * FROM skill_evals WHERE workspace_id = ? ORDER BY created_at DESC",
+crates/otto-state/src/skill_evals.rs:694:             WHERE e.workspace_id = ? ORDER BY i.eval_id, i.iter",
+crates/otto-state/src/skill_evals.rs:748:             ORDER BY e.created_at DESC, e.id DESC \
+crates/otto-state/src/skill_evals.rs:804:            sqlx::query("SELECT * FROM skill_eval_iterations WHERE eval_id = ? ORDER BY iter")
+docs/contracts/api.md:342:| 75b | GET /api/v1/swarm/swarms/{sid}/tasks | ws viewer | — | `SwarmTask[]` — every project's tasks in ONE read (`ORDER BY order_idx, created_at`, like the per-project list); the board's open path groups them by `project_id` instead of one request per project. The per-project list stays for single-project refreshes |
+docs/contracts/api.md:1127:the SQL drivers append `LIMIT n OFFSET m`, Mongo maps it to `skip`. It is applied
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-final.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (8.572167ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-final.log:511:✔ GROUP BY / aggregates / HAVING / ORDER BY / LIMIT — MySQL (0.20025ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-final.log:517:✔ OFFSET without LIMIT: MySQL gets the max-limit idiom (0.066375ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-final.log:518:✔ validate: loose columns under GROUP BY, with a one-click fix (0.2385ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-final.log:519:✔ validate: duplicate output names, SUM of text, OFFSET without ORDER BY (0.07075ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-harness-dom-red.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (11.0875ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-harness-dom-red.log:511:✔ GROUP BY / aggregates / HAVING / ORDER BY / LIMIT — MySQL (0.194292ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-harness-dom-red.log:517:✔ OFFSET without LIMIT: MySQL gets the max-limit idiom (0.064959ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-harness-dom-red.log:518:✔ validate: loose columns under GROUP BY, with a one-click fix (0.198417ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-harness-dom-red.log:519:✔ validate: duplicate output names, SUM of text, OFFSET without ORDER BY (0.072584ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-integration-red.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (19.166125ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-integration-red.log:511:✔ GROUP BY / aggregates / HAVING / ORDER BY / LIMIT — MySQL (0.186209ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-integration-red.log:517:✔ OFFSET without LIMIT: MySQL gets the max-limit idiom (0.06225ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-integration-red.log:518:✔ validate: loose columns under GROUP BY, with a one-click fix (0.1875ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-integration-red.log:519:✔ validate: duplicate output names, SUM of text, OFFSET without ORDER BY (0.062958ms)
+docs/reviews/quality-next-20261008/evidence/round-2-design-ux/unit-integration-initial-failure.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (19.166125ms)
+docs/reviews/quality-next-20261008/evidence/round-2-design-ux/unit-integration-initial-failure.log:511:✔ GROUP BY / aggregates / HAVING / ORDER BY / LIMIT — MySQL (0.186209ms)
+docs/reviews/quality-next-20261008/evidence/round-2-design-ux/unit-integration-initial-failure.log:517:✔ OFFSET without LIMIT: MySQL gets the max-limit idiom (0.06225ms)
+docs/reviews/quality-next-20261008/evidence/round-2-design-ux/unit-integration-initial-failure.log:518:✔ validate: loose columns under GROUP BY, with a one-click fix (0.1875ms)
+docs/reviews/quality-next-20261008/evidence/round-2-design-ux/unit-integration-initial-failure.log:519:✔ validate: duplicate output names, SUM of text, OFFSET without ORDER BY (0.062958ms)
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:59:docs/contracts/api.md:342:| 75b | GET /api/v1/swarm/swarms/{sid}/tasks | ws viewer | — | `SwarmTask[]` — every project's tasks in ONE read (`ORDER BY order_idx, created_at`, like the per-project list); the board's open path groups them by `project_id` instead of one request per project. The per-project list stays for single-project refreshes |
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:127:== SQL: SELECT */non-sargable/leading-wildcard (full-scan risk) (file:line — HINTS, verify each) ==
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:128:crates/otto-server/tests/foundation_integrity.rs:201:        "SELECT user_id,role FROM workspace_members WHERE workspace_id='ws' ORDER BY user_id",
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:129:crates/otto-state/src/goal_loops.rs:179:        let row = sqlx::query("SELECT * FROM goal_loops WHERE id = ?")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:130:crates/otto-state/src/goal_loops.rs:195:            sqlx::query("SELECT * FROM goal_loops WHERE workspace_id = ? ORDER BY created_at DESC")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:131:crates/otto-state/src/goal_loops.rs:207:            sqlx::query("SELECT * FROM goal_loops WHERE status IN ('running','paused','blocked')")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:132:crates/otto-state/src/goal_loops.rs:229:             WHERE loop_id = ? ORDER BY idx",
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:133:crates/otto-state/src/goal_loops.rs:241:        let rows = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? ORDER BY idx")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:134:crates/otto-state/src/goal_loops.rs:250:        let row = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? AND idx = ?")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:135:crates/otto-state/src/goal_loops.rs:599:        let row = sqlx::query("SELECT * FROM goal_loop_iterations WHERE id = ?")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:136:docs/contracts/api.md:342:| 75b | GET /api/v1/swarm/swarms/{sid}/tasks | ws viewer | — | `SwarmTask[]` — every project's tasks in ONE read (`ORDER BY order_idx, created_at`, like the per-project list); the board's open path groups them by `project_id` instead of one request per project. The per-project list stays for single-project refreshes |
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:137:docs/contracts/api.md:1127:the SQL drivers append `LIMIT n OFFSET m`, Mongo maps it to `skip`. It is applied
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:138:docs/reviews/quality-next-20261008/evidence/ui-unit.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (4.907667ms)
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:139:docs/reviews/quality-next-20261008/evidence/ui-unit.log:511:✔ GROUP BY / aggregates / HAVING / ORDER BY / LIMIT — MySQL (1.186125ms)
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:140:docs/reviews/quality-next-20261008/evidence/ui-unit.log:517:✔ OFFSET without LIMIT: MySQL gets the max-limit idiom (0.073958ms)
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:141:docs/reviews/quality-next-20261008/evidence/ui-unit.log:518:✔ validate: loose columns under GROUP BY, with a one-click fix (0.261916ms)
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:142:docs/reviews/quality-next-20261008/evidence/ui-unit.log:519:✔ validate: duplicate output names, SUM of text, OFFSET without ORDER BY (0.068584ms)
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:143:ui/e2e/desktop-quality-next-populated.spec.ts:31:    await page.keyboard.insertText('SELECT * FROM shop.orders LIMIT 1');
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:171:crates/otto-server/tests/foundation_integrity.rs:201:        "SELECT user_id,role FROM workspace_members WHERE workspace_id='ws' ORDER BY user_id",
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:175:crates/otto-state/src/goal_loops.rs:179:        let row = sqlx::query("SELECT * FROM goal_loops WHERE id = ?")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:176:crates/otto-state/src/goal_loops.rs:195:            sqlx::query("SELECT * FROM goal_loops WHERE workspace_id = ? ORDER BY created_at DESC")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:177:crates/otto-state/src/goal_loops.rs:207:            sqlx::query("SELECT * FROM goal_loops WHERE status IN ('running','paused','blocked')")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:179:crates/otto-state/src/goal_loops.rs:241:        let rows = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? ORDER BY idx")
+
+== unbounded reads (missing LIMIT / pagination?) (file:line — HINTS, verify each) ==
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:66:    evaluate(view,&format!("Array.from(document.querySelectorAll('.ctx-menu [role=menuitem]')).find(n=>n.textContent.trim()==={}).click();true",serde_json::to_string(label).unwrap()));
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:280:                    evaluate(&host,"Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent.trim()==='Cancel').click();true");
+apps/desktop/src-tauri/examples/probe_support/school.rs:20:        evaluate(host, "Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent.trim()==='Cancel').click();true");
+crates/otto-server/src/eval_score.rs:196:    let diff: DiffScore = match arts.iter().find(|a| a.kind == ProofArtifactKind::Diff) {
+crates/otto-server/src/routes/goal_loops.rs:536:        .find(|c| c.id == criterion && c.verify_kind == "human")
+crates/otto-server/src/routes/goal_loops.rs:579:                .find(|q| q.id == question && q.answer.is_none())
+crates/otto-server/src/skill_eval.rs:553:    let start = text.find(['[', '{'])?;
+crates/otto-server/src/skill_eval.rs:655:        .find(|s| !s.is_empty())
+crates/otto-server/src/skill_eval.rs:672:    let start = text.find('{')?;
+crates/otto-server/src/skill_eval.rs:714:        if let Some(existing) = acc.iter_mut().find(|e| finding_key(e) == key) {
+crates/otto-server/src/skill_eval.rs:1635:                    .find(|(i, _, _)| *i == chosen)
+crates/otto-server/src/skill_eval.rs:1739:        .find(|s| !s.trim().is_empty())
+crates/otto-server/src/skill_eval.rs:2660:        return eval.iterations.iter().find(|i| i.id == id);
+crates/otto-server/src/skill_eval.rs:2663:        if let Some(it) = eval.iterations.iter().find(|i| i.iter == b) {
+crates/otto-server/src/skill_eval.rs:2694:        .find(|i| i.id == req.iteration_id)
+crates/otto-server/src/skill_eval.rs:2785:        .find(|i| i.id == iter_id)
+crates/otto-server/src/skill_eval.rs:2806:        .find(|i| i.id == iter_id)
+crates/otto-server/src/skill_eval.rs:2869:        .find(|i| i.id == iter_id)
+crates/otto-server/src/skill_eval.rs:2927:        .find(|i| i.id == iter_id)
+crates/otto-server/src/skill_eval.rs:3034:        .find(|i| i.id == iter_id)
+crates/otto-server/src/skill_eval.rs:3104:        .find(|i| i.id == iter_id)
+crates/otto-server/src/skill_eval.rs:3127:        .find(|v| v.name == agent.validation)
+crates/otto-server/src/skill_eval.rs:3461:            sqlx::query_scalar("SELECT COUNT(*) FROM skill_evals WHERE workspace_id = ?")
+crates/otto-server/src/skill_eval_output_tests.rs:206:            .find(|a| a.kind == ProofArtifactKind::Review)
+crates/otto-server/src/skill_eval_output_tests.rs:471:        .find(|a| a.kind == otto_core::proof::ProofArtifactKind::Approval)
+crates/otto-server/src/skill_eval_recovery_tests.rs:181:        .find(|a| a.kind == otto_core::proof::ProofArtifactKind::Approval)
+crates/otto-server/src/vault_docs_agent.rs:2489:        .find(|round| round.iteration == iteration)
+crates/otto-server/src/vault_docs_agent.rs:2510:        .find(|round| round.iteration == iteration)
+crates/otto-server/tests/foundation_integrity.rs:201:        "SELECT user_id,role FROM workspace_members WHERE workspace_id='ws' ORDER BY user_id",
+crates/otto-server/tests/foundation_integrity.rs:235:            "SELECT role FROM workspace_members WHERE workspace_id='ws' AND user_id='owner'",
+crates/otto-server/tests/foundation_integrity.rs:322:        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM canvas_scenes WHERE id='scene'")
+crates/otto-server/tests/foundation_integrity.rs:348:            "SELECT count(*) FROM canvas_scene_refs WHERE session_id='session'"
+crates/otto-state/src/goal_loops.rs:179:        let row = sqlx::query("SELECT * FROM goal_loops WHERE id = ?")
+crates/otto-state/src/goal_loops.rs:195:            sqlx::query("SELECT * FROM goal_loops WHERE workspace_id = ? ORDER BY created_at DESC")
+crates/otto-state/src/goal_loops.rs:207:            sqlx::query("SELECT * FROM goal_loops WHERE status IN ('running','paused','blocked')")
+crates/otto-state/src/goal_loops.rs:228:                  (SELECT MAX(idx) AS max_idx FROM goal_loop_iterations WHERE loop_id = ?) AS m \
+crates/otto-state/src/goal_loops.rs:241:        let rows = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? ORDER BY idx")
+crates/otto-state/src/goal_loops.rs:250:        let row = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? AND idx = ?")
+crates/otto-state/src/goal_loops.rs:341:        let row = sqlx::query("SELECT iterations_started FROM goal_loops WHERE id = ?")
+crates/otto-state/src/goal_loops.rs:599:        let row = sqlx::query("SELECT * FROM goal_loop_iterations WHERE id = ?")
+crates/otto-state/src/goal_loops.rs:711:        let raw: String = sqlx::query_scalar("SELECT ledger_json FROM goal_loops WHERE id = ?")
+crates/otto-state/src/skill_evals.rs:299:        let row = sqlx::query("UPDATE skill_evals SET status = 'running', error = NULL, composite_score = NULL, best_score = NULL, best_iteration = NULL WHERE id = ? AND status IN ('done', 'error') AND EXISTS (SELECT 1 FROM skill_eval_iterations WHERE id = ? AND eval_id = ? AND json_type(agents_json, ?) = 'object')")
+crates/otto-state/src/skill_evals.rs:579:        let rows = sqlx::query("SELECT iter, scoring_json FROM skill_eval_iterations WHERE eval_id = ? AND scoring_json IS NOT NULL")
+crates/otto-state/src/skill_evals.rs:647:        let rows = sqlx::query("SELECT * FROM skill_evals WHERE matrix_id = ? ORDER BY created_at")
+crates/otto-state/src/skill_evals.rs:663:        let row = sqlx::query("SELECT * FROM skill_eval_iterations WHERE id = ?")
+crates/otto-state/src/skill_evals.rs:673:        let row = sqlx::query("SELECT * FROM skill_evals WHERE id = ?")
+crates/otto-state/src/skill_evals.rs:686:            "SELECT * FROM skill_evals WHERE workspace_id = ? ORDER BY created_at DESC",
+crates/otto-state/src/skill_evals.rs:693:            "SELECT i.* FROM skill_eval_iterations i JOIN skill_evals e ON e.id = i.eval_id \
+crates/otto-state/src/skill_evals.rs:742:                    (SELECT COUNT(*) FROM skill_eval_iterations i WHERE i.eval_id = e.id) \
+crates/otto-state/src/skill_evals.rs:804:            sqlx::query("SELECT * FROM skill_eval_iterations WHERE eval_id = ? ORDER BY iter")
+docs/reviews/quality-next-20261008/evidence/native-iteration2/school-before-diagnostic.rs.txt:20:        evaluate(host, "Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent.trim()==='Cancel').click();true");
+docs/reviews/quality-next-20261008/evidence/native-iteration2/school-final.rs.txt:20:        evaluate(host, "Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent.trim()==='Cancel').click();true");
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-final.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (8.572167ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-harness-dom-red.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (11.0875ms)
+docs/reviews/quality-next-20261008/evidence/round-2-coordinator/ui-unit-integration-red.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (19.166125ms)
+docs/reviews/quality-next-20261008/evidence/round-2-design-ux/unit-integration-initial-failure.log:372:✔ successful import never submits the editor draft: SELECT * FROM imported; DELETE FROM imported (19.166125ms)
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:128:crates/otto-server/tests/foundation_integrity.rs:201:        "SELECT user_id,role FROM workspace_members WHERE workspace_id='ws' ORDER BY user_id",
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:129:crates/otto-state/src/goal_loops.rs:179:        let row = sqlx::query("SELECT * FROM goal_loops WHERE id = ?")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:130:crates/otto-state/src/goal_loops.rs:195:            sqlx::query("SELECT * FROM goal_loops WHERE workspace_id = ? ORDER BY created_at DESC")
+docs/reviews/quality-next-20261008/evidence/round-2-performance/hotspots.log:131:crates/otto-state/src/goal_loops.rs:207:            sqlx::query("SELECT * FROM goal_loops WHERE status IN ('running','paused','blocked')")
+
+== linear lookup / quadratic smell (contains/indexOf/concat in a loop) (file:line — HINTS, verify each) ==
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:233:                    for view in [&host,&child]{evaluate(view,"window.liveToken=crypto.randomUUID();window.liveNode=document.querySelector('main')||document.body;window.probeDraft=document.createElement('textarea');window.probeDraft.value='never saved';window.probeDraft.dataset.probe='draft';document.body.appendChild(window.probeDraft);true");}
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:235:                    for which in ["side","main"]{
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:242:                        for view in [&host,&child]{assert_eq!(evaluate(view,"window.liveNode.isConnected&&window.probeDraft.value==='never saved'"),true);}
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:251:                    for view in [&host,&child]{evaluate(view,"window.probeDraft.remove();true");}
+apps/desktop/src-tauri/examples/probe_support/school.rs:55:        (1..=20).contains(&cycles),
+apps/desktop/src-tauri/examples/probe_support/school.rs:155:    for sample in [&before, &after] {
+crates/otto-browser/src/lib.rs:623:        total += outer_html.len() + text.len();
+crates/otto-browser/src/lib.rs:835:        inner.bytes += bytes;
+crates/otto-browser/src/lib.rs:974:        assert!(page.markdown.contains("Hi"));
+crates/otto-browser/src/lib.rs:1033:            assert!(!page.html.contains("internal-only"), "{}", page.html);
+crates/otto-browser/src/lib.rs:1069:                sent += chunk.len();
+crates/otto-browser/src/lib.rs:1134:            matches!(&err, EngineError::Nav(m) if m.contains("application/pdf")),
+crates/otto-browser/src/lib.rs:1150:        for ok in [
+crates/otto-browser/src/lib.rs:1161:        for bad in [
+crates/otto-browser/src/lib.rs:1200:        assert!(matches[0].text.contains("Hi"));
+crates/otto-browser/src/lib.rs:1370:        for host in ["stale.example.com", "probe.example.com"] {
+crates/otto-browser/src/lib.rs:1427:            !title.contains('\n'),
+crates/otto-browser/src/live/chrome.rs:183:        assert!(a.contains(&"--remote-debugging-pipe".to_string()));
+crates/otto-browser/src/live/chrome.rs:192:        assert!(a.contains(&"--user-data-dir=/data/browser/profiles/w/u/p".to_string()));
+crates/otto-browser/src/live/chrome.rs:193:        assert!(a.contains(&"--use-mock-keychain".to_string()));
+crates/otto-browser/src/live/chrome.rs:203:        assert!(a.contains(&"--headless=new".to_string()));
+crates/otto-browser/src/live/chrome.rs:221:        assert!(a.contains(&"--window-size=3840,700".to_string()));
+crates/otto-browser/src/live/process.rs:741:        assert!(!evil.user_data_dir(d).to_string_lossy().contains(".."));
+crates/otto-browser/src/live/process_burst_tests.rs:61:                "Fetch.continueRequest" => continued += 1,
+crates/otto-browser/src/live/process_burst_tests.rs:62:                "Fetch.failRequest" => failed += 1,
+crates/otto-browser/src/live/process_burst_tests.rs:103:    for (case, method, verdict, age) in [
+crates/otto-browser/src/live/proxy.rs:187:    if !methods.contains(&0) {
+crates/otto-browser/src/live/proxy.rs:327:        assert!(proxy.chrome_args()[0].contains(&proxy.port().to_string()));
+crates/otto-browser/src/live/proxy.rs:333:        for mapped in ["127.0.0.1:80", "8.8.8.8:80"] {
+crates/otto-browser/src/live/session.rs:949:                    i.dialog_seq += 1;
+crates/otto-browser/src/live/session.rs:1038:                    if err.contains("ERR_BLOCKED_BY_CLIENT") {
+crates/otto-browser/src/live/session.rs:1498:                        i.dialog_seq += 1;
+crates/otto-browser/src/live/session.rs:1534:                    i.dialog_seq += 1;
+crates/otto-browser/src/live/session.rs:1693:        assert!(js.contains(r#"document.querySelector("a[href=\"x\"]'); alert(1); ('")"#));
+crates/otto-browser/src/live/session_chromium_tests.rs:162:        expected_blocked += n as usize;
+crates/otto-server/src/eval_lab_routes.rs:228:    if !total.is_some_and(|n| (1..=64).contains(&n)) {
+crates/otto-server/src/eval_score.rs:8://! the pure math in [`otto_core::eval_score`]. No agent is involved, so it runs in
+crates/otto-server/src/eval_score.rs:605:        for failed in [
+crates/otto-server/src/routes/goal_loops.rs:376:        .is_some_and(|s| s.contains("Work is ready for human verification"))
+crates/otto-server/src/routes/goal_loops.rs:433:        .is_some_and(|s| s.contains("Work is ready for human verification"))
+crates/otto-server/src/skill_eval.rs:768:        pre += 1;
+crates/otto-server/src/skill_eval.rs:772:        suf += 1;
+crates/otto-server/src/skill_eval.rs:798:                i += 1;
+crates/otto-server/src/skill_eval.rs:799:                j += 1;
+crates/otto-server/src/skill_eval.rs:802:                i += 1;
+crates/otto-server/src/skill_eval.rs:805:                j += 1;
+crates/otto-server/src/skill_eval.rs:810:            i += 1;
+crates/otto-server/src/skill_eval.rs:814:            j += 1;
+crates/otto-server/src/skill_eval.rs:3526:        for text in [
+crates/otto-server/src/skill_eval.rs:3561:        assert!(imp.skill.contains("name: x"));
+crates/otto-server/src/skill_eval.rs:3570:        assert!(d.contains("-b"), "removed line marked: {d}");
+crates/otto-server/src/skill_eval.rs:3571:        assert!(d.contains("+B"), "added line marked: {d}");
+crates/otto-server/src/skill_eval.rs:3572:        assert!(d.contains(" a"), "context line preserved: {d}");
+crates/otto-server/src/skill_eval.rs:3573:        assert!(d.contains("@@"), "unified-diff hunk header present: {d}");
+crates/otto-server/src/skill_eval.rs:3582:        assert!(d.contains("-l25") && d.contains("+L25"), "{d}");
+crates/otto-server/src/skill_eval.rs:3583:        assert!(d.contains("@@ -23,7 +23,7 @@"), "{d}");
+crates/otto-server/src/skill_eval_output_tests.rs:45:        prompt.contains("[performance] (warn) quadratic scan"),
+crates/otto-server/src/skill_eval_output_tests.rs:49:        prompt.contains("[security] (fail) missing permission check"),
+crates/otto-server/src/skill_eval_output_tests.rs:58:    for partial in ["", "[", "[{\"issue\":\"partial"] {
+crates/otto-server/src/skill_eval_output_tests.rs:70:    for text in ["[]", "```json\n[]\n```", "{\"findings\":[]}"] {
+
+== copies / load-all (clone, to_vec, ReadAll, Marshal round-trip) (file:line — HINTS, verify each) ==
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:216:            app.manage(panes::ProbeIsolation{initialization_script:init.clone()});
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:219:            let app=app.handle().clone();std::thread::spawn(move||{
+apps/desktop/src-tauri/examples/probe_support/school.rs:81:    let room = state(child)["scene"]["view"].clone();
+crates/otto-browser/src/lib.rs:104:            return Ok(body.clone());
+crates/otto-browser/src/lib.rs:297:        self.cache = cache.0.clone();
+crates/otto-browser/src/lib.rs:344:                    self.cache.put(key.clone(), page.clone());
+crates/otto-browser/src/lib.rs:512:                .map(|(host, _)| host.clone());
+crates/otto-browser/src/lib.rs:794:            (live && new_enough).then(|| e.page.clone())
+crates/otto-browser/src/lib.rs:827:                .map(|(k, _)| k.clone())
+crates/otto-browser/src/lib.rs:863:            .clone();
+crates/otto-browser/src/lib.rs:945:            BrowserService::with_engines(flaky.clone(), FallbackEngine::from_static("<h1>Hi</h1>"));
+crates/otto-browser/src/lib.rs:956:            BrowserService::with_engines(flaky.clone(), FallbackEngine::from_static("<p>x</p>"));
+crates/otto-browser/src/lib.rs:1271:                Err(EngineError::Nav(m)) => Err(EngineError::Nav(m.clone())),
+crates/otto-browser/src/lib.rs:1547:            Arc::new(Counting(n.clone(), delay)),
+crates/otto-browser/src/lib.rs:1596:            let svc = svc.clone();
+crates/otto-browser/src/lib.rs:1614:        let owner = svc.clone();
+crates/otto-browser/src/live/chrome.rs:251:        let conn = launched.conn.clone();
+crates/otto-browser/src/live/conn.rs:89:        let writer_closed = closed_tx.clone();
+crates/otto-browser/src/live/conn.rs:104:        let pending_r = pending.clone();
+crates/otto-browser/src/live/conn.rs:105:        let routes_r = routes.clone();
+crates/otto-browser/src/live/conn.rs:106:        let closed_r = closed.clone();
+crates/otto-browser/src/live/conn.rs:107:        let reader_closed = closed_tx.clone();
+crates/otto-browser/src/live/conn.rs:108:        let mut stop = closed_rx.clone();
+crates/otto-browser/src/live/conn.rs:165:        let mut rx = self.closed_rx.clone();
+crates/otto-browser/src/live/conn.rs:255:            .and_then(|n| self.out_budget.clone().try_acquire_many_owned(n).ok());
+crates/otto-browser/src/live/conn.rs:367:        .and_then(|n| budget.clone().try_acquire_many_owned(n).ok())
+crates/otto-browser/src/live/conn.rs:379:        session_id: session_id.clone(),
+crates/otto-browser/src/live/conn.rs:420:        let c2 = conn.clone();
+crates/otto-browser/src/live/conn.rs:463:        let c2 = conn.clone();
+crates/otto-browser/src/live/conn.rs:477:        let c3 = conn.clone();
+crates/otto-browser/src/live/conn.rs:507:        let caller = conn.clone();
+crates/otto-browser/src/live/conn.rs:545:        let caller = conn.clone();
+crates/otto-browser/src/live/conn.rs:577:            let conn = conn.clone();
+crates/otto-browser/src/live/conn.rs:654:        let caller = conn.clone();
+crates/otto-browser/src/live/process.rs:345:        let Ok(permit) = self.guard_slots.clone().try_acquire_owned() else {
+crates/otto-browser/src/live/process.rs:356:        let me = self.clone();
+crates/otto-browser/src/live/process.rs:360:            let via = event.session_id.clone();
+crates/otto-browser/src/live/process.rs:363:                _ = me.clone().resolve_paused(req, via) => {},
+crates/otto-browser/src/live/process.rs:441:                        pp.insert(tid.clone(), opener.to_string());
+crates/otto-browser/src/live/process.rs:512:            None => (self.downloads_dir.clone(), None),
+crates/otto-browser/src/live/process.rs:556:                    let filename = info.filename.clone();
+crates/otto-browser/src/live/process.rs:791:            .clone()
+crates/otto-browser/src/live/process_burst_tests.rs:124:            .clone()
+crates/otto-browser/src/live/session.rs:213:        let conn = proc.conn.clone();
+crates/otto-browser/src/live/session.rs:238:            proc.downloads_dir.clone()
+crates/otto-browser/src/live/session.rs:262:            tab_id: p.tab_id.clone(),
+crates/otto-browser/src/live/session.rs:263:            workspace_id: p.workspace_id.clone(),
+crates/otto-browser/src/live/session.rs:264:            owner_id: p.owner_id.clone(),
+crates/otto-browser/src/live/session.rs:265:            profile: p.profile.clone(),
+crates/otto-browser/src/live/session.rs:266:            proc: proc.clone(),
+crates/otto-browser/src/live/session.rs:267:            target_id: target_id.clone(),
+crates/otto-browser/src/live/session.rs:268:            sid: sid.clone(),
+crates/otto-browser/src/live/session.rs:311:            if let Err(e) = session.navigate(NavAction::Goto, Some(url.clone())).await {
+crates/otto-browser/src/live/session.rs:411:            tab_id: self.tab_id.clone(),
+crates/otto-browser/src/live/session.rs:412:            workspace_id: self.workspace_id.clone(),
+crates/otto-browser/src/live/session.rs:413:            owner_id: self.owner_id.clone(),
+crates/otto-browser/src/live/session.rs:416:            version: self.proc.version.clone(),
+crates/otto-browser/src/live/session.rs:417:            profile: self.profile.clone(),
+crates/otto-browser/src/live/session.rs:420:            url: i.url.clone(),
+crates/otto-browser/src/live/session.rs:421:            title: i.title.clone(),
+
+== blocking calls / sleeps (on a hot path?) (file:line — HINTS, verify each) ==
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:50:        std::thread::sleep(std::time::Duration::from_millis(100));
+apps/desktop/src-tauri/examples/pane_spa_probe.rs:160:        std::thread::sleep(std::time::Duration::from_millis(100));
+apps/desktop/src-tauri/examples/probe_support/school.rs:38:        std::thread::sleep(std::time::Duration::from_millis(50));
+apps/desktop/src-tauri/examples/probe_support/school.rs:84:        std::thread::sleep(std::time::Duration::from_millis(200));
+apps/desktop/src-tauri/examples/probe_support/school.rs:86:        std::thread::sleep(std::time::Duration::from_millis(600));
+apps/desktop/src-tauri/examples/probe_support/school.rs:151:    std::thread::sleep(std::time::Duration::from_millis(200));
+apps/desktop/src-tauri/examples/probe_support/school.rs:153:    std::thread::sleep(std::time::Duration::from_millis(600));
+crates/otto-browser/src/lib.rs:204:        select_capped_blocking(html, selector).await
+crates/otto-browser/src/lib.rs:214:/// tens of ms of CPU — run on the blocking pool, not a tokio worker, so a big
+crates/otto-browser/src/lib.rs:223:    tokio::task::spawn_blocking(move || {
+crates/otto-browser/src/lib.rs:336:            let _turn = gate.lock.lock().await;
+crates/otto-browser/src/lib.rs:360:    /// missing/broken lightpanda degrades gracefully rather than blocking
+crates/otto-browser/src/lib.rs:398:            tokio::time::sleep(UNAVAILABLE_RETRY_DELAY).await;
+crates/otto-browser/src/lib.rs:428:        select_capped_blocking(page.html, selector).await
+crates/otto-browser/src/lib.rs:435:    /// select + cap run as one bounded pass on the blocking pool
+crates/otto-browser/src/lib.rs:449:        tokio::task::spawn_blocking(move || select_capped(&page.html, &selector))
+crates/otto-browser/src/lib.rs:484:        let denylist = self.denylist.lock().expect("denylist mutex poisoned");
+crates/otto-browser/src/lib.rs:496:        let mut denylist = self.denylist.lock().expect("denylist mutex poisoned");
+crates/otto-browser/src/lib.rs:521:        let mut denylist = self.denylist.lock().expect("denylist mutex poisoned");
+crates/otto-browser/src/lib.rs:592:/// [`select_capped`] on the blocking pool — a 2 MB parse plus a broad
+crates/otto-browser/src/lib.rs:594:pub(crate) async fn select_capped_blocking(
+crates/otto-browser/src/lib.rs:599:    tokio::task::spawn_blocking(move || select_capped(&html, &selector))
+crates/otto-browser/src/lib.rs:774:        let mut gates = self.cache.gates.lock().expect("page cache gates poisoned");
+crates/otto-browser/src/lib.rs:789:        let mut inner = self.inner.lock().expect("page cache poisoned");
+crates/otto-browser/src/lib.rs:813:        let mut inner = self.inner.lock().expect("page cache poisoned");
+crates/otto-browser/src/lib.rs:847:        let mut inner = self.inner.lock().expect("page cache poisoned");
+crates/otto-browser/src/lib.rs:859:        let mut gates = self.gates.lock().expect("page cache gates poisoned");
+crates/otto-browser/src/lib.rs:873:        self.inner.lock().unwrap().entries.len()
+crates/otto-browser/src/lib.rs:1094:                tokio::time::sleep(gap).await;
+crates/otto-browser/src/lib.rs:1343:            .lock()
+crates/otto-browser/src/lib.rs:1349:        assert_eq!(svc.denylist.lock().unwrap().len(), 1024);
+crates/otto-browser/src/lib.rs:1355:            svc.denylist.lock().unwrap().len(),
+crates/otto-browser/src/lib.rs:1374:            svc.denylist.lock().unwrap().get_mut(host).unwrap().1 =
+crates/otto-browser/src/lib.rs:1384:        let history = svc.denylist.lock().unwrap();
+crates/otto-browser/src/lib.rs:1406:        tokio::time::sleep(Duration::from_millis(60)).await;
+crates/otto-browser/src/lib.rs:1526:            tokio::time::sleep(self.1).await;
+crates/otto-browser/src/lib.rs:1607:        assert!(svc.cache.gates.lock().unwrap().is_empty(), "gates released");
+crates/otto-browser/src/lib.rs:1626:        assert_eq!(svc.cache.gates.lock().unwrap().len(), 1);
+crates/otto-browser/src/lib.rs:1629:        assert!(svc.cache.gates.lock().unwrap().is_empty());
+crates/otto-browser/src/lib.rs:1636:        let _turn = first.lock.lock().await;
+crates/otto-browser/src/lib.rs:1640:        assert_eq!(cache.gates.lock().unwrap().len(), 1);
+crates/otto-browser/src/lib.rs:1643:        assert!(cache.gates.lock().unwrap().is_empty());
+crates/otto-browser/src/lib.rs:1653:        tokio::time::sleep(Duration::from_millis(50)).await;
+crates/otto-browser/src/live/chrome.rs:146:    our_w.set_nonblocking(true)?;
+crates/otto-browser/src/live/chrome.rs:147:    our_r.set_nonblocking(true)?;
+crates/otto-browser/src/live/conn.rs:54:        if let Ok(mut pending) = self.pending.lock() {
+crates/otto-browser/src/live/conn.rs:175:        if let Ok(mut r) = self.routes.lock() {
+crates/otto-browser/src/live/conn.rs:181:        if let Ok(mut r) = self.routes.lock() {
+crates/otto-browser/src/live/conn.rs:208:        if let Ok(mut p) = self.pending.lock() {
+crates/otto-browser/src/live/conn.rs:266:        if let Ok(mut p) = self.pending.lock() {
+crates/otto-browser/src/live/conn.rs:286:    if let Ok(mut p) = pending.lock() {
+crates/otto-browser/src/live/conn.rs:291:    if let Ok(mut r) = routes.lock() {
+crates/otto-browser/src/live/conn.rs:350:        let tx = pending.lock().ok().and_then(|mut p| p.remove(&id));
+crates/otto-browser/src/live/conn.rs:382:        let route = routes.lock().ok().and_then(|r| r.get(sid).cloned());
+crates/otto-browser/src/live/conn.rs:514:        assert_eq!(conn.pending.lock().unwrap().len(), 1);
+crates/otto-browser/src/live/conn.rs:517:        assert!(conn.pending.lock().unwrap().is_empty());
+crates/otto-browser/src/live/conn.rs:582:            conn.pending.lock().unwrap().len() <= 256,
+crates/otto-browser/src/live/conn.rs:587:        assert!(conn.pending.lock().unwrap().is_empty());
+crates/otto-browser/src/live/process.rs:201:        if let Ok(mut t) = proc.loop_task.lock() {
+crates/otto-browser/src/live/process.rs:262:        if let Ok(mut t) = self.targets.lock() {
+
+(seed only — every changed line still gets read against references/cost-catalogue.md;
+ a hit means 'go size n and build a cost model', not 'this is a finding')
