@@ -546,39 +546,106 @@ fn default_severity() -> String {
     "info".to_string()
 }
 
-/// Parse a findings JSON array out of arbitrary agent output (tolerates code
-/// fences + surrounding prose). Returns `[]` on any failure.
-fn parse_findings(text: &str) -> Vec<EvalFinding> {
-    let stripped = text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    let Some(start) = stripped.find('[') else {
-        return Vec::new();
+/// Parse an explicit findings verdict, retaining the distinction between a
+/// valid clean `[]` and missing/malformed output. Fences/prose and the common
+/// `{ "findings": [...] }` wrapper are accepted; unrelated arrays are not.
+fn parse_findings(text: &str) -> Option<Vec<EvalFinding>> {
+    let start = text.find(['[', '{'])?;
+    let value = serde_json::Deserializer::from_str(&text[start..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    let array = match value {
+        serde_json::Value::Array(array) => array,
+        serde_json::Value::Object(mut object) => object.remove("findings")?.as_array()?.clone(),
+        _ => return None,
     };
-    let end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
-    if start >= end {
-        return Vec::new();
+    let mut findings = Vec::with_capacity(array.len());
+    for value in array {
+        let r: RawFinding = serde_json::from_value(value).ok()?;
+        let issue = first_nonempty(&[&r.issue, &r.body, &r.message]);
+        // Dropping an invalid entry would turn malformed findings into a pass.
+        if issue.is_empty() {
+            return None;
+        }
+        findings.push(EvalFinding {
+            severity: r.severity,
+            issue,
+            suggestion: first_nonempty(&[&r.suggestion, &r.fix]),
+            location: r.location.or(r.path),
+        });
     }
-    serde_json::from_str::<Vec<RawFinding>>(&stripped[start..end])
-        .map(|raw| {
-            raw.into_iter()
-                .map(|r| {
-                    let issue = first_nonempty(&[&r.issue, &r.body, &r.message]);
-                    let suggestion = first_nonempty(&[&r.suggestion, &r.fix]);
-                    EvalFinding {
-                        severity: r.severity,
-                        issue,
-                        suggestion,
-                        location: r.location.or(r.path),
-                    }
-                })
-                .filter(|f| !f.issue.trim().is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+    Some(findings)
+}
+
+/// A file can be observed between creation and its final write. Leave incomplete
+/// validator output in place and keep polling until it contains a verdict.
+fn capture_output_ready(text: &str, findings_mode: bool) -> bool {
+    !findings_mode || parse_findings(text).is_some()
+}
+
+fn read_capture_output(path: &Path, findings_mode: bool) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if !capture_output_ready(&text, findings_mode) {
+        return None;
+    }
+    let _ = std::fs::remove_file(path);
+    Some(text)
+}
+
+/// Used by initial validation and retries so transport completion alone cannot
+/// create a successful pass or a clean Review artifact.
+fn record_validation_pass(
+    outcome: &AgentOutcome,
+    scores: &mut Vec<f64>,
+    union: &mut Vec<EvalFinding>,
+) -> bool {
+    if outcome.errored {
+        return false;
+    }
+    let Some(findings) = parse_findings(&outcome.text) else {
+        return false;
+    };
+    scores.push(score_findings(&findings).1);
+    merge_findings(union, findings);
+    true
+}
+
+fn finish_validation(
+    mut state: EvalValidationState,
+    session_id: Option<String>,
+    scores: Vec<f64>,
+    findings: Vec<EvalFinding>,
+    passes: u32,
+) -> EvalValidationState {
+    state.session_id = session_id;
+    if scores.len() != passes as usize {
+        state.status = "error".into();
+        state.note = format!(
+            "validation produced {} of {passes} required findings verdicts",
+            scores.len()
+        );
+        state.passed = false;
+        state.score = 0.0;
+        state.findings = findings;
+    } else {
+        state.status = "done".into();
+        state.score = scores.iter().sum::<f64>() / scores.len() as f64;
+        state.passed = !findings.iter().any(|f| is_fail(&f.severity));
+        state.note = format!(
+            "{} · {} issue{}{}",
+            if state.passed { "passed" } else { "failed" },
+            findings.len(),
+            if findings.len() == 1 { "" } else { "s" },
+            if passes > 1 {
+                format!(" · {} passes", scores.len())
+            } else {
+                String::new()
+            },
+        );
+        state.findings = findings;
+    }
+    state
 }
 
 fn first_nonempty(candidates: &[&str]) -> String {
@@ -1007,8 +1074,7 @@ async fn run_agent_capture(
         }
 
         // 1. The agent wrote its output file (the reliable, provider-agnostic path).
-        if let Ok(text) = std::fs::read_to_string(output_path) {
-            let _ = std::fs::remove_file(output_path);
+        if let Some(text) = read_capture_output(output_path, findings_mode) {
             return AgentOutcome {
                 session_id: Some(sid),
                 text,
@@ -1019,7 +1085,7 @@ async fn run_agent_capture(
         // 2. claude transcript fallback (read incrementally, off the runtime).
         let scan = crate::turn_oracle::poll_claude_tail(&mut transcript).await;
         if let Some(turn) = scan.and_then(|s| s.last_turn_text) {
-            if findings_mode && !parse_findings(&turn).is_empty() {
+            if findings_mode && capture_output_ready(&turn, true) {
                 return AgentOutcome {
                     session_id: Some(sid),
                     text: turn,
@@ -1033,8 +1099,7 @@ async fn run_agent_capture(
             Some(handle) => {
                 if handle.on_exit().borrow().is_some() {
                     // Final read of the file, then fall back to the last turn.
-                    if let Ok(text) = std::fs::read_to_string(output_path) {
-                        let _ = std::fs::remove_file(output_path);
+                    if let Some(text) = read_capture_output(output_path, findings_mode) {
                         return AgentOutcome {
                             session_id: Some(sid),
                             text,
@@ -1119,6 +1184,22 @@ struct ValRun {
     validation: String,
     provider: String,
     criteria: String,
+}
+
+async fn collect_validation_results(
+    mut set: tokio::task::JoinSet<(usize, f64, Vec<EvalFinding>)>,
+    names: &[String],
+) -> (Vec<f64>, Vec<(String, EvalFinding)>) {
+    let mut scores = Vec::new();
+    let mut findings = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((index, score, result)) = joined {
+            scores.push(score);
+            let label = names.get(index).cloned().unwrap_or_default();
+            findings.extend(result.into_iter().map(|f| (label.clone(), f)));
+        }
+    }
+    (scores, findings)
 }
 
 /// Background wrapper: run the eval, set the final status, notify, and clean up
@@ -1287,7 +1368,6 @@ async fn run_skill_eval_core(
         Some(cfg.default_lint_cmd.clone()),
     ]);
     let eval_snapshot = ctx.skill_evals_store.get_eval(eval_id).await?;
-    let mut iter_composites: Vec<(u32, f64)> = Vec::new();
 
     for iter in 1..=iterations {
         if is_cancelled(cancel) {
@@ -1430,7 +1510,6 @@ async fn run_skill_eval_core(
                 let mut pass_scores: Vec<f64> = Vec::new();
                 let mut union: Vec<EvalFinding> = Vec::new();
                 let mut last_sid: Option<String> = None;
-                let mut any_ok = false;
                 for pass in 0..passes {
                     if is_cancelled(&cancel_c) {
                         break;
@@ -1462,65 +1541,19 @@ async fn run_skill_eval_core(
                     )
                     .await;
                     last_sid = outcome.session_id.clone().or(last_sid);
-                    if outcome.errored {
-                        continue;
-                    }
-                    any_ok = true;
-                    let findings = parse_findings(&outcome.text);
-                    let (_passed, score) = score_findings(&findings);
-                    pass_scores.push(score);
-                    merge_findings(&mut union, findings);
+                    record_validation_pass(&outcome, &mut pass_scores, &mut union);
                 }
 
-                let mut final_state = base;
-                final_state.session_id = last_sid;
-                if !any_ok {
-                    final_state.status = "error".into();
-                    final_state.note = "validation did not complete".into();
-                    final_state.passed = false;
-                    final_state.score = 0.0;
-                    final_state.findings = Vec::new();
-                } else {
-                    let score = pass_scores.iter().sum::<f64>() / pass_scores.len() as f64;
-                    let passed = !union.iter().any(|f| is_fail(&f.severity));
-                    let n = union.len();
-                    final_state.status = "done".into();
-                    final_state.passed = passed;
-                    final_state.score = score;
-                    final_state.note = format!(
-                        "{} · {} issue{}{}",
-                        if passed { "passed" } else { "failed" },
-                        n,
-                        if n == 1 { "" } else { "s" },
-                        if passes > 1 {
-                            format!(" · {} passes", pass_scores.len())
-                        } else {
-                            String::new()
-                        }
-                    );
-                    final_state.findings = union;
-                }
+                let final_state = finish_validation(base, last_sid, pass_scores, union, passes);
                 let _ = repo
                     .set_iter_agent_at(&iter_id_c, index, &final_state)
                     .await;
-                (final_state.score, final_state.findings)
+                (index, final_state.score, final_state.findings)
             });
         }
 
-        let mut scores: Vec<f64> = Vec::new();
-        let mut all_findings: Vec<(String, EvalFinding)> = Vec::new();
         let val_names: Vec<String> = seeded.iter().map(|s| s.name.clone()).collect();
-        let mut joined_idx = 0usize;
-        while let Some(joined) = set.join_next().await {
-            if let Ok((score, findings)) = joined {
-                scores.push(score);
-                let label = val_names.get(joined_idx).cloned().unwrap_or_default();
-                for f in findings {
-                    all_findings.push((label.clone(), f));
-                }
-            }
-            joined_idx += 1;
-        }
+        let (scores, all_findings) = collect_validation_results(set, &val_names).await;
 
         let iter_score = if scores.is_empty() {
             100.0
@@ -1536,7 +1569,7 @@ async fn run_skill_eval_core(
         // The impl agent left uncommitted changes in the worktree, so the diff is
         // working-tree vs HEAD (base = None).
         if let Ok(scored_iter) = ctx.skill_evals_store.get_iteration(&iter_id).await {
-            match crate::eval_score::score_iteration(
+            if let Err(e) = crate::eval_score::score_iteration(
                 ctx,
                 &eval_snapshot,
                 &scored_iter,
@@ -1549,14 +1582,7 @@ async fn run_skill_eval_core(
             )
             .await
             {
-                Ok((score, pack_id)) => {
-                    iter_composites.push((iter, score.composite));
-                    let _ = ctx
-                        .skill_evals_store
-                        .set_iter_scoring(&iter_id, &score, Some(&pack_id))
-                        .await;
-                }
-                Err(e) => tracing::warn!(eval = %eval_id, "iteration scoring failed: {e}"),
+                tracing::warn!(eval = %eval_id, "iteration scoring failed: {e}");
             }
         }
 
@@ -1572,7 +1598,9 @@ async fn run_skill_eval_core(
         }
 
         // --- 3. Improve (between iterations only) ----------------------------
-        let perfect = all_findings.is_empty();
+        let perfect = all_findings.is_empty()
+            && scores.len() == seeded.len()
+            && scores.iter().all(|score| *score == 100.0);
         if iter < iterations && !perfect {
             ctx.skill_evals_store
                 .set_iter_status(&iter_id, "improving", "running improver agent")
@@ -1648,6 +1676,16 @@ async fn run_skill_eval_core(
             break;
         }
     }
+
+    // A rating may have changed during later agent iterations. Select from
+    // persisted scores while holding the same lock as rating publication.
+    let _guard = crate::eval_score::update_guard(eval_id).await;
+    let current = ctx.skill_evals_store.get_eval(eval_id).await?;
+    let iter_composites: Vec<_> = current
+        .iterations
+        .iter()
+        .filter_map(|it| it.scoring.as_ref().map(|score| (it.iter, score.composite)))
+        .collect();
 
     // Pick the winner by composite score (the eval-lab headline) when scoring
     // produced one, else fall back to the validator-only score.
@@ -1759,7 +1797,7 @@ async fn run_score_only_core(
         .await?;
 
     let scored_iter = ctx.skill_evals_store.get_iteration(&it.id).await?;
-    let (score, pack_id) = crate::eval_score::score_iteration(
+    crate::eval_score::score_iteration(
         ctx,
         &eval,
         &scored_iter,
@@ -1771,9 +1809,13 @@ async fn run_score_only_core(
         cancel,
     )
     .await?;
-    ctx.skill_evals_store
-        .set_iter_scoring(&it.id, &score, Some(&pack_id))
-        .await?;
+    let _guard = crate::eval_score::update_guard(eval_id).await;
+    let score = ctx
+        .skill_evals_store
+        .get_iteration(&it.id)
+        .await?
+        .scoring
+        .ok_or_else(|| Error::Internal("scoring did not publish a result".into()))?;
     ctx.skill_evals_store
         .set_iter_score(&it.id, score.composite)
         .await?;
@@ -2778,6 +2820,12 @@ async fn rate_iteration(
         .await
         .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
+    let _score_guard = crate::eval_score::update_guard(&eval_id).await;
+    let eval = ctx
+        .skill_evals_store
+        .get_eval(&eval_id)
+        .await
+        .map_err(ApiError)?;
     let it = eval
         .iterations
         .iter()
@@ -2802,13 +2850,11 @@ async fn rate_iteration(
             .skill_evals_store
             .set_iter_scoring(&iter_id, &score, Some(&pack_id))
             .await;
-        // Refresh the run's headline composite if this is the best iteration.
-        if eval.best_iteration == Some(it.iter) {
-            let _ = ctx
-                .skill_evals_store
-                .set_eval_composite(&eval_id, score.composite)
-                .await;
-        }
+        // Re-select the winner too: lowering the old winner (or raising a
+        // different iteration) must not leave best_score/headline stale.
+        crate::eval_score::refresh_best_score(&ctx, &eval_id, "Rating updated")
+            .await
+            .map_err(ApiError)?;
     }
     let eval = ctx
         .skill_evals_store
@@ -2995,6 +3041,7 @@ async fn retry_validation(
     require_ws_role(&ctx, &user, &eval.workspace_id, WorkspaceRole::Editor).await?;
     let retry =
         RetryLease::claim(&ctx.skill_eval_cancels, &eval_id, "validation").map_err(ApiError)?;
+    let score_guard = crate::eval_score::update_guard(&eval_id).await;
     let current = ctx
         .skill_evals_store
         .get_eval(&eval_id)
@@ -3066,6 +3113,8 @@ async fn retry_validation(
         )));
     }
 
+    drop(score_guard);
+
     let ctx_bg = ctx.clone();
     let iter_id_bg = iter_id.clone();
     let eval_id_bg = eval_id.clone();
@@ -3077,7 +3126,6 @@ async fn retry_validation(
         let mut pass_scores: Vec<f64> = Vec::new();
         let mut union: Vec<EvalFinding> = Vec::new();
         let mut last_sid: Option<String> = None;
-        let mut any_ok = false;
         for pass in 0..passes {
             if is_cancelled(&cancel) {
                 break;
@@ -3109,100 +3157,24 @@ async fn retry_validation(
             )
             .await;
             last_sid = outcome.session_id.clone().or(last_sid);
-            if outcome.errored {
-                continue;
-            }
-            any_ok = true;
-            let findings = parse_findings(&outcome.text);
-            let (_p, score) = score_findings(&findings);
-            pass_scores.push(score);
-            merge_findings(&mut union, findings);
+            record_validation_pass(&outcome, &mut pass_scores, &mut union);
         }
 
         if is_cancelled(&cancel) {
             return;
         }
-        let mut final_state = base;
-        final_state.session_id = last_sid;
-        if !any_ok {
-            final_state.status = "error".into();
-            final_state.note = "validation did not complete".into();
-            final_state.passed = false;
-            final_state.score = 0.0;
-            final_state.findings = Vec::new();
-        } else {
-            let score = pass_scores.iter().sum::<f64>() / pass_scores.len() as f64;
-            let passed = !union.iter().any(|f| is_fail(&f.severity));
-            let n = union.len();
-            final_state.status = "done".into();
-            final_state.passed = passed;
-            final_state.score = score;
-            final_state.note = format!(
-                "{} · {} issue{}",
-                if passed { "passed" } else { "failed" },
-                n,
-                if n == 1 { "" } else { "s" }
-            );
-            final_state.findings = union;
-        }
+        let final_state = finish_validation(base, last_sid, pass_scores, union, passes);
         let _ = ctx_bg
             .skill_evals_store
             .set_iter_agent_at(&iter_id_bg, index, &final_state)
             .await;
 
-        // Recompute the iteration's aggregate score from all its validations.
-        if let Ok(updated) = ctx_bg.skill_evals_store.get_iteration(&iter_id_bg).await {
-            let scores: Vec<f64> = updated
-                .agents
-                .iter()
-                .filter(|a| a.status == "done")
-                .map(|a| a.score)
-                .collect();
-            if !scores.is_empty() {
-                let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-                let _ = ctx_bg
-                    .skill_evals_store
-                    .set_iter_score(&iter_id_bg, mean)
-                    .await;
-            }
-        }
-        let rescored = async {
-            let eval = ctx_bg.skill_evals_store.get_eval(&eval_id_bg).await?;
-            let updated = ctx_bg.skill_evals_store.get_iteration(&iter_id_bg).await?;
-            let (scoring, pack_id) =
-                crate::eval_score::rescore_validation(&ctx_bg, &eval, &updated, previous_scoring)
-                    .await?;
-            ctx_bg
-                .skill_evals_store
-                .set_iter_scoring(&iter_id_bg, &scoring, Some(&pack_id))
-                .await?;
-            ctx_bg
-                .skill_evals_store
-                .set_iter_status(&iter_id_bg, "done", "validation retry complete")
-                .await?;
-            let fresh = ctx_bg.skill_evals_store.get_eval(&eval_id_bg).await?;
-            if let Some((iter, score)) = fresh
-                .iterations
-                .iter()
-                .filter_map(|it| it.scoring.as_ref().map(|score| (it.iter, score.composite)))
-                .max_by(|a, b| a.1.total_cmp(&b.1))
-            {
-                ctx_bg
-                    .skill_evals_store
-                    .set_summary(
-                        &eval_id_bg,
-                        &format!("Validation retry complete · best score {score:.0}"),
-                        Some(iter),
-                        Some(score),
-                    )
-                    .await?;
-                ctx_bg
-                    .skill_evals_store
-                    .set_eval_composite(&eval_id_bg, score)
-                    .await?;
-            }
-            Ok::<_, Error>(())
-        };
+        let rescored = crate::eval_score::publish_validation_retry(
+            &ctx_bg,
+            &eval_id_bg,
+            &iter_id_bg,
+            previous_scoring,
+        );
         let result = crate::eval_score::cancellable(&cancel, rescored).await;
         let (status, error) = match result {
             Ok(()) => (SkillEvalStatus::Done, None),
@@ -3507,17 +3479,36 @@ mod tests {
     }
 
     #[test]
+    fn invalid_validator_output_is_distinct_from_a_clean_verdict() {
+        assert!(parse_findings("[]").unwrap().is_empty());
+        for text in [
+            "",
+            "not json",
+            "[",
+            "[{\"issue\":\"unfinished",
+            "[{}]",
+            "[null]",
+            "{\"error\":\"failed\",\"details\":[]}",
+        ] {
+            assert!(
+                parse_findings(text).is_none(),
+                "invalid output became a clean verdict: {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_findings_tolerant() {
         let raw = "ok:\n```json\n[{\"severity\":\"warn\",\"issue\":\"no ctx\",\"suggestion\":\"add ctx\",\"location\":\"a.go:3\"}]\n```";
-        let f = parse_findings(raw);
+        let f = parse_findings(raw).unwrap();
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].issue, "no ctx");
         assert_eq!(f[0].suggestion, "add ctx");
         // Aliases: body/message → issue, fix → suggestion.
-        let f2 = parse_findings("[{\"body\":\"b\",\"fix\":\"do x\"}]");
+        let f2 = parse_findings("[{\"body\":\"b\",\"fix\":\"do x\"}]").unwrap();
         assert_eq!(f2[0].issue, "b");
         assert_eq!(f2[0].suggestion, "do x");
-        assert!(parse_findings("not json").is_empty());
+        assert!(parse_findings("not json").is_none());
     }
 
     #[test]
@@ -3567,3 +3558,7 @@ mod tests {
         assert_eq!(best_iter(&h), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "skill_eval_output_tests.rs"]
+mod output_tests;
