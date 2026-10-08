@@ -8,7 +8,7 @@ use super::super::types::{ChromeBuild, DownloadPolicy};
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
-async fn evaluate(session: &LiveSession, expression: String) -> Value {
+pub(super) async fn evaluate(session: &LiveSession, expression: String) -> Value {
     let reply = session
         .proc
         .conn

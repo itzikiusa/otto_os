@@ -1741,3 +1741,7 @@ mod tests {
 #[cfg(test)]
 #[path = "session_chromium_tests.rs"]
 mod chromium_tests;
+
+#[cfg(test)]
+#[path = "session_http_chromium_tests.rs"]
+mod http_chromium_tests;
