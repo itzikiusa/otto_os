@@ -1,5 +1,7 @@
 # Quality review — round 1 integration checkpoint
 
+Historical round 1 snapshot. The [final campaign report](FINAL.md) supersedes this checkpoint for current assessments, final integration results and delivery status. Original measurements and limitations below remain unchanged as provenance.
+
 Base: `7cff9e538deccdd0e346af7c6285e11863285c00` (refetched `origin/main` remained unchanged). Branch: `review/quality-20261008-next`. Nine reviewers completed the targeted stages of round 1, one PR. The earlier five-iteration claim was incorrect; see the corrected [round ledger](PLAN.md). No production deployment or merge occurred during review.
 
 ## Result and score boundaries
@@ -72,6 +74,6 @@ No current VoiceOver journey, signed-distribution/install acceptance, hours-long
 
 ## Delivery
 
-PR #97 is back in draft while full review/fix rounds 2–5 proceed. This record remains the verified round 1 snapshot; later source changes require their own verification.
+At this checkpoint PR #97 returned to draft while full review/fix rounds 2–5 proceeded. This record remains the verified round 1 snapshot; later source changes have their own round records and final integration evidence.
 
 One PR contains the complete source, regressions, contracts and evidence. Merge to main and local rebuild/reinstall/replacement remain conditional on explicit approval and passing mandatory checks. Advisory outcomes are reported separately and do not become new merge requirements. Deployment must use the clean merged commit and the existing signed build/installed-process receipt workflow.

@@ -1,5 +1,5 @@
 """Record the exact local inputs to the isolated rendered-terminal workload."""
-import hashlib, json, pathlib, platform, subprocess
+import hashlib, json, pathlib, platform, plistlib, subprocess
 root = pathlib.Path(__file__).resolve().parents[5]
 out = pathlib.Path(__file__).parent
 paths = [
@@ -26,5 +26,7 @@ data = {
     'command': 'PATH=/opt/homebrew/bin:$PATH OTTO_E2E_SLOT=qualityr4perf OTTO_E2E_PORT=7896 OTTO_E2E_PW_PORT=5296 OTTO_E2E_BIN=/Users/itziklavon/otto_os/target/debug/ottod OTTO_E2E_SWEEP_ORPHANS=0 OTTO_E2E_TELEMETRY=1 OTTO_TERMINAL_LOAD_SECONDS=90 OTTO_TERMINAL_RECOVERY_SECONDS=10 npx playwright test --project=desktop-webkit --workers=1 --output=/tmp/otto-quality-r4-perf-results e2e/desktop-terminal-rendered-load-perf.spec.ts',
     'note': 'Fresh debug daemon after round-4 correctness repairs; real WebKit + Terminal + PTY. Provider command is owned cat shim, Vite development UI. No user data or 7700 mutation. Timed run under exclusive campaign lease; ordinary user apps remain running.'
 }
+webkit = pathlib.Path('/Users/itziklavon/Library/Caches/ms-playwright/webkit-2359')
+data['webkit'] = {'revision':2359, 'plist':plistlib.loads((webkit/'Playwright.app/Contents/Info.plist').read_bytes()), 'executable_sha256':hashlib.sha256((webkit/'Playwright.app/Contents/MacOS/Playwright').read_bytes()).hexdigest()}
 (out / 'provenance.json').write_text(json.dumps(data, indent=2) + '\n')
 print(json.dumps({k: data[k] for k in ['head','node','rust','machine','platform']}, indent=2))

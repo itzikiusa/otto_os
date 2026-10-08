@@ -1,0 +1,28 @@
+{
+  "head": "a911ce2bc614ae430bf9a16bcd9ee7614813d9d4",
+  "comparison_base": "7cff9e538deccdd0e346af7c6285e11863285c00",
+  "daemon_sha256": "14335b30342d5ab8603e9716620d545778a20be7c86775e65dfa1463c00f8dd9",
+  "source_sha256": {
+    "ui/src/lib/api/types.ts": "486d882e47f911c53b546c70032232f6adef432cbd77e82af9602988b26a9b9d",
+    "ui/src/lib/components/PageHeader.svelte": "76b0733fd58ab9e7c02a494852d299cf1ab69d64ff0093b53f4d0245a7cb0c98",
+    "ui/src/modules/agents/conversation/Composer.svelte": "f168919f56113d77cb23f979e525da672fbba5b37f457a300082172ce0351ee3",
+    "ui/src/modules/agents/conversation/ConversationView.svelte": "eeb043aa52edd6da4c7dde0c59960377d413bddd47e8aa5074ddc7ecd066030d",
+    "ui/src/modules/loops/LoopsPage.svelte": "ab578b54fa3089802ff91418ed80869cbb460e6129d29b79d06f79ace731bb6f",
+    "ui/src/modules/proof/ProofPage.svelte": "40345467e2bd34e0cb7fefb6d01abf7e65cb97e96d50064b154fe618456d6338",
+    "ui/src/modules/skills-eval/RunDetail.svelte": "4f2babb2c7d265c32a2a6e2a9653d0dd928e77a411adfa1eef43109384569eef",
+    "ui/src/modules/skills-eval/Scorecard.svelte": "665f41788dbf8e17387c8750d780f84eb3aa5012164a6f44c18642f701b33623",
+    "ui/src/shell/App.svelte": "1b17c773fd986a29cdabba217b55112f7579e0217060bb38f1287a77cc0f1d0d",
+    "ui/e2e/desktop-quality-round5-evidence-ux.spec.ts": "e9249a9f51fe849c68dc411f0e31f20cf9708a5aaefd97e16c298742ecd56034"
+  },
+  "scope": "Current UI source, Round 4 backend binary; concurrent Round 5 backend changes excluded. Functional validation only; Cargo ran concurrently.",
+  "browser": {
+    "slot": "round5-ux",
+    "daemon_port": 17856,
+    "vite_port": 5229,
+    "passed": 32,
+    "failed": 0,
+    "skipped": 0
+  },
+  "ui_check": "exit 0; 0 errors, 0 warnings",
+  "ui_build": "exit 0"
+}

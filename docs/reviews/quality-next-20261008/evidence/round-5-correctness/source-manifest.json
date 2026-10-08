@@ -1,0 +1,13 @@
+{
+  "round": 5,
+  "reviewer": 19,
+  "base": "7cff9e538deccdd0e346af7c6285e11863285c00",
+  "starting_head": "a911ce2bc614ae430bf9a16bcd9ee7614813d9d4",
+  "owned_source_sha256": {
+    "crates/otto-server/src/eval_score.rs": "8eb1eca86e3ea6b5fa00e9cf84ed10b5d6177cb47d971836fc2126c13d1990eb",
+    "crates/otto-server/src/skill_eval_recovery_tests.rs": "41090212ae6aaafaad217a1cad389329539e312a6bfe89171494ac2e5ad497bb",
+    "docs/contracts/api.md": "7a52cd32577027d08a1ec2f33df6a5d0167b268f49a39ab6f9b81e42f0b960fa",
+    "ui/src/lib/api/types.ts": "486d882e47f911c53b546c70032232f6adef432cbd77e82af9602988b26a9b9d"
+  },
+  "evidence": "Real rating handler and isolated SQLite fixtures; no external provider. Concurrent retry-admission changes belong to reviewer20 and require their own final validation."
+}

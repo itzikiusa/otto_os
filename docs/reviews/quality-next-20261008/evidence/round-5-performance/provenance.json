@@ -1,0 +1,27 @@
+{
+  "head": "a911ce2bc614ae430bf9a16bcd9ee7614813d9d4",
+  "base": "7cff9e538deccdd0e346af7c6285e11863285c00",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "files": {
+    "crates/otto-server/src/skill_eval.rs": "78a49a0d43284a74a3db3fbc77cfbadd1a88be8d3b2535f869deb7b02bda67e9",
+    "crates/otto-server/src/skill_eval_retry_latency_tests.rs": "aa75c06353e636d90a72f2daa2f0cab9a3154a883df59030a172fffb4de19a5f",
+    "crates/otto-server/src/eval_score.rs": "8eb1eca86e3ea6b5fa00e9cf84ed10b5d6177cb47d971836fc2126c13d1990eb",
+    "crates/otto-server/src/skill_eval_recovery_tests.rs": "41090212ae6aaafaad217a1cad389329539e312a6bfe89171494ac2e5ad497bb",
+    "crates/otto-state/src/skill_evals.rs": "ddef7b27ba601f34e16167618b2e2224d239a63cb751792eb3c3f0640155d365",
+    "crates/otto-browser/src/live/conn.rs": "bb2644e1a838d165b9eaeff082d02626919cd5a756005d78a712b5af5c8c2016",
+    "crates/otto-browser/src/live/process.rs": "99fe50fa03bc38370bfad7531faa0264a7de004e0c2cd7fdb550483b7f5b4629",
+    "crates/otto-browser/src/live/proxy.rs": "f4e3e7432b81d161fe9149c6a04282ec5ce35c163b6595d74218ea986f7ab8e6",
+    "crates/otto-browser/src/lib.rs": "aec4fe53f9eec57e35c9dde86e5511f6a1966a33e55358cca3c2e13e893671ab",
+    "crates/otto-server/src/transcript_cache.rs": "b7d4792a69f2b20c1769b3a04fe4df1afbf270449a5f5741da8bc659e5b514ab",
+    "crates/otto-server/src/transcript_tail.rs": "299fa7c38fe380948faf0392f93a72a7d69357322006afdc8937b146e1791667",
+    "crates/otto-sessions/src/ws.rs": "6d34216c24bde68b51af8c400445a8cf80b95178e1677107a6b5abab5e88ee22",
+    "crates/otto-pty/src/held.rs": "b25b450bb84aa2039d82bab3147a1d4b4bb28c2171d5efb6ac3cd073cf80a806",
+    "ui/src/lib/components/termFlow.ts": "54ab339d824a817e11373392b84dcf3e3d311b2dc3cc418686cf5a93976b7f94"
+  },
+  "commands": [
+    "PATH=/opt/homebrew/bin:$PATH GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 cargo test -p otto-server --lib skill_eval::retry_latency_tests::cancellation_does_not_wait_for_retry_diff_and_retry_rechecks_status -- --exact --nocapture (red before lock relocation)",
+    "PATH=/opt/homebrew/bin:$PATH GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 cargo test -p otto-server --lib skill_eval:: -- --nocapture",
+    "PATH=/opt/homebrew/bin:$PATH cargo clippy -p otto-server --all-targets -- -D warnings"
+  ],
+  "note": "No browser workload, production daemon, user repository, or app was launched or replaced. Handler test uses a temporary SQLite fixture and a keyed cfg(test) held-diff boundary."
+}

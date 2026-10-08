@@ -17,7 +17,7 @@ User scope: review and fix performance, correctness/bugs, design and UX, aiming 
 
 The initial delivery incorrectly called five targeted stages five complete iterations. Those stages collectively count as **round 1**. A complete round must review all four verticals, repair confirmed findings, verify the changes, and reassess every vertical before the next round starts. Historical report filenames are retained as provenance, not round counts.
 
-The campaign will use **20 reviewers total**, reusing reviewers for repair checks. Reviewers 1–9 completed round 1; 10–12 cover round 2. Full rounds 3–5 follow sequentially. Every score deduction requires a concrete finding or bounded validation task with an acceptance condition. Product quality and evidence confidence are reported separately. Scores will not be raised to satisfy the target without substantiation.
+The campaign used **20 unique reviewers total**, reusing reviewers for repair checks. Reviewers 1–9 completed round 1; 10–12 covered round 2; 13–15 covered round 3; 16–18 covered round 4; 19–20 plus returning reviewer 12 covered round 5. Every score deduction required a concrete finding or bounded validation task with an acceptance condition. Product quality and evidence confidence are reported separately. See the [final campaign report](FINAL.md) for the round ledger, final assessments and delivery status.
 
 ## Historical stages within round 1
 
