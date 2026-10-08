@@ -1,6 +1,6 @@
 {
   "base": "a0bd718b9fbc008d72c164ce643a24ed78e6368c",
-  "source_head": "a7f799ccd6dc4e4cd46463f3e4f46a386dcbd1c5",
+  "source_head": "d28c613064ec2804d784efea42b2ad363e25d744",
   "branch": "review/quality-20261008",
   "note": "Final integrated source snapshot. Runtime, UI, plugin and CI source commits; validation outcomes recorded separately.",
   "files": {
@@ -289,6 +289,7 @@
     "ui/unit/vaultPreviewOwnership.test.ts": "d2edca2a696965c1f3d6f694c56623b1bb2a0298bad1300af463c18d41051401",
     "ui/unit/vaultStore.test.ts": "09451afea833a4c2a43d159378ae61ae50c1ad19f2c84bf79425d919482bf88b",
     "ui/unit/workbenchActions.test.ts": "b606d610024306b10abf7e8cc79eee58bf32d16e3367d7a852208c783cc3e207",
-    "ui/unit/workbenchOwnership.test.ts": "1220c638858c845e833460b4e94662724de3f38edb4b2840d9f253bde94a9fa8"
+    "ui/unit/workbenchOwnership.test.ts": "1220c638858c845e833460b4e94662724de3f38edb4b2840d9f253bde94a9fa8",
+    "ui/e2e/desktop-scheduled-tasks.spec.ts": "b17402807a166ee5b6fd59570cae97daa58a351a84f4f442e38e5df8586179f6"
   }
 }

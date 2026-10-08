@@ -1,6 +1,6 @@
 # Post-merge findings ledger
 
-Snapshot: `a0bd718b9fbc008d72c164ce643a24ed78e6368c`. Review ongoing. Scores remain unawarded. IDs below summarize domains; exact severity, location and evidence are in each domain report.
+Snapshot: `a0bd718b9fbc008d72c164ce643a24ed78e6368c`. All 16 assignments are complete; confirmed findings are repaired. Whole-product scores remain unawarded. Historical per-finding checkpoints below are superseded by the final integrated results in [VALIDATION.md](VALIDATION.md). IDs below summarize domains; exact severity, location and evidence are in each domain report.
 
 | Area | Finding | Evidence / status |
 | --- | --- | --- |
@@ -43,7 +43,6 @@ Snapshot: `a0bd718b9fbc008d72c164ce643a24ed78e6368c`. Review ongoing. Scores rem
 | R10 channels | Detach races metadata persistence; ingress/rejection queues unbounded; retry/acknowledgement gaps |123channel tests, shared per-daemon admission with recovery reserve, three mutation controls, webhook3/3; identity key change is defensive hardening, not a demonstrated production exploit |
 | R11 privacy/refinement | Foreign refinement reuse, stale detach callbacks and private-memory graph/mutation/dedup/export exposure |37memory/116ordinaryVault/36server cases and focused UI/browser checks; see [R11 report](reports/R11-vault.md); pre-existing exported files are not deleted |
 | R11 scale/liveness | Unbounded search counts and watcher queue; continuous events starve refresh and late overflow loses wakeup | Bounded search/watch queues, deadline flush and republished overflow wake; both10k-note/50k-revision scale gates pass |
-
 | R12 Product/Design | Stale consent/drafts, assist admission/persistence, session reuse authority, graph traversal/races |15repair groups; initial310Rust and selectedmountedjourneys; finalgraph/assist tests queued in sharedintegration; see[R12 report](reports/R12-product-design.md) |
 | R13 shell/native | Workbench/Home ownership, hiddenrendering, searchprivacy/materialization, LSPallocation |55native tests+actualvisibility/panelprobes,10ksearchprojection andfocusedUI/HTTP; see[R13 report](reports/R13-shell-native.md) |
 | R14 evaluator/plugins | Caller/foreign-golden authority, concurrentfixer/scoring, staleproof, cancellation and boundedplugin/usagework |Repairs under finalverification;492TeamPerformancetests pass with one inapplicablelight-onlyassertiondarkskip |
@@ -56,4 +55,4 @@ Excluded from this pass: R02 command-execution candidate stopped by automatic se
 
 Merge verification: all 17 non-advisory checks passed on PR head `0ea2dec98c70d2d987908df89a49ed9594fbf119` before admin merge. Subsequent advisory functional shards 1–4 and red-count ratchet all passed; advisory WebKit performance CANCELLED after 60m24s during Install Playwright WebKit; both performance steps were skipped (job113021988394), so no WebKit performance result exists. No thresholds relaxed.
 
-CI setup repair: cancelled WebKit job logs show Ubuntu Azure mirror metadata requests stalled from21:18:58 through22:18:19; benchmarks never started. All four Playwright dependency-install steps now prepare the official mirror plus30s acquisition timeouts/one retry and bound the complete install to15min. There is no automatic reinstall retry after an interrupted dpkg phase. Eight fake-apt tests pass, preserving package signing/suites/security sources; workflow YAML and all four UI working directories validated. Real hosted-runner execution is pending; no host apt configuration was modified locally.
+CI setup repair: cancelled WebKit job logs show Ubuntu Azure mirror metadata requests stalled from21:18:58 through22:18:19; benchmarks never started. All four Playwright dependency-install steps now prepare the official mirror plus30s acquisition timeouts/one retry and bound the complete install to15min. There is no automatic reinstall retry after an interrupted dpkg phase. Eight fake-apt tests pass, preserving package signing/suites/security sources; workflow YAML and all four UI working directories validated. Initial PR #96 hosted WebKit setup and benchmarks passed; no host apt configuration was modified locally.

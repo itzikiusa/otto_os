@@ -1,6 +1,6 @@
 # Validation coordination
 
-**Current:** PR #94 is merged at `a0bd718b9fbc008d72c164ce643a24ed78e6368c`. All 16 post-merge review assignments are complete. Their confirmed findings are repaired in five source commits on `review/quality-20261008`; local integration and performance verification are complete; repair-PR publication is pending. No whole-product 9.8 claim is supported.
+**Current:** PR #94 is merged at `a0bd718b9fbc008d72c164ce643a24ed78e6368c`. All 16 post-merge review assignments are complete. Their confirmed findings are repaired in six source commits on `review/quality-20261008`; local integration and performance verification are complete; [PR #96](https://github.com/itzikiusa/otto_os/pull/96) is published and hosted verification is in progress. No whole-product 9.8 claim is supported.
 
 The chronological notes below retain the investigation history. This current checkpoint supersedes their earlier pending, failed, uncommitted and skipped-fixture statements.
 
@@ -86,3 +86,11 @@ Full workspace clippy now passed (-D warnings, all targets). It exposed test-onl
 First full nextest run:5446passed,2failed,92skipped,275.17s. The failures were source inventory (a Canvas document fixture's single-node source "new" was mistaken for session metadata) and missing reviewed push-target policy snapshot entries. Canvas fixture now uses a realistic D2 edge; no session-source allowlist change. Policy snapshot regenerated via its update mode: exactly5new entries for the new read-only push-target path,0removed/changed entries. GET still requiresGitView plus the handler'sWorkspaceEditor; hypothetical writes use existingGitEdit and are not mounted. A complete nextest rerun is active after fullclippy, followed bydoc-tests/build. Expired authentication files from the three known root-level isolated E2E slots were removed after validating their metadata/shape; no daemon or fixture data directory was removed.
 
 Final WebKit coverage correction: CI explicitly selected `desktop-terminal-park-redraw.spec.ts`, but the desktop-webkit project matched only `perf` filenames and silently omitted it. Discovery reproduced zero cases, the narrow matcher correction found all three, and all three passed in9.7s. The original performance subset passed31 with2Chromium-only skips in2.7minutes; the separate DB scale subset passed3 in15.8s. Scale1, fresh isolated daemon, no competing heavy workloads; no budgets raised.
+
+## Hosted smoke follow-up
+
+Initial repair PR head `037b64b2d` passed166smoke cases and failed1 (`desktop-scheduled-tasks.spec.ts`: the unchanged-report assertion). The fixture had no delivery destination, yet expected suppression. R08 deliberately requires a delivered same-destination baseline; store-only and failed deliveries remain eligible. The test now asserts that contract, preserves proof/hash checks and exercises two failed deliveries through an absent fixture integration without any external send. Existing Rust state tests retain the successful-delivery and destination-change controls.
+
+Running the entire named spec serially also exposed its global first-button selector: it clicked a different task created earlier in the file. The UI test now selects the seeded `data-task-id`. Final named run:14/14passed in11.1s; E2E TypeScript check and mandatory full clippy passed. Source correction `d28c613064ec2804d784efea42b2ad363e25d744`; no production change or weakened threshold. Logs:`evidence/final/scheduled-e2e-green.log`, `scheduled-tsc.log`, `repush-clippy.log`.
+
+The initial hosted WebKit installer and advisory benchmarks passed, confirming the mirror/deadline repair executes on the runner. Other hosted jobs remain running at this checkpoint; see the PR for final status.

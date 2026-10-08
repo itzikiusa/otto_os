@@ -1,0 +1,63 @@
+[WebServer] (node:48027) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[e2e] launching test daemon: /Users/itziklavon/otto_os/target/debug/ottod
+[e2e]   OTTO_DATA_DIR=/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-eyy4dT OTTO_PORT=17820
+2026-10-08T00:57:28.523298Z  INFO ottod: ottod 0.2.0 starting (data dir /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-eyy4dT)
+2026-10-08T00:57:28.761322Z  WARN otto_keychain: secret store: PLAINTEXT file (/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-eyy4dT/secrets.json) — use Settings ▸ Security ▸ Secure secrets… to encrypt it
+2026-10-08T00:57:28.766380Z  INFO otto_usage::clickhouse: usage: starting clickhouse server (binary /usr/local/bin/clickhouse, data /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-eyy4dT/clickhouse, port 59707)
+2026-10-08T00:57:28.769504Z  INFO otto_server::boot::recovery: session restore kept_running=0 suspended=0
+2026-10-08T00:57:28.771777Z  INFO otto_server::boot::tasks: channel manager: skipping (no root user yet — run onboarding first)
+2026-10-08T00:57:28.771816Z  INFO otto_server::boot::tasks: story watcher: supervisor started
+2026-10-08T00:57:28.771828Z  INFO otto_server::boot::tasks: self-improvement disabled (OTTO_SELF_IMPROVE=off)
+2026-10-08T00:57:28.771916Z  INFO otto_server::boot::tasks: credential monitor + session-event notices started
+2026-10-08T00:57:28.771941Z  INFO otto_server::boot::tasks: conversation view: nudge sweep + history index scan started
+2026-10-08T00:57:28.772010Z  INFO otto_server::boot::tasks: insights scheduler started
+2026-10-08T00:57:28.772021Z  INFO otto_server::boot::tasks: cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)
+2026-10-08T00:57:28.773624Z  INFO otto_server::history_index: history index: scan complete scanned=0 refreshed=0 secs=0
+2026-10-08T00:57:28.775095Z  INFO otto_server::boot::tasks: swarm scheduler started; coordinators restored
+2026-10-08T00:57:28.775154Z  INFO otto_server::boot::tasks: workflow event-trigger listener started
+2026-10-08T00:57:28.775173Z  INFO otto_server::boot::tasks: workflow schedule-trigger scheduler started
+2026-10-08T00:57:28.775190Z  INFO otto_server::boot::tasks: k8s monitor scheduler started
+2026-10-08T00:57:28.775227Z  INFO otto_server::boot::tasks: workgraph projector started
+2026-10-08T00:57:28.776678Z  INFO otto_server::boot::tasks: scheduled tasks scheduler started
+2026-10-08T00:57:28.776719Z  INFO otto_server::boot::tasks: personal agents scheduler started
+2026-10-08T00:57:28.776739Z  INFO otto_server::boot::tasks: assistant supervisor started
+2026-10-08T00:57:28.776757Z  INFO otto_server::boot::tasks: run-with-otto scheduler started
+2026-10-08T00:57:28.776790Z  INFO otto_server::boot::tasks: model-catalog refresher started
+2026-10-08T00:57:28.776830Z  INFO otto_server::boot::tasks: mcp control plane: health sweep started
+2026-10-08T00:57:28.776930Z  INFO ottod: usage tailer: started (claude+codex; agy unsupported)
+2026-10-08T00:57:28.777007Z  INFO otto_server::boot::recovery: boot: post-listen work done in 5 ms (plugins=0)
+2026-10-08T00:57:28.780799Z  INFO otto_server::workgraph_projector: workgraph: boot backfill complete
+2026-10-08T00:57:28.834713Z  INFO ottod: listening on http://127.0.0.1:17820
+2026-10-08T00:57:28.872570Z  INFO ottod: alt loopback lane on http://localhost:17820 ([::1] + 127.0.0.1 both held)
+2026-10-08T00:57:28.872645Z  INFO otto_server::boot: boot: ready in 349 ms (db_compact=0 db_open=233 maintenance=2 modules=9 restore=0 recovery=103)
+2026-10-08T00:57:28.878490Z  INFO otto_design::import: design: legacy import done created=0 synced=0 unchanged=0 skipped=0 errors=0
+[e2e] test daemon ready (pid 48035); root onboarded.
+
+Running 14 tests using 1 worker
+
+2026-10-08T00:57:29.159752Z  INFO otto_usage::engine: usage: clickhouse server ready at /var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-e2e-eyy4dT/clickhouse (binary /usr/local/bin/clickhouse)
+2026-10-08T00:57:29.161382Z  INFO otto_usage::engine: usage: one-time compaction starting (rows=0, dir=0 MB)
+2026-10-08T00:57:29.167835Z  INFO otto_usage::engine: usage: compaction done (rows 0->0, 0 MB -> 0 MB)
+2026-10-08T00:57:29.184570Z  INFO otto_server::boot::tasks: usage tracking started (embedded clickhouse)
+2026-10-08T00:57:29.184916Z  INFO ottod::usage_tailer: usage tailer: dedup rebuild — no claude transcript usage found
+2026-10-08T00:57:29.184965Z  INFO ottod::usage_tailer: usage tailer: seeded 0 pre-existing transcript file(s), 0 Codex cumulative baseline(s), 0 resumed rollout(s) queued for catch-up
+(node:48091) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:55:3 › scheduled tasks API (route → policy → engine → report) › validation: sub-5-min interval, bad cron, bad sandbox/retries/tz rejected (135ms)
+  ✓   2 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:69:3 › scheduled tasks API (route → policy → engine → report) › v2: codex provider + cron + worktree + retries + proof persist (102ms)
+  ✓   3 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:99:3 › scheduled tasks API (route → policy → engine → report) › v2: shell provider runs a REAL command end-to-end (no agent stub) (349ms)
+2026-10-08T00:57:30.124898Z  WARN otto_automation::scheduled_tasks_engine: scheduled task run failed: internal: shell command exited with 3 after 1 attempt(s) task=01M4CG7V86PS03JDP90V1XJ35F
+  ✓   4 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:130:3 › scheduled tasks API (route → policy → engine → report) › a failing shell run keeps its output, says why, and shows on the task badge (365ms)
+  ✓   5 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:165:3 › scheduled tasks API (route → policy → engine → report) › cron fires closer than 5 minutes apart are rejected (105ms)
+  ✓   6 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:179:3 › scheduled tasks API (route → policy → engine → report) › list is workspace-scoped (A task absent from B) (110ms)
+  ✓   7 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:188:3 › scheduled tasks API (route → policy → engine → report) › run now → ok run with a summary, and a fetchable markdown report (358ms)
+  ✓   8 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:214:3 › scheduled tasks API (route → policy → engine → report) › v2: attach_proof builds a proof pack; undelivered reports never establish a notification baseline (1.2s)
+  ✓   9 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:270:3 › scheduled tasks API (route → policy → engine → report) › report route 404s for an unknown run id (109ms)
+  ✓  10 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:277:3 › scheduled tasks API (route → policy → engine → report) › presets include the ticket follow-up + recurring review/security scans (103ms)
+  ✓  11 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:287:3 › scheduled tasks API (route → policy → engine → report) › patch enabled, then delete (110ms)
+  ✓  12 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:307:3 › scheduled tasks UI › page renders the seeded task; Run now produces a report row (2.9s)
+  ✓  13 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:322:3 › scheduled tasks UI › create form exposes v2 controls (provider, cron, timezone, sandbox, toggles) (1.5s)
+  ✓  14 [desktop-browser] › e2e/desktop-scheduled-tasks.spec.ts:339:3 › scheduled tasks UI › create form: "Custom…" provider reveals a slug input and persists it (1.6s)
+
+  14 passed (11.1s)
