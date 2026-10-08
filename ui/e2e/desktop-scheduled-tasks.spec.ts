@@ -211,7 +211,7 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     await ctx.dispose();
   });
 
-  test('v2: attach_proof builds a proof pack; notify_on_change skips an unchanged re-run', async () => {
+  test('v2: attach_proof builds a proof pack; undelivered reports never establish a notification baseline', async () => {
     const { ctx } = await apiCtx();
     const t = await (
       await ctx.post(`${base}${V1}/workspaces/${wsA}/scheduled-tasks`, {
@@ -239,12 +239,31 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
     const first = await runOnce();
     expect(first.status, JSON.stringify(first)).toBe('ok');
     expect(first.proof_pack_id, 'attach_proof → proof pack id').toBeTruthy();
+    expect(first.delivered).toBe(false);
+    expect(first.skipped_delivery).toBe(false);
 
-    // The deterministic stub returns the same report, so the second run is
-    // "unchanged" and delivery is skipped (notify_on_change).
+    // Store-only runs have no successful delivery to suppress. The state
+    // regressions separately cover a delivered, same-destination baseline.
     const second = await runOnce();
     expect(second.status).toBe('ok');
-    expect(second.skipped_delivery, 'unchanged re-run skips delivery').toBe(true);
+    expect(second.report_hash).toBe(first.report_hash);
+    expect(second.proof_pack_id).toBeTruthy();
+    expect(second.delivered).toBe(false);
+    expect(second.skipped_delivery, 'store-only is not a prior delivery').toBe(false);
+
+    // This isolated workspace has no Slack integration: exercise failed
+    // delivery without sending anything externally, and ensure it retries.
+    const patched = await ctx.patch(`${base}${V1}/scheduled-tasks/${t.id}`, {
+      data: { destination: { type: 'slack', chat_id: 'fixture-no-integration' } },
+    });
+    expect(patched.ok(), await patched.text()).toBeTruthy();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const failedDelivery = await runOnce();
+      expect(failedDelivery.status).toBe('ok');
+      expect(failedDelivery.delivered).toBe(false);
+      expect(failedDelivery.delivery_error).toContain('no slack integration');
+      expect(failedDelivery.skipped_delivery, 'failed delivery must be retried').toBe(false);
+    }
     await ctx.dispose();
   });
 
@@ -294,9 +313,10 @@ test.describe('scheduled tasks UI', () => {
     // Self-contained (tests run in parallel): trigger a run from the UI. The
     // handler runs the task (OTTO_E2E stub → instant report) AND auto-expands the
     // run history, so the report summary appears without a separate "Runs" click.
-    await page.getByText('E2E Nightly Review').first().scrollIntoViewIfNeeded();
-    await page.getByRole('button', { name: 'Run now' }).first().click();
-    await expect(page.getByText('Reviewed').first()).toBeVisible({ timeout: 15_000 });
+    const task = page.locator(`[data-task-id="${taskId}"]`);
+    await task.scrollIntoViewIfNeeded();
+    await task.getByRole('button', { name: 'Run now', exact: true }).click();
+    await expect(task.getByText('Reviewed').first()).toBeVisible({ timeout: 15_000 });
   });
 
   test('create form exposes v2 controls (provider, cron, timezone, sandbox, toggles)', async ({ page }) => {
