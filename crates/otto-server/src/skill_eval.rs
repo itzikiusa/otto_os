@@ -1147,13 +1147,7 @@ async fn run_agent_capture(
         }
 
         if Instant::now() >= deadline {
-            if let Some(turn) = last_turn {
-                return AgentOutcome {
-                    session_id: Some(sid),
-                    text: turn,
-                    errored: false,
-                };
-            }
+            let _ = manager.archive(&sid).await;
             slot.set("error", Some(&sid), "timed out (grace period elapsed)")
                 .await;
             return AgentOutcome {
@@ -1169,7 +1163,10 @@ async fn run_agent_capture(
 /// Output-file path for one agent within an iteration.
 fn output_path(eval_id: &Id, iter: u32, slot: &str) -> PathBuf {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(dir).join(format!("otto-skilleval-{eval_id}-{iter}-{slot}.txt"))
+    PathBuf::from(dir).join(format!(
+        "otto-skilleval-{eval_id}-{iter}-{slot}-{}.txt",
+        otto_core::new_id()
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1470,7 +1467,15 @@ async fn run_skill_eval_core(
             },
         )
         .await;
-        let impl_summary = summarize_impl(&impl_outcome.text);
+        let impl_summary = match implementation_summary(&impl_outcome) {
+            Ok(summary) => summary,
+            Err(error) => {
+                ctx.skill_evals_store
+                    .set_iter_status(&iter_id, "error", &error.to_string())
+                    .await?;
+                return Err(error);
+            }
+        };
         ctx.skill_evals_store
             .set_iter_impl(
                 &iter_id,
@@ -1878,6 +1883,15 @@ fn install_skill(worktree: &Path, skill_name: &str, body: &str) {
     if std::fs::create_dir_all(&dir).is_ok() {
         let _ = std::fs::write(dir.join("SKILL.md"), body);
     }
+}
+
+fn implementation_summary(outcome: &AgentOutcome) -> Result<String> {
+    if outcome.errored {
+        return Err(otto_core::Error::Upstream(
+            "implementation agent failed before producing a complete result; validation was not started".into(),
+        ));
+    }
+    Ok(summarize_impl(&outcome.text))
 }
 
 fn summarize_impl(text: &str) -> String {

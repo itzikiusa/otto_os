@@ -23,6 +23,12 @@ use serde_json::Value;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
+#[path = "agent_session_lifecycle.rs"]
+mod lifecycle;
+#[path = "agent_session_reply.rs"]
+mod reply;
+use reply::options as reply_turn_options;
+
 /// Shared artifact visibility does not grant authority to resume its owner's
 /// agent. SessionManager's live lookup also reads this authoritative DB row.
 /// Only R12's studio adapters opt into this check; missing old sessions retain
@@ -98,13 +104,13 @@ pub fn submit_confirm_for(live: usize) -> Duration {
     (SUBMIT_CONFIRM + Duration::from_secs(5) * (live / 10) as u32).min(Duration::from_secs(180))
 }
 
-/// Extra turn-completion channels for providers WITHOUT a pollable transcript
-/// (codex/agy/grok/custom). Turn completion is transcript-based and only
-/// claude writes one — without these, a non-claude agent that finished its
-/// work sits "running" until the 10h idle backstop (the live "codex/grok done
-/// but shown RUNNING" bug).
+/// Completion and ownership policy for a managed agent turn. Validated final
+/// files work across providers; native Claude/Codex artifacts provide progress
+/// and child-task evidence. Silence alone never proves successful completion.
 #[derive(Default)]
 pub struct TurnOpts {
+    /// Owner cancellation: covers creation, prompt dispatch and the entire turn.
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Completion marker: the turn is complete the moment this file exists
     /// with non-empty content — the (trimmed) content IS the turn text. The
     /// caller appends a "FINALLY write your one-line summary to <path>"
@@ -114,10 +120,8 @@ pub struct TurnOpts {
     /// Require a validated file result, including for Claude. Partial or invalid
     /// files cannot end a turn; transcript completion alone is insufficient.
     pub done_file_validator: Option<fn(&str) -> bool>,
-    /// Quiet fallback for non-transcript providers only: once the prompt was
-    /// dispatched, this much PTY silence counts as turn-complete (empty turn
-    /// text). Working TUIs repaint (spinners/tool output), so silence this
-    /// long means the agent is sitting at its input box. Ignored for claude.
+    /// Legacy caller hint, retained for compatibility. Silence never proves
+    /// completion; use a validated final file or native turn completion.
     pub quiet_done: Option<Duration>,
     /// Kill the session when the stall trip fires. Workflow steps set this:
     /// their retry spawns a FRESH session, and the stuck one would otherwise
@@ -127,7 +131,7 @@ pub struct TurnOpts {
     pub kill_on_stall: bool,
     /// Use the turn oracle (sub-agent/handoff-aware completion) instead of
     /// the legacy "first end_turn" detection. Workflow steps set this;
-    /// single-turn chats (Discovery/Canvas/vault docs) keep the legacy path.
+    /// validated result protocols always use it, including single-turn chats.
     pub oracle: bool,
     /// Receives every phase change while the oracle watches the turn.
     pub phase_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::turn_oracle::Phase>>,
@@ -154,7 +158,10 @@ pub async fn run_session_turn(
     stuck_after: Duration,
     on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
-    run_session_turn_with(
+    let reply = reply::Reply::new()
+        .map_err(|e| ApiError(Error::Internal(format!("prepare final reply: {e}"))))?;
+    let complete_prompt = reply.prompt(prompt);
+    let (text, sid) = run_session_turn_with(
         ctx,
         ws,
         user,
@@ -163,12 +170,22 @@ pub async fn run_session_turn(
         cwd,
         provider,
         meta,
-        prompt,
+        &complete_prompt,
         stuck_after,
-        TurnOpts::default(),
+        reply_turn_options(&reply.path()),
         on_ready,
     )
-    .await
+    .await?;
+    // The offline daemon deliberately returns canned content without a provider.
+    if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+        return Ok((text, sid));
+    }
+    let text = reply::decode(&text).ok_or_else(|| {
+        ApiError(Error::Upstream(
+            "agent completed without a valid final reply".into(),
+        ))
+    })?;
+    Ok((text, sid))
 }
 
 /// [`run_session_turn`] with extra completion channels (see [`TurnOpts`]).
@@ -187,7 +204,60 @@ pub async fn run_session_turn_with(
     // early "stuck" signal; interactive callers pass STUCK_IDLE (10h) to keep the
     // long backstop. Never lengthens past TURN_TIMEOUT.
     stuck_after: Duration,
+    opts: TurnOpts,
+    on_ready: impl FnOnce(&Id),
+) -> ApiResult<(String, Id)> {
+    let should_stop = opts.kill_on_stall || opts.cancel.is_some();
+    let cancel = opts.cancel.clone();
+    let mut guard = lifecycle::SessionGuard::new(Arc::clone(&ctx.manager), should_stop);
+    let slot = Arc::clone(&guard.slot);
+    let turn = run_session_turn_inner(
+        ctx,
+        ws,
+        user,
+        existing,
+        title,
+        cwd,
+        provider,
+        meta,
+        prompt,
+        stuck_after,
+        opts,
+        slot,
+        on_ready,
+    );
+    let result = tokio::select! {
+        biased;
+        () = lifecycle::cancelled(cancel) => Err(ApiError(Error::Conflict("agent turn stopped".into()))),
+        () = tokio::time::sleep(TURN_TIMEOUT) => Err(ApiError(Error::Upstream(
+            "agent turn absolute deadline exceeded (including session startup)".into(),
+        ))),
+        result = turn => result,
+    };
+    if result.is_err() && should_stop {
+        guard.stop().await;
+    }
+    guard.disarm();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_turn_inner(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    user: &User,
+    existing: Option<&Id>,
+    title: &str,
+    cwd: &str,
+    provider: &str,
+    meta: Value,
+    prompt: &str,
+    // No-output idle trip. Workflow steps pass a short value (e.g. 3 min) as an
+    // early "stuck" signal; interactive callers pass STUCK_IDLE (10h) to keep the
+    // long backstop. Never lengthens past TURN_TIMEOUT.
+    stuck_after: Duration,
     mut opts: TurnOpts,
+    owner: lifecycle::OwnershipSlot,
     on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
     // 1. E2E short-circuit: the offline test daemon points CLAUDE_BIN at a
@@ -208,11 +278,12 @@ pub async fn run_session_turn_with(
 
     // 3. Resolve the session: resume an existing one (ensure_live restarts it with
     //    --resume when suspended/dead, guarding supports_resume), else create.
-    let (sid, psid) = match existing {
+    let (sid, psid, mut created_guard) = match existing {
         Some(id) if ctx.manager.get(id).await.is_ok() => {
-            ctx.manager.ensure_live(id).await.map_err(ApiError)?;
-            let session = ctx.manager.get(id).await.map_err(ApiError)?;
-            (id.clone(), session.provider_session_id.clone())
+            let (session, guard) = lifecycle::resume(Arc::clone(&ctx.manager), id.clone())
+                .await
+                .map_err(ApiError)?;
+            (id.clone(), session.provider_session_id.clone(), Some(guard))
         }
         _ => {
             let req = CreateSessionReq {
@@ -224,12 +295,15 @@ pub async fn run_session_turn_with(
                 model: None,
                 meta: Some(meta),
             };
-            let session = ctx
-                .manager
-                .create(ws, &user.id, req, None)
-                .await
-                .map_err(ApiError)?;
-            (session.id.clone(), session.provider_session_id.clone())
+            let (session, guard) =
+                lifecycle::create(Arc::clone(&ctx.manager), ws.clone(), user.id.clone(), req)
+                    .await
+                    .map_err(ApiError)?;
+            (
+                session.id.clone(),
+                session.provider_session_id.clone(),
+                Some(guard),
+            )
         }
     };
 
@@ -244,7 +318,19 @@ pub async fn run_session_turn_with(
 
     // Session exists now — let the caller surface its id (e.g. attach the live
     // shell in the Canvas panel) BEFORE the long turn runs.
+    if opts
+        .cancel
+        .as_ref()
+        .is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+    {
+        return Err(ApiError(Error::Conflict("agent turn stopped".into())));
+    }
+    if let Some(guard) = created_guard.as_mut() {
+        guard.transfer_to(&owner);
+    }
     on_ready(&sid);
+    let session_info = ctx.manager.get(&sid).await.map_err(ApiError)?;
+    let provider = session_info.provider.as_str();
     let provider_home = ctx
         .manager
         .provider_home(&ctx.manager.get(&sid).await.map_err(ApiError)?);
@@ -264,27 +350,9 @@ pub async fn run_session_turn_with(
     .is_some();
     let needle = confirm_needle(prompt);
 
-    let phase = |p: crate::turn_oracle::Phase| {
-        if let Some(tx) = &opts.phase_tx {
-            let _ = tx.send(p);
-        }
-    };
-    phase(crate::turn_oracle::Phase::Booting);
-    // A submit that never found a real input box is a no-op turn — fail LOUD
-    // and retryable instead of polling a dead session (R5.3: `wait_for_tui`
-    // now reports a blank TUI instead of assuming it drew).
-    if !submit_once(&ctx.manager, &sid, prompt).await {
-        return Err(ApiError(Error::Upstream(
-            "agent TUI never drew — retrying".into(),
-        )));
-    }
-    ctx.manager.record_user_message(&sid, prompt).await;
-
-    // Baseline of completed assistant turns. For a resumed/non-claude session we
-    // seed it from the pre-submit count; when we can confirm (claude), we RE-baseline
-    // at the exact instant our prompt is seen as the latest user turn (below), so a
-    // stray reply to an empty submit is already counted and can't be mistaken for
-    // THIS turn's result.
+    // Capture the boundary BEFORE submitting: a fast reply may already be in
+    // the first confirmation poll. Matching text alone cannot distinguish an
+    // identical prior prompt in a resumed session.
     let tpath = transcript_path(
         provider,
         &cwd_canon,
@@ -295,10 +363,43 @@ pub async fn run_session_turn_with(
     // the previous poll) and off the runtime: a resumed session's transcript
     // can be tens of MB, and it used to be read + parsed whole every second.
     let mut tail = tpath.clone().map(crate::turn_oracle::ClaudeTail::new);
-    let mut baseline = crate::turn_oracle::poll_claude_tail(&mut tail)
-        .await
+    let before_submit = crate::turn_oracle::poll_claude_tail(&mut tail).await;
+    let mut baseline = before_submit
+        .as_ref()
         .map(|s| s.completed_turns)
         .unwrap_or(0);
+    let user_baseline = before_submit.as_ref().map(|s| s.user_turns).unwrap_or(0);
+    let codex_baseline = if provider == "codex" {
+        match ctx.manager.activity_artifact(&sid).await {
+            Some(path) => codex_baseline_ordinal(path).await,
+            None => 0,
+        }
+    } else {
+        0
+    };
+
+    let phase = |p: crate::turn_oracle::Phase| {
+        if let Some(tx) = &opts.phase_tx {
+            let _ = tx.send(p);
+        }
+    };
+    phase(crate::turn_oracle::Phase::Booting);
+    // A submit that never found a real input box is a no-op turn — fail LOUD
+    // and retryable instead of polling a dead session (R5.3: `wait_for_tui`
+    // now reports a blank TUI instead of assuming it drew).
+    if opts
+        .cancel
+        .as_ref()
+        .is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+    {
+        return Err(ApiError(Error::Conflict("agent turn stopped".into())));
+    }
+    if !submit_once(&ctx.manager, &sid, prompt).await {
+        return Err(ApiError(Error::Upstream(
+            "agent TUI never drew — retrying".into(),
+        )));
+    }
+    ctx.manager.record_user_message(&sid, prompt).await;
 
     if can_confirm {
         let confirm_deadline = Instant::now() + submit_confirm_for(ctx.manager.live_count());
@@ -312,8 +413,10 @@ pub async fn run_session_turn_with(
                 if let Some(err) = scan.api_error {
                     return Err(ApiError(Error::Upstream(format!("agent error: {err}"))));
                 }
-                if user_text_has(scan.last_user_text.as_deref(), &needle) {
-                    baseline = scan.completed_turns;
+                if scan.user_turns > user_baseline
+                    && user_text_has(scan.last_user_text.as_deref(), &needle)
+                {
+                    baseline = scan.completed_before_last_user;
                     entered = true;
                     break;
                 }
@@ -356,7 +459,9 @@ pub async fn run_session_turn_with(
     // 5a. Workflow steps watch through the turn ORACLE instead: a claude
     //     `end_turn` while sub-agents are still working is not completion (see
     //     `turn_oracle`). Every other caller keeps the legacy channels below.
-    if opts.oracle {
+    // Strict artifacts also need native-end grace: a finished agent which
+    // omitted its result must fail recoverably, not wait for the 10h backstop.
+    if opts.oracle || opts.done_file_validator.is_some() {
         // The oracle keeps reading through the same incremental reader (it is
         // already past everything up to the prompt).
         let text = oracle_watch(
@@ -368,6 +473,7 @@ pub async fn run_session_turn_with(
             stuck_after,
             &mut opts,
             baseline,
+            codex_baseline,
             deadline,
             tail,
         )
@@ -432,17 +538,8 @@ pub async fn run_session_turn_with(
                         "agent session exited before replying".into(),
                     )));
                 }
-                // Quiet fallback (non-transcript providers only): a TUI that's
-                // WORKING keeps painting; this much silence means it's idle at
-                // its input box — the turn is over even if the agent never
-                // wrote the done-file. Claude keeps transcript-only detection.
-                if !can_confirm && opts.done_file_validator.is_none() {
-                    if let Some(q) = opts.quiet_done {
-                        if h.last_output_at().elapsed() >= q {
-                            return Ok((String::new(), sid));
-                        }
-                    }
-                }
+                // Silence is not completion: a quiet tool/build may still be
+                // working. Only a validated marker or native turn can finish.
                 // Refresh the progress clock. Codex/agy mint their session id
                 // a few seconds post-spawn, so keep looking for the artifact
                 // (cheap, every ~5s) until found.
@@ -519,12 +616,11 @@ async fn oracle_watch(
     stuck_after: Duration,
     opts: &mut TurnOpts,
     baseline: usize,
+    codex_baseline: u64,
     deadline: Instant,
     claude_tail: Option<crate::turn_oracle::ClaudeTail>,
 ) -> ApiResult<String> {
     use crate::turn_oracle as oracle;
-
-    let started = Instant::now();
     let provider_home = ctx
         .manager
         .provider_home(&ctx.manager.get(sid).await.map_err(ApiError)?);
@@ -546,6 +642,7 @@ async fn oracle_watch(
     let mut clock = oracle::OracleClock::default();
     let mut oopts = oracle::OracleOpts {
         baseline_turns: baseline,
+        baseline_ordinal: codex_baseline,
         ..Default::default()
     };
     // The rollout/transcript, looked up lazily: codex/agy mint their session id
@@ -556,17 +653,8 @@ async fn oracle_watch(
         None
     };
     let mut artifact_lookup_at = Instant::now() + Duration::from_secs(5);
-    // codex: baseline the rollout's ordinal ONCE, right after the submit — a
-    // resumed rollout already holds the prior turn's `task_complete`. If the
-    // rollout only shows up later the baseline stays 0, which is right for a
-    // session this turn just created.
-    let mut codex_baselined = false;
-    if provider == "codex" {
-        if let Some(p) = &artifact {
-            oopts.baseline_ordinal = codex_baseline_ordinal(p.clone()).await;
-            codex_baselined = true;
-        }
-    }
+    // The ordinal was captured before prompt submission. Never rebaseline a
+    // newly discovered rollout: it may already contain this turn's answer.
     // Every transcript/rollout read below is incremental (only the bytes
     // appended since the previous poll) and runs off the runtime together with
     // the directory stats, in ONE blocking hop per tick: a 68 MB transcript
@@ -612,13 +700,6 @@ async fn oracle_watch(
         if provider != "claude" && (artifact.is_none() && Instant::now() >= artifact_lookup_at) {
             artifact = ctx.manager.activity_artifact(sid).await;
             artifact_lookup_at = Instant::now() + Duration::from_secs(5);
-            if artifact.is_some() && !codex_baselined && started.elapsed() <= Duration::from_secs(6)
-            {
-                if let Some(p) = &artifact {
-                    oopts.baseline_ordinal = codex_baseline_ordinal(p.clone()).await;
-                }
-            }
-            codex_baselined = true;
         }
         if tasks_dir.is_none() && Instant::now() >= tasks_lookup_at {
             if let Some(p) = psid {
@@ -743,21 +824,6 @@ async fn oracle_watch(
                             return Err(ApiError(Error::Upstream(
                                 "agent session exited before replying".into(),
                             )));
-                        }
-                        // Quiet fallback: only for providers with NO pollable
-                        // artifact at all (agy/custom) — codex completes on
-                        // `task_complete` now.
-                        if !matches!(provider, "claude" | "codex")
-                            && opts.done_file_validator.is_none()
-                        {
-                            if let Some(q) = opts.quiet_done {
-                                if h.last_output_at().elapsed() >= q {
-                                    if let Some(tx) = opts.outcome_tx.take() {
-                                        let _ = tx.send(oracle::CompleteVia::QuietFallback);
-                                    }
-                                    return Ok(String::new());
-                                }
-                            }
                         }
                         // Progress = the transcript/rollout OR any child file
                         // moving; a sweep whose sub-agents are writing while the
@@ -966,14 +1032,15 @@ fn gate_validated_result(
     requires_validated_result: bool,
     has_validated_result: bool,
 ) -> crate::turn_oracle::Verdict {
-    use crate::turn_oracle::{Phase, Verdict};
+    use crate::turn_oracle::Verdict;
     if requires_validated_result
         && !has_validated_result
         && matches!(verdict, Verdict::Complete { .. })
     {
-        Verdict::Working(Phase::HandoffMissingGrace {
-            left: Duration::ZERO,
-        })
+        Verdict::Failed(
+            "agent ended its turn without a valid final result after the handoff grace period"
+                .into(),
+        )
     } else {
         verdict
     }
@@ -984,7 +1051,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strict_result_protocol_blocks_oracle_idle_and_quiet_completion() {
+    fn recovery_default_turn_requires_a_complete_provider_independent_reply() {
+        let path = std::path::Path::new("/tmp/reply.json");
+        let opts = reply_turn_options(path);
+        assert_eq!(opts.done_file.as_deref(), Some(path));
+        let valid = opts.done_file_validator.expect("strict reply protocol");
+        for bad in ["", "{", "{}", "{\"reply\":\"\"}"] {
+            assert!(!valid(bad), "must keep waiting for a complete reply: {bad}");
+        }
+        assert!(valid("{\"reply\":\"The finished answer\"}"));
+        assert!(
+            opts.quiet_done.is_none(),
+            "silence does not complete a reply"
+        );
+    }
+
+    #[test]
+    fn strict_result_protocol_fails_missing_final_result_after_native_grace() {
         use crate::turn_oracle::{CompleteVia, Verdict};
         for via in [CompleteVia::IdleTurnNoHandoff, CompleteVia::QuietFallback] {
             let verdict = Verdict::Complete {
@@ -993,7 +1076,7 @@ mod tests {
             };
             assert!(matches!(
                 gate_validated_result(verdict, true, false),
-                Verdict::Working(_)
+                Verdict::Failed(_)
             ));
         }
     }

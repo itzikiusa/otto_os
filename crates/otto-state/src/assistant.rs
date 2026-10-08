@@ -155,6 +155,13 @@ pub struct NewTask {
     pub thread_execution_id: Option<String>,
 }
 
+/// Committed local delivery; the host broadcasts these rows after persistence.
+pub struct ReminderDelivery {
+    pub task: AssistantTask,
+    pub turn: Option<AssistantTurn>,
+    pub notice: otto_core::domain::Notice,
+}
+
 /// Task states that end a task (stamp `finished_at`).
 pub const TERMINAL_STATES: [&str; 3] = ["done", "failed", "cancelled"];
 
@@ -859,10 +866,103 @@ impl AssistantRepo {
         Ok(())
     }
 
-    /// Queued reminders whose `run_at` is at or before `now` (RFC3339 UTC).
+    /// Commit a reminder's notice, optional thread turn and terminal state
+    /// together. Legacy running claims are recoverable and task/source keys
+    /// recognize delivery fragments left by an older daemon.
+    pub async fn complete_reminder(&self, id: &str, now: &str) -> Result<Option<ReminderDelivery>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin reminder delivery"))?;
+        let row = sqlx::query("SELECT * FROM assistant_tasks WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("read reminder delivery"))?;
+        let task = row_to_task(&row);
+        if task.kind != "reminder"
+            || !matches!(task.state.as_str(), "queued" | "running")
+            || task.run_at.as_deref().is_none_or(|at| at > now)
+        {
+            return Ok(None);
+        }
+        let source = format!("assistant:reminder:{}", task.id);
+        let turn = if let Some(thread) = &task.thread_id {
+            let existing: Option<String> = sqlx::query_scalar("SELECT id FROM assistant_turns WHERE thread_id = ?
+                AND kind = 'reminder' AND (source_ref = ? OR json_extract(data_json, '$.task_id') = ?) LIMIT 1")
+                .bind(thread).bind(&source).bind(&task.id).fetch_optional(&mut *tx).await.map_err(dberr("find reminder turn"))?;
+            if existing.is_none() {
+                let id = new_id();
+                sqlx::query("INSERT INTO assistant_turns (id, thread_id, role, kind, text, attachments_json, data_json, source_ref, created_at)
+                    VALUES (?, ?, 'system', 'reminder', ?, '[]', ?, ?, ?)")
+                    .bind(&id).bind(thread).bind(format!("⏰ Reminder: {}", task.title))
+                    .bind(serde_json::json!({"task_id":task.id}).to_string()).bind(&source).bind(now)
+                    .execute(&mut *tx).await.map_err(dberr("persist reminder turn"))?;
+                sqlx::query(
+                    "UPDATE assistant_threads SET last_turn_at = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(now)
+                .bind(now)
+                .bind(thread)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("touch reminder thread"))?;
+                let row = sqlx::query("SELECT * FROM assistant_turns WHERE id = ?")
+                    .bind(&id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(dberr("read reminder turn"))?;
+                Some(row_to_turn(&row))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let notice_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM notifications WHERE source_key = ? AND user_id IS ?",
+        )
+        .bind(&source)
+        .bind(&task.owner_user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(dberr("find reminder notification"))?;
+        let notice_id = if let Some(id) = notice_id {
+            id
+        } else {
+            let id = new_id();
+            sqlx::query("INSERT INTO notifications (id, created_at, read, kind, severity, title, body, source_key, user_id)
+                VALUES (?, ?, 0, 'system', 'info', ?, ?, ?, ?)")
+                .bind(&id).bind(now).bind(format!("Reminder: {}",task.title)).bind(&task.detail).bind(&source).bind(&task.owner_user_id)
+                .execute(&mut *tx).await.map_err(dberr("persist reminder notification"))?;
+            id
+        };
+        let row = sqlx::query("SELECT * FROM notifications WHERE id = ?")
+            .bind(&notice_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("read reminder notification"))?;
+        let notice = crate::notifications::row_to_notice(&row)?;
+        sqlx::query("UPDATE assistant_tasks SET state = 'done', finished_at = ?, updated_at = ?, needs_you_json = NULL, result_json = ? WHERE id = ?")
+            .bind(now).bind(now).bind(serde_json::json!({"delivered_at":now,"origin":task.origin}).to_string()).bind(&task.id)
+            .execute(&mut *tx).await.map_err(dberr("complete reminder delivery"))?;
+        let row = sqlx::query("SELECT * FROM assistant_tasks WHERE id = ?")
+            .bind(&task.id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("read completed reminder"))?;
+        let task = row_to_task(&row);
+        tx.commit()
+            .await
+            .map_err(dberr("commit reminder delivery"))?;
+        Ok(Some(ReminderDelivery { task, turn, notice }))
+    }
+
+    /// Due queued reminders and interrupted legacy claims (RFC3339 UTC).
     pub async fn due_reminders(&self, now: &str) -> Result<Vec<AssistantTask>> {
         let rows = sqlx::query(
-            "SELECT * FROM assistant_tasks WHERE kind = 'reminder' AND state = 'queued' \
+            "SELECT * FROM assistant_tasks WHERE kind = 'reminder' AND state IN ('queued','running') \
              AND run_at IS NOT NULL AND run_at <= ? ORDER BY run_at LIMIT 100",
         )
         .bind(now)
@@ -1047,6 +1147,99 @@ mod tests {
 
     async fn repo() -> AssistantRepo {
         AssistantRepo::new(crate::db::test_pool().await)
+    }
+
+    async fn recovery_reminder() -> (AssistantRepo, AssistantTask) {
+        let r = repo().await;
+        let thread = r
+            .create_thread(thread("reminder-owner", None))
+            .await
+            .unwrap();
+        let task = r
+            .create_task(NewTask {
+                owner_user_id: "reminder-owner".into(),
+                thread_id: Some(thread.id),
+                kind: "reminder".into(),
+                state: "queued".into(),
+                title: "Recovery reminder".into(),
+                run_at: Some("2026-10-08T09:00:00Z".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        (r, task)
+    }
+
+    #[tokio::test]
+    async fn recovery_claimed_reminder_remains_due_after_restart() {
+        let (r, task) = recovery_reminder().await;
+        assert!(r.claim_task(&task.id, "queued", "running").await.unwrap());
+        let due = r.due_reminders("2026-10-08T10:00:00Z").await.unwrap();
+        assert_eq!(due.len(), 1, "a crashed claim must remain recoverable");
+        r.complete_reminder(&task.id, "2026-10-08T10:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(r.get_task_any(&task.id).await.unwrap().state, "done");
+    }
+
+    #[tokio::test]
+    async fn recovery_failed_reminder_delivery_rolls_back_thread_and_completion() {
+        let (r, task) = recovery_reminder().await;
+        sqlx::query("CREATE TRIGGER reject_reminder BEFORE INSERT ON notifications BEGIN SELECT RAISE(ABORT, 'notice failed'); END")
+            .execute(&r.pool).await.unwrap();
+        assert!(r
+            .complete_reminder(&task.id, "2026-10-08T10:00:00Z")
+            .await
+            .is_err());
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assistant_turns")
+            .fetch_one(&r.pool)
+            .await
+            .unwrap();
+        assert_eq!(turns, 0, "failed notification must leave no half-delivery");
+        assert_eq!(r.get_task_any(&task.id).await.unwrap().state, "queued");
+        sqlx::query("DROP TRIGGER reject_reminder")
+            .execute(&r.pool)
+            .await
+            .unwrap();
+        assert!(r
+            .complete_reminder(&task.id, "2026-10-08T10:00:00Z")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(r
+            .complete_reminder(&task.id, "2026-10-08T10:00:00Z")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_partial_legacy_reminder_does_not_duplicate_its_thread_turn() {
+        let (r, task) = recovery_reminder().await;
+        r.claim_task(&task.id, "queued", "running").await.unwrap();
+        r.add_turn(NewTurn {
+            thread_id: task.thread_id.clone().unwrap(),
+            role: "system".into(),
+            kind: "reminder".into(),
+            text: "already delivered".into(),
+            data: Some(json!({"task_id":task.id})),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        r.complete_reminder(&task.id, "2026-10-08T10:00:00Z")
+            .await
+            .unwrap();
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assistant_turns")
+            .fetch_one(&r.pool)
+            .await
+            .unwrap();
+        assert_eq!(turns, 1);
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications")
+            .fetch_one(&r.pool)
+            .await
+            .unwrap();
+        assert_eq!(notices, 1);
     }
 
     #[tokio::test]
@@ -1258,7 +1451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn due_reminders_are_claimed_once() {
+    async fn due_reminders_recover_claims_until_atomic_completion() {
         let r = repo().await;
         let t = r
             .create_task(NewTask {
@@ -1285,6 +1478,18 @@ mod tests {
         );
         assert!(r.claim_task(&t.id, "queued", "running").await.unwrap());
         assert!(!r.claim_task(&t.id, "queued", "running").await.unwrap());
+        assert_eq!(
+            r.due_reminders("2026-09-25T00:00:00+00:00")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(r
+            .complete_reminder(&t.id, "2026-09-25T00:00:00+00:00")
+            .await
+            .unwrap()
+            .is_some());
         assert!(r
             .due_reminders("2026-09-25T00:00:00+00:00")
             .await

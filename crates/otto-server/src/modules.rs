@@ -848,8 +848,12 @@ impl otto_design_assist::DesignAssistCtx for ServerCtx {
             t.prompt,
             t.stuck_after,
             crate::agent_session::TurnOpts {
+                done_file_validator: t
+                    .done_file
+                    .as_ref()
+                    .map(|_| (|text: &str| !text.trim().is_empty()) as fn(&str) -> bool),
                 done_file: t.done_file,
-                quiet_done: t.quiet_done,
+                kill_on_stall: true,
                 ..Default::default()
             },
             on_ready,
@@ -1772,6 +1776,11 @@ async fn run_review(
     let _cancel_guard = attempt_cancel
         .as_ref()
         .map(|f| ReviewCancelGuard::new(&ctx.review_cancels, &review_id, f));
+    // Cancellation can commit between launch admission and this task being
+    // polled. Register first so later cancellations also reach this attempt.
+    if review_is_cancelled(&ctx, &review_id).await {
+        return;
+    }
     let result = run_review_core(
         &ctx,
         &review_id,
@@ -4132,161 +4141,9 @@ pub(crate) fn no_pr_changes_message(source: &str, base: &str, uncommitted: bool)
     }
 }
 
-/// Launch an AI review on a specific branch/worktree (Run with Otto's `reviewing`
-/// stage and the workflow `review_run` node). Resolves `base` (an explicit
-/// ref/SHA, or `None` ⇒ the repo's detected default branch — never a
-/// fabricated `main`), diffs `worktree_path` against it, creates a
-/// local-review row keyed to `repo_id`, and drives `run_review` in the
-/// background. Returns the `review_id` plus the base actually used, so
-/// callers publish the RESOLVED branch (a downstream PR must target what was
-/// really reviewed); the caller polls `reviews_store.get_review` for
-/// `Done`/`Error` and reads counts via [`review_findings_counts`].
-///
-/// The third return value is `no_changes`: the diff vs the resolved base was
-/// EMPTY, so the review completed instantly with no reviewers and no findings.
-/// Callers MUST NOT read that as a clean review — zero findings there means
-/// nothing was looked at. Scoring it (100/PASS) is how a misconfigured base
-/// silently green-lights an unreviewed PR.
-///
-/// `jira_context` / `run_context` are what the caller already knows about the
-/// change — the ticket, and the briefs earlier steps produced. Both reach every
-/// reviewer's prompt. Passing `None` makes the reviewers re-derive the system
-/// from raw hunks, which is how documented, intentional behavior gets reported
-/// as a defect of the change that happened to touch its line.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_review_for_branch(
-    ctx: &ServerCtx,
-    repo_id: &Id,
-    worktree_path: &str,
-    base: Option<&str>,
-    cfg_override: Option<ReviewConfig>,
-    jira_context: Option<String>,
-    run_context: Option<String>,
-    mode_override: Option<otto_core::domain::ReviewMode>,
-) -> Result<(Id, otto_git::ResolvedBase, bool)> {
-    run_review_for_branch_sized(
-        ctx,
-        repo_id,
-        worktree_path,
-        base,
-        cfg_override,
-        jira_context,
-        run_context,
-        mode_override,
-        None,
-    )
-    .await
-    .map(|(id, resolved, no_changes, _)| (id, resolved, no_changes))
-}
-
-/// [`run_review_for_branch`] that also returns the reviewed diff's byte
-/// length — the caller's wait budget is sized off it, and recomputing the
-/// whole review diff (one git spawn per untracked file) just for its length
-/// doubled the stage's git work.
-///
-/// `for_run`: a Run-with-Otto run to record the new `review_id` on BEFORE the
-/// background review is spawned. A run cancel drops the stage future at any
-/// await; recording it afterwards (in the stage) left a window where the
-/// review was running but the run did not name it, so cancel could not stop
-/// its reviewers (S2-302 / S15-306).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_review_for_branch_sized(
-    ctx: &ServerCtx,
-    repo_id: &Id,
-    worktree_path: &str,
-    base: Option<&str>,
-    cfg_override: Option<ReviewConfig>,
-    jira_context: Option<String>,
-    run_context: Option<String>,
-    mode_override: Option<otto_core::domain::ReviewMode>,
-    for_run: Option<&Id>,
-) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
-    let repo = ctx.git_store.get_repo(repo_id).await?;
-    let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
-    review_budget_gate(ctx, &repo.workspace_id).await?;
-    let git = otto_git::LocalGit::new(worktree_path);
-    let resolved = git.resolve_base(base).await?;
-    let diff_text = git.review_diff_text(&resolved.diff_ref).await?;
-    let review = ctx
-        .reviews_store
-        .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
-        .await?;
-    let review_id = review.id.clone();
-    if let Some(run_id) = for_run {
-        ctx.runs
-            .set_fields(
-                run_id,
-                &otto_state::runs::RunPatch {
-                    review_id: Some(review_id.clone()),
-                    ..Default::default()
-                },
-            )
-            .await?;
-    }
-    let no_changes = diff_text.trim().is_empty();
-    let diff_len = diff_text.len();
-
-    if no_changes {
-        // No changes vs base — complete immediately with no findings. Loud,
-        // because "0 findings" here is indistinguishable from a clean review in
-        // every downstream count; the caller gets `no_changes` to tell them apart.
-        tracing::warn!(
-            review = %review_id, worktree = %worktree_path, base = %resolved.diff_ref,
-            "review: EMPTY diff vs base — no reviewers ran, no findings are possible"
-        );
-        ctx.reviews_store
-            .set_status(&review_id, ReviewStatus::Done, None)
-            .await?;
-        let _ = ctx.events.send(Event::ReviewChanged {
-            workspace_id: workspace.id.clone(),
-            session_id: None,
-            review_id: review_id.clone(),
-            status: ReviewStatus::Done.as_str().to_string(),
-        });
-    } else {
-        let _ = ctx.events.send(Event::ReviewChanged {
-            workspace_id: workspace.id.clone(),
-            session_id: None,
-            review_id: review_id.clone(),
-            status: ReviewStatus::Running.as_str().to_string(),
-        });
-        let ctx_bg = ctx.clone();
-        let rid = review_id.clone();
-        let wt = worktree_path.to_string();
-        let repo_id_bg = repo_id.clone();
-        // The worktree already holds the branch's real code; name both sides
-        // for the reviewers. A SHA base shows as itself — still meaningful.
-        let dest = resolved.branch.clone();
-        let branches = git
-            .current_branch()
-            .await
-            .ok()
-            .filter(|c| !c.is_empty())
-            .map(|source| ReviewBranches {
-                source,
-                dest,
-                checked_out: true,
-            });
-        tokio::spawn(async move {
-            run_review(
-                ctx_bg,
-                rid,
-                wt,
-                diff_text,
-                jira_context,
-                run_context,
-                workspace,
-                repo_id_bg,
-                0,
-                branches,
-                cfg_override,
-                mode_override,
-            )
-            .await;
-        });
-    }
-    Ok((review_id, resolved, no_changes, diff_len))
-}
+#[path = "review_launch.rs"]
+mod review_launch;
+pub(crate) use review_launch::{run_review_for_branch, run_review_for_branch_sized};
 
 /// Tolerantly extract a commit message from an agent reply. The agent is asked
 /// to reply with ONLY the message, but it may still wrap it in a markdown fence
@@ -7733,3 +7590,7 @@ mod review_retry_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/review_launch_recovery.rs"]
+mod review_launch_recovery_tests;

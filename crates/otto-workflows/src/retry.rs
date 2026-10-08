@@ -1,6 +1,15 @@
 //! Step-retry policy: classify a failure into a retry class and compute the
 //! next backoff. Pure — moved out of otto-server's `workflow_engine`.
 
+/// A completed operation can fail a workflow gate without failing execution.
+/// Preserve its evidence and never replay it through the transport retry loop.
+/// The reserved marker is persisted in node/checkpoint output for recovery.
+pub fn outcome_error(output: &serde_json::Value) -> Option<&str> {
+    output
+        .get("_workflow_error")
+        .and_then(serde_json::Value::as_str)
+}
+
 /// Classify a step error into a retry CLASS (and its human label). These are the
 /// failures a longer pause actually cures — the provider is overloaded or the
 /// daemon is out of file descriptors — as opposed to a bad prompt, which no

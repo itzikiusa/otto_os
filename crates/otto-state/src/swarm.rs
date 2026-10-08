@@ -1845,6 +1845,46 @@ impl SwarmRepo {
         self.list_runs_projected(f, false).await
     }
 
+    /// Retire task-owned verifier/fixer turns before releasing the lifecycle gate.
+    pub async fn stop_verification_runs(&self, task_id: &Id) -> Result<()> {
+        sqlx::query("UPDATE swarm_runs SET status='stopped', finished_at=?, error='task changed'
+                     WHERE task_id=? AND kind IN ('verify','fix') AND status IN ('queued','running','waiting')")
+            .bind(Utc::now().to_rfc3339()).bind(task_id).execute(&self.pool).await
+            .map_err(dberr("stop task verification runs"))?;
+        Ok(())
+    }
+
+    /// Successful turns whose local task routing was interrupted. These retain
+    /// their task claim during restart recovery: replay the durable result, never
+    /// the agent's work. Only the latest task run can own that claim.
+    pub async fn pending_task_results(&self, swarm_id: &Id) -> Result<Vec<SwarmRun>> {
+        let rows = sqlx::query(
+            "SELECT r.* FROM swarm_runs r JOIN swarm_tasks t ON t.id = r.task_id
+             WHERE t.swarm_id = ? AND t.status IN ('in_progress','in_review')
+               AND r.id = (SELECT latest.id FROM swarm_runs latest WHERE latest.task_id = t.id
+                           ORDER BY latest.enqueued_at DESC, latest.rowid DESC LIMIT 1)
+               AND r.status = 'done' AND r.kind IN ('task','planning')
+               AND json_valid(r.result_json)
+               AND json_extract(r.result_json, '$.status') IN ('done','blocked','needs_review','in_progress')
+               AND COALESCE(json_extract(r.result_json, '$._routing_complete'), 0) = 0",
+        ).bind(swarm_id).fetch_all(&self.pool).await.map_err(dberr("pending task results"))?;
+        rows.iter().map(row_to_run).collect()
+    }
+
+    /// Checkpoint result application without replacing usage or other result
+    /// metadata that may have been backfilled concurrently.
+    pub async fn finish_task_routing(&self, run_id: &Id) -> Result<()> {
+        sqlx::query(
+            "UPDATE swarm_runs SET result_json = json_set(result_json, '$._routing_complete', 1)
+                     WHERE id = ? AND status = 'done' AND json_valid(result_json)",
+        )
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("finish task routing"))?;
+        Ok(())
+    }
+
     /// The run list WITHOUT `result_json` (except `kind='recruit'`, whose
     /// Runs-list "Hire" button reads the proposal). A run's result blob is
     /// ~8 KB and the list is 500 rows, reloaded on every open/resync/run —
@@ -1988,7 +2028,15 @@ impl SwarmRepo {
                                  AND r.status IN ('queued','running','waiting'))
                AND NOT EXISTS (SELECT 1 FROM swarm_tasks c
                                WHERE c.parent_task_id = swarm_tasks.id
-                                 AND c.status NOT IN ('done','cancelled'))",
+                                 AND c.status NOT IN ('done','cancelled'))
+               AND NOT EXISTS (SELECT 1 FROM swarm_runs r
+                               WHERE r.id = (SELECT latest.id FROM swarm_runs latest
+                                             WHERE latest.task_id = swarm_tasks.id
+                                             ORDER BY latest.enqueued_at DESC, latest.rowid DESC LIMIT 1)
+                                 AND r.status = 'done' AND r.kind IN ('task','planning')
+                                 AND json_valid(r.result_json)
+                                 AND json_extract(r.result_json, '$.status') IN ('done','blocked','needs_review','in_progress')
+                                 AND COALESCE(json_extract(r.result_json, '$._routing_complete'), 0) = 0)",
         )
         .bind(&now)
         .execute(&self.pool)
@@ -2808,6 +2856,70 @@ mod tests {
         assert_eq!(repo.get_run(&queued.id).await.unwrap().status, "stopped");
         assert_eq!(repo.get_run(&running.id).await.unwrap().status, "stopped");
         assert_eq!(repo.get_run(&done.id).await.unwrap().status, "done");
+    }
+
+    #[tokio::test]
+    async fn fail_running_preserves_success_waiting_for_routing() {
+        let repo = SwarmRepo::new(mem_pool().await);
+        let swarm = new_id();
+        let task = repo
+            .create_task(new_task(&swarm, "in_progress"))
+            .await
+            .unwrap();
+        let mut request = new_run(&swarm);
+        request.task_id = Some(task.id.clone());
+        let run = repo.create_run(request).await.unwrap();
+        repo.update_run(
+            &run.id,
+            RunPatch {
+                status: Some("done".into()),
+                result: Some(Some(
+                    json!({"status":"done", "summary":"already implemented"}),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        repo.fail_running("restart").await.unwrap();
+        assert_eq!(
+            repo.get_task(&task.id).await.unwrap().status,
+            "in_progress",
+            "recover the saved result instead of dispatching the successful task again"
+        );
+        assert!(repo.ready_tasks(&swarm).await.unwrap().is_empty());
+        assert_eq!(repo.pending_task_results(&swarm).await.unwrap().len(), 1);
+        repo.finish_task_routing(&run.id).await.unwrap();
+        assert!(repo.pending_task_results(&swarm).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovery_never_replays_success_from_an_older_attempt() {
+        let repo = SwarmRepo::new(mem_pool().await);
+        let swarm = new_id();
+        let task = repo
+            .create_task(new_task(&swarm, "in_progress"))
+            .await
+            .unwrap();
+        let mut request = new_run(&swarm);
+        request.task_id = Some(task.id.clone());
+        let run = repo.create_run(request).await.unwrap();
+        repo.update_run(
+            &run.id,
+            RunPatch {
+                status: Some("done".into()),
+                result: Some(Some(json!({"status":"done"}))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut next = new_run(&swarm);
+        next.task_id = Some(task.id.clone());
+        repo.create_run(next).await.unwrap();
+        repo.fail_running("restart").await.unwrap();
+        assert!(repo.pending_task_results(&swarm).await.unwrap().is_empty());
+        assert_eq!(repo.get_task(&task.id).await.unwrap().status, "todo");
     }
 
     /// A "todo" task whose dependency isn't done yet is NOT ready; once the

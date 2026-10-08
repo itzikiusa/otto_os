@@ -408,7 +408,6 @@ async fn run(cfg: Config) -> Result<(), String> {
         return Ok(());
     }
     boot::spawn_post_listen_work(&ctx, post_listen_housekeeping);
-    boot::recover_goal_loops(&ctx).await;
     let mut background = boot::spawn_background(&ctx, root_user_id).await;
     background.keep(start_usage_tailer(&cfg, &ctx));
 

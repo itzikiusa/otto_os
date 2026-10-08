@@ -1182,6 +1182,7 @@ export interface GoalQuestion {
   answered_at: string | null;
 }
 export interface GoalLoopLedger {
+  resume_evaluation_iteration?: number | null;
   verifications: GoalHumanVerification[];
   questions: GoalQuestion[];
   next_action: string;
@@ -5919,6 +5920,7 @@ export interface WorkflowCheckpoint {
   status: NodeStatus;
   attempts: number;
   input: unknown;
+  /** Completed gate failures retain evidence; `_workflow_error` is reserved by the engine. */
   output: unknown;
   error?: string | null;
   logs: string[];

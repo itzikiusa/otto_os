@@ -95,6 +95,8 @@
       .map((n) => ({
         id: n.node_id,
         status: n.status,
+        attempts: n.attempts ?? 0,
+        recovery: (n.logs ?? []).filter((line) => line.includes('↻ retry') || line.startsWith('🔁 iteration') || line.includes(' — attempt ')).at(-1),
         sessions: reviewSessions(n, reviews),
         reviews: reviewIds(n).flatMap((id) => reviews[id] ? [reviews[id]] : []),
         activity: n.activity ?? null,
@@ -256,9 +258,11 @@
                engine word ("success", "error", "pending"). -->
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
           <span class="grp-status"><StatusBadge status={runStatus(g.status)} variant="text" /></span>
+          {#if g.attempts > 1}<span class="grp-status">Attempt {g.attempts}</span>{/if}
           <span class="grow"></span>
           <span class="grp-count" role="img" title={plural(g.sessions.length, 'session')} aria-label={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
         </div>
+        {#if g.recovery}<div class="sub recovery-status" data-testid="workflow-recovery-status">{g.recovery}</div>{/if}
         {#each g.sessions as sid (sid)}
           <div class="sess" data-sess={sid}>
             <button class="sess-h" onclick={() => toggle(sid)} aria-expanded={!!expanded[sid]} title={expanded[sid] ? 'Hide live terminal' : 'Show live terminal'}>
@@ -409,6 +413,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .recovery-status {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    overflow: visible;
+    text-overflow: clip;
   }
   .sub[data-status='failed'] {
     color: var(--danger);

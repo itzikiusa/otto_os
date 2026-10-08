@@ -75,6 +75,8 @@ mod autonomy_cache {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonalAgent {
+    #[serde(skip)]
+    pub admission_generation: i64,
     pub id: String,
     pub workspace_id: String,
     pub name: String,
@@ -100,6 +102,10 @@ pub struct PersonalAgent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonalAgentSchedule {
+    #[serde(skip)]
+    pub schedule_generation: i64,
+    #[serde(skip)]
+    pub admission_generation: i64,
     pub id: String,
     pub agent_id: String,
     /// Existing cadence format: `{cadence: interval|daily|weekly|cron, …}`.
@@ -379,6 +385,7 @@ pub struct NewRoomMessage {
 fn row_to_agent(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgent> {
     let delivery_raw: String = r.get("delivery_json");
     Ok(PersonalAgent {
+        admission_generation: r.get("admission_generation"),
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),
         name: r.get("name"),
@@ -400,6 +407,8 @@ fn row_to_agent(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgent> {
 fn row_to_schedule(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentSchedule> {
     let sched_raw: String = r.get("schedule_json");
     Ok(PersonalAgentSchedule {
+        schedule_generation: r.get("schedule_generation"),
+        admission_generation: r.get("admission_generation"),
         id: r.get("id"),
         agent_id: r.get("agent_id"),
         schedule: json(&sched_raw).unwrap_or(Value::Null),
@@ -842,6 +851,128 @@ impl PersonalAgentsRepo {
         Ok(())
     }
 
+    /// Settle only the schedule generation captured by this occurrence.
+    pub async fn settle_captured_schedule(
+        &self,
+        captured: &PersonalAgentSchedule,
+        now: &str,
+        next: Option<&str>,
+    ) -> Result<bool> {
+        let changed = sqlx::query("UPDATE personal_agent_schedules SET last_run_at = ?, next_run_at = ?,
+            enabled = CASE WHEN ? THEN 0 ELSE enabled END, updated_at = ? WHERE id = ? AND schedule_generation = ?")
+            .bind(now).bind(next).bind(captured.schedule["cadence"] == "once").bind(fmt(Utc::now()))
+            .bind(&captured.id).bind(captured.schedule_generation).execute(&self.pool).await
+            .map_err(dberr("settle personal agent schedule generation"))?;
+        Ok(changed.rows_affected() == 1)
+    }
+
+    /// Admit a captured scheduled/proactive dispatch against current eligibility.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admit_captured_run(
+        &self,
+        id: &str,
+        agent: &PersonalAgent,
+        schedule: Option<&PersonalAgentSchedule>,
+        trigger: &str,
+        mode: &str,
+        read_only: bool,
+        goal_id: Option<&str>,
+    ) -> Result<PersonalAgentRun> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin personal agent admission"))?;
+        let automatic = trigger == "schedule" || mode == "proactive";
+        let eligible: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM personal_agents WHERE id = ?
+            AND workspace_id = ? AND admission_generation = ? AND (? = 0 OR enabled = 1))",
+        )
+        .bind(&agent.id)
+        .bind(&agent.workspace_id)
+        .bind(agent.admission_generation)
+        .bind(automatic)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(dberr("check personal agent eligibility"))?;
+        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM personal_agent_runs WHERE agent_id = ? AND status = 'running')")
+            .bind(&agent.id).fetch_one(&mut *tx).await.map_err(dberr("check personal agent overlap"))?;
+        if !eligible || busy {
+            return Err(otto_core::Error::Conflict(
+                "personal agent dispatch is stale or already running".into(),
+            ));
+        }
+        if let Some(schedule) = schedule {
+            let changed = sqlx::query("UPDATE personal_agent_schedules SET admission_generation = admission_generation + 1
+                WHERE id = ? AND agent_id = ? AND enabled = 1 AND schedule_generation = ? AND admission_generation = ?")
+                .bind(&schedule.id).bind(&agent.id).bind(schedule.schedule_generation).bind(schedule.admission_generation)
+                .execute(&mut *tx).await.map_err(dberr("claim personal agent schedule"))?;
+            if changed.rows_affected() != 1 {
+                return Err(otto_core::Error::Conflict(
+                    "personal agent schedule changed or was already dispatched".into(),
+                ));
+            }
+        } else if trigger == "schedule" {
+            return Err(otto_core::Error::Conflict(
+                "scheduled dispatch requires its captured schedule".into(),
+            ));
+        }
+        if mode == "proactive" {
+            let raw: Option<String> = sqlx::query_scalar(
+                "SELECT config_json FROM personal_agent_autonomy WHERE agent_id = ?",
+            )
+            .bind(&agent.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(dberr("read proactive admission config"))?;
+            let mut cfg: AgentAutonomy = raw
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+            let since = fmt(Utc::now() - chrono::Duration::hours(24));
+            let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM personal_agent_runs WHERE agent_id = ? AND mode = 'proactive' AND started_at >= ?")
+                .bind(&agent.id).bind(since).fetch_one(&mut *tx).await.map_err(dberr("check proactive admission budget"))?;
+            if used >= i64::from(cfg.proactive.runs_per_day.clamp(1, 24)) {
+                return Err(otto_core::Error::Conflict(
+                    "proactive daily budget is exhausted".into(),
+                ));
+            }
+            let Some(goal) = cfg.goals.iter_mut().find(|goal| {
+                Some(goal.id.as_str()) == goal_id && goal.enabled && !goal.text.trim().is_empty()
+            }) else {
+                return Err(otto_core::Error::Conflict(
+                    "proactive goal is no longer enabled".into(),
+                ));
+            };
+            goal.last_run_at = Some(fmt(Utc::now()));
+            sqlx::query("UPDATE personal_agent_autonomy SET config_json = ?, updated_at = ? WHERE agent_id = ?")
+                .bind(serde_json::to_string(&cfg).map_err(|e| otto_core::Error::Internal(e.to_string()))?).bind(fmt(Utc::now())).bind(&agent.id)
+                .execute(&mut *tx).await.map_err(dberr("claim proactive goal"))?;
+        }
+        sqlx::query("UPDATE personal_agents SET admission_generation = admission_generation + 1 WHERE id = ?")
+            .bind(&agent.id).execute(&mut *tx).await.map_err(dberr("consume personal agent dispatch"))?;
+        let run = Self::insert_run(
+            &mut tx,
+            id,
+            NewAgentRun {
+                agent_id: agent.id.clone(),
+                schedule_id: schedule.map(|s| s.id.clone()),
+                workspace_id: agent.workspace_id.clone(),
+                trigger: trigger.into(),
+            },
+            mode,
+            read_only,
+            goal_id,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit personal agent admission"))?;
+        if mode == "proactive" {
+            autonomy_cache::invalidate(self.pool.id(), &agent.id);
+        }
+        Ok(run)
+    }
+
     // -- Runs ----------------------------------------------------------------
 
     pub async fn create_run(&self, r: NewAgentRun) -> Result<PersonalAgentRun> {
@@ -852,6 +983,26 @@ impl PersonalAgentsRepo {
     /// The engine reserves cancellation for `id` before this atomic insert.
     pub async fn create_run_configured(
         &self,
+        id: &str,
+        r: NewAgentRun,
+        mode: &str,
+        read_only: bool,
+        goal_id: Option<&str>,
+    ) -> Result<PersonalAgentRun> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin personal agent run"))?;
+        let run = Self::insert_run(&mut tx, id, r, mode, read_only, goal_id).await?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit personal agent run"))?;
+        Ok(run)
+    }
+
+    async fn insert_run(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: &str,
         r: NewAgentRun,
         mode: &str,
@@ -874,10 +1025,15 @@ impl PersonalAgentsRepo {
         .bind(mode)
         .bind(read_only as i64)
         .bind(goal_id)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(dberr("create personal agent run"))?;
-        self.get_run(id).await
+        let row = sqlx::query("SELECT * FROM personal_agent_runs WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(dberr("read admitted personal agent run"))?;
+        row_to_run(&row)
     }
 
     /// Settle a run. A `None` session id keeps the one recorded when the
@@ -1595,6 +1751,196 @@ mod tests {
             created_by: Some("u1".into()),
             ..NewPersonalAgent::defaults(ws.into(), name.into())
         }
+    }
+
+    async fn recovery_schedule() -> (PersonalAgentsRepo, PersonalAgent, PersonalAgentSchedule) {
+        let p = pool().await;
+        seed_ws(&p, "recovery-ws").await;
+        let repo = PersonalAgentsRepo::new(p);
+        let agent = repo
+            .create(new_agent("recovery-ws", "Agent"))
+            .await
+            .unwrap();
+        let schedule = repo
+            .create_schedule(NewAgentSchedule {
+                agent_id: agent.id.clone(),
+                schedule: json!({"cadence":"once", "at":"2026-10-08T09:00:00Z"}),
+                timezone: "UTC".into(),
+                directive: "recap".into(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        (repo, agent, schedule)
+    }
+
+    #[tokio::test]
+    async fn recovery_old_occurrence_does_not_consume_retimed_schedule() {
+        for replacement in [
+            json!({"cadence":"once", "at":"2026-10-09T09:00:00Z"}),
+            json!({"cadence":"interval", "every_min":60}),
+        ] {
+            let (repo, _, captured) = recovery_schedule().await;
+            repo.update_schedule(
+                &captured.id,
+                AgentSchedulePatch {
+                    schedule: Some(replacement.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            repo.rearm_schedule(&captured.id, "2026-10-08T10:00:00Z", true)
+                .await
+                .unwrap();
+            assert!(!repo
+                .settle_captured_schedule(&captured, "2026-10-08T11:00:00Z", None)
+                .await
+                .unwrap());
+            let current = repo.get_schedule(&captured.id).await.unwrap();
+            assert!(current.enabled);
+            assert!(current.last_run_at.is_none());
+            assert_eq!(current.schedule, replacement);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_stale_personal_schedule_and_agent_cannot_dispatch() {
+        for change in [
+            "agent-pause",
+            "agent-aba",
+            "schedule-pause",
+            "schedule-aba",
+            "retime",
+        ] {
+            let (repo, agent, captured) = recovery_schedule().await;
+            match change {
+                "agent-pause" | "agent-aba" => {
+                    repo.update(
+                        &agent.id,
+                        PersonalAgentPatch {
+                            enabled: Some(false),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    if change == "agent-aba" {
+                        repo.update(
+                            &agent.id,
+                            PersonalAgentPatch {
+                                enabled: Some(true),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                "schedule-pause" | "schedule-aba" => {
+                    repo.update_schedule(
+                        &captured.id,
+                        AgentSchedulePatch {
+                            enabled: Some(false),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    if change == "schedule-aba" {
+                        repo.update_schedule(
+                            &captured.id,
+                            AgentSchedulePatch {
+                                enabled: Some(true),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                _ => {
+                    repo.update_schedule(
+                        &captured.id,
+                        AgentSchedulePatch {
+                            schedule: Some(json!({"cadence":"interval","every_min":120})),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            assert!(
+                matches!(
+                    repo.admit_captured_run(
+                        &new_id(),
+                        &agent,
+                        Some(&captured),
+                        "schedule",
+                        "directed",
+                        false,
+                        None
+                    )
+                    .await,
+                    Err(otto_core::Error::Conflict(_))
+                ),
+                "stale {change} dispatched"
+            );
+            assert!(repo.list_runs(&agent.id, 10).await.unwrap().is_empty());
+            assert!(repo
+                .get_schedule(&captured.id)
+                .await
+                .unwrap()
+                .last_run_at
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_consumed_personal_dispatch_cannot_replay_before_settlement() {
+        let (repo, agent, captured) = recovery_schedule().await;
+        let run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&captured),
+                "schedule",
+                "directed",
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        repo.finish_run(
+            &run.id,
+            FinishAgentRun {
+                status: "ok".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&captured),
+                "schedule",
+                "directed",
+                false,
+                None
+            )
+            .await,
+            Err(otto_core::Error::Conflict(_))
+        ));
+        assert!(repo
+            .settle_captured_schedule(&captured, "2026-10-08T11:00:00Z", None)
+            .await
+            .unwrap());
+        let done = repo.get_schedule(&captured.id).await.unwrap();
+        assert!(!done.enabled);
+        assert!(done.last_run_at.is_some());
     }
 
     #[tokio::test]

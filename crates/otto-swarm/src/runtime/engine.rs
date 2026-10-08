@@ -106,6 +106,25 @@ pub(crate) async fn send_run_input(
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
+    #[test]
+    fn run_count_is_admission_limit_not_active_turn_stop() {
+        let swarm: Swarm = serde_json::from_value(json!({
+            "id":"s", "workspace_id":"w", "name":"test", "description":"",
+            "status":"active", "config":{}, "max_total_runs":1,
+            "max_attempts":3, "created_by":"u",
+            "created_at":Utc::now(), "updated_at":Utc::now()
+        }))
+        .unwrap();
+        let spend = otto_state::swarm::SwarmSpend {
+            total_runs: 1,
+            cost_usd: 0.0,
+        };
+        assert!(
+            budget_reason(&swarm, &spend).is_none(),
+            "admitting the last permitted run must not interrupt it"
+        );
+    }
+
     #[tokio::test]
     async fn stopping_during_readiness_does_not_wait_or_send_late_input() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -213,17 +232,18 @@ pub fn start_coordinator(ctx: SwarmRt, swarm_id: Id) {
             old.cancel.cancel();
         }
     }
-    // Re-spawn any verification controllers stranded in `verifying` by a restart
-    // (review B2), then start the tick loop.
-    {
-        let ctx = ctx.clone();
-        let swarm_id = swarm_id.clone();
-        tokio::spawn(async move {
-            crate::runtime::verify::recover(&ctx, &swarm_id).await;
-        });
-    }
+    // Finish local routing of durable successes before dispatching anything.
+    // Then restore verification controllers; their agent locks must exist before
+    // the first coordinator tick can claim another task on those branches.
     crate::runtime::wake::ensure_listener(&ctx);
-    tokio::spawn(coordinator_loop(ctx, swarm_id, handle));
+    tokio::spawn(async move {
+        recover_completed_results(&ctx, &swarm_id).await;
+        if handle.cancel.is_cancelled() {
+            return;
+        }
+        crate::runtime::verify::recover(&ctx, &swarm_id).await;
+        coordinator_loop(ctx, swarm_id, handle).await;
+    });
 }
 
 /// Stop the Coordinator for a swarm (abort/shutdown).
@@ -421,6 +441,12 @@ async fn tick_inner(
         .unwrap_or(4)
         .max(1);
     let active = repo.active_run_count(swarm_id).await?;
+    if let Some(reason) = spend.as_ref().and_then(|sp| run_count_reason(&swarm, sp)) {
+        if active == 0 && repo.pending_task_results(swarm_id).await?.is_empty() {
+            pause_for_budget(ctx, &swarm, &reason).await;
+        }
+        return Ok(());
+    }
     let mut budget = (cap - active).max(0);
     let capacity_reason = || format!("All {active}/{cap} parallel slots are busy");
     if budget <= 0 {
@@ -588,7 +614,7 @@ async fn budget_exceeded(ctx: &SwarmRt, swarm: &Swarm) -> Option<String> {
         return None;
     }
     let spend = ctx.swarm_repo().swarm_spend(&swarm.id).await.ok()?;
-    budget_reason(swarm, &spend)
+    budget_reason(swarm, &spend).or_else(|| run_count_reason(swarm, &spend))
 }
 
 /// Whether any per-swarm budget is set (all nullable = unlimited).
@@ -600,14 +626,6 @@ fn has_budget(swarm: &Swarm) -> bool {
 
 /// [`budget_exceeded`] against an already-read spend.
 fn budget_reason(swarm: &Swarm, spend: &otto_state::swarm::SwarmSpend) -> Option<String> {
-    if let Some(max_runs) = swarm.max_total_runs {
-        if spend.total_runs >= max_runs {
-            return Some(format!(
-                "run budget reached ({}/{} runs)",
-                spend.total_runs, max_runs
-            ));
-        }
-    }
     if let Some(max_cost) = swarm.max_cost_usd {
         if spend.cost_usd >= max_cost {
             return Some(format!(
@@ -630,6 +648,19 @@ fn budget_reason(swarm: &Swarm, spend: &otto_state::swarm::SwarmSpend) -> Option
     None
 }
 
+/// Count caps limit admission; already-admitted turns retain their time budget.
+fn run_count_reason(swarm: &Swarm, spend: &otto_state::swarm::SwarmSpend) -> Option<String> {
+    if let Some(max_runs) = swarm.max_total_runs {
+        if spend.total_runs >= max_runs {
+            return Some(format!(
+                "run budget reached ({}/{} runs)",
+                spend.total_runs, max_runs
+            ));
+        }
+    }
+    None
+}
+
 /// Pause a swarm because a budget was hit: persist status+reason, flip the
 /// coordinator's paused flag (so it idles without ticking), suspend idle swarm
 /// sessions, post to the board, and notify.
@@ -639,6 +670,7 @@ async fn pause_for_budget(ctx: &SwarmRt, swarm: &Swarm, reason: &str) {
         .pause_swarm_with_reason(&swarm.id, reason)
         .await;
     set_paused(ctx, &swarm.id, true);
+    crate::runtime::verify::stop_swarm(ctx, &swarm.id).await;
     stop_runs_for_pause(ctx, &swarm.id).await;
     for s in swarm_session_ids(ctx, &swarm.workspace_id, &swarm.id).await {
         let _ = ctx.manager().suspend(&s).await;
@@ -794,7 +826,83 @@ async fn resolve_agent_by_title(ctx: &SwarmRt, swarm_id: &str, title: &str) -> O
 
 /// Apply a finished turn's result: delegation → subtasks, handoffs, reviews,
 /// concerns, completion (and parent roll-up).
+/// Re-enter result application, not agent execution, after a crash between
+/// saving a successful turn and updating its task/children.
+async fn recover_completed_results(ctx: &SwarmRt, swarm_id: &Id) {
+    let pending = match ctx.swarm_repo().pending_task_results(swarm_id).await {
+        Ok(runs) => runs,
+        Err(error) => {
+            tracing::warn!(swarm = %swarm_id, "recover swarm results: {error}");
+            return;
+        }
+    };
+    for run in pending {
+        let Some(task_id) = &run.task_id else {
+            continue;
+        };
+        let Ok(task) = ctx.swarm_repo().get_task(task_id).await else {
+            continue;
+        };
+        let result = run
+            .result
+            .as_ref()
+            .and_then(|value| run::parse_turn_result(&value.to_string()));
+        if result.is_some() {
+            route_result(ctx, &run, &task, result).await;
+        }
+    }
+}
+
 async fn route_result(
+    ctx: &SwarmRt,
+    run: &otto_state::SwarmRun,
+    task: &SwarmTask,
+    result: Option<SwarmTurnResult>,
+) {
+    let _operation = operation_guard(&task.swarm_id).await;
+    if ctx
+        .swarm_repo()
+        .get_run(&run.id)
+        .await
+        .ok()
+        .and_then(|r| r.result)
+        .is_some_and(|r| r.get("_routing_complete").and_then(|v| v.as_i64()) == Some(1))
+    {
+        return;
+    }
+    let completed = result.is_some();
+    if completed
+        && !matches!(ctx.swarm_repo().get_swarm(&task.swarm_id).await, Ok(s) if s.status == "active")
+    {
+        return;
+    }
+    route_result_inner(ctx, run, task, result).await;
+    if completed {
+        // Child completion may have preceded the parent's interrupted routing.
+        if let Ok(current) = ctx.swarm_repo().get_task(&task.id).await {
+            if current.status == "in_progress"
+                && current.delegated
+                && ctx
+                    .swarm_repo()
+                    .children_complete(&task.id)
+                    .await
+                    .unwrap_or(false)
+            {
+                let _ = ctx
+                    .swarm_repo()
+                    .set_task_status_if(&task.id, &["in_progress"], "done")
+                    .await;
+                emit_task(ctx, &task.id).await;
+                complete_parent_if_done(ctx, &current).await;
+            }
+        }
+        if let Err(error) = ctx.swarm_repo().finish_task_routing(&run.id).await {
+            tracing::warn!(run = %run.id, "checkpoint swarm result routing: {error}");
+        }
+    }
+}
+
+async fn route_result_inner(
     ctx: &SwarmRt,
     run: &otto_state::SwarmRun,
     task: &SwarmTask,
@@ -814,7 +922,9 @@ async fn route_result(
     // cancelled task as `todo`).
     let reassigned = current.assignee_agent_id != task.assignee_agent_id
         && current.assignee_agent_id.as_deref() != Some(run.agent_id.as_str());
-    if current.status != "in_progress" || reassigned {
+    let recovering_review =
+        current.status == "in_review" && result.as_ref().is_some_and(|r| !r.reviews.is_empty());
+    if (current.status != "in_progress" && !recovering_review) || reassigned {
         let outcome = match &result {
             Some(r) if !r.summary.is_empty() => format!("finished ({})", clip(&r.summary, 160)),
             Some(_) => "finished".to_string(),
@@ -1244,10 +1354,20 @@ async fn create_agent_task(
     label: &str,
 ) {
     let repo = &ctx.swarm_repo();
-    let open: Vec<SwarmTask> = repo
+    let existing = repo
         .list_tasks(&origin.project_id)
         .await
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let origin_label = format!("source-run:{}", run.id);
+    if existing.iter().any(|t| {
+        t.title.trim().eq_ignore_ascii_case(title.trim())
+            && t.labels
+                .as_array()
+                .is_some_and(|labels| labels.contains(&json!(origin_label)))
+    }) {
+        return;
+    }
+    let open: Vec<_> = existing
         .into_iter()
         .filter(|t| !matches!(t.status.as_str(), "done" | "cancelled"))
         .collect();
@@ -1281,7 +1401,7 @@ async fn create_agent_task(
             priority: "medium".into(),
             parent_task_id: None,
             depends_on: json!([]),
-            labels: json!([label, format!("hops:{hops}")]),
+            labels: json!([label, format!("hops:{hops}"), origin_label]),
             order_idx: 0,
             created_by: run.agent_id.clone(),
         })
@@ -1377,16 +1497,22 @@ async fn create_subtasks(ctx: &SwarmRt, parent: &SwarmTask, subs: &[run::TurnSub
     // Open-title set for dedup + the backstop count: delegation must not
     // re-create board items that already exist (a repeated planning turn used
     // to double every subtask), nor inflate the project past the cap.
-    let open: Vec<SwarmTask> = repo
+    let existing = repo
         .list_tasks(&parent.project_id)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| !matches!(t.status.as_str(), "done" | "cancelled"))
+        .unwrap_or_default();
+    let mut titles: std::collections::HashSet<String> = existing
+        .iter()
+        .filter(|t| {
+            t.parent_task_id.as_deref() == Some(parent.id.as_str())
+                || !matches!(t.status.as_str(), "done" | "cancelled")
+        })
+        .map(|t| t.title.trim().to_lowercase())
         .collect();
-    let mut titles: std::collections::HashSet<String> =
-        open.iter().map(|t| t.title.trim().to_lowercase()).collect();
-    let mut open_count = open.len();
+    let mut open_count = existing
+        .iter()
+        .filter(|t| !matches!(t.status.as_str(), "done" | "cancelled"))
+        .count();
     // Subtasks inherit the parent's chain depth so a triage-spawned subtask
     // that hands off again still walks toward the MAX_HANDOFF_HOPS cap.
     let hops = task_hops(parent);
@@ -1477,7 +1603,22 @@ async fn enqueue_reviews(
         .ok()
         .and_then(|a| a.reports_to);
     let mut created = 0usize;
-    for rv in &res.reviews {
+    for (index, rv) in res.reviews.iter().enumerate() {
+        let origin = format!("review-source:{}:{index}", run.id);
+        if repo
+            .list_tasks(&task.project_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|t| {
+                t.labels
+                    .as_array()
+                    .is_some_and(|ls| ls.iter().any(|l| l.as_str() == Some(origin.as_str())))
+            })
+        {
+            created += 1;
+            continue;
+        }
         let reviewer = resolve_agent_by_title(ctx, &task.swarm_id, &rv.reviewer_role)
             .await
             .or_else(|| manager.clone());
@@ -1497,7 +1638,7 @@ async fn enqueue_reviews(
             priority: "high".into(),
             parent_task_id: Some(task.id.clone()),
             depends_on: json!([]),
-            labels: json!(["review"]),
+            labels: json!(["review", origin]),
             order_idx: 0,
             created_by: run.agent_id.clone(),
         }).await;
@@ -1527,7 +1668,8 @@ pub(crate) async fn complete_parent_if_done(ctx: &SwarmRt, task: &SwarmTask) {
     };
     if repo.children_complete(parent_id).await.unwrap_or(false) {
         if let Ok(parent) = repo.get_task(parent_id).await {
-            if parent.status != "done" {
+            if (parent.status == "in_progress" && parent.delegated) || parent.status == "in_review"
+            {
                 let _ = repo
                     .update_task(
                         parent_id,
@@ -1971,6 +2113,20 @@ async fn verify_task_h(
 ) -> ApiResult<Json<serde_json::Value>> {
     let task = ctx.swarm_repo().get_task(&tid).await.map_err(ApiError)?;
     check(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    let _operation = operation_guard(&task.swarm_id).await;
+    let task = ctx.swarm_repo().get_task(&tid).await.map_err(ApiError)?;
+    if ctx
+        .swarm_repo()
+        .get_swarm(&task.swarm_id)
+        .await
+        .map_err(ApiError)?
+        .status
+        != "active"
+    {
+        return Err(ApiError(Error::Invalid(
+            "resume the swarm before verification".into(),
+        )));
+    }
     if crate::runtime::verify::is_verifying(&tid) {
         return Ok(Json(
             json!({"started": false, "reason": "already verifying"}),
@@ -1980,6 +2136,27 @@ async fn verify_task_h(
         .assignee_agent_id
         .clone()
         .ok_or_else(|| ApiError(Error::Invalid("task has no assignee to verify".into())))?;
+    for goal in ctx
+        .swarm_repo()
+        .list_goals_for_task(&tid)
+        .await
+        .map_err(ApiError)?
+    {
+        if task.status == "done" || !matches!(goal.status.as_str(), "passed" | "warned") {
+            ctx.swarm_repo()
+                .update_goal(
+                    &goal.id,
+                    otto_state::GoalPatch {
+                        status: Some("pending".into()),
+                        iterations: Some(0),
+                        verdict: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(ApiError)?;
+        }
+    }
     let _ = ctx
         .swarm_repo()
         .update_task(
@@ -2245,6 +2422,7 @@ async fn pause(
         .await
         .map_err(ApiError)?;
     set_paused(&ctx, &sid, true);
+    crate::runtime::verify::stop_swarm(&ctx, &sid).await;
     // In-flight turns end first (their tasks re-queue for the resume) so the
     // retry loop can't respawn them; then suspend the sessions to free RAM
     // (resume-friendly).

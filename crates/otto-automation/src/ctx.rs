@@ -100,6 +100,7 @@ pub trait AutomationCtx: Clone + Send + Sync + 'static {
         waiting_idle: Duration,
         stuck_idle: Duration,
         transcript_ok: Option<fn(&str) -> bool>,
+        result_ok: Option<fn(&str) -> bool>,
         on_status: F,
     ) -> impl Future<Output = RunOutcome> + Send
     where

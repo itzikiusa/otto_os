@@ -14,6 +14,7 @@
 //!   the `scene3d` validator + Blender-script generator.
 //! - [`watcher`] — the story watcher (Jira/Confluence comment reconcile).
 
+mod agent_attempt;
 pub mod analysis;
 pub mod chat;
 pub mod design_format;

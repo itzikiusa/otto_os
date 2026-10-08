@@ -512,6 +512,7 @@ fn errored_writer_waits_only_while_a_peer_is_still_moving() {
             run,
             cancel: Arc::new(AtomicBool::new(false)),
             retries: Arc::new(Mutex::new(HashSet::new())),
+            closed_retries: HashSet::new(),
             persist_tx: None,
         },
     );
@@ -628,6 +629,7 @@ fn retry_handler_state_composition_flags_only_the_requested_error_slot() {
         run,
         cancel: Arc::new(AtomicBool::new(false)),
         retries: Arc::clone(&retries),
+        closed_retries: HashSet::new(),
         persist_tx: None,
     };
 
@@ -869,6 +871,7 @@ fn review_loop_fixture(
             run,
             cancel: Arc::clone(&cancel),
             retries: Arc::clone(&retries),
+            closed_retries: HashSet::new(),
             persist_tx: None,
         },
     );
@@ -1234,6 +1237,7 @@ fn run_state_transitions_respect_terminal_states() {
             run,
             cancel: Arc::new(AtomicBool::new(false)),
             retries: Arc::new(Mutex::new(HashSet::new())),
+            closed_retries: HashSet::new(),
             persist_tx: None,
         },
     );
@@ -1244,4 +1248,83 @@ fn run_state_transitions_respect_terminal_states() {
     let snap = reg.lock().unwrap().get("r1").unwrap().run.clone();
     assert_eq!(snap.state, "cancelled");
     assert!(snap.finished_at.is_some());
+}
+
+#[test]
+fn cancelled_run_ignores_late_agent_callbacks() {
+    let (reg, cancel, _, _, run_id) = review_loop_fixture(1, 1);
+    cancel.store(true, Ordering::Relaxed);
+    finish_run(&reg, &run_id, "cancelled", None);
+    with_run(&reg, &run_id, |run| {
+        run.agents[0].state = "running".into();
+    });
+    assert_ne!(reg.lock().unwrap()[&run_id].run.agents[0].state, "running");
+}
+
+#[test]
+fn exhausted_reviewer_retry_is_rejected_while_peer_runs() {
+    let (reg, _, _, _, run_id) = review_loop_fixture(1, 2);
+    let mut guard = reg.lock().unwrap();
+    let entry = guard.get_mut(&run_id).unwrap();
+    entry.run.state = "reviewing".into();
+    entry.run.review.current_iteration = 1;
+    entry.run.review.rounds.push(VaultDocsReviewRound {
+        iteration: 1,
+        state: "reviewing".into(),
+        reviewers: vec![
+            sample_reviewer("error", vec![]),
+            sample_reviewer("running", vec![]),
+        ],
+        revision: VaultDocsRevision::default(),
+    });
+    entry.closed_retries.insert(reviewer_retry_key(1, 0));
+    assert!(activate_review_retry(entry, 1, Some(0)).is_err());
+    assert_eq!(entry.run.review.rounds[0].reviewers[0].state, "error");
+    assert!(entry.retries.lock().unwrap().is_empty());
+}
+
+#[test]
+fn completion_marker_requires_explicit_final_status() {
+    let (path, prompt) = done_marker();
+    let _ = std::fs::remove_file(path);
+    assert!(prompt.contains("\"status\":\"done\""));
+}
+
+#[test]
+fn final_marker_and_author_results_reject_partial_output() {
+    for text in [
+        "",
+        "done",
+        "{}",
+        "{\"status\":\"done\"}",
+        "{\"status\":\"done\",\"summary\":",
+    ] {
+        assert!(!valid_done_marker(text));
+    }
+    assert!(valid_done_marker(
+        r#"{"status":"done","summary":"Documented"}"#
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("result.json");
+    assert!(require_author_results(&path).is_err());
+    for text in ["", "{}", "{\"written\":[null]}", "{\"written\":[]}"] {
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(
+            require_author_results(&path).is_ok(),
+            text == "{\"written\":[]}"
+        );
+    }
+}
+
+#[test]
+fn exhausted_writer_retry_is_rejected_while_peer_runs() {
+    let (reg, _, _, _, run_id) = review_loop_fixture(1, 2);
+    let mut guard = reg.lock().unwrap();
+    let entry = guard.get_mut(&run_id).unwrap();
+    entry.run.state = "running".into();
+    entry.run.agents[0].state = "error".into();
+    entry.closed_retries.insert(0);
+    assert!(author_retry_target(entry, 0).is_err());
+    assert_eq!(entry.run.agents[0].state, "error");
+    assert!(entry.retries.lock().unwrap().is_empty());
 }

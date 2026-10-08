@@ -443,21 +443,46 @@ async fn retry_agent(
     let instructions = review.instructions.clone();
     let provider = agent.provider.clone();
     let cancel = Arc::clone(&retry.flag);
+    let base = SkillReviewAgent {
+        name: provider.clone(),
+        provider: provider.clone(),
+        model: String::new(),
+        status: "pending".into(),
+        note: String::new(),
+        session_id: None,
+        findings: vec![],
+    };
+    if !ctx
+        .skill_reviews_store
+        .claim_retry(&id, index, &base)
+        .await
+        .map_err(ApiError)?
+    {
+        return Err(ApiError(otto_core::Error::Conflict(
+            "review changed or a retry/fixer is already running".into(),
+        )));
+    }
+    emit(&ctx, &ws.id, &id, "running");
     tokio::spawn(async move {
         let staged = match stage_target(&ctx_bg, &skill_name, &source) {
             Ok(s) => s,
-            Err(_) => return,
+            Err(error) => {
+                let mut failed = base;
+                failed.status = "error".into();
+                failed.note = error.to_string();
+                let _ = ctx_bg
+                    .skill_reviews_store
+                    .set_agent_at(&review_id, index, &failed)
+                    .await;
+                let _ = ctx_bg
+                    .skill_reviews_store
+                    .set_status(&review_id, "error", Some(&error.to_string()))
+                    .await;
+                emit(&ctx_bg, &ws.id, &review_id, "error");
+                return;
+            }
         };
         let reviewer = reviewer_method();
-        let base = SkillReviewAgent {
-            name: provider.clone(),
-            provider: provider.clone(),
-            model: String::new(),
-            status: "pending".into(),
-            note: String::new(),
-            session_id: None,
-            findings: vec![],
-        };
         otto_sessions::trust::ensure_trusted(&provider, &staged.path().to_string_lossy());
         run_skill_review_agent(
             &ctx_bg,
@@ -474,11 +499,43 @@ async fn retry_agent(
             &cancel,
         )
         .await;
-        emit(&ctx_bg, &ws.id, &review_id, "running");
+        if let Err(error) = refresh_after_retry(&ctx_bg, &review_id).await {
+            let _ = ctx_bg
+                .skill_reviews_store
+                .set_status(&review_id, "error", Some(&error.to_string()))
+                .await;
+        }
+        if let Ok(current) = ctx_bg.skill_reviews_store.get(&review_id).await {
+            emit(&ctx_bg, &ws.id, &review_id, &current.status);
+        }
         drop(retry);
     });
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     Ok(Json(review))
+}
+
+async fn refresh_after_retry(ctx: &ServerCtx, review_id: &Id) -> Result<()> {
+    let review = ctx.skill_reviews_store.get(review_id).await?;
+    if review.status == "cancelled" {
+        return Ok(());
+    }
+    let report = review.static_report.as_ref().ok_or_else(|| {
+        otto_core::Error::Internal("review has no static report to rebuild its summary".into())
+    })?;
+    let findings = review
+        .agents
+        .iter()
+        .filter(|agent| agent.name != "summarizer")
+        .flat_map(|agent| agent.findings.iter().cloned())
+        .collect::<Vec<_>>();
+    // Rebuild from the current rows, never the previous summary: a clean retry
+    // must remove findings and patch instructions that it has disproved.
+    ctx.skill_reviews_store
+        .set_summary(review_id, &merge_summary(report, &findings))
+        .await?;
+    ctx.skill_reviews_store
+        .set_status(review_id, "done", None)
+        .await
 }
 
 /// Send the review's findings to a fixer agent that applies them to the REAL
@@ -543,7 +600,7 @@ async fn apply_fixes(
         .map_err(ApiError)?;
     if !ctx
         .skill_reviews_store
-        .claim_fix(&id, &row)
+        .claim_fix_snapshot(&review, &row)
         .await
         .map_err(ApiError)?
     {
@@ -820,7 +877,10 @@ fn emit(ctx: &ServerCtx, ws_id: &Id, review_id: &Id, status: &str) {
 
 fn findings_path(review_id: &str, index: usize) -> PathBuf {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(dir).join(format!("otto-skillreview-{review_id}-{index}.json"))
+    PathBuf::from(dir).join(format!(
+        "otto-skillreview-{review_id}-{index}-{}.json",
+        otto_core::new_id()
+    ))
 }
 
 fn fix_result_path(review_id: &str) -> PathBuf {
@@ -908,9 +968,7 @@ async fn run_skill_review_agent(
             let _ = repo.set_agent_at(review_id, index, &row).await;
             return vec![];
         }
-        if let Ok(text) = std::fs::read_to_string(&out) {
-            let _ = std::fs::remove_file(&out);
-            let findings = parse_skill_findings(&text);
+        if let Some(findings) = read_skill_findings(&out) {
             let n = findings.len();
             row.status = "done".into();
             row.note = format!("{n} finding{}", if n == 1 { "" } else { "s" });
@@ -921,8 +979,7 @@ async fn run_skill_review_agent(
         // The claude transcript, read incrementally and off the runtime.
         let scan = crate::turn_oracle::poll_claude_tail(&mut transcript).await;
         if let Some(turn) = scan.and_then(|s| s.last_turn_text) {
-            let findings = parse_skill_findings(&turn);
-            if !findings.is_empty() {
+            if let Some(findings) = completed_skill_findings(&turn) {
                 let n = findings.len();
                 row.status = "done".into();
                 row.note = format!("{n} finding(s)");
@@ -934,9 +991,7 @@ async fn run_skill_review_agent(
         match ctx.manager.live_handle(&sid) {
             Some(handle) => {
                 if handle.on_exit().borrow().is_some() {
-                    if let Ok(text) = std::fs::read_to_string(&out) {
-                        let _ = std::fs::remove_file(&out);
-                        let findings = parse_skill_findings(&text);
+                    if let Some(findings) = read_skill_findings(&out) {
                         row.status = "done".into();
                         row.note = format!("{} finding(s)", findings.len());
                         row.findings = findings.clone();
@@ -969,6 +1024,7 @@ async fn run_skill_review_agent(
             }
         }
         if Instant::now() >= deadline {
+            let _ = ctx.manager.archive(&sid).await;
             row.status = "error".into();
             row.note = "timed out".into();
             let _ = repo.set_agent_at(review_id, index, &row).await;
@@ -982,20 +1038,23 @@ async fn run_skill_review_agent(
 // The apply-fixes agent (same visible-PTY pattern; edits the real skill dir)
 // ---------------------------------------------------------------------------
 
-/// Lenient parse of the fixer's result file → a short status note.
-fn parse_fix_note(text: &str) -> String {
+/// Consume a fixer result only after its complete schema validates.
+fn read_fix_note(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let note = parse_fix_note(&text)?;
+    let _ = std::fs::remove_file(path);
+    Some(note)
+}
+
+fn parse_fix_note(text: &str) -> Option<String> {
     #[derive(serde::Deserialize, Default)]
     struct RawFix {
-        #[serde(default)]
         applied: Vec<String>,
-        #[serde(default)]
         skipped: Vec<String>,
         #[serde(default)]
         notes: String,
     }
-    let raw: RawFix = slice_json(text, '{', '}')
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    let raw: RawFix = slice_json(text, '{', '}').and_then(|s| serde_json::from_str(s).ok())?;
     let mut parts = vec![format!("{} fix(es) applied", raw.applied.len())];
     if !raw.skipped.is_empty() {
         parts.push(format!("{} skipped", raw.skipped.len()));
@@ -1005,7 +1064,7 @@ fn parse_fix_note(text: &str) -> String {
         note.push_str(" — ");
         note.push_str(raw.notes.trim());
     }
-    note
+    Some(note)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1069,10 +1128,9 @@ async fn run_fix_agent(
             let _ = ctx.manager.archive(&sid).await;
             return;
         }
-        if let Ok(text) = std::fs::read_to_string(&out) {
-            let _ = std::fs::remove_file(&out);
+        if let Some(note) = read_fix_note(&out) {
             row.status = "done".into();
-            row.note = parse_fix_note(&text);
+            row.note = note;
             let _ = repo.set_fix(review_id, &row).await;
             emit(ctx, &ws.id, review_id, "done");
             return;
@@ -1307,22 +1365,40 @@ fn slice_json(text: &str, open: char, close: char) -> Option<&str> {
     None
 }
 
-fn parse_skill_findings(text: &str) -> Vec<SkillFinding> {
-    let Some(arr) = slice_json(text, '[', ']') else {
-        return vec![];
-    };
-    let raw: Vec<RawFinding> = serde_json::from_str(arr).unwrap_or_default();
-    raw.into_iter()
-        .filter(|r| !(r.title.trim().is_empty() && r.evidence.trim().is_empty()))
-        .map(|r| SkillFinding {
-            severity: norm_severity(&r.severity),
-            code: r.code,
-            title: r.title,
-            evidence: r.evidence,
-            why: r.why,
-            fix: r.fix,
-        })
-        .collect()
+// File consumption is kept separate so partial writes can be tested without
+// launching a provider session.
+fn read_skill_findings(path: &Path) -> Option<Vec<SkillFinding>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let findings = parse_skill_findings(&text)?;
+    let _ = std::fs::remove_file(path);
+    Some(findings)
+}
+
+fn completed_skill_findings(text: &str) -> Option<Vec<SkillFinding>> {
+    parse_skill_findings(text)
+}
+
+fn parse_skill_findings(text: &str) -> Option<Vec<SkillFinding>> {
+    let arr = slice_json(text, '[', ']')?;
+    let raw: Vec<RawFinding> = serde_json::from_str(arr).ok()?;
+    if raw
+        .iter()
+        .any(|r| r.title.trim().is_empty() || r.evidence.trim().is_empty())
+    {
+        return None;
+    }
+    Some(
+        raw.into_iter()
+            .map(|r| SkillFinding {
+                severity: norm_severity(&r.severity),
+                code: r.code,
+                title: r.title,
+                evidence: r.evidence,
+                why: r.why,
+                fix: r.fix,
+            })
+            .collect(),
+    )
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1657,3 +1733,7 @@ mod staging_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/skill_review_recovery.rs"]
+mod recovery_tests;

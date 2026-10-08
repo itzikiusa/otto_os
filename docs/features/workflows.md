@@ -205,7 +205,7 @@ fallback is **bounded**, so a missing signal can never hang a run:
 | Parent idle with only background (`Bash`) tasks left | 15 min from the moment the parent went idle — **not** from the task's launch, so a long test run the agent is still working alongside is never cut short. The clock is keyed to the pending ids, not to the tail: a user ping (or a peer's notification) that wakes the parent for one more turn does **not** restart it when it goes idle again with the same task pending — only a change in what is pending does. When a handoff also exists, its own 15 min (from the file's mtime) applies here too, so ending the turn never buys the straggler a second cap | completes and stops the session (which hangs up the task) — `⚠ background task b5gvqf675 never finished after 15m — moving on` |
 | A background task the agent **stopped** (`TaskStop`) | none — the harness never sends a `<task-notification>` for a stopped task, so the stop result itself clears the id (it shows as `stopped` in the sub-agent rows) | nothing to wait for; the turn completes on the normal path |
 | A notification enqueued but never delivered (`remove`d) | 60 s with no new message line | treated as delivered; the tail counts as `end_turn` again |
-| Provider with no transcript artifact (agy / custom) | 150 s of PTY silence (`WF_QUIET_DONE`) | completes — `⚠ no completion signal for this provider — accepted after 150s of silence` |
+| Provider with no transcript artifact (agy / custom) | explicit final handoff, subject to the stall and absolute deadlines | completes only after the nonempty final handoff is written; silence never counts as success |
 | Anything | `TURN_TIMEOUT` (10 h) | the turn is abandoned |
 
 **Sub-agents are allowed.** The step preamble (`WF_STEP_RULES`) is a *completion
@@ -1404,10 +1404,9 @@ are **append-only** — never edit or renumber an existing one.
   is the only guard — a grandchild sitting inside one long, silent tool call can
   still let the step finish ahead of it. Tell the child agent to wait for its own
   delegates before reporting back.
-- **agy / custom providers have no completion signal** — they keep the old
-  fallback and finish after **150 s** of PTY silence, logged as
-  `⚠ no completion signal for this provider — accepted after 150s of silence`.
-  claude and codex use the turn oracle (§3).
+- **agy / custom providers must write the final handoff file.** Silence alone
+  never completes a step. Claude and Codex also provide native turn evidence
+  to the turn oracle (§3).
 
 ---
 
@@ -1469,7 +1468,7 @@ are **append-only** — never edit or renumber an existing one.
 | Step log: `⚠ handoff written but 3 tasks still pending — waiting (up to 15m)` | The agent wrote its handoff **while** sub-agents / background tasks it launched were still running — against the step protocol (§3). The engine waits up to 15 min for them rather than cutting them off. Fix the prompt so the handoff is written last. |
 | Step log: `⚠ handoff written; 1 sub-agent never reported after 15m — moving on` | The 15 min handoff linger expired: a sub-agent never delivered its `<task-notification>`. The step completes on the handoff and its session is stopped. Check that sub-agent's transcript under `subagents/` — it was probably killed or is genuinely stuck. |
 | Step log: `⚠ background task b5gvqf675 never finished after 15m — moving on` | The parent went idle with only a `run_in_background` bash left (a dev server, a `--watch`, a `tail`). The engine completes the step after 15 min and suspends the session, which hangs up the task. Add "stop every background process you started" work to the step, or don't background it. |
-| Step log: `⚠ no completion signal for this provider — accepted after 150s of silence` | agy / custom providers have no transcript artifact, so they still fall back to 150 s of PTY silence (§10). Use claude or codex for steps that delegate. |
+| agy / custom step is idle without a final handoff | The step remains active until it writes its handoff or reaches its stall/absolute deadline. Silence is not evidence that the work finished (§10). |
 | Step log: `↻ retry 2/3 in 2s (codex turn aborted)`, then `✗ codex turn aborted` | codex wrote a `turn_aborted` for the turn we submitted and started no new one within 90 s (usually a dropped upstream connection or a cancelled TUI). The node's retry policy re-runs the step; with no retries left the step errors. |
 | Step log: `↻ retry 2/5 in 23s (provider overloaded: 529)` | An overload / rate-limit / fd-exhaustion / spawn error — the engine forces a ≥ 20 s backoff (plus jitter) and up to 5 attempts when retries are enabled (§3). Nothing to do but let it retry; repeated hits mean too many concurrent agents. |
 | Step log: `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | The stall trip fired (§3): no transcript, sub-agent or `tasks/*.output` movement for `wf_step_stall_secs`. The step is retried in a fresh session. Raise the setting for genuinely long quiet work, or `0` to disable. The trip is never consulted while a bounded hold (idle confirm / handoff grace / linger) is running. |

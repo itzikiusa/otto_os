@@ -183,21 +183,34 @@ impl ImprovementsRepo {
 
     // ---- runs ----
 
+    /// Serialize every trigger against the same workspace admission boundary.
     pub async fn create_run(&self, ws: &Id, trigger: ImprovementTrigger) -> Result<ImprovementRun> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("admit improvement"))?;
+        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM improvement_runs WHERE workspace_id = ? AND status = 'running')")
+            .bind(ws).fetch_one(&mut *tx).await.map_err(dberr("check improvement admission"))?;
+        if busy {
+            return Err(Error::Conflict(
+                "an improvement run is already in progress".into(),
+            ));
+        }
         let id = new_id();
-        let now = fmt(Utc::now());
-        sqlx::query(
-            "INSERT INTO improvement_runs (id, workspace_id, trigger, status, started_at) \
-             VALUES (?, ?, ?, 'running', ?)",
-        )
-        .bind(&id)
-        .bind(ws)
-        .bind(trigger.as_str())
-        .bind(&now)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("create run"))?;
-        self.get_run(&id).await
+        sqlx::query("INSERT INTO improvement_runs (id, workspace_id, trigger, status, started_at) VALUES (?, ?, ?, 'running', ?)")
+            .bind(&id).bind(ws).bind(trigger.as_str()).bind(fmt(Utc::now()))
+            .execute(&mut *tx).await.map_err(dberr("create run"))?;
+        let row = sqlx::query("SELECT * FROM improvement_runs WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("created run"))?;
+        let run = row_to_run(&row)?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit improvement admission"))?;
+        Ok(run)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -386,6 +399,43 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn recovery_improvement_admission_serializes_all_workspace_triggers() {
+        let pool = crate::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces (id,name,root_path,created_at) VALUES ('admission-ws','w','/tmp','2026-10-08')")
+            .execute(&pool).await.unwrap();
+        let repo = ImprovementsRepo::new(pool.clone());
+        let ws = "admission-ws".to_string();
+        let (manual, live) = tokio::join!(
+            repo.create_run(&ws, ImprovementTrigger::Manual),
+            repo.create_run(&ws, ImprovementTrigger::Live)
+        );
+        assert_eq!(
+            usize::from(manual.is_ok()) + usize::from(live.is_ok()),
+            1,
+            "only one workspace producer may be admitted"
+        );
+        let conflict = if manual.is_err() {
+            manual.as_ref().err()
+        } else {
+            live.as_ref().err()
+        };
+        assert!(matches!(conflict, Some(Error::Conflict(_))));
+        let winner = manual.or(live).unwrap();
+        repo.finish_run(
+            &winner.id,
+            ImprovementRunStatus::Done,
+            "finished",
+            0,
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(repo.create_run(&ws, ImprovementTrigger::Live).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn orphaned_running_runs_fail_at_boot() {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .in_memory(true)
@@ -398,15 +448,15 @@ mod tests {
         sqlx::migrate!().run(&pool).await.unwrap();
         let repo = ImprovementsRepo::new(pool);
         let ws: Id = "w1".into();
-        let stuck = repo
-            .create_run(&ws, ImprovementTrigger::Manual)
-            .await
-            .unwrap();
         let done = repo
             .create_run(&ws, ImprovementTrigger::Manual)
             .await
             .unwrap();
         repo.finish_run(&done.id, ImprovementRunStatus::Done, "ok", 1, 0, 0, None)
+            .await
+            .unwrap();
+        let stuck = repo
+            .create_run(&ws, ImprovementTrigger::Manual)
             .await
             .unwrap();
         assert!(repo.has_running(&ws).await.unwrap());

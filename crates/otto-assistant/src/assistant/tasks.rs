@@ -17,11 +17,9 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use otto_core::domain::{Capability, Feature, NoticeKind, NoticeSeverity, User, WorkspaceRole};
+use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
 use otto_core::{Error, Result};
-use otto_state::{
-    AssistantTask, NewApproval, NewAssistantTask, NewNotice, PersonalAgent, PersonalAgentsRepo,
-};
+use otto_state::{AssistantTask, NewApproval, NewAssistantTask, PersonalAgent, PersonalAgentsRepo};
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -1125,46 +1123,19 @@ async fn fire_due_reminders<C: AssistantCtx>(ctx: &C) {
         if !C::cadence_is_due(&spec, None, now, tz) && t.schedule.is_some() {
             continue;
         }
-        if !repo(ctx)
-            .claim_task(&t.id, "queued", "running")
-            .await
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if let Some(tid) = t.thread_id.as_deref() {
-            system_turn(
-                ctx,
-                &t.owner_user_id,
-                tid,
-                "reminder",
-                &format!("⏰ Reminder: {}", t.title),
-                Some(json!({"task_id": t.id})),
-            )
-            .await;
-        }
-        let _ = ctx
-            .create_notice(NewNotice {
-                kind: NoticeKind::System,
-                severity: NoticeSeverity::Info,
-                title: format!("Reminder: {}", t.title),
-                body: t.detail.clone(),
-                source_key: Some(format!("assistant:reminder:{}", t.id)),
-                // The notification opens the Assistant module client-side.
-                action: None,
-                user_id: Some(t.owner_user_id.clone()),
-            })
-            .await;
-        if let Ok(done) = repo(ctx)
-            .set_task_state(
-                &t.id,
-                "done",
-                None,
-                Some(json!({"delivered_at": now.to_rfc3339(), "origin": t.origin})),
-            )
-            .await
-        {
-            emit_task(ctx, &done);
+        match repo(ctx).complete_reminder(&t.id, &now.to_rfc3339()).await {
+            Ok(Some(delivery)) => {
+                if let Some(turn) = delivery.turn {
+                    super::emit_turn(ctx, &t.owner_user_id, &turn, None);
+                }
+                let _ = ctx.events().send(otto_core::event::Event::Notification {
+                    user_id: Some(delivery.task.owner_user_id.clone()),
+                    notice: delivery.notice,
+                });
+                emit_task(ctx, &delivery.task);
+            }
+            Ok(None) => {}
+            Err(error) => warn!(task = %t.id, "assistant: reminder delivery will retry: {error}"),
         }
     }
 }

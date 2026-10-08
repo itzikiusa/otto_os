@@ -91,7 +91,7 @@ fn severity_parse(s: &str) -> Result<NoticeSeverity> {
     }
 }
 
-fn row_to_notice(r: &sqlx::sqlite::SqliteRow) -> Result<Notice> {
+pub(crate) fn row_to_notice(r: &sqlx::sqlite::SqliteRow) -> Result<Notice> {
     let action = match r.get::<Option<String>, _>("action_json") {
         Some(s) => Some(
             serde_json::from_str::<NoticeAction>(&s)

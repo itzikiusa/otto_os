@@ -61,9 +61,11 @@ pub async fn run(
     let handle = ctx.goal_loops().lock().unwrap().get(&loop_.id).cloned();
     // Parks on the loop flag bell (perf W8) instead of a 100 ms poll.
     let cancelled = crate::goal_loop::until_flag(|| {
-        handle
-            .as_ref()
-            .is_some_and(|h| h.cancel.load(Ordering::Relaxed) || h.paused.load(Ordering::Relaxed))
+        handle.as_ref().is_some_and(|h| {
+            h.interrupted.load(Ordering::Relaxed)
+                || h.cancel.load(Ordering::Relaxed)
+                || h.paused.load(Ordering::Relaxed)
+        })
     });
     let turn = RoleTurn {
         workspace: &workspace,

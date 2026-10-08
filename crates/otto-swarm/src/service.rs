@@ -308,11 +308,20 @@ impl SwarmService {
     }
 
     pub async fn update_task(&self, id: &Id, req: UpdateTaskReq) -> Result<SwarmTask> {
+        let task = self.repo.get_task(id).await?;
+        let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
+        let task = self.repo.get_task(id).await?;
+        let invalidates = req.status.as_deref().is_some_and(|s| s != "verifying")
+            || req
+                .assignee_agent_id
+                .as_ref()
+                .is_some_and(|a| a != &task.assignee_agent_id);
         if let Some(Some(aid)) = &req.assignee_agent_id {
             let task = self.repo.get_task(id).await?;
             self.check_assignee(&task.swarm_id, aid).await?;
         }
-        self.repo
+        let updated = self
+            .repo
             .update_task(
                 id,
                 TaskPatch {
@@ -328,7 +337,12 @@ impl SwarmService {
                     order_idx: req.order_idx,
                 },
             )
-            .await
+            .await?;
+        if invalidates {
+            crate::runtime::verify::invalidate_task(id);
+            self.repo.stop_verification_runs(id).await?;
+        }
+        Ok(updated)
     }
 
     /// A task's assignee must be an agent of the task's OWN swarm (S4-05):
@@ -344,6 +358,10 @@ impl SwarmService {
     }
 
     pub async fn delete_task(&self, id: &Id) -> Result<()> {
+        let task = self.repo.get_task(id).await?;
+        let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
+        crate::runtime::verify::invalidate_task(id);
+        self.repo.stop_verification_runs(id).await?;
         self.repo.delete_task(id).await
     }
 

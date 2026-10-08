@@ -100,6 +100,10 @@ pub fn node_catalog() -> Vec<NodeTypeSpec> {
         spec.params_schema = Some(json!({
             "type": "object",
             "properties": {
+                "allow_summary_fallback": {
+                    "type": "boolean", "default": false,
+                    "description": "Allow a deterministic summary when reviewer coverage is complete"
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["fan_out", "orchestrator"],

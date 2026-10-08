@@ -242,10 +242,21 @@ impl ImprovementEngine {
             let rid = match &run_id {
                 Some(r) => r.clone(),
                 None => {
-                    let run = self
+                    let run = match self
                         .improvements
                         .create_run(ws_id, ImprovementTrigger::Live)
-                        .await?;
+                        .await
+                    {
+                        Ok(run) => run,
+                        Err(error) => {
+                            // Admission lost to another trigger; release this
+                            // evidence so a later attempt can still learn it.
+                            self.improvements
+                                .finish_evidence(&source, &claim.token, None)
+                                .await?;
+                            return Err(error);
+                        }
+                    };
                     let _ = self.events.send(Event::ImprovementRunStarted {
                         workspace_id: ws_id.clone(),
                         run_id: run.id.clone(),

@@ -279,6 +279,11 @@ pub(crate) async fn check_repo_in_workspace(
 pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
     let run = ctx.runs.get(run_id).await?;
     if run.status.is_terminal() {
+        // Retrying Stop on a failed/cancelled parent must still reap any child
+        // a previous interrupted teardown left behind, preserving its outcome.
+        if matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) {
+            stop_owned_work(ctx, &run).await;
+        }
         return Ok(run);
     }
     ctx.runs.set_status(run_id, RunStatus::Cancelled).await?;
@@ -309,21 +314,28 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
     // the stage is recorded on the run before its reviewers spawn, and only a
     // read taken now is guaranteed to see it (S2-302).
     let fresh = ctx.runs.get(run_id).await.unwrap_or_else(|_| run.clone());
-    if let Some(review_id) = fresh.review_id.as_ref() {
-        if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
-            crate::modules::cancel_running_review(ctx, &review, &run.workspace_id).await;
-        }
-    }
-    if let Some(loop_id) = fresh.goal_loop_id.as_ref() {
-        if let Err(e) = crate::goal_loop::stop_loop(ctx, loop_id).await {
-            tracing::warn!(run = %run_id, "stop goal loop on cancel: {e}");
-        }
-    }
-    stop_run_sessions(ctx, &run.workspace_id, &run.id).await;
+    stop_owned_work(ctx, &fresh).await;
     run_engine::project(ctx, &fresh).await;
     crate::run_callback::deliver(&ctx.runs, &fresh).await;
     crate::run_workspace::remove_worktree(ctx, &run).await;
     ctx.runs.get(run_id).await
+}
+
+/// Stop only the sessions, review and loop owned by this parent run. This is
+/// also used by failure settlement, where waiting for the engine itself would
+/// deadlock with the stage that is doing the settlement.
+pub(crate) async fn stop_owned_work(ctx: &ServerCtx, run: &OttoRun) {
+    if let Some(review_id) = run.review_id.as_ref() {
+        if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+            crate::modules::cancel_running_review(ctx, &review, &run.workspace_id).await;
+        }
+    }
+    if let Some(loop_id) = run.goal_loop_id.as_ref() {
+        if let Err(e) = crate::goal_loop::stop_loop(ctx, loop_id).await {
+            tracing::warn!(run = %run.id, "stop goal loop on cancel: {e}");
+        }
+    }
+    stop_run_sessions(ctx, &run.workspace_id, &run.id).await;
 }
 
 /// The `meta.source` values of the manager-owned sessions a run stage creates:

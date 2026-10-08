@@ -97,31 +97,34 @@ async fn put_config<S: ImproveCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Admin)
         .await?;
-    let ws = s.workspaces().get(&ws_id).await?;
-    let mut cfg = effective_config(&ws.settings);
-    let reschedule = cfg.enabled != req.enabled || cfg.cadence_minutes != req.cadence_minutes;
-    cfg.enabled = req.enabled;
-    cfg.cadence_minutes = req.cadence_minutes;
-    cfg.lookback_hours = req.lookback_hours;
-    cfg.skill_allowlist = req.skill_allowlist;
-    cfg.autonomy = req.autonomy;
-    cfg.providers = if req.providers.is_empty() {
-        vec!["claude".to_string()]
-    } else {
-        req.providers
-    };
-    cfg.live_evolve = req.live_evolve;
-    // A new cadence (or re-enabling) re-anchors the next run on the last one:
-    // `last_run + cadence`, or one cadence from now if it never ran. Before,
-    // `next_run_at` was left alone, so dropping "Run every" from 1440 to 60
-    // minutes still waited out the old 24h slot. A slot already in the past
-    // makes the run due on the scheduler's next pass.
-    if reschedule {
-        cfg.next_run_at = Some(next_run(&cfg, cfg.last_run_at.unwrap_or_else(Utc::now)));
-    }
-    let merged = write_config(&ws.settings, &cfg);
-    s.workspaces()
-        .update(&ws_id, None, None, Some(&merged), None)
+    let cfg = s
+        .workspaces()
+        .edit_settings(&ws_id, |settings| {
+            let mut cfg = effective_config(settings);
+            let reschedule =
+                cfg.enabled != req.enabled || cfg.cadence_minutes != req.cadence_minutes;
+            cfg.enabled = req.enabled;
+            cfg.cadence_minutes = req.cadence_minutes;
+            cfg.lookback_hours = req.lookback_hours;
+            cfg.skill_allowlist = req.skill_allowlist;
+            cfg.autonomy = req.autonomy;
+            cfg.providers = if req.providers.is_empty() {
+                vec!["claude".to_string()]
+            } else {
+                req.providers
+            };
+            cfg.live_evolve = req.live_evolve;
+            // A new cadence (or re-enabling) re-anchors the next run on the last one:
+            // `last_run + cadence`, or one cadence from now if it never ran. Before,
+            // `next_run_at` was left alone, so dropping "Run every" from 1440 to 60
+            // minutes still waited out the old 24h slot. A slot already in the past
+            // makes the run due on the scheduler's next pass.
+            if reschedule {
+                cfg.next_run_at = Some(next_run(&cfg, cfg.last_run_at.unwrap_or_else(Utc::now)));
+            }
+            *settings = write_config(settings, &cfg);
+            cfg
+        })
         .await?;
     Ok(Json(cfg))
 }

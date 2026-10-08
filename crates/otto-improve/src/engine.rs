@@ -779,13 +779,13 @@ impl ImprovementEngine {
         _start_settings: &serde_json::Value,
         cfg: &otto_core::api::SelfImprovementConfig,
     ) -> Result<()> {
-        let ws = self.workspaces.get(ws_id).await?;
-        let mut fresh = effective_config(&ws.settings);
-        fresh.last_run_at = cfg.last_run_at;
-        fresh.next_run_at = cfg.next_run_at;
-        let merged = write_config(&ws.settings, &fresh);
         self.workspaces
-            .update(ws_id, None, None, Some(&merged), None)
+            .edit_settings(ws_id, |settings| {
+                let mut fresh = effective_config(settings);
+                fresh.last_run_at = cfg.last_run_at;
+                fresh.next_run_at = cfg.last_run_at.map(|at| next_run(&fresh, at));
+                *settings = write_config(settings, &fresh);
+            })
             .await?;
         Ok(())
     }
@@ -1290,6 +1290,38 @@ mod tests {
                     edits: vec![],
                 })
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_run_completion_uses_latest_cadence_and_preserves_settings() {
+        for (old_minutes, current_minutes) in [(1440, 60), (60, 1440)] {
+            let (engine, ws, _, _dir) = harness().await;
+            let now = Utc::now();
+            let old = otto_core::api::SelfImprovementConfig {
+                cadence_minutes: old_minutes,
+                last_run_at: Some(now),
+                next_run_at: Some(now + ChronoDuration::minutes(i64::from(old_minutes))),
+                ..Default::default()
+            };
+            let settings = serde_json::json!({"keep":"user edit", "self_improvement":{"cadence_minutes":current_minutes, "enabled":true}});
+            engine
+                .workspaces
+                .update(&ws, None, None, Some(&settings), None)
+                .await
+                .unwrap();
+            engine
+                .persist_config(&ws, &serde_json::Value::Null, &old)
+                .await
+                .unwrap();
+            let current = engine.workspaces.get(&ws).await.unwrap();
+            let cfg = effective_config(&current.settings);
+            assert_eq!(
+                cfg.next_run_at,
+                Some(now + ChronoDuration::minutes(i64::from(current_minutes)))
+            );
+            assert_eq!(current.settings["keep"], "user edit");
+            assert!(cfg.enabled);
         }
     }
 

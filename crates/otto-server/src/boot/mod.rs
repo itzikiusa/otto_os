@@ -9,11 +9,10 @@
 //! 2. [`build_ctx`] — construct every module (providers, ClickHouse usage
 //!    engine, session manager, …) and assemble the [`ServerCtx`] through
 //!    [`ServerCtx::from_parts`], the literal the test fixture shares.
-//! 3. [`recover_before_serve`] → [`spawn_post_listen_work`] →
-//!    [`recover_goal_loops`] — settle what the previous daemon life left
+//! 3. [`recover_before_serve`] → [`spawn_post_listen_work`] — settle what the previous daemon life left
 //!    behind (sessions, reviews, evals, API runs, workflows, goal loops).
 //! 4. [`spawn_background`] — sweeps, retention and every scheduler; the
-//!    reaps that must precede serving are awaited inside it.
+//!    old-life reaps have finished before any new work is admitted.
 //!
 //! Nothing here binds a socket, owns the process lifecycle or touches the
 //! binary's own files (logs, the running marker, the usage tailer) — that

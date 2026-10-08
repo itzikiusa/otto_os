@@ -128,6 +128,8 @@ pub struct WatchGuard {
     /// Hold the out-file (and any accepted transcript turn) while the claude
     /// parent has launched/resumed tasks that have not reported back.
     pub pending_aware: bool,
+    /// Validate the file independently of transcript fallback (reused sessions).
+    pub result_ok: Option<fn(&str) -> bool>,
     /// `(lens_slug, per-lens findings path)` — for the progress note only.
     pub lens_files: Vec<(String, PathBuf)>,
 }
@@ -314,7 +316,14 @@ where
             None
         };
         // Unguarded this stat never happens — the legacy path is untouched.
-        let out_exists = guarded && tokio::fs::try_exists(out_path).await.unwrap_or(false);
+        let out_exists = if guarded {
+            tokio::fs::read_to_string(out_path)
+                .await
+                .ok()
+                .is_some_and(|text| result_text_valid(&text, guard.result_ok.or(transcript_ok)))
+        } else {
+            false
+        };
         let pending = scan.as_ref().map(|s| s.pending.len()).unwrap_or(0);
         let decision = match scan.as_ref() {
             Some(s) if out_exists => {
@@ -331,8 +340,8 @@ where
         };
 
         if decision != GuardDecision::Hold {
-            if let Ok(text) = tokio::fs::read_to_string(out_path).await {
-                let _ = tokio::fs::remove_file(out_path).await;
+            if let Some(text) = take_result_file(out_path, guard.result_ok.or(transcript_ok)).await
+            {
                 if decision == GuardDecision::AdoptAfterCap {
                     warn!(
                         "agent_run: adopting findings after {}m with {pending} task(s) still pending",
@@ -471,6 +480,26 @@ where
     }
 }
 
+/// Read and consume a result artifact. Validation is supplied by its caller.
+async fn take_result_file(path: &Path, valid: Option<fn(&str) -> bool>) -> Option<String> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    if !result_text_valid(&text, valid) {
+        return None;
+    }
+    let _ = tokio::fs::remove_file(path).await;
+    Some(text)
+}
+
+fn result_text_valid(text: &str, valid: Option<fn(&str) -> bool>) -> bool {
+    // None disables transcript fallback for reused sessions, not validation.
+    !text.trim().is_empty()
+        && match valid {
+            Some(valid) => valid(text),
+            None => serde_json::from_str::<serde_json::Value>(text)
+                .is_ok_and(|v| v.is_object() || v.is_array()),
+        }
+}
+
 /// Whether an elapsed grace deadline should fail the run: only when the agent
 /// has been silent for at least the waiting window (i.e. it is not visibly
 /// working). Pure so the policy is unit-testable without a PTY.
@@ -529,6 +558,9 @@ where
     let mut last = RunOutcome::failed(None, FailReason::Exited);
     for i in 0..max_attempts {
         if cancelled(cancel) {
+            if let Some(sid) = last.session_id.as_ref() {
+                let _ = manager.kill_session(sid).await;
+            }
             last.reason = Some(FailReason::Stopped);
             return last;
         }
@@ -565,6 +597,12 @@ where
 
         let res = attempt(i).await;
         if !res.errored() {
+            if cancelled(cancel) {
+                if let Some(sid) = res.session_id.as_ref() {
+                    let _ = manager.kill_session(sid).await;
+                }
+                return RunOutcome::failed(res.session_id, FailReason::Stopped);
+            }
             return res;
         }
         last = res;
@@ -575,12 +613,50 @@ where
     if cancelled(cancel) {
         last.reason = Some(FailReason::Stopped);
     }
+    // A terminal failure has no next attempt to retire its producer. Never
+    // leave it writing into a path a later manual retry may use.
+    if let Some(sid) = last.session_id.as_ref() {
+        let _ = manager.kill_session(sid).await;
+    }
     last
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn incomplete_result_is_retained_until_a_valid_empty_verdict_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("findings.json");
+        let valid: fn(&str) -> bool = |s| serde_json::from_str::<Vec<serde_json::Value>>(s).is_ok();
+        for incomplete in ["", "[", "[{\"body\":"] {
+            tokio::fs::write(&path, incomplete).await.unwrap();
+            assert!(take_result_file(&path, Some(valid)).await.is_none());
+            assert!(
+                path.exists(),
+                "an incomplete writer must retain its destination"
+            );
+        }
+        tokio::fs::write(&path, "[]").await.unwrap();
+        assert_eq!(
+            take_result_file(&path, Some(valid)).await.as_deref(),
+            Some("[]")
+        );
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn structured_file_without_transcript_fallback_rejects_partial_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn.json");
+        tokio::fs::write(&path, "{\"status\":").await.unwrap();
+        assert!(take_result_file(&path, None).await.is_none());
+        tokio::fs::write(&path, "{\"status\":\"done\"}")
+            .await
+            .unwrap();
+        assert!(take_result_file(&path, None).await.is_some());
+    }
 
     #[test]
     fn deadline_only_fires_on_a_quiet_agent() {

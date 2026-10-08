@@ -1664,7 +1664,7 @@ Live publish requires the matching successful persisted human-approval node in t
 | POST /workspaces/{id}/product/stories/{sid}/plan | ws editor | SavePlanReq | 204 (PO checkbox persistence) |
 | POST /product/stories/{sid}/to-swarm | ws editor | ToSwarmReq? | ToSwarmResp (create a swarm project from the story + seed tasks from its plan) |
 | POST /workspaces/{id}/product/stories/{sid}/inject-session | ws editor | InjectSessionReq | inject story context into a session |
-| POST /product/analyses/{aid}/agents/{agent_id}/retry | ws editor | — | 202 (re-run one analysis lens agent) |
+| POST /product/analyses/{aid}/agents/{agent_id}/retry | ws editor | — | 202 (re-run one analysis lens agent); 409 while an original attempt, Stop, or final publication owns the agent. Stop the active attempt and retry after it settles. |
 | POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent); 404 when `agent_id` is not an agent of `aid` |
 
 ### Product story attachments & the Design arena
@@ -2073,8 +2073,8 @@ fixer agent (`SkillReview.fix_agent`, same session pattern) that edits the REAL 
 | GET /skill-reviews/{id} | ws viewer | — | SkillReview (static report + live agents + summary + fix_agent) |
 | DELETE /skill-reviews/{id} | ws editor | — | 204 (cancels + archives sessions, fixer included) |
 | POST /skill-reviews/{id}/cancel | ws editor | — | cancel a running review |
-| POST /skill-reviews/{id}/agents/{index}/retry | ws editor | — | re-run one reviewer agent |
-| POST /skill-reviews/{id}/apply | ws editor | ApplySkillFixReq (`provider?` default claude, `instructions?`) | SkillReview (fix_agent spawns; 400 while review/fixer running, for bundled skills, or with no findings) |
+| POST /skill-reviews/{id}/agents/{index}/retry | ws editor | — | re-run one reviewer agent; 409 while a reviewer retry or fixer is active, or after cancellation. Atomically marks the review running and clears its old summary before launch; publication rebuilds findings and patch instructions from current reviewer rows before returning to done. |
+| POST /skill-reviews/{id}/apply | ws editor | ApplySkillFixReq (`provider?` default claude, `instructions?`) | SkillReview (fix_agent spawns; 400 while review/fixer running, for bundled skills, or with no findings; 409 if the review changed after the request captured its findings, or another fixer won admission) |
 
 ## Context library (skills / souls / context)
 
@@ -2424,12 +2424,25 @@ session is suspended (resumable providers) or killed, so a finished run holds no
 live PTYs; `true` leaves it running). `review_run` runs the multi-agent PR-review
 engine per step: `providers` (string[]), `lenses` (string[]; `skills` is an
 alias), `threshold` (0–100, default 80), `require_pass` (bool — errors the step
-below threshold), `mode` (`"fan_out"`|`"orchestrator"` — absent = follow the run
+when the review cannot pass), `allow_summary_fallback` (bool, default `false` —
+accept a deterministic summary only when reviewer coverage is complete), `mode` (`"fan_out"`|`"orchestrator"` — absent = follow the run
 override / the stored `ReviewConfig.mode` / `fan_out`; any other string is
 ignored; a run started with `RunWorkflowReq.review_mode` overrides it); its
 output adds
 `score`/`passed`/`blocking`/`advisory`/`findings`/`providers`/`lenses` (empty
-`providers`+`lenses` ⇒ the stored/default review config). `git_pr` accepts
+`providers`+`lenses` ⇒ the stored/default review config). A passing review must be
+finished, nonempty, cover all requested reviewers (including sibling-covered skips),
+and meet the score threshold. Partial/error reviewer rows cannot pass. A failed
+`require_pass` gate retains its structured review output and fails without automatic
+transport retries. Completed review associations are checkpointed before launch and
+adopted on reentry only for the same node, iteration, target, configuration and diff.
+The engine reserves `_workflow_error` in persisted node/checkpoint output for a
+completed operation with a failed gate; consumers should use node `status`/`error`.
+Loop output includes `history[].error` for failed iterations: these cannot satisfy
+`until` using an earlier child's output, and an exhausted failing loop is retryable
+as an errored node. The active run budget also covers inner steps and backoff;
+time waiting at a human approval is excluded. Retry attempt/reason/delay is published
+before another attempt starts. `git_pr` accepts
 `open` (bool, default `false`) — `true` opens the PR on the remote (gate it on the
 incoming edge passing). A run started from a chat (`Action: Workflow`) **streams
 live per-step progress** back into the trigger thread (origin `channel`/`chat`/
@@ -2933,9 +2946,16 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /insights/reports | Insights:View | `?offset=0&limit=200&summaries=false&latest=false` | Newest-first `ReportView[]`; limit 1–200, default 200. Metadata-only by default (`summary:""`); `summaries=true` includes a preview capped at 80 lines / 64 KiB. `latest=true` returns at most one newest report per cadence (three total), ignoring offset. Only selected-page artifacts are hydrated; archive filenames are still enumerated. |
 | GET /insights/report | Insights:View | — | one report's HTML |
 | GET /insights/report-status | Insights:View | `?key=daily:YYYYMMDD_YYYYMMDD&summary=false` (also weekly/monthly) | `{report:ReportView|null, html_revision:string|null}`. Exactly three artifact metadata checks, independent of archive size; optional bounded summary preview. Missing report is null. Bad key is 400. HTML revision changes when HTML length/mtime changes; a new summary alone does not mean completion. |
-| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason?, attached? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed). **One run per period:** while a run for the same `report_key` is still generating (its session alive and not idle for more than 10 min, its HTML unchanged, inside a 2-hour hard cap — liveness follows the session, not a fixed window) the request starts nothing and returns that run with `attached: true` |
+| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason?, attached? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed). **One run per period:** while a run for the same `report_key` is still generating (its session alive and not idle for more than 10 min, its final completion manifest unpublished, inside a 2-hour hard cap — liveness follows the session, not a fixed window) the request starts nothing and returns that run with `attached: true` |
 | GET /insights/runs/active | View | — | `ActiveRun[]` = `{ run_id, report_key, report_revision, started_at }`, oldest first — runs still generating; finished/killed/timed-out runs are pruned. Lets the page restore its progress banner after it was left |
 | POST /insights/runs/{id}/cancel | root | — | 204 — kills and archives the run's session and drops it from the active list; 404 when no such active run |
+
+Insights generation publishes a run-specific completion manifest only after the
+HTML, summary, metrics, index and action ledger are finished. An HTML revision
+is available for preview but does not release the active run. Catch-up treats
+legacy periods as complete only with both HTML and an index entry; periods with
+a pending manifest remain due and recover with forced collection to finish all
+artifacts. The final manifest is published by atomic rename as the last action.
 
 ## LSP (language server bridge)
 
@@ -3668,12 +3688,16 @@ Invalid/empty input returns 400; unknown criterion/question returns 404; workspa
 failures use the usual authorization error. `GoalLoop.ledger` holds `verifications[]`
 (`criterion_id`, exact serialized `criterion_revision`, server-derived `verified_by`, `evidence`,
 `verified_at`), `questions[]` (`id`, `question`, nullable `answer`, `answered_by`, `answered_at`),
-`next_action`, `last_failure_signature`, `repeated_failures`, `review_summary`, `review_passed`.
+`next_action`, `last_failure_signature`, `repeated_failures`, `review_summary`, `review_passed`,
+and nullable `resume_evaluation_iteration` (server-owned pending evaluation after an executor retry).
 Legacy rows default to an empty ledger. Answers do not auto-resume; unanswered questions block Resume.
 Lifecycle and human-decision mutations serialize per loop. Approval/Resume while execution is
 still stopping returns 409. Explicit executor retry owns Running state, cancels with Pause/Stop,
 clears old output/evaluation/approvals, and returns to Blocked for fresh evaluation. Only the
-current iteration can be retried. Build/Research mode cannot change after creation.
+current iteration can be retried. Resume evaluates that iteration without another planner or
+executor fleet and without spending an iteration; pause/restart preserves this continuation.
+Active runtime bounds the entire controller, including retries, and each executor attempt has
+an absolute phase deadline with bounded cleanup. Build/Research mode cannot change after creation.
 Further executor work invalidates human approvals; changed criterion contracts cannot reuse them.
 Final human verification rechecks the current iteration without rerunning executors or consuming
 another iteration, subject to the active-time and phase limits.
@@ -4478,6 +4502,12 @@ engine.
 
 ## Personal Agents
 
+Captured dispatches are admitted against persisted configuration generations.
+Pausing, retiming or editing a schedule/agent invalidates queued work, including
+a pause followed by resume. Completion advances only the captured schedule
+generation, so an old run cannot consume a replacement one-shot occurrence.
+Orphaned running rows are settled before startup admits any new work.
+
 Grok-bot-style preset agents: a named persona (soul) with a **pinned provider +
 model** (per-agent, never leaking into other sessions), 1..N schedules (each
 with its own cadence + directive + cursor), optional browser use
@@ -4763,7 +4793,10 @@ fall-back time fires at the earlier one). `once` is also accepted by Personal
 Agent schedules (`POST /personal-agents/{id}/schedules`): it fires one run and the
 scheduler then disables the schedule. (The cadence validator is shared, so a
 Scheduled Task may also use `once`; it fires once and then has no next run.) Delivery goes to the origin: a `reminder`
-turn in the thread plus a user-targeted `notification` (macOS / phone).
+turn in the thread plus a user-targeted `notification` (macOS / phone). The durable turn,
+notification and task completion commit together. Interrupted legacy claims
+remain eligible for retry; retry reuses any already-persisted reminder turn or
+notification instead of duplicating delivery.
 
 **Memory.** Three layers: `profile.md` (the user's own facts, edited here; the
 agent only proposes), atomic memories in `otto-memory` (collection `assistant`,
@@ -6161,6 +6194,11 @@ All routes below require authentication and are scoped to the effective user's o
 
 
 ### Self-improvement recent-evidence behavior
+
+All triggers share one atomic running-run admission per workspace; a concurrent
+request returns 409 rather than starting another producer. Completion merges
+its runtime cursor onto current settings and calculates the next run using the
+latest cadence, preserving settings changed while the run was active.
 
 `POST /sessions/{id}/evolve` retains its `{ run_id }` response and existing
 permission/liveness checks. Live, channel and manual per-session analysis share

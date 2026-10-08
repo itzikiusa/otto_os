@@ -10,7 +10,8 @@
 //! and its 15-minute needs-attention check never race each other's cursor, and
 //! the per-agent guard keeps them from running at once in the agent's shared
 //! folder and memory. On startup we **reap** `running` rows left by a previous
-//! daemon life.
+//! daemon life before this supervisor starts admitting work (the boot caller
+//! awaits `PersonalAgentsRepo::reap_running`).
 
 use std::time::Duration;
 
@@ -36,11 +37,6 @@ pub fn start<C: AssistantCtx>(ctx: C) -> CancelSignal {
 
 async fn supervise<C: AssistantCtx>(ctx: C, cancel: CancelSignal) {
     let repo = PersonalAgentsRepo::new(ctx.pool().clone());
-    match repo.reap_running().await {
-        Ok(n) if n > 0 => info!("personal agents: reaped {n} interrupted run(s) on startup"),
-        Ok(_) => {}
-        Err(e) => warn!("personal agents: startup reap failed: {e}"),
-    }
     loop {
         if cancel.is_cancelled() {
             return;

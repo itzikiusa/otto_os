@@ -154,3 +154,22 @@ async fn agent_file_read_enforces_scene_byte_budget() {
     tokio::fs::remove_file(path).await.unwrap();
     assert!(matches!(result, Err(Error::PayloadTooLarge(_))));
 }
+
+#[tokio::test]
+async fn replacement_session_is_persisted_for_the_next_turn() {
+    let (_, repo, scene) = scene_fixture().await;
+    repo.set_session(&scene.id, &"deleted-session".into())
+        .await
+        .unwrap();
+    let scene = repo.get(&scene.id).await.unwrap().unwrap();
+    remember_session(&repo, &scene, &"replacement-session".into()).await;
+    assert_eq!(
+        repo.get(&scene.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("replacement-session")
+    );
+}

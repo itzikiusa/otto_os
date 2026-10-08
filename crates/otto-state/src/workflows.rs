@@ -1189,6 +1189,20 @@ impl WorkflowsRepo {
     /// the in-flight node, marks the rest skipped and re-writes the run.
     /// Returns the bumped `rev`, or `None` when the run had already settled.
     pub async fn request_cancel(&self, id: &Id) -> Result<Option<i64>> {
+        let mut tx = self.pool.begin().await.map_err(dberr("begin cancel run"))?;
+        let rev = Self::cancel_in_transaction(&mut tx, id).await?;
+        tx.commit().await.map_err(dberr("commit cancel run"))?;
+        if rev.is_some() {
+            announce_cancel(id);
+        }
+        Ok(rev)
+    }
+
+    /// Shared cancellation used by parent/child transactions.
+    pub(crate) async fn cancel_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &Id,
+    ) -> Result<Option<i64>> {
         sqlx::query_scalar(
             "UPDATE workflow_runs
              SET status = 'canceled', error = 'canceled',
@@ -1201,14 +1215,9 @@ impl WorkflowsRepo {
         )
         .bind(fmt(Utc::now()))
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(dberr("cancel run"))
-        .inspect(|rev| {
-            if rev.is_some() {
-                announce_cancel(id);
-            }
-        })
     }
 
     /// Lifecycle-only read of a run (perf W1): `(status, waiting_approval)`
@@ -1417,7 +1426,7 @@ fn cancel_bus() -> &'static tokio::sync::broadcast::Sender<Id> {
     BUS.get_or_init(|| tokio::sync::broadcast::channel(64).0)
 }
 
-fn announce_cancel(id: &Id) {
+pub(crate) fn announce_cancel(id: &Id) {
     // No receiver (nothing running) is fine.
     let _ = cancel_bus().send(id.clone());
 }

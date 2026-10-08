@@ -131,11 +131,17 @@ fn out_path(run_id: &str) -> PathBuf {
 /// fences / surrounding prose). `None` if no JSON object is present.
 pub fn parse_turn_result(text: &str) -> Option<SwarmTurnResult> {
     let v = crate::recruiter::extract_json(text)?;
+    if !matches!(
+        v.get("status").and_then(|v| v.as_str()),
+        Some("done" | "blocked" | "needs_review" | "in_progress")
+    ) {
+        return None;
+    }
     serde_json::from_value(v).ok()
 }
 
 fn transcript_ok(t: &str) -> bool {
-    crate::recruiter::extract_json(t).is_some()
+    parse_turn_result(t).is_some()
 }
 
 // --- Prompt ----------------------------------------------------------------
@@ -532,8 +538,8 @@ async fn run_turn_inner(
     detect_shared_files(ctx, &swarm, &agent, task.as_ref(), &cwd_info).await;
 
     // Persist terminal state.
-    if let Some(raw) = outcome.raw.as_deref() {
-        let parsed = parse_turn_result(raw);
+    if let Some(parsed) = outcome.raw.as_deref().and_then(parse_turn_result) {
+        let parsed = Some(parsed);
         let status = parsed
             .as_ref()
             .map(|r| r.status.clone())
@@ -1121,6 +1127,21 @@ pub(crate) fn forget_swarm_files(swarm_id: &str) {
 #[cfg(test)]
 mod shared_files_tests {
     use super::*;
+
+    #[test]
+    fn incomplete_turn_objects_are_not_successful_results() {
+        for raw in [
+            "{}",
+            "{\"summary\":\"still writing\"}",
+            "{\"status\":\"unknown\"}",
+        ] {
+            assert!(
+                parse_turn_result(raw).is_none(),
+                "invalid completion: {raw}"
+            );
+        }
+        assert!(parse_turn_result("{\"status\":\"done\"}").is_some());
+    }
 
     /// S4-25b: the guard unregisters the run and removes its result file.
     #[test]

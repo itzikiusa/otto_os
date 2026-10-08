@@ -305,7 +305,7 @@ fn unregister_cancel(reg: &CancelRegistry, agent_id: &str, flag: &Arc<AtomicBool
             true
         }
         Some(_) => false,
-        None => true,
+        None => false,
     }
 }
 
@@ -529,6 +529,15 @@ impl otto_product::ProductStudioHost for ServerCtx {
 #[cfg(test)]
 mod cancel_registry_tests {
     use super::*;
+
+    #[test]
+    fn old_completion_is_superseded_after_successor_already_finished() {
+        let reg: CancelRegistry = Default::default();
+        let old = register_cancel(&reg, "a1");
+        let new = register_cancel(&reg, "a1");
+        assert!(unregister_cancel(&reg, "a1", &new));
+        assert!(!unregister_cancel(&reg, "a1", &old));
+    }
 
     /// S4-16: the old loop's exit never unregisters a Retry's newer flag.
     #[test]
