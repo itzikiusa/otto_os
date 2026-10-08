@@ -442,3 +442,358 @@ async fn promotion_waits_for_publication_and_rechecks_pending_score() {
         .get_skill("interrupted-promotion-fixture")
         .is_none());
 }
+
+fn promotion_auth(user: &User) -> crate::auth::CurrentAuthContext {
+    crate::auth::CurrentAuthContext(otto_core::auth::AuthContext {
+        real_user: user.clone(),
+        effective_user: user.clone(),
+        scope: None,
+        mcp_only: false,
+        mcp_scope: None,
+        mcp_internal: false,
+        mcp_session_id: None,
+        managed_session_id: None,
+    })
+}
+
+#[tokio::test]
+async fn promotion_metadata_failure_reports_written_skill_and_can_retry() {
+    use axum::response::IntoResponse;
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::test_pool().await;
+    let (ctx, eval, iter, mut user) = fixture(&pool, dir.path()).await;
+    user.is_root = true;
+    let name = "promotion-metadata-fixture";
+    // Exercise replacement of a real existing library entry, not just creation.
+    ctx.context_library
+        .put_skill(name, "previous body")
+        .unwrap();
+    assert_eq!(
+        ctx.context_library.get_skill(name).unwrap().body,
+        "previous body"
+    );
+    sqlx::query("CREATE TRIGGER reject_promoted BEFORE UPDATE OF promoted ON skill_evals BEGIN SELECT RAISE(ABORT, 'promotion metadata unavailable'); END").execute(&pool).await.unwrap();
+    let request = || {
+        Json(PromoteSkillReq {
+            iteration_id: iter.id.clone(),
+            source: "tested".into(),
+            name: name.into(),
+            force: false,
+        })
+    };
+    let result = promote_skill(
+        AxPath(eval.id.clone()),
+        State(ctx.clone()),
+        promotion_auth(&user),
+        CurrentUser(user.clone()),
+        request(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "promotion returned success although its metadata write failed"
+    );
+    let response = result.unwrap_err().into_response();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = problem["message"].as_str().unwrap();
+    assert!(
+        message.contains(name) && message.contains("written") && message.contains("retry"),
+        "partial publication must be actionable: {message}"
+    );
+    assert_eq!(
+        ctx.context_library.get_skill(name).unwrap().body,
+        iter.skill_before
+    );
+    let saved = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+    assert!(!saved.promoted);
+    assert!(saved.promoted_at.is_none() && saved.promoted_by.is_none());
+    sqlx::query("DROP TRIGGER reject_promoted")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let Json(skill) = promote_skill(
+        AxPath(eval.id.clone()),
+        State(ctx.clone()),
+        promotion_auth(&user),
+        CurrentUser(user.clone()),
+        request(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(skill.body, iter.skill_before);
+    let saved = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+    assert!(saved.promoted && saved.promoted_at.is_some());
+    assert_eq!(saved.promoted_by.as_deref(), Some(user.id.as_str()));
+}
+
+#[tokio::test]
+async fn promotion_waiver_failure_preserves_library_and_can_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::test_pool().await;
+    let (ctx, eval, iter, mut user) = fixture(&pool, dir.path()).await;
+    user.is_root = true;
+    let name = "promotion-waiver-fixture";
+    ctx.context_library
+        .put_skill(name, "previous body")
+        .unwrap();
+    // A failed command signal makes this iteration require an explicit override.
+    let mut config = default_skill_eval_config("fixture");
+    config.promote_min_score = 100.0;
+    config.require_proof_pass = true;
+    otto_state::SettingsRepo::new(pool.clone())
+        .put("skill_eval", &serde_json::to_value(config).unwrap())
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER reject_waiver BEFORE UPDATE OF waived_by ON proof_packs BEGIN SELECT RAISE(ABORT, 'waiver unavailable'); END").execute(&pool).await.unwrap();
+    let request = || {
+        Json(PromoteSkillReq {
+            iteration_id: iter.id.clone(),
+            source: "tested".into(),
+            name: name.into(),
+            force: true,
+        })
+    };
+    let result = promote_skill(
+        AxPath(eval.id.clone()),
+        State(ctx.clone()),
+        promotion_auth(&user),
+        CurrentUser(user.clone()),
+        request(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "forced promotion returned success although its proof waiver failed"
+    );
+    assert_eq!(
+        ctx.context_library.get_skill(name).unwrap().body,
+        "previous body"
+    );
+    let saved = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+    assert!(!saved.promoted);
+    let pack_id = saved.iterations[0].proof_pack_id.as_ref().unwrap();
+    assert!(ctx
+        .proof_repo
+        .get_pack(pack_id)
+        .await
+        .unwrap()
+        .waived_by
+        .is_none());
+    sqlx::query("DROP TRIGGER reject_waiver")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let Json(skill) = promote_skill(
+        AxPath(eval.id.clone()),
+        State(ctx.clone()),
+        promotion_auth(&user),
+        CurrentUser(user.clone()),
+        request(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(skill.body, iter.skill_before);
+    assert!(
+        ctx.skill_evals_store
+            .get_eval(&eval.id)
+            .await
+            .unwrap()
+            .promoted
+    );
+    assert_eq!(
+        ctx.proof_repo
+            .get_pack(pack_id)
+            .await
+            .unwrap()
+            .waived_by
+            .as_deref(),
+        Some(user.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn promotion_does_not_report_success_when_metadata_row_disappears() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::test_pool().await;
+    let (ctx, eval, iter, mut user) = fixture(&pool, dir.path()).await;
+    user.is_root = true;
+    // Deletion waits for cancellation under the score lock, then deletes the row
+    // outside it. Model that row disappearing at the metadata publication boundary.
+    sqlx::query("CREATE TRIGGER remove_promoted BEFORE UPDATE OF promoted ON skill_evals BEGIN DELETE FROM skill_evals WHERE id = OLD.id; SELECT RAISE(IGNORE); END").execute(&pool).await.unwrap();
+    let result = promote_skill(
+        AxPath(eval.id.clone()),
+        State(ctx.clone()),
+        promotion_auth(&user),
+        CurrentUser(user),
+        Json(PromoteSkillReq {
+            iteration_id: iter.id,
+            source: "tested".into(),
+            name: "promotion-deleted-fixture".into(),
+            force: true,
+        }),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "promotion returned success when no metadata row was updated"
+    );
+    let message = result.unwrap_err().0.to_string();
+    assert!(message.contains("written") && message.contains("no longer exists"));
+    assert!(
+        !message.contains("retry"),
+        "a removed evaluation cannot be retried"
+    );
+    assert_eq!(
+        ctx.context_library
+            .get_skill("promotion-deleted-fixture")
+            .unwrap()
+            .body,
+        iter.skill_before
+    );
+    assert!(matches!(
+        ctx.skill_evals_store.get_eval(&eval.id).await,
+        Err(Error::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn forced_promotion_requires_root_human_before_any_library_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::test_pool().await;
+    let (ctx, eval, iter, mut user) = fixture(&pool, dir.path()).await;
+    let request = || {
+        Json(PromoteSkillReq {
+            iteration_id: iter.id.clone(),
+            source: "tested".into(),
+            name: "promotion-auth-fixture".into(),
+            force: true,
+        })
+    };
+    let denied = promote_skill(
+        AxPath(eval.id.clone()),
+        State(ctx.clone()),
+        promotion_auth(&user),
+        CurrentUser(user.clone()),
+        request(),
+    )
+    .await;
+    assert!(matches!(denied, Err(ApiError(Error::Forbidden(_)))));
+    user.is_root = true;
+    let mut auth = promotion_auth(&user);
+    auth.0.managed_session_id = Some("fixture-agent".into());
+    let denied = promote_skill(
+        AxPath(eval.id.clone()),
+        State(ctx.clone()),
+        auth,
+        CurrentUser(user),
+        request(),
+    )
+    .await;
+    assert!(matches!(denied, Err(ApiError(Error::Forbidden(_)))));
+    assert!(ctx
+        .context_library
+        .get_skill("promotion-auth-fixture")
+        .is_none());
+    assert!(
+        !ctx.skill_evals_store
+            .get_eval(&eval.id)
+            .await
+            .unwrap()
+            .promoted
+    );
+}
+
+#[tokio::test]
+async fn retry_result_storage_failure_stays_pending_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::test_pool().await;
+    let (ctx, eval, iter, _user) = fixture(&pool, dir.path()).await;
+    let previous = ctx
+        .skill_evals_store
+        .get_iteration(&iter.id)
+        .await
+        .unwrap()
+        .scoring;
+    let mut pending = iter.agents[0].clone();
+    pending.status = "pending".into();
+    assert!(ctx
+        .skill_evals_store
+        .begin_validation_retry(&eval.id, &iter.id, 0, &pending)
+        .await
+        .unwrap());
+    sqlx::query("CREATE TRIGGER reject_retry_result BEFORE UPDATE OF agents_json ON skill_eval_iterations BEGIN SELECT RAISE(ABORT, 'validator result unavailable'); END").execute(&pool).await.unwrap();
+    complete_validation_retry(
+        &ctx,
+        &eval.id,
+        &iter.id,
+        0,
+        &iter.agents[0],
+        previous.clone(),
+        &AtomicBool::new(false),
+    )
+    .await
+    .unwrap();
+    let saved = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+    assert_eq!(
+        saved.status,
+        SkillEvalStatus::Error,
+        "a lost validator result must not publish a completed run"
+    );
+    assert!(saved
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("validator result unavailable"));
+    assert_eq!(saved.iterations[0].agents[0].status, "pending");
+    assert_eq!(
+        saved.iterations[0].scoring.as_ref().unwrap().proof_status,
+        "pending"
+    );
+    assert_commands(saved.iterations[0].scoring.as_ref().unwrap());
+    assert!(saved.composite_score.is_none());
+    assert!(
+        !iteration_gate(&ctx, &saved, &saved.iterations[0])
+            .await
+            .allowed
+    );
+    sqlx::query("DROP TRIGGER reject_retry_result")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(ctx
+        .skill_evals_store
+        .begin_validation_retry(&eval.id, &iter.id, 0, &pending)
+        .await
+        .unwrap());
+    complete_validation_retry(
+        &ctx,
+        &eval.id,
+        &iter.id,
+        0,
+        &iter.agents[0],
+        previous,
+        &AtomicBool::new(false),
+    )
+    .await
+    .unwrap();
+    let recovered = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+    assert_eq!(recovered.status, SkillEvalStatus::Done);
+    assert_eq!(recovered.iterations[0].agents[0].status, "done");
+    assert_ne!(
+        recovered.iterations[0]
+            .scoring
+            .as_ref()
+            .unwrap()
+            .proof_status,
+        "pending"
+    );
+    assert_commands(recovered.iterations[0].scoring.as_ref().unwrap());
+    assert!(recovered.composite_score.is_some());
+}

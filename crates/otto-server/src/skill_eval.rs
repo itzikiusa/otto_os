@@ -2726,10 +2726,10 @@ async fn promote_skill(
     // the iteration's proof pack so the bypass is visible there too.
     if !gate.allowed && req.force {
         if let Some(pack_id) = &it.proof_pack_id {
-            let _ = ctx
-                .proof_repo
+            ctx.proof_repo
                 .waive(pack_id, &user.id, "force-promoted past the eval-lab gate")
-                .await;
+                .await
+                .map_err(ApiError)?;
         }
         ctx.audit(otto_state::NewAuditEntry {
             user_id: Some(user.id.clone()),
@@ -2749,7 +2749,22 @@ async fn promote_skill(
     ctx.context_library
         .put_skill(name, &body)
         .map_err(|e| ApiError(Error::Internal(format!("write skill: {e}"))))?;
-    let _ = ctx.skill_evals_store.set_promoted(&eval_id, &user.id).await;
+    // The library file and evaluation row are separate persistence boundaries.
+    // Do not roll back the file: another library writer may already have edited
+    // it. Report the partial result so retrying the same promotion can finish.
+    ctx.skill_evals_store
+        .set_promoted(&eval_id, &user.id)
+        .await
+        .map_err(|e| {
+            if matches!(e, Error::NotFound(_)) {
+                return ApiError(Error::Internal(format!(
+                    "skill '{name}' was written to the library, but its evaluation no longer exists; inspect the library skill before starting another evaluation"
+                )));
+            }
+            ApiError(Error::Internal(format!(
+                "skill '{name}' was written to the library, but promotion metadata could not be saved; retry the same promotion to finish: {e}"
+            )))
+        })?;
     ctx.context_library
         .get_skill(name)
         .map(Json)
@@ -3047,6 +3062,34 @@ async fn impl_diff(
 
 const IMPL_DIFF_CAP: usize = 200 * 1024;
 
+/// Persist one retry's final validator result before publishing its score and
+/// terminal run status. Kept together so failures can leave a retryable run.
+async fn complete_validation_retry(
+    ctx: &ServerCtx,
+    eval_id: &Id,
+    iter_id: &Id,
+    index: usize,
+    final_state: &EvalValidationState,
+    previous_scoring: Option<EvalScore>,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let rescored = async {
+        ctx.skill_evals_store
+            .set_iter_agent_at(iter_id, index, final_state)
+            .await?;
+        crate::eval_score::publish_validation_retry(ctx, eval_id, iter_id, previous_scoring).await
+    };
+    let result = crate::eval_score::cancellable(cancel, rescored).await;
+    let (status, error) = match result {
+        Ok(()) => (SkillEvalStatus::Done, None),
+        Err(e) => (SkillEvalStatus::Error, Some(e.to_string())),
+    };
+    ctx.skill_evals_store
+        .finish_running(eval_id, status, error.as_deref())
+        .await?;
+    Ok(())
+}
+
 /// Prompts retain 6000 characters; bound command output before allocating or
 /// cloning it for the at-most-16 admitted validators.
 async fn validator_diff(path: &str) -> Option<String> {
@@ -3196,26 +3239,19 @@ async fn retry_validation(
             return;
         }
         let final_state = finish_validation(base, last_sid, pass_scores, union, passes);
-        let _ = ctx_bg
-            .skill_evals_store
-            .set_iter_agent_at(&iter_id_bg, index, &final_state)
-            .await;
-
-        let rescored = crate::eval_score::publish_validation_retry(
+        if let Err(error) = complete_validation_retry(
             &ctx_bg,
             &eval_id_bg,
             &iter_id_bg,
+            index,
+            &final_state,
             previous_scoring,
-        );
-        let result = crate::eval_score::cancellable(&cancel, rescored).await;
-        let (status, error) = match result {
-            Ok(()) => (SkillEvalStatus::Done, None),
-            Err(e) => (SkillEvalStatus::Error, Some(e.to_string())),
-        };
-        let _ = ctx_bg
-            .skill_evals_store
-            .finish_running(&eval_id_bg, status, error.as_deref())
-            .await;
+            &cancel,
+        )
+        .await
+        {
+            tracing::warn!(eval = %eval_id_bg, %error, "failed to persist validation retry completion");
+        }
         drop(retry);
     });
 

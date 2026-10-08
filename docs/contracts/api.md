@@ -1971,7 +1971,7 @@ and a `human_rating`.
 | GET /skill-evaluations/{id} | ws viewer | — | SkillEval (with iterations) |
 | DELETE /skill-evaluations/{id} | ws editor | — | 204 |
 | POST /skill-evaluations/{id}/cancel | ws editor | — | cancel a running evaluation; storage failure returns an error before signalling workers |
-| POST /skill-evaluations/{id}/promote | root | PromoteSkillReq (`force?`) | promote winning skill; 409 if the score+proof gate is unmet and not forced |
+| POST /skill-evaluations/{id}/promote | root human | PromoteSkillReq (`force?`) | promote winning skill; 409 if the score+proof gate is unmet and not forced; 500 explicitly reports a library write whose promotion metadata could not be saved |
 | GET /skill-evaluations/{id}/promote-gate | ws viewer | `?iteration_id` | PromoteGate (allowed + reasons) |
 | GET /skill-evaluations/{id}/iterations/{iter_id}/diff | ws viewer | — | iteration impl diff |
 | GET /skill-evaluations/{id}/iterations/{iter_id}/score | ws viewer | — | EvalScore |
@@ -1996,8 +1996,10 @@ signals remain durable across daemon interruption and a later retry; completion 
 persisted signals without rerunning test/lint commands. Failed validators cannot
 produce passing review evidence: every requested pass must return a valid findings
 verdict, including an explicit empty array for a clean pass. Partial pass sets are
-errors and retain any findings already collected. Initial scoring and retry
-publication preserve ratings saved while commands or agents run; rating changes
+errors and retain any findings already collected. Retry completion also requires
+the final validator result to be saved before publishing its score. A result-storage failure leaves the run in `error` with its previous
+command evidence pending and the storage error visible; a later retry can recover.
+Initial scoring and retry publication preserve ratings saved while commands or agents run; rating changes
 reselect the best iteration and refresh its headline. Rating acceptance saves the
 new human signal and preserved command/review signals atomically as a `pending`
 `scoring.proof_status` snapshot and clears the run headline. Evidence/publication
@@ -2010,6 +2012,18 @@ include failed validators as zero in the validator mean. Promotion requires a co
 fresh proof for that iteration/workspace. The diff endpoint is read-only (including
 the Git index), includes tracked and untracked changes, and caps output at 200 KiB
 with `truncated=true` when the capture budget is reached.
+
+Promotion holds the evaluation's publication lock while checking eligibility and
+writing the library. Forced promotion must persist any existing proof pack's waiver
+before writing the skill; waiver failure leaves the library unchanged. Library files
+and evaluation metadata are separate persistence boundaries. If the library write
+succeeds but saving `promoted` fails, the endpoint returns 500 with a message naming
+the already-written skill and instructing the caller to retry the same promotion.
+The written skill is retained, and the evaluation is not falsely marked promoted.
+Retry rechecks authorization and eligibility, writes the selected skill, and retries
+the metadata update; it does not roll back or delete library content. If the
+evaluation was concurrently deleted, the error instead explains that it no longer
+exists and asks the caller to inspect the already-written library skill.
 
 ### Golden tasks (per-repo evaluation corpus)
 

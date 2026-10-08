@@ -5726,12 +5726,14 @@ export interface StartSkillEvalReq {
   weights?: ScoreWeights | null;
 }
 
+/** Promotion can fail after the library write: the error identifies the written
+ * skill and asks for a retry, or library inspection if the evaluation was deleted. */
 export interface PromoteSkillReq {
   iteration_id: Id;
   /** 'tested' = the skill that iteration ran with; 'improved' = its edited version. */
   source: 'tested' | 'improved';
   name: string;
-  /** Bypass the score+proof gate (root only; audited + waives proof). */
+  /** Bypass the score+proof gate (root human only; audited + waives proof before writing the library). */
   force?: boolean;
 }
 

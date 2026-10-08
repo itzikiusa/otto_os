@@ -630,7 +630,7 @@ impl SkillEvalsRepo {
     /// Mark a run as promoted to the library.
     pub async fn set_promoted(&self, eval_id: &Id, by: &str) -> Result<()> {
         let now = fmt(Utc::now());
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE skill_evals SET promoted = 1, promoted_at = ?, promoted_by = ? WHERE id = ?",
         )
         .bind(&now)
@@ -639,6 +639,9 @@ impl SkillEvalsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("set eval promoted"))?;
+        if updated.rows_affected() == 0 {
+            return Err(Error::NotFound(format!("skill evaluation {eval_id}")));
+        }
         Ok(())
     }
 
