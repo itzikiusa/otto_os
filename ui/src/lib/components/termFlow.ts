@@ -363,24 +363,6 @@ export function withInOrderReset(snapshot: Uint8Array): Uint8Array {
   return framed;
 }
 
-/** Should a `scrollback` snapshot rebuild the terminal? Shared by the live
- *  Terminal and a parked one (termPark.ts) so both apply the SAME rule, and
- *  records the snapshot's epoch. An optional compact (`compactPending`,
- *  requested after a confirmed resize) that answers for the same process
- *  (`epoch`) must not erase a selection or a reading position established
- *  after it was requested (`userHolds`); a `resync` reply or an attach
- *  always rebuilds. */
-export function snapshotApplies(
-  st: { compactPending: boolean; resyncPending: boolean; snapshotEpoch: number | null },
-  epoch: number | null,
-  userHolds: () => boolean,
-): boolean {
-  const compact = st.compactPending && !st.resyncPending && st.snapshotEpoch === epoch;
-  st.compactPending = false;
-  st.snapshotEpoch = epoch;
-  return !(compact && userHolds());
-}
-
 /** Agent-TUI ghost clean-up (full viewport repaint): after output has been
  *  quiet this long… */
 export const TUI_CLEANUP_QUIET_MS = 250;

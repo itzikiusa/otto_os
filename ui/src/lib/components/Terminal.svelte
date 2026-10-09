@@ -66,7 +66,7 @@
   import type { SearchAddon as XSearch } from '@xterm/addon-search';
   import type { SessionStatus as ParkedStatus } from '../api/types';
   import { base64ToBytes as parkedB64 } from '../b64';
-  import { snapshotApplies, withInOrderReset as parkedRis, type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
+  import { withInOrderReset as parkedRis, type TermFlow as FlowT, type WriteQueue as QueueT } from './termFlow';
   import { PARK_CELL_BYTES, PARK_SCROLLBACK, TermPark } from './termPark';
   import { CompactQueue } from './termCompactQueue';
 
@@ -148,9 +148,11 @@
     e.sock.onerror = null;
     e.sock.onclose = () => termPark.evict(key, e);
     const applyParkedSnapshot = (epoch: number | null, snap: Uint8Array | null): void => {
-      const buffer = e.term.buffer.active;
-      const holds = () => e.term.hasSelection() || buffer.baseY - buffer.viewportY > 3;
-      if (!snapshotApplies(e, epoch, holds) || !snap?.length) return;
+      // A snapshot replaces output retired by the daemon. Even a compact
+      // requested before parking must apply; skipping it loses those bytes.
+      e.compactPending = false;
+      e.snapshotEpoch = epoch;
+      if (!snap?.length) return;
       e.writes.dropQueued();
       e.resyncPending = false;
       if (e.writes.inflight === 0) {
@@ -870,18 +872,11 @@
   /** Apply a `scrollback` snapshot (JSON or binary form, perf 01 N3). */
   function applySnapshot(epoch: number | null, snap: Uint8Array | null): void {
     compactQueue.done(compactClient);
-    // A delayed optional compact must not erase a selection or reading
-    // position established after its request. A new process/connection still rebuilds: its
-    // epoch differs (or was cleared on connect).
-    // A `resync` reply always rebuilds: its request already dropped
-    // the queued bytes this snapshot replaces.
-    const buffer = term?.buffer.active;
-    const st = { compactPending, resyncPending, snapshotEpoch };
-    const applies = snapshotApplies(st, epoch, () =>
-      !!term?.hasSelection() || (!!buffer && buffer.baseY - buffer.viewportY > 3));
-    compactPending = st.compactPending;
-    snapshotEpoch = st.snapshotEpoch;
-    if (!applies) return;
+    // Every snapshot replaces the daemon's old output subscription. Never
+    // discard a reply: output between request and capture exists ONLY in it.
+    // Selection/scroll guards belong before requesting an optional compact.
+    compactPending = false;
+    snapshotEpoch = epoch;
     // A snapshot fully reconstructs terminal state: history rows +
     // coherent current-screen frame + input modes (bracketed paste,
     // keypad). ALWAYS reset and rebuild from it — appending under the
@@ -1213,9 +1208,8 @@
     resizeCompactTimer = null;
     if (!term || !connected) return;
     // Wait for attach's epoch, then allow only one optional snapshot in flight.
-    // Otherwise the first reply
-    // clears compactPending and a later reply looks like an attach, bypassing
-    // the selection/reading guard. WS replies are ordered but can be delayed.
+    // WS replies are ordered but can be delayed; don't queue redundant
+    // rebuilds while one is already in flight.
     if (snapshotEpoch === null || compactPending) {
       scheduleResizeCompact();
       return;
@@ -2594,6 +2588,9 @@
     // renderer-agnostic view of the screen: on WebGL (3027df89) the text is
     // drawn on a canvas and there is no `.xterm-rows` DOM to read.
     const probeList = (window as unknown as { __ottoTermProbe?: unknown[] }).__ottoTermProbe;
+    // Keep the probe bound to this engine so tests can inspect its buffer
+    // while parked (the component clears `term` when handing it over).
+    const probeTerm = term;
     const probe = Array.isArray(probeList)
       ? {
           sessionId: () => sessionId,
@@ -2603,10 +2600,10 @@
           renderer: () => (webglAddon ? 'webgl' : 'dom'),
           /** The rows currently in the viewport (parsed buffer), as text. */
           text: () => {
-            const b = term?.buffer.active;
-            if (!term || !b) return '';
+            const b = probeTerm?.buffer.active;
+            if (!probeTerm || !b) return '';
             const rows: string[] = [];
-            for (let y = b.viewportY; y < b.viewportY + term.rows; y++) rows.push(b.getLine(y)?.translateToString(true) ?? '');
+            for (let y = b.viewportY; y < b.viewportY + probeTerm.rows; y++) rows.push(b.getLine(y)?.translateToString(true) ?? '');
             return rows.join('\n');
           },
           /** Called after each renderer pass (DOM or WebGL) — "painted". */
@@ -2897,8 +2894,7 @@
       clearTimeout(resizeCompactTimer);
       resizeCompactTimer = null;
     }
-    // Not a guarded compact: the user asked, so it applies even while
-    // scrolled up (snapshotApplies only guards compactPending replies).
+    // Explicit redraws may be requested even while reading scrollback.
     compactPending = false;
     sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback });
   }
