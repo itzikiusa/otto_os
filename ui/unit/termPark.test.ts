@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PARK_BUDGET_BYTES, PARK_CAP, PARK_CELL_BYTES, PARK_SCROLLBACK, PARK_TTL_MS, TermPark } from '../src/lib/components/termPark.ts';
-import { TermFlow, WriteQueue, snapshotApplies } from '../src/lib/components/termFlow.ts';
+import { TermFlow, WriteQueue } from '../src/lib/components/termFlow.ts';
 import type { WsTermFlowFrame } from '../src/lib/api/types.ts';
 
 /** Fake timers: `advance(ms)` fires what came due. */
@@ -107,22 +107,6 @@ test('park → adopt keeps the credit stream: acks continue on the same tag thro
   assert.deepEqual(acks(adopter), [192 * 1024], 'the adopter continues the cumulative count');
   assert.equal(flow.credit, tag, 'same credit stream');
   assert.equal(flow.pending, 0);
-});
-
-test('snapshotApplies: attach/resync rebuild; a held optional compact is skipped', () => {
-  const st = { compactPending: false, resyncPending: false, snapshotEpoch: null as number | null };
-  assert.equal(snapshotApplies(st, 7, () => true), true, 'attach always rebuilds');
-  assert.equal(st.snapshotEpoch, 7);
-  st.compactPending = true;
-  assert.equal(snapshotApplies(st, 7, () => true), false, 'compact for the same process while the user holds a selection/scroll');
-  assert.equal(st.compactPending, false);
-  st.compactPending = true;
-  assert.equal(snapshotApplies(st, 7, () => false), true, 'compact applies when nothing is held');
-  st.compactPending = true;
-  assert.equal(snapshotApplies(st, 8, () => true), true, 'a new process epoch always rebuilds');
-  st.compactPending = true;
-  st.resyncPending = true;
-  assert.equal(snapshotApplies(st, 8, () => true), true, 'a resync reply always rebuilds');
 });
 
 test('park: a byte budget evicts the oldest engines past it, keeping the newest (perf 01 N2)', () => {

@@ -43,12 +43,16 @@ async function tuiRows(page: Page): Promise<string[]> {
 }
 
 /** The daemon's side of `/ws/term`: every `scrollback` gets the current frame. */
-function mockDaemon(page: Page) {
+function mockDaemon(page: Page, binary = true) {
   const stats = { sockets: 0, snapshots: 0, resizes: [] as { cols: number; rows: number }[] };
   let tag = 'F1';
   let live: WebSocketRoute | null = null;
+  let hold = false;
+  let pending: (() => void) | null = null;
   return {
     stats,
+    holdSnapshots() { hold = true; },
+    releaseSnapshot() { hold = false; pending?.(); pending = null; },
     setFrame(next: string) {
       tag = next;
     },
@@ -62,9 +66,21 @@ function mockDaemon(page: Page) {
         live = ws;
         ws.onMessage((message) => {
           const frame = JSON.parse(String(message));
-          if (frame.type === 'scrollback') {
+          if (frame.type === 'credit') {
+            ws.send(JSON.stringify({ type: 'credit', window: frame.window }));
+          } else if (frame.type === 'scrollback') {
             stats.snapshots++;
-            ws.send(JSON.stringify({ type: 'scrollback', data: Buffer.from(tuiFrame(tag)).toString('base64'), epoch: 1 }));
+            const payload = Buffer.from(tuiFrame(tag));
+            const reply = () => {
+              if (binary) {
+                ws.send(JSON.stringify({ type: 'scrollback', binary: true, len: payload.length, epoch: 1 }));
+                ws.send(payload);
+              } else {
+                ws.send(JSON.stringify({ type: 'scrollback', data: payload.toString('base64'), epoch: 1 }));
+              }
+            };
+            if (hold) pending = reply;
+            else reply();
           } else if (frame.type === 'resize') {
             stats.resizes.push({ cols: frame.cols, rows: frame.rows });
           }
@@ -154,3 +170,39 @@ test('Redraw terminal rebuilds a garbled screen from a fresh snapshot', async ({
   await expect.poll(() => tuiRows(page)).toEqual(expectedRows('F2'));
   expect(daemon.stats.sockets, 'redraw keeps the socket').toBe(1);
 });
+
+for (const binary of [false, true]) for (const parked of [false, true]) {
+  test(`a compact arriving after selection keeps the stream coherent (${parked ? 'parked' : 'visible'}, ${binary ? 'binary' : 'JSON'})`, async ({ page }) => {
+    const daemon = mockDaemon(page, binary);
+    await daemon.install();
+    await open(page);
+    await expect.poll(() => daemon.stats.resizes.length).toBeGreaterThan(0);
+    const before = daemon.stats.snapshots;
+    daemon.setFrame('F2');
+    daemon.holdSnapshots();
+    // A real confirmed height change requests an optional compact.
+    await page.evaluate(() => { document.querySelector<HTMLElement>('.layout')!.style.height = '480px'; });
+    await expect.poll(() => daemon.stats.snapshots).toBeGreaterThan(before);
+    const box = (await page.locator('.xterm-screen').boundingBox())!;
+    await page.mouse.move(box.x + 24, box.y + 30);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 240, box.y + 80, { steps: 10 });
+    await page.mouse.up();
+    await expect.poll(() => page.locator('.xterm-helper-textarea').inputValue()).toContain('F1');
+    if (parked) await page.getByRole('button', { name: 'Toggle terminal' }).click();
+    // The daemon retired the old subscription: F2 exists only in this snapshot.
+    daemon.releaseSnapshot();
+    daemon.send('\x1b[14;1HAFTER-SNAPSHOT');
+    if (parked) {
+      // The disposed component's probe stays bound to its parked engine.
+      // Verify it consumed both frames BEFORE mounting the adopter.
+      await expect.poll(() => page.evaluate(() => {
+        const probes = (window as unknown as { __ottoTermProbe: Probe[] }).__ottoTermProbe;
+        return probes.at(-1)?.text() ?? '';
+      })).toContain('AFTER-SNAPSHOT');
+    }
+    if (parked) await page.getByRole('button', { name: 'Toggle terminal' }).click();
+    await expect.poll(() => tuiRows(page)).toEqual(expectedRows('F2'));
+    await expect.poll(() => screen(page)).toContain('AFTER-SNAPSHOT');
+  });
+}

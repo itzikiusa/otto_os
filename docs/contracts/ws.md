@@ -177,6 +177,13 @@ full emulator depth) before live bytes continue. Clients send `resync` before
 any `resume` its drop triggers; a `resume` arriving after it is a no-op.
 Read-only safe (per viewer, never touches the PTY).
 
+Every non-empty snapshot is authoritative: the server swaps the output
+subscription at capture and retires earlier queued output. Clients must apply
+the reply even if the user starts selecting or scrolling after requesting it;
+discarding it permanently loses updates included only in that snapshot. Avoid
+optional resize-compaction requests while a selection or reading position is
+active, rather than discarding an in-flight reply.
+
 A snapshot can therefore arrive while the client still has older output queued
 in its emulator; it must apply the reset IN ORDER after that backlog (Otto
 prefixes the snapshot with RIS `ESC c` in that case) rather than resetting
