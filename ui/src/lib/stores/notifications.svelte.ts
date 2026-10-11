@@ -384,7 +384,10 @@ class NotificationStore {
       if (n.read || !n.source_key?.endsWith(':waiting') || n.action?.type !== 'open_session') continue;
       const st = ws.statusMap[sid];
       if (st === 'working' || st === 'exited') continue;
-      ws.markNeedsYou(sid);
+      // Raised at the notice's own time: if the operator saw the session
+      // after it (persisted), the flag stays down — no re-raise on reload.
+      const at = Date.parse(n.created_at);
+      ws.markNeedsYou(sid, Number.isFinite(at) ? at : undefined);
     }
   }
 
@@ -460,6 +463,21 @@ class NotificationStore {
   }
 
   // ── Mutations (API + optimistic local state) ──────────────────────────────
+
+  /** The operator entered / focused session `sid`: its unread "waiting" and
+   *  "idle" notices are answered, so mark them read (one call; the daemon
+   *  keeps it, so other windows and devices agree and a reload can't
+   *  re-raise the session's flag from them). */
+  async markSessionSeen(sid: string): Promise<void> {
+    const ids = this.notices
+      .filter((n) => {
+        if (n.read) return false;
+        const k = parseSessionKey(n.source_key);
+        return k?.id === sid && (k.state === 'waiting' || k.state === 'idle');
+      })
+      .map((n) => n.id);
+    if (ids.length) await this.markManyRead(ids);
+  }
 
   async markRead(id: string): Promise<void> {
     const target = this.notices.find((n) => n.id === id);

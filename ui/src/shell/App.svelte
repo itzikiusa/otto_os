@@ -82,6 +82,7 @@
   import { toasts } from '../lib/toast.svelte';
   import { now } from '../lib/stores/now.svelte';
   import { badgeWriter, tauriBadgeSink } from '../lib/dockBadge';
+  import { notifications } from '../lib/stores/notifications.svelte';
 
   // Effects that used to sit between the imports, in their original order.
   // Transcript store: follows page visibility; reset on unmount.
@@ -206,6 +207,50 @@
   // document keeps the old rule — only beside an agent session — so a split
   // never shows two rails.
   const showRightPanel = $derived(!isEmbedded || rightPanel.session);
+
+  // ---- "needs you" raise/lower flag (lib/attention.ts) ----
+  // The operator is present while this window is visible and focused.
+  $effect(() => {
+    const sync = (e?: Event): void => {
+      ws.operatorPresent = document.visibilityState === 'visible' && (e?.type === 'blur' ? false : e?.type === 'focus' ? true : document.hasFocus());
+    };
+    const onVis = (): void => sync();
+    const onFocus = (e: Event): void => sync(e);
+    // Another window lowered / raised a flag: adopt it.
+    const onStorage = (e: StorageEvent): void => {
+      if (e.storageArea === localStorage && e.key === 'otto_attention') ws.reloadAttention();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onFocus);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onFocus);
+      window.removeEventListener('storage', onStorage);
+    };
+  });
+  // LOWER: entering / focusing a session (even doing nothing) puts its flag
+  // down and answers its waiting/idle notices; it stays down until the next
+  // turn end or prompt.
+  $effect(() => {
+    const id = ws.activeSessionId;
+    if (!id || moduleName !== 'agents' || !ws.operatorPresent) return;
+    untrack(() => {
+      ws.clearNeedsYou(id);
+      void notifications.markSessionSeen(id);
+    });
+  });
+  // A flag restored from storage for a session that is working again or has
+  // exited is stale (the live `session_status` rule, applied to loaded rows).
+  $effect(() => {
+    const stale = Object.keys(ws.needsYou).filter((id) => {
+      const st = ws.statusMap[id];
+      return st === 'working' || st === 'running' || st === 'exited' || st === 'reconnectable';
+    });
+    if (stale.length) untrack(() => stale.forEach((id) => ws.clearNeedsYou(id)));
+  });
 
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
   // auth.phase only; the write to plugins.list isn't read here, so no loop.

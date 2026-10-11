@@ -31,6 +31,10 @@ import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
+import { flaggedIds, forget, mergeAttention, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
+
+/** Persisted raise/seen times behind the "needs you" flag (lib/attention.ts). */
+const LS_ATTENTION = 'otto_attention';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
@@ -177,12 +181,20 @@ class WorkspaceStore {
   /** global session-status map (fed by loads + events WS) */
   statusMap: Record<Id, SessionStatus> = $state({});
 
-  /** Sticky "needs you" flags: a session raised a Notification/blocked hook and
-   *  is waiting on the operator (a permission or input it couldn't auto-accept).
-   *  Distinct from plain `idle` (which conflates "thinking" and "blocked").
-   *  Set when the `:waiting` notice arrives (see {@link markNeedsYou}); cleared
-   *  when the user attends — opens the session or sends it input. */
-  needsYou: Record<Id, boolean> = $state({});
+  /** "Needs you" flags, a raise/lower flag per session (lib/attention.ts):
+   *  RAISED by a `:waiting` notice — the daemon sends one when an agent's turn
+   *  ends (Working → Idle, confirmed idle for a while: monitor.rs) and on a
+   *  permission / question prompt (see {@link markNeedsYou}); LOWERED when the operator
+   *  enters / focuses the session (even doing nothing), sends it input, or it
+   *  resumes / exits ({@link clearNeedsYou}); it stays down until the next
+   *  turn end or prompt. Never "on" just because a session is idle. Mirrors
+   *  `attention` (persisted, so a reload neither drops an unseen flag nor
+   *  re-raises a seen one). */
+  private attention: Attention = parseAttention(lsGet(LS_ATTENTION));
+  needsYou: Record<Id, boolean> = $state(Object.fromEntries(flaggedIds(this.attention).map((id) => [id, true])));
+  /** The app window is visible and focused (App.svelte keeps it current):
+   *  only then does an on-screen session count as "seen". */
+  operatorPresent = $state(true);
 
   /** Sidebar filter toggle: show only sessions that need attention. */
   needsYouFilter = $state(false);
@@ -406,12 +418,42 @@ class WorkspaceStore {
     return this.buckets.foregroundActive;
   }
 
-  /** Flag a session as needing the operator's attention (blocked on input). */
-  markNeedsYou(id: Id): void {
-    if (this.needsYou[id]) return;
-    this.needsYou = { ...this.needsYou, [id]: true };
+  /** Is the operator looking at `id` right now (Agents page, focused pane,
+   *  window in front)? A raise while watching is seen at once. */
+  private watching(id: Id): boolean {
+    return this.operatorPresent && id === this.activeSessionId && (router.module === '' || router.module === 'agents');
+  }
+
+  /** `write`: 'merge' folds in what other windows stored since (so a stale
+   *  window never erases their raises / seens), 'replace' writes as-is (a
+   *  forgotten session), 'none' only adopts (a storage event). */
+  private setAttention(next: Attention, write: 'merge' | 'replace' | 'none' = 'merge'): void {
+    if (next === this.attention) return;
+    if (write === 'merge') next = mergeAttention(parseAttention(lsGet(LS_ATTENTION)), next);
+    this.attention = next;
+    if (write !== 'none') lsSet(LS_ATTENTION, serializeAttention(next));
+    const flags: Record<Id, boolean> = {};
+    for (const id of flaggedIds(next)) flags[id] = true;
+    const prev = Object.keys(this.needsYou);
+    const now = Object.keys(flags);
+    if (prev.length !== now.length || now.some((id) => !this.needsYou[id])) this.needsYou = flags;
+  }
+
+  /** Raise a session's flag: its agent finished a turn, or it is blocked on
+   *  the operator (prompt / permission). `at`: when that happened (a
+   *  notice's time on a reload) — a raise older than the last time the
+   *  operator saw the session stays down. */
+  markNeedsYou(id: Id, at: number = Date.now()): void {
+    const was = this.needsYou[id] === true;
+    this.setAttention(raise(this.attention, id, at, this.watching(id)));
     // Needing the operator while not on screen is unread activity too.
-    if (id !== this.activeSessionId) this.unread = { ...this.unread, [id]: true };
+    if (!was && this.needsYou[id] && id !== this.activeSessionId) this.unread = { ...this.unread, [id]: true };
+  }
+
+  /** Another window (popout, side pane) wrote its flags: merge them in —
+   *  the latest raise and the latest seen per session win. */
+  reloadAttention(): void {
+    this.setAttention(mergeAttention(this.attention, parseAttention(lsGet(LS_ATTENTION))), 'none');
   }
 
   /** Reload the in-flight workflow runs for the current workspace. Cheap query;
@@ -467,12 +509,16 @@ class WorkspaceStore {
     if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
   }
 
-  /** Clear a session's "needs you" flag — the user has attended to it. */
+  /** Lower a session's flag: the operator entered / focused it or sent it
+   *  input, or what it waited on is resolved (working again, exited). It
+   *  stays down until a LATER raise. */
   clearNeedsYou(id: Id): void {
-    if (!this.needsYou[id]) return;
-    const next = { ...this.needsYou };
-    delete next[id];
-    this.needsYou = next;
+    this.setAttention(see(this.attention, id, Date.now()));
+  }
+
+  /** A session is gone for good: drop its flag history too. */
+  private forgetAttention(id: Id): void {
+    this.setAttention(forget(this.attention, id), 'replace');
   }
 
   async load(): Promise<void> {
@@ -1608,7 +1654,7 @@ class WorkspaceStore {
     this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== id);
     this.dropArchived(id);
     delete this.statusMap[id];
-    this.clearNeedsYou(id);
+    this.forgetAttention(id);
   }
 
   private dropArchived(id: Id): void {
@@ -1995,7 +2041,7 @@ class WorkspaceStore {
       }
       case 'session_removed': {
         delete this.statusMap[ev.session_id];
-        this.clearNeedsYou(ev.session_id);
+        this.forgetAttention(ev.session_id);
         if (this.unread[ev.session_id]) {
           const next = { ...this.unread };
           delete next[ev.session_id];

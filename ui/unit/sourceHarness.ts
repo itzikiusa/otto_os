@@ -34,6 +34,10 @@ export function loadSource(path: URL, imports: Record<string, unknown>, globals:
       if (!(name in imports) && (name === '../latest' || name === './latest' || name === '../../lib/latest')) {
         return loadSource(new URL('../src/lib/latest.ts', import.meta.url), {}, globals);
       }
+      // The "needs you" raise/lower rules (lib/attention.ts) are pure TS too.
+      if (!(name in imports) && name === '../attention') {
+        return loadSource(new URL('../src/lib/attention.ts', import.meta.url), {}, globals);
+      }
       // Execute the real bounded worker helper; transport lanes are unused here.
       if (!(name in imports) && name === '../poll') {
         return loadSource(new URL('../src/lib/poll.ts', import.meta.url), {
