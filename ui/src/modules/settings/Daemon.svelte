@@ -1,7 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
-  import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
+  import { settingsSaveErrorText } from './ownerOnly';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Daemon settings (root): network listener toggle + port, log path display.
   import { api } from '../../lib/api/client';
@@ -75,14 +75,6 @@
     return secs === DEFAULT_MANUAL_GRACE_SECS ? `${formatGrace(secs)} (default)` : formatGrace(secs);
   }
   const dirty = $derived(listenerDirty || sandboxDirty || sessionsDirty);
-  const exemptOptions = $derived(
-    exemptCandidates(auth.meta?.providers ?? [], allSettings['providers'], sandboxExempt),
-  );
-  function setExempt(provider: string, unconfined: boolean): void {
-    sandboxExempt = unconfined
-      ? [...new Set([...sandboxExempt, provider])].sort((a, b) => a.localeCompare(b))
-      : sandboxExempt.filter((p) => p !== provider);
-  }
   // The inputs' min/max are advisory only; an out-of-range or empty port would
   // be saved as-is (and an empty one silently falls back to the loopback port).
   const portValid = $derived(Number.isInteger(port) && port >= 1024 && port <= 65535);
@@ -93,6 +85,14 @@
   // last-run, MCP/PR-review settings, another window) and wrote false
   // skip-permissions / network-listener audit entries on every save.
   let allSettings: Record<string, unknown> = $state({});
+  const exemptOptions = $derived(
+    exemptCandidates(auth.meta?.providers ?? [], allSettings['providers'], sandboxExempt),
+  );
+  function setExempt(provider: string, unconfined: boolean): void {
+    sandboxExempt = unconfined
+      ? [...new Set([...sandboxExempt, provider])].sort((a, b) => a.localeCompare(b))
+      : sandboxExempt.filter((p) => p !== provider);
+  }
 
   $effect(() => {
     void load();
@@ -198,7 +198,7 @@
       }
       toasts.success('Daemon settings saved', notes.join(' · '));
     } catch (e) {
-      toastError('Couldn’t save daemon settings', e);
+      toasts.error('Couldn’t save daemon settings', settingsSaveErrorText(e, loadErrorText));
     } finally {
       saving = false;
     }

@@ -3,6 +3,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
+  import { settingsSaveErrorText } from './ownerOnly';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Custom agent providers (root): add any CLI (opencode, kilo, …) as a
   // session provider. Stored in the `providers` settings key; the daemon
@@ -169,7 +170,7 @@
       ws.addSession(session); // navigates to the update session
       toasts.info('Updating CLIs…', 'Watch the Update CLIs session for progress');
     } catch (e) {
-      toastError('Couldn’t update the provider', e);
+      toasts.error('Couldn’t update the provider', settingsSaveErrorText(e, loadErrorText));
     } finally {
       updating = false;
     }
@@ -237,7 +238,7 @@
       toasts.success('Providers saved', 'Available immediately for new sessions');
       formOpen = false;
     } catch (e) {
-      toastError('Couldn’t save providers', e);
+      toasts.error('Couldn’t save providers', settingsSaveErrorText(e, loadErrorText));
     } finally {
       saving = false;
     }
@@ -257,7 +258,7 @@
           : `PR and commit drafts use ${draftModel}`,
       );
     } catch (e) {
-      toastError('Couldn’t save the draft model', e);
+      toasts.error('Couldn’t save the draft model', settingsSaveErrorText(e, loadErrorText));
     } finally {
       saving = false;
     }
@@ -278,7 +279,7 @@
           : `New sessions and channel replies default to ${defaultProvider}`,
       );
     } catch (e) {
-      toastError('Couldn’t save the default agent', e);
+      toasts.error('Couldn’t save the default agent', settingsSaveErrorText(e, loadErrorText));
     } finally {
       saving = false;
     }
@@ -317,7 +318,7 @@
       if (enable) revert.add(nameOfProvider);
       else revert.delete(nameOfProvider);
       disabled = revert;
-      toastError(`Couldn’t ${enable ? 'enable' : 'hide'} ${nameOfProvider}`, e);
+      toasts.error(`Couldn’t ${enable ? 'enable' : 'hide'} ${nameOfProvider}`, settingsSaveErrorText(e, loadErrorText));
     }
   }
 
@@ -344,7 +345,7 @@
         autoUpdate.enabled ? `Daily at ${autoUpdate.time_of_day} ${autoUpdate.use_utc ? 'UTC' : 'local time'}` : undefined,
       );
     } catch (e) {
-      toastError('Couldn’t save automatic updates', e);
+      toasts.error('Couldn’t save automatic updates', settingsSaveErrorText(e, loadErrorText));
       // Re-read so the controls never show a schedule that isn't saved.
       autoUpdate = {
         ...AUTO_UPDATE_DEFAULTS,
@@ -381,7 +382,7 @@
       );
     } catch (e) {
       skipPermissions = !skipPermissions; // revert the optimistic toggle on failure
-      toastError('Couldn’t save the permission setting', e);
+      toasts.error('Couldn’t save the permission setting', settingsSaveErrorText(e, loadErrorText));
     } finally {
       savingSkip = false;
     }
