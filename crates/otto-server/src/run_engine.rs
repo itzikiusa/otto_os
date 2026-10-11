@@ -205,6 +205,7 @@ async fn stage_resolve(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
     let repo = crate::run_sources::resolve_repo(
         ctx,
         &run.workspace_id,
+        &run.created_by,
         run.repo_id.as_deref(),
         run.source_kind,
         &run.source_ref,

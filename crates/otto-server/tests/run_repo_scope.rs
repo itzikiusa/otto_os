@@ -1,7 +1,10 @@
-//! Run with Otto never works in another workspace's repo (S15-05): launch only
-//! checks the caller's role on the TARGET workspace, so an explicit `repo_id`
-//! from a different workspace must be refused — as a 404, exactly like a
-//! missing repo — before any run row, worktree or agent exists.
+//! Run with Otto never works in a repo its launcher cannot reach (S15-05):
+//! launch only checks the caller's role on the TARGET workspace, so an
+//! explicit `repo_id` from a workspace they cannot edit is refused — as a 404,
+//! exactly like a missing repo — before any run row, worktree or agent
+//! exists. A repo another workspace registered is fine when they CAN edit
+//! that workspace (sweep 2026-10-11: the same lift #102 gave workflow runs).
+use otto_core::domain::{Capability, Feature, WorkspaceRole};
 use otto_server::ServerCtx;
 use otto_state::{DbPool, NewRepo};
 use serde_json::json;
@@ -24,7 +27,7 @@ async fn mem_pool() -> DbPool {
 }
 
 #[tokio::test]
-async fn launching_a_run_on_another_workspaces_repo_is_not_found() {
+async fn launching_a_run_on_a_repo_the_launcher_cannot_edit_is_not_found() {
     let tmp = tempfile::TempDir::new().unwrap();
     let pool = mem_pool().await;
     let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
@@ -33,8 +36,16 @@ async fn launching_a_run_on_another_workspaces_repo_is_not_found() {
         .create("owner", "unused", "Owner", true)
         .await
         .unwrap();
+    let member = users
+        .create("member", "unused", "Member", false)
+        .await
+        .unwrap();
+    otto_state::GrantsRepo::new(pool.clone())
+        .set_grants(&member.id, &[(Feature::RunWithOtto, Capability::Edit)])
+        .await
+        .unwrap();
     let token = otto_rbac::AuthRepo::new(pool.clone())
-        .issue(&owner.id)
+        .issue(&member.id)
         .await
         .unwrap();
     let ws_a = ctx
@@ -45,6 +56,10 @@ async fn launching_a_run_on_another_workspaces_repo_is_not_found() {
     let ws_b = ctx
         .workspaces
         .create("B", tmp.path().to_str().unwrap(), &owner.id)
+        .await
+        .unwrap();
+    ctx.workspaces
+        .set_member(&ws_b.id, &member.id, WorkspaceRole::Editor)
         .await
         .unwrap();
     let checkout = tmp.path().join("repo-a");
@@ -70,21 +85,23 @@ async fn launching_a_run_on_another_workspaces_repo_is_not_found() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = reqwest::Client::new();
 
-    let r = client
-        .post(format!("{origin}/workspaces/{}/runs", ws_b.id))
-        .bearer_auth(&token)
-        .json(&json!({ "seed_text": "fix it", "repo_id": repo_a.id }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 404, "a repo of workspace A launched from B");
-    // The handler's NotFound (not an unmounted route): a JSON problem body.
-    let body: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(body["code"], "not_found", "{body}");
-    assert!(
-        body["message"].as_str().unwrap_or("").contains("repo"),
-        "{body}"
-    );
+    for repo_id in [repo_a.id.as_str(), "no-such-repo"] {
+        let r = client
+            .post(format!("{origin}/workspaces/{}/runs", ws_b.id))
+            .bearer_auth(&token)
+            .json(&json!({ "seed_text": "fix it", "repo_id": repo_id }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "{repo_id}: a repo the member cannot edit");
+        // The handler's NotFound (not an unmounted route): a JSON problem body.
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["code"], "not_found", "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("repo"),
+            "{body}"
+        );
+    }
     assert!(
         ctx.runs
             .list_by_workspace(&ws_b.id, 10)
@@ -92,6 +109,41 @@ async fn launching_a_run_on_another_workspaces_repo_is_not_found() {
             .unwrap()
             .is_empty(),
         "no run row is created"
+    );
+    // Once the member may edit A as well, B's run may work in A's repo. The
+    // repo-scope check passes; the launch then goes on to the source checks.
+    ctx.workspaces
+        .set_member(&ws_a.id, &member.id, WorkspaceRole::Viewer)
+        .await
+        .unwrap();
+    let r = client
+        .post(format!("{origin}/workspaces/{}/runs", ws_b.id))
+        .bearer_auth(&token)
+        .json(&json!({ "seed_text": "fix it", "repo_id": repo_a.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        404,
+        "a viewer of A still cannot drive its checkout"
+    );
+    ctx.workspaces
+        .set_member(&ws_a.id, &member.id, WorkspaceRole::Editor)
+        .await
+        .unwrap();
+    let r = client
+        .post(format!("{origin}/workspaces/{}/runs", ws_b.id))
+        .bearer_auth(&token)
+        .json(&json!({ "seed_text": "fix it", "repo_id": repo_a.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "an editor of both workspaces: {}",
+        r.text().await.unwrap_or_default()
     );
     server.abort();
 }

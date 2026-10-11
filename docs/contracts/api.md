@@ -4892,7 +4892,7 @@ The run advances in the background; subscribe to `Event::OttoRunUpdated` (see `w
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/workspaces/{wid}/runs | run_with_otto edit + ws editor | `LaunchRunReq {source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, title?}` | OttoRun (queued; poll/subscribe) `404` when `repo_id` names a repo outside `{wid}` (reported like a missing repo; no run is created). |
+| POST /api/v1/workspaces/{wid}/runs | run_with_otto edit + ws editor | `LaunchRunReq {source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, title?}` | OttoRun (queued; poll/subscribe) `404` when `repo_id` names no registered repo, or a repo of another workspace the caller cannot edit (reported like a missing repo; no run is created). A repo another workspace registered is accepted when the caller is root or an editor there too (as a workflow run may name any registered repo, S3-302). |
 | GET /api/v1/workspaces/{wid}/runs | run_with_otto view + ws viewer | — | `OttoRun[]` |
 | GET /api/v1/workspaces/{wid}/runs/detect?q= | run_with_otto view + ws viewer | — | `{detected: {source_kind, source_ref, url}?}` |
 | GET /api/v1/runs/{id} | run_with_otto view + ws viewer | — | OttoRun |
