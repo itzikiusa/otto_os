@@ -56,7 +56,9 @@
 
   // Legacy deep links / persisted state may still say 'changes' or 'history';
   // both render the graph now, and the Graph tab must read as active for them.
-  const effTab = $derived(tab === 'changes' || tab === 'history' ? 'graph' : tab);
+  // Legacy ids (changes/history) are the graph; so is Focus in the Side panel,
+  // which has no Focus tab (see `tabs`).
+  const effTab = $derived(tab === 'changes' || tab === 'history' || (embedded && tab === 'focus') ? 'graph' : tab);
 
   // Status is owned by the git store (single source of truth) so the auto-fetch
   // loop, the tab strip and this toolbar all stay in sync from one fetch.
@@ -249,14 +251,15 @@
     return scp?.[1] ?? 'this remote';
   }
 
-  const tabs = [
+  const tabs = $derived([
     { id: 'graph', label: 'Graph' },
     { id: 'prs', label: 'Pull requests' },
     { id: 'review', label: 'Review' },
     // Cross-repo: "my PRs" + "my Jira work" — not scoped to this repo, but it
-    // lives here because the git page is where you think about this.
-    { id: 'focus', label: 'Focus' },
-  ];
+    // lives here because the git page is where you think about this. Not in
+    // the Side panel's repo view (`embedded`): there it read as this repo's.
+    ...(embedded ? [] : [{ id: 'focus', label: 'Focus' }]),
+  ]);
 
   function selectTab(id: string): void {
     resolving = false;

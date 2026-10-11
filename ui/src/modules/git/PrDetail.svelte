@@ -14,7 +14,6 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { git } from '../../lib/stores/git.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
   import { renderMarkdown } from '../../lib/md';
   import { openExternal } from '../../lib/external';
@@ -370,15 +369,23 @@
   // notify the author + reviewers, so both confirm where / what / who first.
   const repoLabel = $derived(prRepo?.name ?? 'this repository');
 
+  // What declining means where the PR lives: Bitbucket Cloud "declines" (and
+  // a declined PR can't be reopened); GitHub and GitLab close it, reopenable.
+  const declineWhat = $derived(
+    prRepo?.provider === 'bitbucket'
+      ? `Bitbucket declines the PR: it is closed without merging and can’t be reopened.`
+      : `${providerName === 'the provider' ? 'The provider' : providerName} closes the PR without merging. It can be reopened there.`,
+  );
+
   async function action(kind: 'approve' | 'decline'): Promise<void> {
     const approve = kind === 'approve';
     const ok = await confirmOutward({
       verb: approve ? 'Approve PR' : 'Decline PR',
       title: approve ? `Approve PR #${number}?` : `Decline PR #${number}?`,
-      where: `${repoLabel} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
+      where: `${repoLabel} on ${providerName} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
       what: approve
         ? 'Your approval, posted under your git account.'
-        : 'The PR is closed without merging. It can be reopened on the provider.',
+        : declineWhat,
       who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers are notified.`,
       danger: !approve,
     });
@@ -395,10 +402,6 @@
     } finally {
       if (!disposed) busy = '';
     }
-  }
-
-  function moreMenu(e: MouseEvent | KeyboardEvent): void {
-    ctxMenu.show(e, [{ label: 'Decline PR…', icon: 'x', danger: true, action: () => void action('decline') }]);
   }
 
   async function openAsSession(): Promise<void> {
@@ -593,17 +596,19 @@
             </button>
           </div>
           <span class="grow"></span>
-          <!-- Decline is destructive + outward: kept out of the primary row
-               (next to Merge) and behind a ⋯ menu that then confirms. -->
+          <!-- Decline is destructive + outward: danger-styled, set apart at the
+               far end of the row (not beside Merge), and it confirms where it
+               goes and what happens before anything is sent. -->
           <button
-            class="icon-btn"
+            class="btn danger"
             disabled={busy !== ''}
-            data-testid="prd-more"
-            aria-label="More PR actions"
-            title="More PR actions"
-            onclick={moreMenu}
-            onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && moreMenu(e)}
-          ><Icon name="more" size={14} /></button>
+            data-testid="prd-decline"
+            title="Close PR #{number} without merging (asks first)"
+            onclick={() => action('decline')}
+          >
+            <Icon name="x" size={12} />
+            {busy === 'decline' ? 'Declining…' : 'Decline…'}
+          </button>
         </section>
         {#if showRequestChanges}
           <section class="prd-request-changes card">
@@ -872,6 +877,7 @@
   }
   .prd-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
