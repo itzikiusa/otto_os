@@ -18,6 +18,8 @@
 
 #[path = "activity_isolation.rs"]
 mod activity_isolation;
+#[path = "agent_run_recovery.rs"]
+mod agent_run_recovery;
 #[path = "admin_sessions.rs"]
 mod admin_sessions;
 #[path = "auth_security.rs"]
