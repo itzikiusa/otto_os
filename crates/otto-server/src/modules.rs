@@ -6038,7 +6038,7 @@ async fn open_agent_session(
         .await
         .map_err(ApiError)?;
     // S11-302: an agent's own credential opens workers only inside the
-    // workspace, its own folder or a worktree of the same repo.
+    // workspace, its own folder, a registered repo or a worktree of those.
     if let Some(lead) = crate::feature_guard::agent_session_of(&auth) {
         ctx.manager
             .check_agent_cwd(&ws, lead, create.cwd.as_deref())
