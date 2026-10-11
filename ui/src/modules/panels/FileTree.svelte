@@ -1,9 +1,12 @@
 <script lang="ts">
   // FileTree: lazy browsable file tree + read-only syntax-highlighted viewer
-  // for the right-panel Files tab.
+  // for the Side panel's Files tab. With `navigation` it also gets the folder
+  // picker's navigation (lib/components/folderNavigation.ts): Back / Forward /
+  // Up, clickable breadcrumbs, a typed "go to" path, a Show hidden toggle, and
+  // an "open this folder" action on every folder row.
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -13,6 +16,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { emptyHistory, folderCrumbs, historyTarget, parentFolder, resolveJump, settleFolder } from '../../lib/components/folderNavigation';
+  import { lsGet, lsSet } from '../../lib/storage';
   import { marked } from 'marked';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
 
@@ -25,8 +30,10 @@
     /** When true, this section responds to programmatic open-file requests
      *  (terminal `file:line` clicks). Only one section should be primary. */
     primary?: boolean;
+    /** Folder navigation bar (history, breadcrumbs, go-to path, hidden). */
+    navigation?: boolean;
   }
-  let { root = undefined, onClose = undefined, primary = false }: Props = $props();
+  let { root = undefined, onClose = undefined, primary = false, navigation = false }: Props = $props();
 
   // ── tree state ────────────────────────────────────────────────────────────
 
@@ -55,6 +62,71 @@
   let rootRequest: AbortController | undefined;
   let fileGeneration = 0;
   let fileRequest: AbortController | undefined;
+
+  // ── navigation state ──────────────────────────────────────────────────────
+  // The folder actually listed (canonical, from the daemon) + its parent, the
+  // Back/Forward history of listed folders, and the history entry a Back /
+  // Forward step is walking to (settled when its listing lands).
+  let listedPath = $state('');
+  let listedParent = $state<string | null>(null);
+  let history = $state(emptyHistory());
+  let walkIndex: number | undefined;
+  const backIndex = $derived(historyTarget(history, -1));
+  const forwardIndex = $derived(historyTarget(history, 1));
+  // Dotfiles are shown by default (the tree always listed them); the toggle
+  // is remembered per device.
+  const HIDDEN_KEY = 'otto_files_show_hidden';
+  let showHidden = $state(lsGet(HIDDEN_KEY) !== '0');
+  function toggleHidden(): void {
+    showHidden = !showHidden;
+    lsSet(HIDDEN_KEY, showHidden ? '1' : '0');
+  }
+  let editingPath = $state(false);
+  let pathDraft = $state('');
+  let pathInput = $state<HTMLInputElement | null>(null);
+  let crumbsEl = $state<HTMLElement | null>(null);
+
+  /** Show `path` as the tree's root (`index`: a Back/Forward step). */
+  function navigate(path: string, index?: number): void {
+    if (path === loadedRoot && !rootError) {
+      // Already listed: only the history position moves.
+      if (index !== undefined) history = { ...history, index };
+      return;
+    }
+    walkIndex = index;
+    overriddenRoot = path;
+    if (path === loadedRoot) void loadRoot(path); // a failed listing: retry it
+  }
+  /** Follow the section's own folder again (the session's / the panel's). */
+  function resetRoot(): void {
+    walkIndex = undefined;
+    overriddenRoot = undefined;
+  }
+  function walk(index: number | null): void {
+    if (index !== null) navigate(history.paths[index], index);
+  }
+  async function startPathEdit(): Promise<void> {
+    pathDraft = listedPath || effectiveRoot;
+    editingPath = true;
+    await tick();
+    pathInput?.focus();
+    pathInput?.select();
+  }
+  function commitPath(): void {
+    const target = resolveJump(pathDraft, listedPath || effectiveRoot);
+    editingPath = false;
+    if (target) navigate(target);
+  }
+  function onPathKey(e: KeyboardEvent): void {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitPath();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      editingPath = false;
+    }
+  }
 
   // ── viewer state ──────────────────────────────────────────────────────────
 
@@ -106,10 +178,17 @@
     loadedRoot = r;
     rootLoading = true;
     rootError = '';
+    const index = walkIndex;
+    walkIndex = undefined;
     try {
       const data = await api.get<FsBrowse>(`/fs/browse?path=${encodeURIComponent(r)}&files=true`, controller.signal);
       if (generation !== rootGeneration) return;
       rootNodes = data.entries.map((e) => makeNode(e, 0));
+      listedPath = data.path;
+      listedParent = data.parent;
+      history = settleFolder(history, data.path, index);
+      await tick();
+      if (generation === rootGeneration && crumbsEl) crumbsEl.scrollLeft = crumbsEl.scrollWidth;
     } catch (e) {
       if (generation === rootGeneration) rootError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -155,9 +234,7 @@
     await readFile(entry.path, undefined, undefined, true, false);
   }
 
-  function parentFolder(path: string): string {
-    return path.slice(0, path.lastIndexOf('/')) || '/';
-  }
+  const folderOf = (path: string): string => parentFolder(path) ?? '/';
 
   async function openPath(path: string, line?: number, col?: number): Promise<void> {
     await readFile(path, line, col, false, true);
@@ -170,7 +247,7 @@
     fileRequest = controller;
     // Browsing location is independent from workspace/session identity. Listing
     // the parent is useful but never a prerequisite to showing a readable file.
-    if (revealParent) overriddenRoot = parentFolder(path);
+    if (revealParent) overriddenRoot = folderOf(path);
     viewerGotoLine = line ?? null;
     viewerGotoCol = col ?? null;
     viewerLoading = true;
@@ -182,7 +259,7 @@
       const data = await api.get<FsRead>(`/fs/read?path=${encodeURIComponent(path)}`, controller.signal);
       if (generation !== fileGeneration) return;
       viewerFile = data;
-      if (revealParent) overriddenRoot = parentFolder(data.path);
+      if (revealParent) overriddenRoot = folderOf(data.path);
     } catch (e) {
       if (generation !== fileGeneration) return;
       viewerError = `Cannot open ${path}: ${e instanceof Error ? e.message : String(e)}. If the terminal shortened the filename, use its full path.`;
@@ -246,19 +323,22 @@
   `;
   });
 
-  // Collect flattened visible nodes for rendering (DFS walk).
-  function flatten(nodes: TreeNode[]): TreeNode[] {
+  // Collect flattened visible nodes for rendering (DFS walk). Dotfiles (and
+  // everything under a dot-folder) drop out while Show hidden is off.
+  function flatten(nodes: TreeNode[], hidden: boolean): TreeNode[] {
     const out: TreeNode[] = [];
     for (const n of nodes) {
+      if (!hidden && n.entry.name.startsWith('.')) continue;
       out.push(n);
       if (n.open && n.children.length > 0) {
-        out.push(...flatten(n.children));
+        out.push(...flatten(n.children, hidden));
       }
     }
     return out;
   }
 
-  const visibleNodes = $derived(flatten(rootNodes));
+  const visibleNodes = $derived(flatten(rootNodes, showHidden || !navigation));
+  const hiddenCount = $derived(navigation && !showHidden ? rootNodes.filter((n) => n.entry.name.startsWith('.')).length : 0);
 
   // Basename of root for display.
   function basename(p: string): string {
@@ -288,6 +368,16 @@
         <Icon name="folder" size={12} />
         <span class="ft-root-text">{basename(effectiveRoot)}</span>
       </span>
+      {#if navigation && overriddenRoot !== undefined && (root ?? wsRoot) && overriddenRoot !== (root ?? wsRoot)}
+        <button
+          class="icon-btn ft-change-btn"
+          title="Back to {basename(root ?? wsRoot)}"
+          aria-label="Back to {basename(root ?? wsRoot)}"
+          onclick={resetRoot}
+        >
+          <Icon name="home" size={12} />
+        </button>
+      {/if}
       {#if effectiveRoot}
         <!-- The tree is loaded once per root; files the agent writes afterwards
              only show up on a re-list, so give that a button. -->
@@ -321,6 +411,61 @@
       {/if}
     </div>
 
+    {#if navigation && effectiveRoot}
+      <!-- Folder navigation: the folder picker's history, breadcrumbs and
+           go-to path, sized for the panel (icons + one scrolling crumb row). -->
+      <div class="ft-nav">
+        <button class="icon-btn ft-nav-btn" title="Back" aria-label="Back" disabled={backIndex === null || rootLoading} onclick={() => walk(backIndex)}>
+          <Icon name="chevronLeft" size={12} />
+        </button>
+        <button class="icon-btn ft-nav-btn" title="Forward" aria-label="Forward" disabled={forwardIndex === null || rootLoading} onclick={() => walk(forwardIndex)}>
+          <Icon name="chevronRight" size={12} />
+        </button>
+        <button class="icon-btn ft-nav-btn" title="Up one folder" aria-label="Up one folder" disabled={!listedParent || rootLoading} onclick={() => listedParent && navigate(listedParent)}>
+          <Icon name="arrowUp" size={12} />
+        </button>
+        {#if editingPath}
+          <input
+            bind:this={pathInput}
+            bind:value={pathDraft}
+            class="input ft-path-input mono"
+            dir="ltr"
+            aria-label="Go to folder (absolute, ~ or relative path)"
+            placeholder="/path, ~/path or sub/folder"
+            spellcheck="false"
+            autocomplete="off"
+            onkeydown={onPathKey}
+            onblur={() => (editingPath = false)}
+          />
+        {:else}
+          <nav class="ft-crumbs mono" dir="ltr" aria-label="Folder path" bind:this={crumbsEl} ondblclick={() => void startPathEdit()}>
+            {#each folderCrumbs(listedPath || effectiveRoot) as part, i (part.path)}
+              {#if i > 1}<span class="ft-crumb-sep" aria-hidden="true">/</span>{/if}
+              <button
+                class="ft-crumb"
+                title={part.path}
+                aria-current={part.path === (listedPath || effectiveRoot) ? 'location' : undefined}
+                onclick={() => navigate(part.path)}
+              >{part.label}</button>
+            {/each}
+          </nav>
+          <button class="icon-btn ft-nav-btn" title="Type a path to go to" aria-label="Type a path to go to" onclick={() => void startPathEdit()}>
+            <Icon name="edit" size={12} />
+          </button>
+        {/if}
+        <button
+          class="icon-btn ft-nav-btn"
+          class:on={showHidden}
+          title={showHidden ? 'Hide dotfiles' : 'Show hidden files (dotfiles)'}
+          aria-label="Show hidden files"
+          aria-pressed={showHidden}
+          onclick={toggleHidden}
+        >
+          <Icon name={showHidden ? 'eye' : 'eyeOff'} size={12} />
+        </button>
+      </div>
+    {/if}
+
     {#if !effectiveRoot}
       <EmptyState
         icon="folder"
@@ -346,6 +491,7 @@
       <div class="tree-pane" class:has-viewer={!!viewerFile}>
         <div class="tree-list">
           {#each visibleNodes as node (node.entry.path)}
+            <div class="tree-item">
             <button
               class="tree-row"
               class:is-dir={node.entry.is_dir}
@@ -353,6 +499,7 @@
               class:is-file={!node.entry.is_dir}
               style="padding-inline-start: {8 + node.depth * 14}px"
               onclick={() => node.entry.is_dir ? toggleDir(node) : openFile(node.entry)}
+              ondblclick={() => navigation && node.entry.is_dir && navigate(node.entry.path)}
               title={node.entry.path}
             >
               {#if node.entry.is_dir}
@@ -373,9 +520,17 @@
                 <span class="git-badge dim"><Icon name="branch" size={12} /></span>
               {/if}
             </button>
+            {#if navigation && node.entry.is_dir}
+              <button class="icon-btn enter-btn" title="Open {node.entry.name} as the folder" aria-label="Open folder {node.entry.name}" onclick={() => navigate(node.entry.path)}>
+                <Icon name="arrow" size={12} />
+              </button>
+            {/if}
+            </div>
           {/each}
           {#if visibleNodes.length === 0}
-            <div class="empty-dir dim">Empty folder</div>
+            <div class="empty-dir dim">
+              {#if hiddenCount > 0}Only hidden items here. <button class="btn small ghost" onclick={toggleHidden}>Show hidden</button>{:else}Empty folder{/if}
+            </div>
           {/if}
         </div>
       </div>
@@ -487,6 +642,62 @@
     color: var(--danger);
   }
 
+  /* ── navigation ───────────────────────── */
+  .ft-nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 4px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    min-width: 0;
+  }
+  .ft-nav-btn {
+    flex-shrink: 0;
+  }
+  .ft-nav-btn.on {
+    color: var(--accent-text);
+  }
+  .ft-crumbs {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .ft-crumb {
+    flex-shrink: 0;
+    font: inherit;
+    color: inherit;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    padding: 2px 4px;
+    cursor: pointer;
+  }
+  .ft-crumb:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .ft-crumb[aria-current] {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .ft-crumb-sep {
+    flex-shrink: 0;
+  }
+  .ft-path-input {
+    flex: 1;
+    min-width: 0;
+    height: 22px;
+    font-size: var(--fs-xs);
+  }
+
   /* ── tree ─────────────────────────────── */
   .tree-pane {
     flex: 1 1 0;
@@ -505,11 +716,37 @@
     padding: 2px 0;
   }
 
+  .tree-item {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .tree-item:hover {
+    background: var(--hover);
+  }
+  /* "Open this folder": shown on row hover / keyboard focus. */
+  .enter-btn {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    margin-inline-end: 4px;
+    opacity: 0;
+  }
+  .tree-item:hover .enter-btn,
+  .enter-btn:focus-visible {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .enter-btn {
+      opacity: 0.6;
+    }
+  }
   .tree-row {
     display: flex;
     align-items: center;
     gap: 4px;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     height: 22px;
     border: none;
     background: transparent;
