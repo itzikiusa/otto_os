@@ -150,8 +150,9 @@ Insights are **multi-provider** in two senses:
 2. **How they are generated.** Each run is a real headless agent session created
    on the **global default provider** (`default_provider` setting, resolved via
    `otto_core::provider::resolve_provider`). The run executes in a **neutral
-   cwd** (the Otto data dir, which always exists and is where the skill writes
-   its history), and is auto-trusted for that path. The session title is
+   cwd** (`<data_dir>/insights`, created on the first run and permitted by the
+   agent sandbox), and is auto-trusted for that path. Otto's data root remains
+   protected and is never used as the agent's working directory. The session title is
    `Insights: <kind>` with `meta.source = "insights"`. It runs headlessly — Otto
    injects the run prompt once the session TUI is ready, then lets it complete on
    its own; the disposable session is archived after the run window so it does
