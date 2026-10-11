@@ -12,8 +12,8 @@
 //! A "run" = spawning a real, headless agent session that executes the
 //! `insights` skill for that period (mirroring how `product_agent::run_lens_session`
 //! runs a product lens). The session runs on the global default provider in a
-//! neutral cwd (the Otto data dir). If the `insights` skill is not installed in
-//! the Library, the run is SKIPPED and a warning logged (it's a manual-install
+//! neutral cwd (the Insights report directory). If the `insights` skill is not
+//! installed in the Library, the run is SKIPPED and a warning logged (it's a manual-install
 //! skill; the UI tells the user to install it).
 //!
 //! Data dir layout the skill writes (mirrored here for parsing / idempotency):
@@ -828,8 +828,8 @@ fn materialize_collector(dir: &Path) -> std::io::Result<PathBuf> {
 
 /// Spawn a real, openable agent session that runs the `insights` skill for
 /// `(kind, offset)`. The session uses the global default provider, runs in a
-/// neutral cwd (the Otto data dir), and is NOT awaited to completion here — it
-/// runs headlessly like the planner / product lens sessions.
+/// neutral cwd (the Insights report directory), and is NOT awaited to completion
+/// here — it runs headlessly like the planner / product lens sessions.
 ///
 /// Returns the spawned session id on success. Returns `Ok(None)` (a no-op) when
 /// the `insights` skill is not installed in the Library — the caller logs a
@@ -861,18 +861,18 @@ pub async fn run_insights<C: InsightsCtx>(
         return Ok(None);
     };
 
-    // Neutral cwd: the Otto data dir (parent of the library root), which always
-    // exists and is where the skill writes its history.
-    let data_dir = insights_dir(ctx)
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| ctx.library().root.clone());
-    let cwd = data_dir.to_string_lossy().into_owned();
+    // Agent sessions cannot start in Otto's data root. The report directory is
+    // an allowed agent work area; create it for first runs before cwd validation.
+    let dir = insights_dir(ctx);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("prepare insights directory: {e}")))?;
+    let cwd = dir.to_string_lossy().into_owned();
 
     // Provider/model come from the insights config (built-in or custom, e.g.
     // grok); an empty provider falls back to the host workspace's default agent,
     // then the global default.
-    let cfg = read_config(&insights_dir(ctx));
+    let cfg = read_config(&dir);
     let provider = if cfg.provider.trim().is_empty() {
         ctx.resolve_provider(Some(&ws), None).await?
     } else {
@@ -882,7 +882,6 @@ pub async fn run_insights<C: InsightsCtx>(
 
     // One run per period: a live run for the same report is returned instead of
     // spawning a second agent (a double-click, or Run after leaving the page).
-    let dir = insights_dir(ctx);
     let report_key = requested_period(kind, offset.max(0), as_of)
         .map(|(s, e)| period_key(kind, s, e))
         .ok_or_else(|| otto_core::Error::Invalid("report offset is out of range".into()))?;

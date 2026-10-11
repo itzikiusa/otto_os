@@ -111,6 +111,62 @@ test('⌘W under "Always delete" goes through the undoable path', async () => {
   ws.cancelPendingDelete('s1');
 });
 
+test('"Always delete": explicit Delete removes idle and working agents without asking', async () => {
+  for (const status of ['idle', 'working']) {
+    const { ws, deleted, posted, asked } = store('agents', 'delete', false);
+    ws.sessions[0].provider = 'claude';
+    ws.statusMap = { s1: status };
+    await ws.requestDeleteSession('s1');
+    assert.deepEqual(deleted, ['/sessions/s1'], `${status}: explicit Delete honours the preference`);
+    assert.deepEqual(posted, []);
+    assert.deepEqual(asked, [], `${status}: no confirmation`);
+    assert.deepEqual(ws.sessions, [], 'deleted session leaves the live list');
+    assert.deepEqual(ws.openTabs, [], 'deleted session tab closes');
+  }
+});
+
+test('"Always delete": closing a working agent keeps the Undo window without asking', async () => {
+  const { ws, deleted, posted, asked, undo } = store('agents', 'delete', false);
+  ws.sessions[0].provider = 'claude';
+  ws.statusMap = { s1: 'working' };
+  await ws.requestCloseTab('s1');
+  try {
+    assert.deepEqual(posted, ['/sessions/s1/archive'], 'close stops the agent with history retained for Undo');
+    assert.deepEqual(deleted, [], 'close does not immediately delete history');
+    assert.deepEqual(asked, []);
+    assert.equal(undo.length, 1, 'Undo remains available');
+  } finally {
+    ws.cancelPendingDelete('s1');
+  }
+});
+
+test('explicit Delete without "Always delete" still asks before stopping a working agent', async () => {
+  for (const pref of ['', 'archive'] as const) {
+    const { ws, deleted, posted, asked } = store('agents', pref, false);
+    ws.sessions[0].provider = 'claude';
+    ws.statusMap = { s1: 'working' };
+    await ws.requestDeleteSession('s1');
+    assert.equal(asked.length, 1);
+    assert.match(asked[0], /working right now/);
+    assert.deepEqual(deleted, [], 'cancel keeps the session');
+    assert.deepEqual(posted, []);
+    assert.deepEqual(ws.openTabs, ['s1']);
+  }
+});
+
+test('"Always delete": bulk close still confirms once and Cancel preserves every session', async () => {
+  const { ws, deleted, posted, asked } = store('agents', 'delete', false);
+  ws.sessions = [...ws.sessions, { ...ws.sessions[0], id: 's2', title: 'Agent two' }];
+  ws.statusMap = { s1: 'working', s2: 'idle' };
+  ws.openTabs = ['s1', 's2'];
+  await ws.requestCloseTabs(['s1', 's2']);
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /deletes 2 sessions/);
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(posted, []);
+  assert.deepEqual(ws.openTabs, ['s1', 's2']);
+});
+
 // S13-301: every way back from the archive cancels the pending delete.
 test('"Always delete" then ⌘⇧T: the reopened session is never deleted', async () => {
   const { ws, deleted, posted } = store('agents', 'delete');

@@ -13,8 +13,8 @@ import { expectFullyInViewport } from './helpers';
 // user opted out of the question — confirming anyway made "Always delete" a
 // lie); a remembered Delete archives first and deletes when its Undo toast
 // runs out (S13-01: a stray ⌘W is never instantly irreversible), and a bulk close that ends more than one session always confirms
-// once, naming the count. An AGENT working mid-turn still asks; these plain
-// shells read as "working" whenever they print, but are never mid-turn.
+// once, naming the count. "Always delete" also applies to working agents;
+// "Always archive" still asks before stopping an agent mid-turn.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let ctx: APIRequestContext;
@@ -275,4 +275,61 @@ test('default preference: an explicit Delete still asks, and Cancel keeps the se
   await dlg.getByRole('button', { name: 'Cancel' }).click();
   await expect(dlg).toBeHidden();
   expect(await exists(idByTitle.Gattuso)).toBe(true);
+});
+
+test('"Always delete" set in Settings: working agents delete and close without confirmation', async ({ page }, info) => {
+  const captureSchemes = async (state: string) => {
+    for (const scheme of ['light', 'dark'] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await expect(page.locator('html')).toHaveAttribute('data-scheme', scheme);
+      const name = `always-delete-${state}-${scheme}.png`;
+      const path = info.outputPath(name);
+      await page.screenshot({ path });
+      await info.attach(name, { path, contentType: 'image/png' });
+    }
+  };
+  // Keep real isolated-daemon deletion/archive behavior, but present the
+  // harmless shell fixtures as working agents. Quiet events prevent shell
+  // status updates from overwriting this deterministic mid-turn fixture.
+  await page.routeWebSocket('**/ws/events*', () => {});
+  await page.route((url) => url.pathname === `/api/v1/workspaces/${wsId}/sessions`, async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const rows = await response.json();
+    await route.fulfill({
+      response,
+      json: rows.map((row: Record<string, unknown>) => row.archived ? row : { ...row, provider: 'claude', status: 'working' }),
+    });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('otto_theme', 'native');
+    localStorage.setItem('otto_scheme', 'auto');
+  });
+  await page.reload();
+  await page.goto('/#/settings/appearance');
+  await page.getByRole('radio', { name: /Always delete/ }).check();
+  await captureSchemes('setting');
+  await page.goto('/#/agents');
+
+  const row = page.locator('.nav-item.nested-item', { hasText: 'Kaka' }).first();
+  await expect(row.locator('[data-state="working"]')).toBeVisible();
+  await row.click({ button: 'right' });
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…', exact: true }).click();
+  await expect.poll(() => exists(idByTitle.Kaka), { timeout: 15_000 }).toBe(false);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  const tab = await openTab(page, 'Nesta');
+  await expect(tab.locator('[data-state="working"]')).toBeVisible();
+  await tab.locator('.tab-close').click();
+  await expect(tab).toBeHidden();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect.poll(() => isArchived(idByTitle.Nesta)).toBe(true);
+  const undo = page.getByRole('button', { name: 'Undo', exact: true });
+  await expect(undo).toBeVisible();
+  await undo.hover(); // Keep the Undo window open while capturing both schemes.
+  await captureSchemes('working-close-undo');
+  await undo.click();
+  await expect.poll(() => isArchived(idByTitle.Nesta)).toBe(false);
+  expect(await exists(idByTitle.Nesta)).toBe(true);
+  expect(await exists(idByTitle.Maldini)).toBe(true);
 });
