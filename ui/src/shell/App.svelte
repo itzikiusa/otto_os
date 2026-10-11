@@ -2,15 +2,6 @@
   import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
   import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
-  $effect(() => {
-    const onVis = (): void => transcriptStore.setVisible(!document.hidden);
-    onVis();
-    document.addEventListener('visibilitychange', onVis);
-    return () => {
-      document.removeEventListener('visibilitychange', onVis);
-      transcriptStore.reset();
-    };
-  });
   import { untrack } from 'svelte';
   // Main shell (post-auth): rail/navigator + tab bar + module router +
   // right panel + status bar + palette + global keys.
@@ -76,8 +67,6 @@
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
-  // Old bookmarks lead to the workspace's existing context editor.
-  $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   import { git } from '../lib/stores/git.svelte';
   import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
@@ -89,11 +78,26 @@
   import { activeNavId, availableModules, goToEntries, groupLabel, moduleLabel, resolveOrder, visibleOrder } from '../lib/sidebar';
   import { prefetchQueue, shouldPrefetch } from '../lib/prefetchPlan';
   import { api, baseUrl, getToken } from '../lib/api/client';
-  $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
   import type { Connection, Session } from '../lib/api/types';
   import { toasts } from '../lib/toast.svelte';
   import { now } from '../lib/stores/now.svelte';
   import { badgeWriter, tauriBadgeSink } from '../lib/dockBadge';
+
+  // Effects that used to sit between the imports, in their original order.
+  // Transcript store: follows page visibility; reset on unmount.
+  $effect(() => {
+    const onVis = (): void => transcriptStore.setVisible(!document.hidden);
+    onVis();
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      transcriptStore.reset();
+    };
+  });
+  // Old bookmarks lead to the workspace's existing context editor.
+  $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
+  // Transcript cache identity: daemon + signed-in user.
+  $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
 
