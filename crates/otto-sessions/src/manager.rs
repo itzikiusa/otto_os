@@ -2661,8 +2661,9 @@ impl SessionManager {
         // Package managers / build tools cache into a private per-session dir
         // (under temp, which is writable): the user's shared caches hold code
         // unsandboxed programs run later, so they are not writable roots.
-        spec.env
-            .extend(otto_sandbox::agent_cache_env(&agent_cache_dir(&session.id)));
+        let cache = agent_cache_dir(&session.id);
+        otto_sandbox::seed_agent_cache(&cache, &home, |k| std::env::var(k).ok());
+        spec.env.extend(otto_sandbox::agent_cache_env(&cache));
         let (program, args) = policy.wrap(&spec.program, &spec.args);
         spec.program = program;
         spec.args = args;

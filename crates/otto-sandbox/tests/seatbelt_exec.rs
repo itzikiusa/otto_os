@@ -710,7 +710,11 @@ fn seatbelt_agent_cannot_poison_shared_package_caches() {
         );
     }
     let cache = std::env::temp_dir().join(format!("otto-agent-cache-test-{}", std::process::id()));
-    for (_, dir) in otto_sandbox::agent_cache_env(&cache) {
+    // Path-valued entries only (`MAVEN_ARGS` carries a flag).
+    for (_, dir) in otto_sandbox::agent_cache_env(&cache)
+        .into_iter()
+        .filter(|(_, v)| v.starts_with('/'))
+    {
         let f = Path::new(&dir).join("x");
         assert!(can_write(&pol, &f), "{} must be writable", f.display());
     }

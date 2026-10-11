@@ -349,10 +349,13 @@ const AGENT_CACHE_ENV: &[(&str, &str)] = &[
     ("PIP_CACHE_DIR", "pip"),
     ("GOCACHE", "go-build"),
     // Go module downloads (`~/go/pkg/mod` by default — not writable, so a
-    // sandboxed `go build` / `go mod download` used to fail). Cargo, Maven and
-    // Gradle homes also hold the user's config and credentials, so they are
-    // not relocated (sweep 2026-10-11 M3).
+    // sandboxed `go build` / `go mod download` used to fail; sweep 2026-10-11).
     ("GOMODCACHE", "go-mod"),
+    // Cargo and Gradle keep their download caches in their home, next to the
+    // user's config and credentials: the private home links those files back
+    // ([`seed_agent_cache`]) so registries and auth keep working.
+    ("CARGO_HOME", "cargo"),
+    ("GRADLE_USER_HOME", "gradle"),
     ("YARN_CACHE_FOLDER", "yarn"),
     ("BUN_INSTALL_CACHE_DIR", "bun"),
 ];
@@ -836,10 +839,73 @@ impl SandboxPolicy {
 /// of the user's shared caches — which unsandboxed programs later execute
 /// from and which are therefore NOT writable roots ([`AGENT_CACHE_ENV`]).
 pub fn agent_cache_env(dir: &Path) -> Vec<(String, String)> {
-    AGENT_CACHE_ENV
+    let mut env: Vec<(String, String)> = AGENT_CACHE_ENV
         .iter()
         .map(|(k, sub)| (k.to_string(), dir.join(sub).to_string_lossy().into_owned()))
-        .collect()
+        .collect();
+    // Maven's local repository (`~/.m2/repository`); `MAVEN_ARGS` is read by
+    // Maven 3.9+, and `~/.m2/settings.xml` is still read in place.
+    env.push((
+        "MAVEN_ARGS".into(),
+        format!("-Dmaven.repo.local={}", dir.join("m2").display()),
+    ));
+    env
+}
+
+/// Config and credential files a private Cargo / Gradle home links back to
+/// the user's real home (read through the link; writes stay denied).
+const LINKED_HOME_FILES: &[(&str, &str, &str, &[&str])] = &[
+    (
+        "cargo",
+        "CARGO_HOME",
+        ".cargo",
+        &[
+            "config.toml",
+            "config",
+            "credentials.toml",
+            "credentials",
+            "bin",
+        ],
+    ),
+    (
+        "gradle",
+        "GRADLE_USER_HOME",
+        ".gradle",
+        &[
+            "gradle.properties",
+            "init.gradle",
+            "init.gradle.kts",
+            "init.d",
+        ],
+    ),
+];
+
+/// Prepare `dir` (see [`agent_cache_env`]) before the process starts: the
+/// private Cargo / Gradle homes get symlinks to the user's config, registry
+/// credentials, init scripts and installed cargo subcommands, so only the
+/// download caches are private. Best-effort: a missing source is skipped.
+/// `env` is the daemon's view of `CARGO_HOME` / `GRADLE_USER_HOME`.
+#[allow(clippy::disallowed_methods)] // sync helper: runs once before a spawn
+pub fn seed_agent_cache(dir: &Path, home: &Path, env: impl Fn(&str) -> Option<String>) {
+    for (sub, var, default, files) in LINKED_HOME_FILES {
+        let source = env(var)
+            .filter(|v| Path::new(v).is_absolute())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(default));
+        if !source.is_absolute() {
+            continue;
+        }
+        let private = dir.join(sub);
+        if std::fs::create_dir_all(&private).is_err() {
+            continue;
+        }
+        for f in *files {
+            let (from, to) = (source.join(f), private.join(f));
+            if from.exists() && std::fs::symlink_metadata(&to).is_err() {
+                let _ = std::os::unix::fs::symlink(&from, &to);
+            }
+        }
+    }
 }
 
 /// True when a writable grant of `root` would cover `$HOME` itself: `root`
@@ -1561,6 +1627,41 @@ mod tests {
         assert!(env.iter().any(|(k, _)| k == "PRE_COMMIT_HOME"));
         assert!(env.iter().any(|(k, _)| k == "XDG_CACHE_HOME"));
         assert!(env.contains(&("GOMODCACHE".into(), "/t/c/go-mod".into())));
+        assert!(env.contains(&("CARGO_HOME".into(), "/t/c/cargo".into())));
+        assert!(env.contains(&("GRADLE_USER_HOME".into(), "/t/c/gradle".into())));
+        assert!(env.contains(&("MAVEN_ARGS".into(), "-Dmaven.repo.local=/t/c/m2".into())));
+    }
+
+    /// Sweep 2026-10-11 M3: the private Cargo / Gradle homes keep the user's
+    /// config, credentials and cargo subcommands (linked, not copied).
+    #[test]
+    fn seeded_private_homes_link_the_users_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        std::fs::write(home.join(".cargo/config.toml"), "[net]\n").unwrap();
+        std::fs::write(home.join(".cargo/credentials.toml"), "token").unwrap();
+        let gradle = tmp.path().join("gradle-home");
+        std::fs::create_dir_all(&gradle).unwrap();
+        std::fs::write(gradle.join("gradle.properties"), "x=1").unwrap();
+        let cache = tmp.path().join("cache");
+        let env =
+            |k: &str| (k == "GRADLE_USER_HOME").then(|| gradle.to_string_lossy().into_owned());
+        seed_agent_cache(&cache, &home, env);
+        seed_agent_cache(&cache, &home, env); // idempotent
+        let read = |p: &str| std::fs::read_to_string(cache.join(p)).unwrap();
+        assert_eq!(read("cargo/config.toml"), "[net]\n");
+        assert_eq!(read("cargo/credentials.toml"), "token");
+        assert!(cache.join("cargo/bin").is_dir());
+        assert_eq!(read("gradle/gradle.properties"), "x=1");
+        assert!(
+            std::fs::symlink_metadata(cache.join("cargo/credentials.toml"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "credentials are linked, never copied into temp"
+        );
+        assert!(!cache.join("cargo/config").exists());
     }
 
     /// S11-302: a cwd at or above `$HOME` (or `/`) is never granted.
