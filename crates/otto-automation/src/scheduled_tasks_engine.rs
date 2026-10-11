@@ -1157,7 +1157,7 @@ pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) 
     let ctx = ctx.clone();
     tokio::spawn(async move {
         let repo = ctx.scheduled_tasks();
-        let task = match repo.get_run_task_snapshot(&run.id).await {
+        let task = match repo.get_run_task_for_recovery(&run.id).await {
             Ok(t) => t,
             Err(e) => {
                 record_finish(

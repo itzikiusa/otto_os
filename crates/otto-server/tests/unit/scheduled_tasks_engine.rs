@@ -390,7 +390,10 @@ async fn workflow_task_overlap_is_recorded_skipped_not_error() {
 /// Recovery uses only durable run state: the original context is discarded
 /// before the waiter starts. Distinct unknown destinations exercise the real
 /// delivery dispatcher without making any network request.
-async fn recovered_handoff(legacy: bool, malformed: bool, workflow_status: &str) {
+async fn recovered_handoff(legacy: bool, malformed: bool, workflow_status: &str, edit_after: bool) {
+    // A legacy run (no snapshot) recovers from the task only while the task
+    // is unchanged since the run started (sweep 2026-10-11 A3).
+    let refused = malformed || (legacy && edit_after);
     use crate::routes::browser::tests::test_ctx;
     use crate::scheduled_tasks_engine::resume_workflow_handoff;
     let (tmp, ctx, initial) = admission_fixture().await;
@@ -447,18 +450,21 @@ async fn recovered_handoff(legacy: bool, malformed: bool, workflow_status: &str)
         .set_run_workflow_run(&run.id, &workflow_run.id)
         .await
         .unwrap();
-    let edited = ctx
-        .scheduled_tasks
-        .update(
-            &task.id,
-            otto_state::ScheduledTaskPatch {
-                schedule: Some(json!({"cadence":"once","run_at":"2000-01-01T11:00:00Z"})),
-                destination: Some(json!({"type":"edited-destination-B"})),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    let edited = if edit_after {
+        ctx.scheduled_tasks
+            .update(
+                &task.id,
+                otto_state::ScheduledTaskPatch {
+                    schedule: Some(json!({"cadence":"once","run_at":"2000-01-01T11:00:00Z"})),
+                    destination: Some(json!({"type":"edited-destination-B"})),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+    } else {
+        task.clone()
+    };
     let pool = ctx.pool.clone();
     drop(ctx);
     let fresh = test_ctx(&pool, tmp.path().to_path_buf()).await;
@@ -482,7 +488,7 @@ async fn recovered_handoff(legacy: bool, malformed: bool, workflow_status: &str)
         loop {
             let row = fresh.scheduled_tasks.get_run(&run.id).await.unwrap();
             if row.status != "running" {
-                if legacy || malformed {
+                if refused {
                     break;
                 }
                 if let Ok(otto_core::event::Event::ScheduledTaskRunUpdated { .. }) =
@@ -498,20 +504,24 @@ async fn recovered_handoff(legacy: bool, malformed: bool, workflow_status: &str)
     .expect("recovered run did not settle");
     let after = fresh.scheduled_tasks.get(&task.id).await.unwrap();
     assert_eq!(after.schedule_generation, edited.schedule_generation);
-    assert!(
-        after.last_run_at.is_none(),
-        "old completion consumed the retimed occurrence"
-    );
-    assert!(cadence::is_due_since(
-        &after.schedule,
-        None,
-        None,
-        Utc::now(),
-        chrono_tz::UTC
-    ));
+    if edit_after {
+        assert!(
+            after.last_run_at.is_none(),
+            "old completion consumed the retimed occurrence"
+        );
+        assert!(cadence::is_due_since(
+            &after.schedule,
+            None,
+            None,
+            Utc::now(),
+            chrono_tz::UTC
+        ));
+    } else {
+        assert!(after.last_run_at.is_some(), "the occurrence is settled");
+    }
     let done = fresh.scheduled_tasks.get_run(&run.id).await.unwrap();
     assert!(!done.delivered);
-    if legacy || malformed {
+    if refused {
         assert_eq!(done.status, "error");
         assert!(done
             .error
@@ -559,20 +569,28 @@ async fn recovered_handoff(legacy: bool, malformed: bool, workflow_status: &str)
 
 #[tokio::test]
 async fn quality_recovered_handoff_preserves_admitted_generation_and_destination() {
-    recovered_handoff(false, false, "success").await;
+    recovered_handoff(false, false, "success", true).await;
 }
 
 #[tokio::test]
 async fn quality_legacy_handoff_does_not_consume_or_deliver_edited_task() {
-    recovered_handoff(true, false, "success").await;
+    recovered_handoff(true, false, "success", true).await;
+}
+
+/// Sweep 2026-10-11 A3: a hand-off admitted before migration 0178 (or by a
+/// rolled-back daemon) and interrupted by a restart still delivers its report
+/// and settles its occurrence when the task was not edited meanwhile.
+#[tokio::test]
+async fn legacy_handoff_of_an_unchanged_task_delivers_and_settles() {
+    recovered_handoff(true, false, "success", false).await;
 }
 
 #[tokio::test]
 async fn quality_malformed_handoff_does_not_consume_or_deliver_edited_task() {
-    recovered_handoff(false, true, "success").await;
+    recovered_handoff(false, true, "success", true).await;
 }
 
 #[tokio::test]
 async fn quality_recovered_failed_handoff_report_is_owned_by_its_run() {
-    recovered_handoff(false, false, "error").await;
+    recovered_handoff(false, false, "error", true).await;
 }
