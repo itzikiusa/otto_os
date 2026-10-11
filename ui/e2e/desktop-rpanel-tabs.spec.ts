@@ -162,3 +162,44 @@ test('agent session: the session tabs join the rail and Files/Git follow the ses
   await expect(railBtn(page, 'Activity')).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('otto_right_tab'))).toBe('activity');
 });
+
+test('API tab (narrow): full URL preview, params rows keep × on the row, light and dark', async ({ page }) => {
+  await openPage(page, 'home');
+  await railBtn(page, 'API').click();
+  const panel = page.locator('.rpanel');
+  await expect(panel.locator('.rpanel-title')).toHaveText('API');
+  await panel.getByRole('textbox', { name: 'Request URL' }).fill('https://gwsinatra-stg.groovegaming.com/games/attribute/get/1.0/list');
+  const params: [string, string][] = [['type', 'FEATURE'], ['page', '0'], ['size', '100'], ['sort', 'name'], ['order', 'asc'], ['q', 'a b&c']];
+  for (const [k, v] of params) {
+    await panel.getByRole('button', { name: /Add param/ }).click();
+    await panel.getByRole('textbox', { name: 'Parameter name' }).last().fill(k);
+    await panel.getByRole('textbox', { name: 'Value' }).last().fill(v);
+  }
+  // Untick the last one: it drops out of the URL.
+  await panel.getByRole('checkbox', { name: 'Send q' }).uncheck();
+  const full = panel.getByTestId('api-full-url');
+  await expect(full).toHaveText('https://gwsinatra-stg.groovegaming.com/games/attribute/get/1.0/list?type=FEATURE&page=0&size=100&sort=name&order=asc');
+  await panel.getByRole('checkbox', { name: 'Send q' }).check();
+  await expect(full).toHaveText(/&order=asc&q=a\+b%26c$/);
+  await expectFullyInViewport(page, panel.getByRole('button', { name: 'Copy the full URL' }));
+  // The URL box wraps inside the panel instead of widening it.
+  const box = (await full.boundingBox())!;
+  const panelBox = (await panel.boundingBox())!;
+  expect(box.x + box.width).toBeLessThanOrEqual(panelBox.x + panelBox.width + 0.5);
+  // Every row keeps its checkbox, key, value and × on one line.
+  const rows = panel.locator('.kv-row');
+  for (let i = 0; i < (await rows.count()); i++) {
+    const row = rows.nth(i);
+    const key = (await row.getByRole('textbox', { name: 'Parameter name' }).boundingBox())!;
+    const x = (await row.getByRole('button', { name: 'Remove row' }).boundingBox())!;
+    expect(Math.abs(x.y + x.height / 2 - (key.y + key.height / 2))).toBeLessThan(4);
+  }
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: test.info().outputPath('side-panel-api-light.png') });
+  await page.evaluate(() => {
+    localStorage.setItem('otto_scheme', 'dark');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'otto_scheme' }));
+  });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.screenshot({ path: test.info().outputPath('side-panel-api-dark.png') });
+});

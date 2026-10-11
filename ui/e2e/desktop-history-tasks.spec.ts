@@ -119,6 +119,9 @@ async function tasksOf(page: Page, sid: string): Promise<{ title: string; source
 test.describe('history page', () => {
   test('lists the seeded claude session and opens it read-only', async ({ page }) => {
     expect(claudeId, 'the fixture-backed session row was created').not.toBe('');
+    // The Side panel is on every page now; fold it so the History header has
+    // room for its actions (they overflow into ⋯ beside an open panel).
+    await page.addInitScript(() => localStorage.setItem('otto_right_open', '0'));
     await openPage(page, 'history');
     const list = page.getByTestId('history-list');
     await expect(list).toBeVisible();

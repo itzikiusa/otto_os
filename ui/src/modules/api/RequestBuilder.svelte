@@ -1903,8 +1903,13 @@
       flex: 1 1 0;
       min-width: 0;
     }
-    .kv-head > span:nth-child(2) {
+    /* Column titles track the shrinking key/value inputs (× column kept). */
+    .kv-head {
+      padding-inline-end: 30px;
+    }
+    .kv-head > span:not(.kv-check-h):not(.kv-type-h) {
       flex: 1 1 0;
+      min-width: 0;
     }
     .field-row {
       flex-wrap: wrap;

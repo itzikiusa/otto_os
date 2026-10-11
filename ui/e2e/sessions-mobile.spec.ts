@@ -435,6 +435,10 @@ test('phone: navigator + activity drawers open within the viewport', async ({ pa
     const rightDrawer = page.locator('.drawer[aria-label="Side panel"]').first();
     await expect(rightDrawer).toBeVisible();
     await expectOnScreen(page, await settledBox(rightDrawer), 'activity drawer');
+    // The same rail + content as desktop; the rail starts below the drawer's ✕.
+    await expect(rightDrawer.locator('.rstrip')).toBeVisible();
+    await expect(rightDrawer.locator('.rpanel-title')).toBeVisible();
     await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: test.info().outputPath('side-panel-drawer.png') });
   }
 });

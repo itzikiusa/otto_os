@@ -65,12 +65,13 @@
   }
   $effect(() => {
     if (vault.centerMode !== 'note') return;
-    const off = rightPanel.register({ id: DETAILS_TAB, label: 'Note details', icon: 'link', component: RightPanel });
+    // untrack: register reads + writes the page-tab list (no self-dependency).
+    const off = untrack(() => rightPanel.register({ id: DETAILS_TAB, label: 'Note details', icon: 'link', component: RightPanel }));
     if (!detailsApplied) {
       detailsApplied = true;
       if (wantDetails) untrack(() => ui.openRight(DETAILS_TAB));
     }
-    return off;
+    return () => untrack(off);
   });
   $effect(() => {
     const showing = rightOpen;

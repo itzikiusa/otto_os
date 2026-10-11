@@ -590,6 +590,7 @@
     border-inline-start: 1px solid var(--border);
     background: var(--bg);
     flex-shrink: 0;
+    overflow-x: hidden;
     overflow-y: auto;
   }
   /* The drawer floats its ✕ over the top corner: start the icons below it. */
