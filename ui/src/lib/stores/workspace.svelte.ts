@@ -1321,8 +1321,9 @@ class WorkspaceStore {
     return !!s && !s.archived;
   }
 
-  /** Whether ending `id` now would stop an AGENT mid-turn — the one case a
-   *  remembered "Always archive/delete" still asks about. `working` only means
+  /** Whether ending `id` now would stop an AGENT mid-turn. Archive/restart
+   *  confirmations use this; "Always delete" still honours the opt-out.
+   *  `working` only means
    *  "printed in the last few seconds", so a plain shell (whose prompt redraw
    *  or `ls` output reads as working) is not mid-turn: its close/delete
    *  honours the remembered choice like an idle session's.
@@ -1346,10 +1347,9 @@ class WorkspaceStore {
    *  asking anyway made the setting a lie. But "Always delete" is never
    *  silently irreversible: it resolves to 'delete-deferred' (archive now,
    *  delete after an Undo toast — see {@link deleteWithUndo}), so a stray
-   *  ⌘W / ⌫ / middle-click can be taken back. Two more guards: a close that ends
-   *  **more than one** session (Close others / to the right / all), or one
-   *  that stops a **working** agent mid-turn, always confirms once, whatever
-   *  the preference. */
+   *  ⌘W / ⌫ / middle-click can be taken back. A close that ends **more than
+   *  one** session (Close others / to the right / all) always confirms once.
+   *  "Always archive" also confirms before stopping a working agent. */
   private async resolveCloseAction(ids: Id[]): Promise<CloseAction | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
@@ -1358,7 +1358,7 @@ class WorkspaceStore {
     const busy = ending.filter((id) => this.isAgentMidTurn(id)).length;
     const pref = ui.closeTabPref;
     if (pref === 'archive' && !many && busy === 0) return 'archive';
-    if (pref === 'delete' && !many && busy === 0) return 'delete-deferred';
+    if (pref === 'delete' && !many) return 'delete-deferred';
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
     const busyNote =
       busy === 0
@@ -1583,9 +1583,8 @@ class WorkspaceStore {
    *  setting feel broken). Bulk deletes keep their own one-time confirm.
    *  Failures surface as a toast. */
   async requestDeleteSession(id: Id): Promise<void> {
-    // "Always delete" skips this — but never for an agent working mid-turn.
-    const working = this.isAgentMidTurn(id);
-    if (ui.closeTabPref !== 'delete' || working) {
+    if (ui.closeTabPref !== 'delete') {
+      const working = this.isAgentMidTurn(id);
       const name = this.sessions.find((s) => s.id === id)?.title?.trim();
       const ok = await confirmer.ask(
         `Delete ${name ? `“${name}”` : 'this session'} and its entire history? This cannot be undone.${working ? ' It is working right now and will stop mid-turn.' : ''}`,
