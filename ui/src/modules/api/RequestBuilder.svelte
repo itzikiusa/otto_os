@@ -18,7 +18,7 @@
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { api, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
-  import { collectionPaths, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
+  import { collectionPaths, fullRequestUrl, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
   import { marked } from 'marked';
   import { sanitizeHtml } from '../../lib/sanitize';
   import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse, ApiSecretable } from '../../lib/api/types';
@@ -198,6 +198,10 @@
     requestVarNames(draft, bodyVars).map((n) => resolveVar(n, apiClient.runtimeVars, envForVars)),
   );
   const missingVars = $derived(usedVars.filter((v) => v.kind === 'missing').length);
+  // Params tab: the URL as sent — enabled rows appended and encoded, known
+  // variables filled in (secrets / built-ins / missing ones stay {{name}}).
+  const sentUrl = $derived(fullRequestUrl(draft.url, draft.query, apiClient.runtimeVars, envForVars));
+  const sentUrlSegments = $derived(splitVars(sentUrl));
 
   // ── key/value rows ────────────────────────────────────────────────────────
   function addRow(which: 'headers' | 'query', key = '', value = ''): void {
@@ -864,8 +868,17 @@
 
   <div class="tabbody" role="tabpanel" id="api-req-panel-{tab}" aria-labelledby="api-req-tab-{tab}">
     {#if tab === 'params'}
-      <p class="tab-help">Added to the URL as <code>?key=value</code>. Untick a row to skip it without deleting it.</p>
+      <p class="tab-help">Added to the URL as <code>?key=value</code>. Untick a row to skip it.</p>
       {@render kvEditor('query', draft.query)}
+      {#if draft.url.trim()}
+        <div class="full-url">
+          <div class="full-url-head">
+            <span class="full-url-label" id="api-full-url-label">Full URL</span>
+            <button class="icon-btn" title="Copy the full URL" aria-label="Copy the full URL" onclick={() => void copyText(sentUrl, 'URL')}><Icon name="copy" size={12} /></button>
+          </div>
+          <output class="full-url-text mono" dir="ltr" aria-labelledby="api-full-url-label" data-testid="api-full-url">{#each sentUrlSegments as seg, i (i)}{#if seg.isVar}<span class="full-url-var" title="Filled in when sent">{seg.text}</span>{:else}{seg.text}{/if}{/each}</output>
+        </div>
+      {/if}
     {:else if tab === 'headers'}
       <p class="tab-help">{draft.kind === 'grpc' ? 'gRPC metadata sent with the call.' : 'Sent with the request. Content-Type follows the Body type unless you set it yourself.'}</p>
       {@render kvEditor('headers', draft.headers)}
@@ -1470,6 +1483,43 @@
   .tab-help.inline {
     display: inline;
   }
+  /* Params: the URL as sent. Wraps anywhere inside its box (a long query
+     string never widens the page), selectable, copyable. */
+  .full-url {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+  }
+  .full-url-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .full-url-label {
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .full-url-text {
+    display: block;
+    max-height: 120px;
+    overflow-y: auto;
+    font-size: var(--fs-s);
+    line-height: 1.45;
+    color: var(--text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+  .full-url-var {
+    color: var(--accent-text);
+  }
   code {
     font-family: var(--font-mono);
     font-size: var(--fs-s);
@@ -1846,12 +1896,15 @@
     .send {
       margin-inline-start: auto;
     }
-    .kv-row {
-      flex-wrap: wrap;
-    }
+    /* Key and value share the row and shrink; the checkbox and × stay on it
+       (they used to wrap, leaving × alone on its own line). */
     .kv-key,
     .kv-val {
-      flex: 1 1 calc(50% - 24px);
+      flex: 1 1 0;
+      min-width: 0;
+    }
+    .kv-head > span:nth-child(2) {
+      flex: 1 1 0;
     }
     .field-row {
       flex-wrap: wrap;

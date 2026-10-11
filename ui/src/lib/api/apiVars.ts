@@ -178,3 +178,51 @@ export function parseSetCookies(headers: ApiKeyVal[]): ResponseCookie[] {
       };
     });
 }
+
+/** Substitute the `{{vars}}` that have a known value (session, then the
+ *  environment), up to three passes like the daemon (a value may itself hold
+ *  a `{{var}}`). Built-ins, secrets and missing names stay as `{{name}}`. */
+export function fillKnownVars(s: string, runtime: Record<string, string>, env: VarEnv | null): string {
+  let cur = s;
+  for (let pass = 0; pass < 3 && cur.includes('{{'); pass++) {
+    const next = cur.replace(VAR_RE, (whole, name: string) => {
+      const r = resolveVar(name, runtime, env);
+      return r.value !== undefined ? r.value : whole;
+    });
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/** One query component, form-encoded the way the daemon sends it (reqwest →
+ *  application/x-www-form-urlencoded: space → `+`, only `*-._` and
+ *  alphanumerics stay bare). A `{{var}}` left unresolved stays readable. */
+function encodeQueryPart(s: string): string {
+  return splitVars(s)
+    .map((seg) => (seg.isVar ? seg.text : new URLSearchParams([['', seg.text]]).toString().slice(1)))
+    .join('');
+}
+
+/** The URL the request is sent to: `url` plus the ENABLED, named query rows
+ *  appended (after any `?…` already in the URL, before a `#fragment`), each
+ *  key/value encoded. Variables with a known value are filled in when
+ *  `runtime`/`env` are given; the rest show as `{{name}}`. */
+export function fullRequestUrl(
+  url: string,
+  query: ApiKeyVal[],
+  runtime: Record<string, string> = {},
+  env: VarEnv | null = null,
+): string {
+  const base = fillKnownVars(url.trim(), runtime, env);
+  const pairs = query
+    .filter((r) => r.enabled !== false && r.key !== '')
+    .map((r) => `${encodeQueryPart(fillKnownVars(r.key, runtime, env))}=${encodeQueryPart(fillKnownVars(r.value, runtime, env))}`);
+  if (pairs.length === 0) return base;
+  const hash = base.indexOf('#');
+  const head = hash < 0 ? base : base.slice(0, hash);
+  const frag = hash < 0 ? '' : base.slice(hash);
+  const q = head.indexOf('?');
+  const sep = q < 0 ? '?' : head.endsWith('?') || head.endsWith('&') ? '' : '&';
+  return `${head}${sep}${pairs.join('&')}${frag}`;
+}
