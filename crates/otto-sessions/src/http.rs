@@ -436,6 +436,20 @@ async fn create_session<S: SessionsCtx>(
                     m.insert("work".to_string(), v);
                 }
             }
+            // The creating agent, from the credential (never the body), as
+            // `POST …/sessions/open` stamps it: an agent may then message and
+            // stop the session it made here too (sweep 2026-10-11 L2).
+            match auth.as_ref().and_then(|Extension(a)| agent_session_of(a)) {
+                Some(creator) => {
+                    m.insert(
+                        DELEGATED_BY_META.to_string(),
+                        serde_json::Value::String(creator.to_string()),
+                    );
+                }
+                None => {
+                    m.remove(DELEGATED_BY_META);
+                }
+            }
         }
     }
 

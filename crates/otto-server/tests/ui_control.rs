@@ -918,6 +918,60 @@ async fn nested_resume_meta_is_server_owned() {
     }
 }
 
+/// Sweep 2026-10-11 L2: a session an agent creates through the plain
+/// `POST /workspaces/{id}/sessions` is stamped as its worker (from the
+/// credential, like `/sessions/open`), so the agent can stop it again; a
+/// person's body cannot forge the stamp.
+#[tokio::test]
+async fn an_agent_can_stop_the_session_it_created() {
+    let d = boot().await;
+    let (st, body) = d
+        .post(
+            &d.agent,
+            "/workspaces/ws1/sessions",
+            json!({"kind": "agent", "provider": "shell", "meta": {"delegated_by": "forged"}}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        body["meta"]["delegated_by"],
+        json!(d.sid.as_str()),
+        "{body}"
+    );
+    let worker = body["id"].as_str().unwrap().to_string();
+    let (st, body) = d
+        .post(
+            &d.agent,
+            &format!("/sessions/{worker}/archive"),
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "the creating agent may archive its worker: {body}");
+
+    let (st, body) = d
+        .post(
+            &d.human,
+            "/workspaces/ws1/sessions",
+            json!({"kind": "agent", "provider": "shell", "meta": {"delegated_by": d.sid.as_str()}}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body["meta"].get("delegated_by").is_none(), "{body}");
+    let mine = body["id"].as_str().unwrap().to_string();
+    let (st, _) = d
+        .post(
+            &d.agent,
+            &format!("/sessions/{mine}/archive"),
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 403, "an agent never controls a person's session");
+}
+
 /// S11-302: an agent's own credential cannot open a worker whose folder (a
 /// Seatbelt write grant, pre-trusted) lies outside the workspace, its own
 /// folder or a worktree of the same repo — and nobody can start an agent
