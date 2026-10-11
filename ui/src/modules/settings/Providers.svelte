@@ -7,7 +7,10 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   // Custom agent providers (root): add any CLI (opencode, kilo, …) as a
   // session provider. Stored in the `providers` settings key; the daemon
-  // reloads its registry live on save.
+  // reloads its registry live on save. A non-root settings admin sees only
+  // what their own role reaches — Update all CLIs (ws editor) and the model
+  // catalog (Agents) — never the daemon-wide settings (`GET|PUT /settings`
+  // are root-only).
   import { api } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -177,7 +180,8 @@
   }
 
   $effect(() => {
-    void loadSettings();
+    if (auth.isRoot) void loadSettings();
+    else loading = false;
   });
 
   async function loadSettings(): Promise<void> {
@@ -454,7 +458,13 @@
   <SectionIntro>Built-ins are always available; add any other CLI (opencode, kilo, …) under Custom. Every change here applies immediately to new sessions.</SectionIntro>
   <div class="providers-body">
 
-  {#if loading || loadError}
+  {#if !auth.isRoot}
+    <p class="hint" role="note">
+      The default agent, custom providers, automatic updates and permissions apply to the whole
+      Otto daemon — only Otto’s owner can view or change them. You can still update the CLIs and
+      refresh the model catalog.
+    </p>
+  {:else if loading || loadError}
     <LoadState what="provider settings" {loading} error={loadError || null} empty rows={4} onretry={() => void loadSettings()} />
   {:else}
     <section class="section">
@@ -631,6 +641,7 @@
       </p>
     </section>
 
+  {/if}
     <section class="section">
       <div class="prow between">
         <h2 class="section-title">Models catalog</h2>
@@ -678,7 +689,6 @@
         across Otto offer these; a failed refresh keeps the last good list and marks it Stale.
       </p>
     </section>
-  {/if}
   </div>
   </PageBody>
 </div>
