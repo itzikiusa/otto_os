@@ -6218,6 +6218,13 @@ async fn execute_node(
                 // has no commits ahead of base and the provider rejects the PR
                 // ("no changes to be pulled"). Sweep leftovers into a commit, but
                 // ONLY in a dedicated worktree — never a user's main checkout.
+                // Otto's own commit / push skips hooks that live inside the work
+                // tree (husky: an agent there can edit them). Say so on the run
+                // instead of letting a commit-msg / pre-push rule surface in CI.
+                let mut hooks_note = otto_git::LocalGit::new(&wt)
+                    .worktree_hooks_skipped()
+                    .await
+                    .then(|| skipped_hooks_note(&repo.name));
                 if wt != repo.path {
                     match otto_git::LocalGit::new(&wt)
                         .commit_all_if_dirty(&format!(
@@ -6226,11 +6233,14 @@ async fn execute_node(
                         ))
                         .await
                     {
-                        Ok(Some(sha)) => logs.push(format!(
-                            "git_pr: committed leftover worktree changes on {} ({})",
-                            repo.name,
-                            &sha[..sha.len().min(9)]
-                        )),
+                        Ok(Some(sha)) => {
+                            logs.push(format!(
+                                "git_pr: committed leftover worktree changes on {} ({})",
+                                repo.name,
+                                &sha[..sha.len().min(9)]
+                            ));
+                            logs.extend(hooks_note.take());
+                        }
                         Ok(None) => {}
                         Err(e) => notes.push(format!(
                             "{}: leftover-changes commit failed: {e}",
@@ -6324,6 +6334,7 @@ async fn execute_node(
                     },
                     None => None,
                 };
+                logs.extend(hooks_note.take());
                 match otto_git::LocalGit::new(&wt).push(push_token).await {
                     Ok(_) => logs.push(format!(
                         "git_pr: pushed {} to remote for {}",
@@ -7614,6 +7625,15 @@ pub(crate) async fn ensure_run_location(
         }
     }
     Ok(())
+}
+
+/// The run note for a repo whose in-worktree hooks Otto's own git skipped.
+fn skipped_hooks_note(repo: &str) -> String {
+    format!(
+        "⚠ git_pr: {repo}'s hooks live inside its work tree (core.hooksPath, e.g. husky) \
+         and did not run for Otto's own commit / push — an agent there can edit them, so \
+         unattended runs skip them; CI or your next commit still runs them"
+    )
 }
 
 /// Whether a `repos[]` entry is written as a path (`/…`, `~…`, `./…`, `../…`)

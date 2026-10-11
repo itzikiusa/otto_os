@@ -222,6 +222,31 @@ async fn an_in_worktree_hooks_path_runs_only_for_a_person_s_commit() {
     );
 }
 
+/// Sweep 2026-10-11 A1: callers can tell a daemon commit will skip the
+/// repo's in-worktree hooks, to say so on the run.
+#[tokio::test]
+async fn daemon_handles_report_skipped_in_worktree_hooks() {
+    let (_tmp, repo) = repo();
+    assert!(
+        !LocalGit::new(&repo).worktree_hooks_skipped().await,
+        "no hooksPath"
+    );
+    sh(&repo, &["config", "core.hooksPath", ".husky/_"]);
+    assert!(LocalGit::new(&repo).worktree_hooks_skipped().await);
+    assert!(
+        !LocalGit::new(&repo)
+            .person_initiated()
+            .worktree_hooks_skipped()
+            .await,
+        "a person's own git runs them"
+    );
+    sh(&repo, &["config", "core.hooksPath", "/usr/share/git-hooks"]);
+    assert!(
+        !LocalGit::new(&repo).worktree_hooks_skipped().await,
+        "a hooksPath outside the work tree still runs"
+    );
+}
+
 /// S2-02(b): the worktree probe only runs `git status` in trees that
 /// round-trip to this repo — not in one whose admin `gitdir` (or `.git`
 /// file) was re-pointed at an agent-built repo.

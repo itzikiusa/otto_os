@@ -964,6 +964,14 @@ impl LocalGit {
         self
     }
 
+    /// Will this handle's commits / pushes skip the repo's hooks? True for a
+    /// daemon-initiated handle in a repo whose `core.hooksPath` lies inside the
+    /// work tree (husky / lefthook) — callers surface it on their run, since
+    /// those hooks (commit-msg, pre-commit, pre-push) are then left to CI.
+    pub async fn worktree_hooks_skipped(&self) -> bool {
+        !self.person_initiated && self.hooks_path_in_worktree().await
+    }
+
     /// Is `core.hooksPath` set to a directory inside this work tree (where an
     /// agent session can rewrite the hooks)? A relative value is resolved
     /// against the work tree root, so it counts as inside. Errors (no repo,
