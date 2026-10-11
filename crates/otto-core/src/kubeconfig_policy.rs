@@ -5,7 +5,9 @@
 //! any sandbox. A kubeconfig an agent pasted, or a file it wrote in its work
 //! tree and registered, could otherwise run `/bin/sh -c 'curl … | sh'` the
 //! next time the cluster list refreshes. So Otto runs ONLY the well-known
-//! cloud credential plugins in [`ALLOWED_EXEC_PLUGINS`], refuses the
+//! cloud credential plugins in [`ALLOWED_EXEC_PLUGINS`] — plus the general
+//! CLIs in [`ALLOWED_EXEC_SUBCOMMANDS`], for their credential subcommand
+//! only — refuses the
 //! environment variables that would make even those load foreign code or a
 //! foreign config (which can name a `credential_process`), and refuses a
 //! legacy `auth-provider` block that runs a command (`cmd-path`).
@@ -27,6 +29,19 @@ pub const ALLOWED_EXEC_PLUGINS: &[&str] = &[
     "aws-iam-authenticator",
     "gke-gcloud-auth-plugin",
     "kubelogin",
+];
+
+/// General-purpose CLIs that are also common credential plugins, allowed only
+/// when `args` START with their credential subcommand (the same binary runs
+/// anything else): kubelogin as a kubectl plugin, Teleport, DigitalOcean.
+/// Matched on the basename like [`ALLOWED_EXEC_PLUGINS`].
+pub const ALLOWED_EXEC_SUBCOMMANDS: &[(&str, &[&str])] = &[
+    ("kubectl", &["oidc-login", "get-token"]),
+    ("tsh", &["kube", "credentials"]),
+    (
+        "doctl",
+        &["kubernetes", "cluster", "kubeconfig", "exec-credential"],
+    ),
 ];
 
 /// Exec-plugin `env` names that would make an allowed plugin load foreign
@@ -51,12 +66,37 @@ fn allowed_name(name: &str) -> bool {
     ALLOWED_EXEC_PLUGINS.contains(&name)
 }
 
-fn allow_list() -> String {
-    ALLOWED_EXEC_PLUGINS.join(", ")
+/// The credential subcommand `name` must be run with, when it is one of
+/// [`ALLOWED_EXEC_SUBCOMMANDS`].
+fn subcommand_of(name: &str) -> Option<&'static [&'static str]> {
+    ALLOWED_EXEC_SUBCOMMANDS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, sub)| *sub)
 }
 
-/// Check one exec `command`. `Err` carries a user-facing reason naming it.
+fn allow_list() -> String {
+    let scoped = ALLOWED_EXEC_SUBCOMMANDS
+        .iter()
+        .map(|(n, sub)| format!("{n} {}", sub.join(" ")));
+    ALLOWED_EXEC_PLUGINS
+        .iter()
+        .map(|p| p.to_string())
+        .chain(scoped)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Check one exec `command` run with no arguments. `Err` carries a
+/// user-facing reason naming it.
 pub fn check_exec_command(command: &str) -> Result<(), String> {
+    check_exec_invocation(command, &[])
+}
+
+/// Check one exec `command` with its `args`: an allowed plugin with any
+/// arguments, or a subcommand-scoped CLI whose `args` start with its
+/// credential subcommand.
+pub fn check_exec_invocation(command: &str, args: &[&str]) -> Result<(), String> {
     let cmd = command.trim();
     if cmd.is_empty() {
         return Err("exec credential plugin has no command".into());
@@ -67,26 +107,41 @@ pub fn check_exec_command(command: &str) -> Result<(), String> {
             allow_list()
         ))
     };
-    if !cmd.contains('/') {
-        return if allowed_name(cmd) {
-            Ok(())
+    // `Ok(true)`: allowed whatever its args; `Ok(false)`: allowed only with
+    // its credential subcommand.
+    let allowed = |name: &str| -> Option<bool> {
+        if allowed_name(name) {
+            Some(true)
         } else {
-            refuse("not an allowed plugin")
-        };
-    }
-    if !cmd.starts_with('/') {
+            subcommand_of(name).map(|_| false)
+        }
+    };
+    if cmd.contains('/') && !cmd.starts_with('/') {
         return refuse("a relative path");
     }
     let path = Path::new(cmd);
-    let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if !allowed_name(base) {
+    let base = if cmd.contains('/') {
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    } else {
+        cmd
+    };
+    let Some(any_args) = allowed(base) else {
         return refuse("not an allowed plugin");
-    }
+    };
     // A symlink named `aws` pointing at a shell is still a shell.
-    if let Ok(real) = std::fs::canonicalize(path) {
-        let real_base = real.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !allowed_name(real_base) {
-            return refuse(&format!("it resolves to '{}'", real.display()));
+    if cmd.contains('/') {
+        if let Ok(real) = std::fs::canonicalize(path) {
+            let real_base = real.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if allowed(real_base) != Some(any_args) {
+                return refuse(&format!("it resolves to '{}'", real.display()));
+            }
+        }
+    }
+    if !any_args {
+        let sub = subcommand_of(base).unwrap_or(&[]);
+        let given: Vec<&str> = args.iter().map(|a| a.trim()).collect();
+        if !given.starts_with(sub) {
+            return refuse(&format!("'{base}' only runs as '{base} {}'", sub.join(" ")));
         }
     }
     Ok(())
@@ -95,7 +150,12 @@ pub fn check_exec_command(command: &str) -> Result<(), String> {
 /// Check a user's `exec` block: its command and its `env` names.
 pub fn check_exec_block(exec: &Value) -> Result<(), String> {
     let command = exec.get("command").and_then(Value::as_str).unwrap_or("");
-    check_exec_command(command)?;
+    let args: Vec<&str> = exec
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect())
+        .unwrap_or_default();
+    check_exec_invocation(command, &args)?;
     if let Some(env) = exec.get("env").and_then(Value::as_array) {
         for e in env {
             let name = e.get("name").and_then(Value::as_str).unwrap_or("").trim();
@@ -244,6 +304,63 @@ mod tests {
             err.contains("'/bin/sh'") && err.contains("user 'u'"),
             "{err}"
         );
+    }
+
+    /// Sweep 2026-10-11 H1: kubelogin as a kubectl plugin, Teleport and
+    /// DigitalOcean clusters stopped working under the S11-303 allow-list.
+    /// Their CLIs run anything else, so only the credential subcommand passes.
+    #[test]
+    fn general_clis_pass_only_with_their_credential_subcommand() {
+        let ok = [
+            (
+                "kubectl",
+                vec!["oidc-login", "get-token", "--oidc-issuer-url=https://x"],
+            ),
+            ("/usr/local/bin/kubectl", vec!["oidc-login", "get-token"]),
+            ("tsh", vec!["kube", "credentials", "--kube-cluster=prod"]),
+            (
+                "doctl",
+                vec![
+                    "kubernetes",
+                    "cluster",
+                    "kubeconfig",
+                    "exec-credential",
+                    "id",
+                ],
+            ),
+        ];
+        for (c, args) in ok {
+            assert!(check_exec_invocation(c, &args).is_ok(), "{c} {args:?}");
+        }
+        let refused = [
+            ("kubectl", vec![]),
+            ("kubectl", vec!["--", "exec"]),
+            ("kubectl", vec!["exec", "pod", "--", "sh"]),
+            ("kubectl", vec!["oidc-login"]),
+            ("tsh", vec!["ssh", "root@host"]),
+            ("doctl", vec!["compute", "ssh", "x"]),
+            ("./kubectl", vec!["oidc-login", "get-token"]),
+        ];
+        for (c, args) in refused {
+            let err = check_exec_invocation(c, &args).unwrap_err();
+            assert!(err.contains("not allowed"), "{c} {args:?}: {err}");
+        }
+        let block = cfg(json!({"exec": {"command": "kubectl",
+            "args": ["oidc-login", "get-token", "--oidc-client-id=k"]}}));
+        assert!(check_kubeconfig(&block, Some("c")).is_ok());
+        let block = cfg(json!({"exec": {"command": "tsh", "args": ["ssh", "x"]}}));
+        assert!(check_kubeconfig(&block, Some("c")).is_err());
+        // A symlink named `kubectl` pointing at a shell is still refused.
+        let dir = std::env::temp_dir().join(format!("otto-kcp-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("kubectl");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
+        assert!(
+            check_exec_invocation(link.to_str().unwrap(), &["oidc-login", "get-token"]).is_err()
+        );
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
