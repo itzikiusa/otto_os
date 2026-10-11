@@ -697,8 +697,8 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
     ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
         let ws = self.ctx.workspaces().get(&wf.workspace_id).await.ok()?;
-        // S3-302: a chat `Working Directory:` (or repos) outside the
-        // workflow's workspace never starts a run — say why in the thread.
+        // S3-302: a chat `Working Directory:` (or repos) outside every
+        // registered repo never starts a run — say why in the thread.
         if let Err(reason) = self.ctx.check_run_location(&ws, &input).await {
             tracing::info!(
                 "workflow chat: refused to start '{}' from {channel}/{chat}: {reason}",

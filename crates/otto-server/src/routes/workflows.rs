@@ -594,10 +594,10 @@ pub async fn run_workflow(
         &mut raw_input,
         otto_workflows::triggers::InputSource::Manual,
     );
-    // The run's location must be THIS workspace's (S3-302): an explicit
-    // `repo_id`, a `working_directory` and `repos` may only name its
-    // registered repos (or their worktrees) or its root — a foreign one would
-    // drive another workspace's checkout and git account. 400 otherwise.
+    // The run's location must be a registered repo (S3-302): an explicit
+    // `repo_id`, a `working_directory` and `repos` may only name a repo
+    // registered in Otto (any workspace, or a linked worktree of one) or this
+    // workspace's root — never an arbitrary folder. 400 otherwise.
     workflow_engine::ensure_run_location(&ctx, &ws, &raw_input)
         .await
         .map_err(ApiError)?;

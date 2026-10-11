@@ -154,11 +154,12 @@ async fn serve(ctx: &ServerCtx) -> (String, tokio::task::JoinHandle<()>) {
     (origin, server)
 }
 
-/// S3-302: a manual workflow run whose input names ANOTHER workspace's repo is
-/// refused (400) before any run row exists — it would otherwise drive that
-/// repo's checkout and git account from a `git_pr` / `review_run` step.
+/// S3-302: a manual workflow run may name ANOTHER workspace's registered repo
+/// (one shared workflow, e.g. a PR reviewer, serves repos registered
+/// elsewhere); an id that is not a registered repo is refused (400) before any
+/// run row exists.
 #[tokio::test]
-async fn manual_workflow_run_with_a_foreign_repo_id_is_refused() {
+async fn manual_workflow_run_takes_any_registered_repo_id() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (ctx, pool, owner, token, ws_b, repo_a) = two_workspaces_with_repo(&tmp).await;
     let graph: otto_core::workflows::WorkflowGraph = serde_json::from_value(json!({
@@ -173,14 +174,17 @@ async fn manual_workflow_run_with_a_foreign_repo_id_is_refused() {
     let r = reqwest::Client::new()
         .post(format!("{origin}/workflows/{}/run", wf.id))
         .bearer_auth(&token)
-        .json(&json!({ "input": { "repo_id": repo_a.id, "base": "main" } }))
+        .json(&json!({ "input": { "repo_id": "no-such-repo", "base": "main" } }))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 400, "a repo of workspace A from B's workflow");
+    assert_eq!(r.status(), 400, "an unregistered repo id");
     let body: serde_json::Value = r.json().await.unwrap();
     assert!(
-        body["message"].as_str().unwrap_or("").contains("workspace"),
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("registered"),
         "{body}"
     );
     assert!(
@@ -190,6 +194,19 @@ async fn manual_workflow_run_with_a_foreign_repo_id_is_refused() {
             .unwrap()
             .is_empty(),
         "no run row is created"
+    );
+    let r = reqwest::Client::new()
+        .post(format!("{origin}/workflows/{}/run", wf.id))
+        .bearer_auth(&token)
+        .json(&json!({ "input": { "repo_id": repo_a.id, "base": "main" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "a repo of workspace A from B's workflow: {}",
+        r.text().await.unwrap_or_default()
     );
     server.abort();
 }
@@ -335,10 +352,11 @@ async fn located_workspace(
 }
 
 /// S3-302 (route level): a manual run's `working_directory` / `repos` may only
-/// name the workflow's workspace — its root or a registered repo, and paths
-/// inside them. Anything else is a 400 naming the path, before any run row.
+/// name the workflow's workspace root or a registered repo (of ANY workspace),
+/// and paths inside them. Anything else is a 400 naming the path, before any
+/// run row.
 #[tokio::test]
-async fn manual_run_location_is_limited_to_the_workflows_workspace() {
+async fn manual_run_location_is_limited_to_registered_repos() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (ctx, pool, token, ws_b, b_repo, foreign, wf) = located_workspace(&tmp).await;
     let (origin, server) = serve(&ctx).await;
@@ -366,7 +384,7 @@ async fn manual_run_location_is_limited_to_the_workflows_workspace() {
         let body: serde_json::Value = r.json().await.unwrap();
         let msg = body["message"].as_str().unwrap_or("");
         assert!(
-            msg.contains("workspace") || msg.contains("absolute") || msg.contains("'..'"),
+            msg.contains("registered") || msg.contains("absolute") || msg.contains("'..'"),
             "{input}: {body}"
         );
     }
@@ -397,11 +415,48 @@ async fn manual_run_location_is_limited_to_the_workflows_workspace() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    // A repo registered in ANOTHER workspace: accepted by path, name and id.
+    let a_repo = tmp.path().join("a-repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let ws_a = ctx
+        .workspaces
+        .create(
+            "A",
+            tmp.path().join("a-root").to_str().unwrap(),
+            &wf.created_by,
+        )
+        .await
+        .unwrap();
+    let a = ctx
+        .git_store
+        .create_repo(NewRepo {
+            workspace_id: ws_a.id.clone(),
+            name: "a-repo".into(),
+            path: a_repo.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    for input in [
+        json!({"working_directory": a_repo.to_string_lossy()}),
+        json!({"repos": [{"repo": "a-repo", "name": "main", "type": "branch"}]}),
+        json!({"repo_id": a.id}),
+    ] {
+        let r = run(input.clone()).await.unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "{input}: {}",
+            r.text().await.unwrap_or_default()
+        );
+    }
     server.abort();
 }
 
-/// S3-302 (chat path): a chat `Working Directory:` outside the workflow's
-/// workspace starts nothing and the reply in the thread says why.
+/// S3-302 (chat path): a chat `Working Directory:` outside every registered
+/// repo starts nothing and the reply in the thread says why.
 #[tokio::test]
 async fn chat_working_directory_outside_the_workspace_is_refused_in_the_thread() {
     use otto_channels::workflow_trigger::WorkflowChatTrigger;
@@ -417,7 +472,7 @@ async fn chat_working_directory_outside_the_workspace_is_refused_in_the_thread()
         .await
         .expect("the thread gets a reply");
     assert!(ack.reply.contains("Can't start"), "{}", ack.reply);
-    assert!(ack.reply.contains("outside workspace"), "{}", ack.reply);
+    assert!(ack.reply.contains("not a registered repo"), "{}", ack.reply);
     assert!(
         otto_state::WorkflowsRepo::new(pool.clone())
             .list_runs(&wf.id)
