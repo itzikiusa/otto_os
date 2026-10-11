@@ -42,9 +42,9 @@ pub trait WorkflowCtx: Clone + Send + Sync + 'static {
     /// picks it up.
     fn request_skip_current(&self, run_id: &str, node_id: &str);
     /// S3-302: refuse a run whose caller-given location (`working_directory`,
-    /// `repos`, `repo_id`) leaves `ws` — the workflow's own workspace: only its
-    /// registered repos (and their linked worktrees) or its root, and paths
-    /// inside them. `Err` carries the user-facing reason.
+    /// `repos`, `repo_id`) is not a repo registered in Otto (any workspace, or a
+    /// linked worktree of one) or `ws`'s root, or a path inside them. `Err`
+    /// carries the user-facing reason.
     fn check_run_location(
         &self,
         ws: &Workspace,

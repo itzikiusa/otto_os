@@ -6200,15 +6200,9 @@ async fn execute_node(
             let mut opened_n: u64 = 0;
             for (repo_id, worktree, base) in &resolved {
                 let repo = match ctx.git_store.get_repo(repo_id).await {
-                    // S3-302: only this workflow's workspace's repos (and their
-                    // git accounts) — a target's repo_id may come from run input.
-                    Ok(r) if r.workspace_id == ws.id => r,
-                    Ok(_) => {
-                        notes.push(format!(
-                            "{repo_id}: not registered in this workflow's workspace — skipped"
-                        ));
-                        continue;
-                    }
+                    // S3-302: any registered repo (a target's repo_id may come
+                    // from run input; ensure_run_location vetted it at start).
+                    Ok(r) => r,
                     Err(e) => {
                         notes.push(format!("{repo_id}: repo missing: {e}"));
                         continue;
@@ -7516,9 +7510,8 @@ fn expand_tilde(p: &str) -> String {
 /// See design §B — this is what makes such steps resilient instead of failing
 /// with a bare "missing repo_id".
 ///
-/// An explicit `repo_id` must be registered in the workflow's OWN workspace
-/// (S3-302): a run never drives another workspace's checkout or git account,
-/// the same rule Run-with-Otto enforces (S15-05).
+/// An explicit `repo_id` must be a repo registered in Otto (S3-302) — in any
+/// workspace, so one workflow can review a repo another workspace registered.
 async fn resolve_step_repo_id(
     ctx: &ServerCtx,
     ws: &Workspace,
@@ -7533,7 +7526,7 @@ async fn resolve_step_repo_id(
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty());
     if let Some(id) = explicit {
-        ensure_repo_in_workspace(ctx, &ws.id, &id).await?;
+        ensure_repo_registered(ctx, &id).await?;
         return Ok(Some(id));
     }
     let hint = p
@@ -7545,34 +7538,34 @@ async fn resolve_step_repo_id(
     Ok(resolve_repo_id_for_path(ctx, &ws.id, &hint).await)
 }
 
-/// `repo_id` names a repo registered in `workspace_id` — else `Invalid` (a
-/// foreign or unknown id reads the same, so ids of other workspaces don't
-/// leak). S3-302.
-pub(crate) async fn ensure_repo_in_workspace(
+/// `repo_id` names a repo registered in Otto (any workspace) — else
+/// `Invalid`. S3-302.
+pub(crate) async fn ensure_repo_registered(
     ctx: &ServerCtx,
-    workspace_id: &Id,
     repo_id: &str,
 ) -> otto_core::Result<()> {
     match ctx.git_store.get_repo(&repo_id.to_string()).await {
-        Ok(r) if &r.workspace_id == workspace_id => Ok(()),
-        _ => Err(otto_core::Error::Invalid(format!(
-            "repo '{repo_id}' is not registered in this workflow's workspace"
+        Ok(_) => Ok(()),
+        Err(_) => Err(otto_core::Error::Invalid(format!(
+            "repo '{repo_id}' is not a registered repo"
         ))),
     }
 }
 
 /// S3-302: where a run may work. Its `working_directory` (comma-separated
 /// paths), `repos` declarations (repo, worktree path, `repo_id`) and an
-/// explicit `repo_id` must all stay inside the workflow's OWN workspace — one
-/// of its registered repos (or a linked worktree of one) or the workspace
-/// root, and paths inside them. Checked where a run starts from caller input
-/// (the manual-run route, chat); the error names the offending value.
+/// explicit `repo_id` must all name a repo registered in Otto — in ANY
+/// workspace, so a shared workflow (e.g. a PR reviewer) can work on a repo
+/// another workspace registered — or a linked worktree of one, or the
+/// workflow's workspace root, and paths inside them. Arbitrary unregistered
+/// folders stay refused. Checked where a run starts from caller input (the
+/// manual-run route, chat); the error names the offending value.
 pub(crate) async fn ensure_run_location(
     ctx: &ServerCtx,
     ws: &Workspace,
     input: &Value,
 ) -> otto_core::Result<()> {
-    let repos = ctx.git_store.list_repos(&ws.id).await?;
+    let repos = ctx.git_store.list_all_repos().await?;
     let pairs: Vec<(String, String)> = repos
         .iter()
         .map(|r| (r.id.clone(), r.path.clone()))
@@ -7585,7 +7578,7 @@ pub(crate) async fn ensure_run_location(
             .map(str::to_string)
     };
     if let Some(rid) = text("repo_id", input) {
-        ensure_repo_in_workspace(ctx, &ws.id, &rid).await?;
+        ensure_repo_registered(ctx, &rid).await?;
     }
     if let Some(wd) = text("working_directory", input) {
         for path in wd.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -7600,13 +7593,13 @@ pub(crate) async fn ensure_run_location(
                 ensure_path_in_workspace(ws, &pairs, &e.repo).await?;
             } else {
                 return Err(otto_core::Error::Invalid(format!(
-                    "repo '{}' is not registered in workspace '{}'",
-                    e.repo, ws.name
+                    "repo '{}' is not a registered repo",
+                    e.repo
                 )));
             }
         }
         if let Some(rid) = &e.repo_id {
-            ensure_repo_in_workspace(ctx, &ws.id, rid).await?;
+            ensure_repo_registered(ctx, rid).await?;
         }
         if e.kind == "worktree" {
             ensure_path_in_workspace(ws, &pairs, &e.name).await?;
@@ -7619,8 +7612,8 @@ pub(crate) async fn ensure_run_location(
 }
 
 /// One path of [`ensure_run_location`]: absolute (`~` expanded), and inside
-/// the workspace root, one of `repos` (`(id, path)` of the workspace's
-/// registered repos), or a linked worktree whose origin is one of them.
+/// the workspace root, one of `repos` (`(id, path)` of every registered
+/// repo), or a linked worktree whose origin is one of them.
 async fn ensure_path_in_workspace(
     ws: &Workspace,
     repos: &[(String, String)],
@@ -7679,9 +7672,9 @@ async fn ensure_path_in_workspace(
         }
     }
     Err(otto_core::Error::Invalid(format!(
-        "working directory '{raw}' is outside workspace '{}' — a run may only work in this \
-         workspace's registered repos or its root folder ({})",
-        ws.name, ws.root_path
+        "working directory '{raw}' is not a registered repo — a run may only work in a repo \
+         registered in Otto (any workspace) or this workspace's root folder ({})",
+        ws.root_path
     )))
 }
 
@@ -8280,20 +8273,20 @@ async fn resolve_repo_entries(
         // The origin repo's display name — filled from whichever registered repo
         // we resolve to, so `repos.json` names the repo even for a worktree-only run.
         let mut repo_name: Option<String> = None;
-        // Only the workflow's OWN workspace's repos (S3-302): a declared id or
-        // name never resolves to another workspace's checkout + git account.
-        let by_id = ctx
-            .git_store
-            .get_repo(&e.repo)
-            .await
-            .ok()
-            .filter(|r| &r.workspace_id == workspace_id);
+        // Any registered repo (S3-302). A declared NAME prefers the
+        // workflow's own workspace, then the first registered repo of that name.
+        let by_id = ctx.git_store.get_repo(&e.repo).await.ok();
         if let Some(r) = by_id {
             rid = Some(r.id.clone());
             repo_name = Some(r.name.clone());
             root = Some(r.path);
-        } else if let Ok(repos) = ctx.git_store.list_repos(workspace_id).await {
-            if let Some(r) = repos.into_iter().find(|r| r.name == e.repo) {
+        } else if let Ok(repos) = ctx.git_store.list_all_repos().await {
+            let named = || repos.iter().filter(|r| r.name == e.repo);
+            if let Some(r) = named()
+                .find(|r| &r.workspace_id == workspace_id)
+                .or_else(|| named().next())
+                .cloned()
+            {
                 rid = Some(r.id);
                 repo_name = Some(r.name.clone());
                 root = Some(r.path);
@@ -8384,28 +8377,21 @@ async fn resolve_repo_id_for_path(
     workspace_id: &Id,
     path: &str,
 ) -> Option<String> {
-    // Match by PATH against ALL registered repos, then keep the winner only
-    // when it is registered in the RUN's workspace (S3-302, S15-05: a run
-    // never drives another workspace's checkout or git account). Matching
-    // globally first matters: otherwise a path nested under a repo registered
-    // in the run's workspace (e.g. the home dir) would win over the exact repo
-    // registered elsewhere and silently target the wrong repo — a foreign
-    // winner resolves to `None` instead. `match_repo_path` picks the
+    // Match by PATH against ALL registered repos, in any workspace (S3-302:
+    // a run may work on any registered repo). Matching globally matters:
+    // otherwise a path nested under a repo registered in the run's workspace
+    // (e.g. the home dir) would win over the exact repo registered elsewhere
+    // and silently target the wrong repo. `match_repo_path` picks the
     // deepest/exact match, so ~/proj/app → the app repo, not a parent-dir repo.
     let expanded = expand_tilde(path);
     let all = ctx.git_store.list_all_repos().await.ok()?;
     let pairs: Vec<(String, String)> = all.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
-    let own = |id: String| -> Option<String> {
-        all.iter()
-            .any(|r| r.id == id && &r.workspace_id == workspace_id)
-            .then_some(id)
-    };
     if let Some(id) = match_repo_path(&expanded, &pairs) {
-        return own(id);
+        return Some(id);
     }
     if let Some(main) = git_main_worktree(&expanded).await {
         if let Some(id) = match_repo_path(&main, &pairs) {
-            return own(id);
+            return Some(id);
         }
     }
     // Last resort (unchanged): a run workspace with exactly one repo → use it.
