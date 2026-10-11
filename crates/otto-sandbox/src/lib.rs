@@ -348,6 +348,11 @@ const AGENT_CACHE_ENV: &[(&str, &str)] = &[
     ("PRE_COMMIT_HOME", "pre-commit"),
     ("PIP_CACHE_DIR", "pip"),
     ("GOCACHE", "go-build"),
+    // Go module downloads (`~/go/pkg/mod` by default — not writable, so a
+    // sandboxed `go build` / `go mod download` used to fail). Cargo, Maven and
+    // Gradle homes also hold the user's config and credentials, so they are
+    // not relocated (sweep 2026-10-11 M3).
+    ("GOMODCACHE", "go-mod"),
     ("YARN_CACHE_FOLDER", "yarn"),
     ("BUN_INSTALL_CACHE_DIR", "bun"),
 ];
@@ -1555,6 +1560,7 @@ mod tests {
         assert!(env.iter().any(|(k, _)| k == "UV_CACHE_DIR"));
         assert!(env.iter().any(|(k, _)| k == "PRE_COMMIT_HOME"));
         assert!(env.iter().any(|(k, _)| k == "XDG_CACHE_HOME"));
+        assert!(env.contains(&("GOMODCACHE".into(), "/t/c/go-mod".into())));
     }
 
     /// S11-302: a cwd at or above `$HOME` (or `/`) is never granted.

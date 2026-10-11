@@ -255,7 +255,7 @@ Notes:
   leaving reads global. The shared package caches (`~/.npm`, `~/.cache`,
   `~/Library/Caches`) and `~/.otto` are NOT writable; the session's
   `npm_config_cache` / `UV_CACHE_DIR` / `XDG_CACHE_HOME` / `PRE_COMMIT_HOME` /
-  `PIP_CACHE_DIR` / `GOCACHE` / `YARN_CACHE_FOLDER` / `BUN_INSTALL_CACHE_DIR` point
+  `PIP_CACHE_DIR` / `GOCACHE` / `GOMODCACHE` / `YARN_CACHE_FOLDER` / `BUN_INSTALL_CACHE_DIR` point
   at a private `<tmp>/otto-agent-cache/<session id>/` instead (a codex session's
   shadow `CODEX_HOME` in its context bundle is re-opened, minus its config, skills
   and instruction files). Otto's
