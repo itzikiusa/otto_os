@@ -2,9 +2,11 @@
   import { loadErrorText } from '../../lib/loadError';
   // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar
   // (Files / Search / Tags over the active vault), center (note edit⇄read or
-  // the graph), right panel (backlinks / outgoing / outline / properties /
-  // OKF). Files on disk are the truth; the daemon keeps a derived index.
-  import { onMount } from 'svelte';
+  // the graph), and the note's details (backlinks / outgoing / outline /
+  // properties / OKF) as a "Note details" tab of the shell's Side panel — one
+  // right panel, not two. Files on disk are the truth; the daemon keeps a
+  // derived index.
+  import { onMount, untrack } from 'svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -18,6 +20,8 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
+  import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
@@ -37,12 +41,18 @@
 
   // -- pane widths (drag-resizable, persisted) ---------------------------------
   const LEFT_W_KEY = 'otto_vault_left_w';
-  const RIGHT_W_KEY = 'otto_vault_right_w';
   // Storage is a convenience cache: lsGet/lsSet swallow a blocked accessor or
   // a full quota, so a private window never blanks the page.
   let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  let rightW = $state(loadPaneWidth(RIGHT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  let rightOpen = $state(lsGet('otto_vault_right_open') !== '0');
+  // Note details live in the Side panel. The vault's own "right panel open"
+  // preference (default open) is still honoured: on the first note shown the
+  // panel opens on the details tab, and showing / hiding that tab here writes
+  // the preference back.
+  const DETAILS_TAB = 'page:vault-details' as const;
+  const DETAILS_KEY = 'otto_vault_right_open';
+  const wantDetails = lsGet(DETAILS_KEY) !== '0';
+  let detailsApplied = false;
+  const rightOpen = $derived(ui.rightOpen && rightPanel.shown === DETAILS_TAB);
   let leftOpen = $state(lsGet('otto_vault_left_open') !== '0');
 
   function toggleLeft(): void {
@@ -50,9 +60,22 @@
     lsSet('otto_vault_left_open', leftOpen ? '1' : '0');
   }
   function toggleRight(): void {
-    rightOpen = !rightOpen;
-    lsSet('otto_vault_right_open', rightOpen ? '1' : '0');
+    if (rightOpen) ui.toggleRight();
+    else ui.openRight(DETAILS_TAB);
   }
+  $effect(() => {
+    if (vault.centerMode !== 'note') return;
+    const off = rightPanel.register({ id: DETAILS_TAB, label: 'Note details', icon: 'link', component: RightPanel });
+    if (!detailsApplied) {
+      detailsApplied = true;
+      if (wantDetails) untrack(() => ui.openRight(DETAILS_TAB));
+    }
+    return off;
+  });
+  $effect(() => {
+    const showing = rightOpen;
+    if (detailsApplied && vault.centerMode === 'note') lsSet(DETAILS_KEY, showing ? '1' : '0');
+  });
 
   // -- create-vault dialog -------------------------------------------------------
   let createOpen = $state(false);
@@ -151,7 +174,7 @@
       { label: 'Trash and restore', icon: 'trash', action: () => void vault.openTrash() },
       { separator: true },
       { label: 'File tree', checked: leftOpen, action: toggleLeft },
-      { label: 'Right panel', checked: rightOpen, action: toggleRight },
+      ...(vault.centerMode === 'note' ? [{ label: 'Note details', checked: rightOpen, hint: '⌘J', action: toggleRight }] : []),
     ];
     ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
   }
@@ -497,12 +520,6 @@
         {/if}
       </main>
 
-      {#if rightOpen && vault.centerMode === 'note'}
-        <div class="resizer-right"><PaneDivider bind:width={rightW} storageKey={RIGHT_W_KEY} label="Resize details panel" invert /></div>
-        <aside class="right-pane" style="width:{rightW}px">
-          <RightPanel />
-        </aside>
-      {/if}
     </div>
 
     <footer class="vault-statusbar">
@@ -517,7 +534,7 @@
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>
         {#if vault.current.okf && vault.okfReport}
           <span class:ok={vault.okfReport.conformant} class:bad={!vault.okfReport.conformant}
-            title={vault.okfReport.conformant ? 'This note passes OKF validation' : 'See the OKF section in the right panel'}>
+            title={vault.okfReport.conformant ? 'This note passes OKF validation' : 'See the OKF section in Note details (Side panel)'}>
             <Icon name={vault.okfReport.conformant ? 'check' : 'warning'} size={12} />
             {vault.okfReport.conformant ? 'OKF valid' : `OKF: ${vault.okfReport.errors.length} ${vault.okfReport.errors.length === 1 ? 'issue' : 'issues'}`}
           </span>
@@ -694,10 +711,6 @@
     padding: 6px 8px;
     border-bottom: 1px solid var(--border);
   }
-  /* display:contents so the divider stays a flex item of .panes. */
-  .resizer-right {
-    display: contents;
-  }
   .center {
     flex: 1;
     min-width: 0;
@@ -787,11 +800,6 @@
   .center-empty {
     overflow-y: auto;
   }
-  .right-pane {
-    border-inline-start: 1px solid var(--border);
-    flex-shrink: 0;
-    min-height: 0;
-  }
   .vs-inline {
     margin-inline-start: 6px;
     vertical-align: middle;
@@ -852,16 +860,7 @@
     word-break: break-word;
   }
 
-  /* Mid widths (narrow desktop / tablet portrait / phone landscape): the
-   * fixed side panes would crush the note pane — drop the right panel. */
-  @media (max-width: 1024px) {
-    .right-pane,
-    .resizer-right {
-      display: none;
-    }
-  }
-
-  /* Phone: stack — left pane becomes a top strip, right panel hidden, and the
+  /* Phone: stack — left pane becomes a top strip, and the
    * status bar drops the on-disk path (it would take a whole row). */
   @media (max-width: 640px) {
     .vs-path {
@@ -875,9 +874,6 @@
       max-height: min(25%, 180px);
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
-    }
-    .right-pane {
-      display: none;
     }
   }
 </style>
