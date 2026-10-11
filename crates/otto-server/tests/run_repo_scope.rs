@@ -429,6 +429,7 @@ async fn manual_run_location_is_limited_to_registered_repos() {
         json!({"working_directory": "/"}),
         json!({"repos": [{"repo": "repo-of-another-ws", "name": "main", "type": "branch"}]}),
         json!({"repos": [{"repo": foreign.to_string_lossy(), "name": foreign.to_string_lossy()}]}),
+        json!({"repos": [{"repo": "./relative", "name": "main", "type": "branch"}]}),
     ];
     for input in refused {
         let r = run(input.clone()).await.unwrap();
@@ -440,6 +441,19 @@ async fn manual_run_location_is_limited_to_registered_repos() {
             "{input}: {body}"
         );
     }
+    // Sweep 2026-10-11 A2: an unregistered `org/name` is a repo NAME, so the
+    // refusal says it is not registered (it used to say "must be an absolute
+    // path", treating the slash as a path).
+    let r = run(json!({"repos": [{"repo": "org/name", "name": "main", "type": "branch"}]}))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let msg = body["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("'org/name' is not a registered repo"),
+        "{body}"
+    );
     assert!(
         otto_state::WorkflowsRepo::new(pool.clone())
             .list_runs(&wf.id)

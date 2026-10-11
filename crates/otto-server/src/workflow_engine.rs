@@ -7590,11 +7590,15 @@ pub(crate) async fn ensure_run_location(
     {
         let registered = repos.iter().any(|r| r.id == e.repo || r.name == e.repo);
         if !registered {
-            if e.repo.contains('/') || e.repo.starts_with('~') {
+            // A path names a folder; anything else (`org/name` included) is a
+            // repo name or id, and an unknown one says so — not "must be an
+            // absolute path".
+            if looks_like_path(&e.repo) {
                 ensure_path_in_workspace(ws, &pairs, &e.repo).await?;
             } else {
                 return Err(otto_core::Error::Invalid(format!(
-                    "repo '{}' is not a registered repo",
+                    "repo '{}' is not a registered repo — name a registered repo by its \
+                     name or id, or give its absolute path",
                     e.repo
                 )));
             }
@@ -7610,6 +7614,13 @@ pub(crate) async fn ensure_run_location(
         }
     }
     Ok(())
+}
+
+/// Whether a `repos[]` entry is written as a path (`/…`, `~…`, `./…`, `../…`)
+/// rather than a repo name or id.
+fn looks_like_path(repo: &str) -> bool {
+    let r = repo.trim();
+    r.starts_with('/') || r.starts_with('~') || r.starts_with('.')
 }
 
 /// One path of [`ensure_run_location`]: absolute (`~` expanded), and inside
