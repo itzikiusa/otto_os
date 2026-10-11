@@ -18,10 +18,10 @@
 
 #[path = "activity_isolation.rs"]
 mod activity_isolation;
-#[path = "agent_run_recovery.rs"]
-mod agent_run_recovery;
 #[path = "admin_sessions.rs"]
 mod admin_sessions;
+#[path = "agent_run_recovery.rs"]
+mod agent_run_recovery;
 #[path = "auth_security.rs"]
 mod auth_security;
 #[path = "canvas_refs_api.rs"]

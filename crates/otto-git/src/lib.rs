@@ -8,6 +8,7 @@ mod diff_cache;
 #[cfg(test)]
 mod diff_tests;
 pub mod history;
+mod hooks;
 pub mod http;
 pub mod local;
 pub mod ops;

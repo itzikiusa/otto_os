@@ -323,43 +323,7 @@ pub(crate) fn worktree_round_trips(path: &Path, common: &Path) -> bool {
     canon(Path::new(back.trim())).is_some_and(|b| Some(b) == canon(&dot_git))
 }
 
-/// Does a `core.hooksPath` value point inside the work tree `toplevel`?
-/// Relative values resolve against the work tree root (git's rule), so they
-/// are inside unless they climb out with `..`; `~/` expands to `$HOME`.
-pub(crate) fn hooks_path_inside(hooks: &str, toplevel: Option<&str>) -> bool {
-    let Some(top) = toplevel else {
-        return false;
-    };
-    let top = std::fs::canonicalize(top).unwrap_or_else(|_| PathBuf::from(top));
-    let raw = if let Some(rest) = hooks.strip_prefix("~/") {
-        match std::env::var_os("HOME") {
-            Some(h) => PathBuf::from(h).join(rest),
-            None => return false,
-        }
-    } else {
-        PathBuf::from(hooks)
-    };
-    let abs = if raw.is_absolute() {
-        raw
-    } else {
-        top.join(raw)
-    };
-    // Resolve `..` / symlinks where the dir exists; else normalise lexically.
-    let resolved = std::fs::canonicalize(&abs).unwrap_or_else(|_| {
-        let mut out = PathBuf::new();
-        for c in abs.components() {
-            match c {
-                std::path::Component::ParentDir => {
-                    out.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => out.push(other),
-            }
-        }
-        out
-    });
-    resolved.starts_with(&top)
-}
+pub(crate) use crate::hooks::hooks_path_inside;
 
 /// The git subcommand in an argv: the first word after git's GLOBAL options.
 /// Used for error text AND for [`HOOK_VERBS`] gating, so every leading global
@@ -944,7 +908,7 @@ pub struct LocalGit {
     /// the work tree (husky / lefthook: `.husky/_`), which any agent working
     /// there can edit; daemon-initiated commits / merges / pushes (workflows,
     /// Run with Otto, swarm, scheduled tasks) run with hooks off in that case.
-    person_initiated: bool,
+    pub(crate) person_initiated: bool,
 }
 
 impl LocalGit {
@@ -964,14 +928,6 @@ impl LocalGit {
         self
     }
 
-    /// Will this handle's commits / pushes skip the repo's hooks? True for a
-    /// daemon-initiated handle in a repo whose `core.hooksPath` lies inside the
-    /// work tree (husky / lefthook) — callers surface it on their run, since
-    /// those hooks (commit-msg, pre-commit, pre-push) are then left to CI.
-    pub async fn worktree_hooks_skipped(&self) -> bool {
-        !self.person_initiated && self.hooks_path_in_worktree().await
-    }
-
     /// Is `core.hooksPath` set to a directory inside this work tree (where an
     /// agent session can rewrite the hooks)? A relative value is resolved
     /// against the work tree root, so it counts as inside. Errors (no repo,
@@ -980,7 +936,9 @@ impl LocalGit {
     /// Returns an OWNED future (both commands are built up front) so a
     /// detached write can run the probe inside its own task — see
     /// [`Self::spawn_capture`].
-    fn hooks_path_in_worktree(&self) -> impl std::future::Future<Output = bool> + Send + 'static {
+    pub(crate) fn hooks_path_in_worktree(
+        &self,
+    ) -> impl std::future::Future<Output = bool> + Send + 'static {
         let cmd = |args: &'static [&'static str]| {
             let mut cmd = self.base_cmd();
             // Read the REPO's value: the hardened `core.hooksPath=/dev/null`
