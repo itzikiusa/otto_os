@@ -112,3 +112,10 @@ export function withFolderPick(picks: Record<string, string>, wsId: string, path
   else delete next[wsId];
   return next;
 }
+
+/** Drop picks for workspaces that no longer exist (`ids`: the live list). */
+export function prunePicks(picks: Record<string, string>, ids: readonly string[]): Record<string, string> {
+  const live = new Set(ids);
+  const keep = Object.entries(picks).filter(([wsId]) => live.has(wsId));
+  return keep.length === Object.keys(picks).length ? picks : Object.fromEntries(keep);
+}

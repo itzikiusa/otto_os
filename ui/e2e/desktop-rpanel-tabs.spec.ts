@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
 import { openPage, expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
@@ -13,6 +13,9 @@ import { openPage, expectFullyInViewport, expectNoHorizontalOverflow } from './h
 
 let wsA = '';
 let root = '';
+let root2 = '';
+// Unique per worker: every worker seeds its own second workspace.
+const otherWs = `Side panel other ${process.pid}-${Date.now().toString(36)}`;
 
 test.beforeAll(async () => {
   const a = await apiCtx();
@@ -24,6 +27,11 @@ test.beforeAll(async () => {
   writeFileSync(join(root, '.env.example'), 'KEY=value\n');
   writeFileSync(join(root, 'src', 'lib', 'util.ts'), 'export const x = 1;\n');
   await seedShellSession(a.ctx, a.base, wsA);
+  // A second workspace: its folder is offered by the folder bar's menu.
+  const ws2 = await seedWorkspace(a.ctx, a.base, otherWs);
+  const all = (await (await a.ctx.get(`${a.base}/api/v1/workspaces`)).json()) as { id: string; root_path: string }[];
+  root2 = all.find((w) => w.id === ws2)!.root_path;
+  writeFileSync(join(root2, 'OTHER.md'), '# other\n');
   await a.ctx.dispose();
 });
 
@@ -202,4 +210,45 @@ test('API tab (narrow): full URL preview, params rows keep × on the row, light 
   });
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.screenshot({ path: test.info().outputPath('side-panel-api-dark.png') });
+});
+
+test('Files follows the panel folder: a pick re-roots a browsed tree; a vanished pick offers the workspace folder', async ({ page }) => {
+  await openPage(page, 'home');
+  await railBtn(page, 'Files').click();
+  const panel = page.locator('.rpanel');
+  const current = panel.getByRole('navigation', { name: 'Folder path' }).locator('[aria-current="location"]');
+  const rootName = root.split('/').at(-1)!;
+  const otherName = root2.split('/').at(-1)!;
+  await expect(current).toHaveText(rootName);
+  // Browse away (Up), then pick another folder in the folder bar.
+  await panel.getByRole('button', { name: 'Up one folder' }).click();
+  await expect(current).not.toHaveText(rootName);
+  await panel.locator('.folder-btn').click();
+  // A long, filterable menu (the shared test daemon holds many workspaces).
+  const menu = page.locator('.ctx-menu');
+  const find = menu.getByPlaceholder('Find a repository or workspace');
+  if (await find.count()) await find.fill(otherWs);
+  await menu.getByRole('menuitemcheckbox', { name: new RegExp(otherWs) }).click();
+  await expect(panel.locator('.folder-btn')).toContainText(otherName);
+  await expect(current).toHaveText(otherName);
+  await expect(panel.locator('.tree-row', { hasText: 'OTHER.md' })).toBeVisible();
+  // A fresh Back/Forward history for the new folder.
+  await expect(panel.getByRole('button', { name: 'Back', exact: true })).toBeDisabled();
+  // The picked folder disappears: the bar says so and offers the workspace's.
+  rmSync(root2, { recursive: true, force: true });
+  await page.reload();
+  await expect(panel.locator('.folder-missing')).toContainText('Not found');
+  await panel.getByRole('button', { name: 'Use workspace folder' }).click();
+  await expect(panel.locator('.folder-btn')).toContainText(rootName);
+  await expect(panel.locator('.folder-missing')).toHaveCount(0);
+  await expect(current).toHaveText(rootName);
+});
+
+test('pop-out windows keep the Side panel', async ({ page }) => {
+  await page.goto('/?popout=1#/home');
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
+  await expect(rail(page)).toBeVisible();
+  await railBtn(page, 'Notes').click();
+  await expect(page.locator('.rpanel .rpanel-title')).toHaveText('Notes');
+  await expectNoHorizontalOverflow(page);
 });

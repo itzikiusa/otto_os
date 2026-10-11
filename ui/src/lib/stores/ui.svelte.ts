@@ -572,12 +572,31 @@ class UiStore {
     lsSet(LS.rail, this.railExpanded ? '1' : '0');
   }
 
+  /** A page's own, NON-persisted view of the Side panel (the Vault showing
+   *  its Note details by default): wins over the saved open/tab until the
+   *  person acts on the panel or the page goes away, and is never written to
+   *  storage — visiting a page must not leave the panel open everywhere. */
+  rightTransient: { open: boolean; tab: RightPanelTab } | null = $state(null);
+  /** What the Side panel shows now: the page's transient view, else the saved state. */
+  get rightOpenNow(): boolean {
+    return this.rightTransient?.open ?? this.rightOpen;
+  }
+  get rightTabNow(): RightPanelTab {
+    return this.rightTransient?.tab ?? this.rightTab;
+  }
+
   toggleRight(): void {
-    this.rightOpen = !this.rightOpen;
+    // Acting on the panel ends a page's transient view; the result is saved.
+    const open = this.rightOpenNow;
+    if (this.rightTransient) this.rightTab = this.rightTransient.tab;
+    this.rightTransient = null;
+    this.rightOpen = !open;
     lsSet(LS.right, this.rightOpen ? '1' : '0');
+    lsSet(LS.rightTab, this.rightTab);
   }
 
   openRight(tab: RightPanelTab): void {
+    this.rightTransient = null;
     this.rightTab = tab;
     this.rightOpen = true;
     lsSet(LS.right, '1');
@@ -586,6 +605,7 @@ class UiStore {
 
   /** Set open + tab together (a rail click), persisting both. */
   setRight(open: boolean, tab: RightPanelTab): void {
+    this.rightTransient = null;
     this.rightTab = tab;
     this.rightOpen = open;
     lsSet(LS.right, open ? '1' : '0');

@@ -10,13 +10,13 @@
 //     into this one panel instead of showing a second, competing right panel.
 import type { Component } from 'svelte';
 import type { IconName } from '../components/Icon.svelte';
-import { contextFolder, parseFolderPicks, shownRightTab, visibleRightTabs, withFolderPick, type PageTabId, type RightTabDef } from '../rightTabs';
+import { contextFolder, parseFolderPicks, prunePicks, shownRightTab, visibleRightTabs, withFolderPick, type PageTabId, type RightTabDef } from '../rightTabs';
 import { lsGet, lsSet } from '../storage';
 import { router } from '../router.svelte';
 import { ui } from './ui.svelte';
 import { ws } from './workspace.svelte';
 
-const LS_PICKS = 'otto_right_folder';
+export const LS_PICKS = 'otto_right_folder';
 
 export interface PageTab {
   id: PageTabId;
@@ -26,6 +26,9 @@ export interface PageTab {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   component: Component<any>;
   props?: Record<string, unknown>;
+  /** The person explicitly showed (true) or hid (false) THIS tab from the
+   *  rail or the panel's collapse — the page's own preference to remember. */
+  onshow?: (shown: boolean) => void;
 }
 
 /** One rail entry: a shell tab or a page tab. */
@@ -69,7 +72,7 @@ class RightPanelStore {
     ...this.shellTabs.map((t) => ({ id: t.id, label: t.label, icon: t.icon, page: false })),
   ]);
   /** What the open panel shows (the chosen tab, or the first one available here). */
-  readonly shown = $derived(shownRightTab(ui.rightTab, this.tabs.map((t) => t.id)));
+  readonly shown = $derived(shownRightTab(ui.rightTabNow, this.tabs.map((t) => t.id)));
 
   /** Contribute a tab while the page is mounted; returns the unregister. */
   register(tab: PageTab): () => void {
@@ -84,12 +87,27 @@ class RightPanelStore {
     return this.tabs.some((t) => t.id === id);
   }
 
-  /** Point the panel at `path` for the current workspace (`null`: its root). */
+  /** Point the panel at `path` for the current workspace (`null`: its root).
+   *  Applied on top of what storage holds now, so another window's pick for
+   *  another workspace is never overwritten by this window's stale copy. */
   pickFolder(path: string | null): void {
     const id = ws.currentId;
     if (!id) return;
-    this.picks = withFolderPick(this.picks, id, path);
+    this.picks = withFolderPick(parseFolderPicks(lsGet(LS_PICKS)), id, path);
     lsSet(LS_PICKS, JSON.stringify(this.picks));
+  }
+
+  /** Another window changed the picks (storage event). */
+  reloadPicks(): void {
+    this.picks = parseFolderPicks(lsGet(LS_PICKS));
+  }
+
+  /** Forget picks of workspaces that no longer exist (`ids`: the live list). */
+  prunePicks(ids: readonly string[]): void {
+    const stored = parseFolderPicks(lsGet(LS_PICKS));
+    const next = prunePicks(stored, ids);
+    if (next !== stored) lsSet(LS_PICKS, JSON.stringify(next));
+    this.picks = next;
   }
 }
 

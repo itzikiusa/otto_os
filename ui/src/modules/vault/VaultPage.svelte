@@ -44,15 +44,19 @@
   // Storage is a convenience cache: lsGet/lsSet swallow a blocked accessor or
   // a full quota, so a private window never blanks the page.
   let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  // Note details live in the Side panel. The vault's own "right panel open"
-  // preference (default open) is still honoured: on the first note shown the
-  // panel opens on the details tab, and showing / hiding that tab here writes
-  // the preference back.
+  // Note details live in the Side panel, as its "Note details" tab. The
+  // Vault's own "show details" preference (default on) is kept SEPARATE from
+  // the panel's saved state: it is applied as the panel's transient view
+  // (ui.rightTransient — never persisted, gone when the Vault unmounts), and
+  // written only by an explicit show / hide of Note details (the ⋯ menu, its
+  // rail icon, collapsing while it is shown). Visiting the Vault therefore
+  // never leaves the panel open on other pages.
   const DETAILS_TAB = 'page:vault-details' as const;
   const DETAILS_KEY = 'otto_vault_right_open';
-  const wantDetails = lsGet(DETAILS_KEY) !== '0';
-  let detailsApplied = false;
-  const rightOpen = $derived(ui.rightOpen && rightPanel.shown === DETAILS_TAB);
+  const rightOpen = $derived(ui.rightOpenNow && rightPanel.shown === DETAILS_TAB);
+  function rememberDetails(shown: boolean): void {
+    lsSet(DETAILS_KEY, shown ? '1' : '0');
+  }
   let leftOpen = $state(lsGet('otto_vault_left_open') !== '0');
 
   function toggleLeft(): void {
@@ -60,22 +64,22 @@
     lsSet('otto_vault_left_open', leftOpen ? '1' : '0');
   }
   function toggleRight(): void {
-    if (rightOpen) ui.toggleRight();
-    else ui.openRight(DETAILS_TAB);
+    const show = !rightOpen;
+    ui.rightTransient = { open: show, tab: DETAILS_TAB };
+    rememberDetails(show);
   }
   $effect(() => {
     if (vault.centerMode !== 'note') return;
     // untrack: register reads + writes the page-tab list (no self-dependency).
-    const off = untrack(() => rightPanel.register({ id: DETAILS_TAB, label: 'Note details', icon: 'link', component: RightPanel }));
-    if (!detailsApplied) {
-      detailsApplied = true;
-      if (wantDetails) untrack(() => ui.openRight(DETAILS_TAB));
-    }
-    return () => untrack(off);
-  });
-  $effect(() => {
-    const showing = rightOpen;
-    if (detailsApplied && vault.centerMode === 'note') lsSet(DETAILS_KEY, showing ? '1' : '0');
+    const off = untrack(() => rightPanel.register({ id: DETAILS_TAB, label: 'Note details', icon: 'link', component: RightPanel, onshow: rememberDetails }));
+    untrack(() => {
+      if (lsGet(DETAILS_KEY) !== '0' && !rightOpen) ui.rightTransient = { open: true, tab: DETAILS_TAB };
+    });
+    return () =>
+      untrack(() => {
+        off();
+        if (ui.rightTransient?.tab === DETAILS_TAB) ui.rightTransient = null;
+      });
   });
 
   // -- create-vault dialog -------------------------------------------------------

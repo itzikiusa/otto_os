@@ -6,7 +6,7 @@
   // an "open this folder" action on every folder row.
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -102,6 +102,20 @@
     walkIndex = undefined;
     overriddenRoot = undefined;
   }
+  // The folder this section belongs to changed (another session focused, a
+  // folder picked in the Side panel's folder bar, another workspace): follow
+  // it — a folder browsed to under the OLD one would leave the tree and the
+  // folder bar (and Git) disagreeing — and start a fresh Back/Forward history.
+  let followedRoot = untrack(() => root);
+  $effect(() => {
+    const r = root;
+    untrack(() => {
+      if (r === followedRoot) return;
+      followedRoot = r;
+      resetRoot();
+      history = emptyHistory();
+    });
+  });
   function walk(index: number | null): void {
     if (index !== null) navigate(history.paths[index], index);
   }

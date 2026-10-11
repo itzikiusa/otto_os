@@ -9,6 +9,7 @@ import {
   contextFolder,
   isPageTabId,
   parseFolderPicks,
+  prunePicks,
   railClick,
   shownRightTab,
   visibleRightTabs,
@@ -69,4 +70,11 @@ test('folder picks round-trip per workspace and ignore malformed storage', () =>
 test('page tab ids are namespaced', () => {
   assert.ok(isPageTabId('page:vault-details'));
   assert.ok(!isPageTabId('git'));
+});
+
+test('picks of workspaces that no longer exist are pruned (same object when nothing changes)', () => {
+  const picks = { w1: '/a', w2: '/b' };
+  assert.deepEqual(prunePicks(picks, ['w1']), { w1: '/a' });
+  assert.equal(prunePicks(picks, ['w1', 'w2', 'w3']), picks);
+  assert.deepEqual(prunePicks(picks, []), {});
 });

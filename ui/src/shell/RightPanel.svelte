@@ -55,7 +55,7 @@
   // Warm the persisted tab with this chunk, so an open panel's first tab does
   // not wait for the mount → effect round trip before its import starts.
   {
-    const k = uiStore.rightOpen ? panelKeyOf(uiStore.rightTab, uiStore.browserPanelVersion) : null;
+    const k = uiStore.rightOpenNow ? panelKeyOf(uiStore.rightTabNow, uiStore.browserPanelVersion) : null;
     if (k) void loadPanel(k);
   }
   /** Tabs whose content works on the panel's folder (they get the folder bar). */
@@ -75,7 +75,9 @@
   import FolderPicker from '../lib/components/FolderPicker.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { SIDE_PANEL, railClick } from '../lib/rightTabs';
-  import { rightPanel } from '../lib/stores/rightPanel.svelte';
+  import { rightPanel, LS_PICKS } from '../lib/stores/rightPanel.svelte';
+  import { api } from '../lib/api/client';
+  import type { FsStat } from '../lib/api/types';
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws } from '../lib/stores/workspace.svelte';
   import { git } from '../lib/stores/git.svelte';
@@ -114,12 +116,19 @@
   const shown = $derived(rightPanel.shown);
   const shownTab = $derived(tabs.find((t) => t.id === shown) ?? null);
   const pageTab = $derived(rightPanel.pageTabs.find((t) => t.id === shown) ?? null);
-  const open = $derived((ui.rightOpen || forceOpen) && shown !== null);
+  const open = $derived((ui.rightOpenNow || forceOpen) && shown !== null);
 
   function onRail(id: string): void {
     // In the drawer the content is always showing: a click only switches.
-    const next = forceOpen ? { open: true, tab: id } : railClick(ui.rightOpen, shown, id);
+    const next = forceOpen ? { open: true, tab: id } : railClick(ui.rightOpenNow, shown, id);
     ui.setRight(next.open, next.tab as typeof ui.rightTab);
+    // An explicit show / hide of a page's own tab is that page's preference.
+    rightPanel.pageTabs.find((t) => t.id === id)?.onshow?.(next.open);
+  }
+  function collapse(): void {
+    const page = rightPanel.pageTabs.find((t) => t.id === shown);
+    ui.toggleRight();
+    page?.onshow?.(false);
   }
 
   // Rail keys: ↑/↓ (Home/End) move focus between the icons; Enter/Space click.
@@ -141,6 +150,34 @@
   const folder = $derived(rightPanel.folder);
   const folderName = $derived(folder.split('/').filter(Boolean).at(-1) ?? folder);
   let pickerOpen = $state(false);
+
+  // A picked folder can vanish (deleted, moved, unmounted): check it once per
+  // pick and offer the workspace folder instead of a Git / Files error.
+  let pickMissing = $state(false);
+  $effect(() => {
+    const path = rightPanel.picked ? folder : '';
+    pickMissing = false;
+    if (!path) return;
+    let live = true;
+    api
+      .get<FsStat>(`/fs/stat?path=${encodeURIComponent(path)}`)
+      .then((st) => { if (live) pickMissing = !st.is_dir; })
+      .catch((e: unknown) => { if (live) pickMissing = (e as { status?: number })?.status === 404; });
+    return () => { live = false; };
+  });
+  // Picks of workspaces that no longer exist are dropped; another window's
+  // pick is adopted as it happens.
+  $effect(() => {
+    const ids = ws.workspaces.map((w) => w.id);
+    if (ids.length) untrack(() => rightPanel.prunePicks(ids));
+  });
+  $effect(() => {
+    const onStorage = (e: StorageEvent): void => {
+      if (e.storageArea === localStorage && e.key === LS_PICKS) rightPanel.reloadPicks();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  });
   function folderMenu(e: MouseEvent): void {
     const root = ws.current?.root_path ?? '';
     const items: MenuItem[] = [
@@ -327,7 +364,7 @@
           </button>
           <button
             class="icon-btn"
-            onclick={() => ui.toggleRight()}
+            onclick={collapse}
             title="Collapse panel (⌘J)"
             aria-keyshortcuts="Meta+J"
             aria-label="Collapse panel"
@@ -353,6 +390,12 @@
               {#if folder}<span class="dim folder-kind">{rightPanel.picked ? 'picked' : 'workspace'}</span>{/if}
               <Icon name="chevronDown" size={12} />
             </button>
+            {#if pickMissing}
+              <span class="folder-missing" role="status">
+                <Icon name="warning" size={12} /> Not found
+                <button class="btn small" onclick={() => rightPanel.pickFolder(null)}>Use workspace folder</button>
+              </span>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -562,6 +605,17 @@
   }
   .folder-kind {
     flex-shrink: 0;
+    font-size: var(--fs-xs);
+  }
+  .rpanel-folder {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .folder-missing {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--warning);
     font-size: var(--fs-xs);
   }
   .rpanel-body {
