@@ -17,19 +17,17 @@
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { DEFAULT_MANUAL_GRACE_SECS, formatGrace, policyFromSettings } from '../../lib/idleSuspend';
   import { idleSuspend } from '../../lib/stores/idleSuspend.svelte';
+  import {
+    exemptCandidates,
+    readExempt,
+    sameExempt,
+    sandboxBody,
+    type ProcessSandbox,
+  } from './sandboxExempt';
 
   interface NetworkListener {
     enabled: boolean;
     port: number;
-  }
-
-  interface ProcessSandbox {
-    enabled: boolean;
-    network: 'full' | 'loopback' | 'none';
-    /** Providers a person exempted from confinement (kept as-is on save). */
-    exempt_providers?: string[];
-    /** Legacy allow-list of built-in providers (kept as-is on save). */
-    providers?: string[];
   }
 
   let loading = $state(true);
@@ -42,14 +40,20 @@
   let port = $state(7700);
   let sandboxEnabled = $state(false);
   let sandboxNetwork = $state<'full' | 'loopback' | 'none'>('full');
+  // Providers that run unconfined while the sandbox is on (`exempt_providers`).
+  let sandboxExempt = $state<string[]>([]);
   // Last-saved values: the ONE Save (in the header) sends only the groups
   // that differ from these, and is disabled while nothing does.
   let savedListener = $state<NetworkListener>({ enabled: false, port: 7700 });
-  let sandboxRest: Partial<ProcessSandbox> = {};
-  let savedSandbox = $state<ProcessSandbox>({ enabled: false, network: 'full' });
+  // The stored value: keys this form doesn't edit (the legacy `providers`
+  // list) survive a save.
+  let sandboxStored: Partial<ProcessSandbox> = {};
+  let savedSandbox = $state({ enabled: false, network: 'full', exempt: [] as string[] });
   const listenerDirty = $derived(enabled !== savedListener.enabled || port !== savedListener.port);
   const sandboxDirty = $derived(
-    sandboxEnabled !== savedSandbox.enabled || sandboxNetwork !== savedSandbox.network,
+    sandboxEnabled !== savedSandbox.enabled ||
+      sandboxNetwork !== savedSandbox.network ||
+      !sameExempt(sandboxExempt, savedSandbox.exempt),
   );
   // Session lifetime: `session_persistence` (sessions you start survive a
   // daemon restart, default on) and `manual_idle_suspend_secs` (quiet time
@@ -71,6 +75,14 @@
     return secs === DEFAULT_MANUAL_GRACE_SECS ? `${formatGrace(secs)} (default)` : formatGrace(secs);
   }
   const dirty = $derived(listenerDirty || sandboxDirty || sessionsDirty);
+  const exemptOptions = $derived(
+    exemptCandidates(auth.meta?.providers ?? [], allSettings['providers'], sandboxExempt),
+  );
+  function setExempt(provider: string, unconfined: boolean): void {
+    sandboxExempt = unconfined
+      ? [...new Set([...sandboxExempt, provider])].sort((a, b) => a.localeCompare(b))
+      : sandboxExempt.filter((p) => p !== provider);
+  }
   // The inputs' min/max are advisory only; an out-of-range or empty port would
   // be saved as-is (and an empty one silently falls back to the loopback port).
   const portValid = $derived(Number.isInteger(port) && port >= 1024 && port <= 65535);
@@ -100,17 +112,13 @@
       }
       savedListener = { enabled, port };
       const sb = allSettings['process_sandbox'] as ProcessSandbox | undefined;
-      sandboxRest = {};
+      sandboxStored = sb ? { ...sb } : {};
       if (sb) {
-        // Keys this form doesn't edit (the exempt list) survive a save.
-        const rest: Partial<ProcessSandbox> = { ...sb };
-        delete rest.enabled;
-        delete rest.network;
-        sandboxRest = rest;
         sandboxEnabled = sb.enabled;
         sandboxNetwork = sb.network ?? 'full';
       }
-      savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+      sandboxExempt = readExempt(sb);
+      savedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork, exempt: sandboxExempt };
       // Unset = the daemon default (on); only an explicit `false` turns it off.
       persistEnabled = allSettings['session_persistence'] !== false;
       manualGrace = policyFromSettings(allSettings).manualGraceSecs;
@@ -140,8 +148,8 @@
     // still write a network-listener audit entry.
     const body: Record<string, unknown> = {};
     if (listenerDirty) body.network_listener = { enabled, port };
-    if (sandboxDirty)
-      body.process_sandbox = { ...sandboxRest, enabled: sandboxEnabled, network: sandboxNetwork };
+    const sandboxValue = sandboxBody(sandboxStored, sandboxEnabled, sandboxNetwork, sandboxExempt);
+    if (sandboxDirty) body.process_sandbox = sandboxValue;
     if (sessionsDirty) {
       if (persistEnabled !== savedSessions.persist) body.session_persistence = persistEnabled;
       if (manualGrace !== savedSessions.manualGrace) body.manual_idle_suspend_secs = manualGrace;
@@ -150,7 +158,7 @@
     const saveSandbox = sandboxDirty;
     const saveSessions = sessionsDirty;
     const submittedListener = { enabled, port };
-    const submittedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+    const submittedSandbox = { enabled: sandboxEnabled, network: sandboxNetwork, exempt: [...sandboxExempt] };
     const submittedSessions = { persist: persistEnabled, manualGrace };
     saving = true;
     try {
@@ -169,9 +177,12 @@
       }
       if (saveSandbox) {
         savedSandbox = submittedSandbox;
+        sandboxStored = sandboxValue;
+        const unconfined = submittedSandbox.exempt.length;
         notes.push(
           submittedSandbox.enabled
-            ? `New sessions confined (network: ${submittedSandbox.network})`
+            ? `New sessions confined (network: ${submittedSandbox.network})` +
+                (unconfined ? `, except ${submittedSandbox.exempt.join(', ')}` : '')
             : 'Sandbox off for new sessions',
         );
       }
@@ -247,11 +258,11 @@
     <h2 class="section-title">Process sandbox</h2>
     <div class="card pad dm-card">
       <SettingToggle label="Confine agent sessions with the OS sandbox (macOS Seatbelt)" checked={sandboxEnabled} testid="sandbox-enabled" onchange={(v) => { sandboxEnabled = v; }}>
-        When on, spawned agent CLIs (claude / codex / agy / shell) can only write to
-        the workspace, its git dir, the CLIs' own caches and temp — never the rest of
-        your disk. Reads are unaffected. macOS only. Applies to sessions started from now on;
-        running ones keep the confinement they started with. Not yet confined: custom providers,
-        connection terminals, and background agent runs (workflow steps, scheduled tasks, swarms).
+        When on, spawned agent CLIs — custom providers included — can only write to the
+        workspace, its git dir, the CLIs' own caches and temp — never the rest of your disk.
+        Reads are unaffected. macOS only. Applies to sessions started from now on; running ones
+        keep the confinement they started with. Not yet confined: connection terminals and
+        background agent runs (workflow steps, scheduled tasks, swarms).
       </SettingToggle>
       <div class="field net indent">
         <label for="dm-sandbox-net">Network</label>
@@ -270,6 +281,25 @@
       </div>
       {#if sandboxEnabled && sandboxNetwork !== 'full'}
         <p class="warn-note indent"><Icon name="warning" size={12} /> Without full network access, agent CLIs can’t reach their model API — use this only for offline shells.</p>
+      {/if}
+      {#if exemptOptions.length > 0}
+        <fieldset class="exempt indent" data-testid="sandbox-exempt">
+          <legend>Run unconfined</legend>
+          <p class="hint-line">
+            Ticked providers keep full disk access even with the sandbox on. Custom providers you
+            had before the sandbox covered them start out ticked.
+          </p>
+          {#each exemptOptions as p (p)}
+            <SettingToggle
+              label={p}
+              checked={sandboxExempt.includes(p)}
+              disabled={!sandboxEnabled}
+              title={sandboxEnabled ? undefined : 'Turn on the sandbox to choose which providers it skips'}
+              testid={`sandbox-exempt-${p}`}
+              onchange={(v) => setExempt(p, v)}
+            />
+          {/each}
+        </fieldset>
       {/if}
     </div>
 
@@ -361,6 +391,22 @@
   }
   .field.grace {
     max-width: 320px;
+  }
+  .exempt {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-block: 4px 0;
+    margin-inline-end: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+  .exempt legend {
+    padding: 0;
+    margin-block-end: 2px;
+    font-size: var(--fs-s);
+    font-weight: 600;
   }
   .warn-note {
     display: flex;

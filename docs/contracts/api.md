@@ -243,7 +243,10 @@ Notes:
   agent session is confined — user-added providers included — except providers a
   person lists in `exempt_providers`; the legacy `providers` list still exempts the
   built-in `claude`/`codex`/`agy`/`shell` it leaves out, but never a provider it
-  doesn't know. Each confined agent CLI runs under a Seatbelt profile that denies
+  doesn't know. Settings → Daemon edits `exempt_providers` ("Run unconfined").
+  Migration 0183 recorded, once, every custom provider that ran unconfined before
+  this rule (one the legacy list did not name) in `exempt_providers` of a stored
+  value that had no such key, so an upgrade never silently confines it. Each confined agent CLI runs under a Seatbelt profile that denies
   filesystem **writes** outside the workspace cwd (never one at or above `$HOME`),
   the resolved git dir (so worktree commits still work), the agent CLIs' own
   STATE dirs (an allow-list: `~/.claude/{projects,todos,statsig,sessions,…}`,
