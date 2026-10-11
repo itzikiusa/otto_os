@@ -99,7 +99,7 @@ async fn manual_and_scheduled_runs_launch_in_the_allowed_report_directory() {
         .await;
         assert!(
             result.is_ok(),
-            "report launch must pass the cwd guard: {result:?}"
+            "report launch must pass the configured data-directory guard"
         );
         let sid = result.unwrap().expect("installed skill starts a run");
         let session = host.manager.get(&sid).await.unwrap();
