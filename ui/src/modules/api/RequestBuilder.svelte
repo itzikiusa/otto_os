@@ -200,7 +200,7 @@
   const missingVars = $derived(usedVars.filter((v) => v.kind === 'missing').length);
   // Params tab: the URL as sent — enabled rows appended and encoded, known
   // variables filled in (secrets / built-ins / missing ones stay {{name}}).
-  const sentUrl = $derived(fullRequestUrl(draft.url, draft.query, apiClient.runtimeVars, envForVars));
+  const sentUrl = $derived(fullRequestUrl(draft.url, draft.query, apiClient.runtimeVars, envForVars, draft.auth));
   const sentUrlSegments = $derived(splitVars(sentUrl));
 
   // ── key/value rows ────────────────────────────────────────────────────────
@@ -876,7 +876,9 @@
             <span class="full-url-label" id="api-full-url-label">Full URL</span>
             <button class="icon-btn" title="Copy the full URL" aria-label="Copy the full URL" onclick={() => void copyText(sentUrl, 'URL')}><Icon name="copy" size={12} /></button>
           </div>
-          <output class="full-url-text mono" dir="ltr" aria-labelledby="api-full-url-label" data-testid="api-full-url">{#each sentUrlSegments as seg, i (i)}{#if seg.isVar}<span class="full-url-var" title="Filled in when sent">{seg.text}</span>{:else}{seg.text}{/if}{/each}</output>
+          <!-- Not an <output>: that is an implicit live region and would
+               re-announce the whole URL on every keystroke. -->
+          <div class="full-url-text mono" dir="ltr" role="group" aria-labelledby="api-full-url-label" data-testid="api-full-url">{#each sentUrlSegments as seg, i (i)}{#if seg.isVar}<span class="full-url-var" title="Filled in when sent">{seg.text}</span>{:else}{seg.text}{/if}{/each}</div>
         </div>
       {/if}
     {:else if tab === 'headers'}
@@ -929,7 +931,7 @@
         <!-- nothing to edit -->
       {:else if formActive}
         <div class="kv-list">
-          <div class="kv-head" aria-hidden="true"><span>Key</span>{#if multipartActive}<span class="kv-type-h">Type</span>{/if}<span>Value</span></div>
+          <div class="kv-head" aria-hidden="true"><span>Key</span>{#if multipartActive}<span class="kv-type-h">Type</span>{/if}<span>Value</span><span class="kv-x-h"></span></div>
           {#each formRows as row, i (i)}
             <div class="kv-row">
               <input dir="ltr" class="input kv-key mono" placeholder="email" aria-label="Field name" value={row.key} oninput={(e) => updateFormRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
@@ -1170,7 +1172,7 @@
       <datalist id="hdr-keys">{#each COMMON_HEADERS as h}<option value={h}></option>{/each}</datalist>
     {/if}
     {#if rows.length > 0}
-      <div class="kv-head" aria-hidden="true"><span class="kv-check-h"></span><span>{which === 'query' ? 'Parameter' : 'Header'}</span><span>Value</span></div>
+      <div class="kv-head" aria-hidden="true"><span class="kv-check-h"></span><span>{which === 'query' ? 'Parameter' : 'Header'}</span><span>Value</span><span class="kv-x-h"></span></div>
     {/if}
     {#each rows as row, i (i)}
       <div class="kv-row" class:off={row.enabled === false}>
@@ -1623,6 +1625,11 @@
   .kv-type-h {
     width: 72px;
   }
+  /* Holds the row's × column so the titles line up with the inputs. */
+  .kv-x-h {
+    width: 24px;
+    flex-shrink: 0;
+  }
   .kv-row.off .kv-key,
   .kv-row.off .kv-val {
     color: var(--text-dim);
@@ -1904,10 +1911,7 @@
       min-width: 0;
     }
     /* Column titles track the shrinking key/value inputs (× column kept). */
-    .kv-head {
-      padding-inline-end: 30px;
-    }
-    .kv-head > span:not(.kv-check-h):not(.kv-type-h) {
+    .kv-head > span:not(.kv-check-h):not(.kv-type-h):not(.kv-x-h) {
       flex: 1 1 0;
       min-width: 0;
     }

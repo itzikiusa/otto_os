@@ -54,3 +54,16 @@ test('fillKnownVars stops on a self-referencing value instead of looping', () =>
   const env: VarEnv = { name: 'e', variables: { a: '{{a}}!' }, secret_keys: [] };
   assert.equal(fillKnownVars('{{a}}', {}, env), '{{a}}!!!');
 });
+
+test('an API key sent in the query is shown last, its value always masked', () => {
+  const env: VarEnv = { name: 'e', variables: { keyname: 'api_key' }, secret_keys: [] };
+  const plain = fullRequestUrl('https://x.test/a', [row('q', '1')], {}, env, { type: 'api_key', key: '{{keyname}}', value: 'sk-live-123', in: 'query' });
+  assert.equal(plain, 'https://x.test/a?q=1&api_key=••••');
+  assert.ok(!plain.includes('sk-live'));
+  const secret = fullRequestUrl('https://x.test/a', [], {}, null, { type: 'api_key', key: 'token', value: { $secret: 'ref' }, in: 'query' });
+  assert.equal(secret, 'https://x.test/a?token=••••');
+  // In a header, or no key: nothing in the URL.
+  assert.equal(fullRequestUrl('https://x.test/a', [], {}, null, { type: 'api_key', key: 'X-Key', value: 'v', in: 'header' }), 'https://x.test/a');
+  assert.equal(fullRequestUrl('https://x.test/a', [], {}, null, { type: 'api_key', key: ' ', value: 'v', in: 'query' }), 'https://x.test/a');
+  assert.equal(fullRequestUrl('https://x.test/a', [], {}, null, { type: 'bearer', token: 't' }), 'https://x.test/a');
+});

@@ -4,7 +4,7 @@
 // the save sheet, and small URL / cookie parsers. Framework-free so
 // `unit/apiVars.test.ts` can exercise it.
 
-import type { ApiCollection, ApiKeyVal } from './types';
+import type { ApiAuth, ApiCollection, ApiKeyVal } from './types';
 
 /** Built-ins the daemon generates at send time (they always win). */
 export const DYNAMIC_VARS: Record<string, string> = {
@@ -204,20 +204,30 @@ function encodeQueryPart(s: string): string {
     .join('');
 }
 
+/** How a credential value reads in the URL preview: never the value itself. */
+export const MASKED_VALUE = '••••';
+
 /** The URL the request is sent to: `url` plus the ENABLED, named query rows
  *  appended (after any `?…` already in the URL, before a `#fragment`), each
- *  key/value encoded. Variables with a known value are filled in when
- *  `runtime`/`env` are given; the rest show as `{{name}}`. */
+ *  key/value encoded, then — like the daemon's `apply_auth` — an API key sent
+ *  "in query" as `name=••••` (its value is masked whatever it is: the preview
+ *  is copyable and must never carry a credential). Variables with a known
+ *  value are filled in when `runtime`/`env` are given; the rest show as
+ *  `{{name}}`. */
 export function fullRequestUrl(
   url: string,
   query: ApiKeyVal[],
   runtime: Record<string, string> = {},
   env: VarEnv | null = null,
+  auth: ApiAuth | null = null,
 ): string {
   const base = fillKnownVars(url.trim(), runtime, env);
   const pairs = query
     .filter((r) => r.enabled !== false && r.key !== '')
     .map((r) => `${encodeQueryPart(fillKnownVars(r.key, runtime, env))}=${encodeQueryPart(fillKnownVars(r.value, runtime, env))}`);
+  if (auth?.type === 'api_key' && auth.in === 'query' && auth.key.trim() !== '') {
+    pairs.push(`${encodeQueryPart(fillKnownVars(auth.key, runtime, env))}=${MASKED_VALUE}`);
+  }
   if (pairs.length === 0) return base;
   const hash = base.indexOf('#');
   const head = hash < 0 ? base : base.slice(0, hash);
