@@ -384,10 +384,10 @@ class NotificationStore {
       if (n.read || !n.source_key?.endsWith(':waiting') || n.action?.type !== 'open_session') continue;
       const st = ws.statusMap[sid];
       if (st === 'working' || st === 'exited') continue;
-      // Raised at the notice's own time: if the operator saw the session
-      // after it (persisted), the flag stays down — no re-raise on reload.
+      // Only a notice newer than the last one the operator answered for this
+      // session (persisted, daemon clock) re-raises — no re-raise on reload.
       const at = Date.parse(n.created_at);
-      ws.markNeedsYou(sid, Number.isFinite(at) ? at : undefined);
+      ws.markNeedsYou(sid, { noticeAt: Number.isFinite(at) ? at : undefined, restore: true });
     }
   }
 
@@ -468,6 +468,18 @@ class NotificationStore {
    *  "idle" notices are answered, so mark them read (one call; the daemon
    *  keeps it, so other windows and devices agree and a reload can't
    *  re-raise the session's flag from them). */
+  /** The newest notice time (daemon clock) this client holds for session
+   *  `sid` — what entering the session answers. */
+  sessionNoticeAt(sid: string): number | undefined {
+    let max: number | undefined;
+    for (const n of this.notices) {
+      if (parseSessionKey(n.source_key)?.id !== sid) continue;
+      const t = Date.parse(n.created_at);
+      if (Number.isFinite(t) && (max === undefined || t > max)) max = t;
+    }
+    return max;
+  }
+
   async markSessionSeen(sid: string): Promise<void> {
     const ids = this.notices
       .filter((n) => {

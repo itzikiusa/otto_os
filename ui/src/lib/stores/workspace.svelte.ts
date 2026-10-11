@@ -31,7 +31,7 @@ import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
-import { flaggedIds, forget, mergeAttention, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
+import { flaggedIds, forget, mergeAttention, noticeIsNew, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
 
 /** Persisted raise/seen times behind the "needs you" flag (lib/attention.ts). */
 const LS_ATTENTION = 'otto_attention';
@@ -182,9 +182,10 @@ class WorkspaceStore {
   statusMap: Record<Id, SessionStatus> = $state({});
 
   /** "Needs you" flags, a raise/lower flag per session (lib/attention.ts):
-   *  RAISED by a `:waiting` notice — the daemon sends one when an agent's turn
-   *  ends (Working → Idle, confirmed idle for a while: monitor.rs) and on a
-   *  permission / question prompt (see {@link markNeedsYou}); LOWERED when the operator
+   *  RAISED by the daemon's `session_attention` event (and its `:waiting`
+   *  notice when session notices are on) — an agent's turn ended (Working →
+   *  Idle, confirmed idle for a while: monitor.rs) or it raised a permission
+   *  / question prompt (see {@link markNeedsYou}); LOWERED when the operator
    *  enters / focuses the session (even doing nothing), sends it input, or it
    *  resumes / exits ({@link clearNeedsYou}); it stays down until the next
    *  turn end or prompt. Never "on" just because a session is idle. Mirrors
@@ -192,6 +193,9 @@ class WorkspaceStore {
    *  re-raises a seen one). */
   private attention: Attention = parseAttention(lsGet(LS_ATTENTION));
   needsYou: Record<Id, boolean> = $state(Object.fromEntries(flaggedIds(this.attention).map((id) => [id, true])));
+  /** Flags restored from storage whose session's status isn't known yet:
+   *  once it is, a working / exited one is stale ({@link settleRestoredFlag}). */
+  private restoredFlags = new Set<Id>(flaggedIds(this.attention));
   /** The app window is visible and focused (App.svelte keeps it current):
    *  only then does an on-screen session count as "seen". */
   operatorPresent = $state(true);
@@ -440,12 +444,18 @@ class WorkspaceStore {
   }
 
   /** Raise a session's flag: its agent finished a turn, or it is blocked on
-   *  the operator (prompt / permission). `at`: when that happened (a
-   *  notice's time on a reload) — a raise older than the last time the
-   *  operator saw the session stays down. */
-  markNeedsYou(id: Id, at: number = Date.now()): void {
+   *  the operator (prompt / permission). `noticeAt`: the daemon time of the
+   *  notice behind it; `restore`: re-derived from an unread notice on load. */
+  markNeedsYou(id: Id, opts: { noticeAt?: number; restore?: boolean } = {}): void {
+    // A reload re-deriving from an unread notice: only one newer than the
+    // last notice answered for this session counts (daemon clock vs daemon
+    // clock). The raise itself is stamped on this client's clock.
+    if (opts.restore && opts.noticeAt !== undefined && !noticeIsNew(this.attention, id, opts.noticeAt)) return;
     const was = this.needsYou[id] === true;
-    this.setAttention(raise(this.attention, id, at, this.watching(id)));
+    // Stamped on this client's clock; a raise that FOLLOWS a lower in the
+    // same millisecond is still later than it.
+    const at = Math.max(Date.now(), (this.attention.seen[id] ?? -Infinity) + 1);
+    this.setAttention(raise(this.attention, id, at, this.watching(id), opts.noticeAt));
     // Needing the operator while not on screen is unread activity too.
     if (!was && this.needsYou[id] && id !== this.activeSessionId) this.unread = { ...this.unread, [id]: true };
   }
@@ -512,8 +522,25 @@ class WorkspaceStore {
   /** Lower a session's flag: the operator entered / focused it or sent it
    *  input, or what it waited on is resolved (working again, exited). It
    *  stays down until a LATER raise. */
-  clearNeedsYou(id: Id): void {
-    this.setAttention(see(this.attention, id, Date.now()));
+  clearNeedsYou(id: Id, noticeAt?: number): void {
+    this.restoredFlags.delete(id);
+    // A lower that follows a raise (even one stamped a millisecond ahead) wins.
+    this.setAttention(see(this.attention, id, Math.max(Date.now(), this.attention.raised[id] ?? -Infinity), noticeAt));
+  }
+
+  /** Restored flags still waiting for their session's status (App reads
+   *  `statusMap` for these and calls {@link settleRestoredFlag}). */
+  restoredFlagIds(): Id[] {
+    return [...this.restoredFlags];
+  }
+
+  /** A restored flag's session status is known: a session that is working
+   *  again or has exited no longer needs the operator (the live
+   *  `session_status` rule, applied once to what storage brought back). A
+   *  flag raised in THIS run is never touched here. */
+  settleRestoredFlag(id: Id, status: string): void {
+    if (!this.restoredFlags.delete(id)) return;
+    if (status === 'working' || status === 'running' || status === 'exited' || status === 'reconnectable') this.clearNeedsYou(id);
   }
 
   /** A session is gone for good: drop its flag history too. */
@@ -1940,6 +1967,11 @@ class WorkspaceStore {
     switch (ev.type) {
       case 'session_archive_changed': {
         this.applyArchiveState(ev.session);
+        break;
+      }
+      case 'session_attention': {
+        // The daemon's always-on "needs you" signal (turn end / prompt).
+        this.markNeedsYou(ev.session_id);
         break;
       }
       case 'session_status': {

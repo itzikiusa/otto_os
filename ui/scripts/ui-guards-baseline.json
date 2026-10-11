@@ -360,11 +360,11 @@
     "src/modules/workbench/EditorTabs.svelte": 1,
     "src/modules/workbench/WorkbenchPage.svelte": 1,
     "src/modules/workflows/WorkflowsPage.svelte": 1,
+    "src/shell/RightPanel.svelte": 1,
     "src/shell/TabBar.svelte": 1
   },
   "media-width": {},
   "off-grid-spacing": {
-    "src/modules/api/RequestBuilder.svelte": 1,
     "src/modules/database/GridView.svelte": 2,
     "src/modules/database/JsonView.svelte": 1,
     "src/modules/database/VerticalView.svelte": 1

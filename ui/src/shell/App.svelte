@@ -202,20 +202,30 @@
   });
 
   // The Side panel (Git/Files/Notes/…, plus a page's own tabs) is on every
-  // page: beside an agent session it follows the session, elsewhere a
-  // workspace folder (stores/rightPanel.svelte.ts). The side-by-side pane's
-  // document keeps the old rule — only beside an agent session — so a split
-  // never shows two rails.
+  // page, pop-out windows included (a popped-out page keeps its tools; e2e
+  // desktop-rpanel-tabs): beside an agent session it follows the session,
+  // elsewhere a workspace folder (stores/rightPanel.svelte.ts). The
+  // side-by-side pane's document keeps the old rule — only beside an agent
+  // session — so a split never shows two rails.
   const showRightPanel = $derived(!isEmbedded || rightPanel.session);
 
   // ---- "needs you" raise/lower flag (lib/attention.ts) ----
-  // The operator is present while this window is visible and focused.
+  // The operator is present while this window is visible and focused. Focus
+  // moving INTO an iframe of this window (file preview, Outputs, Browser,
+  // canvas) blurs the window but the operator is still here:
+  // `document.hasFocus()` is true while a nested frame has focus, so a blur
+  // is re-checked a tick later instead of trusted.
   $effect(() => {
-    const sync = (e?: Event): void => {
-      ws.operatorPresent = document.visibilityState === 'visible' && (e?.type === 'blur' ? false : e?.type === 'focus' ? true : document.hasFocus());
+    let blurTimer: ReturnType<typeof setTimeout> | undefined;
+    const sync = (): void => {
+      ws.operatorPresent = document.visibilityState === 'visible' && document.hasFocus();
     };
     const onVis = (): void => sync();
-    const onFocus = (e: Event): void => sync(e);
+    const onFocus = (e: Event): void => {
+      clearTimeout(blurTimer);
+      if (e.type === 'focus') ws.operatorPresent = document.visibilityState === 'visible';
+      else blurTimer = setTimeout(sync, 0);
+    };
     // Another window lowered / raised a flag: adopt it.
     const onStorage = (e: StorageEvent): void => {
       if (e.storageArea === localStorage && e.key === 'otto_attention') ws.reloadAttention();
@@ -225,6 +235,7 @@
     window.addEventListener('blur', onFocus);
     window.addEventListener('storage', onStorage);
     return () => {
+      clearTimeout(blurTimer);
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('blur', onFocus);
@@ -238,18 +249,19 @@
     const id = ws.activeSessionId;
     if (!id || moduleName !== 'agents' || !ws.operatorPresent) return;
     untrack(() => {
-      ws.clearNeedsYou(id);
+      ws.clearNeedsYou(id, notifications.sessionNoticeAt(id));
       void notifications.markSessionSeen(id);
     });
   });
-  // A flag restored from storage for a session that is working again or has
-  // exited is stale (the live `session_status` rule, applied to loaded rows).
+  // A flag restored from STORAGE is settled once its session's status is
+  // known: working again or exited means it's stale (the live
+  // `session_status` rule, applied once to loaded rows). Flags raised in this
+  // run — e.g. a permission prompt while the status still reads working — are
+  // never touched here.
   $effect(() => {
-    const stale = Object.keys(ws.needsYou).filter((id) => {
-      const st = ws.statusMap[id];
-      return st === 'working' || st === 'running' || st === 'exited' || st === 'reconnectable';
-    });
-    if (stale.length) untrack(() => stale.forEach((id) => ws.clearNeedsYou(id)));
+    void ws.needsYou;
+    const known = ws.restoredFlagIds().map((id) => [id, ws.statusMap[id]] as const).filter(([, st]) => st !== undefined);
+    if (known.length) untrack(() => known.forEach(([id, st]) => ws.settleRestoredFlag(id, st)));
   });
 
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
