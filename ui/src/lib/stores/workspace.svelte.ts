@@ -1349,7 +1349,8 @@ class WorkspaceStore {
    *  delete after an Undo toast — see {@link deleteWithUndo}), so a stray
    *  ⌘W / ⌫ / middle-click can be taken back. A close that ends **more than
    *  one** session (Close others / to the right / all) always confirms once.
-   *  "Always archive" also confirms before stopping a working agent. */
+   *  Neither remembered choice asks about a working agent: archive keeps the
+   *  conversation resumable and "Always delete" keeps its Undo window. */
   private async resolveCloseAction(ids: Id[]): Promise<CloseAction | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
@@ -1357,7 +1358,7 @@ class WorkspaceStore {
     const many = n > 1;
     const busy = ending.filter((id) => this.isAgentMidTurn(id)).length;
     const pref = ui.closeTabPref;
-    if (pref === 'archive' && !many && busy === 0) return 'archive';
+    if (pref === 'archive' && !many) return 'archive';
     if (pref === 'delete' && !many) return 'delete-deferred';
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
     const busyNote =
@@ -1764,7 +1765,10 @@ class WorkspaceStore {
    *  under that run). Resolves false when the user cancelled; a failed
    *  archive rejects. */
   async requestArchive(id: Id, hint?: { working?: boolean; title?: string; engine?: string | null }): Promise<boolean> {
-    if (this.isAgentMidTurn(id, hint)) {
+    // "Always archive" covers the user's own sessions (archive is resumable);
+    // a session a workflow / engine run owns still asks — that run loses it.
+    const remembered = ui.closeTabPref === 'archive' && !hint?.engine;
+    if (!remembered && this.isAgentMidTurn(id, hint)) {
       const name =
         this.sessions.find((x) => x.id === id)?.title?.trim() ||
         this.otherWsSessions.find((x) => x.id === id)?.title?.trim() ||
