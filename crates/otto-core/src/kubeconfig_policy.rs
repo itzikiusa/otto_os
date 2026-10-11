@@ -42,7 +42,85 @@ pub const ALLOWED_EXEC_SUBCOMMANDS: &[(&str, &[&str])] = &[
         "doctl",
         &["kubernetes", "cluster", "kubeconfig", "exec-credential"],
     ),
+    ("gcloud", &["config", "config-helper"]),
+    ("az", &["account", "get-access-token"]),
 ];
+
+/// Credential wrappers that run ANOTHER command with fetched credentials:
+/// allowed only as `<wrapper> exec … -- <command> <args…>` where the wrapped
+/// command is itself an allowed (non-wrapper) invocation.
+pub const ALLOWED_EXEC_WRAPPERS: &[&str] = &["aws-vault", "saml2aws"];
+
+/// Programs a person may never add to the extra allow-list: each runs
+/// arbitrary code from its arguments.
+const NEVER_EXTRA: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "env",
+    "xargs",
+    "python",
+    "python3",
+    "node",
+    "deno",
+    "bun",
+    "perl",
+    "ruby",
+    "php",
+    "osascript",
+    "open",
+    "curl",
+    "wget",
+    "aws-vault",
+    "saml2aws",
+];
+
+/// Extra plugins Otto's owner allowed (settings `kubeconfig_exec_plugins`,
+/// root-only): run with any arguments, like [`ALLOWED_EXEC_PLUGINS`].
+static EXTRA_PLUGINS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Settings key holding the owner's extra exec-plugin names (root-only, as
+/// every `PUT /settings` write).
+pub const EXTRA_PLUGINS_SETTING: &str = "kubeconfig_exec_plugins";
+
+/// The entries of an extra allow-list that can never be added: a path, a
+/// shell, an interpreter or a wrapper.
+pub fn refused_extra_plugins<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+    names
+        .iter()
+        .map(|n| n.as_ref().trim())
+        .filter(|n| n.contains('/') || NEVER_EXTRA.contains(n))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Replace the owner's extra allow-list (from [`EXTRA_PLUGINS_SETTING`]).
+/// Only bare program names are kept, and never a shell or interpreter.
+/// Returns the names that were refused.
+pub fn set_extra_plugins<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+    let refused = refused_extra_plugins(names);
+    let kept = names
+        .iter()
+        .map(|n| n.as_ref().trim())
+        .filter(|n| !n.is_empty() && !refused.iter().any(|r| r == n))
+        .map(str::to_string)
+        .collect();
+    *EXTRA_PLUGINS.write().unwrap_or_else(|e| e.into_inner()) = kept;
+    refused
+}
+
+fn extra_plugin(name: &str) -> bool {
+    EXTRA_PLUGINS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|p| p == name)
+}
 
 /// Exec-plugin `env` names that would make an allowed plugin load foreign
 /// code (dynamic-loader / interpreter hooks), run a shell rc file, or read a
@@ -63,7 +141,25 @@ const DENIED_ENV: &[&str] = &[
 const DENIED_ENV_PREFIXES: &[&str] = &["DYLD_", "LD_", "PYTHON", "CLOUDSDK_PYTHON"];
 
 fn allowed_name(name: &str) -> bool {
-    ALLOWED_EXEC_PLUGINS.contains(&name)
+    ALLOWED_EXEC_PLUGINS.contains(&name) || extra_plugin(name)
+}
+
+/// How a program may run as a credential plugin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    AnyArgs,
+    Subcommand(&'static [&'static str]),
+    Wrapper,
+}
+
+fn kind_of(name: &str) -> Option<Kind> {
+    if allowed_name(name) {
+        Some(Kind::AnyArgs)
+    } else if ALLOWED_EXEC_WRAPPERS.contains(&name) {
+        Some(Kind::Wrapper)
+    } else {
+        subcommand_of(name).map(Kind::Subcommand)
+    }
 }
 
 /// The credential subcommand `name` must be run with, when it is one of
@@ -79,10 +175,19 @@ fn allow_list() -> String {
     let scoped = ALLOWED_EXEC_SUBCOMMANDS
         .iter()
         .map(|(n, sub)| format!("{n} {}", sub.join(" ")));
+    let wrappers = ALLOWED_EXEC_WRAPPERS
+        .iter()
+        .map(|w| format!("{w} exec … -- <an allowed plugin>"));
+    let extra = EXTRA_PLUGINS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     ALLOWED_EXEC_PLUGINS
         .iter()
         .map(|p| p.to_string())
+        .chain(extra)
         .chain(scoped)
+        .chain(wrappers)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -107,15 +212,6 @@ pub fn check_exec_invocation(command: &str, args: &[&str]) -> Result<(), String>
             allow_list()
         ))
     };
-    // `Ok(true)`: allowed whatever its args; `Ok(false)`: allowed only with
-    // its credential subcommand.
-    let allowed = |name: &str| -> Option<bool> {
-        if allowed_name(name) {
-            Some(true)
-        } else {
-            subcommand_of(name).map(|_| false)
-        }
-    };
     if cmd.contains('/') && !cmd.starts_with('/') {
         return refuse("a relative path");
     }
@@ -125,26 +221,43 @@ pub fn check_exec_invocation(command: &str, args: &[&str]) -> Result<(), String>
     } else {
         cmd
     };
-    let Some(any_args) = allowed(base) else {
+    let Some(kind) = kind_of(base) else {
         return refuse("not an allowed plugin");
     };
     // A symlink named `aws` pointing at a shell is still a shell.
     if cmd.contains('/') {
         if let Ok(real) = std::fs::canonicalize(path) {
             let real_base = real.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if allowed(real_base) != Some(any_args) {
+            if kind_of(real_base) != Some(kind) {
                 return refuse(&format!("it resolves to '{}'", real.display()));
             }
         }
     }
-    if !any_args {
-        let sub = subcommand_of(base).unwrap_or(&[]);
-        let given: Vec<&str> = args.iter().map(|a| a.trim()).collect();
-        if !given.starts_with(sub) {
-            return refuse(&format!("'{base}' only runs as '{base} {}'", sub.join(" ")));
+    let given: Vec<&str> = args.iter().map(|a| a.trim()).collect();
+    match kind {
+        Kind::AnyArgs => Ok(()),
+        Kind::Subcommand(sub) if given.starts_with(sub) => Ok(()),
+        Kind::Subcommand(sub) => {
+            refuse(&format!("'{base}' only runs as '{base} {}'", sub.join(" ")))
+        }
+        Kind::Wrapper => {
+            let inner = given
+                .iter()
+                .position(|a| *a == "--")
+                .filter(|_| given.first() == Some(&"exec"))
+                .map(|i| &given[i + 1..]);
+            let Some([inner_cmd, inner_args @ ..]) = inner else {
+                return refuse(&format!(
+                    "'{base}' only runs as '{base} exec … -- <an allowed plugin>'"
+                ));
+            };
+            let inner_base = inner_cmd.rsplit('/').next().unwrap_or("");
+            if ALLOWED_EXEC_WRAPPERS.contains(&inner_base) {
+                return refuse("a wrapper inside a wrapper");
+            }
+            check_exec_invocation(inner_cmd, inner_args)
         }
     }
-    Ok(())
 }
 
 /// Check a user's `exec` block: its command and its `env` names.
@@ -361,6 +474,73 @@ mod tests {
         );
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn credential_wrappers_pass_only_around_an_allowed_plugin() {
+        let ok = [
+            (
+                "aws-vault",
+                vec![
+                    "exec",
+                    "prod",
+                    "--",
+                    "aws",
+                    "eks",
+                    "get-token",
+                    "--cluster-name",
+                    "x",
+                ],
+            ),
+            (
+                "saml2aws",
+                vec![
+                    "exec",
+                    "--exec-profile",
+                    "p",
+                    "--",
+                    "aws-iam-authenticator",
+                    "token",
+                ],
+            ),
+            (
+                "aws-vault",
+                vec!["exec", "dev", "--", "kubectl", "oidc-login", "get-token"],
+            ),
+            ("gcloud", vec!["config", "config-helper", "--format=json"]),
+            ("az", vec!["account", "get-access-token", "--resource", "x"]),
+        ];
+        for (c, args) in ok {
+            assert!(check_exec_invocation(c, &args).is_ok(), "{c} {args:?}");
+        }
+        let refused = [
+            ("aws-vault", vec!["exec", "prod", "--", "sh", "-c", "id"]),
+            (
+                "aws-vault",
+                vec!["exec", "prod", "--", "aws-vault", "exec", "x", "--", "aws"],
+            ),
+            ("aws-vault", vec!["exec", "prod"]),
+            ("aws-vault", vec!["login", "prod", "--", "aws"]),
+            ("saml2aws", vec!["exec", "--", "kubectl", "exec", "pod"]),
+            ("gcloud", vec!["compute", "ssh", "x"]),
+            ("az", vec!["vm", "run-command", "invoke"]),
+        ];
+        for (c, args) in refused {
+            assert!(check_exec_invocation(c, &args).is_err(), "{c} {args:?}");
+        }
+    }
+
+    /// The owner's extra allow-list (settings `kubeconfig_exec_plugins`)
+    /// adds bare names, never a shell, interpreter, path or wrapper.
+    #[test]
+    fn extra_plugins_are_owner_opt_in_and_never_shells() {
+        let refused = set_extra_plugins(&["corp-kube-auth", "bash", "/opt/x", " ", "python3"]);
+        assert_eq!(refused, vec!["bash", "/opt/x", "python3"]);
+        assert!(check_exec_invocation("corp-kube-auth", &["login"]).is_ok());
+        assert!(check_exec_invocation("/usr/local/bin/corp-kube-auth", &[]).is_ok());
+        assert!(check_exec_invocation("bash", &[]).is_err());
+        set_extra_plugins::<&str>(&[]);
+        assert!(check_exec_invocation("corp-kube-auth", &[]).is_err());
     }
 
     #[test]
