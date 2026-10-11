@@ -17,7 +17,6 @@
   import RemotesPanel from './RemotesPanel.svelte';
   import RecoveryTools from './RecoveryTools.svelte';
   import { gitBridge } from './gitBridge.svelte';
-  import FocusView from './FocusView.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -56,9 +55,9 @@
 
   // Legacy deep links / persisted state may still say 'changes' or 'history';
   // both render the graph now, and the Graph tab must read as active for them.
-  // Legacy ids (changes/history) are the graph; so is Focus in the Side panel,
-  // which has no Focus tab (see `tabs`).
-  const effTab = $derived(tab === 'changes' || tab === 'history' || (embedded && tab === 'focus') ? 'graph' : tab);
+  // Legacy ids are the graph: changes/history, and focus (Focus is a
+  // page-level view of the Git page now, not a repo sub-tab).
+  const effTab = $derived(tab === 'changes' || tab === 'history' || tab === 'focus' ? 'graph' : tab);
 
   // Status is owned by the git store (single source of truth) so the auto-fetch
   // loop, the tab strip and this toolbar all stay in sync from one fetch.
@@ -251,15 +250,13 @@
     return scp?.[1] ?? 'this remote';
   }
 
-  const tabs = $derived([
+  // Per-repo views only. Focus (my PRs + my Jira work) is cross-repo: it is a
+  // page-level view of the Git page (GitPage's header), not a sub-tab here.
+  const tabs = [
     { id: 'graph', label: 'Graph' },
     { id: 'prs', label: 'Pull requests' },
     { id: 'review', label: 'Review' },
-    // Cross-repo: "my PRs" + "my Jira work" — not scoped to this repo, but it
-    // lives here because the git page is where you think about this. Not in
-    // the Side panel's repo view (`embedded`): there it read as this repo's.
-    ...(embedded ? [] : [{ id: 'focus', label: 'Focus' }]),
-  ]);
+  ];
 
   function selectTab(id: string): void {
     resolving = false;
@@ -434,8 +431,6 @@
       <div class="rv-tab-scroll">
         <LazyMount lazy={LocalReviewLazy} what="the local review" variant="panel" props={{ repoId: repo.id }} />
       </div>
-    {:else if effTab === 'focus'}
-      <FocusView />
     {:else if status}
       <!-- Graph is the default for 'graph' AND any legacy tab id (changes /
            history) still living in persisted state or old deep links. -->

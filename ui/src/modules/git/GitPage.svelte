@@ -47,9 +47,12 @@
   let repoView = $state<{ openMoreMenu: (e: MouseEvent) => void } | undefined>();
   const prRepo = $derived(git.allRepos.find((r) => r.id === routeRepoId) ?? null);
 
-  // Focus view (my PRs + my Jira work) shown from the landing when no repo tab
-  // is open — the same view also lives as a sub-tab inside every open repo.
-  let landingFocus = $state(false);
+  // Focus (my PRs + my Jira work across every repo) is a PAGE-level view, not
+  // a repo sub-tab: the Focus entry pinned before the repo tabs swaps the
+  // body to it, whatever
+  // repo tab is open; clicking a repo tab (or the Git crumb) goes back. Deep
+  // links: #/git/focus, and the legacy #/git/<repo>/focus.
+  let focusView = $state(false);
 
   // add repo sheet
   let addOpen = $state(false);
@@ -153,8 +156,12 @@
       await git.initializeOpenTabs();
       // A deep-link into a repo (#/git/:id or #/git/:id/:tab, non-PR) opens that
       // repo as a tab so the route still lands somewhere useful.
-      if (routeRepoId && !isPr && git.allRepos.some((r) => r.id === routeRepoId)) {
-        git.openRepoTab(routeRepoId, routeTab ?? undefined);
+      if (routeRepoId === 'focus') focusView = true;
+      else if (routeRepoId && !isPr && git.allRepos.some((r) => r.id === routeRepoId)) {
+        if (routeTab === 'focus') {
+          git.openRepoTab(routeRepoId, 'graph');
+          focusView = true;
+        } else git.openRepoTab(routeRepoId, routeTab ?? undefined);
       }
     })();
   });
@@ -169,12 +176,20 @@
     const rid = routeRepoId;
     const tab = routeTab;
     const known = rid != null && git.allRepos.some((r) => r.id === rid);
-    if (rid && !isPr && tab && known) {
-      untrack(() => git.openRepoTab(rid, tab));
+    if (rid === 'focus') {
+      untrack(() => (focusView = true));
+    } else if (rid && !isPr && tab && known) {
+      untrack(() => {
+        if (tab === 'focus') {
+          git.openRepoTab(rid, 'graph');
+          focusView = true;
+        } else git.openRepoTab(rid, tab);
+      });
     }
   });
 
   function openRepo(repoId: string): void {
+    focusView = false;
     git.openRepoTab(repoId);
     // Drop any lingering deep-link route so the tab UI fully owns navigation.
     if (router.parts[0] === 'git' && router.parts.length > 1) router.go('git');
@@ -324,15 +339,15 @@
          (like a document window's tab strip), so an open repo costs no extra
          chrome row. -->
     <PageHeader
-      title={landingFocus && !activeRepo ? 'Focus' : 'Git'}
-      crumbs={landingFocus && !activeRepo ? [{ label: 'Git', onclick: () => (landingFocus = false) }] : []}
+      title={focusView ? 'Focus' : 'Git'}
+      crumbs={focusView ? [{ label: 'Git', onclick: () => (focusView = false) }] : []}
       class="git-header"
     >
       {#snippet tabs()}
-        <GitTabs embedded onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
+        <GitTabs embedded focus={focusView} ontogglefocus={() => (focusView = !focusView)} onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
       {/snippet}
       {#snippet actions()}
-        {#if activeRepo}
+        {#if activeRepo && !focusView}
           {@const repoId = activeRepo.id}
           <!-- The repo's verbs live in the header (not a second toolbar row under
                it); they collapse into ⋯ by data-overflow when the bar is tight. -->
@@ -355,17 +370,17 @@
             aria-haspopup="menu"
             onclick={(e) => repoView?.openMoreMenu(e)}
           ><Icon name="more" size={16} /></button>
-        {:else if !landingFocus && git.allRepos.length > 0}
-          <!-- Adding a repository lives in the + tab (and the empty state) —
-               no second "Add repository" primary here. -->
-          <button class="btn small ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
-            <Icon name="zap" size={14} /> Focus
-          </button>
         {/if}
       {/snippet}
     </PageHeader>
 
-    {#if activeRepo}
+    {#if focusView}
+      <PageBody fill padded={false}>
+        <div class="landing-focus">
+          <FocusView />
+        </div>
+      </PageBody>
+    {:else if activeRepo}
       {#key activeRepo.id}
         <PageBody fill padded={false}>
         <div class="gitpage-body">
@@ -382,12 +397,6 @@
         </div>
         </PageBody>
       {/key}
-    {:else if landingFocus}
-      <PageBody fill padded={false}>
-        <div class="landing-focus">
-          <FocusView />
-        </div>
-      </PageBody>
     {:else}
       <!-- ── Compact, centered hub (no tab open). Adding/opening also live in
            the + tab, so this is just a tidy launcher, not a separate screen. ── -->

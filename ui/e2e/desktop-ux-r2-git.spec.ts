@@ -48,7 +48,9 @@ test.beforeEach(async ({ page }) => {
 });
 async function openRepo(page: Page, tab = 'graph') {
   await page.goto(`/#/git/${repoId}/${tab}`);
-  await expect(page.locator('.rv-tabs')).toBeVisible();
+  // Focus is the Git page's own view now (the legacy repo/focus link opens it).
+  if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  else await expect(page.locator('.rv-tabs')).toBeVisible();
 }
 function diff(path: string) {
   return { files: [{ path, old_path: null, is_binary: false, hunks: [{ header: '@@ -0,0 +1 @@', lines: [{ origin: 'add', content: path, old_line: null, new_line: 1 }] }] }] };
