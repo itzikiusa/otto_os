@@ -21,19 +21,27 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     boot.mark("restore");
     fail_orphaned_reviews(ctx).await;
     fail_orphaned_skill_evals(ctx).await;
-    otto_state::SkillReviewsRepo::new(ctx.pool.clone())
-        .fail_running()
-        .await
-        .map_err(|e| format!("skill-review recovery: {e}"))?;
     // Await old-life settlement before any supervisor or resumed workflow can
     // admit a fresh run; a detached sweep can accidentally reap that new work.
-    otto_state::PersonalAgentsRepo::new(ctx.pool.clone())
-        .reap_running()
-        .await
-        .map_err(|e| format!("personal-agent recovery: {e}"))?;
-    crate::vault_docs_agent::recover_interrupted(ctx.clone())
-        .await
-        .map_err(|e| format!("vault-docs recovery: {e}"))?;
+    // A failed step is LOGGED, never fatal: a stale `running` row is a smaller
+    // harm than a daemon that refuses to serve (each step only flips rows).
+    warn_on_err(
+        "skill-review recovery",
+        otto_state::SkillReviewsRepo::new(ctx.pool.clone())
+            .fail_running()
+            .await,
+    );
+    warn_on_err(
+        "personal-agent recovery",
+        otto_state::PersonalAgentsRepo::new(ctx.pool.clone())
+            .reap_running()
+            .await,
+    );
+    // Status flips only; the vault rescans it needs run in the background.
+    warn_on_err(
+        "vault-docs recovery",
+        crate::vault_docs_agent::recover_interrupted(ctx.clone()).await,
+    );
 
     // Do not replay API requests with uncertain external outcomes after a crash.
     otto_state::api_runs::ApiRunsRepo(ctx.pool.clone())
@@ -43,14 +51,23 @@ pub async fn recover_before_serve(ctx: &ServerCtx, boot: &mut BootPhases) -> Res
     // Cross-engine admission matters too: resumed workflows can launch a goal
     // loop, swarm, or Product analysis before HTTP starts serving.
     recover_goal_loops(ctx).await;
-    ctx.swarm_repo
-        .fail_running("Interrupted by a daemon restart — the coordinator will re-run the task.")
-        .await
-        .map_err(|e| format!("swarm recovery: {e}"))?;
+    warn_on_err(
+        "swarm recovery",
+        ctx.swarm_repo
+            .fail_running("Interrupted by a daemon restart — the coordinator will re-run the task.")
+            .await,
+    );
     crate::scheduled_tasks_scheduler::reap_interrupted(ctx).await;
     otto_product::run::reap_orphaned_agents_on_startup(ctx.clone()).await;
     recover_workflow_runs(ctx).await;
     Ok(())
+}
+
+/// Log a non-critical recovery step's failure (S-6: these used to abort boot).
+fn warn_on_err<T>(step: &str, result: otto_core::Result<T>) {
+    if let Err(e) = result {
+        tracing::warn!("{step}: {e}");
+    }
 }
 
 /// Restore sessions from the previous daemon run: resumable agent
