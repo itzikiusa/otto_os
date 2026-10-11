@@ -7081,6 +7081,7 @@ async fn run_node_agent(
         crate::agent_session::TurnOpts {
             done_file,
             done_file_validator: None,
+            transcript_fallback: false,
             cancel: None,
             // Silence is not evidence that delegated work has completed.
             quiet_done: None,
