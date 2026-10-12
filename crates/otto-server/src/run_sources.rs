@@ -212,6 +212,11 @@ where
             Err(e) => tried.push(format!("{label}: {e}")),
         }
     }
+    if tried.is_empty() {
+        return Err(Error::Invalid(
+            "no Jira/Confluence account connected".into(),
+        ));
+    }
     Err(Error::Invalid(format!(
         "no account could read {what} {} — {}",
         run.source_ref,

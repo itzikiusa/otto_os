@@ -174,6 +174,20 @@ impl ConfluenceClient {
         max_pages: usize,
         what: &str,
     ) -> Result<(Vec<serde_json::Value>, bool)> {
+        self.get_pages_until(url, query, max_pages, usize::MAX, what)
+            .await
+    }
+
+    /// [`Self::get_all_pages`] that also stops once `enough` results are in
+    /// (a windowed search needs only the first `start + limit`).
+    async fn get_pages_until(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+        max_pages: usize,
+        enough: usize,
+        what: &str,
+    ) -> Result<(Vec<serde_json::Value>, bool)> {
         // Callers already check; the pager sends the auth header itself.
         self.ensure_tls()?;
         let mut all = Vec::new();
@@ -209,11 +223,11 @@ impl ConfluenceClient {
             let got = page.len();
             all.extend(page);
             next = self.next_link(&body);
-            if got == 0 || next.is_none() {
+            if got == 0 || next.is_none() || all.len() >= enough {
                 break;
             }
         }
-        if next.is_some() {
+        if next.is_some() && all.len() < enough {
             // The cap, not the end of the collection: never silent.
             tracing::warn!(
                 what,
@@ -559,15 +573,16 @@ impl ConfluenceClient {
                 .unwrap_or_default()
         } else {
             // Cloud's `/content/search` is cursor-paged (`_links.next`); an
-            // offset `start` is not reliably honoured. Walk the cursor in
-            // 100-hit pages to the requested window (≤ 1,000 hits deep).
-            let want = (start + limit) as usize;
-            let max_pages = (want / 100 + 1).min(10);
+            // offset `start` is not reliably honoured. Walk the cursor until
+            // the window is covered — pages may come back shorter than asked
+            // — at most 10 pages deep.
+            let want = start.saturating_add(limit) as usize;
             let (all, _) = self
-                .get_all_pages(
+                .get_pages_until(
                     &url,
                     &[("cql", cql), ("limit", "100"), ("expand", "space")],
-                    max_pages,
+                    10,
+                    want,
                     "search_pages",
                 )
                 .await?;

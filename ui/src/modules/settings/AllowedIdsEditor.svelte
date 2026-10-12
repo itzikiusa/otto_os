@@ -90,7 +90,11 @@
       {placeholder}
       spellcheck="false"
       autocomplete="off"
-      onblur={addTyped}
+      onblur={() => {
+        // Leaving the box keeps a finished id (so Save doesn't drop it), not
+        // half-typed text.
+        if (typed.split(/[\s,]+/).every((t) => t === '' || /^[A-Za-z0-9_-]{4,}$/.test(t))) addTyped();
+      }}
       onkeydown={(e) => {
         if (e.key === 'Enter') {
           e.preventDefault();

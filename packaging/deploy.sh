@@ -756,6 +756,9 @@ cp "$ROOT/target/release/ottod" "$APP_SRC/binaries/ottod-$TRIPLE"
 echo "==> 3/7  Desktop app (Tauri bundle)"
 ( cd "$APP_SRC" && npx --yes @tauri-apps/cli@^2 build --bundles app )
 
+# Compile + bundle done: the disk watchdog stops here, so it can never
+# interrupt signing or the install (neither grows target/).
+[[ -n "${DISK_WATCH_PID:-}" ]] && kill "$DISK_WATCH_PID" 2>/dev/null || true
 echo "==> 4/7  Sign (+ ensure 'Otto Dev Signing' is trusted for code signing)"
 bash "$HERE/sign.sh" "$APP" "$ROOT/target/release/ottod"
 if [[ "$WANT_DMG" == 1 ]]; then
@@ -771,8 +774,6 @@ else
     echo "    Cargo caches preserved (PRUNE=1 opts into eviction; may force recompilation)"
 fi
 
-# Build steps done: the disk watchdog stops here (install never grows target/).
-[[ -n "${DISK_WATCH_PID:-}" ]] && kill "$DISK_WATCH_PID" 2>/dev/null || true
 [[ "$(git rev-parse HEAD)" == "$BUILD_SOURCE_COMMIT" ]] || { fail_verify "source commit changed during build"; exit 1; }
 build_manifest > "$BUILD_RECEIPT.tmp"
 mv "$BUILD_RECEIPT.tmp" "$BUILD_RECEIPT"
