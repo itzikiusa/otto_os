@@ -1,0 +1,16 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { CQL_TEMPLATES, JQL_TEMPLATES, fillTemplate } from '../src/modules/product/queryTemplates.ts';
+
+test('templates fill the selected key, or a KEY placeholder', () => {
+  assert.equal(fillTemplate('project = {P} AND parent = {P}-1', 'CS3'), 'project = CS3 AND parent = CS3-1');
+  assert.equal(fillTemplate('project = {P}', ''), 'project = KEY');
+  assert.equal(fillTemplate('space = {P}', 'my "space"'), 'space = "my \\"space\\""');
+});
+
+test('every template is non-empty and uniquely labelled', () => {
+  for (const list of [JQL_TEMPLATES, CQL_TEMPLATES]) {
+    assert.equal(new Set(list.map((t) => t.label)).size, list.length);
+    for (const t of list) assert.ok(t.query.trim().length > 0, t.label);
+  }
+});

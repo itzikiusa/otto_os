@@ -7,6 +7,12 @@
   import type { ConfluenceSpace, ConfluencePageSummary } from './types';
   import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { openExternal } from '../../lib/external';
+  import {
+    CQL_CHEATSHEET, CQL_DOCS, CQL_TEMPLATES, JQL_CHEATSHEET, JQL_DOCS, JQL_TEMPLATES, fillTemplate,
+  } from './queryTemplates';
 
   interface PickedItem {
     key: string;
@@ -166,6 +172,27 @@
     if (!accountId) return;
     // Empty query re-triggers the recency default; no early return.
     debounceTimer = setTimeout(() => void search(q, 0, false), 350);
+  }
+
+  // Raw-mode help: examples to start from + a one-screen syntax sheet.
+  let syntaxOpen = $state(false);
+  let queryInput: HTMLInputElement | undefined = $state();
+  const rawLang = $derived(sourceKind === 'jira' ? 'JQL' : 'CQL');
+  function showExamples(e: MouseEvent): void {
+    const key = sourceKind === 'jira' ? selectedProjectKey : selectedSpaceKey;
+    const list = sourceKind === 'jira' ? JQL_TEMPLATES : CQL_TEMPLATES;
+    ctxMenu.show(e, list.map((t) => {
+      const q = fillTemplate(t.query, key);
+      return {
+        label: t.label,
+        title: q,
+        action: () => {
+          query = q;
+          // Placed, not run: most need a value edited (version, epic, label).
+          queueMicrotask(() => queryInput?.focus());
+        },
+      };
+    }));
   }
 
   function onQueryKey(e: KeyboardEvent): void {
@@ -372,6 +399,7 @@
     id="ss-query"
     class="picker-input"
     class:mono={rawMode}
+    bind:this={queryInput}
     bind:value={query}
     oninput={onQueryInput}
     onkeydown={onQueryKey}
@@ -380,8 +408,28 @@
     autocomplete="off"
   />
   {#if rawMode}
+    <div class="raw-help">
+      <button type="button" class="help-btn" aria-haspopup="menu" onclick={showExamples}>
+        <Icon name="note" size={12} /> Examples…
+      </button>
+      <button type="button" class="help-btn" aria-expanded={syntaxOpen} onclick={() => (syntaxOpen = !syntaxOpen)}>
+        <Icon name={syntaxOpen ? 'chevronDown' : 'chevronRight'} size={12} /> {rawLang} syntax
+      </button>
+      <button type="button" class="help-btn" title="Open Atlassian’s {rawLang} reference in the browser"
+        onclick={() => void openExternal(sourceKind === 'jira' ? JQL_DOCS : CQL_DOCS)}>
+        <Icon name="external" size={12} /> Reference
+      </button>
+    </div>
+    {#if syntaxOpen}
+      <dl class="cheatsheet" aria-label="{rawLang} cheat sheet">
+        {#each sourceKind === 'jira' ? JQL_CHEATSHEET : CQL_CHEATSHEET as [term, text] (term)}
+          <dt>{term}</dt>
+          <dd class="mono">{text}</dd>
+        {/each}
+      </dl>
+    {/if}
     <p class="raw-note">
-      Runs as written — the {sourceKind === 'jira' ? 'project' : 'space'} filter above is ignored.
+      Enter runs it as written — the {sourceKind === 'jira' ? 'project' : 'space'} filter above only fills the examples.
     </p>
   {/if}
 </div>
@@ -459,6 +507,54 @@
     outline-offset: 1px;
   }
   .picker-input.mono {
+    font-family: var(--font-mono);
+  }
+  .raw-help {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 4px;
+    margin-top: 4px;
+  }
+  .help-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 6px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .help-btn:hover {
+    background: var(--hover);
+  }
+  .help-btn:focus-visible {
+    outline: 2px solid var(--accent-text);
+  }
+  .cheatsheet {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 10px;
+    margin: 6px 0 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    font-size: var(--fs-xs);
+  }
+  .cheatsheet dt {
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .cheatsheet dd {
+    margin: 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+  .mono {
     font-family: var(--font-mono);
   }
   .raw-note {
