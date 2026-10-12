@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
+import * as sandboxExemptHelpers from '../src/modules/settings/sandboxExempt.ts';
 
 test('edits made during a daemon settings save remain unsaved', async () => {
   const source = readFileSync(new URL('../src/modules/settings/Daemon.svelte', import.meta.url), 'utf8')
@@ -17,7 +18,8 @@ test('edits made during a daemon settings save remain unsaved', async () => {
   const context = createContext({
     dirty: true, portError: '', listenerDirty: true, sandboxDirty: true, sessionsDirty: true,
     enabled: true, port: 7701, savedListener: { enabled: true, port: 7700 },
-    sandboxEnabled: true, sandboxNetwork: 'loopback', sandboxRest: {}, savedSandbox: { enabled: false, network: 'full' },
+    sandboxEnabled: true, sandboxNetwork: 'loopback', sandboxRest: {}, sandboxStored: {}, sandboxExempt: [],
+    ...sandboxExemptHelpers, savedSandbox: { enabled: false, network: 'full' },
     persistEnabled: false, manualGrace: 3600, savedSessions: { persist: true, manualGrace: 86400 },
     saving: false, allSettings: {}, auth: { meta: {} }, idleSuspend: {}, policyFromSettings: (v: unknown) => v,
     api: { put: async (_: string, body: unknown) => { sent = body; return response.promise; } },
