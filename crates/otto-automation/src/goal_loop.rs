@@ -1523,17 +1523,31 @@ fn safe_loop_id(loop_id: &str) -> &str {
 }
 
 fn executor_out_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
-    tmp_dir().join(format!(
+    tmp_file(format!(
         "otto-goalloop-{}-{idx}-{exec}.json",
         safe_loop_id(loop_id)
     ))
 }
 
 fn prompt_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
-    tmp_dir().join(format!(
+    tmp_file(format!(
         "otto-goalloop-{}-{idx}-{exec}.prompt",
         safe_loop_id(loop_id)
     ))
+}
+
+/// `name` as a file directly in the temp dir. The indices in it come from
+/// HTTP path params (retry); they parse as integers and the loop id is
+/// re-validated, yet the join itself still refuses a name that could leave
+/// the directory — a hostile name fails closed to one that never exists.
+fn tmp_file(name: String) -> PathBuf {
+    if name.contains("..") {
+        return tmp_dir().join("otto-goalloop-invalid");
+    }
+    if name.contains(std::path::is_separator) {
+        return tmp_dir().join("otto-goalloop-invalid");
+    }
+    tmp_dir().join(name)
 }
 
 fn valid_executor_result(text: &str) -> bool {
@@ -1927,6 +1941,25 @@ fn executor_error_note(reason: Option<FailReason>) -> String {
 #[cfg(test)]
 mod goal_loop_tests {
     use super::*;
+
+    #[test]
+    fn tmp_files_stay_directly_in_the_temp_dir() {
+        let tmp = tmp_dir();
+        let out = executor_out_path("01HZX", 3, 1);
+        assert_eq!(out.parent(), Some(tmp.as_path()));
+        assert_eq!(out.file_name().unwrap(), "otto-goalloop-01HZX-3-1.json");
+        // A hostile loop id never reaches the join intact.
+        let p = prompt_path("../../etc/x", 0, 0);
+        assert_eq!(p.parent(), Some(tmp.as_path()));
+        assert_eq!(p.file_name().unwrap(), "otto-goalloop-invalid-0-0.prompt");
+        for bad in ["../x", "a/b", "..", "x/../../y"] {
+            assert_eq!(
+                tmp_file(bad.into()),
+                tmp.join("otto-goalloop-invalid"),
+                "{bad}"
+            );
+        }
+    }
     fn recovery_goal(ledger: serde_json::Value) -> GoalLoop {
         serde_json::from_value(serde_json::json!({
             "id":"g", "workspace_id":"w", "name":"Goal", "repo_path":"/tmp/isolated",
