@@ -13,12 +13,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use otto_core::api::{
-    AddArtifactReq, ApiEvidenceReq, AssembleReq, AttachMediaReq, CiRefreshReq, CreateProofPackReq,
-    CreateSnapshotReq, DbEvidenceReq, KafkaEvidenceReq, PrCheckReq, ProofArtifactView,
-    ProofPackDetailResp, ProofPackResp, ProofSnapshotMeta, ProofSnapshotResp, ProofSummaryResp,
-    ProofSummaryRow, RepoProofConfigResp, WaiveReq,
+    AddArtifactReq, ApiEvidenceReq, AssembleCmd, AssembleReq, AttachMediaReq, CiRefreshReq,
+    CreateProofPackReq, CreateSnapshotReq, DbEvidenceReq, KafkaEvidenceReq, PrCheckReq,
+    ProofArtifactView, ProofPackDetailResp, ProofPackResp, ProofSnapshotMeta, ProofSnapshotResp,
+    ProofSummaryResp, ProofSummaryRow, RepoProofConfigResp, WaiveReq,
 };
-use otto_core::auth::AuthUser;
+use otto_core::auth::{AuthContext, AuthUser};
 use otto_core::domain::WorkspaceRole;
 use otto_core::proof::{
     CiSummary, ProofArtifact, ProofArtifactKind, ProofArtifactStatus, ProofPack, RepoProofConfig,
@@ -26,6 +26,7 @@ use otto_core::proof::{
 };
 use otto_core::{Error, Id};
 
+use crate::auth::CurrentAuthContext;
 use crate::error::{ApiError, ApiResult};
 use crate::proof as engine;
 use crate::state::ServerCtx;
@@ -558,18 +559,32 @@ async fn add_artifact(
     Ok(Json(pack_resp(&ctx, pack).await?))
 }
 
+/// `commands` run as `sh -c` in the DAEMON, outside every session sandbox, so
+/// only a person may ask for them: an agent session's token, a session's MCP
+/// credential or a share link would otherwise escape its own confinement
+/// through this route. Diff assembly (no commands) stays open to them.
+fn require_person_for_commands(auth: &AuthContext, commands: &[AssembleCmd]) -> ApiResult<()> {
+    if commands.is_empty() {
+        return Ok(());
+    }
+    crate::auth::require_human(auth)
+}
+
 async fn assemble(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Path(id): Path<Id>,
     Json(req): Json<AssembleReq>,
 ) -> ApiResult<Json<ProofPackResp>> {
+    let commands = req.commands.unwrap_or_default();
+    require_person_for_commands(&auth, &commands)?;
     let pack = pack_for(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(cwd) = req.cwd.as_deref() {
         // Best-effort diff assembly.
         let _ = engine::assemble_diff(&ctx, &pack, cwd, req.base.as_deref()).await;
         // Run any requested commands as command artifacts.
-        for c in req.commands.unwrap_or_default() {
+        for c in commands {
             let _ = engine::run_command_artifact(&ctx, &pack, cwd, &c.cmd, c.kind.as_deref()).await;
         }
     }
@@ -1153,5 +1168,50 @@ mod proof_route_tests {
             .collect::<Vec<_>>()
             .join(",");
         assert!(parse_work_items(&too_many).is_err());
+    }
+
+    fn auth(edit: impl FnOnce(&mut AuthContext)) -> AuthContext {
+        let u = otto_core::domain::User {
+            id: "root".into(),
+            username: "root".into(),
+            display_name: "root".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        let mut a = AuthContext {
+            real_user: u.clone(),
+            effective_user: u,
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        };
+        edit(&mut a);
+        a
+    }
+
+    /// Assemble `commands` run unsandboxed in the daemon: only a person's own
+    /// credential may request them, even when an agent's token acts as root.
+    #[test]
+    fn assemble_commands_need_a_person() {
+        let cmds = vec![AssembleCmd {
+            cmd: "true".into(),
+            kind: None,
+        }];
+        assert!(require_person_for_commands(&auth(|_| {}), &cmds).is_ok());
+        let agents: [fn(&mut AuthContext); 3] = [
+            |a| a.managed_session_id = Some("agent-sess".into()),
+            |a| a.mcp_session_id = Some("agent-sess".into()),
+            |a| a.mcp_only = true,
+        ];
+        for edit in agents {
+            let a = auth(edit);
+            assert!(require_person_for_commands(&a, &cmds).is_err());
+            // A diff-only assemble stays open to the same credential.
+            assert!(require_person_for_commands(&a, &[]).is_ok());
+        }
     }
 }

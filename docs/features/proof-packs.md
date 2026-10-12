@@ -621,7 +621,7 @@ workspace role.
 | 119 | `PATCH /proof-packs/{id}` | ws editor · ProofPack Edit | `{title?, summary?}` | `ProofPackResp` |
 | 120 | `DELETE /proof-packs/{id}` | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |
 | 121 | `POST /proof-packs/{id}/artifacts` | ws editor · ProofPack Edit | `AddArtifactReq {kind, title, content?, content_url?, status?, metadata?}` | `ProofPackResp` |
-| 122 | `POST /proof-packs/{id}/assemble` | ws editor · ProofPack Edit | `AssembleReq {cwd?, base?, commands?:[{cmd, kind?}]}` | `ProofPackResp` |
+| 122 | `POST /proof-packs/{id}/assemble` | ws editor · ProofPack Edit; non-empty `commands` need a person's credential (agent/MCP/share → 403: they run unsandboxed in the daemon) | `AssembleReq {cwd?, base?, commands?:[{cmd, kind?}]}` | `ProofPackResp` |
 | 123 | `POST /proof-packs/{id}/waive` | ws editor (or Admin if `OTTO_PROOF_WAIVER_MIN_ROLE=admin`) · ProofPack Edit | `WaiveReq {reason}` (≥10 chars) | `ProofPackResp` |
 | 124 | `DELETE /proof-artifacts/{id}` | ws editor · ProofPack Edit | — | `{ok:true}` |
 | 125 | `GET /proof-artifacts/{id}/content` | ws viewer · ProofPack View | — | `{content, ref_kind, kind, status, metadata}` (full stored content) |
