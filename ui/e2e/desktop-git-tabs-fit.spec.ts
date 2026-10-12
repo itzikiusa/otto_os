@@ -55,13 +55,15 @@ async function openTabs(page: Page, count: number): Promise<void> {
 }
 const tab = (page: Page, i: number) => page.getByRole('tab', { name: `${repos[i].name} — ${repos[i].branch}`, exact: true });
 
+const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 test('few repos: every tab shows its branch inline', async ({ page }) => {
   await page.setViewportSize({ width: 1800, height: 800 });
   await openTabs(page, 2);
   for (const i of [0, 1]) {
     await expect(tab(page, i)).toBeVisible();
     await expect(tab(page, i).locator('.git-tab-branch')).toBeVisible();
-    await expect(tab(page, i)).toHaveAttribute('title', new RegExp(`^${repos[i].name} — ${repos[i].branch.replace(/\./g, '\\.')}`));
+    await expect(tab(page, i)).toHaveAttribute('title', new RegExp(`^${reEscape(repos[i].name)} — ${reEscape(repos[i].branch)}`));
   }
   await expect(page.locator('.git-tablist')).toHaveAttribute('data-branches', 'all');
 });
