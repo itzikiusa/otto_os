@@ -1225,6 +1225,7 @@ mod tests {
                 workspace_id: "ws1".into(),
                 user_id: "alice".into(),
                 doc_id: "d1".into(),
+                scope: "workspace".into(),
                 action: "updated".into(),
                 rev: 1,
                 content_hash: "h".into(),

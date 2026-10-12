@@ -779,6 +779,10 @@ pub enum Event {
         workspace_id: Id,
         user_id: Id,
         doc_id: Id,
+        /// `workspace` | `global`. A global doc shows in every workspace, so
+        /// windows on OTHER workspaces than `workspace_id` refetch too.
+        #[serde(default)]
+        scope: String,
         /// `created` | `updated` | `trashed` | `restored` | `deleted`.
         action: String,
         rev: i64,
@@ -1007,6 +1011,7 @@ mod tests {
                 workspace_id: "w".into(),
                 user_id: "u".into(),
                 doc_id: "d".into(),
+                scope: "global".into(),
                 action: "updated".into(),
                 rev: 2,
                 content_hash: "h".into(),

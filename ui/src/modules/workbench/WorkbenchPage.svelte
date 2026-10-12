@@ -294,6 +294,23 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  /** Flip where the open file shows: every workspace ↔ this workspace only. */
+  async function toggleScope(): Promise<void> {
+    if (!doc) return;
+    const next = doc.scope === 'global' ? 'workspace' : 'global';
+    try {
+      await workbench.setScope(doc.id, next);
+      toasts.success(
+        next === 'global' ? 'Shows in all workspaces' : 'Kept in this workspace',
+        next === 'global'
+          ? `“${doc.name}” now appears in the Workbench of every workspace.`
+          : `“${doc.name}” now appears only in this workspace.`,
+      );
+    } catch (e) {
+      toasts.error("Couldn’t change where it shows", loadErrorText(e));
+    }
+  }
+
   async function trashActive(): Promise<void> {
     if (!doc) return;
     const name = doc.name;
@@ -342,6 +359,15 @@
         action: () => doc && void workbench.duplicate(doc.id).catch((err) => toasts.error("Couldn’t duplicate", loadErrorText(err))),
       },
       { label: 'Download', icon: 'download', disabled: !has || isImage, action: download },
+      {
+        label: doc?.scope === 'global' ? 'Keep in this workspace only' : 'Show in all workspaces',
+        icon: doc?.scope === 'global' ? 'folder' : 'globe',
+        disabled: !has,
+        action: () => void toggleScope(),
+      },
+      { separator: true },
+      { label: 'New files in all workspaces', checked: workbench.newScope === 'global', action: () => workbench.setNewScope('global') },
+      { label: 'New files in this workspace only', checked: workbench.newScope === 'workspace', action: () => workbench.setNewScope('workspace') },
       { separator: true },
       { label: workbench.showTrash ? 'Back to files' : 'Show trash', icon: 'trash', action: toggleTrash },
       { label: 'Move to trash', icon: 'trash', danger: true, disabled: !has, action: () => void trashActive() }, // ui-guards: allow — reversible (restore from the trash), so no confirm
@@ -567,6 +593,19 @@
                   title="History"
                 >
                   <Icon name="clock" size={12} /> History
+                </button>
+                <button
+                  class="btn small wb-toggle"
+                  class:on={doc.scope === 'global'}
+                  aria-pressed={doc.scope === 'global'}
+                  data-testid="wb-scope-toggle"
+                  onclick={() => void toggleScope()}
+                  title={doc.scope === 'global'
+                    ? 'Shows in every workspace. Click to keep it in this workspace only.'
+                    : 'Shows only in this workspace. Click to show it in every workspace.'}
+                >
+                  <Icon name={doc.scope === 'global' ? 'globe' : 'folder'} size={12} />
+                  {doc.scope === 'global' ? 'All workspaces' : 'This workspace'}
                 </button>
                 {#if wsId}
                   <SendToButton ws={wsId} {doc} content={active.buffer} {lang} {values} />

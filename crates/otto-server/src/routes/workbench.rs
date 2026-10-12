@@ -4,7 +4,8 @@
 //! rules: coalesced autosave bursts, checkpoints, content-addressed blobs,
 //! trash → explicit permanent delete). Every route is workspace-scoped AND
 //! owner-scoped: a doc is only ever visible to the user who created it, so the
-//! repo is always called with `(workspace, caller)`.
+//! repo is always called with `(workspace, caller)`. A `global`-scope doc is
+//! visible from every workspace of its owner (the repo's `VISIBLE` rule).
 //!
 //!   GET    /workspaces/{ws}/workbench/docs[?trash=true]          → [WorkbenchDoc]
 //!   POST   /workspaces/{ws}/workbench/docs                       → 201 WorkbenchDocFull
@@ -91,6 +92,7 @@ fn changed(ctx: &ServerCtx, doc: &WorkbenchDoc, action: &str, client_id: Option<
         workspace_id: doc.workspace_id.clone(),
         user_id: doc.owner_id.clone(),
         doc_id: doc.id.clone(),
+        scope: doc.scope.clone(),
         action: action.to_string(),
         rev: doc.rev,
         content_hash: doc.content_hash.clone(),

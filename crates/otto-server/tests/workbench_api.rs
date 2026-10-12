@@ -495,6 +495,108 @@ async fn image_assets_roundtrip_and_reject_non_images() {
     assert!(r.status.is_client_error(), "got {}", r.status);
 }
 
+/// A `global` doc shows in every workspace its owner is a member of (and
+/// nowhere else, and never to another user); scoping it back to "this
+/// workspace" moves it into the workspace that asked.
+#[tokio::test]
+async fn global_docs_follow_their_owner_across_workspaces() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_user(&pool, "bob", false).await;
+    for ws in ["ws1", "ws2", "ws3"] {
+        seed_workspace(&pool, ws).await;
+    }
+    set_member(&pool, "ws1", "alice", "editor").await;
+    set_member(&pool, "ws2", "alice", "editor").await;
+    set_member(&pool, "ws1", "bob", "editor").await;
+    set_member(&pool, "ws2", "bob", "editor").await;
+    let app = workbench_router(test_ctx(&pool).await);
+    let (alice, bob) = (user("alice", false), user("bob", false));
+    const DOCS2: &str = "/workspaces/ws2/workbench/docs";
+
+    let r = post(
+        &app,
+        &alice,
+        DOCS,
+        json!({ "name": "factoperatordetailed.sql", "content": "select 1", "scope": "global" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CREATED);
+    assert_eq!(r.json()["scope"], "global");
+    let gid = r.json()["id"].as_str().unwrap().to_string();
+    let local = create_doc(&app, &alice, "local.sql", "select 2").await;
+
+    // ws2 lists the global doc only, and can edit it.
+    let names: Vec<String> = get(&app, &alice, DOCS2)
+        .await
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, vec!["factoperatordetailed.sql"]);
+    let r = patch(
+        &app,
+        &alice,
+        &format!("{DOCS2}/{gid}"),
+        json!({ "content": "select 3" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        get(&app, &alice, &format!("{DOCS}/{gid}")).await.json()["content"],
+        "select 3"
+    );
+    assert_eq!(
+        get(&app, &alice, &format!("{DOCS2}/{local}")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    // Not a member of ws3 → the route refuses before any lookup.
+    let r = get(&app, &alice, "/workspaces/ws3/workbench/docs").await;
+    assert!(r.status.is_client_error(), "{}", r.status);
+    // Never visible to another user, in any workspace.
+    assert!(get(&app, &bob, DOCS2)
+        .await
+        .json()
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        get(&app, &bob, &format!("{DOCS2}/{gid}")).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // Back to "this workspace" from ws2 → it lives in ws2 now.
+    let r = patch(
+        &app,
+        &alice,
+        &format!("{DOCS2}/{gid}"),
+        json!({ "scope": "workspace" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        (
+            r.json()["scope"].as_str(),
+            r.json()["workspace_id"].as_str()
+        ),
+        (Some("workspace"), Some("ws2"))
+    );
+    assert_eq!(
+        get(&app, &alice, &format!("{DOCS}/{gid}")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let r = patch(
+        &app,
+        &alice,
+        &format!("{DOCS2}/{gid}"),
+        json!({ "scope": "team" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+}
+
 /// Real route + isolated SQLite fixture: all revisions share the existing tiny
 /// content blob, so lifetime metadata growth is tested without large bodies.
 async fn many_revision_fixture(count: i64) -> (Router, DbPool, User, String) {

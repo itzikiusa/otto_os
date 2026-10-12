@@ -1062,7 +1062,7 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "workbench_list",
-                "description": "Read-only: list the session owner's Workbench scratch files in this workspace (id, name, language, pinned, folder, tags, size, rev, updated_at) — pinned first, newest first. `query` filters by a case-insensitive name substring; `trash: true` lists the trash instead. Read one with workbench_get.",
+                "description": "Read-only: list the session owner's Workbench scratch files in this workspace, incl. global ones (id, name, scope, language, pinned, folder, tags, size, rev, updated_at) — pinned first, newest first. `query` filters by a case-insensitive name substring; `trash: true` lists the trash instead. Read one with workbench_get.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1088,14 +1088,15 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "workbench_write",
-                "description": "MUTATING (Agents Edit): write a Workbench scratch file's content — update by `doc_id`, else the live file with exact `name`, else create a new file named `name`. Every write is recorded as its own revision in the file's full history (nothing is overwritten or lost; the user can diff and restore). `language` optionally sets json | md | sql | html | mermaid | d2 | csv | yaml | … (default: auto-detect). Only write when the user asked for it.",
+                "description": "MUTATING (Agents Edit): write a Workbench scratch file's content — update by `doc_id`, else the live file with exact `name`, else create a new file named `name`. Every write is recorded as its own revision in the file's full history (nothing is overwritten or lost; the user can diff and restore). `language` optionally sets json | md | sql | html | mermaid | d2 | csv | yaml | … (default: auto-detect). `scope` (create only): workspace | global. Only write when the user asked for it.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "doc_id": { "type": "string" },
                         "name": { "type": "string", "description": "File name; required when doc_id is omitted." },
                         "content": { "type": "string" },
-                        "language": { "type": "string" }
+                        "language": { "type": "string" },
+                        "scope": { "type": "string", "enum": ["workspace", "global"] }
                     },
                     "required": ["content"]
                 }
@@ -3741,6 +3742,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 _ => {
                     let content = arg_string_allow_empty(args, "content")?;
                     let language = arg_optional_string(args, "language")?.filter(|s| !s.is_empty());
+                    let scope = arg_optional_string(args, "scope")?.filter(|s| !s.is_empty());
                     let mut id = arg_optional_string(args, "doc_id")?.filter(|s| !s.is_empty());
                     let doc_name = arg_optional_string(args, "name")?.filter(|s| !s.is_empty());
                     if id.is_none() {
@@ -3768,6 +3770,9 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                             });
                             if let Some(l) = language {
                                 body["language"] = json!(l);
+                            }
+                            if let Some(sc) = scope {
+                                body["scope"] = json!(sc);
                             }
                             let mut doc = ctx.post_json(&base, &body).await?;
                             // Don't echo the content back into the transcript.

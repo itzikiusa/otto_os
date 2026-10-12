@@ -11834,11 +11834,17 @@ export interface K8sFleetSeriesBatch {
  *  `rename`-free: metadata changes never create revisions. */
 export type WorkbenchRevisionKind = 'create' | 'auto' | 'checkpoint' | 'restore';
 
+/** Where the owner sees a doc: `workspace` = only in the workspace it lives in
+ *  (`workspace_id`); `global` = in every workspace (still owner-only). */
+export type WorkbenchScope = 'workspace' | 'global';
+
 /** List row / metadata (no content). */
 export interface WorkbenchDoc {
   id: Id;
+  /** The workspace the doc lives in (for a `global` doc: where it was created). */
   workspace_id: Id;
   owner_id: Id;
+  scope: WorkbenchScope;
   name: string;
   /** Language id (cm-langs extension style: `json`, `md`, `sql`, `html`,
    *  `mermaid`, `d2`, `csv`, `yaml`, `toml`, `xml`, `sh`, `py`, `js`, `ts`,
@@ -11873,6 +11879,8 @@ export interface WorkbenchCreateReq {
   folder?: string;
   tags?: string[];
   pinned?: boolean;
+  /** Default `workspace`. */
+  scope?: WorkbenchScope;
 }
 
 /** `PATCH /workbench/docs/{id}` — every field optional. `content` triggers a
@@ -11884,6 +11892,9 @@ export interface WorkbenchUpdateReq {
   pinned?: boolean;
   folder?: string;
   tags?: string[];
+  /** `global` shows it in every workspace; `workspace` scopes it to the
+   *  workspace of this request (moving it here if it lived elsewhere). */
+  scope?: WorkbenchScope;
   /** Force a fresh revision (⌘S "save now") instead of coalescing. */
   checkpoint?: boolean;
   /** Opaque per-window id echoed in the WS event so a window can ignore its
@@ -11954,6 +11965,9 @@ export interface WorkbenchDocChangedEvent {
   workspace_id: Id;
   user_id: Id;
   doc_id: Id;
+  /** A `global` doc shows in every workspace, so windows on other
+   *  workspaces than `workspace_id` refetch too. */
+  scope: WorkbenchScope;
   action: 'created' | 'updated' | 'trashed' | 'restored' | 'deleted';
   rev: number;
   /** Content hash after the change (a coalesced autosave keeps `rev`). */

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
-  // Workbench file list: search, pinned-first live docs, and the trash view
-  // (Restore / Delete forever). Every row has a context menu (ctxMenu).
+  // Workbench file list: search, pinned-first live docs grouped by scope
+  // (this workspace / all workspaces), and the trash view (Restore / Delete
+  // forever). Every row has a context menu (ctxMenu).
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -35,6 +36,10 @@
   const live = $derived(sortDocs(workbench.docs).filter((d) => matches(d, query.trim())));
   const pinned = $derived(live.filter((d) => d.pinned));
   const rest = $derived(live.filter((d) => !d.pinned));
+  const restHere = $derived(rest.filter((d) => d.scope !== 'global'));
+  const restGlobal = $derived(rest.filter((d) => d.scope === 'global'));
+  /** Label the scope groups only when both exist: one group needs no title. */
+  const splitScopes = $derived(restHere.length > 0 && restGlobal.length > 0);
   const trashed = $derived(workbench.trash.filter((d) => matches(d, query.trim())));
 
   function iconFor(lang: string): IconName {
@@ -69,6 +74,17 @@
         action: () => void act(d.pinned ? 'unpin' : 'pin', () => workbench.patchMeta(d.id, { pinned: !d.pinned })),
       },
       { label: 'Duplicate', icon: 'copy', action: () => void act('duplicate', () => workbench.duplicate(d.id)) },
+      d.scope === 'global'
+        ? {
+            label: 'Keep in this workspace only',
+            icon: 'folder',
+            action: () => void act('change where it shows', () => workbench.setScope(d.id, 'workspace')),
+          }
+        : {
+            label: 'Show in all workspaces',
+            icon: 'globe',
+            action: () => void act('change where it shows', () => workbench.setScope(d.id, 'global')),
+          },
       { separator: true },
       {
         label: 'Move to trash', // ui-guards: allow — reversible (restore from the trash), so no confirm
@@ -128,6 +144,7 @@
     >
       <Icon name={iconFor(d.language)} size={13} />
       <span class="wb-name">{d.name}</span>
+      {#if d.scope === 'global'}<span class="wb-scope" title="Shows in every workspace" aria-label="All workspaces"><Icon name="globe" size={12} /></span>{/if}
       {#if workbench.isDirty(d.id)}<span class="wb-dot" title="Unsaved changes" aria-label="Unsaved changes"></span>{/if}
       <span class="wb-when"><RelTime iso={d.updated_at} /></span>
     </button>
@@ -168,6 +185,7 @@
           {#each trashed as d (d.id)}
             <li use:rowMenuKeys class="wb-trash-row" data-testid="wb-trash-row" oncontextmenu={(e) => trashMenu(e, d)}>
               <span class="wb-name" title={d.name}>{d.name}</span>
+              {#if d.scope === 'global'}<span class="wb-scope" title="Shows in every workspace" aria-label="All workspaces"><Icon name="globe" size={12} /></span>{/if}
               <span class="wb-when">{sizeLabel(d.size)}</span>
               <button class="btn small" onclick={() => void restore(d)} title="Restore with its full history">Restore</button>
               <button class="icon-btn wb-purge" onclick={() => void purge(d)} aria-label={`Delete ${d.name} forever`} title="Delete forever">
@@ -204,7 +222,16 @@
             {#each pinned as d (d.id)}{@render row(d)}{/each}
           </ul>
         {/if}
-        {#if rest.length > 0}
+        {#if splitScopes}
+          <h4 class="wb-sec" title="Only in this workspace">This workspace</h4>
+          <ul class="wb-list" aria-label="Files in this workspace" data-testid="wb-files-here">
+            {#each restHere as d (d.id)}{@render row(d)}{/each}
+          </ul>
+          <h4 class="wb-sec" title="Show in every workspace">All workspaces</h4>
+          <ul class="wb-list" aria-label="Files in all workspaces" data-testid="wb-files-global">
+            {#each restGlobal as d (d.id)}{@render row(d)}{/each}
+          </ul>
+        {:else if rest.length > 0}
           {#if pinned.length > 0}<h4 class="wb-sec">Files</h4>{/if}
           <ul class="wb-list" aria-label="Files">
             {#each rest as d (d.id)}{@render row(d)}{/each}
@@ -316,6 +343,11 @@
     flex: none;
     color: var(--text-dim);
     font-size: var(--fs-xs);
+  }
+  .wb-scope {
+    flex: none;
+    display: inline-flex;
+    color: var(--text-dim);
   }
   .wb-dot {
     flex: none;

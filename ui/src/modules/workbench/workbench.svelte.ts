@@ -1,5 +1,10 @@
 // Workbench store — per-user scratch files with full, append-only history.
 //
+// A doc's `scope` decides where its owner sees it: `workspace` (only in the
+// workspace it lives in) or `global` (every workspace). The list from the
+// daemon already holds both for the bound workspace; new files take the
+// remembered default (`newScope`).
+//
 // The daemon owns the history (every content save lands in a revision; rapid
 // autosaves coalesce server-side into one revision per ~60 s burst). This store
 // owns the *editing* state: the doc list + trash, the open tabs (persisted per
@@ -21,7 +26,7 @@ import {
   trashWorkbenchDoc,
   updateWorkbenchDoc,
 } from '../../lib/api/workbench';
-import type { WorkbenchDoc, WorkbenchDocFull, WorkbenchUpdateReq } from '../../lib/api/types';
+import type { WorkbenchDoc, WorkbenchDocFull, WorkbenchScope, WorkbenchUpdateReq } from '../../lib/api/types';
 import { loadErrorText } from '../../lib/loadError';
 import { ApiError } from '../../lib/api/client';
 import { onLive, appLive } from '../../lib/live';
@@ -87,6 +92,7 @@ const K_UNSAVED = (id: string) => `otto.wb.unsaved.${id}`;
 const K_VALUES = (id: string) => `otto.wb.values.${id}`;
 const K_PREVIEW = 'otto.wb.preview';
 const K_PANEL = 'otto.wb.panel';
+const K_NEW_SCOPE = 'otto.wb.newScope';
 
 /** "Untitled N" with N one past the highest existing. */
 export function nextUntitledName(names: readonly string[]): string {
@@ -132,6 +138,9 @@ class WorkbenchStore {
   open: Record<string, OpenDoc> = $state({});
 
   panel: SidePanel = $state(lsGet<SidePanel>(K_PANEL, 'none'));
+  /** Scope given to files created here. Global by default: a scratch file
+   *  silently staying behind in one workspace reads as "it disappeared". */
+  newScope: WorkbenchScope = $state(lsGet<WorkbenchScope>(K_NEW_SCOPE, 'global') === 'workspace' ? 'workspace' : 'global');
   previewOn: Record<string, boolean> = $state(lsGet<Record<string, boolean>>(K_PREVIEW, {}));
   values: Record<string, Record<string, string>> = $state({});
 
@@ -235,7 +244,10 @@ class WorkbenchStore {
   }
 
   private onEvent(ev: Record<string, unknown>): void {
-    if (ev.workspace_id !== this.ws) return;
+    // Ours when it lives here, is global (shows everywhere), or is a doc we
+    // list that just moved away (scoped to another workspace → drop it).
+    const known = this.docs.some((d) => d.id === ev.doc_id) || this.trash.some((d) => d.id === ev.doc_id);
+    if (ev.workspace_id !== this.ws && ev.scope !== 'global' && !known) return;
     if (ev.client_id && ev.client_id === WB_CLIENT_ID) return;
     const id = String(ev.doc_id ?? '');
     const action = String(ev.action ?? '');
@@ -305,7 +317,7 @@ class WorkbenchStore {
 
   private upsertMeta(meta: WorkbenchDoc): void {
     const i = this.docs.findIndex((d) => d.id === meta.id);
-    if (meta.deleted_at) {
+    if (meta.deleted_at || (meta.scope !== 'global' && meta.workspace_id !== this.ws)) {
       if (i >= 0) this.docs.splice(i, 1);
       return;
     }
@@ -596,6 +608,17 @@ class WorkbenchStore {
     if (o?.doc) o.doc = { ...o.doc, ...meta, content: o.doc.content };
   }
 
+  /** Show a doc in every workspace (`global`) or only in this one. Scoping a
+   *  global doc to "this workspace" moves it here (the daemon re-homes it). */
+  async setScope(id: string, scope: WorkbenchScope): Promise<void> {
+    await this.patchMeta(id, { scope });
+  }
+
+  setNewScope(scope: WorkbenchScope): void {
+    this.newScope = scope;
+    lsSet(K_NEW_SCOPE, scope);
+  }
+
   /** Apply a restored doc (history restore / external reload) to the tab. */
   applyDoc(doc: WorkbenchDocFull): void {
     const o = this.open[doc.id];
@@ -610,12 +633,17 @@ class WorkbenchStore {
     this.upsertMeta(doc);
   }
 
-  async create(body: { name?: string; language?: string; content?: string }): Promise<WorkbenchDocFull | null> {
+  async create(body: { name?: string; language?: string; content?: string; scope?: WorkbenchScope }): Promise<WorkbenchDocFull | null> {
     const ws = this.ws;
     const generation = this.generation;
     if (!ws) return null;
     const name = body.name ?? nextUntitledName(this.docs.map((d) => d.name));
-    const doc = await createWorkbenchDoc(ws, { name, language: body.language ?? 'auto', content: body.content ?? '' });
+    const doc = await createWorkbenchDoc(ws, {
+      name,
+      language: body.language ?? 'auto',
+      content: body.content ?? '',
+      scope: body.scope ?? this.newScope,
+    });
     if (this.ws !== ws || this.generation !== generation) return doc;
     this.upsertMeta(doc);
     this.open[doc.id] = {
@@ -648,6 +676,7 @@ class WorkbenchStore {
       content: src.content,
       folder: src.folder,
       tags: src.tags,
+      scope: src.scope,
     });
     if (this.ws !== ws || this.generation !== generation) return doc;
     this.upsertMeta(doc);
