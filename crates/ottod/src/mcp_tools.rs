@@ -2503,19 +2503,15 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         "otto_search_issues" => {
             let acc = arg_str(args, "account_id")?;
             let mut path = format!("/issue/search?account_id={}", seg(&acc));
-            if let Some(q) = args.get("query").and_then(Value::as_str) {
-                path.push_str(&format!("&q={}", seg(q)));
-            }
-            if let Some(p) = args
-                .get("project")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                path.push_str(&format!("&project={}", seg(p)));
-            }
             path.push_str(&opt_query(
                 args,
-                &[("jql", "jql"), ("start_at", "start_at"), ("limit", "limit")],
+                &[
+                    ("q", "query"),
+                    ("project", "project"),
+                    ("jql", "jql"),
+                    ("start_at", "start_at"),
+                    ("limit", "limit"),
+                ],
             ));
             ReadCall::get(path)
         }

@@ -721,8 +721,8 @@ BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)"
 # 30 GB must stay free at all times: the release build + bundle need ~10 GB.
 # Refuse up front, and stop the build if the disk still drops under the
 # floor (scripts/disk-guard.sh — it never deletes anything itself).
-bash "$ROOT/scripts/disk-guard.sh" check 10 deploy || { fail_verify "not enough free disk for a release build (30 GB must stay free)"; exit 1; }
 if [[ "${DISK_GUARD:-1}" != 0 ]]; then
+    bash "$ROOT/scripts/disk-guard.sh" check 10 deploy || { fail_verify "not enough free disk for a release build (30 GB must stay free)"; exit 1; }
     bash "$ROOT/scripts/disk-guard.sh" watch $$ deploy &
     DISK_WATCH_PID=$!
 fi
