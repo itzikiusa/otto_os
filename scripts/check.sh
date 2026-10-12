@@ -130,10 +130,19 @@ echo "plugin changed: $( [ "$PLUGIN_CHANGED" = 1 ] && echo yes || echo no)"
 
 # ── Rust ──────────────────────────────────────────────────────────────────────
 if [ -n "$RUST_CHANGED" ] || [ -n "$RUST_TESTED" ]; then
-  # A workspace test build needs ~25 GB of target/: never start one that
-  # would run the disk dry (scripts/disk-guard.sh says why).
+  # 30 GB must stay free at all times (scripts/disk-guard.sh says why): a
+  # workspace test build peaks at ~35 GB of target/, a few crates at ~15.
+  # Refuse up front, and stop the build if the disk still drops under it.
   step "disk guard"
-  run bash "$ROOT/scripts/disk-guard.sh" check
+  NEED_GB=15
+  # "all", or most of the workspace by name (an otto-core change): ~35 GB.
+  if [ "$RUST_TESTED" = all ] || [ "$(wc -w <<<"$RUST_TESTED")" -gt 15 ]; then NEED_GB=35; fi
+  run bash "$ROOT/scripts/disk-guard.sh" check "$NEED_GB" check
+  if [ "$DRY" != 1 ] && [ "${DISK_GUARD:-1}" != 0 ]; then
+    bash "$ROOT/scripts/disk-guard.sh" watch $$ check &
+    GUARD_PID=$!
+    trap 'kill "$GUARD_PID" 2>/dev/null || true' EXIT
+  fi
   step "rustfmt"
   if [ "$RUST_CHANGED" = all ]; then
     if [ "$FMT_CHECK" = 1 ]; then run "$CARGO" fmt --all --check; else run "$CARGO" fmt --all; fi

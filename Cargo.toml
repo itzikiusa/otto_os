@@ -168,6 +168,17 @@ apache-avro = "0.22.0"
 # docs/testing/build-performance.md
 [profile.dev.package."*"]
 opt-level = 1
+# …and without DWARF: nobody steps through tokio/sqlx in a debugger, and full
+# debuginfo for ~800 dependency units, re-linked into every crate's test
+# binary, was most of a ~35 GB workspace test build (it filled the disk,
+# 2026-10-12). Panics still name the dependency frames via the symbol table.
+debug = false
+
+# Workspace crates keep file:line in backtraces and panics, not full DWARF
+# (variables/types for a debugger). Run `CARGO_PROFILE_DEV_DEBUG=true cargo …`
+# for a debugging session that needs it.
+[profile.dev]
+debug = "line-tables-only"
 
 # Build speed over the last few % of runtime/binary size: this app is built +
 # deployed locally many times a day, and thin-LTO's cross-module phase capped

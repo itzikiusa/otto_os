@@ -718,9 +718,14 @@ if [[ "${OTTO_DEPLOY_PHASE:-}" != "queue-finish" ]]; then
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || { fail_verify "build requires a clean source tree"; exit 1; }
 BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)"
 [[ "${SKIP_UI:-0}" != 1 ]] || { fail_verify "receipted deployment requires a fresh UI build; unset SKIP_UI"; exit 1; }
-# The release build + bundle need ~10 GB; prune stale cargo artifacts first
-# and refuse rather than fill the disk mid-build (scripts/disk-guard.sh).
-bash "$ROOT/scripts/disk-guard.sh" deploy || { fail_verify "not enough free disk for a release build"; exit 1; }
+# 30 GB must stay free at all times: the release build + bundle need ~10 GB.
+# Refuse up front, and stop the build if the disk still drops under the
+# floor (scripts/disk-guard.sh — it never deletes anything itself).
+bash "$ROOT/scripts/disk-guard.sh" check 10 deploy || { fail_verify "not enough free disk for a release build (30 GB must stay free)"; exit 1; }
+if [[ "${DISK_GUARD:-1}" != 0 ]]; then
+    bash "$ROOT/scripts/disk-guard.sh" watch $$ deploy &
+    DISK_WATCH_PID=$!
+fi
 echo "==> 1/7  Frontend → ui/dist"
 # A pull that changed package-lock.json needs `npm ci` first, or the build
 # fails on a missing module.
@@ -766,6 +771,8 @@ else
     echo "    Cargo caches preserved (PRUNE=1 opts into eviction; may force recompilation)"
 fi
 
+# Build steps done: the disk watchdog stops here (install never grows target/).
+[[ -n "${DISK_WATCH_PID:-}" ]] && kill "$DISK_WATCH_PID" 2>/dev/null || true
 [[ "$(git rev-parse HEAD)" == "$BUILD_SOURCE_COMMIT" ]] || { fail_verify "source commit changed during build"; exit 1; }
 build_manifest > "$BUILD_RECEIPT.tmp"
 mv "$BUILD_RECEIPT.tmp" "$BUILD_RECEIPT"

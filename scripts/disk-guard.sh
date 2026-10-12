@@ -1,45 +1,77 @@
 #!/bin/bash
-# Disk guard for heavy builds (scripts/check.sh, packaging/deploy.sh).
+# Disk floor for heavy builds (scripts/check.sh, packaging/deploy.sh): the Mac
+# must keep at least DISK_FLOOR_GB (30) free at ALL times.
 #
-# Cargo never garbage-collects target/: every feature/profile variant of a
-# workspace crate stays in deps/ forever, and a link killed mid-way (a full
-# disk, a cancelled run) leaves its `*.rcgu.o` codegen units behind — 11 GB of
-# them on 2026-10-12, when a test build filled a 228 GB disk to 0 bytes and
-# the whole agent session (every shell, every file write) stopped dead.
+# Why: cargo never garbage-collects target/ and a workspace test build peaks
+# at ~30-40 GB (a test binary per crate, each linking every dependency, plus
+# the codegen units of in-flight links). On 2026-10-12 one filled a 228 GB
+# disk to 0 bytes twice; every shell and file write on the machine then
+# failed with ENOSPC until someone cleaned up from another terminal.
 #
-# Before building, so the build itself never runs a disk dry:
-#   1. always: drop stray `*.rcgu.o` in target/*/deps (rustc deletes its own
-#      on success; a leftover is an aborted link's) — only while no cargo runs;
-#   2. free < DISK_GUARD_LOW_GB (15): evict old dependency variants
-#      (packaging/prune-target.sh --apply; may force some recompilation);
-#   3. still < DISK_GUARD_MIN_GB (8): refuse, saying what to delete.
-# DISK_GUARD=0 skips it. Usage: scripts/disk-guard.sh [label]
+# This script NEVER deletes anything — what to remove is the user's call. It:
+#   check NEED_GB [label]  refuses (exit 1) unless free − NEED_GB ≥ the floor,
+#                          listing what holds the space (stale artifacts,
+#                          leftover `*.rcgu.o`, target dirs) for the user;
+#   watch PID [label]      polls every 3 s while PID lives and, once free
+#                          space falls under the floor, stops PID's process
+#                          tree (the build) and says why.
+# DISK_GUARD=0 skips both.
 set -euo pipefail
 [[ "${DISK_GUARD:-1}" == 0 ]] && exit 0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOW="${DISK_GUARD_LOW_GB:-15}"
-MIN="${DISK_GUARD_MIN_GB:-8}"
-label="${1:-build}"
+FLOOR="${DISK_FLOOR_GB:-30}"
 
 free_gb() { df -Pk "$ROOT" | awk 'NR==2 {printf "%d", $4 / 1048576}'; }
-building() { pgrep -x rustc >/dev/null 2>&1 || pgrep -f 'cargo (build|test|check|run|clippy|nextest)' >/dev/null 2>&1; }
 
-if ! building; then
-    for deps in "$ROOT"/target/*/deps "$ROOT"/apps/desktop/src-tauri/target/*/deps; do
-        [[ -d "$deps" ]] && find "$deps" -maxdepth 1 -name '*.rcgu.o' -delete 2>/dev/null || true
+report() {
+    echo "  What holds space under $ROOT (nothing was deleted):" >&2
+    local d
+    for d in "$ROOT"/target/* "$ROOT"/apps/desktop/src-tauri/target/*; do
+        [[ -d "$d" ]] && du -sh "$d" 2>/dev/null | sed 's/^/    /' >&2
     done
-fi
+    local o
+    o=$(find "$ROOT"/target "$ROOT"/apps/desktop/src-tauri/target -maxdepth 3 -name '*.rcgu.o' 2>/dev/null | wc -l | tr -d ' ')
+    [[ "$o" != 0 ]] && echo "    $o leftover *.rcgu.o (an aborted link's codegen units)" >&2
+    echo "  Preview stale-variant eviction: packaging/prune-target.sh (dry run)." >&2
+}
 
-free="$(free_gb)"
-if (( free < LOW )); then
-    echo "disk-guard ($label): ${free} GB free (< ${LOW} GB) — evicting old cargo artifacts"
-    bash "$ROOT/packaging/prune-target.sh" --apply || true
-    free="$(free_gb)"
-fi
-if (( free < MIN )); then
-    echo "disk-guard ($label): only ${free} GB free (< ${MIN} GB) — refusing to start a build that would fill the disk." >&2
-    echo "  Free space first, e.g. 'rm -rf $ROOT/target/debug' (rebuilt on demand), or set DISK_GUARD=0 to override." >&2
-    exit 1
-fi
-echo "disk-guard ($label): ${free} GB free"
+# Kill PID and every descendant, children first (the cargo → rustc → linker tree).
+kill_tree() {
+    local p
+    for p in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$p"; done
+    kill -TERM "$1" 2>/dev/null || true
+}
+
+case "${1:-}" in
+    check)
+        need="${2:?usage: disk-guard.sh check NEED_GB [label]}"
+        label="${3:-build}"
+        free="$(free_gb)"
+        if (( free - need < FLOOR )); then
+            echo "disk-guard ($label): ${free} GB free; this build needs ~${need} GB and ${FLOOR} GB must stay free — not starting." >&2
+            report
+            exit 1
+        fi
+        echo "disk-guard ($label): ${free} GB free (needs ~${need} GB, floor ${FLOOR} GB)"
+        ;;
+    watch)
+        pid="${2:?usage: disk-guard.sh watch PID [label]}"
+        label="${3:-build}"
+        while kill -0 "$pid" 2>/dev/null; do
+            free="$(free_gb)"
+            if (( free < FLOOR )); then
+                echo "" >&2
+                echo "disk-guard ($label): free space fell to ${free} GB (< ${FLOOR} GB) — stopping the build." >&2
+                report
+                for c in $(pgrep -P "$pid" 2>/dev/null); do [[ "$c" == "$BASHPID" ]] || kill_tree "$c"; done
+                exit 1
+            fi
+            sleep 3
+        done
+        ;;
+    *)
+        echo "usage: disk-guard.sh check NEED_GB [label] | watch PID [label]" >&2
+        exit 2
+        ;;
+esac
