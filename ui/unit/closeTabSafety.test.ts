@@ -140,6 +140,36 @@ test('"Always delete": closing a working agent keeps the Undo window without ask
   }
 });
 
+// Sweep 2026-10-11 prefs S-2: "Always archive" still asked before closing a
+// working agent — the same class of bug #101 fixed for "Always delete".
+test('"Always archive": closing or archiving a working agent archives without asking', async () => {
+  const { ws, deleted, posted, asked } = store('agents', 'archive', false);
+  ws.sessions[0].provider = 'claude';
+  ws.statusMap = { s1: 'working' };
+  ws.applyArchiveState = () => {};
+  await ws.requestCloseTab('s1');
+  assert.deepEqual(asked, [], 'the remembered choice is honoured mid-turn');
+  assert.deepEqual(posted, ['/sessions/s1/archive']);
+  assert.deepEqual(deleted, [], 'archive never deletes');
+
+  const explicit = store('agents', 'archive', false);
+  explicit.ws.sessions[0].provider = 'claude';
+  explicit.ws.statusMap = { s1: 'working' };
+  assert.equal(await explicit.ws.requestArchive('s1'), true);
+  assert.deepEqual(explicit.asked, []);
+  assert.deepEqual(explicit.posted, ['/sessions/s1/archive']);
+});
+
+test('"Always archive" still asks before archiving a session an engine run owns', async () => {
+  const { ws, posted, asked } = store('home', 'archive', false);
+  ws.sessions = [];
+  ws.statusMap = {};
+  assert.equal(await ws.requestArchive('bg1', { working: true, title: 'Step 3', engine: 'workflow' }), false);
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /workflow run that owns it/);
+  assert.deepEqual(posted, []);
+});
+
 test('explicit Delete without "Always delete" still asks before stopping a working agent', async () => {
   for (const pref of ['', 'archive'] as const) {
     const { ws, deleted, posted, asked } = store('agents', pref, false);

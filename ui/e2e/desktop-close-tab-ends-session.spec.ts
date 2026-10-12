@@ -13,8 +13,8 @@ import { expectFullyInViewport } from './helpers';
 // user opted out of the question — confirming anyway made "Always delete" a
 // lie); a remembered Delete archives first and deletes when its Undo toast
 // runs out (S13-01: a stray ⌘W is never instantly irreversible), and a bulk close that ends more than one session always confirms
-// once, naming the count. "Always delete" also applies to working agents;
-// "Always archive" still asks before stopping an agent mid-turn.
+// once, naming the count. Both remembered choices also apply to working
+// agents (archive is resumable; delete keeps its Undo window).
 // ─────────────────────────────────────────────────────────────────────────────
 
 let ctx: APIRequestContext;

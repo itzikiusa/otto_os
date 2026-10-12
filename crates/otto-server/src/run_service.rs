@@ -8,6 +8,7 @@
 use chrono::Utc;
 
 use otto_core::api::{CreatePrReq, PrSummary};
+use otto_core::domain::WorkspaceRole;
 use otto_core::run::{
     open_pr_block_reason, parse_decision, parse_source_ref, ApprovalDecision, ApproveRunReq,
     LaunchRunReq, OpenPrBlock, OttoRun, RunOrigin, RunStatus, SourceKind,
@@ -38,11 +39,11 @@ pub async fn launch(
     req: LaunchRunReq,
 ) -> Result<OttoRun> {
     let (kind, source_ref, url) = determine_source(&req, origin, &origin_meta)?;
-    // An explicit repo must belong to THIS workspace (the caller's role was
-    // checked here, not on the repo's): refuse at launch, before any run row,
-    // worktree or agent exists. `resolve_repo` re-checks at the stage.
+    // An explicit repo must be one the launcher may drive (see
+    // `check_repo_for_run`): refuse at launch, before any run row, worktree
+    // or agent exists. `resolve_repo` re-checks at the stage.
     if let Some(rid) = req.repo_id.as_deref().filter(|s| !s.is_empty()) {
-        check_repo_in_workspace(ctx, workspace_id, rid).await?;
+        check_repo_for_run(ctx, workspace_id, created_by, rid).await?;
     }
 
     // Channel runs seed their goal/body from the trigger message.
@@ -260,16 +261,41 @@ async fn log_approval(ctx: &ServerCtx, run: &OttoRun, decision: &str, note: Opti
         .await;
 }
 
-/// `NotFound` unless repo `repo_id` exists AND belongs to `workspace_id` — a
-/// repo of another workspace is reported exactly like a missing one.
-pub(crate) async fn check_repo_in_workspace(
+/// `NotFound` unless repo `repo_id` is registered AND the run may drive it:
+/// a repo of `workspace_id`, or — as a workflow run may (S3-302) — a repo
+/// another workspace registered, when `created_by` may edit THAT workspace
+/// (launch only checked their role on `workspace_id`; root passes). A repo
+/// they cannot reach reads exactly like a missing one (S15-05).
+pub(crate) async fn check_repo_for_run(
     ctx: &ServerCtx,
     workspace_id: &Id,
+    created_by: &str,
     repo_id: &str,
 ) -> Result<()> {
-    match ctx.git_store.get_repo(&repo_id.to_string()).await {
-        Ok(r) if r.workspace_id == *workspace_id => Ok(()),
-        Ok(_) | Err(Error::NotFound(_)) => Err(Error::NotFound("repo".into())),
+    let not_found = || Error::NotFound("repo".into());
+    let repo = match ctx.git_store.get_repo(&repo_id.to_string()).await {
+        Ok(r) => r,
+        Err(Error::NotFound(_)) => return Err(not_found()),
+        Err(e) => return Err(e),
+    };
+    if repo.workspace_id == *workspace_id {
+        return Ok(());
+    }
+    let user = match otto_state::UsersRepo::new(ctx.pool.clone())
+        .get(&created_by.to_string())
+        .await
+    {
+        Ok(u) => u,
+        Err(Error::NotFound(_)) => return Err(not_found()),
+        Err(e) => return Err(e),
+    };
+    match ctx
+        .roles
+        .check(&user, &repo.workspace_id, WorkspaceRole::Editor)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(Error::Forbidden(_) | Error::NotFound(_) | Error::Unauthorized) => Err(not_found()),
         Err(e) => Err(e),
     }
 }

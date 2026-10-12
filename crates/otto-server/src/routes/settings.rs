@@ -7,7 +7,7 @@ use otto_state::{NewAuditEntry, SettingsRepo};
 use serde_json::{Map, Value};
 
 use crate::auth::{require_root, CurrentUser};
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
 /// `GET /api/v1/settings`
@@ -30,8 +30,32 @@ pub async fn put_all(
     require_root(&user)?;
     crate::auth::require_human(&auth.0)?;
     let repo = SettingsRepo::new(ctx.pool.clone());
+    // The owner's extra kubeconfig exec plugins: bare names, never a shell or
+    // interpreter — refused before anything is written.
+    let extra_plugins = match body.get(otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING) {
+        Some(value) => {
+            let names: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| {
+                ApiError(otto_core::Error::Invalid(
+                    "kubeconfig_exec_plugins must be an array of program names".into(),
+                ))
+            })?;
+            let refused = otto_core::kubeconfig_policy::refused_extra_plugins(&names);
+            if !refused.is_empty() {
+                return Err(ApiError(otto_core::Error::Invalid(format!(
+                    "kubeconfig_exec_plugins may only name a credential plugin by its bare \
+                     program name, never a path, shell, interpreter or wrapper: {}",
+                    refused.join(", ")
+                ))));
+            }
+            Some(names)
+        }
+        None => None,
+    };
     for (key, value) in &body {
         repo.put(key, value).await?;
+    }
+    if let Some(names) = extra_plugins {
+        otto_core::kubeconfig_policy::set_extra_plugins(&names);
     }
     // Custom providers apply immediately — no daemon restart needed.
     if let Some(value) = body.get("providers") {

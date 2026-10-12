@@ -236,6 +236,57 @@ mod tests {
         assert_eq!(pr_draft_model_from(Some(&json!("  opus  "))), "opus");
     }
 
+    /// 0183 (sweep 2026-10-11 prefs S-1): custom providers that ran
+    /// unconfined before S11-309 are recorded as exempt once; a provider the
+    /// legacy allow-list confined stays confined, and a person's own exempt
+    /// list is never rewritten.
+    #[tokio::test]
+    async fn sandbox_migration_keeps_existing_custom_providers_unconfined() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let repo = SettingsRepo::new(pool.clone());
+        let migration =
+            include_str!("../migrations/0183_sandbox_exempt_existing_custom_providers.sql");
+        let custom = json!({"opencode": {"cmd": "opencode", "args": []},
+                            "mycli": {"cmd": "mycli", "args": []},
+                            "claude": {"cmd": "claude", "args": []}});
+        repo.put("providers", &custom).await.unwrap();
+        let cases = [
+            (
+                json!({"enabled": true, "network": "full"}),
+                json!({"enabled": true, "network": "full", "exempt_providers": ["mycli", "opencode"]}),
+            ),
+            (
+                json!({"enabled": true, "providers": ["claude", "mycli"]}),
+                json!({"enabled": true, "providers": ["claude", "mycli"], "exempt_providers": ["opencode"]}),
+            ),
+            (
+                json!({"enabled": true, "exempt_providers": []}),
+                json!({"enabled": true, "exempt_providers": []}),
+            ),
+            (
+                json!({"enabled": true, "providers": ["opencode", "mycli"]}),
+                json!({"enabled": true, "providers": ["opencode", "mycli"]}),
+            ),
+        ];
+        for (before, after) in cases {
+            repo.put("process_sandbox", &before).await.unwrap();
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+            let mut got = repo.get("process_sandbox").await.unwrap().unwrap();
+            if let Some(list) = got
+                .get_mut("exempt_providers")
+                .and_then(|v| v.as_array_mut())
+            {
+                list.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+            }
+            assert_eq!(got, after, "from {before}");
+        }
+    }
+
     #[tokio::test]
     async fn get_cached_serves_repeats_and_sees_in_process_writes_at_once() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

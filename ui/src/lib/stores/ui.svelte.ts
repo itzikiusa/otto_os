@@ -25,6 +25,9 @@ export type RightTab =
   | 'browser'
   | 'api'
   | 'canvas';
+/** What the Side panel can show: a shell tab, or a tab a page contributes
+ *  while it is mounted (`page:<name>`, stores/rightPanel.svelte.ts). */
+export type RightPanelTab = RightTab | `page:${string}`;
 /** Which browser the agent-mode right panel's Browser tab hosts: `v1` is the
  *  original per-session panel (native tabs + take-over picker), `v2` is the
  *  Browser module (reader/live tabs, persisted marks, ask bar) embedded in the
@@ -228,7 +231,7 @@ function clampApiBuilder(px: number): number {
 class UiStore {
   railExpanded = $state(lsGet(LS.rail) !== '0');
   rightOpen = $state(lsGet(LS.right) === '1');
-  rightTab: RightTab = $state((lsGet(LS.rightTab) as RightTab) ?? 'git');
+  rightTab: RightPanelTab = $state((lsGet(LS.rightTab) as RightPanelTab) ?? 'git');
   rightWidth = $state(clampRight(Number(lsGet(LS.rightWidth)) || 300));
   railWidth = $state(clampRail(Number(lsGet(LS.railWidth)) || 240));
   // DB dock: the DB Explorer docked beside the agent panes (side-by-side).
@@ -569,15 +572,43 @@ class UiStore {
     lsSet(LS.rail, this.railExpanded ? '1' : '0');
   }
 
-  toggleRight(): void {
-    this.rightOpen = !this.rightOpen;
-    lsSet(LS.right, this.rightOpen ? '1' : '0');
+  /** A page's own, NON-persisted view of the Side panel (the Vault showing
+   *  its Note details by default): wins over the saved open/tab until the
+   *  person acts on the panel or the page goes away, and is never written to
+   *  storage — visiting a page must not leave the panel open everywhere. */
+  rightTransient: { open: boolean; tab: RightPanelTab } | null = $state(null);
+  /** What the Side panel shows now: the page's transient view, else the saved state. */
+  get rightOpenNow(): boolean {
+    return this.rightTransient?.open ?? this.rightOpen;
+  }
+  get rightTabNow(): RightPanelTab {
+    return this.rightTransient?.tab ?? this.rightTab;
   }
 
-  openRight(tab: RightTab): void {
+  toggleRight(): void {
+    // Acting on the panel ends a page's transient view; the result is saved.
+    const open = this.rightOpenNow;
+    if (this.rightTransient) this.rightTab = this.rightTransient.tab;
+    this.rightTransient = null;
+    this.rightOpen = !open;
+    lsSet(LS.right, this.rightOpen ? '1' : '0');
+    lsSet(LS.rightTab, this.rightTab);
+  }
+
+  openRight(tab: RightPanelTab): void {
+    this.rightTransient = null;
     this.rightTab = tab;
     this.rightOpen = true;
     lsSet(LS.right, '1');
+    lsSet(LS.rightTab, tab);
+  }
+
+  /** Set open + tab together (a rail click), persisting both. */
+  setRight(open: boolean, tab: RightPanelTab): void {
+    this.rightTransient = null;
+    this.rightTab = tab;
+    this.rightOpen = open;
+    lsSet(LS.right, open ? '1' : '0');
     lsSet(LS.rightTab, tab);
   }
 

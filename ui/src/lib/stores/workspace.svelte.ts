@@ -31,6 +31,10 @@ import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
+import { flaggedIds, forget, mergeAttention, noticeIsNew, parseAttention, raise, see, serializeAttention, type Attention } from '../attention';
+
+/** Persisted raise/seen times behind the "needs you" flag (lib/attention.ts). */
+const LS_ATTENTION = 'otto_attention';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
@@ -177,12 +181,24 @@ class WorkspaceStore {
   /** global session-status map (fed by loads + events WS) */
   statusMap: Record<Id, SessionStatus> = $state({});
 
-  /** Sticky "needs you" flags: a session raised a Notification/blocked hook and
-   *  is waiting on the operator (a permission or input it couldn't auto-accept).
-   *  Distinct from plain `idle` (which conflates "thinking" and "blocked").
-   *  Set when the `:waiting` notice arrives (see {@link markNeedsYou}); cleared
-   *  when the user attends — opens the session or sends it input. */
-  needsYou: Record<Id, boolean> = $state({});
+  /** "Needs you" flags, a raise/lower flag per session (lib/attention.ts):
+   *  RAISED by the daemon's `session_attention` event (and its `:waiting`
+   *  notice when session notices are on) — an agent's turn ended (Working →
+   *  Idle, confirmed idle for a while: monitor.rs) or it raised a permission
+   *  / question prompt (see {@link markNeedsYou}); LOWERED when the operator
+   *  enters / focuses the session (even doing nothing), sends it input, or it
+   *  resumes / exits ({@link clearNeedsYou}); it stays down until the next
+   *  turn end or prompt. Never "on" just because a session is idle. Mirrors
+   *  `attention` (persisted, so a reload neither drops an unseen flag nor
+   *  re-raises a seen one). */
+  private attention: Attention = parseAttention(lsGet(LS_ATTENTION));
+  needsYou: Record<Id, boolean> = $state(Object.fromEntries(flaggedIds(this.attention).map((id) => [id, true])));
+  /** Flags restored from storage whose session's status isn't known yet:
+   *  once it is, a working / exited one is stale ({@link settleRestoredFlag}). */
+  private restoredFlags = new Set<Id>(flaggedIds(this.attention));
+  /** The app window is visible and focused (App.svelte keeps it current):
+   *  only then does an on-screen session count as "seen". */
+  operatorPresent = $state(true);
 
   /** Sidebar filter toggle: show only sessions that need attention. */
   needsYouFilter = $state(false);
@@ -406,12 +422,48 @@ class WorkspaceStore {
     return this.buckets.foregroundActive;
   }
 
-  /** Flag a session as needing the operator's attention (blocked on input). */
-  markNeedsYou(id: Id): void {
-    if (this.needsYou[id]) return;
-    this.needsYou = { ...this.needsYou, [id]: true };
+  /** Is the operator looking at `id` right now (Agents page, focused pane,
+   *  window in front)? A raise while watching is seen at once. */
+  private watching(id: Id): boolean {
+    return this.operatorPresent && id === this.activeSessionId && (router.module === '' || router.module === 'agents');
+  }
+
+  /** `write`: 'merge' folds in what other windows stored since (so a stale
+   *  window never erases their raises / seens), 'replace' writes as-is (a
+   *  forgotten session), 'none' only adopts (a storage event). */
+  private setAttention(next: Attention, write: 'merge' | 'replace' | 'none' = 'merge'): void {
+    if (next === this.attention) return;
+    if (write === 'merge') next = mergeAttention(parseAttention(lsGet(LS_ATTENTION)), next);
+    this.attention = next;
+    if (write !== 'none') lsSet(LS_ATTENTION, serializeAttention(next));
+    const flags: Record<Id, boolean> = {};
+    for (const id of flaggedIds(next)) flags[id] = true;
+    const prev = Object.keys(this.needsYou);
+    const now = Object.keys(flags);
+    if (prev.length !== now.length || now.some((id) => !this.needsYou[id])) this.needsYou = flags;
+  }
+
+  /** Raise a session's flag: its agent finished a turn, or it is blocked on
+   *  the operator (prompt / permission). `noticeAt`: the daemon time of the
+   *  notice behind it; `restore`: re-derived from an unread notice on load. */
+  markNeedsYou(id: Id, opts: { noticeAt?: number; restore?: boolean } = {}): void {
+    // A reload re-deriving from an unread notice: only one newer than the
+    // last notice answered for this session counts (daemon clock vs daemon
+    // clock). The raise itself is stamped on this client's clock.
+    if (opts.restore && opts.noticeAt !== undefined && !noticeIsNew(this.attention, id, opts.noticeAt)) return;
+    const was = this.needsYou[id] === true;
+    // Stamped on this client's clock; a raise that FOLLOWS a lower in the
+    // same millisecond is still later than it.
+    const at = Math.max(Date.now(), (this.attention.seen[id] ?? -Infinity) + 1);
+    this.setAttention(raise(this.attention, id, at, this.watching(id), opts.noticeAt));
     // Needing the operator while not on screen is unread activity too.
-    if (id !== this.activeSessionId) this.unread = { ...this.unread, [id]: true };
+    if (!was && this.needsYou[id] && id !== this.activeSessionId) this.unread = { ...this.unread, [id]: true };
+  }
+
+  /** Another window (popout, side pane) wrote its flags: merge them in —
+   *  the latest raise and the latest seen per session win. */
+  reloadAttention(): void {
+    this.setAttention(mergeAttention(this.attention, parseAttention(lsGet(LS_ATTENTION))), 'none');
   }
 
   /** Reload the in-flight workflow runs for the current workspace. Cheap query;
@@ -467,12 +519,33 @@ class WorkspaceStore {
     if (ev.waiting_approval !== undefined) r.waiting_approval = ev.waiting_approval;
   }
 
-  /** Clear a session's "needs you" flag — the user has attended to it. */
-  clearNeedsYou(id: Id): void {
-    if (!this.needsYou[id]) return;
-    const next = { ...this.needsYou };
-    delete next[id];
-    this.needsYou = next;
+  /** Lower a session's flag: the operator entered / focused it or sent it
+   *  input, or what it waited on is resolved (working again, exited). It
+   *  stays down until a LATER raise. */
+  clearNeedsYou(id: Id, noticeAt?: number): void {
+    this.restoredFlags.delete(id);
+    // A lower that follows a raise (even one stamped a millisecond ahead) wins.
+    this.setAttention(see(this.attention, id, Math.max(Date.now(), this.attention.raised[id] ?? -Infinity), noticeAt));
+  }
+
+  /** Restored flags still waiting for their session's status (App reads
+   *  `statusMap` for these and calls {@link settleRestoredFlag}). */
+  restoredFlagIds(): Id[] {
+    return [...this.restoredFlags];
+  }
+
+  /** A restored flag's session status is known: a session that is working
+   *  again or has exited no longer needs the operator (the live
+   *  `session_status` rule, applied once to what storage brought back). A
+   *  flag raised in THIS run is never touched here. */
+  settleRestoredFlag(id: Id, status: string): void {
+    if (!this.restoredFlags.delete(id)) return;
+    if (status === 'working' || status === 'running' || status === 'exited' || status === 'reconnectable') this.clearNeedsYou(id);
+  }
+
+  /** A session is gone for good: drop its flag history too. */
+  private forgetAttention(id: Id): void {
+    this.setAttention(forget(this.attention, id), 'replace');
   }
 
   async load(): Promise<void> {
@@ -1349,7 +1422,8 @@ class WorkspaceStore {
    *  delete after an Undo toast — see {@link deleteWithUndo}), so a stray
    *  ⌘W / ⌫ / middle-click can be taken back. A close that ends **more than
    *  one** session (Close others / to the right / all) always confirms once.
-   *  "Always archive" also confirms before stopping a working agent. */
+   *  Neither remembered choice asks about a working agent: archive keeps the
+   *  conversation resumable and "Always delete" keeps its Undo window. */
   private async resolveCloseAction(ids: Id[]): Promise<CloseAction | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
@@ -1357,7 +1431,7 @@ class WorkspaceStore {
     const many = n > 1;
     const busy = ending.filter((id) => this.isAgentMidTurn(id)).length;
     const pref = ui.closeTabPref;
-    if (pref === 'archive' && !many && busy === 0) return 'archive';
+    if (pref === 'archive' && !many) return 'archive';
     if (pref === 'delete' && !many) return 'delete-deferred';
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
     const busyNote =
@@ -1608,7 +1682,7 @@ class WorkspaceStore {
     this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== id);
     this.dropArchived(id);
     delete this.statusMap[id];
-    this.clearNeedsYou(id);
+    this.forgetAttention(id);
   }
 
   private dropArchived(id: Id): void {
@@ -1764,7 +1838,10 @@ class WorkspaceStore {
    *  under that run). Resolves false when the user cancelled; a failed
    *  archive rejects. */
   async requestArchive(id: Id, hint?: { working?: boolean; title?: string; engine?: string | null }): Promise<boolean> {
-    if (this.isAgentMidTurn(id, hint)) {
+    // "Always archive" covers the user's own sessions (archive is resumable);
+    // a session a workflow / engine run owns still asks — that run loses it.
+    const remembered = ui.closeTabPref === 'archive' && !hint?.engine;
+    if (!remembered && this.isAgentMidTurn(id, hint)) {
       const name =
         this.sessions.find((x) => x.id === id)?.title?.trim() ||
         this.otherWsSessions.find((x) => x.id === id)?.title?.trim() ||
@@ -1896,6 +1973,11 @@ class WorkspaceStore {
         this.applyArchiveState(ev.session);
         break;
       }
+      case 'session_attention': {
+        // The daemon's always-on "needs you" signal (turn end / prompt).
+        this.markNeedsYou(ev.session_id);
+        break;
+      }
       case 'session_status': {
         // Unread dot: a background tab's session just finished a stretch of
         // work (working → idle/exited) while the user was looking elsewhere.
@@ -1995,7 +2077,7 @@ class WorkspaceStore {
       }
       case 'session_removed': {
         delete this.statusMap[ev.session_id];
-        this.clearNeedsYou(ev.session_id);
+        this.forgetAttention(ev.session_id);
         if (this.unread[ev.session_id]) {
           const next = { ...this.unread };
           delete next[ev.session_id];

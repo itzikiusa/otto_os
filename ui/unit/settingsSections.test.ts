@@ -96,12 +96,24 @@ test('every section page titles itself from the registry', () => {
 test('sections backed by root-only handlers are gated on root, not settings:admin', () => {
   const settingsAdmin: SettingsAccess = { can: (f, level) => f === 'settings' && level === 'admin', isRoot: false };
   const ids = availableSections(settingsAdmin).map((s) => s.id);
-  for (const id of ['providers', 'daemon', 'trust-safety', 'logs']) {
+  for (const id of ['daemon', 'trust-safety', 'logs']) {
     assert.equal(findSection(id)!.gate, 'root', `${id} must be root-gated`);
     assert.ok(!ids.includes(id as never), `${id} shown to a non-root settings admin`);
   }
   // Sections whose handlers accept settings admins stay open to them.
   assert.ok(ids.includes('skills'));
+});
+
+// Sweep 2026-10-11 UI-1: Providers also drives `/providers/models` (Agents)
+// and `/workspaces/{id}/providers/update` (ws editor). Root-gating the whole
+// section hid those from settings admins; the page instead loads the
+// root-only `GET /settings` for root alone.
+test('settings admins keep Providers; its daemon-wide settings stay root-only', () => {
+  const settingsAdmin: SettingsAccess = { can: (f, level) => f === 'settings' && level === 'admin', isRoot: false };
+  assert.ok(availableSections(settingsAdmin).some((s) => s.id === 'providers'));
+  const src = readFileSync(new URL('../src/modules/settings/Providers.svelte', import.meta.url), 'utf8');
+  assert.match(src, /if \(auth\.isRoot\) void loadSettings\(\)/, 'GET /settings only for root');
+  assert.match(src, /\{#if !auth\.isRoot\}/, 'non-root sees the owner-only note, not the settings form');
 });
 
 // S17-303: a section's UI gate must match its handlers' real gate. These

@@ -24,8 +24,10 @@
 /// Bump this whenever a rate changes. (Source: Anthropic pricing, claude-api
 /// reference, cached 2026-09-25 — Fable 5/5.1 $10/$50 (cache read $1 / $0.25),
 /// Opus 5.5 $4/$20 (cache read $0.20), Opus 5 / 4.5–4.8 $5/$25, Opus 4 / 4.1
-/// $15/$75, Sonnet 5 / 5.5 $2/$10, Sonnet 4.x $3/$15, Haiku 4.5 $1/$5 per 1M.)
-pub const PRICED_AS_OF: &str = "2026-09-25";
+/// $15/$75, Sonnet 5 / 5.5 $2/$10, Sonnet 4.x $3/$15, Haiku 4.5 $1/$5 per 1M;
+/// re-checked 2026-10-11 for Haiku 5.5: $0.10/$0.50 for a prompt of 100K tokens
+/// or fewer, $0.50/$2.50 above, cache reads 0.1× and 5m writes 1.25× input.)
+pub const PRICED_AS_OF: &str = "2026-10-11";
 
 /// Cache-read tokens cost ~0.1× the base input rate.
 const CACHE_READ_FACTOR: f64 = 0.1;
@@ -41,6 +43,10 @@ struct Rates {
     output: f64,
     /// Cache-read $/1M when it isn't the usual 0.1× input.
     cache_read: Option<f64>,
+    /// A second card for long prompts: `(threshold, input, output)` applies
+    /// when a turn's prompt (input + cache read + cache write) exceeds
+    /// `threshold` tokens. Cache rates follow the chosen input rate.
+    long_prompt: Option<(u64, f64, f64)>,
 }
 
 impl Rates {
@@ -49,6 +55,34 @@ impl Rates {
             input,
             output,
             cache_read: None,
+            long_prompt: None,
+        }
+    }
+
+    /// A rate card that switches to `(long_input, long_output)` for prompts
+    /// over `threshold` tokens.
+    const fn with_long_prompt(
+        input: f64,
+        output: f64,
+        threshold: u64,
+        long_input: f64,
+        long_output: f64,
+    ) -> Self {
+        Self {
+            input,
+            output,
+            cache_read: None,
+            long_prompt: Some((threshold, long_input, long_output)),
+        }
+    }
+
+    /// The card for a turn whose prompt is `prompt_tokens` long.
+    fn for_prompt(self, prompt_tokens: u64) -> Self {
+        match self.long_prompt {
+            Some((threshold, input, output)) if prompt_tokens > threshold => {
+                Self::new(input, output)
+            }
+            _ => self,
         }
     }
 
@@ -58,6 +92,7 @@ impl Rates {
             input,
             output,
             cache_read: Some(cache_read),
+            long_prompt: None,
         }
     }
 
@@ -102,6 +137,11 @@ fn lookup(model: &str) -> Option<Rates> {
         }
         if m.contains("3-haiku") || m.contains("haiku-3") {
             return Some(Rates::new(0.25, 1.25));
+        }
+        // Haiku 5.5 (the `haiku` alias since its release): two cards chosen
+        // by prompt length.
+        if m.contains("haiku-5-5") {
+            return Some(Rates::with_long_prompt(0.10, 0.50, 100_000, 0.50, 2.50));
         }
         return Some(Rates::new(1.0, 5.0));
     }
@@ -172,7 +212,9 @@ pub fn estimate_cost(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
 ) -> f64 {
-    let r = lookup(model).unwrap_or(FALLBACK);
+    let r = lookup(model)
+        .unwrap_or(FALLBACK)
+        .for_prompt(input_tokens + cache_read_tokens + cache_write_tokens);
     let per_m = |tokens: u64, rate: f64| (tokens as f64 / 1_000_000.0) * rate;
     per_m(input_tokens, r.input)
         + per_m(output_tokens, r.output)
@@ -210,6 +252,21 @@ mod tests {
         assert!((cost("claude-sonnet-4-6") - (3.0 + 15.0 + 0.3 + 3.75)).abs() < 1e-9);
         // Haiku: $1 + $5 + $0.10 + $1.25
         assert!((cost("claude-haiku-4-5") - (1.0 + 5.0 + 0.1 + 1.25)).abs() < 1e-9);
+    }
+
+    /// Haiku 5.5 is priced at $0.10/$0.50 up to a 100K-token prompt and
+    /// $0.50/$2.50 above; it used to be billed as Haiku 4.5 ($1/$5).
+    #[test]
+    fn haiku_5_5_uses_its_own_two_prompt_length_cards() {
+        let short = estimate_cost("claude-haiku-5-5", 60_000, 1_000_000, 30_000, 10_000);
+        let want = 0.06 * 0.10 + 1.0 * 0.50 + 0.03 * 0.01 + 0.01 * 0.125;
+        assert!((short - want).abs() < 1e-9, "{short} vs {want}");
+        let long = estimate_cost("claude-haiku-5-5", 60_000, 1_000_000, 40_001, 0);
+        let want = 0.06 * 0.50 + 1.0 * 2.50 + 0.040_001 * 0.05;
+        assert!((long - want).abs() < 1e-9, "{long} vs {want}");
+        assert!(is_priced("claude-haiku-5-5"));
+        // Haiku 4.5 keeps its single card at any prompt length.
+        assert!((estimate_cost("claude-haiku-4-5", 500_000, 0, 0, 0) - 0.5).abs() < 1e-9);
     }
 
     #[test]

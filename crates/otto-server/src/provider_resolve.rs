@@ -8,6 +8,10 @@
 //! requested  ->  workspace `default_provider`  ->  global `default_provider`  ->  "claude"
 //! ```
 //!
+//! A default that is excluded in Settings (`disabled_providers`) is skipped,
+//! as the workflow engine and the UI picker already did; only an explicit
+//! request may name one (existing sessions also still resume theirs).
+//!
 //! Before this module ~30 call sites hand-rolled the chain; several skipped the
 //! workspace default (canvas preview, insights) and all of them silently
 //! swallowed a settings-read failure. The pure precedence lives in
@@ -31,7 +35,9 @@ impl ServerCtx {
     }
 
     /// Resolve the provider for an agent launch: `requested` (when non-blank)
-    /// → `ws`'s per-workspace default → the global default → `"claude"`.
+    /// → `ws`'s per-workspace default → the global default → `"claude"`,
+    /// skipping every default that is disabled (see
+    /// [`otto_sessions::ProviderRegistry::resolve_default`]).
     ///
     /// `ws` is `None` only for genuinely workspace-less launches (plugin host
     /// runs, global review/eval config defaults). An explicit, non-blank
@@ -49,10 +55,10 @@ impl ServerCtx {
             .map(|w| otto_core::provider::workspace_default(&w.settings))
             .unwrap_or("");
         let global = self.global_default_provider().await?;
-        Ok(otto_core::provider::resolve_provider(&[
-            ws_default,
-            global.as_str(),
-        ]))
+        Ok(self
+            .manager
+            .providers()
+            .resolve_default(&[ws_default, global.as_str()]))
     }
 
     /// [`Self::resolve_provider`] for callers holding only a workspace id. A

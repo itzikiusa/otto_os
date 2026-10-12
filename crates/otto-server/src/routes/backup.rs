@@ -181,6 +181,10 @@ pub async fn import_settings(
             let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
             ctx.manager.providers().set_disabled(&names);
         }
+        if key == otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING {
+            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
+            otto_core::kubeconfig_policy::set_extra_plugins(&names);
+        }
         if key == "agent_skip_permissions" {
             let skip = value.as_bool().unwrap_or(true);
             let overrides = repo.get("providers").await.ok().flatten();
@@ -366,6 +370,10 @@ pub async fn state_restore(
         if key == "disabled_providers" {
             let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
             ctx.manager.providers().set_disabled(&names);
+        }
+        if key == otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING {
+            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
+            otto_core::kubeconfig_policy::set_extra_plugins(&names);
         }
         if key == "agent_skip_permissions" {
             let skip = value.as_bool().unwrap_or(true);

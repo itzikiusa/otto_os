@@ -6218,6 +6218,13 @@ async fn execute_node(
                 // has no commits ahead of base and the provider rejects the PR
                 // ("no changes to be pulled"). Sweep leftovers into a commit, but
                 // ONLY in a dedicated worktree — never a user's main checkout.
+                // Otto's own commit / push skips hooks that live inside the work
+                // tree (husky: an agent there can edit them). Say so on the run
+                // instead of letting a commit-msg / pre-push rule surface in CI.
+                let mut hooks_note = otto_git::LocalGit::new(&wt)
+                    .worktree_hooks_skipped()
+                    .await
+                    .then(|| skipped_hooks_note(&repo.name));
                 if wt != repo.path {
                     match otto_git::LocalGit::new(&wt)
                         .commit_all_if_dirty(&format!(
@@ -6226,11 +6233,14 @@ async fn execute_node(
                         ))
                         .await
                     {
-                        Ok(Some(sha)) => logs.push(format!(
-                            "git_pr: committed leftover worktree changes on {} ({})",
-                            repo.name,
-                            &sha[..sha.len().min(9)]
-                        )),
+                        Ok(Some(sha)) => {
+                            logs.push(format!(
+                                "git_pr: committed leftover worktree changes on {} ({})",
+                                repo.name,
+                                &sha[..sha.len().min(9)]
+                            ));
+                            logs.extend(hooks_note.take());
+                        }
                         Ok(None) => {}
                         Err(e) => notes.push(format!(
                             "{}: leftover-changes commit failed: {e}",
@@ -6324,6 +6334,7 @@ async fn execute_node(
                     },
                     None => None,
                 };
+                logs.extend(hooks_note.take());
                 match otto_git::LocalGit::new(&wt).push(push_token).await {
                     Ok(_) => logs.push(format!(
                         "git_pr: pushed {} to remote for {}",
@@ -7081,6 +7092,7 @@ async fn run_node_agent(
         crate::agent_session::TurnOpts {
             done_file,
             done_file_validator: None,
+            transcript_fallback: false,
             cancel: None,
             // Silence is not evidence that delegated work has completed.
             quiet_done: None,
@@ -7589,11 +7601,15 @@ pub(crate) async fn ensure_run_location(
     {
         let registered = repos.iter().any(|r| r.id == e.repo || r.name == e.repo);
         if !registered {
-            if e.repo.contains('/') || e.repo.starts_with('~') {
+            // A path names a folder; anything else (`org/name` included) is a
+            // repo name or id, and an unknown one says so — not "must be an
+            // absolute path".
+            if looks_like_path(&e.repo) {
                 ensure_path_in_workspace(ws, &pairs, &e.repo).await?;
             } else {
                 return Err(otto_core::Error::Invalid(format!(
-                    "repo '{}' is not a registered repo",
+                    "repo '{}' is not a registered repo — name a registered repo by its \
+                     name or id, or give its absolute path",
                     e.repo
                 )));
             }
@@ -7609,6 +7625,22 @@ pub(crate) async fn ensure_run_location(
         }
     }
     Ok(())
+}
+
+/// The run note for a repo whose in-worktree hooks Otto's own git skipped.
+fn skipped_hooks_note(repo: &str) -> String {
+    format!(
+        "⚠ git_pr: {repo}'s hooks live inside its work tree (core.hooksPath, e.g. husky) \
+         and did not run for Otto's own commit / push — an agent there can edit them, so \
+         unattended runs skip them; CI or your next commit still runs them"
+    )
+}
+
+/// Whether a `repos[]` entry is written as a path (`/…`, `~…`, `./…`, `../…`)
+/// rather than a repo name or id.
+fn looks_like_path(repo: &str) -> bool {
+    let r = repo.trim();
+    r.starts_with('/') || r.starts_with('~') || r.starts_with('.')
 }
 
 /// One path of [`ensure_run_location`]: absolute (`~` expanded), and inside

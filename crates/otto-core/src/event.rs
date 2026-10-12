@@ -42,6 +42,16 @@ pub enum Event {
     },
     /// A session was removed.
     SessionRemoved { session_id: Id, workspace_id: Id },
+    /// An agent session needs the operator: `reason` is `"turn_end"` (its turn
+    /// finished — confirmed idle, monitor.rs) or `"prompt"` (a permission /
+    /// question from claude's Notification hook). Sent whatever the
+    /// notification settings say: it drives the SPA's "needs you" flag, while
+    /// the `session_events` setting only gates the persisted notice.
+    SessionAttention {
+        session_id: Id,
+        workspace_id: Id,
+        reason: String,
+    },
     /// Free-form notice surfaced as a toast/notification.
     /// `level` is one of "info" | "warn" | "error".
     Notice {
@@ -804,6 +814,7 @@ impl Event {
             Event::SessionMetaUpdated { .. } => "session_meta_updated",
             Event::SessionRenamed { .. } => "session_renamed",
             Event::SessionRemoved { .. } => "session_removed",
+            Event::SessionAttention { .. } => "session_attention",
             Event::Notice { .. } => "notice",
             Event::Notification { .. } => "notification",
             Event::ImprovementRunStarted { .. } => "improvement_run_started",
@@ -951,6 +962,11 @@ mod tests {
             Event::SessionRemoved {
                 session_id: "s".into(),
                 workspace_id: "w".into(),
+            },
+            Event::SessionAttention {
+                session_id: "s".into(),
+                workspace_id: "w".into(),
+                reason: "prompt".into(),
             },
             Event::Notice {
                 level: "info".into(),

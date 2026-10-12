@@ -38,7 +38,7 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌘,` | Open Settings |
 | `?` | Show the keyboard shortcut sheet |
 | `⌘1` | Show or hide the sidebar |
-| `⌘J` | Show or hide the Session panel |
+| `⌘J` | Show or hide the Side panel |
 | `⌘⇧←` / `⌘⇧→` | Go back / forward through the pages you visited (not while typing in a field) |
 | `⌘\` | Open or close the side-by-side pane |
 | `⌥-click` | On a sidebar item: open it side by side |

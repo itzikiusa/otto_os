@@ -44,6 +44,14 @@ pub async fn build_ctx(
     // git store and the orchestrator.
     let settings = SettingsRepo::new(pool.clone());
     let providers = provider_registry(&settings).await?;
+    // The owner's extra kubeconfig exec plugins (root-only setting).
+    let extra_plugins: Vec<String> = settings
+        .get(otto_core::kubeconfig_policy::EXTRA_PLUGINS_SETTING)
+        .await
+        .map_err(|e| format!("read kubeconfig_exec_plugins setting: {e}"))?
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    otto_core::kubeconfig_policy::set_extra_plugins(&extra_plugins);
     let (usage, telemetry) = start_usage_and_telemetry(cfg, &settings).await?;
     let context_library = context_library(cfg);
     let manager = session_manager(cfg, &pool, &events, &secrets, providers, &context_library);

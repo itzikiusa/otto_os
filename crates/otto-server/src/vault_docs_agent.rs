@@ -1897,7 +1897,7 @@ async fn persist_interrupted_row(
 /// Startup sweep (awaited before admission): every run row still
 /// non-terminal was killed by the restart — mark it `interrupted`, soft-trash
 /// its orphaned `_drafts` dir (multi-writer docs runs), and rescan the touched
-/// vaults so the tree stops showing the leftovers.
+/// vaults (in the background) so the tree stops showing the leftovers.
 pub async fn recover_interrupted(ctx: ServerCtx) -> otto_core::Result<()> {
     let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
     let rows = repo.list_unfinished().await?;
@@ -1916,14 +1916,20 @@ pub async fn recover_interrupted(ctx: ServerCtx) -> otto_core::Result<()> {
         }
         marked += 1;
     }
-    for vault_id in &rescan {
-        let _ = ctx.vault.scan(*vault_id).await;
-    }
     tracing::info!(
         "vault_docs: marked {marked} interrupted run(s) from before restart \
-         ({} vault(s) rescanned after drafts cleanup)",
+         ({} vault(s) to rescan after drafts cleanup)",
         rescan.len()
     );
+    // A rescan walks the whole vault: off boot's critical path (it is awaited
+    // before the listener serves), so a large vault never delays startup.
+    if !rescan.is_empty() {
+        tokio::spawn(async move {
+            for vault_id in rescan {
+                let _ = ctx.vault.scan(vault_id).await;
+            }
+        });
+    }
     Ok(())
 }
 

@@ -4,7 +4,7 @@
 // the save sheet, and small URL / cookie parsers. Framework-free so
 // `unit/apiVars.test.ts` can exercise it.
 
-import type { ApiCollection, ApiKeyVal } from './types';
+import type { ApiAuth, ApiCollection, ApiKeyVal } from './types';
 
 /** Built-ins the daemon generates at send time (they always win). */
 export const DYNAMIC_VARS: Record<string, string> = {
@@ -177,4 +177,62 @@ export function parseSetCookies(headers: ApiKeyVal[]): ResponseCookie[] {
         attributes: attrs.map((a) => a.trim()).filter(Boolean).join('; '),
       };
     });
+}
+
+/** Substitute the `{{vars}}` that have a known value (session, then the
+ *  environment), up to three passes like the daemon (a value may itself hold
+ *  a `{{var}}`). Built-ins, secrets and missing names stay as `{{name}}`. */
+export function fillKnownVars(s: string, runtime: Record<string, string>, env: VarEnv | null): string {
+  let cur = s;
+  for (let pass = 0; pass < 3 && cur.includes('{{'); pass++) {
+    const next = cur.replace(VAR_RE, (whole, name: string) => {
+      const r = resolveVar(name, runtime, env);
+      return r.value !== undefined ? r.value : whole;
+    });
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/** One query component, form-encoded the way the daemon sends it (reqwest →
+ *  application/x-www-form-urlencoded: space → `+`, only `*-._` and
+ *  alphanumerics stay bare). A `{{var}}` left unresolved stays readable. */
+function encodeQueryPart(s: string): string {
+  return splitVars(s)
+    .map((seg) => (seg.isVar ? seg.text : new URLSearchParams([['', seg.text]]).toString().slice(1)))
+    .join('');
+}
+
+/** How a credential value reads in the URL preview: never the value itself. */
+export const MASKED_VALUE = '••••';
+
+/** The URL the request is sent to: `url` plus the ENABLED, named query rows
+ *  appended (after any `?…` already in the URL, before a `#fragment`), each
+ *  key/value encoded, then — like the daemon's `apply_auth` — an API key sent
+ *  "in query" as `name=••••` (its value is masked whatever it is: the preview
+ *  is copyable and must never carry a credential). Variables with a known
+ *  value are filled in when `runtime`/`env` are given; the rest show as
+ *  `{{name}}`. */
+export function fullRequestUrl(
+  url: string,
+  query: ApiKeyVal[],
+  runtime: Record<string, string> = {},
+  env: VarEnv | null = null,
+  auth: ApiAuth | null = null,
+): string {
+  const base = fillKnownVars(url.trim(), runtime, env);
+  const pairs = query
+    .filter((r) => r.enabled !== false && r.key !== '')
+    .map((r) => `${encodeQueryPart(fillKnownVars(r.key, runtime, env))}=${encodeQueryPart(fillKnownVars(r.value, runtime, env))}`);
+  if (auth?.type === 'api_key' && auth.in === 'query' && auth.key.trim() !== '') {
+    pairs.push(`${encodeQueryPart(fillKnownVars(auth.key, runtime, env))}=${MASKED_VALUE}`);
+  }
+  if (pairs.length === 0) return base;
+  const hash = base.indexOf('#');
+  const head = hash < 0 ? base : base.slice(0, hash);
+  const frag = hash < 0 ? '' : base.slice(hash);
+  const q = head.indexOf('?');
+  const sep = q < 0 ? '?' : head.endsWith('?') || head.endsWith('&') ? '' : '&';
+  return `${head}${sep}${pairs.join('&')}${frag}`;
 }

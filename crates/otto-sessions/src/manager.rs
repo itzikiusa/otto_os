@@ -2661,8 +2661,9 @@ impl SessionManager {
         // Package managers / build tools cache into a private per-session dir
         // (under temp, which is writable): the user's shared caches hold code
         // unsandboxed programs run later, so they are not writable roots.
-        spec.env
-            .extend(otto_sandbox::agent_cache_env(&agent_cache_dir(&session.id)));
+        let cache = agent_cache_dir(&session.id);
+        otto_sandbox::seed_agent_cache(&cache, &home, |k| std::env::var(k).ok());
+        spec.env.extend(otto_sandbox::agent_cache_env(&cache));
         let (program, args) = policy.wrap(&spec.program, &spec.args);
         spec.program = program;
         spec.args = args;
@@ -3015,8 +3016,9 @@ impl SessionManager {
 
     /// S11-302: where an agent's OWN credential (`caller` = its session) may
     /// open another session. Inside the workspace root, inside the caller's
-    /// own folder, or in a worktree of the same repository as either (same
-    /// git common dir) — never an arbitrary folder, whose tree the new
+    /// own folder, inside a repo a person registered in this workspace, or in
+    /// a worktree of the same repository as any of those (same git common
+    /// dir) — never an arbitrary folder, whose tree the new
     /// session's sandbox would make writable and its trust pre-seeding would
     /// trust. `None` (the workspace root) is always fine. A person's
     /// credential never comes here.
@@ -3043,6 +3045,15 @@ impl SessionManager {
                 bases.push(std::path::PathBuf::from(own.cwd));
             }
         }
+        // A registered repo may live outside the workspace root (sweep
+        // 2026-10-11 M2): a person chose it for this workspace.
+        match otto_state::GitStore::new(self.repo.pool())
+            .list_repos(&ws.id)
+            .await
+        {
+            Ok(repos) => bases.extend(repos.into_iter().map(|r| std::path::PathBuf::from(r.path))),
+            Err(e) => tracing::warn!(workspace = %ws.id, "agent cwd check: list repos: {e}"),
+        }
         let bases: Vec<std::path::PathBuf> = bases
             .iter()
             .filter_map(|b| std::fs::canonicalize(b).ok())
@@ -3058,8 +3069,8 @@ impl SessionManager {
             }
         }
         Err(Error::Forbidden(format!(
-            "an agent may only open sessions inside the workspace, its own folder \
-             or a worktree of the same repository (not {cwd})"
+            "an agent may only open sessions inside the workspace, its own folder, \
+             a repo registered in this workspace or a worktree of those (not {cwd})"
         )))
     }
 
@@ -7362,6 +7373,46 @@ mod tests {
 
     #[path = "archive.rs"]
     mod archive;
+
+    /// Sweep 2026-10-11 M2: an agent may open a worker in a repo registered
+    /// in its workspace even outside the workspace root; an unregistered
+    /// folder is still refused.
+    #[tokio::test]
+    async fn agent_cwd_accepts_a_registered_repo_outside_the_root() {
+        let (mgr, repo, mut ws, _user) = test_manager().await;
+        let root = tempfile::tempdir().unwrap(); // the fixture's /tmp holds every Linux tempdir
+        ws.root_path = root.path().to_string_lossy().into_owned();
+        let checkout = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(checkout.path()).unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let caller: Id = new_id();
+        assert!(matches!(
+            mgr.check_agent_cwd(&ws, &caller, Some(&path_s)).await,
+            Err(Error::Forbidden(_))
+        ));
+        sqlx::query(
+            "INSERT INTO repos (id, workspace_id, name, path, created_at) VALUES (?, ?, 'r', ?, ?)",
+        )
+        .bind(new_id())
+        .bind(&ws.id)
+        .bind(&path_s)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&repo.pool())
+        .await
+        .unwrap();
+        mgr.check_agent_cwd(&ws, &caller, Some(&path_s))
+            .await
+            .expect("registered repo");
+        std::fs::create_dir_all(path.join("src")).unwrap();
+        mgr.check_agent_cwd(&ws, &caller, Some(&format!("{path_s}/src")))
+            .await
+            .expect("a folder inside it");
+        let other = tempfile::tempdir().unwrap();
+        assert!(mgr
+            .check_agent_cwd(&ws, &caller, Some(other.path().to_str().unwrap()))
+            .await
+            .is_err());
+    }
 
     async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
         // A migrated on-disk sqlite (in a tempdir) via otto-state's opener.

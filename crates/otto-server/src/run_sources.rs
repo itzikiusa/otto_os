@@ -30,6 +30,7 @@ const BODY_CAP: usize = 12_000;
 pub(crate) async fn resolve_repo(
     ctx: &ServerCtx,
     workspace_id: &Id,
+    created_by: &str,
     explicit_repo_id: Option<&str>,
     source_kind: SourceKind,
     source_ref: &str,
@@ -37,7 +38,9 @@ pub(crate) async fn resolve_repo(
     let repo =
         resolve_repo_any(ctx, workspace_id, explicit_repo_id, source_kind, source_ref).await?;
     if repo.workspace_id != *workspace_id {
-        return Err(Error::NotFound("repo".into()));
+        // Only an explicit repo can come from another workspace; re-check it
+        // with the launcher's role there, as at launch.
+        crate::run_service::check_repo_for_run(ctx, workspace_id, created_by, &repo.id).await?;
     }
     Ok(repo)
 }

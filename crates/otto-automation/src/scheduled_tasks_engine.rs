@@ -879,6 +879,11 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
         let cache = std::env::temp_dir()
             .join("otto-agent-cache")
             .join(format!("scheduled-{}", task.id));
+        if let Some(home) = std::env::var_os("HOME") {
+            otto_sandbox::seed_agent_cache(&cache, std::path::Path::new(&home), |k| {
+                std::env::var(k).ok()
+            });
+        }
         let mut argv: Vec<String> = otto_sandbox::agent_cache_env(&cache)
             .into_iter()
             .map(|(k, v)| format!("{k}={v}"))
@@ -1157,7 +1162,7 @@ pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) 
     let ctx = ctx.clone();
     tokio::spawn(async move {
         let repo = ctx.scheduled_tasks();
-        let task = match repo.get_run_task_snapshot(&run.id).await {
+        let task = match repo.get_run_task_for_recovery(&run.id).await {
             Ok(t) => t,
             Err(e) => {
                 record_finish(

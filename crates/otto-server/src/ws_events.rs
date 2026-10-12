@@ -436,6 +436,11 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::SessionRemoved {
             session_id,
             workspace_id,
+        }
+        | Event::SessionAttention {
+            session_id,
+            workspace_id,
+            ..
         } => Scope::Session {
             workspace_id,
             session_id,
@@ -1038,6 +1043,12 @@ mod tests {
             Event::SessionRemoved {
                 session_id: "s1".into(),
                 workspace_id: "ws1".into(),
+            },
+            // "Needs you" is as session-private as the status it accompanies.
+            Event::SessionAttention {
+                session_id: "s1".into(),
+                workspace_id: "ws1".into(),
+                reason: "turn_end".into(),
             },
             Event::TrailAppended {
                 session_id: "s1".into(),

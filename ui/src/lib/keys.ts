@@ -511,7 +511,7 @@ export const KEYMAP: ShortcutGroup[] = [
       { keys: '⌘,', label: 'Open Settings' },
       { keys: '?', label: 'Show the keyboard shortcut sheet' },
       { keys: '⌘1', label: 'Show or hide the sidebar' },
-      { keys: '⌘J', label: 'Show or hide the Session panel' },
+      { keys: '⌘J', label: 'Show or hide the Side panel' },
       { keys: '⌘⇧← / ⌘⇧→', label: 'Go back / forward through the pages you visited (not while typing in a field)' },
       { keys: '⌘\\', label: 'Open or close the side-by-side pane' },
       { keys: '⌥-click', label: 'On a sidebar item: open it side by side' },

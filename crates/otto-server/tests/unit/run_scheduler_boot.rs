@@ -87,3 +87,36 @@ async fn run_scheduler_recovery_failure_prevents_boot_admission() {
         .unwrap_err();
     assert!(error.starts_with("run-with-otto recovery:"), "{error}");
 }
+
+/// S-6 (sweep 2026-10-11): a DB error in a non-critical recovery step
+/// (skill reviews, personal agents, vault docs, swarm) used to refuse boot.
+/// Each now logs and the daemon still serves; the steps after it still run.
+#[tokio::test]
+async fn non_critical_recovery_failures_do_not_prevent_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = crate::test_support::mem_pool().await;
+    let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+    sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES ('recovery-ws', 'Recovery', '/tmp', '2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
+    let old = live_run(&ctx, "recovery-ws").await;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for drop in [
+        "DROP TABLE skill_reviews",
+        "DROP TABLE personal_agent_runs",
+        "DROP TABLE vault_docs_runs",
+        "DROP TABLE swarm_runs",
+    ] {
+        sqlx::query(drop).execute(&pool).await.unwrap();
+    }
+    let mut phases = crate::boot::BootPhases::start();
+    crate::boot::recover_before_serve(&ctx, &mut phases)
+        .await
+        .expect("boot serves despite failed non-critical recovery steps");
+    assert_eq!(
+        ctx.runs.get(&old.id).await.unwrap().status,
+        RunStatus::Failed,
+        "the critical run-with-otto settlement still ran"
+    );
+}
