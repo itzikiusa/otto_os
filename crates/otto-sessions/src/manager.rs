@@ -7379,15 +7379,9 @@ mod tests {
     /// folder is still refused.
     #[tokio::test]
     async fn agent_cwd_accepts_a_registered_repo_outside_the_root() {
-        let (mgr, repo, ws, _user) = test_manager().await;
-        // The shared fixture roots the workspace at /tmp, which contains every
-        // tempdir on Linux; give this test its own root so the checkout below
-        // is really outside it.
-        let root = tempfile::tempdir().unwrap();
-        let ws = Workspace {
-            root_path: root.path().to_string_lossy().into_owned(),
-            ..ws
-        };
+        let (mgr, repo, mut ws, _user) = test_manager().await;
+        let root = tempfile::tempdir().unwrap(); // the fixture's /tmp holds every Linux tempdir
+        ws.root_path = root.path().to_string_lossy().into_owned();
         let checkout = tempfile::tempdir().unwrap();
         let path = std::fs::canonicalize(checkout.path()).unwrap();
         let path_s = path.to_string_lossy().into_owned();
