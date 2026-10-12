@@ -1239,11 +1239,20 @@ mod tests {
             );
             if want_truncated {
                 // And the transfer is really over (the child was killed), not
-                // still streaming behind the returned preview.
+                // still streaming behind the returned preview. A `write` the
+                // fixture was already inside when SIGKILL landed still
+                // completes — under load after `written` was read (8 KiB
+                // flaked in) — so compare two reads taken once it settled.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let settled = std::fs::metadata(&local).unwrap().len();
+                assert!(
+                    settled <= written + 8192,
+                    "the oversized get kept writing after the cap"
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 let later = std::fs::metadata(&local).unwrap().len();
                 assert_eq!(
-                    later, written,
+                    later, settled,
                     "the oversized get kept writing after the cap"
                 );
             }

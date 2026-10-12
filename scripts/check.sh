@@ -130,6 +130,10 @@ echo "plugin changed: $( [ "$PLUGIN_CHANGED" = 1 ] && echo yes || echo no)"
 
 # ── Rust ──────────────────────────────────────────────────────────────────────
 if [ -n "$RUST_CHANGED" ] || [ -n "$RUST_TESTED" ]; then
+  # A workspace test build needs ~25 GB of target/: never start one that
+  # would run the disk dry (scripts/disk-guard.sh says why).
+  step "disk guard"
+  run bash "$ROOT/scripts/disk-guard.sh" check
   step "rustfmt"
   if [ "$RUST_CHANGED" = all ]; then
     if [ "$FMT_CHECK" = 1 ]; then run "$CARGO" fmt --all --check; else run "$CARGO" fmt --all; fi

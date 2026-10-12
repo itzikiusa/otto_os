@@ -277,6 +277,8 @@
         `/workspaces/${wsId}/integrations/${editChannel}`,
         body,
       );
+      // A new Slack bot token may see other people / channels: reload names.
+      if (editChannel === 'slack' && fBotToken !== '') void loadSlackDir(wsId, true);
       integrations = [
         ...integrations.filter((i) => i.channel !== editChannel),
         updated,
@@ -786,6 +788,7 @@
         </div>
         <AllowedIdsEditor
           bind:value={fAllowedUsers}
+          labelledby="ch-users-label"
           people={editChannel === 'slack' ? slackDir?.users ?? [] : []}
           label={channelLabel(editChannel)}
           placeholder={editChannel === 'slack' ? 'Member ID (U0123…)' : 'User ID'}

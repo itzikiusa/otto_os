@@ -48,7 +48,10 @@ test('channels: an enabled Slack card shows why it is not connected', async ({ p
   // …and explained in the editor.
   await page.getByRole('button', { name: 'Edit Slack integration' }).click();
   await expect(page.getByText(/can run an agent on this Mac/)).toBeVisible();
-  await page.getByLabel('Allowed users').fill('U0123ABC');
+  // The allow-list is a list now: type an id, Enter adds it as a row.
+  await page.getByLabel('Add user id').fill('U0123ABC');
+  await page.getByLabel('Add user id').press('Enter');
+  await expect(page.getByRole('group', { name: 'Allowed users' }).getByText('U0123ABC')).toBeVisible();
   await expect(page.getByText(/can run an agent on this Mac/)).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 });

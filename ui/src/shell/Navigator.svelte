@@ -2229,7 +2229,7 @@
   /* Select tools: the select-all box sits in the SAME column as the row
      boxes below it (8px inset), at the same 13px size; the actions are quiet
      text buttons, not outlined slabs. */
-  .arch-tools { display: flex; align-items: center; gap: 2px; min-height: 26px; padding-inline: 8px 2px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-height: 26px; padding-inline: 8px 2px; font-size: var(--fs-xs); color: var(--text-dim); }
   .arch-state { display: flex; align-items: center; gap: 6px; padding: 4px 10px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
   .arch-state .show-more { width: auto; padding: 0; }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }

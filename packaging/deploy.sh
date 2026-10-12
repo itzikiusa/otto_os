@@ -718,6 +718,9 @@ if [[ "${OTTO_DEPLOY_PHASE:-}" != "queue-finish" ]]; then
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || { fail_verify "build requires a clean source tree"; exit 1; }
 BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)"
 [[ "${SKIP_UI:-0}" != 1 ]] || { fail_verify "receipted deployment requires a fresh UI build; unset SKIP_UI"; exit 1; }
+# The release build + bundle need ~10 GB; prune stale cargo artifacts first
+# and refuse rather than fill the disk mid-build (scripts/disk-guard.sh).
+bash "$ROOT/scripts/disk-guard.sh" deploy || { fail_verify "not enough free disk for a release build"; exit 1; }
 echo "==> 1/7  Frontend → ui/dist"
 # A pull that changed package-lock.json needs `npm ci` first, or the build
 # fails on a missing module.

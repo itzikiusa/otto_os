@@ -9,6 +9,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { untrack } from 'svelte';
   import { openExternal } from '../../lib/external';
   import {
     CQL_CHEATSHEET, CQL_DOCS, CQL_TEMPLATES, JQL_CHEATSHEET, JQL_DOCS, JQL_TEMPLATES, fillTemplate,
@@ -158,7 +159,9 @@
     query = '';
     // Reload with the new project/space filter.
     if (accountId && sourceKind === 'jira') {
-      void search('', 0, false, proj || undefined);
+      // untrack: search() reads the Match mode — switching it must not re-run
+      // this reset (it wiped the typed query and fired an empty search).
+      untrack(() => void search('', 0, false, proj || undefined));
     } else if (accountId && sourceKind === 'confluence' && space) {
       // Confluence: wait for user to type (spaces are wide).
     }
@@ -226,6 +229,8 @@
     projectOverride?: string,
   ): Promise<void> {
     if (!accountId) return;
+    // An empty raw query is not "recent issues" — it waits for Enter.
+    if (rawMode && !q.trim()) return;
     searchCtl?.abort();
     const ctl = new AbortController();
     searchCtl = ctl;

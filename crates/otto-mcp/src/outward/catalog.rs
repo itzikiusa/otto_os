@@ -583,24 +583,20 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
         // ================= Issues (Jira / Confluence) =================
         json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
-            "description":"Search Jira issues. Either `jql` — any JQL, run verbatim (e.g. `fixVersion = \"6.23.0\" ORDER BY key`, `parent = CS3-15095`, `assignee = currentUser() AND sprint in openSprints()`) — or `query`: FREE TEXT (summary + description) or an issue key (`GS-123`), optionally scoped by `project`. `jql` wins when both are given. Empty both → issues assigned to you. Returns `{key, summary, status, issue_type, url}` plus `parent_key`, `assignee`, `fix_versions`, `updated` when set; `limit` (default 25, max 100) per call, page with `start_at` (a full page ⇒ maybe more). Read-only.",
+            "description":"Search Jira: `jql` (raw JQL) or `query` (text / key, optional `project`); neither → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
             "inputSchema":{"type":"object","properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"project":{"type":"string"},
-                "jql":{"type":"string","description":"Raw JQL; overrides `query`/`project`."},
-                "start_at":{"type":"integer","description":"Offset of the first result (default 0)."},
-                "limit":{"type":"integer","description":"Results per call, 1–100 (default 25)."}}}}),
+                "jql":{"type":"string"},
+                "start_at":{"type":"integer"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.get_issue","mutating":false,"category":"Issues",
             "description":"Get one Jira issue's full detail (description, comments, changelog, links) by key. Available status changes come from otto.list_issue_transitions. Read-only.",
             "inputSchema":{"type":"object","required":["key"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
         json!({"name":"otto.search_confluence","mutating":false,"category":"Issues",
-            "description":"Search Confluence pages. Either `cql` — any CQL, run verbatim (e.g. `space = DEV AND label = \"release\" AND lastmodified > now(\"-30d\")`, `text ~ \"Strapi\" AND type = page`) — or `query`: a title search (a numeric query matches a page id), or title + body with `full_text: true`; optional `space` key. Returns `{id, title, space_key, url}`; `limit` (default 25, max 100), page with `start`. Read-only.",
+            "description":"Search Confluence: `cql` (raw CQL) or `query` (title or page id; `full_text` adds body), optional `space`. Hits: id, title, space_key, url. `limit` ≤100, page with `start`. Read-only.",
             "inputSchema":{"type":"object","properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"space":{"type":"string"},
-                "cql":{"type":"string","description":"Raw CQL; overrides `query`/`space`/`full_text`."},
-                "full_text":{"type":"boolean","description":"With `query`: match page bodies too, not only titles."},
-                "start":{"type":"integer","description":"Offset of the first result (default 0)."},
-                "limit":{"type":"integer","description":"Results per call, 1–100 (default 25)."}}}}),
+                "cql":{"type":"string"},"full_text":{"type":"boolean"},"start":{"type":"integer"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.get_confluence_page","mutating":false,"category":"Issues",
             "description":"Read one Confluence page. Returns id, title, space_key, url, version and the body as MARKDOWN (`body_md`) — never storage XHTML. Read-only.",
             "inputSchema":{"type":"object","required":["page_id"],"properties":{

@@ -16,8 +16,10 @@
     placeholder?: string;
     /** Platform word for the empty state ("Slack", "Telegram"). */
     label: string;
+    /** Id of the visible heading that names this group. */
+    labelledby?: string;
   }
-  let { value = $bindable(), people = [], placeholder = 'User ID', label }: Props = $props();
+  let { value = $bindable(), people = [], placeholder = 'User ID', label, labelledby }: Props = $props();
 
   const ids = $derived(allowedIds(value));
   const byId = $derived(new Map(people.map((p) => [p.id, p])));
@@ -45,9 +47,9 @@
   }
 </script>
 
-<div class="allow-list" data-testid="allowed-ids">
+<div class="allow-list" role="group" aria-labelledby={labelledby} data-testid="allowed-ids">
   {#if ids.length > 0}
-    <ul aria-label="Allowed users">
+    <ul aria-label="Allowed user list">
       {#each ids as id (id)}
         {@const p = byId.get(id)}
         <li>
@@ -88,6 +90,7 @@
       {placeholder}
       spellcheck="false"
       autocomplete="off"
+      onblur={addTyped}
       onkeydown={(e) => {
         if (e.key === 'Enter') {
           e.preventDefault();

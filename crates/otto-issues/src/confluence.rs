@@ -524,42 +524,59 @@ impl ConfluenceClient {
         self.ensure_tls()?;
         let url = self.api("/content/search");
         let space_key = space_hint;
-        let start_s = start.to_string();
-        let limit_s = limit.clamp(1, 100).to_string();
+        let limit = limit.clamp(1, 100);
+        let results_vec: Vec<serde_json::Value> = if start == 0 {
+            let limit_s = limit.to_string();
+            let resp = self
+                .http
+                .get(&url)
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .query(&[
+                    ("cql", cql),
+                    ("limit", limit_s.as_str()),
+                    ("expand", "space"),
+                ])
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence search_pages request: {e}")))?;
 
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .query(&[
-                ("cql", cql),
-                ("start", start_s.as_str()),
-                ("limit", limit_s.as_str()),
-                ("expand", "space"),
-            ])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence search_pages request: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(Error::Upstream(format!(
+                    "confluence search_pages failed ({status}): {body}"
+                )));
+            }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "confluence search_pages failed ({status}): {body}"
-            )));
-        }
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence search_pages parse: {e}")))?;
-
-        let results_arr = body
-            .get("results")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[]);
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence search_pages parse: {e}")))?;
+            body.get("results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            // Cloud's `/content/search` is cursor-paged (`_links.next`); an
+            // offset `start` is not reliably honoured. Walk the cursor in
+            // 100-hit pages to the requested window (≤ 1,000 hits deep).
+            let want = (start + limit) as usize;
+            let max_pages = (want / 100 + 1).min(10);
+            let (all, _) = self
+                .get_all_pages(
+                    &url,
+                    &[("cql", cql), ("limit", "100"), ("expand", "space")],
+                    max_pages,
+                    "search_pages",
+                )
+                .await?;
+            all.into_iter()
+                .skip(start as usize)
+                .take(limit as usize)
+                .collect()
+        };
+        let results_arr = results_vec.as_slice();
 
         let mut pages = Vec::with_capacity(results_arr.len());
         for p in results_arr {

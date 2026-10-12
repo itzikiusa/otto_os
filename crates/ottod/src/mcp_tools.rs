@@ -1202,8 +1202,8 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_search_issues",
-                "description": "Read-only: search Jira issues. Either `jql` — any JQL, run verbatim (e.g. `fixVersion = \"6.23.0\" ORDER BY key`, `parent = CS3-15095`) — or `query`: FREE TEXT (summary + description) or an issue key (`GS-123`), optionally scoped by `project`. `jql` wins. Empty both → issues assigned to you. `{key, summary, status, issue_type, url}` plus `parent_key`, `assignee`, `fix_versions`, `updated` when set; `limit` (default 25, max 100), page with `start_at`.",
-                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string", "description": "Raw JQL; overrides query/project." }, "start_at": { "type": "integer" }, "limit": { "type": "integer", "description": "1–100 (default 25)." } } }
+                "description": "Read-only: search Jira by `jql` (raw JQL) or `query` (text / key, optional `project`). `limit` ≤100, page with `start_at`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string" }, "start_at": { "type": "integer" }, "limit": { "type": "integer" } } }
             },
             {
                 "name": "otto_list_issue_transitions",
