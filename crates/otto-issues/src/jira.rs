@@ -28,6 +28,8 @@ const JQL_PAGE: u32 = 100;
 /// Issues returned per `search_jql` call — the offset-paged contract the UI's
 /// "Load more" relies on (a full window ⇒ there may be more).
 const JQL_WINDOW: u32 = 25;
+/// Fields every search asks for — what [`IssueSummary`] is built from.
+const SUMMARY_FIELDS: &str = "summary,status,issuetype,parent,assignee,fixVersions,updated";
 /// Memoised walks kept at once / how long one stays valid.
 const JQL_WALKS_MAX: usize = 32;
 const JQL_WALK_TTL: Duration = Duration::from_secs(600);
@@ -524,10 +526,23 @@ impl JiraClient {
     /// (only reached when the new endpoint is missing — 404/405) honors
     /// `startAt` directly.
     pub async fn search_jql(&self, jql: &str, start_at: u32) -> Result<Vec<IssueSummary>> {
+        self.search_jql_window(jql, start_at, JQL_WINDOW).await
+    }
+
+    /// [`Self::search_jql`] with a caller-chosen window (clamped to
+    /// 1..=[`JQL_PAGE`]) — a raw-JQL caller listing a whole release wants up
+    /// to 100 hits per call, not the picker's 25.
+    pub async fn search_jql_window(
+        &self,
+        jql: &str,
+        start_at: u32,
+        window: u32,
+    ) -> Result<Vec<IssueSummary>> {
+        let window = window.clamp(1, JQL_PAGE);
         // Hard cap on one token walk (Jira calls per request) — a runaway
         // "load more" can't turn into an unbounded crawl.
         const MAX_PAGES: u32 = 10;
-        let fields = "summary,status,issuetype";
+        let fields = SUMMARY_FIELDS;
         let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
         let key = jql_walk_key(&self.base_url, &self.auth_header, jql);
         let page_size = JQL_PAGE.to_string();
@@ -547,7 +562,7 @@ impl JiraClient {
                 .unwrap_or((0, None))
         });
 
-        let window_end = start_at.saturating_add(JQL_WINDOW);
+        let window_end = start_at.saturating_add(window);
         let mut out: Vec<IssueSummary> = Vec::new();
         for _ in 0..MAX_PAGES {
             // A page this walk already fetched (the 4 "load more" windows of
@@ -582,7 +597,7 @@ impl JiraClient {
                         // falling back masked it behind the classic endpoint's
                         // "410 Gone" on Cloud.
                         if token.is_none() && new_search_unavailable(resp.status()) {
-                            return self.search_jql_classic(jql, start_at, fields).await;
+                            return self.search_jql_classic(jql, start_at, window, fields).await;
                         }
                         let status = resp.status();
                         let body = resp.text().await.unwrap_or_default();
@@ -734,10 +749,12 @@ impl JiraClient {
         &self,
         jql: &str,
         start_at: u32,
+        window: u32,
         fields: &str,
     ) -> Result<Vec<IssueSummary>> {
         let fallback_url = format!("{}/rest/api/3/search", self.base_url);
         let start_at_s = start_at.to_string();
+        let window_s = window.to_string();
         let resp = self
             .http
             .get(&fallback_url)
@@ -745,7 +762,7 @@ impl JiraClient {
             .header("Accept", "application/json")
             .query(&[
                 ("jql", jql),
-                ("maxResults", "25"),
+                ("maxResults", window_s.as_str()),
                 ("startAt", start_at_s.as_str()),
                 ("fields", fields),
             ])
@@ -801,7 +818,28 @@ impl JiraClient {
                 .unwrap_or("")
                 .to_string();
             let url = format!("{}/browse/{}", self.base_url, key);
+            let text_at = |path: &[&str]| -> Option<String> {
+                let mut cur = &fields;
+                for p in path {
+                    cur = cur.get(p)?;
+                }
+                cur.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+            };
+            let fix_versions = fields
+                .get("fixVersions")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
             results.push(IssueSummary {
+                parent_key: text_at(&["parent", "key"]),
+                assignee: text_at(&["assignee", "displayName"]),
+                fix_versions,
+                updated: text_at(&["updated"]),
                 key,
                 summary,
                 status,
@@ -2298,7 +2336,7 @@ fn extract_linked_issue(issue: &serde_json::Value, rel: &str) -> Option<JiraLink
 ///   - text `q` → `project = "KEY" AND (summary ~ "q*" OR text ~ "q")`
 ///
 /// When `project` is `None`, falls back to the original unrestricted behaviour.
-fn build_jql(q: &str, project: Option<&str>) -> String {
+pub(crate) fn build_jql(q: &str, project: Option<&str>) -> String {
     // Empty query: return recently-updated issues for the current user so the
     // picker has content before any typing.
     if q.trim().is_empty() {
@@ -2679,12 +2717,32 @@ mod tests {
         (from..from + n)
             .map(|i| IssueSummary {
                 key: format!("K-{i}"),
-                summary: String::new(),
-                status: String::new(),
-                issue_type: String::new(),
-                url: String::new(),
+                ..Default::default()
             })
             .collect()
+    }
+
+    #[test]
+    fn issue_summaries_carry_parent_assignee_and_fix_versions() {
+        let c = JiraClient::new("https://acme.atlassian.net", "me@x", "t");
+        let body = serde_json::json!({"issues": [
+            {"key": "CS3-1", "fields": {
+                "summary": "S", "status": {"name": "Done"}, "issuetype": {"name": "Story"},
+                "parent": {"key": "CS3-0"}, "assignee": {"displayName": "Dana"},
+                "fixVersions": [{"name": "6.23.0"}, {"name": "6.24.0"}],
+                "updated": "2026-10-01T10:00:00.000+0000"}},
+            {"key": "CS3-2", "fields": {"summary": "bare", "assignee": null}}
+        ]});
+        let got = c.parse_issue_summaries(&body);
+        assert_eq!(got[0].parent_key.as_deref(), Some("CS3-0"));
+        assert_eq!(got[0].assignee.as_deref(), Some("Dana"));
+        assert_eq!(got[0].fix_versions, ["6.23.0", "6.24.0"]);
+        assert!(got[0].updated.is_some());
+        assert_eq!(got[0].url, "https://acme.atlassian.net/browse/CS3-1");
+        // Absent fields stay absent — and out of the JSON.
+        assert!(got[1].parent_key.is_none() && got[1].assignee.is_none());
+        let json = serde_json::to_value(&got[1]).unwrap();
+        assert!(json.get("fix_versions").is_none() && json.get("parent_key").is_none());
     }
 
     #[test]

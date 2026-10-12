@@ -172,7 +172,25 @@ falls back to `GET /rest/api/3/project`.
 | All digits (e.g. `12345`) | Page id lookup | `type=page and id=12345` |
 | Free text (e.g. `onboarding guide`) | Title contains-match | `type=page and space="KEY" and title ~ "onboarding guide"` (the `space` clause is omitted when no space is given) |
 
-Results (up to 25) carry `id`, `title`, `space_key`, and a browser `url`.
+Results (up to 25; `limit=` up to 100, `start=` to page) carry `id`, `title`,
+`space_key`, and a browser `url`.
+
+`mode=text` widens a free-text query to the page body:
+`type=page and (title ~ "q" or text ~ "q")`. Or skip the builder entirely with
+**`cql=`** — any CQL, run verbatim (e.g. `space = DEV AND label = "release" AND
+lastmodified > now("-30d")`). The search box's **Match** menu (Title / Title +
+body / CQL) and the `otto.search_confluence` tool's `full_text` / `cql` args map
+to these.
+
+### Raw JQL
+
+`GET /api/v1/issue/search?jql=…` runs any JQL verbatim — release lists
+(`fixVersion = "6.23.0" ORDER BY key`), epic breakdowns (`parent = CS3-15095`),
+sprint views — and wins over `q`/`project`. `limit=` raises the page to 100.
+Each hit also carries `parent_key`, `assignee`, `fix_versions` and `updated`
+when Jira has them, so a caller can group results without fetching each issue.
+In the UI pick **JQL** in the search box's **Match** menu (Enter runs it); agents
+pass `jql` to `otto.search_issues` / `otto_search_issues`.
 
 ### What fields are pulled on import
 
@@ -289,9 +307,9 @@ section **## Issue trackers (Jira / Confluence)**.
 | `PATCH /issue/accounts/{id}` | member (owner) | `UpdateIssueAccountReq` | `IssueAccount` |
 | `DELETE /issue/accounts/{id}` | member (owner) | — | `204` (Keychain token removed) |
 | `GET /issue/projects?account_id=` | member | — | `IssueProject[]` |
-| `GET /issue/search?account_id=&q=&project=&start_at=` | member | — | `IssueSummary[]` (JQL) |
+| `GET /issue/search?account_id=&q=&project=&jql=&limit=&start_at=` | member | — | `IssueSummary[]` (JQL; `jql` = raw) |
 | `GET /issue/confluence/spaces?account_id=` | member | — | `ConfluenceSpace[]` |
-| `GET /issue/confluence/search?account_id=&q=&space=` | member | — | `ConfluencePageSummary[]` (CQL) |
+| `GET /issue/confluence/search?account_id=&q=&space=&mode=&cql=&start=&limit=` | member | — | `ConfluencePageSummary[]` (CQL; `cql` = raw) |
 | `GET /issue/{account_id}/{key}` | member | — | `IssueDetail` |
 | `GET /issue/{account_id}/{key}/full` | member | — | `IssueFull` (description, comments, changelog, attachments, links, fields, estimate) |
 | `GET /issue/{account_id}/{key}/transitions` | member | — | `JiraTransition[]` |

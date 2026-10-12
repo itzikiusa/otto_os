@@ -26,7 +26,8 @@
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { latestOnly } from '../../lib/latest';
   import type { Tone } from '../../lib/status';
-  import type { RejectedSender } from '../../lib/api/types';
+  import type { RejectedSender, SlackDirectory } from '../../lib/api/types';
+  import AllowedIdsEditor from './AllowedIdsEditor.svelte';
   import { pendingRejected, senderLabel, withAllowed } from './channelAllow';
 
   // ---------------------------------------------------------------------------
@@ -34,6 +35,44 @@
   // ---------------------------------------------------------------------------
 
   let integrations: Integration[] = $state([]);
+  // Slack names for the ids on the card and in the editor (members +
+  // channels via the bot token). Null until loaded; ids show bare meanwhile.
+  let slackDir = $state<SlackDirectory | null>(null);
+  let slackDirLoading = $state(false);
+  const slackUser = $derived(new Map((slackDir?.users ?? []).map((u) => [u.id, u])));
+  const slackChannel = $derived(new Map((slackDir?.channels ?? []).map((c) => [c.id, c])));
+  async function loadSlackDir(id: string, refresh = false): Promise<void> {
+    slackDirLoading = true;
+    try {
+      const d = await api.get<SlackDirectory>(
+        `/workspaces/${id}/integrations/slack/directory${refresh ? '?refresh=1' : ''}`,
+      );
+      if (wsId === id) slackDir = d;
+    } catch {
+      // Names are a nicety: the ids still work, so a failure stays quiet.
+      if (wsId === id) slackDir = null;
+    } finally {
+      slackDirLoading = false;
+    }
+  }
+  /** "#general" for a known Slack channel id, else the id. */
+  function slackChannelLabel(id: string): string {
+    const c = slackChannel.get(id.trim());
+    return c ? `#${c.name}` : id;
+  }
+  function pickSlackChannel(e: MouseEvent | KeyboardEvent): void {
+    const items = (slackDir?.channels ?? [])
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((c) => ({
+        label: `#${c.name}`,
+        hint: c.is_private ? 'private' : undefined,
+        title: c.id,
+        checked: fChannelId.trim() === c.id,
+        action: () => (fChannelId = c.id),
+      }));
+    ctxMenu.show(e, items, { filter: true, filterPlaceholder: 'Search channels…', maxVisible: 12 });
+  }
   let loading = $state(false);
   let loadError = $state('');
   let testBusy: Channel | null = $state(null); // which channel is mid-test
@@ -163,6 +202,8 @@
       const rows = await api.get<Integration[]>(`/workspaces/${id}/integrations`);
       if (!t.current || wsId !== id) return;
       integrations = rows;
+      slackDir = null;
+      if (rows.some((i) => i.channel === 'slack' && i.has_bot_token)) void loadSlackDir(id);
     } catch (e) {
       if (!t.current || wsId !== id) return;
       // Inline, not a toast: the cards would otherwise all read "Not
@@ -191,6 +232,7 @@
     fReplyInstructions = existing?.reply_instructions ?? '';
     fPreferredCli = existing?.preferred_cli ?? '';
     editOpen = true;
+    if (channel === 'slack' && existing?.has_bot_token && wsId && !slackDir && !slackDirLoading) void loadSlackDir(wsId);
   }
 
   // ---------------------------------------------------------------------------
@@ -446,7 +488,7 @@
   function statusLine(intg: Integration | null, channel: Channel): string {
     if (!intg || !intg.has_bot_token) return 'Not set up';
     const target = intg.channel_id
-      ? `${channel === 'webhook' ? 'replies to' : 'default'} ${intg.channel_id}`
+      ? `${channel === 'webhook' ? 'replies to' : 'default'} ${channel === 'slack' ? slackChannelLabel(intg.channel_id) : intg.channel_id}`
       : channel === 'webhook'
         ? 'no reply URL'
         : 'no default chat';
@@ -522,7 +564,7 @@
                   <ul>
                     {#each turnedAway as r (r.user)}
                       <li>
-                        <span class="mono" dir="ltr">{senderLabel(r)}</span>
+                        <span class="mono" dir="ltr">{channel === 'slack' && !r.name && slackUser.get(r.user) ? `${slackUser.get(r.user)?.name} (${r.user})` : senderLabel(r)}</span>
                         <span class="dim">· <RelTime iso={r.at} /></span>
                         <button
                           class="btn small"
@@ -698,6 +740,18 @@
             ? '-100123456…'
             : 'https://example.com/otto-replies (optional)'}
       />
+      {#if editChannel === 'slack' && (slackDir?.channels.length ?? 0) > 0}
+        <div class="dir-row">
+          <button type="button" class="btn small" onclick={pickSlackChannel} aria-haspopup="menu">
+            <Icon name="search" size={12} /> Choose channel…
+          </button>
+          {#if fChannelId.trim() && slackChannel.get(fChannelId.trim())}
+            <span class="dir-name">{slackChannelLabel(fChannelId)}</span>
+          {/if}
+        </div>
+      {:else if editChannel === 'slack' && slackDir?.channels_error}
+        <span class="hint">{slackDir.channels_error}</span>
+      {/if}
       {#if editChannel === 'webhook'}
         <span class="hint">
           Where the agent’s reply is POSTed. A request may override it with <code>callback_url</code>.
@@ -708,24 +762,43 @@
 
     <!-- Allowed users -->
     <div class="field">
-      <label for="ch-users">{editChannel === 'webhook' ? 'Allowed callers' : 'Allowed users'}</label>
-      <input dir="auto"
-        id="ch-users"
-        class="input"
-        bind:value={fAllowedUsers}
-        spellcheck="false"
-        autocomplete="off"
-        placeholder={editChannel === 'webhook' ? 'ci-bot,deploy-bot' : 'U01234,U05678'}
-      />
-      <span class="hint">
-        {#if editChannel === 'webhook'}
+      {#if editChannel === 'webhook'}
+        <label for="ch-users">Allowed callers</label>
+        <input dir="auto"
+          id="ch-users"
+          class="input"
+          bind:value={fAllowedUsers}
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="ci-bot,deploy-bot"
+        />
+        <span class="hint">
           Comma-separated caller ids, matched against the <code>user</code> field in the POST body.
           Leave blank to allow everyone.
-        {:else}
-          Comma-separated {channelLabel(editChannel)} user IDs{editChannel === 'slack' ? ' (Profile → ⋯ → Copy member ID)' : ''}.
+        </span>
+      {:else}
+        <div class="users-head">
+          <span class="field-label" id="ch-users-label">Allowed users</span>
+          {#if editChannel === 'slack' && slackDir}
+            <button type="button" class="btn ghost small" disabled={slackDirLoading} onclick={() => wsId && void loadSlackDir(wsId, true)}
+              title="Reload names from Slack">{slackDirLoading ? 'Refreshing…' : 'Refresh names'}</button>
+          {/if}
+        </div>
+        <AllowedIdsEditor
+          bind:value={fAllowedUsers}
+          people={editChannel === 'slack' ? slackDir?.users ?? [] : []}
+          label={channelLabel(editChannel)}
+          placeholder={editChannel === 'slack' ? 'Member ID (U0123…)' : 'User ID'}
+        />
+        <span class="hint">
+          {#if editChannel === 'slack'}
+            {#if slackDir?.users_error}{slackDir.users_error} {/if}Pick people, or paste member IDs (Profile → ⋯ → Copy member ID).
+          {:else}
+            {channelLabel(editChannel)} user IDs.
+          {/if}
           Required: a blank list admits nobody.
-        {/if}
-      </span>
+        </span>
+      {/if}
       {#if editChannel !== 'webhook' && fAllowedUsers.trim() === ''}
         <label class="checkbox-row modal-check">
           <input id="ch-open" type="checkbox" bind:checked={fOpenToAll} />
@@ -791,6 +864,28 @@
 {/if}
 
 <style>
+  /* Slack directory affordances in the edit sheet. */
+  .users-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .users-head .field-label {
+    font-size: var(--fs-s);
+    font-weight: 500;
+    color: var(--text-dim);
+  }
+  .dir-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .dir-name {
+    font-size: var(--fs-s);
+    font-weight: 500;
+  }
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
   .settings-section {
     display: flex;

@@ -1387,3 +1387,51 @@ fn api_base_url_refuses_internal_targets() {
     assert!(api_base_url_shape("http://gitlab.corp", true).is_ok());
     assert!(api_base_url_shape("http://127.0.0.1", true).is_err());
 }
+
+fn acct(id: &str, kind: GitProviderKind, ns: Option<&str>) -> GitAccount {
+    GitAccount {
+        id: id.into(),
+        user_id: "u".into(),
+        provider: kind,
+        label: id.into(),
+        username: "me".into(),
+        token_ref: format!("tok-{id}"),
+        api_base_url: None,
+        namespace: ns.map(str::to_string),
+        token_expires_at: None,
+        created_at: chrono::Utc::now(),
+    }
+}
+
+#[test]
+fn pick_account_never_guesses_between_two_accounts() {
+    use GitProviderKind::{Bitbucket, Github, Gitlab};
+    let pick = |accts: Vec<GitAccount>, kind, owner| pick_account(accts, kind, owner).map(|a| a.id);
+    // The only account for the provider binds, whatever the owner.
+    let one = vec![acct("bb", Bitbucket, None), acct("gh", Github, None)];
+    assert_eq!(pick(one, Bitbucket, Some("acme")).as_deref(), Some("bb"));
+    // Two Bitbucket accounts: the one whose workspace owns the remote.
+    let two = || {
+        vec![
+            acct("old", Bitbucket, Some("other")),
+            acct("new", Bitbucket, Some("Acme")),
+        ]
+    };
+    assert_eq!(pick(two(), Bitbucket, Some("acme")).as_deref(), Some("new"));
+    // …and no match / no owner / no namespaces → nothing (was: the oldest).
+    assert_eq!(pick(two(), Bitbucket, Some("third")), None);
+    assert_eq!(pick(two(), Bitbucket, None), None);
+    let bare = vec![acct("a", Bitbucket, None), acct("b", Bitbucket, None)];
+    assert_eq!(pick(bare, Bitbucket, Some("acme")), None);
+    // GitLab nested groups match by prefix; two owners of one remote → none.
+    let gl = vec![
+        acct("g1", Gitlab, Some("grp")),
+        acct("g2", Gitlab, Some("else")),
+    ];
+    assert_eq!(pick(gl, Gitlab, Some("grp/sub")).as_deref(), Some("g1"));
+    let dup = vec![
+        acct("x", Github, Some("acme")),
+        acct("y", Github, Some("acme")),
+    ];
+    assert_eq!(pick(dup, Github, Some("acme")), None);
+}

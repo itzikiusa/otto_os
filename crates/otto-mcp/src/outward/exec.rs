@@ -757,8 +757,18 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             {
                 path.push_str(&format!("&project={}", seg(p)));
             }
+            if let Some(j) = args
+                .get("jql")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                path.push_str(&format!("&jql={}", seg(j)));
+            }
             if let Some(n) = args.get("start_at").and_then(u64_lenient) {
                 path.push_str(&format!("&start_at={n}"));
+            }
+            if let Some(n) = args.get("limit").and_then(u64_lenient) {
+                path.push_str(&format!("&limit={n}"));
             }
             SelfCall::get(path)
         }
@@ -778,12 +788,29 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "search_confluence" => {
             let acc = arg_str(args, "account_id")?;
-            let q = arg_str(args, "query")?;
-            let mut path = format!(
-                "/api/v1/issue/confluence/search?account_id={}&q={}",
-                seg(&acc),
-                seg(&q)
-            );
+            let mut path = format!("/api/v1/issue/confluence/search?account_id={}", seg(&acc));
+            let opt = |k: &str| {
+                args.get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+            };
+            match (opt("cql"), opt("query")) {
+                (Some(cql), _) => path.push_str(&format!("&cql={}", seg(cql))),
+                (None, Some(q)) => path.push_str(&format!("&q={}", seg(q))),
+                (None, None) => {
+                    return Err(Error::Invalid(
+                        "search_confluence needs `query` or `cql`".into(),
+                    ))
+                }
+            }
+            if args.get("full_text").and_then(Value::as_bool) == Some(true) {
+                path.push_str("&mode=text");
+            }
+            for k in ["start", "limit"] {
+                if let Some(n) = args.get(k).and_then(u64_lenient) {
+                    path.push_str(&format!("&{k}={n}"));
+                }
+            }
             if let Some(s) = args
                 .get("space")
                 .and_then(Value::as_str)

@@ -122,7 +122,7 @@ test('SourceSearch preserves existing results and retries the failed page contex
   const urls: string[] = [];
   const s = functions('../src/modules/product/SourceSearch.svelte', ['search'], {
     accountId:'account',sourceKind:'jira',searchCtl:null,searchSeq:0,searchError:'',retrySearch:null,
-    selectedProjectKey:'P',selectedSpaceKey:'',searching:false,loadingMore:false,searched:true,
+    selectedProjectKey:'P',selectedSpaceKey:'',searching:false,loadingMore:false,searched:true,mode:'text',rawMode:false,
     jiraResults:[{key:'P-1'}],confluenceResults:[],jiraOffset:25,jiraHasMore:true,
     AbortController,loadErrorText:String,
     api:{get:async(url:string)=>{urls.push(url);if(fail)throw new Error('offline');return [{key:'P-2'}];}},

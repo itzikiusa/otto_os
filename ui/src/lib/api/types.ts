@@ -4341,6 +4341,11 @@ export interface IssueSummary {
   status: string;
   issue_type: string;
   url: string;
+  /** Present only when Jira has a value (raw-JQL callers group by these). */
+  parent_key?: string;
+  assignee?: string;
+  fix_versions?: string[];
+  updated?: string;
 }
 
 /** `GET /issue/my-work?account_id=` — one of the caller's assigned issues
@@ -4399,6 +4404,33 @@ export interface WebhookInboundResp {
   conversation: string;
 }
 
+
+/** `GET /workspaces/{id}/integrations/slack/directory` — one Slack member. */
+export interface SlackDirUser {
+  id: string;
+  /** Display name, else real name, else the handle. */
+  name: string;
+  handle: string;
+  is_bot: boolean;
+}
+
+/** One Slack channel the bot can see. */
+export interface SlackDirChannel {
+  id: string;
+  name: string;
+  is_private: boolean;
+}
+
+/** `GET /workspaces/{id}/integrations/slack/directory[?refresh=1]` — names for
+ *  the Slack card's ids. A part that Slack refused carries its `*_error`
+ *  (e.g. the missing scope) and comes back empty. */
+export interface SlackDirectory {
+  users: SlackDirUser[];
+  channels: SlackDirChannel[];
+  users_error?: string;
+  channels_error?: string;
+  truncated: boolean;
+}
 
 export interface Integration {
   workspace_id: string;

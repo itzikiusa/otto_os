@@ -415,26 +415,25 @@ async fn provider_ctx_with_account<S: GitCtx>(
 
 /// Bind an unbound repo to the caller's account for `kind` and persist it.
 ///
-/// Registration already picks "the caller's first account for the detected
-/// provider" — but it only runs once, so a repo registered BEFORE its account
+/// Registration already applies [`pick_account`] — but it only runs once, so a repo registered BEFORE its account
 /// existed stays unbound forever and every provider call dies with "repo has no
 /// git account". Applying the same rule lazily heals those repos; it is only
 /// ever the caller's OWN credential, so it opens no path S4 didn't already
-/// allow. Ambiguity (two accounts on one provider) is never guessed — the user
-/// picks via `PATCH /repos/{id}`.
+/// allow. Ambiguity (two accounts on one provider, none owning the remote's
+/// namespace) is never guessed — the user picks via `PATCH /repos/{id}`.
 async fn adopt_account<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     repo: &Repo,
     kind: GitProviderKind,
 ) -> Result<GitAccount> {
-    let mut mine = s
-        .store()
-        .list_accounts(&user.0.id)
-        .await?
-        .into_iter()
-        .filter(|a| a.provider == kind);
-    let (Some(account), None) = (mine.next(), mine.next()) else {
+    let owner = repo
+        .remote_url
+        .as_deref()
+        .and_then(detect)
+        .map(|(_, r)| r.owner);
+    let accounts = s.store().list_accounts(&user.0.id).await?;
+    let Some(account) = pick_account(accounts, kind, owner.as_deref()) else {
         return Err(Error::Invalid(format!(
             "repo has no git account: link a {} account to this repo (Git → repo card → Account)",
             kind.as_str()
@@ -457,7 +456,7 @@ async fn adopt_account<S: GitCtx>(
     tracing::info!(
         repo = %repo.name,
         account = %account.label,
-        "linked repo to the only {} account on file",
+        "linked repo to the matching {} account",
         kind.as_str()
     );
     Ok(account)
@@ -1173,7 +1172,8 @@ async fn register_repo<S: GitCtx>(
     let remote_url = git.remote_url().await;
     let detected = remote_url.as_deref().and_then(detect);
     let provider = detected.as_ref().map(|(k, _)| *k);
-    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider).await?;
+    let owner = detected.as_ref().map(|(_, r)| r.owner.as_str());
+    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider, owner).await?;
     let name = req
         .name
         .clone()
@@ -1230,7 +1230,8 @@ async fn clone_into_workspace<S: GitCtx>(
 
     let detected = detect(url);
     let provider = detected.as_ref().map(|(k, _)| *k);
-    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider).await?;
+    let owner = detected.as_ref().map(|(_, r)| r.owner.as_str());
+    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider, owner).await?;
 
     let dest_str = dest.to_string_lossy().into_owned();
     // Row first — the UI sees the repo immediately; Notice events track progress.
@@ -1312,13 +1313,14 @@ async fn clone_into_workspace<S: GitCtx>(
     Ok(repo)
 }
 
-/// Validate an explicit account id, or auto-match the caller's first account
-/// for the detected provider.
+/// Validate an explicit account id, or auto-match the caller's account for the
+/// detected provider by [`pick_account`]'s no-guess rule.
 async fn resolve_account<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     explicit: Option<&Id>,
     provider: Option<GitProviderKind>,
+    owner: Option<&str>,
 ) -> Result<Option<Id>> {
     if let Some(id) = explicit {
         let account = s.store().get_account(id).await?;
@@ -1331,10 +1333,38 @@ async fn resolve_account<S: GitCtx>(
         return Ok(None);
     };
     let accounts = s.store().list_accounts(&user.0.id).await?;
-    Ok(accounts
+    Ok(pick_account(accounts, kind, owner).map(|a| a.id))
+}
+
+/// The caller's account for `kind` that a repo may bind to WITHOUT asking:
+/// the only one on file, else the only one whose namespace (Bitbucket
+/// workspace, GitHub org, GitLab group — nested groups match by prefix) owns
+/// the remote. With several accounts per provider "the oldest" silently bound
+/// repos to the wrong credential, so anything still ambiguous is `None` and the
+/// user links one (Git → repo card → Account).
+fn pick_account(
+    accounts: Vec<GitAccount>,
+    kind: GitProviderKind,
+    owner: Option<&str>,
+) -> Option<GitAccount> {
+    let mut mine: Vec<GitAccount> = accounts
         .into_iter()
-        .find(|a| a.provider == kind)
-        .map(|a| a.id))
+        .filter(|a| a.provider == kind)
+        .collect();
+    if mine.len() == 1 {
+        return mine.pop();
+    }
+    let owner = owner?.to_ascii_lowercase();
+    let mut owning = mine.into_iter().filter(|a| {
+        a.namespace.as_deref().is_some_and(|ns| {
+            let ns = ns.trim().trim_matches('/').to_ascii_lowercase();
+            !ns.is_empty() && (owner == ns || owner.starts_with(&format!("{ns}/")))
+        })
+    });
+    match (owning.next(), owning.next()) {
+        (Some(a), None) => Some(a),
+        _ => None,
+    }
 }
 
 fn derive_repo_name(url: &str) -> Option<String> {

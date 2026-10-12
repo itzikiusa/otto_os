@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { allowedIds, pendingRejected, senderLabel, withAllowed } from '../src/modules/settings/channelAllow.ts';
+import { allowedIds, pendingRejected, senderLabel, withAllowed, withAllowedMany, withoutAllowed } from '../src/modules/settings/channelAllow.ts';
 
 const at = '2026-10-06T00:00:00Z';
 
@@ -31,4 +31,11 @@ test('allowing a sender appends once, keeping the others', () => {
 test('a sender reads as name (id), or the id alone', () => {
   assert.equal(senderLabel({ user: '111', name: '@alice', at }), '@alice (111)');
   assert.equal(senderLabel({ user: '111', name: ' ', at }), '111');
+});
+
+test('removing an id keeps the rest; pasting several adds each once', () => {
+  assert.equal(withoutAllowed('U1, U2,U3', 'U2'), 'U1, U3');
+  assert.equal(withoutAllowed('U1', 'U9'), 'U1');
+  assert.equal(withAllowedMany('U1', 'U2, U1  U3'), 'U1, U2, U3');
+  assert.equal(withAllowedMany('', '  '), '');
 });

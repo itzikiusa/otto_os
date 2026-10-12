@@ -122,7 +122,7 @@ where
 /// pool), so a new adapter per inbound message / outbound notification reuses
 /// warm TLS connections instead of paying a fresh handshake every time. Falls
 /// back to a default client if the builder fails.
-fn build_http_client() -> reqwest::Client {
+pub(crate) fn build_http_client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -197,7 +197,10 @@ const MAX_RETRY_AFTER_SECS: u64 = 120;
 /// `ratelimited` and reads the delay back with `mirror::retry_after_hint`, so a
 /// rate-limited final reply is re-posted instead of silently lost. (It used to
 /// surface as reqwest's generic "429 Too Many Requests" with no delay.)
-async fn api_json(resp: reqwest::Response, method: &str) -> anyhow::Result<serde_json::Value> {
+pub(crate) async fn api_json(
+    resp: reqwest::Response,
+    method: &str,
+) -> anyhow::Result<serde_json::Value> {
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let secs = retry_after_secs(
             resp.headers()

@@ -6,7 +6,7 @@
 //! Three pure/async building blocks, exercised by the `execute_node` arm in
 //! `workflow_engine.rs`:
 //! - [`extract_jira_key`] — find the ticket the step should act on.
-//! - [`resolve_jira_account`] — pick which configured Jira account to fetch with.
+//! - [`resolve_jira_accounts`] — which configured Jira accounts to fetch with, in order.
 //! - [`render_issue_md`] — turn a fetched [`otto_issues::IssueFull`] into the
 //!   markdown written to `jira-<KEY>.md`.
 
@@ -102,38 +102,46 @@ fn scan_jira_key(text: &str) -> Option<String> {
     None
 }
 
-/// Resolve which Jira account a `prepare_context` fetch should use: an
-/// explicit `params.account_id` wins; else the run user's own Jira account
-/// (first one); else any Jira account configured on the daemon (single-user
-/// / admin-configured setups). `Err` carries a human-readable reason.
-pub async fn resolve_jira_account<C: WorkflowCtx>(
+/// The Jira accounts a `prepare_context` fetch may use, in the order to try
+/// them: an explicit `params.account_id` alone; else every one of the run
+/// user's own accounts (oldest first — with several Jira sites connected the
+/// caller tries each until one knows the key, instead of failing on whichever
+/// came first); else the daemon's accounts (single-user / admin-configured
+/// setups). `Err` carries a human-readable reason.
+pub async fn resolve_jira_accounts<C: WorkflowCtx>(
     ctx: &C,
     run_user: &Id,
     account_id: Option<&str>,
-) -> std::result::Result<otto_core::domain::IssueAccount, String> {
+) -> std::result::Result<Vec<otto_core::domain::IssueAccount>, String> {
     if let Some(id) = account_id.map(str::trim).filter(|s| !s.is_empty()) {
         return ctx
             .issues_store()
             .get_account(&id.to_string())
             .await
+            .map(|a| vec![a])
             .map_err(|e| e.to_string());
     }
+    let is_jira = |a: &otto_core::domain::IssueAccount| {
+        matches!(a.provider, otto_core::domain::IssueProviderKind::Jira)
+    };
     if let Ok(accounts) = ctx.issues_store().list_accounts(run_user).await {
-        if let Some(a) = accounts
-            .into_iter()
-            .find(|a| matches!(a.provider, otto_core::domain::IssueProviderKind::Jira))
-        {
-            return Ok(a);
+        let mine: Vec<_> = accounts.into_iter().filter(is_jira).collect();
+        if !mine.is_empty() {
+            return Ok(mine);
         }
     }
-    let all = ctx
+    let all: Vec<_> = ctx
         .issues_store()
         .list_all_accounts()
         .await
-        .map_err(|e| e.to_string())?;
-    all.into_iter()
-        .find(|a| matches!(a.provider, otto_core::domain::IssueProviderKind::Jira))
-        .ok_or_else(|| "no Jira account configured".to_string())
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(is_jira)
+        .collect();
+    if all.is_empty() {
+        return Err("no Jira account configured".to_string());
+    }
+    Ok(all)
 }
 
 /// Render a fetched issue (+ its comments/links/attachments) to markdown —

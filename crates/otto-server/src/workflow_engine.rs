@@ -3854,32 +3854,41 @@ async fn execute_node(
                 Some(key) => {
                     jira.insert("found".into(), json!(true));
                     jira.insert("key".into(), json!(key));
-                    let fetched = match crate::workflow_prepare::resolve_jira_account(
+                    let fetched = match crate::workflow_prepare::resolve_jira_accounts(
                         ctx,
                         &user.id,
                         p.get("account_id").and_then(Value::as_str),
                     )
                     .await
                     {
-                        Ok(account) => {
-                            let token =
-                                otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+                        // Several Jira sites: the first account that knows the key.
+                        Ok(accounts) => {
+                            let mut last = Err(format!("no Jira account could read {key}"));
+                            for account in accounts {
+                                let token =
+                                    otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                last = match token {
+                                    Some(t) => otto_issues::JiraClient::new(
+                                        &account.base_url,
+                                        &account.email,
+                                        &t,
+                                    )
+                                    .get_issue_full(&key)
                                     .await
-                                    .ok()
-                                    .flatten();
-                            match token {
-                                Some(t) => otto_issues::JiraClient::new(
-                                    &account.base_url,
-                                    &account.email,
-                                    &t,
-                                )
-                                .get_issue_full(&key)
-                                .await
-                                .map_err(|e| e.to_string()),
-                                None => {
-                                    Err(format!("missing token for issue account {}", account.id))
+                                    .map_err(|e| e.to_string()),
+                                    None => Err(format!(
+                                        "missing token for issue account {}",
+                                        account.id
+                                    )),
+                                };
+                                if last.is_ok() {
+                                    break;
                                 }
                             }
+                            last
                         }
                         Err(e) => Err(e),
                     };

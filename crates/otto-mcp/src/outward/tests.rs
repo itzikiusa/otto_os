@@ -728,6 +728,38 @@ fn route_for_maps_git_issues_swarm_memory_usage() {
     assert!(c.path.starts_with("/api/v1/issue/search?account_id=a1"));
     assert!(c.path.contains("&q=a%20%3D%20b"), "got {}", c.path);
     assert!(c.path.contains("&project=X"));
+    // Raw JQL + a wider window pass straight through.
+    let c = route_for(
+        "search_issues",
+        &json!({"account_id":"a1","jql":"fixVersion = \"6.23.0\"","limit":100}),
+    )
+    .unwrap();
+    assert!(
+        c.path.contains("&jql=fixVersion%20%3D%20%226.23.0%22"),
+        "got {}",
+        c.path
+    );
+    assert!(c.path.ends_with("&limit=100"), "got {}", c.path);
+    // Confluence: raw CQL needs no `query`; full-text maps to mode=text.
+    let c = route_for(
+        "search_confluence",
+        &json!({"account_id":"a1","cql":"label = \"rel\"","limit":50}),
+    )
+    .unwrap();
+    assert!(
+        c.path.contains("&cql=label%20%3D%20%22rel%22"),
+        "got {}",
+        c.path
+    );
+    assert!(!c.path.contains("&q="));
+    let c = route_for(
+        "search_confluence",
+        &json!({"account_id":"a1","query":"strapi","full_text":true,"space":"DEV"}),
+    )
+    .unwrap();
+    assert!(c.path.contains("&q=strapi&mode=text"), "got {}", c.path);
+    assert!(c.path.contains("&space=DEV"));
+    assert!(route_for("search_confluence", &json!({"account_id":"a1"})).is_err());
     let c = route_for(
         "transition_issue",
         &json!({"account_id":"a1","key":"K-1","transition_id":"21"}),

@@ -1202,8 +1202,8 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_search_issues",
-                "description": "Read-only: search Jira issues. `query` is FREE TEXT (summary + description), or an issue key (`GS-123`) for that issue — NOT JQL. Empty `query` → issues assigned to you. Optional `project` key. Up to 25 `{key, summary, status, issue_type, url}`; page with `start_at`.",
-                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "start_at": { "type": "integer" } } }
+                "description": "Read-only: search Jira issues. Either `jql` — any JQL, run verbatim (e.g. `fixVersion = \"6.23.0\" ORDER BY key`, `parent = CS3-15095`) — or `query`: FREE TEXT (summary + description) or an issue key (`GS-123`), optionally scoped by `project`. `jql` wins. Empty both → issues assigned to you. `{key, summary, status, issue_type, url}` plus `parent_key`, `assignee`, `fix_versions`, `updated` when set; `limit` (default 25, max 100), page with `start_at`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string", "description": "Raw JQL; overrides query/project." }, "start_at": { "type": "integer" }, "limit": { "type": "integer", "description": "1–100 (default 25)." } } }
             },
             {
                 "name": "otto_list_issue_transitions",
@@ -2513,7 +2513,10 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             {
                 path.push_str(&format!("&project={}", seg(p)));
             }
-            path.push_str(&opt_query(args, &[("start_at", "start_at")]));
+            path.push_str(&opt_query(
+                args,
+                &[("jql", "jql"), ("start_at", "start_at"), ("limit", "limit")],
+            ));
             ReadCall::get(path)
         }
         "otto_list_issue_transitions" => ReadCall::get(format!(
