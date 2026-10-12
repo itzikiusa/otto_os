@@ -3,6 +3,7 @@
 // name could match (or break on) text that is not that attribute.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+// @ts-expect-error — plain .mjs codemod helper, no declaration file
 import { attrValue } from '../scripts/codemods/markup.mjs';
 
 test('attrValue reads namespaced and dotted names literally', () => {
