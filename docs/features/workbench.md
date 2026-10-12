@@ -8,9 +8,19 @@ sweep), the API client, a terminal or agent session, or the Vault.
 
 - Route: `#/workbench`. Sidebar entry **Workbench** (Build group). ⌘K: "Go to Workbench".
 - RBAC: rides the **Agents** feature (reads = View, writes = Edit). Files are
-  **per user** inside a workspace. Other members never see your files.
+  **per user**. Other members never see your files.
+- **Where a file shows.** Each file is either in **All workspaces** (globe
+  icon) or in **This workspace** only. New files go to all workspaces by
+  default; ⋯ → *New files in this workspace only* changes that default (it is
+  remembered on this device). Flip one file with the toolbar's
+  **All workspaces / This workspace** button or its row menu. Choosing *This
+  workspace* moves the file into the workspace you are in. When both kinds
+  exist the list groups them under **This workspace** and **All workspaces**.
+  Files created before this option existed stay in their workspace until you
+  flip them.
 - Code: UI `ui/src/modules/workbench/`, API client `ui/src/lib/api/workbench.ts`,
-  store `crates/otto-state/src/workbench.rs` (migration `0165_workbench.sql`),
+  store `crates/otto-state/src/workbench.rs` (migrations `0165_workbench.sql`,
+  `0184_workbench_doc_scope.sql`),
   routes `crates/otto-server/src/routes/workbench.rs`.
 
 ## Walkthrough
@@ -131,9 +141,17 @@ MCP (agents):
   bundled.
 - The DB hand-off needs at least one DB connection in the workspace. With more
   than six connections it opens the DB page and asks you to pick one.
-- Files are personal: there is no sharing between users yet.
+- Files are personal: there is no sharing between users yet. A file in
+  **All workspaces** still belongs to you only.
+- Open tabs are remembered per workspace, so a global file open in one
+  workspace isn't automatically open in another (it is listed there).
 
 ## Troubleshooting
+
+- **"My files disappeared after switching tabs."** The tab belongs to another
+  workspace and the files are scoped to the workspace they were made in.
+  Go back to that workspace and choose **All workspaces** on each file
+  (toolbar or row menu); they then show everywhere.
 
 - **"Not saved" with Retry.** The daemon refused or was unreachable. The buffer
   stays dirty and is backed up locally, so press Retry or ⌘S.

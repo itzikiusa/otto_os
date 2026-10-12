@@ -55,6 +55,7 @@ async function daemon<T>(page: Page, method: string, path: string, data?: unknow
 interface DocRow {
   id: string;
   name: string;
+  workspace_id: string;
 }
 
 async function openWorkbench(page: Page): Promise<void> {
@@ -97,8 +98,10 @@ test('create → type → format → preview → history restore', async ({ page
   // ⌘S: a checkpoint revision holding the minified text.
   await page.keyboard.press('ControlOrMeta+S');
   const listDocs = () => daemon<DocRow[]>(page, 'GET', `/workspaces/${workspaceId}/workbench/docs`);
-  await expect.poll(async () => (await listDocs()).length).toBeGreaterThan(0);
-  const docId = (await listDocs())[0]!.id;
+  await expect.poll(async () => (await listDocs()).filter((d) => d.workspace_id === workspaceId).length).toBeGreaterThan(0);
+  // New files default to `global`, so other specs' files can list here too:
+  // take the newest one that was created in THIS workspace.
+  const docId = (await listDocs()).find((d) => d.workspace_id === workspaceId)!.id;
   await expect
     .poll(async () => (await daemon<{ content: string }>(page, 'GET', `/workspaces/${workspaceId}/workbench/docs/${docId}`)).content)
     .toBe(MINIFIED);

@@ -1,5 +1,11 @@
 //! Workbench: per-user scratch files with a FULL, append-only edit history.
 //!
+//! Visibility: a doc always belongs to ONE owner. Its `scope` decides where
+//! that owner sees it — `workspace` (only in the workspace it lives in) or
+//! `global` (in every workspace; migration 0184). Every lookup goes through
+//! [`VISIBLE`], so a global doc is reachable from any of the owner's
+//! workspaces and a workspace doc from its own only.
+//!
 //! Users create them with `POST /workspaces/{ws}/workbench/docs` and autosave
 //! with `PATCH …/docs/{id}`; every content change lands in
 //! `workbench_revisions` (see migration 0165).
@@ -40,6 +46,15 @@ const MAX_DIFF_EDITS: usize = 2_000;
 /// Lines per side a diff will consider at all.
 const MAX_DIFF_LINES: usize = 20_000;
 
+/// Scope of a doc visible only in the workspace it lives in (the default).
+pub const SCOPE_WORKSPACE: &str = "workspace";
+/// Scope of a doc visible in every workspace of its owner.
+pub const SCOPE_GLOBAL: &str = "global";
+
+/// Row predicate "visible to owner `?1` from workspace `?2`" — binds
+/// `(owner, ws)` in that order. The one place the scope rule lives.
+const VISIBLE: &str = "owner_id = ? AND (workspace_id = ? OR scope = 'global')";
+
 // ---------------------------------------------------------------------------
 // Wire types (mirrored by ui/src/lib/api/types.ts "Workbench")
 // ---------------------------------------------------------------------------
@@ -47,8 +62,12 @@ const MAX_DIFF_LINES: usize = 20_000;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkbenchDoc {
     pub id: Id,
+    /// The workspace the doc lives in. For a `global` doc this is just where
+    /// it was created (or last moved to); it shows in every workspace.
     pub workspace_id: Id,
     pub owner_id: Id,
+    /// `workspace` | `global` — see the module doc.
+    pub scope: String,
     pub name: String,
     pub language: String,
     pub pinned: bool,
@@ -82,6 +101,9 @@ pub struct NewWorkbenchDoc {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// `workspace` (default) | `global`.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -98,6 +120,10 @@ pub struct WorkbenchPatch {
     pub folder: Option<String>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// `global` shows the doc in every workspace; `workspace` scopes it to
+    /// the workspace of this request (moving it there if it lived elsewhere).
+    #[serde(default)]
+    pub scope: Option<String>,
     #[serde(default)]
     pub checkpoint: bool,
     #[serde(default)]
@@ -214,6 +240,14 @@ fn check_tags(tags: &[String]) -> Result<String> {
     serde_json::to_string(&clean).map_err(|e| Error::Internal(e.to_string()))
 }
 
+fn check_scope(scope: &str) -> Result<&'static str> {
+    match scope.trim() {
+        SCOPE_WORKSPACE => Ok(SCOPE_WORKSPACE),
+        SCOPE_GLOBAL => Ok(SCOPE_GLOBAL),
+        _ => Err(invalid("scope must be `workspace` or `global`")),
+    }
+}
+
 fn check_content(content: &str) -> Result<()> {
     if content.len() > MAX_CONTENT_BYTES {
         return Err(invalid(format!(
@@ -232,6 +266,7 @@ fn row_to_doc(r: &sqlx::sqlite::SqliteRow) -> Result<WorkbenchDoc> {
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),
         owner_id: r.get("owner_id"),
+        scope: r.get("scope"),
         name: r.get("name"),
         language: r.get("language"),
         pinned: r.get::<i64, _>("pinned") != 0,
@@ -288,12 +323,12 @@ async fn gc_blob(tx: &mut Tx, hash: &str) -> Result<()> {
 }
 
 async fn doc_in_tx(tx: &mut Tx, ws: &Id, owner: &Id, id: &Id) -> Result<WorkbenchDoc> {
-    let row = sqlx::query(
-        "SELECT * FROM workbench_docs WHERE id = ? AND workspace_id = ? AND owner_id = ?",
-    )
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT * FROM workbench_docs WHERE id = ? AND {VISIBLE}"
+    )))
     .bind(id)
-    .bind(ws)
     .bind(owner)
+    .bind(ws)
     .fetch_optional(&mut **tx)
     .await
     .map_err(dberr("get workbench doc"))?
@@ -421,19 +456,24 @@ impl WorkbenchRepo {
             .map_err(dberr("lock workbench"))
     }
 
-    /// The caller's docs in `ws`: live ones (pinned first, newest first) or,
-    /// with `trash`, the soft-deleted ones (most recently trashed first).
+    /// The caller's docs visible in `ws` (its own + their global ones): live
+    /// ones (pinned first, newest first) or, with `trash`, the soft-deleted
+    /// ones (most recently trashed first).
     pub async fn list(&self, ws: &Id, owner: &Id, trash: bool) -> Result<Vec<WorkbenchDoc>> {
         let sql = if trash {
-            "SELECT * FROM workbench_docs WHERE workspace_id = ? AND owner_id = ?
-               AND deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+            format!(
+                "SELECT * FROM workbench_docs WHERE {VISIBLE}
+                   AND deleted_at IS NOT NULL ORDER BY deleted_at DESC"
+            )
         } else {
-            "SELECT * FROM workbench_docs WHERE workspace_id = ? AND owner_id = ?
-               AND deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC"
+            format!(
+                "SELECT * FROM workbench_docs WHERE {VISIBLE}
+                   AND deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC"
+            )
         };
-        let rows = sqlx::query(sql)
-            .bind(ws)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(owner)
+            .bind(ws)
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("list workbench docs"))?;
@@ -460,6 +500,7 @@ impl WorkbenchRepo {
         let language = check_language(req.language.as_deref().unwrap_or("auto"))?;
         let folder = check_folder(req.folder.as_deref().unwrap_or(""))?;
         let tags = check_tags(req.tags.as_deref().unwrap_or(&[]))?;
+        let scope = check_scope(req.scope.as_deref().unwrap_or(SCOPE_WORKSPACE))?;
         let content = req.content.unwrap_or_default();
         check_content(&content)?;
         let id = new_id();
@@ -467,13 +508,14 @@ impl WorkbenchRepo {
         let mut tx = self.begin().await?;
         let hash = put_blob(&mut tx, &content).await?;
         sqlx::query(
-            "INSERT INTO workbench_docs (id, workspace_id, owner_id, name, language, pinned, folder,
-               tags_json, content_hash, size, rev, created_at, updated_at, deleted_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)",
+            "INSERT INTO workbench_docs (id, workspace_id, owner_id, scope, name, language, pinned,
+               folder, tags_json, content_hash, size, rev, created_at, updated_at, deleted_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)",
         )
         .bind(&id)
         .bind(ws)
         .bind(owner)
+        .bind(scope)
         .bind(&name)
         .bind(&language)
         .bind(req.pinned.unwrap_or(false) as i64)
@@ -507,12 +549,12 @@ impl WorkbenchRepo {
     }
 
     pub async fn get_meta(&self, ws: &Id, owner: &Id, id: &Id) -> Result<WorkbenchDoc> {
-        let row = sqlx::query(
-            "SELECT * FROM workbench_docs WHERE id = ? AND workspace_id = ? AND owner_id = ?",
-        )
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT * FROM workbench_docs WHERE id = ? AND {VISIBLE}"
+        )))
         .bind(id)
-        .bind(ws)
         .bind(owner)
+        .bind(ws)
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("get workbench doc"))?
@@ -560,6 +602,7 @@ impl WorkbenchRepo {
         let language = patch.language.as_deref().map(check_language).transpose()?;
         let folder = patch.folder.as_deref().map(check_folder).transpose()?;
         let tags = patch.tags.as_deref().map(check_tags).transpose()?;
+        let scope = patch.scope.as_deref().map(check_scope).transpose()?;
         if let Some(c) = &patch.content {
             check_content(c)?;
         }
@@ -581,13 +624,18 @@ impl WorkbenchRepo {
             || language.is_some()
             || folder.is_some()
             || tags.is_some()
+            || scope.is_some()
             || patch.pinned.is_some();
+        // Scoping a doc to "this workspace" moves it here: a global doc
+        // created elsewhere must not vanish into the workspace it came from.
+        let home = (scope == Some(SCOPE_WORKSPACE)).then_some(ws);
         if meta_changed {
             sqlx::query(
                 "UPDATE workbench_docs SET
                    name = COALESCE(?, name), language = COALESCE(?, language),
                    folder = COALESCE(?, folder), tags_json = COALESCE(?, tags_json),
-                   pinned = COALESCE(?, pinned), updated_at = ?
+                   pinned = COALESCE(?, pinned), scope = COALESCE(?, scope),
+                   workspace_id = COALESCE(?, workspace_id), updated_at = ?
                  WHERE id = ?",
             )
             .bind(name)
@@ -595,6 +643,8 @@ impl WorkbenchRepo {
             .bind(folder)
             .bind(tags)
             .bind(patch.pinned.map(|p| p as i64))
+            .bind(scope)
+            .bind(home)
             .bind(fmt(now))
             .bind(id)
             .execute(&mut *tx)
@@ -860,22 +910,22 @@ impl WorkbenchRepo {
         })
     }
 
+    /// Owner-scoped, NOT workspace-scoped: a global doc's pasted image was
+    /// uploaded from whichever workspace it was being edited in, and must
+    /// render in every workspace the doc shows in. `_ws` only gates the route.
     pub async fn get_asset(
         &self,
-        ws: &Id,
+        _ws: &Id,
         owner: &Id,
         id: &Id,
     ) -> Result<(WorkbenchAsset, Vec<u8>)> {
-        let r = sqlx::query(
-            "SELECT * FROM workbench_assets WHERE id = ? AND workspace_id = ? AND owner_id = ?",
-        )
-        .bind(id)
-        .bind(ws)
-        .bind(owner)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(dberr("get workbench asset"))?
-        .ok_or_else(|| Error::NotFound(format!("workbench asset {id}")))?;
+        let r = sqlx::query("SELECT * FROM workbench_assets WHERE id = ? AND owner_id = ?")
+            .bind(id)
+            .bind(owner)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("get workbench asset"))?
+            .ok_or_else(|| Error::NotFound(format!("workbench asset {id}")))?;
         Ok((row_to_asset(&r)?, r.get("data")))
     }
 
@@ -886,12 +936,12 @@ impl WorkbenchRepo {
         owner: &Id,
         name: &str,
     ) -> Result<Option<WorkbenchDoc>> {
-        let row = sqlx::query(
-            "SELECT * FROM workbench_docs WHERE workspace_id = ? AND owner_id = ? AND name = ?
-               AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
-        )
-        .bind(ws)
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT * FROM workbench_docs WHERE {VISIBLE} AND name = ?
+               AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+        )))
         .bind(owner)
+        .bind(ws)
         .bind(name)
         .fetch_optional(&self.pool)
         .await
@@ -1372,6 +1422,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_docs_show_in_every_workspace_of_their_owner_only() {
+        let repo = WorkbenchRepo::new(mem_pool().await);
+        let (ws1, u) = ids();
+        let ws2: Id = "ws2".into();
+        let g = repo
+            .create(
+                &ws1,
+                &u,
+                NewWorkbenchDoc {
+                    name: "dicasinos.sql".into(),
+                    scope: Some("global".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(g.doc.scope, SCOPE_GLOBAL);
+        let local = new_doc(&repo, Utc::now()).await;
+        assert_eq!(local.doc.scope, SCOPE_WORKSPACE, "default scope");
+
+        // ws2 sees the global doc (read, write, history, by name) but not the
+        // workspace one; ws1 sees both.
+        let in_ws2: Vec<Id> = repo
+            .list(&ws2, &u, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(in_ws2, vec![g.doc.id.clone()]);
+        assert_eq!(repo.list(&ws1, &u, false).await.unwrap().len(), 2);
+        repo.update(&ws2, &u, &g.doc.id, content("edited from ws2"))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get(&ws1, &u, &g.doc.id).await.unwrap().content,
+            "edited from ws2"
+        );
+        assert_eq!(
+            repo.list_revisions(&ws2, &u, &g.doc.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(repo
+            .find_by_name(&ws2, &u, "dicasinos.sql")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(repo.get(&ws2, &u, &local.doc.id).await.is_err());
+        // Never another user's.
+        assert!(repo.get(&ws2, &"u2".into(), &g.doc.id).await.is_err());
+        assert!(repo
+            .list(&ws1, &"u2".into(), false)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Trash is scoped the same way.
+        repo.trash(&ws2, &u, &g.doc.id).await.unwrap();
+        assert_eq!(repo.list(&ws1, &u, true).await.unwrap().len(), 1);
+        repo.restore(&ws1, &u, &g.doc.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scoping_to_a_workspace_moves_the_doc_there_and_keeps_history() {
+        let repo = WorkbenchRepo::new(mem_pool().await);
+        let (ws1, u) = ids();
+        let ws2: Id = "ws2".into();
+        let d = new_doc(&repo, Utc::now()).await;
+        let scope = |s: &str| WorkbenchPatch {
+            scope: Some(s.into()),
+            ..Default::default()
+        };
+        // workspace → global: now visible from ws2; rev untouched.
+        let g = repo
+            .update(&ws1, &u, &d.doc.id, scope("global"))
+            .await
+            .unwrap();
+        assert_eq!(
+            (g.scope.as_str(), g.rev, g.workspace_id.as_str()),
+            ("global", 1, "ws1")
+        );
+        // global → "this workspace" from ws2 adopts it into ws2 …
+        let m = repo
+            .update(&ws2, &u, &d.doc.id, scope("workspace"))
+            .await
+            .unwrap();
+        assert_eq!(
+            (m.scope.as_str(), m.workspace_id.as_str()),
+            ("workspace", "ws2")
+        );
+        // … so it leaves ws1, and its history came along.
+        assert!(repo.list(&ws1, &u, false).await.unwrap().is_empty());
+        assert_eq!(
+            repo.list_revisions(&ws2, &u, &d.doc.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            repo.update(&ws2, &u, &d.doc.id, scope("everywhere")).await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            repo.create(
+                &ws1,
+                &u,
+                NewWorkbenchDoc {
+                    name: "x".into(),
+                    scope: Some("team".into()),
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn restore_revision_appends_and_shares_the_blob() {
         let repo = WorkbenchRepo::new(mem_pool().await);
         let (ws, u) = ids();
@@ -1527,5 +1699,7 @@ mod tests {
         let (meta, bytes) = repo.get_asset(&ws, &u, &a.id).await.unwrap();
         assert_eq!((meta.mime.as_str(), bytes.len()), ("image/png", 8));
         assert!(repo.get_asset(&ws, &"u2".into(), &a.id).await.is_err());
+        // A global doc's image renders from any of the owner's workspaces.
+        assert!(repo.get_asset(&"ws2".into(), &u, &a.id).await.is_ok());
     }
 }
