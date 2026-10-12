@@ -3,6 +3,8 @@
 //! implementing contract endpoints #31–#56.
 
 #[cfg(test)]
+mod argv_guard_tests;
+#[cfg(test)]
 mod config_hardening_tests;
 mod diff_cache;
 #[cfg(test)]

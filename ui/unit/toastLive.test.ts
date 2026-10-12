@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const src = readFileSync(new URL('../src/lib/components/Toasts.svelte', import.meta.url), 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+const src = readFileSync(new URL('../src/lib/components/Toasts.svelte', import.meta.url), 'utf8').replace(/<!--[\s\S]*?-->/g, ' ');
 const markup = src.slice(src.indexOf('</script>'), src.indexOf('<style'));
 
 test('the persistent container is the polite live region', () => {

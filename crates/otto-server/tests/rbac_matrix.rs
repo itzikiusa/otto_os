@@ -553,11 +553,11 @@ async fn agent_credentials_are_refused_on_every_admin_and_secret_route() {
     let (human_app, tagged) = class_app(pool.clone(), root.clone(), Cred::Human);
     // Sanity floor: the scanner and the tag table both still work, and the
     // findings' named routes are among the tagged ones.
-    let admin_or_secret: Vec<_> = tagged.iter().filter(|(_, _, c)| c != "Outward").collect();
+    let privileged_routes: Vec<_> = tagged.iter().filter(|(_, _, c)| c != "Outward").collect();
     assert!(
-        admin_or_secret.len() >= 60,
+        privileged_routes.len() >= 60,
         "only {} tagged",
-        admin_or_secret.len()
+        privileged_routes.len()
     );
     for must in [
         (Method::PUT, "/api/v1/settings"),
@@ -570,7 +570,7 @@ async fn agent_credentials_are_refused_on_every_admin_and_secret_route() {
         (Method::POST, "/api/v1/workflow-runs/x1/approve"),
     ] {
         assert!(
-            admin_or_secret
+            privileged_routes
                 .iter()
                 .any(|(m, p, _)| *m == must.0 && p == must.1),
             "{} {} must be tagged Admin/Secret",

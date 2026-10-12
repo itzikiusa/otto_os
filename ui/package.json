@@ -37,6 +37,7 @@
       "mermaid": "$mermaid"
     },
     "dompurify": "3.4.16",
+    "katex": "0.18.11",
     "@excalidraw/excalidraw": {
       "sass": "1.105.1"
     },

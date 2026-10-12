@@ -3810,7 +3810,11 @@ impl LocalGit {
         start_point: Option<&str>,
         checkout: bool,
     ) -> Result<()> {
+        Self::guard_ref(name)?;
         let sp = start_point.filter(|s| !s.is_empty());
+        if let Some(sp) = sp {
+            Self::guard_ref(sp)?;
+        }
         // No explicit start point + the name exists on origin ⇒ the caller
         // means THAT branch: base it at the remote tip with tracking, not at a
         // possibly-stale HEAD with no upstream (see `checkout`).
@@ -3823,7 +3827,7 @@ impl LocalGit {
             let args: &[&str] = if checkout {
                 &["checkout", "-b", name, "--track", &remote]
             } else {
-                &["branch", "--track", name, &remote]
+                &["branch", "--track", "--end-of-options", name, &remote]
             };
             self.run(args).await?;
             return Ok(());
@@ -4330,6 +4334,8 @@ impl LocalGit {
         strategy: LocalMergeStrategy,
         auto_stash: bool,
     ) -> Result<MergeResult> {
+        Self::guard_ref(source)?;
+        Self::guard_ref(target)?;
         // Refuse to START a merge over an unfinished one (or a rebase /
         // cherry-pick / revert). The old "already merging" exemption then
         // checked out `target`, which git refuses with "you need to resolve
@@ -4453,7 +4459,7 @@ impl LocalGit {
             // target's current tree, so the working tree is left untouched.
             if up_to_date && matches!(strategy, LocalMergeStrategy::MergeCommit) {
                 let target_head = self.run(&["rev-parse", "HEAD"]).await?.trim().to_string();
-                let source_head = self.run(&["rev-parse", source]).await?.trim().to_string();
+                let source_head = self.resolve_commit(source).await?;
                 let tree = self
                     .run(&["rev-parse", "HEAD^{tree}"])
                     .await?
@@ -5477,17 +5483,6 @@ pub const HEAD_REMOTES_CAP: usize = 20;
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn guard_ref_refuses_option_like_and_control_values() {
-        assert!(super::LocalGit::guard_ref("feature/x").is_ok());
-        assert!(super::LocalGit::guard_ref("v1.2.3").is_ok());
-        assert!(super::LocalGit::guard_ref("HEAD~2").is_ok());
-        assert!(super::LocalGit::guard_ref("--upload-pack=touch /tmp/pwn").is_err());
-        assert!(super::LocalGit::guard_ref("-c").is_err());
-        assert!(super::LocalGit::guard_ref("  --force").is_err());
-        assert!(super::LocalGit::guard_ref("main\nrm").is_err());
-    }
-
     use super::*;
     use otto_core::api::LineOrigin;
 

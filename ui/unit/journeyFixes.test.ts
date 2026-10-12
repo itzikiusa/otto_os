@@ -66,10 +66,12 @@ test('History ⌘K resume is registered only when the button would allow it', ()
 test('agent-channel UI copy never shows the internal "room" noun (S20-302)', () => {
   for (const file of ['personal-agents/RoomsView.svelte', 'personal-agents/AgentAutonomy.svelte']) {
     const code = readFileSync(new URL(`../src/modules/${file}`, import.meta.url), 'utf8')
-      // Drop the <style> block and comments: only rendered/announced text counts.
-      .replace(/<style[\s\S]*?<\/style>/g, '')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
+      // Blank out the <style> block and comments: only rendered/announced text
+      // counts. A space (not '') keeps token boundaries and can't splice a new
+      // delimiter together from the text on either side.
+      .replace(/<style[\s\S]*?<\/style>/g, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/^\s*\/\/.*$/gm, '');
     const visible: string[] = [];
     // String literals (labels, toasts, dialogs, attributes)…

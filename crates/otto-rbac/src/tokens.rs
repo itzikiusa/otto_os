@@ -1841,6 +1841,14 @@ mod tests {
         pool.into()
     }
 
+    /// A code guaranteed to differ from `otp` in every digit, derived at run
+    /// time so no fixed code literal sits in the tests.
+    fn wrong_otp(otp: &str) -> String {
+        otp.bytes()
+            .map(|d| char::from(b'0' + (d - b'0' + 1) % 10))
+            .collect()
+    }
+
     /// Seed a minimal (non-root, enabled) user and return its id.
     async fn seed_user(pool: &DbPool, username: &str) -> Id {
         let id = new_id();
@@ -3161,7 +3169,7 @@ mod tests {
             .unwrap();
 
         // Wrong code → false (and stays pending).
-        assert!(!repo.verify_share_otp(&raw, "000000").await.unwrap() || otp == "000000");
+        assert!(!repo.verify_share_otp(&raw, &wrong_otp(&otp)).await.unwrap());
         // Correct code → true, and the share becomes non-pending.
         assert!(repo.verify_share_otp(&raw, &otp).await.unwrap());
         let scope = repo.authenticate(&raw).await.unwrap().scope.unwrap();
@@ -3198,9 +3206,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let wrong = if otp == "000000" { "111111" } else { "000000" };
+        let wrong = wrong_otp(&otp);
         for i in 1..=SHARE_OTP_MAX_FAILURES {
-            let out = repo.verify_share_otp_outcome(&raw, wrong).await.unwrap();
+            let out = repo.verify_share_otp_outcome(&raw, &wrong).await.unwrap();
             let want = if i == SHARE_OTP_MAX_FAILURES {
                 ShareOtpOutcome::Burned
             } else {
@@ -3215,13 +3223,9 @@ mod tests {
         // Pending (never verified) → extendable; the new code works.
         assert!(repo.extendable_share_id(&raw).await.unwrap().is_some());
         let (fresh, _, _) = repo.extend_share_otp(&raw).await.unwrap().unwrap();
-        let wrong = if fresh == "000000" {
-            "111111"
-        } else {
-            "000000"
-        };
+        let wrong = wrong_otp(&fresh);
         for _ in 1..SHARE_OTP_MAX_FAILURES {
-            assert!(!repo.verify_share_otp(&raw, wrong).await.unwrap());
+            assert!(!repo.verify_share_otp(&raw, &wrong).await.unwrap());
         }
         assert!(
             repo.verify_share_otp(&raw, &fresh).await.unwrap(),
@@ -3372,7 +3376,7 @@ mod tests {
         let scope = repo.authenticate(&raw).await.unwrap().scope.unwrap();
         assert!(!scope.otp_pending, "a plain share must not be OTP-pending");
         // And verify is a no-op on a non-OTP share.
-        assert!(!repo.verify_share_otp(&raw, "123456").await.unwrap());
+        assert!(!repo.verify_share_otp(&raw, &generate_otp()).await.unwrap());
     }
 
     /// `revoke_all_for_user` also clears the user's shares (lost-device kill
