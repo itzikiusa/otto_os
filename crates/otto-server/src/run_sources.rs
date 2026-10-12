@@ -166,32 +166,73 @@ fn strip_tags(s: &str) -> String {
     out
 }
 
-async fn issue_account(
+/// The issue accounts a run may read its source with, in the order to try
+/// them: the run creator's own (oldest first), else the daemon's (a
+/// single-user / admin-configured setup).
+async fn issue_accounts(
     ctx: &ServerCtx,
     created_by: &Id,
-) -> Result<otto_core::domain::IssueAccount> {
-    // `into_iter().next()` (not `remove(0)`) so no panic path can ever carry
-    // account data into a panic message / log.
-    if let Ok(a) = ctx.issues_store.list_accounts(created_by).await {
-        if let Some(first) = a.into_iter().next() {
-            return Ok(first);
+) -> Result<Vec<otto_core::domain::IssueAccount>> {
+    if let Ok(mine) = ctx.issues_store.list_accounts(created_by).await {
+        if !mine.is_empty() {
+            return Ok(mine);
         }
     }
-    ctx.issues_store
-        .list_all_accounts()
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::Invalid("no Jira/Confluence account configured".into()))
+    let all = ctx.issues_store.list_all_accounts().await?;
+    if all.is_empty() {
+        return Err(Error::Invalid(
+            "no Jira/Confluence account configured".into(),
+        ));
+    }
+    Ok(all)
+}
+
+/// `fetch` with each of the run's issue accounts in turn; the first success
+/// wins. A missing / unreadable token skips that account rather than ending
+/// the search, and the final error names what every account said.
+async fn first_readable<T, F, Fut>(
+    ctx: &ServerCtx,
+    run: &OttoRun,
+    what: &str,
+    fetch: F,
+) -> Result<T>
+where
+    F: Fn(otto_core::domain::IssueAccount, String) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut tried = Vec::new();
+    for account in issue_accounts(ctx, &run.created_by).await? {
+        let label = account.label.clone();
+        match otto_core::secrets::get_async(&ctx.secrets, &account.token_ref).await {
+            Ok(Some(token)) => match fetch(account, token).await {
+                Ok(v) => return Ok(v),
+                Err(e) => tried.push(format!("{label}: {e}")),
+            },
+            Ok(None) => tried.push(format!("{label}: token missing")),
+            Err(e) => tried.push(format!("{label}: {e}")),
+        }
+    }
+    if tried.is_empty() {
+        return Err(Error::Invalid(
+            "no Jira/Confluence account connected".into(),
+        ));
+    }
+    Err(Error::Invalid(format!(
+        "no account could read {what} {} — {}",
+        run.source_ref,
+        tried.join("; ")
+    )))
 }
 
 async fn resolve_jira(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
-    let account = issue_account(ctx, &run.created_by).await?;
-    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
-        .await?
-        .ok_or_else(|| Error::Invalid("Jira token missing".into()))?;
-    let client = otto_issues::JiraClient::new(&account.base_url, &account.email, &token);
-    let issue = client.get_issue_full(&run.source_ref).await?;
+    // With several Jira sites connected the key belongs to one of them — try
+    // each (the first one used to win, and every other site's keys failed).
+    let issue = first_readable(ctx, run, "Jira issue", |a, token| async move {
+        otto_issues::JiraClient::new(&a.base_url, &a.email, &token)
+            .get_issue_full(&run.source_ref)
+            .await
+    })
+    .await?;
     let comments = issue
         .comments
         .iter()
@@ -224,12 +265,13 @@ async fn resolve_jira(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> 
 }
 
 async fn resolve_confluence(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
-    let account = issue_account(ctx, &run.created_by).await?;
-    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
-        .await?
-        .ok_or_else(|| Error::Invalid("Confluence token missing".into()))?;
-    let client = otto_issues::ConfluenceClient::new(&account.base_url, &account.email, &token);
-    let page = client.get_page(&run.source_ref).await?;
+    // Same rule as Jira: the first connected site that has the page.
+    let page = first_readable(ctx, run, "Confluence page", |a, token| async move {
+        otto_issues::ConfluenceClient::new(&a.base_url, &a.email, &token)
+            .get_page(&run.source_ref)
+            .await
+    })
+    .await?;
     Ok(ResolvedSource {
         title: page.title.clone(),
         body_md: clean(&strip_tags(&page.body_storage), BODY_CAP),

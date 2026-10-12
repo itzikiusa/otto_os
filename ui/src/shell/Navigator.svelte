@@ -34,6 +34,7 @@
   import { viewport } from '../lib/stores/viewport.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import { toasts } from '../lib/toast.svelte';
+  import { copyText } from '../lib/clipboard';
   import type { WorkspaceWithRole } from '../lib/api/types';
   import { tick, untrack } from 'svelte';
   import {
@@ -409,6 +410,49 @@
     if (!s || !ws.canEditSession(s)) return;
     renamingId = id;
     draft = current;
+  }
+
+  /** Open the New Session sheet in workspace `id` (switching there first —
+   *  the sheet always targets the current workspace). */
+  async function newSessionIn(id: string): Promise<void> {
+    if (ws.currentId !== id && !(await ws.select(id))) return;
+    ui.newSessionScratch = false;
+    ui.newSessionOpen = true;
+  }
+
+  /** Right-click on a workspace folder (the Agents chip, an all-workspaces
+   *  group, a Workspaces row): start work there first, then manage it. */
+  function workspaceMenuItems(w: WorkspaceWithRole): MenuItem[] {
+    const items: MenuItem[] = [
+      { label: `New session in “${w.name}”…`, icon: 'plus', action: () => void newSessionIn(w.id) },
+      { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+      { separator: true },
+    ];
+    if (ws.currentId !== w.id) {
+      items.push({ label: 'Switch to this workspace', icon: 'check', action: () => void ws.select(w.id) });
+    }
+    items.push(
+      {
+        label: 'Copy folder path',
+        icon: 'copy',
+        title: w.root_path,
+        action: async () => {
+          if (await copyText(w.root_path)) toasts.success('Copied', w.root_path);
+          else toasts.warn('Couldn’t copy the path');
+        },
+      },
+      { label: 'Workspace context', icon: 'note', action: async () => { if (await ws.select(w.id)) router.go('settings/context-soul'); } },
+    );
+    if (w.my_role === 'admin') {
+      items.push(
+        { separator: true },
+        { label: 'Rename…', icon: 'edit', action: () => void renameWorkspace(w) },
+        { label: 'Change folder…', icon: 'folder', action: () => void changeWorkspaceDir(w) },
+        { label: 'Remove workspace…', icon: 'trash', danger: true, action: () => void removeWorkspace(w) },
+      );
+    }
+    items.push({ separator: true }, { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) });
+    return items;
   }
 
   /** Open the New Session sheet pre-set to "No workspace". */
@@ -967,18 +1011,7 @@
           class="nav-item"
           class:active-ws={ws.currentId === w.id}
           onclick={() => ws.select(w.id)}
-          oncontextmenu={(e) => ctxMenu.show(e, [
-            { label: 'Switch to this workspace', icon: 'check', action: () => ws.select(w.id) },
-            { separator: true },
-            ...(w.my_role === 'admin' ? [
-              { label: 'Rename…', icon: 'edit', action: () => void renameWorkspace(w) },
-              { label: 'Change folder…', icon: 'folder', action: () => void changeWorkspaceDir(w) },
-              { label: 'Remove workspace…', icon: 'trash', danger: true as const, action: () => void removeWorkspace(w) },
-              { separator: true as const },
-            ] : []),
-            { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) },
-            { label: 'Workspace context', icon: 'note', action: async () => { if (await ws.select(w.id)) router.go('settings/context-soul'); } },
-          ])}
+          oncontextmenu={(e) => ctxMenu.show(e, workspaceMenuItems(w))}
           title={w.root_path}
         >
           <Icon name="folder" size={14} />
@@ -1259,15 +1292,17 @@
          switch. With no current workspace the "No workspace" group right
          below already says so, so the chip would only repeat it. -->
     {#if ws.current}
-      <button
+      {@const cur = ws.current}
+      <button use:rowMenu
         class="ws-chip"
         onclick={openWsSwitcher}
+        oncontextmenu={(e) => ctxMenu.show(e, workspaceMenuItems(cur))}
         aria-haspopup="menu"
         title={`${ws.current.name}\n${ws.current.root_path}\nClick to switch workspace`}
         aria-label={`Current workspace: ${ws.current.name}. Switch workspace`}
         data-testid="agents-current-ws"
       >
-        <Icon name="folder" size={12} />
+        <Icon name="folder" size={13} />
         <span class="ellipsis">{ws.current.name}</span>
         <Icon name="chevronDown" size={12} />
       </button>
@@ -1310,7 +1345,7 @@
           { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
       >
-        <Icon name="home" size={12} />
+        <Icon name="home" size={13} />
         <span class="ellipsis">No workspace</span>
       </div>
       <div class="nested">
@@ -1329,8 +1364,14 @@
       {#each ws.otherWsGroups as g (g.ws.id)}
         {@const rows = g.sessions.filter(matches)}
         {#if rows.length > 0}
-          <div class="ws-group-label" title="Sessions in workspace “{g.ws.name}”">
-            <Icon name="folder" size={12} />
+          <div use:rowMenu
+            role="presentation"
+            class="ws-group-label"
+            title="Sessions in workspace “{g.ws.name}” — right-click for actions"
+            data-testid="ws-group-{g.ws.id}"
+            oncontextmenu={(e) => ctxMenu.show(e, workspaceMenuItems(g.ws))}
+          >
+            <Icon name="folder" size={13} />
             <span class="ellipsis">{g.ws.name}</span>
           </div>
           <div class="nested">
@@ -1411,8 +1452,8 @@
     <!-- Archived sessions: parked rows under the Agents lists (restore /
          delete), folded by default. -->
     {#if ws.hasArchived || ws.archivedSessions.length > 0}
-      <button class="nav-item subtle" aria-expanded={archivedOpen} data-testid="archived-toggle" onclick={toggleArchived}>
-        <Icon name="archive" size={14} />
+      <button class="nav-item nested-item arch-toggle" aria-expanded={archivedOpen} data-testid="archived-toggle" onclick={toggleArchived}>
+        <Icon name="archive" size={13} />
         <span class="grow">Archived</span>
         {#if ws.archivedLoaded}
           <span class="count-chip">{ws.archivedSessions.length}{ws.archivedHasMore ? '+' : ''}</span>
@@ -2047,24 +2088,32 @@
     padding-inline-start: 4px;
     border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
   }
-  /* Current-workspace chip: quiet, dim, one line; reads as a label until
-     hovered (then as the switcher it is). */
+  /* Agents' sub-list grid: every row — workspace header, session, Archived,
+     select tools — is 26px with its leading glyph (icon / dot / checkbox) in
+     one 8px-inset column, so nothing reads as a stray indent. */
+  /* Current-workspace header: a real group heading (legible, full-contrast
+     name) that is also the switcher — the chevron says so. */
   .ws-chip {
     display: flex;
     align-items: center;
-    gap: 4px;
-    max-width: calc(100% - 4px);
-    margin: 1px 0 2px;
-    padding: 2px 6px;
+    gap: 6px;
+    max-width: 100%;
+    height: 26px;
+    margin: 2px 0 0;
+    padding: 0 8px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
+    color: var(--text);
+    font-size: var(--fs-s);
     font-weight: 600;
     text-align: start;
     cursor: pointer;
     min-width: 0;
+  }
+  .ws-chip > :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-dim);
   }
   .ws-chip:hover {
     color: var(--text);
@@ -2084,11 +2133,30 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 8px 2px;
-    font-size: var(--fs-xs);
+    height: 26px;
+    margin-top: 2px;
+    padding: 0 8px;
+    font-size: var(--fs-s);
     font-weight: 600;
-    color: var(--text-dim);
+    color: var(--text);
     min-width: 0;
+    border-radius: var(--radius-s);
+  }
+  .ws-group-label > :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-dim);
+  }
+  /* Archived: a list row like the sessions above (same height, type and
+     glyph column), set apart by a hairline instead of a bigger font. */
+  .nav-item.arch-toggle {
+    gap: 6px;
+    margin-top: 4px;
+    color: var(--text-dim);
+    border-top: 1px solid color-mix(in srgb, var(--text-dim) 14%, transparent);
+    border-radius: 0 0 var(--radius-s) var(--radius-s);
+  }
+  .nav-item.arch-toggle:hover {
+    color: var(--text);
   }
   .all-ws-toggle.on {
     color: var(--accent-text);
@@ -2158,12 +2226,17 @@
   .nested-item.active .row-secondary {
     display: inline-flex;
   }
-  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding-block: 2px 4px; padding-inline: 8px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
+  /* Select tools: the select-all box sits in the SAME column as the row
+     boxes below it (8px inset), at the same 13px size; the actions are quiet
+     text buttons, not outlined slabs. */
+  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-height: 26px; padding-inline: 8px 2px; font-size: var(--fs-xs); color: var(--text-dim); }
   .arch-state { display: flex; align-items: center; gap: 6px; padding: 4px 10px 6px; font-size: var(--fs-xs); color: var(--text-dim); }
   .arch-state .show-more { width: auto; padding: 0; }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
-  .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
-  .arch-check { flex-shrink: 0; }
+  .arch-all input, .arch-check { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); }
+  .arch-check { flex-shrink: 0; margin-inline-start: 8px; }
+  /* The row after a checkbox drops its own inset — the box is the glyph column. */
+  .nested-row > .arch-check + .nested-item { padding-inline-start: 6px; }
   .sel-toggle.on { color: var(--accent-text); }
   .nested-row.selected .nested-item { background: var(--accent-soft); }
   .row-action {
@@ -2199,11 +2272,12 @@
      wrapped under the icon and spilled past the sidebar edge. */
   .arch-tools .row-action {
     display: inline-flex; align-items: center; gap: 4px; width: auto; height: 22px;
-    padding: 0 6px; flex-shrink: 0; opacity: 1;
-    border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap;
+    padding: 0 6px; flex-shrink: 0; opacity: 1; font-size: var(--fs-xs);
+    border: none; border-radius: var(--radius-s); white-space: nowrap;
   }
   .arch-tools .row-action:disabled { opacity: var(--disabled-opacity); cursor: default; }
-  .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+  .arch-tools .row-action:not(:disabled) { color: var(--text); }
+  .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); }
   .nav-item.subtle {
     color: var(--text-dim);
   }

@@ -265,10 +265,13 @@ oauth_config:
       # `app_mention` event below. The code DOES handle app_mention, so if you
       # subscribe to that event (as this manifest does) keep this scope.
       - app_mentions:read
-      # Resolve human-readable names for users/channels in logs or future UI.
-      # OPTIONAL — current code keys on raw ids only.
-      # - users:read
-      # - channels:read
+      # Names in Settings → Slack: the allowed-users list shows "Dana Levi
+      # @dana" next to each U… id, "Add person…" / "Choose channel…" pickers,
+      # and #channel names (GET …/integrations/slack/directory). Without
+      # them everything still works — the card just shows bare ids.
+      - users:read
+      - channels:read
+      - groups:read
 
 settings:
   event_subscriptions:
@@ -358,7 +361,12 @@ In Otto: **Settings → Slack, Telegram & webhooks → Slack → Edit**:
 - **Default channel ID** *(optional)* → the `C…` id of the channel you'll use the
   `Test` button / notifications against (right-click the channel in Slack → *View
   channel details* → copy the **Channel ID** at the bottom).
-- **Allowed users** *(optional)* → comma-separated Slack user ids (`U…`).
+- **Allowed users** *(optional)* → a list, one person per row. With the
+  `users:read` scope each row shows the member's name and `@handle`, and
+  **Add person…** picks from the workspace's members; otherwise paste `U…` ids
+  (several at once is fine). **Choose channel…** (with `channels:read`) fills the
+  default channel the same way. Names are cached for 5 minutes; **Refresh names**
+  reloads them.
 - **Preferred CLI / Agent reply / Reply instructions** as desired (§5).
 - Tick **Enabled** → **Save**.
 

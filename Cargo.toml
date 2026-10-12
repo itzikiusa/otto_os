@@ -168,6 +168,17 @@ apache-avro = "0.22.0"
 # docs/testing/build-performance.md
 [profile.dev.package."*"]
 opt-level = 1
+# No debug info anywhere in dev/test builds: nobody here runs a debugger, and
+# on macOS debuginfo is kept in each crate's object files next to the binary
+# (split-debuginfo "unpacked"), re-linked into every test binary — the bulk
+# of a 30-40 GB workspace test build (it filled the disk, 2026-10-12). Panics
+# and backtraces still name every function via the symbol table; only
+# file:line is lost. `CARGO_PROFILE_DEV_DEBUG=true cargo …` brings it back
+# for a one-off debugging session.
+debug = false
+
+[profile.dev]
+debug = false
 
 # Build speed over the last few % of runtime/binary size: this app is built +
 # deployed locally many times a day, and thin-LTO's cross-module phase capped

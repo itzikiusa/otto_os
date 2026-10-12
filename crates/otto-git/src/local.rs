@@ -277,7 +277,23 @@ fn harden(cmd: &mut std::process::Command) {
         .env("GIT_CONFIG_PARAMETERS", HARDENED_GIT_CONFIG)
         .env("GIT_PAGER", "cat")
         .stdin(Stdio::null());
+    test_hermetic(cmd);
 }
+
+/// This crate's unit tests run git against throwaway fixtures: the developer's
+/// own `~/.gitconfig` / system config (a `url.*.insteadOf` rewrite, a signing
+/// key, a default branch) must not leak in — CI has none, so a laptop with,
+/// say, a Bitbucket `insteadOf` failed tests CI passes. Production spawns keep
+/// the user's config.
+#[cfg(test)]
+fn test_hermetic(cmd: &mut std::process::Command) {
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    cmd.env("GIT_CONFIG_GLOBAL", null)
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+}
+
+#[cfg(not(test))]
+fn test_hermetic(_cmd: &mut std::process::Command) {}
 
 /// Does the work tree at `path` round-trip to the repo whose common git dir
 /// is `common`? The main tree's `.git` must BE `common`; a linked tree's
@@ -1006,6 +1022,7 @@ impl LocalGit {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        test_hermetic(cmd.as_std_mut());
         cmd
     }
 

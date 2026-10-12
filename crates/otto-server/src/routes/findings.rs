@@ -428,14 +428,29 @@ async fn to_jira(
     }
     let account = match &body.account_id {
         Some(aid) => ctx.issues_store.get_account(aid).await.map_err(ApiError)?,
-        None => ctx
-            .issues_store
-            .list_accounts(&user.id)
-            .await
-            .map_err(ApiError)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| ApiError(Error::Invalid("no Jira account configured".to_string())))?,
+        // No account named: only the caller's sole Jira account is a safe
+        // default — with several sites "the oldest" filed into the wrong one.
+        None => {
+            let mut mine = ctx
+                .issues_store
+                .list_accounts(&user.id)
+                .await
+                .map_err(ApiError)?
+                .into_iter();
+            match (mine.next(), mine.next()) {
+                (Some(only), None) => only,
+                (None, _) => {
+                    return Err(ApiError(Error::Invalid(
+                        "no Jira account configured".to_string(),
+                    )))
+                }
+                (Some(_), Some(_)) => {
+                    return Err(ApiError(Error::Invalid(
+                        "several Jira accounts are connected: pass account_id".to_string(),
+                    )))
+                }
+            }
+        }
     };
     otto_core::auth::authorize_owner(&account, &user).map_err(ApiError)?;
     let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)

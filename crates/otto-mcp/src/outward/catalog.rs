@@ -583,18 +583,20 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
         // ================= Issues (Jira / Confluence) =================
         json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
-            "description":"Search Jira issues. `query` is FREE TEXT (matched against summary + description), or an issue key (`GS-123`) for that issue — it is NOT JQL. Empty `query` → issues assigned to you. Optional `project` key. Returns up to 25 `{key, summary, status, issue_type, url}`; page with `start_at`. Read-only.",
+            "description":"Search Jira: `jql` (raw JQL) or `query` (text / key, optional `project`); neither → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
             "inputSchema":{"type":"object","properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"project":{"type":"string"},
-                "start_at":{"type":"integer","description":"Offset of the first result (default 0)."}}}}),
+                "jql":{"type":"string"},
+                "start_at":{"type":"integer"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.get_issue","mutating":false,"category":"Issues",
             "description":"Get one Jira issue's full detail (description, comments, changelog, links) by key. Available status changes come from otto.list_issue_transitions. Read-only.",
             "inputSchema":{"type":"object","required":["key"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
         json!({"name":"otto.search_confluence","mutating":false,"category":"Issues",
-            "description":"Search Confluence pages by title (`query`; a numeric query matches a page id); optional `space` key. Returns up to 25 `{id, title, space_key, url}`. Read-only.",
-            "inputSchema":{"type":"object","required":["query"],"properties":{
-                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"space":{"type":"string"}}}}),
+            "description":"Search Confluence: `cql` (raw CQL) or `query` (title or page id; `full_text` adds body), optional `space`. Hits: id, title, space_key, url. `limit` ≤100, page with `start`. Read-only.",
+            "inputSchema":{"type":"object","properties":{
+                "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"space":{"type":"string"},
+                "cql":{"type":"string"},"full_text":{"type":"boolean"},"start":{"type":"integer"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.get_confluence_page","mutating":false,"category":"Issues",
             "description":"Read one Confluence page. Returns id, title, space_key, url, version and the body as MARKDOWN (`body_md`) — never storage XHTML. Read-only.",
             "inputSchema":{"type":"object","required":["page_id"],"properties":{

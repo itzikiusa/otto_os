@@ -157,7 +157,7 @@ esac
             result = subprocess.run(
                 ["/bin/bash", str(root / "packaging/deploy.sh")],
                 env={**os.environ, "PATH": str(mocks) + ":/usr/bin:/bin", "TEST_ROOT": str(root),
-                     "BUILD_ONLY": "1", "PRUNE": "0", "SKIP_UI": "0", "OTTO_DEPLOY_PHASE": "", "FINISH_DELAY_SECONDS": "0"},
+                     "BUILD_ONLY": "1", "PRUNE": "0", "DISK_GUARD": "0", "SKIP_UI": "0", "OTTO_DEPLOY_PHASE": "", "FINISH_DELAY_SECONDS": "0"},
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -168,7 +168,7 @@ esac
             stale = subprocess.run(
                 ["/bin/bash", str(root / "packaging/deploy.sh")],
                 env={**os.environ, "PATH": str(mocks) + ":/usr/bin:/bin", "TEST_ROOT": str(root),
-                     "BUILD_ONLY": "1", "PRUNE": "0", "SKIP_UI": "1", "OTTO_DEPLOY_PHASE": "", "FINISH_DELAY_SECONDS": "0"},
+                     "BUILD_ONLY": "1", "PRUNE": "0", "DISK_GUARD": "0", "SKIP_UI": "1", "OTTO_DEPLOY_PHASE": "", "FINISH_DELAY_SECONDS": "0"},
                 capture_output=True, text=True,
             )
             self.assertNotEqual(stale.returncode, 0)

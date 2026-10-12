@@ -114,11 +114,27 @@ impl VaultEngine {
         let cb_overflow = overflow.clone();
         let healthy = Arc::new(AtomicBool::new(true));
         let cb_healthy = healthy.clone();
+        let cb_root = root.clone();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let touch = match res {
                 Ok(ev) if matches!(ev.kind, notify::EventKind::Access(_)) => return,
                 Ok(ev) if ev.need_rescan() || ev.paths.len() > MAX_CHECKED_PATHS => Touch::Rescan,
-                Ok(ev) => Touch::Paths(ev.paths),
+                Ok(ev) => {
+                    // Drop what the index never holds (`.git`, hidden dirs,
+                    // `node_modules`) BEFORE queueing: one guarded write's
+                    // git commit fires dozens of `.git/objects` events, which
+                    // filled the 16-slot queue → overflow → a full rescan on
+                    // every self-write (seen on macOS FSEvents).
+                    let ps: Vec<PathBuf> = ev
+                        .paths
+                        .into_iter()
+                        .filter(|p| indexable_rel(&cb_root, p).is_some())
+                        .collect();
+                    if ps.is_empty() {
+                        return;
+                    }
+                    Touch::Paths(ps)
+                }
                 Err(_) => {
                     cb_healthy.store(false, Ordering::Relaxed);
                     Touch::Rescan

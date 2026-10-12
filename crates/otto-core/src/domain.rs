@@ -802,13 +802,25 @@ pub struct IssueProject {
 }
 
 /// A brief issue summary returned by search.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The optional tail (parent, assignee, fix versions, updated) lets a raw-JQL
+/// caller (release lists, epic breakdowns) group results without one
+/// `get_issue` per hit; each is omitted from the JSON when Jira has no value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssueSummary {
     pub key: String,
     pub summary: String,
     pub status: String,
     pub issue_type: String,
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fix_versions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
 }
 
 /// One of the caller's assigned issues (the Focus view's "my work" list),

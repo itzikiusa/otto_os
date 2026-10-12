@@ -359,13 +359,32 @@ async fn search_issues<S: IssuesCtx>(
         .get("start_at")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    // `jql` runs verbatim (and wins over `q`/`project`); otherwise the
+    // free-text / key builder makes one. Jira's own 400 explains a bad query.
+    let jql = match params
+        .get("jql")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => raw.to_string(),
+        None => crate::jira::build_jql(&q, project.as_deref()),
+    };
+    let limit = limit_param(&params, 25);
     let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
-    let results = client.search(&q, project.as_deref(), start_at).await?;
+    let results = client.search_jql_window(&jql, start_at, limit).await?;
     Ok(Json(results))
+}
+
+/// Optional `limit` query param (page window), defaulting to `default`.
+fn limit_param(params: &HashMap<String, String>, default: u32) -> u32 {
+    params
+        .get("limit")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 /// The caller's open assigned issues for the Focus view. `account_id` picks
@@ -429,21 +448,43 @@ async fn search_pages_cf<S: IssuesCtx>(
         .get("account_id")
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
-    let q = params
-        .get("q")
-        .ok_or_else(|| Error::Invalid("q query param required".into()))?
-        .clone();
     let space = params
         .get("space")
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // `cql` runs verbatim; otherwise `q` is a title search, or title + body
+    // with `mode=text`.
+    let cql = match params
+        .get("cql")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => raw.to_string(),
+        None => {
+            let q = params
+                .get("q")
+                .ok_or_else(|| Error::Invalid("q (or cql) query param required".into()))?;
+            if params.get("mode").is_some_and(|m| m == "text") {
+                crate::confluence::build_page_text_cql(space.as_deref(), q)
+            } else {
+                crate::confluence::build_page_cql(space.as_deref(), q)
+            }
+        }
+    };
+    let start: u32 = params
+        .get("start")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let limit = limit_param(&params, 25);
     let account = load_authorized_account(&s, &account_id, &user).await?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
-    let results = client.search_pages(space.as_deref(), &q).await?;
+    let results = client
+        .search_cql(&cql, space.as_deref(), start, limit)
+        .await?;
     Ok(Json(results))
 }
 

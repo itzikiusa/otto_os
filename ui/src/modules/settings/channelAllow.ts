@@ -12,6 +12,20 @@ export function allowedIds(allowed: string): string[] {
     .filter((s) => s !== '');
 }
 
+/** `allowed` without `user` (normalized `a, b` spacing). */
+export function withoutAllowed(allowed: string, user: string): string {
+  return allowedIds(allowed)
+    .filter((id) => id !== user.trim())
+    .join(', ');
+}
+
+/** Ids typed or pasted in one go ("U1, U2 U3") → appended, deduped. */
+export function withAllowedMany(allowed: string, typed: string): string {
+  return typed
+    .split(/[\s,]+/)
+    .reduce((acc, id) => (id.trim() ? withAllowed(acc, id) : acc), allowed);
+}
+
 /** Rejected senders not already on the allow-list (a sender allowed since
  *  they were turned away stays listed by the daemon until it restarts). */
 export function pendingRejected(rejected: RejectedSender[] | undefined, allowed: string): RejectedSender[] {

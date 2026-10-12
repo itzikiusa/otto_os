@@ -1202,8 +1202,8 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_search_issues",
-                "description": "Read-only: search Jira issues. `query` is FREE TEXT (summary + description), or an issue key (`GS-123`) for that issue — NOT JQL. Empty `query` → issues assigned to you. Optional `project` key. Up to 25 `{key, summary, status, issue_type, url}`; page with `start_at`.",
-                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "start_at": { "type": "integer" } } }
+                "description": "Read-only: search Jira by `jql` (raw JQL) or `query` (text / key, optional `project`). `limit` ≤100, page with `start_at`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string" }, "start_at": { "type": "integer" }, "limit": { "type": "integer" } } }
             },
             {
                 "name": "otto_list_issue_transitions",
@@ -2503,17 +2503,16 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         "otto_search_issues" => {
             let acc = arg_str(args, "account_id")?;
             let mut path = format!("/issue/search?account_id={}", seg(&acc));
-            if let Some(q) = args.get("query").and_then(Value::as_str) {
-                path.push_str(&format!("&q={}", seg(q)));
-            }
-            if let Some(p) = args
-                .get("project")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                path.push_str(&format!("&project={}", seg(p)));
-            }
-            path.push_str(&opt_query(args, &[("start_at", "start_at")]));
+            path.push_str(&opt_query(
+                args,
+                &[
+                    ("q", "query"),
+                    ("project", "project"),
+                    ("jql", "jql"),
+                    ("start_at", "start_at"),
+                    ("limit", "limit"),
+                ],
+            ));
             ReadCall::get(path)
         }
         "otto_list_issue_transitions" => ReadCall::get(format!(

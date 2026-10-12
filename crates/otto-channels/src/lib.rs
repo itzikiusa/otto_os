@@ -15,6 +15,7 @@ pub mod run_trigger;
 pub mod secrets_redact;
 pub mod seed;
 pub mod slack;
+pub mod slack_directory;
 pub mod swarm_trigger;
 pub mod telegram;
 pub mod transcript;

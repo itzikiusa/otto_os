@@ -12,6 +12,7 @@
   // finding_updated WS event also drives a refetch).
   import { toastError } from '../../lib/toastError';
   import {
+    api,
     acceptFinding,
     waiveFinding,
     falsePositiveFinding,
@@ -23,7 +24,8 @@
     verifyFinding,
     regressionTestFinding,
   } from '../../lib/api/client';
-  import type { Finding } from '../../lib/api/types';
+  import type { Finding, IssueAccount } from '../../lib/api/types';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
@@ -182,17 +184,36 @@
       return;
     }
     if (busy) return;
+    // Several Jira sites connected: the server won't guess which one — ask.
+    let account: IssueAccount | undefined;
+    try {
+      const accounts = await api.get<IssueAccount[]>('/issue/accounts');
+      if (accounts.length > 1) {
+        const picked = await confirmer.choose(`Which Jira should ${key} be created in?`, {
+          title: 'Choose a Jira account',
+          options: accounts.map((a) => ({
+            label: `${a.label} — ${a.base_url.replace(/^https?:\/\//, '')}`,
+            value: a.id,
+          })),
+        });
+        if (!picked.value) return;
+        account = accounts.find((a) => a.id === picked.value);
+      }
+    } catch (e) {
+      toastError('Couldn’t load Jira accounts', e);
+      return;
+    }
     // Creating an issue is outward-facing: say where it lands and who sees it.
     const ok = await confirmOutward({
       verb: 'Create Jira issue',
-      where: `Jira project ${key}`,
+      where: account ? `Jira project ${key} on ${account.base_url}` : `Jira project ${key}`,
       what: finding.title || finding.body.split('\n')[0],
       who: 'Everyone with access to the project; watchers may be notified.',
     });
     if (!ok) return;
     busy = 'convert to Jira';
     try {
-      const f = await findingToJira(finding.id, { project_key: key });
+      const f = await findingToJira(finding.id, { project_key: key, account_id: account?.id });
       onupdated(f);
       toasts.success('Jira issue created', f.jira_key ?? undefined);
       jiraOpen = false;

@@ -93,6 +93,23 @@ test.describe('all-workspaces sidebar + workspace management', () => {
     expect(await page.evaluate(() => localStorage.getItem('otto_nav_all_ws'))).toBe('0');
   });
 
+  test('right-click a workspace folder under Agents → new session there', async ({ page }) => {
+    const nav = page.locator('.navigator');
+    // The current-workspace header offers it too, for the workspace it names.
+    await nav.getByTestId('agents-current-ws').click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: `New session in “${WS_A}”…` })).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    // An other-workspace group: switch there and open the New session sheet.
+    const groupLabel = nav.locator('.ws-group-label', { hasText: WS_B });
+    await expect(groupLabel).toBeVisible({ timeout: 15_000 });
+    await groupLabel.click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: 'Copy folder path' })).toBeVisible();
+    await page.getByRole('menuitem', { name: new RegExp(`^New session in “${WS_B}`) }).click();
+    await expect(page.getByRole('dialog', { name: 'New session' })).toBeVisible({ timeout: 15_000 });
+    await expect(nav.getByTestId('agents-current-ws')).toContainText(WS_B);
+  });
+
   test('workspace context menu: rename and delete', async ({ page }) => {
     const nav = page.locator('.navigator');
     const bRow = nav.locator('.nav-item', { hasText: WS_B }).first();

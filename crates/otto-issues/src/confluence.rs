@@ -174,6 +174,20 @@ impl ConfluenceClient {
         max_pages: usize,
         what: &str,
     ) -> Result<(Vec<serde_json::Value>, bool)> {
+        self.get_pages_until(url, query, max_pages, usize::MAX, what)
+            .await
+    }
+
+    /// [`Self::get_all_pages`] that also stops once `enough` results are in
+    /// (a windowed search needs only the first `start + limit`).
+    async fn get_pages_until(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+        max_pages: usize,
+        enough: usize,
+        what: &str,
+    ) -> Result<(Vec<serde_json::Value>, bool)> {
         // Callers already check; the pager sends the auth header itself.
         self.ensure_tls()?;
         let mut all = Vec::new();
@@ -209,11 +223,11 @@ impl ConfluenceClient {
             let got = page.len();
             all.extend(page);
             next = self.next_link(&body);
-            if got == 0 || next.is_none() {
+            if got == 0 || next.is_none() || all.len() >= enough {
                 break;
             }
         }
-        if next.is_some() {
+        if next.is_some() && all.len() < enough {
             // The cap, not the end of the collection: never silent.
             tracing::warn!(
                 what,
@@ -506,38 +520,78 @@ impl ConfluenceClient {
         space_key: Option<&str>,
         query: &str,
     ) -> Result<Vec<ConfluencePageSummary>> {
+        let cql = build_page_cql(space_key, query);
+        self.search_cql(&cql, space_key, 0, 25).await
+    }
+
+    /// Run a caller-built CQL query (e.g. `space = DEV AND label = "release"
+    /// AND lastmodified > now("-30d")`) and return page summaries. `start` /
+    /// `limit` page through the hits (`limit` clamped to 1..=100).
+    /// `space_hint` fills `space_key` when a hit's space isn't expanded.
+    pub async fn search_cql(
+        &self,
+        cql: &str,
+        space_hint: Option<&str>,
+        start: u32,
+        limit: u32,
+    ) -> Result<Vec<ConfluencePageSummary>> {
         self.ensure_tls()?;
         let url = self.api("/content/search");
-        let cql = build_page_cql(space_key, query);
+        let space_key = space_hint;
+        let limit = limit.clamp(1, 100);
+        let results_vec: Vec<serde_json::Value> = if start == 0 {
+            let limit_s = limit.to_string();
+            let resp = self
+                .http
+                .get(&url)
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .query(&[
+                    ("cql", cql),
+                    ("limit", limit_s.as_str()),
+                    ("expand", "space"),
+                ])
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence search_pages request: {e}")))?;
 
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .query(&[("cql", cql.as_str()), ("limit", "25"), ("expand", "space")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence search_pages request: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(Error::Upstream(format!(
+                    "confluence search_pages failed ({status}): {body}"
+                )));
+            }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "confluence search_pages failed ({status}): {body}"
-            )));
-        }
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence search_pages parse: {e}")))?;
-
-        let results_arr = body
-            .get("results")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[]);
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence search_pages parse: {e}")))?;
+            body.get("results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            // Cloud's `/content/search` is cursor-paged (`_links.next`); an
+            // offset `start` is not reliably honoured. Walk the cursor until
+            // the window is covered — pages may come back shorter than asked
+            // — at most 10 pages deep.
+            let want = start.saturating_add(limit) as usize;
+            let (all, _) = self
+                .get_pages_until(
+                    &url,
+                    &[("cql", cql), ("limit", "100"), ("expand", "space")],
+                    10,
+                    want,
+                    "search_pages",
+                )
+                .await?;
+            all.into_iter()
+                .skip(start as usize)
+                .take(limit as usize)
+                .collect()
+        };
+        let results_arr = results_vec.as_slice();
 
         let mut pages = Vec::with_capacity(results_arr.len());
         for p in results_arr {
@@ -701,6 +755,21 @@ pub fn build_page_cql(space_key: Option<&str>, query: &str) -> String {
         _ => String::new(),
     };
     format!("type=page{space_clause} and title ~ \"{escaped}\"")
+}
+
+/// Full-text variant of [`build_page_cql`]: matches the title OR the page body
+/// (`text ~`). A numeric query still means a page id.
+pub fn build_page_text_cql(space_key: Option<&str>, query: &str) -> String {
+    let q = query.trim();
+    if q.chars().all(|c| c.is_ascii_digit()) && !q.is_empty() {
+        return format!("type=page and id={q}");
+    }
+    let escaped: String = q.replace('\\', "\\\\").replace('"', "\\\"");
+    let space_clause = match space_key {
+        Some(k) if !k.trim().is_empty() => format!(" and space=\"{}\"", k.trim()),
+        _ => String::new(),
+    };
+    format!("type=page{space_clause} and (title ~ \"{escaped}\" or text ~ \"{escaped}\")")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2198,6 +2267,15 @@ mod tests {
             client.api("/content/123"),
             "https://site.atlassian.net/wiki/rest/api/content/123"
         );
+    }
+
+    #[test]
+    fn build_page_text_cql_matches_title_or_body() {
+        assert_eq!(
+            build_page_text_cql(Some("DEV"), r#"say "hi""#),
+            r#"type=page and space="DEV" and (title ~ "say \"hi\"" or text ~ "say \"hi\"")"#
+        );
+        assert_eq!(build_page_text_cql(None, "42"), "type=page and id=42");
     }
 
     // ── build_page_cql ───────────────────────────────────────────────────────

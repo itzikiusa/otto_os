@@ -24,8 +24,11 @@ have one Slack, one Telegram and one Webhook integration.
 1. At api.slack.com/apps, create an app with **Socket Mode** turned on. Give the
    bot the `chat:write`, `channels:history`, `groups:history`, `im:history`,
    `mpim:history`, `files:read`, `files:write` and `app_mentions:read` scopes,
-   and subscribe to the `app_mention` and `message.*` bot events. The full
-   manifest is in `docs/features/channels-slack-telegram.md`.
+   and subscribe to the `app_mention` and `message.*` bot events. Add
+   `users:read`, `channels:read` and `groups:read` too if you want names next
+   to the ids in Settings (an "Add person…" picker for allowed users and a
+   "Choose channel…" picker); without them you paste ids. The full manifest is
+   in `docs/features/channels-slack-telegram.md`.
 2. Install the app to your Slack workspace and copy the **Bot User OAuth
    Token** (`xoxb-…`).
 3. Under **Basic information → App-level tokens**, create a token with the

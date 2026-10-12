@@ -130,6 +130,26 @@ echo "plugin changed: $( [ "$PLUGIN_CHANGED" = 1 ] && echo yes || echo no)"
 
 # ── Rust ──────────────────────────────────────────────────────────────────────
 if [ -n "$RUST_CHANGED" ] || [ -n "$RUST_TESTED" ]; then
+  # 30 GB must stay free at all times (scripts/disk-guard.sh says why): a
+  # workspace test build peaks at ~35 GB of target/, a few crates at ~15.
+  # Refuse up front, and stop the build if the disk still drops under it.
+  # Gate builds are one-off: incremental mode keeps a second copy of every
+  # crate's codegen (4.7 GB of a partial ottod build, 2026-10-12) and splits
+  # each into up to 256 units that all sit on disk while linking — most of a
+  # 30-40 GB workspace test build. CI already builds this way (rust-cache sets
+  # CARGO_INCREMENTAL=0). Day-to-day
+  # `cargo run` keeps it.
+  export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+  step "disk guard"
+  NEED_GB=15
+  # "all", or most of the workspace by name (an otto-core change): ~35 GB.
+  if [ "$RUST_TESTED" = all ] || [ "$(wc -w <<<"$RUST_TESTED")" -gt 15 ]; then NEED_GB=35; fi
+  run bash "$ROOT/scripts/disk-guard.sh" check "$NEED_GB" check
+  if [ "$DRY" != 1 ] && [ "${DISK_GUARD:-1}" != 0 ]; then
+    bash "$ROOT/scripts/disk-guard.sh" watch $$ check &
+    GUARD_PID=$!
+    trap 'kill "$GUARD_PID" 2>/dev/null || true' EXIT
+  fi
   step "rustfmt"
   if [ "$RUST_CHANGED" = all ]; then
     if [ "$FMT_CHECK" = 1 ]; then run "$CARGO" fmt --all --check; else run "$CARGO" fmt --all; fi

@@ -1,9 +1,10 @@
 //! Axum router for workspace channel-integration endpoints.
 //! All paths are relative to the `/api/v1` mount point.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -88,6 +89,10 @@ pub fn router<S: ChannelsCtx>() -> Router<S> {
             "/workspaces/{id}/integrations/seed-from-loom",
             post(seed_from_loom::<S>),
         )
+        .route(
+            "/workspaces/{id}/integrations/slack/directory",
+            get(slack_directory::<S>),
+        )
 }
 
 /// Response body for a test-message call.
@@ -127,6 +132,39 @@ async fn integration_status<S: ChannelsCtx>(
         .check(&user.0, &ws_id, WorkspaceRole::Viewer)
         .await?;
     Ok(Json(crate::health::snapshot(&ws_id)))
+}
+
+/// `GET /api/v1/workspaces/{id}/integrations/slack/directory[?refresh=1]` —
+/// the Slack workspace's members and channels (via the saved bot token) so
+/// the settings card can show names next to ids. Editor-gated like the rest
+/// of the card's configuration; never errors on a Slack-side failure — each
+/// part carries its own `*_error` and the UI falls back to bare ids.
+async fn slack_directory<S: ChannelsCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(ws_id): Path<Id>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<crate::slack_directory::SlackDirectory>> {
+    s.roles()
+        .check(&user.0, &ws_id, WorkspaceRole::Editor)
+        .await?;
+    let token = otto_core::secrets::get_async(s.secrets(), &format!("chan-bot-{ws_id}-slack"))
+        .await
+        .ok()
+        .flatten()
+        .filter(|t| !t.trim().is_empty());
+    let Some(token) = token else {
+        let missing = "Save a Slack bot token first.".to_string();
+        return Ok(Json(crate::slack_directory::SlackDirectory {
+            users_error: Some(missing.clone()),
+            channels_error: Some(missing),
+            ..Default::default()
+        }));
+    };
+    let refresh = params
+        .get("refresh")
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true"));
+    Ok(Json(crate::slack_directory::lookup(&token, refresh).await))
 }
 
 async fn upsert_integration<S: ChannelsCtx>(

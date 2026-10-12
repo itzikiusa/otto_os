@@ -7,6 +7,13 @@
   import type { ConfluenceSpace, ConfluencePageSummary } from './types';
   import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { untrack } from 'svelte';
+  import { openExternal } from '../../lib/external';
+  import {
+    CQL_CHEATSHEET, CQL_DOCS, CQL_TEMPLATES, JQL_CHEATSHEET, JQL_DOCS, JQL_TEMPLATES, fillTemplate,
+  } from './queryTemplates';
 
   interface PickedItem {
     key: string;
@@ -34,6 +41,12 @@
 
   // --- shared search state ---
   let query = $state('');
+  // How the query is read: free text (Jira) / title (Confluence), title +
+  // body (Confluence), or a raw JQL / CQL expression run verbatim. Raw modes
+  // search on Enter — a half-typed expression is a guaranteed 400.
+  type SearchMode = 'text' | 'body' | 'raw';
+  let mode = $state<SearchMode>('text');
+  const rawMode = $derived(mode === 'raw');
   let jiraResults: IssueSummary[] = $state([]);
   let confluenceResults: ConfluencePageSummary[] = $state([]);
   let searching = $state(false);
@@ -75,6 +88,7 @@
     ++searchSeq; searchCtl?.abort();
     searching = false; loadingMore = false; searchError = ''; searched = false; retrySearch = null;
     query = '';
+    mode = 'text';
     jiraResults = [];
     confluenceResults = [];
     jiraOffset = 0;
@@ -145,7 +159,9 @@
     query = '';
     // Reload with the new project/space filter.
     if (accountId && sourceKind === 'jira') {
-      void search('', 0, false, proj || undefined);
+      // untrack: search() reads the Match mode — switching it must not re-run
+      // this reset (it wiped the typed query and fired an empty search).
+      untrack(() => void search('', 0, false, proj || undefined));
     } else if (accountId && sourceKind === 'confluence' && space) {
       // Confluence: wait for user to type (spaces are wide).
     }
@@ -154,10 +170,47 @@
   // --- search ---
   function onQueryInput(): void {
     if (debounceTimer) clearTimeout(debounceTimer);
+    if (rawMode) return;
     const q = query.trim();
     if (!accountId) return;
     // Empty query re-triggers the recency default; no early return.
     debounceTimer = setTimeout(() => void search(q, 0, false), 350);
+  }
+
+  // Raw-mode help: examples to start from + a one-screen syntax sheet.
+  let syntaxOpen = $state(false);
+  let queryInput: HTMLInputElement | undefined = $state();
+  const rawLang = $derived(sourceKind === 'jira' ? 'JQL' : 'CQL');
+  function showExamples(e: MouseEvent): void {
+    const key = sourceKind === 'jira' ? selectedProjectKey : selectedSpaceKey;
+    const list = sourceKind === 'jira' ? JQL_TEMPLATES : CQL_TEMPLATES;
+    ctxMenu.show(e, list.map((t) => {
+      const q = fillTemplate(t.query, key);
+      return {
+        label: t.label,
+        title: q,
+        action: () => {
+          query = q;
+          // Placed, not run: most need a value edited (version, epic, label).
+          queueMicrotask(() => queryInput?.focus());
+        },
+      };
+    }));
+  }
+
+  function onQueryKey(e: KeyboardEvent): void {
+    if (e.key !== 'Enter' || !rawMode || !accountId) return;
+    e.preventDefault();
+    const q = query.trim();
+    if (q) void search(q, 0, false);
+  }
+
+  function onModeChange(): void {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    const q = query.trim();
+    // Switching INTO a raw mode leaves the results until Enter; switching out
+    // re-runs the text search (empty = the Jira recency default).
+    if (!rawMode && accountId && (q || sourceKind === 'jira')) void search(q, 0, false);
   }
 
   /**
@@ -176,6 +229,8 @@
     projectOverride?: string,
   ): Promise<void> {
     if (!accountId) return;
+    // An empty raw query is not "recent issues" — it waits for Enter.
+    if (rawMode && !q.trim()) return;
     searchCtl?.abort();
     const ctl = new AbortController();
     searchCtl = ctl;
@@ -192,8 +247,11 @@
       if (sourceKind === 'jira') {
         const proj = projectOverride ?? selectedProjectKey;
         const projectParam = proj ? `&project=${encodeURIComponent(proj)}` : '';
+        const queryParam = rawMode
+          ? `jql=${encodeURIComponent(q)}`
+          : `q=${encodeURIComponent(q)}${projectParam}`;
         const page = await api.get<IssueSummary[]>(
-          `/issue/search?account_id=${encodeURIComponent(accountId)}&q=${encodeURIComponent(q)}${projectParam}&start_at=${startAt}`,
+          `/issue/search?account_id=${encodeURIComponent(accountId)}&${queryParam}&start_at=${startAt}`,
           ctl.signal,
         );
         if (!current()) return;
@@ -209,8 +267,11 @@
         const spaceParam = selectedSpaceKey
           ? `&space=${encodeURIComponent(selectedSpaceKey)}`
           : '';
+        const queryParam = rawMode
+          ? `cql=${encodeURIComponent(q)}`
+          : `q=${encodeURIComponent(q)}${spaceParam}${mode === 'body' ? '&mode=text' : ''}`;
         const pages = await api.get<ConfluencePageSummary[]>(
-          `/issue/confluence/search?account_id=${encodeURIComponent(accountId)}&q=${encodeURIComponent(q)}${spaceParam}`,
+          `/issue/confluence/search?account_id=${encodeURIComponent(accountId)}&${queryParam}`,
           ctl.signal,
         );
         if (!current()) return;
@@ -249,9 +310,13 @@
   }
 
   const searchPlaceholder = $derived(
-    sourceKind === 'jira'
-      ? (selectedProjectKey ? 'Number (5218) or name…' : 'PROJ-123, number, or text…')
-      : 'Page title or id…',
+    rawMode
+      ? (sourceKind === 'jira'
+        ? 'fixVersion = "6.23.0" ORDER BY key — Enter to run'
+        : 'space = DEV AND label = "release" — Enter to run')
+      : sourceKind === 'jira'
+        ? (selectedProjectKey ? 'Number (5218) or name…' : 'PROJ-123, number, or text…')
+        : mode === 'body' ? 'Words in the title or page body…' : 'Page title or id…',
   );
 
   const hasResults = $derived(
@@ -314,18 +379,64 @@
 
 <!-- Search input -->
 <div class="picker-field">
-  <label class="picker-label" for="ss-query">
-    {sourceKind === 'jira' ? 'Search issues' : 'Search pages'}
-  </label>
+  <div class="query-head">
+    <label class="picker-label" for="ss-query">
+      {sourceKind === 'jira' ? 'Search issues' : 'Search pages'}
+    </label>
+    <select
+      class="mode-select"
+      aria-label="Match"
+      title="How the search box is read"
+      bind:value={mode}
+      onchange={onModeChange}
+    >
+      {#if sourceKind === 'jira'}
+        <option value="text">Text or key</option>
+        <option value="raw">JQL</option>
+      {:else}
+        <option value="text">Title</option>
+        <option value="body">Title + body</option>
+        <option value="raw">CQL</option>
+      {/if}
+    </select>
+  </div>
   <input dir="auto"
     id="ss-query"
     class="picker-input"
+    class:mono={rawMode}
+    bind:this={queryInput}
     bind:value={query}
     oninput={onQueryInput}
+    onkeydown={onQueryKey}
     placeholder={searchPlaceholder}
     spellcheck="false"
     autocomplete="off"
   />
+  {#if rawMode}
+    <div class="raw-help">
+      <button type="button" class="help-btn" aria-haspopup="menu" onclick={showExamples}>
+        <Icon name="note" size={12} /> Examples…
+      </button>
+      <button type="button" class="help-btn" aria-expanded={syntaxOpen} onclick={() => (syntaxOpen = !syntaxOpen)}>
+        <Icon name={syntaxOpen ? 'chevronDown' : 'chevronRight'} size={12} /> {rawLang} syntax
+      </button>
+      <button type="button" class="help-btn" title="Open Atlassian’s {rawLang} reference in the browser"
+        onclick={() => void openExternal(sourceKind === 'jira' ? JQL_DOCS : CQL_DOCS)}>
+        <Icon name="external" size={12} /> Reference
+      </button>
+    </div>
+    {#if syntaxOpen}
+      <dl class="cheatsheet" aria-label="{rawLang} cheat sheet">
+        {#each sourceKind === 'jira' ? JQL_CHEATSHEET : CQL_CHEATSHEET as [term, text] (term)}
+          <dt>{term}</dt>
+          <dd class="mono">{text}</dd>
+        {/each}
+      </dl>
+    {/if}
+    <p class="raw-note">
+      Enter runs it as written — the {sourceKind === 'jira' ? 'project' : 'space'} filter above only fills the examples.
+    </p>
+  {/if}
 </div>
 
 {#if searchError}
@@ -381,6 +492,80 @@
     flex-direction: column;
     gap: 2px;
     margin-bottom: 10px;
+  }
+  .query-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .mode-select {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    padding: 0;
+    cursor: pointer;
+  }
+  .mode-select:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 1px;
+  }
+  .picker-input.mono {
+    font-family: var(--font-mono);
+  }
+  .raw-help {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 4px;
+    margin-top: 4px;
+  }
+  .help-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 6px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .help-btn:hover {
+    background: var(--hover);
+  }
+  .help-btn:focus-visible {
+    outline: 2px solid var(--accent-text);
+  }
+  .cheatsheet {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 10px;
+    margin: 6px 0 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    font-size: var(--fs-xs);
+  }
+  .cheatsheet dt {
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .cheatsheet dd {
+    margin: 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .raw-note {
+    margin: 2px 0 0;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .picker-label {
     font-size: var(--fs-xs);
