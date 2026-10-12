@@ -133,6 +133,13 @@ if [ -n "$RUST_CHANGED" ] || [ -n "$RUST_TESTED" ]; then
   # 30 GB must stay free at all times (scripts/disk-guard.sh says why): a
   # workspace test build peaks at ~35 GB of target/, a few crates at ~15.
   # Refuse up front, and stop the build if the disk still drops under it.
+  # Gate builds are one-off: incremental mode keeps a second copy of every
+  # crate's codegen (4.7 GB of a partial ottod build, 2026-10-12) and splits
+  # each into up to 256 units that all sit on disk while linking — most of a
+  # 30-40 GB workspace test build. CI already builds this way (rust-cache sets
+  # CARGO_INCREMENTAL=0). Day-to-day
+  # `cargo run` keeps it.
+  export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
   step "disk guard"
   NEED_GB=15
   # "all", or most of the workspace by name (an otto-core change): ~35 GB.
