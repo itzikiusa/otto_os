@@ -1095,8 +1095,7 @@ fn base_tool_catalog() -> Value {
                         "doc_id": { "type": "string" },
                         "name": { "type": "string", "description": "File name; required when doc_id is omitted." },
                         "content": { "type": "string" },
-                        "language": { "type": "string" },
-                        "scope": { "type": "string", "enum": ["workspace", "global"] }
+                        "language": { "type": "string" }, "scope": { "type": "string", "enum": ["workspace", "global"] }
                     },
                     "required": ["content"]
                 }
@@ -3742,7 +3741,6 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 _ => {
                     let content = arg_string_allow_empty(args, "content")?;
                     let language = arg_optional_string(args, "language")?.filter(|s| !s.is_empty());
-                    let scope = arg_optional_string(args, "scope")?.filter(|s| !s.is_empty());
                     let mut id = arg_optional_string(args, "doc_id")?.filter(|s| !s.is_empty());
                     let doc_name = arg_optional_string(args, "name")?.filter(|s| !s.is_empty());
                     if id.is_none() {
@@ -3766,13 +3764,10 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                         None => {
                             let mut body = json!({
                                 "name": doc_name.unwrap_or_default(),
-                                "content": content,
+                                "content": content, "scope": arg_optional_string(args, "scope")?.filter(|s| !s.is_empty()),
                             });
                             if let Some(l) = language {
                                 body["language"] = json!(l);
-                            }
-                            if let Some(sc) = scope {
-                                body["scope"] = json!(sc);
                             }
                             let mut doc = ctx.post_json(&base, &body).await?;
                             // Don't echo the content back into the transcript.
