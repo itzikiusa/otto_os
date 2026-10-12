@@ -2,15 +2,6 @@
   import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
   import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
-  $effect(() => {
-    const onVis = (): void => transcriptStore.setVisible(!document.hidden);
-    onVis();
-    document.addEventListener('visibilitychange', onVis);
-    return () => {
-      document.removeEventListener('visibilitychange', onVis);
-      transcriptStore.reset();
-    };
-  });
   import { untrack } from 'svelte';
   // Main shell (post-auth): rail/navigator + tab bar + module router +
   // right panel + status bar + palette + global keys.
@@ -46,7 +37,8 @@
   import { navPending } from '../lib/navPending.svelte';
   import { startSnip } from '../lib/snip';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
-  import { RIGHT_TABS, SESSION_PANEL } from '../lib/rightTabs';
+  import { RIGHT_TABS, SIDE_PANEL } from '../lib/rightTabs';
+  import { rightPanel } from '../lib/stores/rightPanel.svelte';
   import { startWindowDrag } from '../lib/windowDrag';
   import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute, closePopoutWindow } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
@@ -75,8 +67,6 @@
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
-  // Old bookmarks lead to the workspace's existing context editor.
-  $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
   import { git } from '../lib/stores/git.svelte';
   import { auth, impersonationStartedMs } from '../lib/stores/auth.svelte';
   import { events } from '../lib/events.svelte';
@@ -88,11 +78,27 @@
   import { activeNavId, availableModules, goToEntries, groupLabel, moduleLabel, resolveOrder, visibleOrder } from '../lib/sidebar';
   import { prefetchQueue, shouldPrefetch } from '../lib/prefetchPlan';
   import { api, baseUrl, getToken } from '../lib/api/client';
-  $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
   import type { Connection, Session } from '../lib/api/types';
   import { toasts } from '../lib/toast.svelte';
   import { now } from '../lib/stores/now.svelte';
   import { badgeWriter, tauriBadgeSink } from '../lib/dockBadge';
+  import { notifications } from '../lib/stores/notifications.svelte';
+
+  // Effects that used to sit between the imports, in their original order.
+  // Transcript store: follows page visibility; reset on unmount.
+  $effect(() => {
+    const onVis = (): void => transcriptStore.setVisible(!document.hidden);
+    onVis();
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      transcriptStore.reset();
+    };
+  });
+  // Old bookmarks lead to the workspace's existing context editor.
+  $effect(() => { if (router.module === 'projects') router.go('settings/context-soul'); });
+  // Transcript cache identity: daemon + signed-in user.
+  $effect(() => {transcriptStore.setIdentity(JSON.stringify([baseUrl(),auth.me?.id ?? '']));});
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
 
@@ -195,12 +201,68 @@
     ui.navDrawerOpen = false;
   });
 
-  // The right activity panel (Git/Files/Notes/Activity/Info/Browser/API) is only
-  // meaningful for coding-agent sessions. Connection terminals (SSH / DB / custom,
-  // kind === 'connection') are opened from the Connections page but run in the
-  // Agents view; they don't need the panel — so gate it on the focused session
-  // actually being an agent session.
-  const showRightPanel = $derived(moduleName === 'agents' && ws.activeSession?.kind === 'agent');
+  // The Side panel (Git/Files/Notes/…, plus a page's own tabs) is on every
+  // page, pop-out windows included (a popped-out page keeps its tools; e2e
+  // desktop-rpanel-tabs): beside an agent session it follows the session,
+  // elsewhere a workspace folder (stores/rightPanel.svelte.ts). The
+  // side-by-side pane's document keeps the old rule — only beside an agent
+  // session — so a split never shows two rails.
+  const showRightPanel = $derived(!isEmbedded || rightPanel.session);
+
+  // ---- "needs you" raise/lower flag (lib/attention.ts) ----
+  // The operator is present while this window is visible and focused. Focus
+  // moving INTO an iframe of this window (file preview, Outputs, Browser,
+  // canvas) blurs the window but the operator is still here:
+  // `document.hasFocus()` is true while a nested frame has focus, so a blur
+  // is re-checked a tick later instead of trusted.
+  $effect(() => {
+    let blurTimer: ReturnType<typeof setTimeout> | undefined;
+    const sync = (): void => {
+      ws.operatorPresent = document.visibilityState === 'visible' && document.hasFocus();
+    };
+    const onVis = (): void => sync();
+    const onFocus = (e: Event): void => {
+      clearTimeout(blurTimer);
+      if (e.type === 'focus') ws.operatorPresent = document.visibilityState === 'visible';
+      else blurTimer = setTimeout(sync, 0);
+    };
+    // Another window lowered / raised a flag: adopt it.
+    const onStorage = (e: StorageEvent): void => {
+      if (e.storageArea === localStorage && e.key === 'otto_attention') ws.reloadAttention();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onFocus);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      clearTimeout(blurTimer);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onFocus);
+      window.removeEventListener('storage', onStorage);
+    };
+  });
+  // LOWER: entering / focusing a session (even doing nothing) puts its flag
+  // down and answers its waiting/idle notices; it stays down until the next
+  // turn end or prompt.
+  $effect(() => {
+    const id = ws.activeSessionId;
+    if (!id || moduleName !== 'agents' || !ws.operatorPresent) return;
+    untrack(() => {
+      ws.clearNeedsYou(id, notifications.sessionNoticeAt(id));
+      void notifications.markSessionSeen(id);
+    });
+  });
+  // A flag restored from STORAGE is settled once its session's status is
+  // known: working again or exited means it's stale (the live
+  // `session_status` rule, applied once to loaded rows). Flags raised in this
+  // run — e.g. a permission prompt while the status still reads working — are
+  // never touched here.
+  $effect(() => {
+    void ws.needsYou;
+    const known = ws.restoredFlagIds().map((id) => [id, ws.statusMap[id]] as const).filter(([, st]) => st !== undefined);
+    if (known.length) untrack(() => known.forEach(([id, st]) => ws.settleRestoredFlag(id, st)));
+  });
 
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
   // auth.phase only; the write to plugins.list isn't read here, so no loop.
@@ -614,7 +676,7 @@
       { id: 'core.go-back', title: 'Go back', group: 'Navigate', shortcut: '⌘⇧←', keywords: 'previous page history return', run: () => router.back() },
       { id: 'core.go-forward', title: 'Go forward', group: 'Navigate', shortcut: '⌘⇧→', keywords: 'next page history', run: () => router.forward() },
       { id: 'core.toggle-rail', title: 'Toggle sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
-      { id: 'core.toggle-right', title: `Toggle ${SESSION_PANEL}`, group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
+      { id: 'core.toggle-right', title: `Toggle ${SIDE_PANEL}`, group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toastError('Couldn’t open window', e)) }] : []),
       { id: 'core.scheme-auto', title: 'Use automatic color scheme (follow system)', group: 'View', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
       { id: 'core.scheme-light', title: 'Use light color scheme', group: 'View', keywords: 'color scheme mode day', run: () => ui.setScheme('light') },
@@ -622,14 +684,18 @@
       { id: 'core.theme-native', title: 'Use Native theme', group: 'View', run: () => ui.setTheme('native') },
       { id: 'core.theme-pro-dark', title: 'Use Pro Dark theme', group: 'View', run: () => ui.setTheme('pro-dark') },
       { id: 'core.theme-warm', title: 'Use Warm theme', group: 'View', run: () => ui.setTheme('warm') },
-      // One "Open <tab> panel" per Session-panel tab (lib/rightTabs.ts).
+      // One "Open <tab> panel" per Side-panel tab (lib/rightTabs.ts). A tab
+      // that doesn't exist here (Activity off a session) says so instead.
       ...RIGHT_TABS.map((t) => ({
         id: t.id === 'git' ? 'core.git-panel' : t.id === 'notes' ? 'core.notes' : `core.panel-${t.id}`,
         title: `Open ${t.label} panel`,
         group: 'View',
-        detail: SESSION_PANEL,
-        keywords: `session panel right side ${t.id}`,
-        run: () => ui.openRight(t.id),
+        detail: SIDE_PANEL,
+        keywords: `side session panel right ${t.id}`,
+        run: () => {
+          if (rightPanel.available(t.id)) ui.openRight(t.id);
+          else toasts.info(`${t.label} isn’t available here`, t.sessionOnly ? 'It belongs to an agent session: open one in Agents.' : 'This page already shows it.');
+        },
       })),
       { id: 'core.shortcuts', title: 'Show keyboard shortcuts', group: 'Help', shortcut: '?', keywords: 'keys cheat sheet bindings hotkeys', run: () => (shortcutsOpen = true) },
       { id: 'core.logout', title: 'Sign out', group: 'Account', keywords: 'log out logout account', run: () => auth.logout() },
@@ -1207,8 +1273,8 @@
         class="mtop-btn"
         class:active={ui.rightOpen}
         onclick={() => ui.toggleRight()}
-        title={SESSION_PANEL}
-        aria-label={SESSION_PANEL}
+        title={SIDE_PANEL}
+        aria-label={SIDE_PANEL}
         aria-expanded={ui.rightOpen}
       >
         <Icon name="panel" size={20} />
@@ -1281,16 +1347,15 @@
             {/if}
           </div>
 
-          <!-- The Session panel (Git/Files/Activity/…) for the focused session. Shown in
-               every Agents layout — tabbed, split, AND tiled — so per-session activity
-               stays visible in multi-session views (it tracks `ws.activeSession`, the
-               focused pane/tile), not just when a single session is on screen. It
-               belongs to the Agents pane, so a side-by-side split keeps it there. -->
+          <!-- The Side panel (rail + Git/Files/Notes/… content) on every page. In
+               every Agents layout — tabbed, split, AND tiled — it tracks the focused
+               session (`ws.activeSession`); elsewhere a workspace folder. It belongs
+               to the main pane, so a side-by-side split keeps it there. -->
           {#if showRightPanel}
-            <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label={SESSION_PANEL} width="min(92vw, 360px)">
-              <!-- Loaded with the Agents page (shell/pages.svelte.ts). -->
+            <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label={SIDE_PANEL} width="min(92vw, 360px)">
+              <!-- Its chunk starts with the Agents page, or on first show (pages.svelte.ts). -->
               {@const RightPanel = loadedRightPanel()}
-              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" role="status" aria-label="Loading the {SESSION_PANEL}"><Skeleton rows={4} height={28} /></div>{/if}
+              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" class:rail={!compactShell} role="status" aria-label="Loading the {SIDE_PANEL}">{#if compactShell}<Skeleton rows={4} height={28} />{/if}</div>{/if}
             </Drawer>
           {/if}
         </div>
@@ -1368,6 +1433,13 @@
 <style>
   .rp-loading {
     padding: 12px;
+  }
+  /* Desktop: hold the rail's 36px while its chunk lands (no layout jump). */
+  .rp-loading.rail {
+    width: 36px;
+    padding: 0;
+    flex-shrink: 0;
+    border-inline-start: 1px solid var(--border);
   }
   .shell {
     /* 100% (of #app), NOT 100vh — in the transparent overlay-titlebar

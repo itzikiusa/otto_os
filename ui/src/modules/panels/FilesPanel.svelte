@@ -1,7 +1,9 @@
 <script lang="ts">
   // FilesPanel: multi-section file tree container (up to 4 sections).
-  // Each section is an independent FileTree rooted at its own folder.
-  import { ws } from '../../lib/stores/workspace.svelte';
+  // Each section is an independent FileTree rooted at its own folder, with
+  // folder navigation; it starts at the Side panel's folder (the session's
+  // cwd, or the workspace folder picked in the panel).
+  import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import FileTree from './FileTree.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
@@ -9,17 +11,11 @@
 
   interface Section {
     id: number;
-    /** undefined → FileTree falls back to ws default */
+    /** undefined → the Side panel's folder */
     root: string | undefined;
   }
 
   let nextId = $state(1);
-
-  // Default root from workspace (read once at init; sections track their own root via FileTree).
-  function defaultRoot(): string | undefined {
-    const r = ws.activeSession?.cwd || ws.current?.root_path;
-    return r || undefined;
-  }
 
   let sections: Section[] = $state([{ id: nextId++, root: undefined }]);
 
@@ -60,8 +56,9 @@
       {/if}
       <div class="fp-section">
         <FileTree
-          root={section.root}
+          root={section.root ?? (rightPanel.folder || undefined)}
           primary={i === 0}
+          navigation
           onClose={sections.length > 1 ? () => removeSection(section.id) : undefined}
         />
       </div>

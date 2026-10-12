@@ -370,15 +370,7 @@ pub async fn claude_ingest(
         // so drop it and let the monitor path own "idle". Permission prompts
         // and other messages are genuine blocks → still immediate.
         if !msg.to_ascii_lowercase().contains("waiting for your input") {
-            notify(
-                &ctx,
-                &session,
-                NoticeSeverity::Warn,
-                "Agent needs attention",
-                format!("{} · {}", session.title, clip(msg, 160)),
-                "waiting",
-            )
-            .await;
+            notify_waiting(&ctx, &session, msg).await;
         }
     }
 
@@ -453,6 +445,22 @@ fn normalize_codex(p: &Value) -> Option<TrailDraft> {
             detail: None,
         }),
     }
+}
+
+/// A prompt / permission request is waiting on the operator: signal the
+/// "needs you" flag ALWAYS ([`Event::SessionAttention`]), then the persisted
+/// `:waiting` notice, which the `session_events` setting may suppress.
+async fn notify_waiting(ctx: &ServerCtx, session: &Session, msg: &str) {
+    crate::monitor::signal_attention(ctx, session, "prompt");
+    notify(
+        ctx,
+        session,
+        NoticeSeverity::Warn,
+        "Agent needs attention",
+        format!("{} · {}", session.title, clip(msg, 160)),
+        "waiting",
+    )
+    .await;
 }
 
 /// Persist + broadcast a per-session notice, de-duped on a stable source key.
@@ -938,6 +946,102 @@ mod tests {
             nudge_pending: false,
             nudged_at: None,
         }
+    }
+
+    /// R9: a prompt raises the SPA's "needs you" flag whatever the
+    /// notification settings say — with session notices OFF the attention
+    /// event still goes out and no notice is persisted; with them ON both do.
+    #[tokio::test]
+    async fn waiting_prompt_signals_attention_even_with_session_notices_off() {
+        use otto_core::event::Event;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let u = users.create("u", "x", "U", false).await.unwrap();
+        let root = tmp.path().to_string_lossy().to_string();
+        let ws = ctx.workspaces.create("A", &root, &u.id).await.unwrap();
+        let session = otto_state::SessionsRepo::new(pool.clone())
+            .create(otto_state::NewSession {
+                workspace_id: ws.id.clone(),
+                kind: otto_core::domain::SessionKind::Agent,
+                provider: "claude".into(),
+                title: "Agent".into(),
+                cwd: root.clone(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: u.id.clone(),
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let repo = ctx.notifications().repo().clone();
+        let mut settings = repo.get_settings().await.unwrap();
+        let notices = || async {
+            repo.list(50, &otto_state::NoticeAccess::All)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|n| {
+                    n.source_key.as_deref() == Some(&format!("session:{}:waiting", session.id))
+                })
+                .count()
+        };
+        let next_attention = |rx: &mut tokio::sync::broadcast::Receiver<Event>| loop {
+            match rx.try_recv() {
+                Ok(Event::SessionAttention {
+                    session_id, reason, ..
+                }) => return Some((session_id, reason)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        };
+
+        settings.session_events = false;
+        repo.put_settings(&settings).await.unwrap();
+        let mut rx = ctx.events.subscribe();
+        notify_waiting(&ctx, &session, "Claude needs your permission to use Bash").await;
+        assert_eq!(
+            next_attention(&mut rx),
+            Some((session.id.clone(), "prompt".to_string()))
+        );
+        assert_eq!(notices().await, 0, "the setting still gates the notice");
+
+        settings.session_events = true;
+        repo.put_settings(&settings).await.unwrap();
+        notify_waiting(&ctx, &session, "Claude needs your permission to use Bash").await;
+        assert_eq!(
+            next_attention(&mut rx),
+            Some((session.id.clone(), "prompt".to_string()))
+        );
+        assert_eq!(notices().await, 1);
+    }
+
+    /// Turn-end attention is for interactive agent sessions only.
+    #[test]
+    fn attention_is_for_interactive_agent_sessions() {
+        let mut s: Session = serde_json::from_value(serde_json::json!({
+            "id": "s", "workspace_id": "w", "kind": "agent", "provider": "claude", "title": "t",
+            "status": "idle", "cwd": "/tmp", "created_by": "u", "created_at": "2026-10-11T00:00:00Z",
+            "last_active_at": "2026-10-11T00:00:00Z", "archived": false, "meta": {}
+        }))
+        .unwrap();
+        assert!(crate::monitor::attention_wanted(&s));
+        s.provider = "shell".into();
+        assert!(!crate::monitor::attention_wanted(&s), "a plain shell");
+        s.provider = "ssh".into();
+        s.kind = otto_core::domain::SessionKind::Connection;
+        assert!(
+            !crate::monitor::attention_wanted(&s),
+            "a connection terminal"
+        );
+        s.kind = otto_core::domain::SessionKind::Agent;
+        s.provider = "codex".into();
+        s.meta = serde_json::json!({ "source": "insights" });
+        assert!(
+            !crate::monitor::attention_wanted(&s),
+            "a background session"
+        );
     }
 
     #[test]

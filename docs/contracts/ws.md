@@ -550,7 +550,7 @@ every event it is allowed). Otto: `ui/src/lib/topicSocket.ts` (the tray).
 Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). The tag is
 the `type` field (snake_case of the variant name); the remaining keys are the payload.
 Delivery scope: **session-family events** (`session_status`, `session_created`,
-`session_meta_updated`, `session_renamed`, `session_archive_changed`, `session_removed`, `trail_appended`,
+`session_meta_updated`, `session_renamed`, `session_archive_changed`, `session_removed`, `session_attention`, `trail_appended`,
 `tasks_updated`, `transcript_appended`, `transcript_live`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
 `workspace_id`; other **workspace-scoped events** (improvement, swarm,
@@ -575,6 +575,7 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
 {"type":"session_meta_updated","session_id":"…","workspace_id":"…","meta":{…}}
 {"type":"session_renamed","session_id":"…","workspace_id":"…","title":"…"}
 {"type":"session_removed","session_id":"…","workspace_id":"…"}
+{"type":"session_attention","session_id":"…","workspace_id":"…","reason":"turn_end"|"prompt"}
 ```
 
 - `session_status` — a session's live status changed (`SessionStatus` enum).
@@ -592,6 +593,13 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
   provider-title auto-namer adopting the CLI's own session title
   (`meta.title_source = "provider"`).
 - `session_removed` — a session row was removed (PTY killed).
+- `session_attention` — an AGENT session needs the operator: `reason: "turn_end"` (its turn
+  finished: Working→Idle confirmed idle for `idle_notice_confirm_secs` with a quiet process
+  tree, `monitor.rs`) or `"prompt"` (claude's Notification hook: a permission or question;
+  not its generic 60 s "waiting for your input"). Sent **whatever** Settings → Notifications
+  "session events" says (that setting only gates the persisted `:waiting` notice below), so
+  the SPA's "needs you" flag (raise on this, lower when the operator enters/focuses the
+  session) never depends on notification delivery. Background sessions never send it.
 
 Sessions of the hidden scratch workspace (workspace-less sessions, see api.md
 #16a) carry `workspace_id: "scratch"`; delivery rules are unchanged (owner ∨
@@ -613,7 +621,7 @@ Notices & notifications:
   present the notification targets a single user and is delivered only to that user;
   when absent it is delivered per the standard workspace/broadcast scoping.
   A notice whose `source_key` ends in `:waiting` with an `open_session` action marks the
-  session as "needs you" in the SPA (sticky flag, cleared on open/input). Two producers:
+  session as "needs you" in the SPA (raised; lowered when the operator enters/focuses the session — see `session_attention`). Two producers:
   claude's native Notification hook, and — for every AGENT provider — the daemon's
   Working→Idle turn-finish transition (`session:{id}:waiting`). Shell sessions keep the
   plain `session:{id}:idle` key and never raise the flag.

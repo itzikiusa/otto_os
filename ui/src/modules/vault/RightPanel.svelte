@@ -43,7 +43,7 @@
   }
 </script>
 
-<aside class="right">
+<div class="right">
   {#if vault.current?.okf && vault.note && !vault.note.meta.reserved}
     <section><h3 class="hdr">Knowledge provenance</h3><KnowledgeMetadata frontmatter={vault.note.meta.frontmatter} /></section>
   {/if}
@@ -197,7 +197,7 @@
       {/if}
     </section>
   {/if}
-</aside>
+</div>
 
 <style>
   .right {

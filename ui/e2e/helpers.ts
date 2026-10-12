@@ -252,19 +252,14 @@ export async function runBarCommand(page: Page, title: string): Promise<void> {
   });
 }
 
-/** Select a right-panel tab by name. A narrow panel folds the tabs that
- *  don't fit into its "More panels" menu, so pick from there when needed. */
+/** Show a Side-panel tab by name: click its rail icon unless it is already
+ *  the one shown (a second click would collapse the panel to the rail). */
 export async function openRightPanelTab(page: Page, name: string): Promise<void> {
-  const panel = page.locator('.rpanel');
-  await expect(panel.locator('.rtab').first()).toBeVisible();
-  const tab = panel.getByRole('tab', { name, exact: true });
-  if (await tab.isVisible()) {
-    await tab.click();
-  } else {
-    await panel.getByRole('button', { name: 'More panels' }).click();
-    await page.locator('.ctx-menu').getByRole('menuitem', { name, exact: true }).click();
-  }
-  await expect(tab).toHaveAttribute('aria-selected', 'true');
+  const btn = page.locator('.rstrip').getByRole('button', { name, exact: true });
+  await expect(btn).toBeVisible();
+  if ((await btn.getAttribute('aria-pressed')) !== 'true') await btn.click();
+  await expect(btn).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.rpanel .rpanel-title')).toHaveText(name);
 }
 
 /** The flattened PNG a snip annotated-save POSTs, as base64. The editor sends

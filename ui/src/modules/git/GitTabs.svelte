@@ -1,6 +1,8 @@
 <script lang="ts">
   // GitKraken-style top-level repo tab strip for the Git page. Each tab is one
-  // OPEN repo (name + current branch + a status dot + a close ✕). Click to
+  // OPEN repo (name + a status dot + a close ✕, and its current branch when
+  // the strip has room — see `fitBranches`; the branch is always in the
+  // tab's tooltip and accessible name). Click to
   // activate, middle-click to close, drag to reorder (mirrors shell/TabBar). The
   // trailing + button opens a picker of repos not already open. Styled like
   // ApiPage's `.req-tabs`. Workspace-independent — driven entirely by the git
@@ -11,6 +13,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { onTabKey } from '../../lib/tabKeys';
+  import { branchMode, repoTabLabel } from './repoTabFit';
 
   interface Props {
     /** Open a repo as a tab (parent loads/wires the active RepoView). */
@@ -19,8 +22,14 @@
     onadd: (mode: 'register' | 'clone' | 'browse') => void;
     /** Rendered inside the PageHeader bar (pill tabs, no own border row). */
     embedded?: boolean;
+    /** The page-level Focus view is showing: its entry is pressed and no
+     *  repo tab reads as selected. */
+    focus?: boolean;
+    /** Toggle Focus. Without it the Focus entry isn't rendered. */
+    ontogglefocus?: () => void;
   }
-  let { onopen, onadd, embedded = false }: Props = $props();
+  let { onopen, onadd, embedded = false, focus = false, ontogglefocus }: Props = $props();
+  const selectedId = $derived(focus ? null : git.activeRepoId);
 
   const byId = $derived(new Map(git.allRepos.map((r) => [r.id, r])));
   const openRepos = $derived(
@@ -125,6 +134,66 @@
     dragOverId = null;
   }
 
+  // ── Branch chips only while they fit ─────────────────────────────────────
+  // Measured, not counted: show every branch, read the widths, and if the row
+  // would overflow keep only the active tab's branch (if THAT fits) or none
+  // (repoTabFit.ts). Written straight to `data-branches` on the list so the
+  // measure → apply round trip happens inside one frame, without a re-render.
+  // Re-measured when the strip or its header resizes, and when the tabs,
+  // their branches or the active tab change.
+  const GAP = 2;
+  function fitBranches(): void {
+    const el = listEl;
+    if (!el) return;
+    el.removeAttribute('data-branches');
+    const tabs = Array.from(el.querySelectorAll<HTMLElement>('.git-tab'));
+    const measures = tabs.map((t) => {
+      const chip = t.querySelector<HTMLElement>('.git-tab-branch');
+      return { full: t.getBoundingClientRect().width + GAP, branch: chip ? chip.getBoundingClientRect().width + 6 : 0 };
+    });
+    const overflowing = el.scrollWidth > el.clientWidth + 0.5;
+    const active = tabs.findIndex((t) => t.classList.contains('active'));
+    el.setAttribute('data-branches', overflowing ? branchMode(measures, el.clientWidth + GAP, active) : 'all');
+  }
+  let fitFrame = 0;
+  function scheduleFit(): void {
+    if (fitFrame) return;
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = 0;
+      fitBranches();
+    });
+  }
+  $effect(() => {
+    const el = listEl;
+    if (!el) return;
+    const ro = new ResizeObserver(scheduleFit);
+    ro.observe(el);
+    // The row is content-sized, so its own size never says "there is room
+    // again": watch what bounds it too — the header row and its siblings (the
+    // actions shrinking frees room) and the header's style, where PageHeader
+    // writes the tab cap (--ph-tabs-max).
+    const header = el.closest('header');
+    const row = el.closest('.ph-tabs-inline')?.parentElement ?? el.parentElement;
+    if (row) {
+      ro.observe(row);
+      for (const child of Array.from(row.children)) ro.observe(child);
+    }
+    const mo = new MutationObserver(scheduleFit);
+    if (header) mo.observe(header, { attributes: true, attributeFilter: ['style'] });
+    scheduleFit();
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      if (fitFrame) cancelAnimationFrame(fitFrame);
+      fitFrame = 0;
+    };
+  });
+  $effect(() => {
+    void openRepos.map((r) => `${r.name}:${branchOf(r.id)}`).join();
+    void selectedId;
+    untrack(scheduleFit);
+  });
+
   // Only the tab row scrolls; + and auto-fetch sit outside it so they are
   // never clipped. Keep the active tab in view when it changes (opened from
   // the picker, restored on load) — it may be off the scroller's edge.
@@ -138,22 +207,39 @@
 </script>
 
 <div class="git-tabs" class:embedded>
+  {#if ontogglefocus && git.allRepos.length > 0}
+    <!-- Focus is cross-repo (my PRs + my Jira work), so it is its own entry
+         pinned before the repo tabs, never one of a repo's sub-tabs. -->
+    <button
+      class="git-focus"
+      class:on={focus}
+      aria-pressed={focus}
+      title={focus ? 'Back to the open repository' : 'Focus: your pull requests and Jira work across repositories'}
+      onclick={ontogglefocus}
+    >
+      <Icon name="zap" size={13} />Focus
+    </button>
+    <span class="git-focus-sep" aria-hidden="true"></span>
+  {/if}
   <!-- The tablist must contain ONLY role="tab" children (ARIA
        aria-required-children), and it is the only part that scrolls: the
        auto-fetch toggle and + stay pinned after it, fully visible however
        many repos are open. -->
   <div class="git-tablist" role="tablist" bind:this={listEl}>
   {#each openRepos as r (r.id)}
+    {@const branch = branchOf(r.id)}
+    {@const label = repoTabLabel(r.name, branch)}
     <div
       class="git-tab"
-      class:active={git.activeRepoId === r.id}
+      class:active={selectedId === r.id}
       class:drag-over={dragOverId === r.id}
       role="tab"
       tabindex={git.activeRepoId === r.id || (!git.activeRepoId && r.id === openRepos[0]?.id) ? 0 : -1}
-      aria-selected={git.activeRepoId === r.id}
+      aria-selected={selectedId === r.id}
+      aria-label={label}
       data-repo-id={r.id}
       draggable="true"
-      title={branchOf(r.id) ? `${r.path}\n${branchOf(r.id)}` : r.path}
+      title={`${label}\n${r.path}`}
       onclick={() => onopen(r.id)}
       onkeydown={(e) => onRepoTabKey(e, r.id)}
       ondragstart={(e) => onDragStart(e, r.id)}
@@ -170,9 +256,9 @@
     >
       <span class="git-tab-dot" class:dirty={isDirty(r.id)} aria-hidden="true"></span>
       <span class="git-tab-name">{r.name}</span>
-      {#if branchOf(r.id)}
-        <span class="git-tab-branch mono">
-          <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branchOf(r.id)}</span>
+      {#if branch}
+        <span class="git-tab-branch mono" aria-hidden="true">
+          <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branch}</span>
         </span>
       {/if}
       <button
@@ -308,6 +394,48 @@
   .git-tab.active .git-tab-branch {
     color: var(--accent-text);
   }
+  /* fitBranches(): the row would overflow — name-only tabs (the active one
+     keeps its branch when that alone fits). */
+  .git-tablist:global([data-branches='none']) .git-tab-branch,
+  .git-tablist:global([data-branches='active']) .git-tab:not(.active) .git-tab-branch {
+    display: none;
+  }
+  .git-focus {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .git-focus:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .git-focus.on {
+    background: var(--accent-soft);
+    border-color: var(--border);
+    color: var(--accent-text);
+  }
+  .git-focus:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  .git-focus-sep {
+    align-self: center;
+    flex-shrink: 0;
+    width: 1px;
+    height: 16px;
+    margin-inline: 4px;
+    background: var(--border);
+  }
   /* Same look as the session TabBar's close (Icon x in a 16px box). */
   .git-tab-close {
     display: grid;
@@ -426,7 +554,8 @@
       min-height: 40px;
     }
     .git-autofetch,
-    .git-tab-new {
+    .git-tab-new,
+    .git-focus {
       min-width: 40px;
       min-height: 40px;
     }

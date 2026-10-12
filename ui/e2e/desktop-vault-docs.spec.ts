@@ -166,6 +166,44 @@ test('ui: tree, reading view, wikilink nav, backlinks, status bar', async ({ pag
   await expect(page.locator('.right .item .t', { hasText: 'Auth API' })).toBeVisible();
 });
 
+test('ui: Note details is a Side panel tab; the Vault never leaves the panel open elsewhere', async ({ page }) => {
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('nd-seeded')) return;
+    sessionStorage.setItem('nd-seeded', '1');
+    localStorage.setItem('otto_right_open', '0');
+    localStorage.setItem('otto_right_tab', 'git');
+    localStorage.removeItem('otto_vault_right_open');
+  });
+  await openPage(page, 'vault');
+  // The previous test left auth-api open; the view is restored with it.
+  await expect(page.locator('.read')).toBeVisible({ timeout: 15_000 });
+  const details = page.locator('.rstrip').getByRole('button', { name: 'Note details', exact: true });
+  await expect(details).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.rpanel .rpanel-title')).toHaveText('Note details');
+  await expect(page.locator('.rpanel .right')).toContainText('Backlinks');
+  // Shown by the Vault's own preference — the panel's saved state is untouched…
+  expect(await page.evaluate(() => [localStorage.getItem('otto_right_open'), localStorage.getItem('otto_right_tab')])).toEqual(['0', 'git']);
+  // …so leaving the Vault leaves the panel closed.
+  await openPage(page, 'home');
+  await expect(page.locator('.rstrip')).toBeVisible();
+  await expect(page.locator('.rpanel')).toHaveCount(0);
+  // Back in the Vault the details show again; hiding them is remembered.
+  await openPage(page, 'vault');
+  await expect(details).toHaveAttribute('aria-pressed', 'true');
+  await details.click();
+  await expect(page.locator('.rpanel')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('otto_vault_right_open'))).toBe('0');
+  await page.reload();
+  await expect(page.locator('.read')).toBeVisible({ timeout: 15_000 });
+  await expect(details).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.rpanel')).toHaveCount(0);
+  // The ⋯ menu brings them back (and remembers that).
+  await page.getByRole('button', { name: 'More vault actions', exact: true }).click();
+  await page.locator('.ctx-menu').getByRole('menuitemcheckbox', { name: /Note details/ }).click();
+  await expect(page.locator('.rpanel .rpanel-title')).toHaveText('Note details');
+  expect(await page.evaluate(() => localStorage.getItem('otto_vault_right_open'))).toBe('1');
+});
+
 test('ui: edit + autosave persists to disk', async ({ page }) => {
   await openPage(page, 'vault');
   const tree = page.locator('.tree');

@@ -48,7 +48,9 @@ test.beforeEach(async ({ page }) => {
 });
 async function openRepo(page: Page, tab = 'graph') {
   await page.goto(`/#/git/${repoId}/${tab}`);
-  await expect(page.locator('.rv-tabs')).toBeVisible();
+  // Focus is the Git page's own view now (the legacy repo/focus link opens it).
+  if (tab === 'focus') await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  else await expect(page.locator('.rv-tabs')).toBeVisible();
 }
 function diff(path: string) {
   return { files: [{ path, old_path: null, is_binary: false, hunks: [{ header: '@@ -0,0 +1 @@', lines: [{ origin: 'add', content: path, old_line: null, new_line: 1 }] }] }] };
@@ -207,6 +209,66 @@ test('switching PR while editing cannot carry the old title into the new PR', as
   await expect(page.locator('.prd-title')).toContainText('PR 2:');
   await expect(page.locator('.prd-title-input')).toHaveCount(0);
 });
+test('PR Decline: confirms which PR and what happens, posts it, then reads Declined', async ({ page }) => {
+  await prFixtures(page);
+  let state = 'open';
+  const declined: string[] = [];
+  // Registered after prFixtures, so these win for the PR row and the decline.
+  await page.route('**/api/v1/repos/*/prs/*', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (/\/prs\/1$/.test(path)) {
+      await route.fulfill({ json: { ...pr(1), state, title: 'PR 1: tidy up', description_md: 'Body', approved_by: [], reviewers: [], mergeable: true, comments: [] } });
+    } else await route.fallback();
+  });
+  await page.route('**/api/v1/repos/*/prs/*/decline', async route => {
+    declined.push(route.request().method());
+    state = 'declined';
+    await route.fulfill({ status: 204, body: '' });
+  });
+  await page.goto(`/#/git/${repoId}/pr/1`);
+  const decline = page.getByTestId('prd-decline');
+  await expect(decline).toBeVisible();
+  await expect(decline).toHaveClass(/danger/);
+  // Cancel sends nothing.
+  await decline.click();
+  const dialog = page.getByRole('dialog', { name: 'Decline PR #1?' });
+  await expect(dialog).toContainText('PR #1');
+  await expect(dialog).toContainText('without merging');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(declined).toEqual([]);
+  // Confirm posts once, then the PR reloads as Declined (no actions left).
+  await decline.click();
+  await page.getByRole('dialog', { name: 'Decline PR #1?' }).getByRole('button', { name: 'Decline PR', exact: true }).click();
+  await expect.poll(() => declined).toEqual(['POST']);
+  await expect(page.locator('.prd-page .chip', { hasText: 'Declined' }).first()).toBeVisible();
+  await expect(decline).toHaveCount(0);
+});
+
+test('Focus: the URL drives it — toggle, repo link inside Focus, Back and reload', async ({ page }) => {
+  await focusFixtures(page);
+  await openRepo(page, 'graph');
+  const focus = page.getByRole('button', { name: 'Focus', exact: true });
+  await expect(focus).toHaveAttribute('aria-pressed', 'false');
+  await focus.click();
+  await expect(page).toHaveURL(/#\/git\/focus$/);
+  await expect(focus).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.rv-tabs')).toHaveCount(0);
+  // A repo link inside Focus leaves it for that repo's pull requests.
+  await page.locator('.fx-repo-link').first().click();
+  await expect(focus).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.rv-tabs').getByRole('tab', { name: 'Pull requests' })).toHaveAttribute('aria-selected', 'true');
+  // Back returns to Focus; reload keeps it.
+  await page.goBack();
+  await expect(focus).toHaveAttribute('aria-pressed', 'true');
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Focus', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  // The Git crumb leaves Focus and drops it from the URL.
+  await page.locator('h1.ph-title').getByRole('button', { name: 'Git', exact: true }).click();
+  await expect(page).toHaveURL(/#\/git$/);
+  await expect(page.locator('.rv-tabs')).toBeVisible();
+});
+
 for (const scenario of [
   { name: 'native-light-desktop', scheme: 'light', theme: 'native', width: 1440, height: 900, rtl: false },
   { name: 'native-dark-tablet', scheme: 'dark', theme: 'native', width: 820, height: 1180, rtl: false },

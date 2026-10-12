@@ -1314,6 +1314,10 @@ export type OttoEvent =
     }
   | { type: 'session_renamed'; session_id: Id; workspace_id: Id; title: string }
   | { type: 'session_removed'; session_id: Id; workspace_id: Id }
+  /** An agent session needs the operator: its turn ended (confirmed idle) or
+   *  it raised a prompt / permission request. Sent whatever the notification
+   *  settings say — it drives the session list's "needs you" flag. */
+  | { type: 'session_attention'; session_id: Id; workspace_id: Id; reason: 'turn_end' | 'prompt' }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
   | { type: 'notification'; notice: Notice; user_id?: string | null }
   // Self-improvement engine (otto-improve) — see docs/contracts/ws.md.
