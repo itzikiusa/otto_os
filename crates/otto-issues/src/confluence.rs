@@ -174,6 +174,8 @@ impl ConfluenceClient {
         max_pages: usize,
         what: &str,
     ) -> Result<(Vec<serde_json::Value>, bool)> {
+        // Callers already check; the pager sends the auth header itself.
+        self.ensure_tls()?;
         let mut all = Vec::new();
         let mut next: Option<String> = None;
         for _ in 0..max_pages {
