@@ -11,6 +11,7 @@ import {
   sanitizeD2Svg,
   d2ScopeClass,
   isScopedSelector,
+  safeCssValue,
   scopeD2Css,
   scopeD2Styles,
   scopeSelector,
@@ -288,4 +289,11 @@ test('serialized style text is entity-decoded for parsing and re-escaped after',
   );
   assert.ok(out.includes('.d2-7 .a &gt; .b{content:"&lt;/style&gt;&lt;img'), out);
   assert.ok(!/<img|<\/style><img/.test(out), out);
+});
+
+test('comment delimiters (incl. the `--!>` close) never ride in a value', () => {
+  for (const v of ['a<!--b', 'a-->b', 'a--!>b', 'a/*b']) assert.equal(safeCssValue(v), false, v);
+  // Inside a CSS string they are inert text.
+  assert.equal(safeCssValue('"--!>"'), true);
+  assert.equal(safeCssValue('1px solid red'), true);
 });

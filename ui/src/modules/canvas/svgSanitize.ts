@@ -170,7 +170,8 @@ function contained(text: string): boolean {
   const closed = walkTopLevel(text, (ch) => {
     if (ch === '{' || ch === '}' || ch === ';') ok = false;
   });
-  return ok && closed && !/\/\*|<!--|-->/.test(text.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ''));
+  // `--!>` closes an HTML comment too (the spec's "incorrectly closed comment").
+  return ok && closed && !/\/\*|<!--|--!?>/.test(text.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ''));
 }
 
 /** Split a selector list on its top-level commas (`:is(a, b)` stays whole). */

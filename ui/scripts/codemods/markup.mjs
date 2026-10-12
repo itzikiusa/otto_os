@@ -45,7 +45,7 @@ export function startTags(text, names, markup = markupOf(text)) {
 /** A static attribute's value (`name="v"`, `name='v'`, `name={"v"}` / `name={v}`
  *  as raw text), or null when absent. */
 export function attrValue(attrs, name) {
-  const esc = name.replace(/[:.]/g, '\\$&');
+  const esc = name.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
   const m = new RegExp(`(?:^|\\s)${esc}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|\\{([^}]*)\\})`).exec(attrs);
   if (!m) return new RegExp(`(?:^|\\s)\\{${esc}\\}`).test(attrs) ? name : null;
   return m[1] ?? m[2] ?? m[3] ?? '';
