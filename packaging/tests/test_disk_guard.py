@@ -40,12 +40,17 @@ class DiskGuard(unittest.TestCase):
 
     def test_watch_stops_the_build_tree_but_not_its_parent(self):
         with tempfile.TemporaryDirectory() as d:
+            # A root with no target/ at all — a fresh clone, as on CI, where
+            # the report's `find` used to trip set -e and end the watchdog.
+            (Path(d) / "scripts").mkdir()
+            guard_copy = Path(d) / "scripts/disk-guard.sh"
+            guard_copy.write_text(GUARD.read_text())
             marker = Path(d) / "survived"
             # Parent "build script": starts the watchdog on itself, then a
             # long child (the "cargo"); the child must die, the parent must
             # live on to report it.
             script = (
-                f'DISK_FLOOR_GB={10**6} bash "{GUARD}" watch $$ t &\n'
+                f'DISK_FLOOR_GB={10**6} bash "{guard_copy}" watch $$ t &\n'
                 "sleep 30 & S=$!\n"
                 "wait $S; echo \"child=$?\"\n"
                 f'touch "{marker}"\n'

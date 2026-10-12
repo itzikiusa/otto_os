@@ -54,6 +54,6 @@ export const CQL_DOCS = 'https://developer.atlassian.com/cloud/confluence/advanc
  *  the `KEY` placeholder when nothing is selected. */
 export function fillTemplate(query: string, key: string): string {
   const k = key.trim();
-  const v = k === '' ? 'KEY' : /^[A-Za-z0-9_]+$/.test(k) ? k : `"${k.replace(/"/g, '\\"')}"`;
+  const v = k === '' ? 'KEY' : /^[A-Za-z0-9_]+$/.test(k) ? k : `"${k.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
   return query.replaceAll('{P}', v);
 }

@@ -28,11 +28,13 @@ report() {
     echo "  What holds space under $ROOT (nothing was deleted):" >&2
     local d
     for d in "$ROOT"/target/* "$ROOT"/apps/desktop/src-tauri/target/*; do
-        [[ -d "$d" ]] && du -sh "$d" 2>/dev/null | sed 's/^/    /' >&2
+        if [[ -d "$d" ]]; then du -sh "$d" 2>/dev/null | sed 's/^/    /' >&2 || true; fi
     done
     local o
-    o=$(find "$ROOT"/target "$ROOT"/apps/desktop/src-tauri/target -maxdepth 3 -name '*.rcgu.o' 2>/dev/null | wc -l | tr -d ' ')
-    [[ "$o" != 0 ]] && echo "    $o leftover *.rcgu.o (an aborted link's codegen units)" >&2
+    # `|| true`: no target dir (a fresh clone / CI) must not trip set -e and
+    # end the watchdog before it stops the build.
+    o=$( { find "$ROOT"/target "$ROOT"/apps/desktop/src-tauri/target -maxdepth 3 -name '*.rcgu.o' 2>/dev/null || true; } | wc -l | tr -d ' ')
+    if [[ "$o" != 0 ]]; then echo "    $o leftover *.rcgu.o (an aborted link's codegen units)" >&2; fi
     echo "  Preview stale-variant eviction: packaging/prune-target.sh (dry run)." >&2
 }
 

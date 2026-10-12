@@ -6,6 +6,7 @@ test('templates fill the selected key, or a KEY placeholder', () => {
   assert.equal(fillTemplate('project = {P} AND parent = {P}-1', 'CS3'), 'project = CS3 AND parent = CS3-1');
   assert.equal(fillTemplate('project = {P}', ''), 'project = KEY');
   assert.equal(fillTemplate('space = {P}', 'my "space"'), 'space = "my \\"space\\""');
+  assert.equal(fillTemplate('space = {P}', 'a\\b'), 'space = "a\\\\b"');
 });
 
 test('every template is non-empty and uniquely labelled', () => {
