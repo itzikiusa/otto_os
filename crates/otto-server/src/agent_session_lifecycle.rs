@@ -37,6 +37,11 @@ async fn acquire_lease(sid: &str) -> Lease {
 pub(super) struct SessionOwnership {
     id: Id,
     _lease: Lease,
+    /// Whether a failed turn retires (kills) the session. Only a session this
+    /// turn CREATED is the turn's to kill; a resumed one belongs to its thread
+    /// (Discovery chat, DB Assist, a design or vault thread) and is released
+    /// alive, so the next message resumes it and the user can open it.
+    retire: bool,
 }
 pub(super) type OwnershipSlot = Arc<Mutex<Option<SessionOwnership>>>;
 
@@ -67,14 +72,22 @@ impl SessionGuard {
         *target.lock().unwrap_or_else(|e| e.into_inner()) = owned;
         self.disarm();
     }
-    pub async fn stop(&mut self) {
+    /// End a failed turn. A created session is killed. A resumed one is
+    /// released alive, except that an owner's Stop (`cancelled`) suspends it:
+    /// its work stops and the conversation stays resumable.
+    pub async fn stop(&mut self, cancelled: bool) {
         let owned = self.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(owner) = owned {
             let manager = Arc::clone(&self.manager);
             let id = owner.id.clone();
+            let (kill, suspend) = (owner.retire, !owner.retire && cancelled);
             // If this waiter is dropped, the cleanup task still owns the lease.
             let cleanup = tokio::spawn(retire(owner, async move {
-                let _ = manager.kill_session(&id).await;
+                if kill {
+                    let _ = manager.kill_session(&id).await;
+                } else if suspend {
+                    let _ = manager.suspend(&id).await;
+                }
             }));
             let _ = cleanup.await;
         }
@@ -87,6 +100,8 @@ impl Drop for SessionGuard {
             return;
         }
         let owned = self.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        // A resumed session is only released (dropping `owner` frees the lease).
+        let owned = owned.filter(|owner| owner.retire);
         if let (Some(owner), Ok(rt)) = (owned, tokio::runtime::Handle::try_current()) {
             let manager = Arc::clone(&self.manager);
             let id = owner.id.clone();
@@ -114,6 +129,7 @@ pub(super) async fn create(
                 *guard.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionOwnership {
                     id: session.id.clone(),
                     _lease: lease,
+                    retire: true,
                 });
                 Ok((session, guard))
             }
@@ -125,7 +141,8 @@ pub(super) async fn create(
         .map_err(|_| Error::Internal("session creation interrupted".into()))?
 }
 
-/// A dropped resume future must retire a provider which becomes live later.
+/// A dropped resume future releases its reservation once the resume settles.
+/// The resumed session itself is never retired: it belongs to its thread.
 pub(super) async fn resume(
     manager: Arc<SessionManager>,
     sid: Id,
@@ -139,6 +156,7 @@ pub(super) async fn resume(
         *guard.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionOwnership {
             id: sid.clone(),
             _lease: lease,
+            retire: false,
         });
         let result = async {
             manager.ensure_live(&sid).await?;
@@ -172,6 +190,7 @@ mod tests {
         let owner = SessionOwnership {
             id: id.clone(),
             _lease: acquire_lease(&id).await,
+            retire: true,
         };
         let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
         let cleanup = tokio::spawn(retire(owner, async {
@@ -189,6 +208,94 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_secs(1), successor)
             .await
             .is_ok());
+    }
+
+    async fn live_shell(
+        ctx: &crate::state::ServerCtx,
+        ws: &Workspace,
+        user: &Id,
+        dir: &std::path::Path,
+    ) -> Id {
+        let req = CreateSessionReq {
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: Some("shell".into()),
+            title: Some("thread".into()),
+            cwd: None,
+            connection_id: None,
+            model: None,
+            meta: None,
+        };
+        let spec = otto_pty::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![],
+            cwd: Some(dir.to_string_lossy().into()),
+            env: vec![],
+        };
+        ctx.manager
+            .create(ws, user, req, Some(spec))
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// S-1 (sweep 2026-10-11): a failed turn on a RESUMED session (Discovery
+    /// chat, DB Assist) used to kill the user's session; only a session the
+    /// turn created is its to retire.
+    #[tokio::test]
+    async fn failed_turn_releases_a_resumed_session_and_retires_only_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("u", "x", "U", false)
+            .await
+            .unwrap();
+        let ws = ctx
+            .workspaces
+            .create("w", tmp.path().to_str().unwrap(), &user.id)
+            .await
+            .unwrap();
+        let sessions = otto_state::SessionsRepo::new(pool.clone());
+        let exited = |id: Id| {
+            let sessions = sessions.clone();
+            async move {
+                sessions.get(&id).await.unwrap().status == otto_core::domain::SessionStatus::Exited
+            }
+        };
+
+        let thread = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
+        for cancelled in [false, true] {
+            ctx.manager.ensure_live(&thread).await.unwrap();
+            let (_, mut resumed) = resume(Arc::clone(&ctx.manager), thread.clone())
+                .await
+                .unwrap();
+            let mut turn = SessionGuard::new(Arc::clone(&ctx.manager), true);
+            resumed.transfer_to(&turn.slot);
+            turn.stop(cancelled).await;
+            assert!(!exited(thread.clone()).await, "cancelled={cancelled}");
+            if !cancelled {
+                assert!(ctx.manager.is_live(&thread), "a failed turn leaves it open");
+            }
+            // The reservation is released: the next message resumes at once.
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), acquire_lease(&thread))
+                    .await
+                    .is_ok()
+            );
+        }
+
+        let created = live_shell(&ctx, &ws, &user.id, tmp.path()).await;
+        let mut turn = SessionGuard::new(Arc::clone(&ctx.manager), true);
+        *turn.slot.lock().unwrap() = Some(SessionOwnership {
+            id: created.clone(),
+            _lease: acquire_lease(&created).await,
+            retire: true,
+        });
+        turn.stop(false).await;
+        assert!(
+            exited(created).await,
+            "a session the turn created is retired"
+        );
     }
 
     #[tokio::test]

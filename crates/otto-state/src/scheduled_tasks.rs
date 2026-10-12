@@ -561,6 +561,38 @@ impl ScheduledTasksRepo {
         Ok(task)
     }
 
+    /// [`Self::get_run_task_snapshot`] for re-attaching a workflow hand-off
+    /// after a restart. A run written without a snapshot (before migration
+    /// 0178, or by a rolled-back daemon) falls back to the task's CURRENT
+    /// definition — the behaviour before 0178 — but only while that definition
+    /// provably has not changed since the run started (`updated_at` ≤
+    /// `started_at`; admission does not touch `updated_at`), so an edited
+    /// task's report never goes to its new destination. A malformed or invalid
+    /// snapshot never falls back.
+    pub async fn get_run_task_for_recovery(&self, run_id: &str) -> Result<ScheduledTask> {
+        let row = sqlx::query(
+            "SELECT task_id, started_at, admitted_task_json IS NULL AS legacy \
+             FROM scheduled_task_runs WHERE id=?",
+        )
+        .bind(run_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("read admission snapshot"))?;
+        if !row.get::<bool, _>("legacy") {
+            return self.get_run_task_snapshot(run_id).await;
+        }
+        let task = self.get(&row.get::<String, _>("task_id")).await?;
+        let started = row.get::<String, _>("started_at");
+        let parse = |t: &str| chrono::DateTime::parse_from_rfc3339(t).ok();
+        match (parse(&task.updated_at), parse(&started)) {
+            (Some(updated), Some(started)) if updated <= started => Ok(task),
+            _ => Err(otto_core::Error::Internal(
+                "this run predates admission snapshots and its task changed since it started"
+                    .into(),
+            )),
+        }
+    }
+
     /// Raw history insertion for import/fixtures. Engine dispatch uses `admit_run`.
     pub async fn create_run(&self, r: NewRun) -> Result<ScheduledTaskRun> {
         let id = new_id();
@@ -1427,6 +1459,61 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repo.get_run(&run.id).await.unwrap().status, "ok");
+    }
+
+    /// Sweep 2026-10-11 A3: a hand-off run admitted by a build without
+    /// snapshots (NULL) used to end as "interrupted by daemon restart" on the
+    /// next boot, skipping its report and schedule settlement. It recovers
+    /// from the task while the task is unchanged since the run started.
+    #[tokio::test]
+    async fn legacy_run_recovers_from_an_unchanged_task_only() {
+        let p = pool().await;
+        seed_ws(&p, "ws1").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let task = repo.create(new_task("ws1", "legacy")).await.unwrap();
+        let run = repo
+            .create_run(NewRun {
+                task_id: task.id.clone(),
+                workspace_id: "ws1".into(),
+                trigger: "schedule".into(),
+            })
+            .await
+            .unwrap();
+        let recovered = repo.get_run_task_for_recovery(&run.id).await.unwrap();
+        assert_eq!(recovered.id, task.id);
+        assert_eq!(recovered.prompt, task.prompt);
+        // An edit after the run started: ownership can no longer be proven.
+        sqlx::query("UPDATE scheduled_tasks SET updated_at = ? WHERE id = ?")
+            .bind("2999-01-01T00:00:00+00:00")
+            .bind(&task.id)
+            .execute(&p)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_run_task_for_recovery(&run.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("changed since"));
+        // A run WITH a snapshot recovers from it, never the current task.
+        repo.finish_run(
+            &run.id,
+            FinishRun {
+                status: "ok".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let current = repo.get(&task.id).await.unwrap();
+        let admitted = repo.admit_run(&current, "manual").await.unwrap();
+        assert_eq!(
+            repo.get_run_task_for_recovery(&admitted.id)
+                .await
+                .unwrap()
+                .updated_at,
+            current.updated_at
+        );
     }
 
     #[tokio::test]

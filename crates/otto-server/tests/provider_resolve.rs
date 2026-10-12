@@ -68,6 +68,43 @@ async fn precedence_is_requested_then_workspace_then_global_then_claude() {
     );
 }
 
+/// Sweep 2026-10-11 prefs S-5: only workflows skipped a provider excluded in
+/// Settings; insights, canvas, DB assist, product and scheduled tasks could
+/// still spawn a disabled default.
+#[tokio::test]
+async fn a_disabled_default_is_never_resolved() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mem_pool().await;
+    let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
+    seed_ws(&pool, "ws-codex", json!({ "default_provider": "codex" })).await;
+    let ws = ctx.workspaces.get(&Id::from("ws-codex")).await.unwrap();
+    SettingsRepo::new(pool.clone())
+        .put(DEFAULT_PROVIDER_KEY, &json!("agy"))
+        .await
+        .unwrap();
+    ctx.manager.providers().set_disabled(&["codex"]);
+    assert_eq!(
+        ctx.resolve_provider(Some(&ws), None).await.unwrap(),
+        "agy",
+        "a disabled workspace default falls through to the global one"
+    );
+    ctx.manager
+        .providers()
+        .set_disabled(&["codex", "agy", "claude"]);
+    let picked = ctx.resolve_provider(Some(&ws), None).await.unwrap();
+    assert!(
+        !["codex", "agy", "claude"].contains(&picked.as_str()),
+        "never a disabled provider, even the claude fallback: {picked}"
+    );
+    // An explicit request is the person's choice and is not filtered.
+    assert_eq!(
+        ctx.resolve_provider(Some(&ws), Some("codex"))
+            .await
+            .unwrap(),
+        "codex"
+    );
+}
+
 #[tokio::test]
 async fn unknown_workspace_and_db_errors_surface_instead_of_falling_back() {
     let tmp = tempfile::TempDir::new().unwrap();

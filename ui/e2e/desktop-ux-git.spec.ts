@@ -108,7 +108,8 @@ test('Focus account failure offers Retry instead of account setup', async ({ pag
     ? route.fulfill({ status: 503, json: { code: 'unavailable', message: 'Account service unavailable' } })
     : route.fulfill({ json: [] }));
   await page.route('**/api/v1/repos/*/prs?*', (route) => route.fulfill({ json: { items: [], has_more: false } }));
-  await openRepo(page, 'focus');
+  // Focus is a page-level view (not a per-repo tab), so it has no repo tabs.
+  await page.goto('/#/git/focus');
   const section = page.locator('.fx-section').filter({ hasText: 'My Jira work' });
   await expect(section.getByRole('button', { name: 'Retry' })).toBeVisible();
   await expect(section.getByText('Connect a Jira account', { exact: false })).toHaveCount(0);

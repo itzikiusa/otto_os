@@ -495,9 +495,24 @@ fn result_text_valid(text: &str, valid: Option<fn(&str) -> bool>) -> bool {
     !text.trim().is_empty()
         && match valid {
             Some(valid) => valid(text),
-            None => serde_json::from_str::<serde_json::Value>(text)
-                .is_ok_and(|v| v.is_object() || v.is_array()),
+            None => holds_complete_json(text),
         }
+}
+
+/// A COMPLETE JSON object or array somewhere in `text` — bare, fenced or
+/// wrapped in prose (callers parse leniently), while a half-written file
+/// (`{"status":`) still has none and keeps the watch waiting. Only the first
+/// few openers are tried: each failed try reads to the end of the file.
+fn holds_complete_json(text: &str) -> bool {
+    text.char_indices()
+        .filter(|(_, c)| matches!(c, '{' | '['))
+        .take(8)
+        .any(|(i, _)| {
+            serde_json::Deserializer::from_str(&text[i..])
+                .into_iter::<serde_json::Value>()
+                .next()
+                .is_some_and(|v| v.is_ok_and(|v| v.is_object() || v.is_array()))
+        })
 }
 
 /// Whether an elapsed grace deadline should fail the run: only when the agent
@@ -596,13 +611,9 @@ where
         }
 
         let res = attempt(i).await;
+        // A finished result is kept even when a Stop lands after it: the work
+        // is done, and the caller decides what a late cancel means for it.
         if !res.errored() {
-            if cancelled(cancel) {
-                if let Some(sid) = res.session_id.as_ref() {
-                    let _ = manager.kill_session(sid).await;
-                }
-                return RunOutcome::failed(res.session_id, FailReason::Stopped);
-            }
             return res;
         }
         last = res;
@@ -613,12 +624,21 @@ where
     if cancelled(cancel) {
         last.reason = Some(FailReason::Stopped);
     }
-    // A terminal failure has no next attempt to retire its producer. Never
-    // leave it writing into a path a later manual retry may use.
-    if let Some(sid) = last.session_id.as_ref() {
-        let _ = manager.kill_session(sid).await;
+    if retire_after_final_failure(last.reason) {
+        if let Some(sid) = last.session_id.as_ref() {
+            let _ = manager.kill_session(sid).await;
+        }
     }
     last
+}
+
+/// Whether the FINAL failed attempt's session is killed. Only a manual Stop
+/// ends it: a stuck / timed-out / exited reviewer or executor stays openable
+/// for inspection (reviewers show "Open it to respond"), the idle-suspend
+/// sweep reaps it once nobody watches, and every attempt clears its own
+/// result path before it starts.
+fn retire_after_final_failure(reason: Option<FailReason>) -> bool {
+    reason == Some(FailReason::Stopped)
 }
 
 #[cfg(test)]
@@ -656,6 +676,46 @@ mod tests {
             .await
             .unwrap();
         assert!(take_result_file(&path, None).await.is_some());
+    }
+
+    /// S-5 (sweep 2026-10-11): a reused swarm session's result file may be
+    /// fenced or prose-wrapped (the swarm parser is lenient); only a file
+    /// with no complete JSON value is still treated as half-written.
+    #[test]
+    fn unvalidated_result_accepts_wrapped_json_but_not_a_partial_write() {
+        for ok in [
+            "{\"status\":\"done\"}",
+            "```json\n{\"status\":\"done\",\"summary\":\"x\"}\n```",
+            "Done. Result:\n{\"status\":\"blocked\"}\nThanks",
+            "[1, 2]",
+        ] {
+            assert!(result_text_valid(ok, None), "{ok}");
+        }
+        for partial in [
+            "",
+            "  ",
+            "{\"status\":",
+            "```json\n{\"status\":\"do",
+            "plain prose",
+        ] {
+            assert!(!result_text_valid(partial, None), "{partial}");
+        }
+    }
+
+    /// S-4 (sweep 2026-10-11): only a manual Stop kills the last attempt's
+    /// session; any other terminal failure leaves it openable.
+    #[test]
+    fn final_failure_keeps_the_session_unless_stopped() {
+        assert!(retire_after_final_failure(Some(FailReason::Stopped)));
+        for r in [
+            FailReason::Stuck,
+            FailReason::Timeout,
+            FailReason::Exited,
+            FailReason::SessionGone,
+            FailReason::CreateFailed,
+        ] {
+            assert!(!retire_after_final_failure(Some(r)), "{r:?}");
+        }
     }
 
     #[test]

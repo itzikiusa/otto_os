@@ -118,16 +118,25 @@ pub struct TurnOpts {
     /// claude just completes via whichever channel fires first).
     pub done_file: Option<std::path::PathBuf>,
     /// Require a validated file result, including for Claude. Partial or invalid
-    /// files cannot end a turn; transcript completion alone is insufficient.
+    /// files cannot end a turn; transcript completion alone is insufficient
+    /// unless `transcript_fallback` is set.
     pub done_file_validator: Option<fn(&str) -> bool>,
+    /// With a validated `done_file`, still accept the provider's native final
+    /// text (claude transcript / codex rollout) once the turn ended with
+    /// nothing pending and the handoff grace expired. Plain chat turns
+    /// ([`run_session_turn`]) set this: an answer given only in chat is still
+    /// the answer. Engine result protocols (workflows, reviews, vault docs)
+    /// leave it off. Providers with no native signal (agy) still need the file.
+    pub transcript_fallback: bool,
     /// Legacy caller hint, retained for compatibility. Silence never proves
     /// completion; use a validated final file or native turn completion.
     pub quiet_done: Option<Duration>,
-    /// Kill the session when the stall trip fires. Workflow steps set this:
-    /// their retry spawns a FRESH session, and the stuck one would otherwise
-    /// linger alive forever (its spinner defeats the idle-suspend sweep too).
-    /// Interactive callers keep the default (false) — their session belongs
-    /// to the user.
+    /// Kill the session when the stall trip fires — and on any failed turn.
+    /// Workflow steps set this: their retry spawns a FRESH session, and the
+    /// stuck one would otherwise linger alive forever (its spinner defeats the
+    /// idle-suspend sweep too). Only ever applies to a session the turn
+    /// CREATED: a resumed `existing` session belongs to its thread and is
+    /// released alive (an owner's `cancel` suspends it instead).
     pub kill_on_stall: bool,
     /// Use the turn oracle (sub-agent/handoff-aware completion) instead of
     /// the legacy "first end_turn" detection. Workflow steps set this;
@@ -160,7 +169,15 @@ pub async fn run_session_turn(
 ) -> ApiResult<(String, Id)> {
     let reply = reply::Reply::new()
         .map_err(|e| ApiError(Error::Internal(format!("prepare final reply: {e}"))))?;
-    let complete_prompt = reply.prompt(prompt);
+    // With permission prompts on, writing the reply file outside the cwd asks
+    // for approval and the turn would sit until the idle backstop; claude and
+    // codex end their turns natively, so they answer in chat alone instead.
+    let (complete_prompt, opts) =
+        if reply::wants_file(provider, ctx.manager.providers().skip_permissions()) {
+            (reply.prompt(prompt), reply_turn_options(&reply.path()))
+        } else {
+            (prompt.to_string(), reply::chat_options())
+        };
     let (text, sid) = run_session_turn_with(
         ctx,
         ws,
@@ -172,7 +189,7 @@ pub async fn run_session_turn(
         meta,
         &complete_prompt,
         stuck_after,
-        reply_turn_options(&reply.path()),
+        opts,
         on_ready,
     )
     .await?;
@@ -180,9 +197,9 @@ pub async fn run_session_turn(
     if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
         return Ok((text, sid));
     }
-    let text = reply::decode(&text).ok_or_else(|| {
+    let text = reply::final_text(&text).ok_or_else(|| {
         ApiError(Error::Upstream(
-            "agent completed without a valid final reply".into(),
+            "agent completed without a final reply".into(),
         ))
     })?;
     Ok((text, sid))
@@ -209,6 +226,7 @@ pub async fn run_session_turn_with(
 ) -> ApiResult<(String, Id)> {
     let should_stop = opts.kill_on_stall || opts.cancel.is_some();
     let cancel = opts.cancel.clone();
+    let stop_flag = cancel.clone();
     let mut guard = lifecycle::SessionGuard::new(Arc::clone(&ctx.manager), should_stop);
     let slot = Arc::clone(&guard.slot);
     let turn = run_session_turn_inner(
@@ -235,7 +253,8 @@ pub async fn run_session_turn_with(
         result = turn => result,
     };
     if result.is_err() && should_stop {
-        guard.stop().await;
+        let cancelled = stop_flag.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
+        guard.stop(cancelled).await;
     }
     guard.disarm();
     result
@@ -280,12 +299,17 @@ async fn run_session_turn_inner(
 
     // 3. Resolve the session: resume an existing one (ensure_live restarts it with
     //    --resume when suspended/dead, guarding supports_resume), else create.
-    let (sid, psid, mut created_guard) = match existing {
+    let (sid, psid, mut created_guard, created_here) = match existing {
         Some(id) if ctx.manager.get(id).await.is_ok() => {
             let (session, guard) = lifecycle::resume(Arc::clone(&ctx.manager), id.clone())
                 .await
                 .map_err(ApiError)?;
-            (id.clone(), session.provider_session_id.clone(), Some(guard))
+            (
+                id.clone(),
+                session.provider_session_id.clone(),
+                Some(guard),
+                false,
+            )
         }
         _ => {
             let req = CreateSessionReq {
@@ -305,9 +329,12 @@ async fn run_session_turn_inner(
                 session.id.clone(),
                 session.provider_session_id.clone(),
                 Some(guard),
+                true,
             )
         }
     };
+    // A resumed session belongs to its thread: a stall never kills it.
+    opts.kill_on_stall &= created_here;
 
     // This driver is the session's consumer for the rest of the turn: hold it
     // against the idle-suspend sweep until we return (the guard drops on
@@ -768,7 +795,7 @@ async fn oracle_watch(
         }
         // A strict result protocol never falls back to a transcript or silence,
         // even after the oracle's normal missing-handoff grace expires.
-        v = gate_validated_result(v, opts.done_file_validator.is_some(), handoff.is_some());
+        v = gate_validated_result(v, requires_validated_result(opts), handoff.is_some());
         match v {
             oracle::Verdict::Complete { text, via } => {
                 // The reminder-echo guard stays in FRONT of the "no handoff,
@@ -1027,6 +1054,12 @@ fn transcript_path(
     }
 }
 
+/// Whether ONLY a validated result file may complete the turn (no native
+/// final-text fallback).
+fn requires_validated_result(opts: &TurnOpts) -> bool {
+    opts.done_file_validator.is_some() && !opts.transcript_fallback
+}
+
 /// Keep oracle completion subject to the caller's strict file protocol while
 /// retaining its ordinary failure/stall handling and bounded polling.
 fn gate_validated_result(
@@ -1066,6 +1099,21 @@ mod tests {
             opts.quiet_done.is_none(),
             "silence does not complete a reply"
         );
+    }
+
+    /// S-2 (sweep 2026-10-11): plain chat turns fall back to the native final
+    /// text; engine protocols that validate a result file stay strict.
+    #[test]
+    fn chat_turns_fall_back_to_native_text_while_engine_protocols_stay_strict() {
+        let chat = reply_turn_options(std::path::Path::new("/tmp/reply.json"));
+        assert!(!requires_validated_result(&chat));
+        let engine = TurnOpts {
+            done_file: Some("/tmp/handoff.md".into()),
+            done_file_validator: Some(|t: &str| !t.trim().is_empty()),
+            ..Default::default()
+        };
+        assert!(requires_validated_result(&engine));
+        assert!(!requires_validated_result(&TurnOpts::default()));
     }
 
     #[test]

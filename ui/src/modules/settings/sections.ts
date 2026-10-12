@@ -57,7 +57,9 @@ export const SETTINGS_SECTIONS = [
   { id: 'sharing', label: 'Sharing', group: 'integrations', keywords: 'email sender share guest one-time code otp gmail smtp email remote' },
   // ── Agents ──
   { id: 'assistant', label: 'Assistant', group: 'agents', keywords: 'otto assistant routing claude codex subscription limit' },
-  { id: 'providers', label: 'Providers', group: 'agents', keywords: 'agent cli claude codex agy gemini custom model update', gate: 'root' },
+  // Settings admins reach Update all CLIs (ws editor) and the model catalog
+  // (Agents); the daemon-wide settings on the page stay root-only in the page.
+  { id: 'providers', label: 'Providers', group: 'agents', keywords: 'agent cli claude codex agy gemini custom model update', gate: ADMIN },
   { id: 'context-soul', label: 'Workspace context', group: 'agents', keywords: 'soul goals instructions memory references project' },
   { id: 'self-improvement', label: 'Self-improvement', group: 'agents', keywords: 'improve review memory skills edits approval' },
   { id: 'insights', label: 'Insights', group: 'agents', keywords: 'reports daily weekly monthly schedule html' },

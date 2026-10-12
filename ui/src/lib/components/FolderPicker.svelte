@@ -8,7 +8,7 @@
   import { untrack, onDestroy, onMount, tick } from 'svelte';
   import Skeleton from './Skeleton.svelte';
   import Badge from './Badge.svelte';
-  import { emptyHistory, recordFolder, historyTarget, folderCrumbs, emptyShortcuts, parseShortcuts, rememberFolder, toggleFavorite } from './folderNavigation';
+  import { emptyHistory, settleFolder, historyTarget, folderCrumbs, emptyShortcuts, parseShortcuts, rememberFolder, toggleFavorite } from './folderNavigation';
   import { auth } from '../stores/auth.svelte';
   import { api, baseUrl } from '../api/client';
   import type { FsBrowse, FsEntry } from '../api/types';
@@ -86,12 +86,7 @@
       view = next;
       updateShortcuts(current => rememberFolder(current, next.path));
       filter = ''; // A successful navigation starts with the full listing.
-      if (index === undefined) history = recordFolder(history, next.path);
-      else {
-        const paths = [...history.paths];
-        paths[index] = next.path;
-        history = { paths, index };
-      }
+      history = settleFolder(history, next.path, index);
       await tick();
       if (seq === requestSeq && crumbsElement) crumbsElement.scrollLeft = crumbsElement.scrollWidth;
     } catch (e) {

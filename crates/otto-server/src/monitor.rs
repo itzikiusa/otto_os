@@ -647,17 +647,25 @@ async fn handle_session_transition(
                 // running under the agent (build / tests / deploy) — it does
                 // NOT need the user yet. The eventual resume produces a fresh
                 // Working→Idle transition, so the notice isn't lost, just late.
-                // Cheap gates FIRST (S9-07): background sessions and a
-                // disabled `session_events` setting discard the notice anyway,
-                // so they must not pay `tree_active`'s two whole-machine `ps`
-                // scans + 750 ms for it. `emit_session_notice` re-checks both.
-                if !idle_notice_wanted(&ctx, &s).await {
+                // Cheap gates FIRST (S9-07): a background session, or a shell
+                // session with session notices off, wants neither the notice
+                // nor the attention signal, so it must not pay `tree_active`'s
+                // two whole-machine `ps` scans + 750 ms. An AGENT session
+                // always signals attention (the "needs you" flag must not
+                // depend on notification delivery); the notice stays gated.
+                let notice = idle_notice_wanted(&ctx, &s).await;
+                if is_background(&s) || !(notice || attention_wanted(&s)) {
                     return;
                 }
                 if ctx.manager.tree_active(&id).await {
                     return;
                 }
-                emit_session_notice(&ctx, &id, s, SessionStatus::Idle).await;
+                if attention_wanted(&s) {
+                    signal_attention(&ctx, &s, "turn_end");
+                }
+                if notice {
+                    emit_session_notice(&ctx, &id, s, SessionStatus::Idle).await;
+                }
             });
         }
         SessionStatus::Exited => {
@@ -668,6 +676,24 @@ async fn handle_session_transition(
         }
         _ => {}
     }
+}
+
+/// Whether a confirmed turn end of `s` should raise the SPA's "needs you"
+/// flag: interactive coding-agent sessions only — not a plain shell (provider
+/// `shell`) or a connection terminal finishing a command, and not background
+/// sessions (they run unattended).
+pub(crate) fn attention_wanted(s: &otto_core::domain::Session) -> bool {
+    s.kind == otto_core::domain::SessionKind::Agent && s.provider != "shell" && !is_background(s)
+}
+
+/// Broadcast [`Event::SessionAttention`] for `s` — independent of the
+/// `session_events` notification setting (that only gates the notice).
+pub(crate) fn signal_attention(ctx: &ServerCtx, s: &otto_core::domain::Session, reason: &str) {
+    let _ = ctx.events.send(Event::SessionAttention {
+        session_id: s.id.clone(),
+        workspace_id: s.workspace_id.clone(),
+        reason: reason.to_string(),
+    });
 }
 
 /// Whether an idle notice for `s` could be emitted at all: not a background

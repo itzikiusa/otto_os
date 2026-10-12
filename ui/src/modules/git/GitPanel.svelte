@@ -1,21 +1,26 @@
 <script lang="ts">
-  // Full Git view for the agent-mode right panel. Auto-detects the repo for the
-  // focused session's cwd (registers it idempotently), then embeds the same
+  // Full Git view for the Side panel. Auto-detects the repo for the panel's
+  // folder — the focused session's cwd in an agent session, else the
+  // workspace folder or the one picked in the panel (registers it
+  // idempotently), then embeds the same
   // RepoView the Git module uses — branch + push/pull/fetch toolbar and the
   // Graph / Changes / History / Pull Requests tabs — with panel-local tab state
-  // so it never navigates away from agent mode.
+  // so it never navigates away from the page it sits beside. No Focus tab
+  // here: that view is cross-repo, it lives on the Git page.
   import { git } from '../../lib/stores/git.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
+  import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import RepoView from './RepoView.svelte';
 
   let panelTab = $state('changes');
 
-  // When the focused session changes, detect the repo at its working dir.
+  // When the panel's folder changes (focused session, picked folder), detect
+  // the repo at it.
   $effect(() => {
-    const cwd = ws.activeSession?.cwd;
+    const cwd = rightPanel.folder;
     const wsId = ws.currentId;
     if (cwd && wsId) void git.detectFor(wsId, cwd);
   });
@@ -32,12 +37,12 @@
           variant="compact"
           error={git.reposError}
           empty
-          onretry={() => ws.currentId && void git.retryRepos(ws.currentId, ws.activeSession?.cwd)}
+          onretry={() => ws.currentId && void git.retryRepos(ws.currentId, rightPanel.folder)}
         />
       {:else if git.notARepo}
-        <p class="dim">This session’s folder isn’t a git repository.</p>
+        <p class="dim">{rightPanel.session ? 'This session’s folder' : 'This folder'} isn’t a git repository.</p>
       {:else}
-        <p class="dim">No repository for this session yet.</p>
+        <p class="dim">No repository for {rightPanel.session ? 'this session' : 'this workspace'} yet.</p>
       {/if}
       <button class="btn small" onclick={() => router.go('git')}>Open Git module</button>
     </div>

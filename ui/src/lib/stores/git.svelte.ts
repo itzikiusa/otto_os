@@ -25,11 +25,12 @@ import type {
 /** Sub-tab inside an open repo (mirrors RepoView's tab set). The old
  *  'changes' and 'history' tabs were folded into the graph (WIP row + detail
  *  panel); persisted values from before that fold are normalized to 'graph'. */
-export type GitSubTab = 'graph' | 'prs' | 'review' | 'focus';
+export type GitSubTab = 'graph' | 'prs' | 'review';
 
-/** Map a persisted/legacy sub-tab value onto the current tab set. */
+/** Map a persisted/legacy sub-tab value onto the current tab set (Focus is
+ *  a page-level view now, no longer a repo sub-tab). */
 function normSubTab(sub: string | null | undefined): string {
-  return sub == null || sub === 'changes' || sub === 'history' ? DEFAULT_SUB : sub;
+  return sub == null || sub === 'changes' || sub === 'history' || sub === 'focus' ? DEFAULT_SUB : sub;
 }
 
 /** Shape of the global open-tabs persistence blob. */
@@ -319,7 +320,7 @@ class GitStore {
     this.persistOpenTabs();
   }
 
-  /** Set the active sub-tab for a repo (graph/prs/review/focus). */
+  /** Set the active sub-tab for a repo (graph/prs/review). */
   setSubTab(repoId: string, sub: string): void {
     this.subTab = { ...this.subTab, [repoId]: sub };
     this.persistOpenTabs();

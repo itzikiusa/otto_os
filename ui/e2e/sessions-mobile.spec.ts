@@ -428,13 +428,17 @@ test('phone: navigator + activity drawers open within the viewport', async ({ pa
   await page.keyboard.press('Escape');
   await expect(leftDrawer).toBeHidden();
 
-  // Open the right activity drawer (agent session focused → the panel toggle shows).
-  const rightToggle = page.locator('.mtop-btn[aria-label="Session panel"]');
+  // Open the right activity drawer (the Side panel toggle shows on every page).
+  const rightToggle = page.locator('.mtop-btn[aria-label="Side panel"]');
   if (await rightToggle.count()) {
     await rightToggle.click();
-    const rightDrawer = page.locator('.drawer[aria-label="Session panel"]').first();
+    const rightDrawer = page.locator('.drawer[aria-label="Side panel"]').first();
     await expect(rightDrawer).toBeVisible();
     await expectOnScreen(page, await settledBox(rightDrawer), 'activity drawer');
+    // The same rail + content as desktop; the rail starts below the drawer's ✕.
+    await expect(rightDrawer.locator('.rstrip')).toBeVisible();
+    await expect(rightDrawer.locator('.rpanel-title')).toBeVisible();
     await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: test.info().outputPath('side-panel-drawer.png') });
   }
 });

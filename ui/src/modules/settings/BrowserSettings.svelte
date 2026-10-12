@@ -77,7 +77,7 @@
 
     <section class="card bs-card" aria-labelledby="bs-panel">
       <h2 id="bs-panel" class="row-title">Browser beside a session</h2>
-      <p class="row-desc">What the Browser tab of the Session panel (⌘J) shows on this device.</p>
+      <p class="row-desc">What the Browser tab of the Side panel (⌘J) shows on this device.</p>
       <div class="choices" role="radiogroup" aria-labelledby="bs-panel">
         <label class="choice">
           <input

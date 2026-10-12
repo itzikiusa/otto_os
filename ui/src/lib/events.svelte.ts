@@ -740,7 +740,8 @@ class EventsClient {
             n.source_key?.endsWith(':waiting') &&
             n.action?.type === 'open_session'
           ) {
-            ws.markNeedsYou(n.action.session_id);
+            const at = Date.parse(n.created_at);
+            ws.markNeedsYou(n.action.session_id, { noticeAt: Number.isFinite(at) ? at : undefined });
           }
         } else if (parsed.type === 'trail_appended' || parsed.type === 'tasks_updated') {
           activity.applyEvent(parsed);

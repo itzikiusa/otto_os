@@ -15,6 +15,41 @@ export function historyTarget(history: FolderHistory, delta: -1 | 1): number | n
   return target >= 0 && target < history.paths.length ? target : null;
 }
 
+/** A folder finished loading at canonical `path`. A fresh visit (`index`
+ *  undefined) is recorded; a Back/Forward step (`index` = the entry walked to)
+ *  keeps the branch and only canonicalizes that entry. */
+export function settleFolder(history: FolderHistory, path: string, index?: number): FolderHistory {
+  if (index === undefined) return recordFolder(history, path);
+  const paths = [...history.paths];
+  paths[index] = path;
+  return { paths, index };
+}
+
+/** The folder above `path` (`null` at the root). */
+export function parentFolder(path: string): string | null {
+  const trimmed = path.replace(/\/+$/, '');
+  if (trimmed === '') return null;
+  return trimmed.slice(0, trimmed.lastIndexOf('/')) || '/';
+}
+
+/** A typed "go to" path, made absolute against the folder being shown:
+ *  `/abs`, `~` / `~/x` (the daemon expands it), or relative (`src`, `../x`).
+ *  `.`/`..` segments and repeated slashes are folded; `null` for blank input.
+ *  The daemon still checks access and canonicalizes (symlinks) on load. */
+export function resolveJump(input: string, current: string): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  if (raw === '~' || raw.startsWith('~/')) return raw.replace(/\/+$/, '') || '~';
+  const joined = raw.startsWith('/') ? raw : `${current.replace(/\/+$/, '')}/${raw}`;
+  const out: string[] = [];
+  for (const part of joined.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+  return `/${out.join('/')}`;
+}
+
 /** The daemon returns absolute POSIX paths. Keep spaces and Unicode intact. */
 export function folderCrumbs(path: string): { label: string; path: string }[] {
   const crumbs = [{ label: '/', path: '/' }];
