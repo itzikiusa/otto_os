@@ -3721,11 +3721,11 @@ impl SessionManager {
         // The owner leaving makes the grid un-owned for the viewers that
         // remain (their primary pane may take it); the last viewer leaving
         // drops the feed.
-        if self.attached_conns.contains_key(id) {
-            self.publish_grid(id);
-        } else {
-            self.grids.remove(id);
-        }
+        // Removal is keyed on nobody listening (not on the attach count): a
+        // viewer attaching right now may already hold a receiver. The leaving
+        // socket dropped its own receiver before its guard.
+        self.publish_grid(id);
+        self.grids.remove_if(id, |_, tx| tx.receiver_count() == 0);
         // Authority is STICKY: a departing owner does NOT release it. While
         // the user is away from the pane the session must keep the pane's
         // grid — releasing let a passive tile/preview re-pin the PTY narrow
@@ -8457,9 +8457,11 @@ mod tests {
         mgr.claim_input_authority(&id, local.conn_id());
         assert!(!rx.has_changed().unwrap());
 
-        // The last viewer leaving drops the feed.
+        // The last viewer leaving (its receiver gone first, as the WS loop
+        // drops it before its guard) drops the feed.
+        drop(rx);
         drop(local);
-        assert!(rx.has_changed().is_err());
+        assert!(!mgr.grids.contains_key(&id));
         let _ = handle.kill();
     }
 

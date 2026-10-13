@@ -1619,6 +1619,24 @@ fn grid_frame(g: crate::manager::GridState, conn_id: u64) -> String {
         .to_string()
 }
 
+/// Send a pending [`GridState`] change now (before a snapshot taken at that
+/// grid), so the client never judges a snapshot against the old grid.
+async fn flush_grid(
+    rx: &mut Option<watch::Receiver<crate::manager::GridState>>,
+    socket: &mut WebSocket,
+    conn_id: u64,
+) -> Result<(), ()> {
+    let Some(r) = rx.as_mut() else { return Ok(()) };
+    if !r.has_changed().unwrap_or(false) {
+        return Ok(());
+    }
+    let g = *r.borrow_and_update();
+    socket
+        .send(Message::Text(grid_frame(g, conn_id).into()))
+        .await
+        .map_err(|_| ())
+}
+
 /// Next [`GridState`] change; `None` once the feed is gone (never ready
 /// again while `rx` is `None`).
 async fn next_grid(
@@ -2097,6 +2115,9 @@ async fn serve_terminal<S: SessionsCtx>(
                                 let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, c, r).await;
                             }
                         }
+                        if flush_grid(&mut grid_rx, &mut socket, conn_id).await.is_err() {
+                            return;
+                        }
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
                             let frame = client_resync_frame(&mut flow, rx, pty_capture(h, want), binary_snapshots).await;
                             if frame.send(&mut socket).await.is_err() {
@@ -2162,6 +2183,12 @@ async fn serve_terminal<S: SessionsCtx>(
                             (None, Some(h)) => snapshot_frame(h, want, binary_snapshots).await,
                             (_, None) => Snap::build(Vec::new(), 0, false),
                         };
+                        // The grid this snapshot is at goes out FIRST: the
+                        // client judges the snapshot against it (else it saw
+                        // the pre-resize grid and asked for a second one).
+                        if flush_grid(&mut grid_rx, &mut socket, conn_id).await.is_err() {
+                            return;
+                        }
                         // Sent inline, i.e. before any subsequent live bytes.
                         if frame.send(&mut socket).await.is_err() {
                             return;

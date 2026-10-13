@@ -86,6 +86,6 @@ test('another window sizing the PTY: the pane offers a take-over and reclaims it
   remote.close();
   await expect(page.locator('.term-overlay[data-foreign-grid]')).toHaveCount(0, { timeout: 10_000 });
   const probe = await attach(id);
-  await expect.poll(() => probe.grids[0], { timeout: 10_000 }).toMatchObject({ cols: paneCols, owner: 'other' });
+  await expect.poll(() => last(probe), { timeout: 10_000 }).toMatchObject({ cols: paneCols, owner: 'other' });
   probe.close();
 });

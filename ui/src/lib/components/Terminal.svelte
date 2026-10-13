@@ -1395,7 +1395,9 @@
     if (step.rebuild) rebuildFromServer();
     const next = step.foreign && ptyGrid ? ptyGrid : null;
     if (next?.cols !== foreignGrid?.cols || next?.rows !== foreignGrid?.rows) foreignGrid = next ? { ...next } : null;
-    if (autoClaim && step.claim) claimGrid();
+    // Not while our own snapshot request is on its way: the attach already
+    // claims (primary pane) and resizes with that request.
+    if (autoClaim && step.claim && !snapshotAsked) claimGrid();
   }
 
   function onGridFrame(f: WsTermGridFrame): void {
@@ -2426,6 +2428,9 @@
     ptyGrid = e.grid ? { cols: e.grid.cols, rows: e.grid.rows } : null;
     gridOwner = e.grid?.owner ?? 'none';
     gridRebuild = e.gridDirty;
+    // A snapshot the parked socket asked for has landed (or never will):
+    // don't let that request suppress the rebuild this engine owes.
+    snapshotAsked = false;
     keyLat?.reset();
     connectedSid = sid;
     closedByUs = false;
@@ -3008,8 +3013,12 @@
     // A deliberate "this pane": take the size back WITH our grid. A bare
     // resize from a non-owner is ignored server-side, so the snapshot used to
     // come back at the other viewer's grid and the pane stayed broken.
-    if (!readOnly) claimGrid();
-    else if (term.cols !== lastCols || term.rows !== lastRows) {
+    // The grid also goes as a plain resize: a room relay drops `claim` (a
+    // same-size resize is free server-side).
+    if (!readOnly) {
+      claimGrid();
+      sendJson({ type: 'resize', cols: term.cols, rows: term.rows });
+    } else if (term.cols !== lastCols || term.rows !== lastRows) {
       lastCols = term.cols;
       lastRows = term.rows;
       sendJson({ type: 'resize', cols: lastCols, rows: lastRows });
