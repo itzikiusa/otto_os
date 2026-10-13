@@ -1196,12 +1196,12 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_list_issue_accounts",
-                "description": "Read-only: YOUR Jira (+ Confluence) / Linear accounts — `{items}` with id, label, email, base_url, provider (`jira`/`linear`) (never the token). Issue tools take `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account.",
+                "description": "Read-only: YOUR Jira/Linear accounts — `{items}` with id, label, email, base_url, provider (never the token). Issue tools take `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_search_issues",
-                "description": "Read-only: search the account's tracker by `jql` (Jira), `filter` (Linear IssueFilter JSON) or `query` (text / key, optional `project` = Jira project / Linear team). `limit` ≤100, page with `start_at`.",
+                "description": "Read-only: search by `jql` (Jira), `filter` (Linear IssueFilter) or `query` (text / key, optional `project`/team). `limit` ≤100, page with `start_at`.",
                 "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string" }, "filter": { "type": "object" }, "start_at": { "type": "integer" }, "limit": { "type": "integer" } } }
             },
             {
