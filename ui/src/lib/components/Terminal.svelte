@@ -900,6 +900,9 @@
     // one captured at a foreign grid leaves the pane still owing a rebuild.
     snapshotAsked = false;
     if (!gridDiffers()) gridRebuild = false;
+    // An un-owned foreign grid that arrived while this snapshot was in
+    // flight skipped its auto-claim — take it now.
+    else if (gridOwner === 'none') settleGrid(true);
     // Every snapshot replaces the daemon's old output subscription. Never
     // discard a reply: output between request and capture exists ONLY in it.
     // Selection/scroll guards belong before requesting an optional compact.

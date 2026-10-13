@@ -3719,8 +3719,7 @@ impl SessionManager {
             }
         }
         // The owner leaving makes the grid un-owned for the viewers that
-        // remain (their primary pane may take it); the last viewer leaving
-        // drops the feed.
+        // remain (their primary pane may take it).
         // Removal is keyed on nobody listening (not on the attach count): a
         // viewer attaching right now may already hold a receiver. The leaving
         // socket dropped its own receiver before its guard.
