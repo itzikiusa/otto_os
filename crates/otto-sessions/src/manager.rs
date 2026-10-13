@@ -18,6 +18,8 @@ use otto_rbac::AuthRepo;
 use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
 use tokio::sync::{broadcast, Mutex};
 
+use crate::agy::{agy_cli_root, scan_agy_conversation};
+
 use crate::providers::ProviderRegistry;
 
 /// Build `["--add-dir", path, ...]` args for providers that support `--add-dir`
@@ -843,58 +845,6 @@ fn codex_rollout_match(
     let session_id = p.get("session_id").and_then(|s| s.as_str())?.to_string();
     let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
     Some((session_id, mtime))
-}
-
-/// Root directory agy (Antigravity Gemini CLI) writes conversations to:
-/// `~/.gemini/antigravity-cli`. Holds `conversations/<id>.db|.pb` (one per
-/// conversation, named by its UUID) plus a `cache/last_conversations.json`
-/// map of `cwd -> most-recent conversation id`.
-fn agy_cli_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".gemini")
-        .join("antigravity-cli")
-}
-
-/// One scan-and-pick pass: read `cache/last_conversations.json`, look up `cwd`,
-/// and accept the mapped conversation id when its `conversations/<id>.{db,pb}`
-/// file exists, is modified at/after `floor`, and isn't already `claimed`. Split
-/// out from the capture loop (`spawn_session_id_capture`) so it's synchronously
-/// testable. agy mints its own conversation id (like codex); the cwd-keyed map
-/// makes this inherently sole-candidate.
-fn scan_agy_conversation(
-    cli_root: &std::path::Path,
-    cwd: &str,
-    floor: std::time::SystemTime,
-    claimed: &std::collections::HashSet<&str>,
-) -> Option<String> {
-    let map_path = cli_root.join("cache").join("last_conversations.json");
-    let raw = std::fs::read_to_string(&map_path).ok()?;
-    let map: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let id = map.get(cwd).and_then(|v| v.as_str())?;
-    if claimed.contains(id) {
-        return None;
-    }
-    if !agy_conversation_fresh(cli_root, id, floor) {
-        return None;
-    }
-    Some(id.to_string())
-}
-
-/// True when agy's conversation file `conversations/<id>.db|.pb` exists and was
-/// modified at/after `floor` — i.e. created/touched by THIS launch, not a stale
-/// pre-existing conversation that happened to share the same cwd.
-fn agy_conversation_fresh(
-    cli_root: &std::path::Path,
-    id: &str,
-    floor: std::time::SystemTime,
-) -> bool {
-    let dir = cli_root.join("conversations");
-    ["db", "pb"].iter().any(|ext| {
-        std::fs::metadata(dir.join(format!("{id}.{ext}")))
-            .and_then(|m| m.modified())
-            .map(|m| m >= floor)
-            .unwrap_or(false)
-    })
 }
 
 /// The command that puts a reopened `shell` session back into the agent
@@ -1854,6 +1804,8 @@ pub struct SessionManager {
     engine_turns: Arc<DashMap<Id, usize>>,
     /// Size-authority owner per session: the conn that most recently typed.
     size_owner: Arc<DashMap<Id, u64>>,
+    /// Grid feed for terminal viewers (crate::grid, the WS `grid` frame).
+    grids: Arc<crate::grid::GridFeeds>,
     /// Per-session authority locks issue epochs rechecked by the PTY writer.
     room_authority: crate::room_authority::RoomAuthorityMap,
     /// Last observed cumulative CPU (ms) of each live session's DESCENDANT
@@ -1996,6 +1948,7 @@ impl SessionManager {
             viewed: Arc::new(DashMap::new()),
             engine_turns: Arc::new(DashMap::new()),
             size_owner: Arc::new(DashMap::new()),
+            grids: Default::default(),
             room_authority: Default::default(),
             suspend_cpu: Arc::new(DashMap::new()),
             deferred_holders: Arc::new(DashMap::new()),
@@ -3356,6 +3309,7 @@ impl SessionManager {
         self.networks
             .activate(session.id.clone(), network, handle.on_exit());
         self.live.insert(session.id.clone(), Arc::clone(&handle));
+        self.publish_grid(&session.id);
         self.start_status_task(
             session.id.clone(),
             session.workspace_id.clone(),
@@ -3672,6 +3626,7 @@ impl SessionManager {
             .entry(id.clone())
             .or_default()
             .push(conn_id);
+        self.publish_grid(id);
         AttachGuard {
             manager: Arc::clone(self),
             id: id.clone(),
@@ -3697,6 +3652,10 @@ impl SessionManager {
                 self.attached_conns.remove_if(id, |_, v| v.is_empty());
             }
         }
+        // The owner leaving un-owns the grid for the viewers that remain (the
+        // leaving socket dropped its receiver before this guard).
+        self.publish_grid(id);
+        self.grids.forget_if_unwatched(id);
         // Authority is STICKY: a departing owner does NOT release it. While
         // the user is away from the pane the session must keep the pane's
         // grid — releasing let a passive tile/preview re-pin the PTY narrow
@@ -3715,6 +3674,7 @@ impl SessionManager {
     /// resizes from non-owners are ignored while the owner stays attached.
     pub fn note_input_authority(&self, id: &Id, conn_id: u64) {
         self.size_owner.insert(id.clone(), conn_id);
+        self.publish_grid(id);
     }
 
     /// Optimistic [`Self::note_input_authority`] for the terminal socket
@@ -3723,14 +3683,20 @@ impl SessionManager {
     /// against stale authority while the PTY write is still pending. Returns
     /// the previous owner for [`Self::revert_input_authority`].
     pub fn claim_input_authority(&self, id: &Id, conn_id: u64) -> Option<u64> {
-        self.size_owner.insert(id.clone(), conn_id)
+        let prev = self.size_owner.insert(id.clone(), conn_id);
+        if prev != Some(conn_id) {
+            self.publish_grid(id);
+        }
+        prev
     }
 
     /// Undo an optimistic claim whose write failed — only while `conn_id`
     /// still holds it (a newer claim by someone else stands).
     pub fn revert_input_authority(&self, id: &Id, conn_id: u64, prev: Option<u64>) {
+        let mut reverted = false;
         if let dashmap::mapref::entry::Entry::Occupied(mut e) = self.size_owner.entry(id.clone()) {
             if *e.get() == conn_id {
+                reverted = true;
                 match prev {
                     Some(p) => {
                         e.insert(p);
@@ -3741,6 +3707,28 @@ impl SessionManager {
                 }
             }
         }
+        if reverted {
+            self.publish_grid(id);
+        }
+    }
+
+    /// `id`'s grid + ATTACHED size owner as viewers see it (crate::grid).
+    pub fn grid_state(&self, id: &Id) -> crate::grid::GridState {
+        let (cols, rows) = self.live_handle(id).map(|h| h.size()).unwrap_or((0, 0));
+        let attached = |o: &u64| self.attached_conns.get(id).is_some_and(|c| c.contains(o));
+        let owner = self.size_owner.get(id).map(|e| *e).filter(attached);
+        crate::grid::GridState { cols, rows, owner }
+    }
+
+    /// Subscribe to `id`'s grid feed (the WS loop sends each change).
+    pub fn grid_watch(&self, id: &Id) -> tokio::sync::watch::Receiver<crate::grid::GridState> {
+        self.grids.watch(id, self.grid_state(id))
+    }
+
+    /// Push `id`'s grid to its viewers when it changed (every resize and
+    /// size-authority change calls this).
+    pub fn publish_grid(&self, id: &Id) {
+        self.grids.publish(id, || self.grid_state(id));
     }
 
     /// Whether `conn_id` may resize `id` under the size-authority policy:
@@ -4606,6 +4594,7 @@ impl SessionManager {
         // is logged, so a narrow re-pin can be timed and attributed.
         tracing::info!(session = %id, "pty resize {old_cols}x{old_rows} -> {cols}x{rows}");
         handle.resize(cols, rows)?;
+        self.publish_grid(id);
         // Persist the last known grid size so resume/reconnect can restore it
         // (prevents reflow flash on reconnect). Best-effort — no await. Uses the
         // atomic merge (single UPDATE): the old read-modify-write raced
@@ -5716,6 +5705,7 @@ impl SessionManager {
         self.last_touch.remove(id);
         self.viewed.remove(id);
         self.size_owner.remove(id);
+        self.grids.remove(id);
         // Also ends a pending provider-id capture task (it exits on the missing
         // probe entry at its next poll).
         self.capture_probes.remove(id);
@@ -5950,6 +5940,7 @@ impl SessionManager {
             self.passive_resume.insert(id.clone(), ());
         }
         self.live.insert(id.clone(), Arc::clone(&handle));
+        self.publish_grid(id);
         self.repo.update_status(id, SessionStatus::Running).await?;
         let _ = self.events.send(Event::SessionStatus {
             session_id: id.clone(),
@@ -6120,6 +6111,7 @@ impl SessionManager {
         let pid = handle.pid();
         let handle = Arc::new(handle);
         self.live.insert(sid.clone(), Arc::clone(&handle));
+        self.publish_grid(&sid);
         // Not activity: a restart must not reset the idle clock (A14).
         if let Err(e) = self
             .repo
@@ -7373,6 +7365,8 @@ mod tests {
 
     #[path = "archive.rs"]
     mod archive;
+    #[path = "grid.rs"]
+    mod grid;
 
     /// Sweep 2026-10-11 M2: an agent may open a worker in a repo registered
     /// in its workspace even outside the workspace root; an unregistered

@@ -76,7 +76,7 @@ test('Focus account switch ignores a late work response and clears issue details
   await page.route('**/api/v1/issue/my-work?*', r => r.request().url().includes('account-a') ? (pending = r, undefined) : r.fulfill({ json: [issue('B-1')] }));
   await openRepo(page, 'focus');
   await expect.poll(() => !!pending).toBe(true);
-  await page.getByTitle('Jira account', { exact: true }).selectOption('account-b');
+  await page.getByTitle('Issue-tracker account', { exact: true }).selectOption('account-b');
   await expect(page.locator('.fx-issue')).toContainText('B-1');
   await pending!.fulfill({ json: [issue('A-1')] });
   await page.waitForTimeout(150);
@@ -94,7 +94,7 @@ test('Focus quick view ignores a late issue and closes when account changes', as
   await pending!.fulfill({ json: issue('AUDIT-1') });
   await page.waitForTimeout(150);
   await expect(page.locator('.fx-quick-summary')).toContainText('AUDIT-2');
-  await page.getByTitle('Jira account', { exact: true }).selectOption('account-b');
+  await page.getByTitle('Issue-tracker account', { exact: true }).selectOption('account-b');
   await expect(page.locator('.fx-quick')).toHaveCount(0);
 });
 test('phone Focus quick view traps focus, closes with Escape and restores its trigger', async ({ page }) => {

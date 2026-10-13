@@ -3,6 +3,8 @@
 //! router and the terminal WebSocket.
 
 pub mod accounts;
+mod agy;
+pub mod grid;
 pub mod http;
 pub mod lifecycle;
 pub mod manager;

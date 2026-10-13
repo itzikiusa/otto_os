@@ -86,7 +86,7 @@ below). Clients need no change: keep sending, and treat a dropped socket or a
 {"type":"resize","cols":120,"rows":32}
 {"type":"scrollback","lines":2000,"cols":160,"rows":48}   // snapshot request; optional grid = "resize to this first" (see below)
 {"type":"search","query":"foo"}                     // server-side ring-buffer search (see below)
-{"type":"claim"}                                    // claim size authority (sent on terminal focus)
+{"type":"claim","cols":160,"rows":48}               // claim size authority (focus / window back / Redraw); optional grid = "and resize to this" (see Size authority)
 {"type":"pause"}                                    // flow control: stop sending me output (see below)
 {"type":"resume"}                                   // flow control: send again (+ one snapshot if anything was held back)
 {"type":"resync","lines":2000}                      // (optional "cols"/"rows" as on scrollback) typed over a dropped local backlog: discard my queued output, send ONE snapshot (see below)
@@ -215,6 +215,29 @@ viewer to attach/refit set the grid, letting a later-attaching preview
 shrink an open pane. Preview / monitor embeds must never claim on attach; a
 session only ever watched by claim-less embeds (vault-run / workflow panels)
 stays first-come-sized.
+
+**Grid feed (`grid`, server → client).** Every viewer is told the PTY's real
+grid and who sizes it: once right after the attach `status`, then on every
+change — a resize, a claim / typing that moves authority, the owner's socket
+closing, a respawn:
+
+```json
+{"type":"grid","cols":100,"rows":30,"owner":"other"}  // "self" = this socket owns the size, "other" = another ATTACHED socket does, "none" = nobody attached does
+```
+
+`cols`/`rows` are 0 while no process is live. A viewer whose own grid differs
+from `cols`×`rows` is receiving output laid out for another grid (a remote
+browser that typed re-sized the PTY: TUI frames land on the wrong cells and,
+with fewer PTY rows, the pane's bottom rows are never repainted). Otto's
+terminal then (a) shows "sized for another window" with a one-click take-over
+while `owner` is `"other"`; (b) on the PRIMARY pane, takes the grid back by
+itself when `owner` is `"none"` (the other viewer left; authority is still
+sticky server-side, so only a claim moves it) and when the window regains
+focus; and (c) once `owner` is `"self"` at its own grid, rebuilds from ONE
+`scrollback` snapshot, since its buffer was painted at the foreign grid.
+`claim` with `cols`+`rows` claims and resizes in one step: a bare `claim`
+left the PTY at the old owner's grid until the client happened to resize.
+Older servers send no `grid` and ignore the claim's grid.
 
 **Resize semantics.** A `resize` matching the PTY's current grid is dropped
 server-side before the ioctl — no SIGWINCH, no emulator rewrap, no meta
