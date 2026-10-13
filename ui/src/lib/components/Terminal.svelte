@@ -899,10 +899,10 @@
     // A snapshot captured at OUR grid replaces whatever another grid painted;
     // one captured at a foreign grid leaves the pane still owing a rebuild.
     snapshotAsked = false;
-    if (!gridDiffers()) gridRebuild = false;
-    // An un-owned foreign grid that arrived while this snapshot was in
-    // flight skipped its auto-claim — take it now.
-    else if (gridOwner === 'none') settleGrid(true);
+    gridRebuild = false;
+    // Captured at another viewer's grid (we could not resize): this pane
+    // owes a rebuild; an un-owned one skipped its auto-claim — take it now.
+    if (gridDiffers() && gridOwner !== 'self') settleGrid(true);
     // Every snapshot replaces the daemon's old output subscription. Never
     // discard a reply: output between request and capture exists ONLY in it.
     // Selection/scroll guards belong before requesting an optional compact.

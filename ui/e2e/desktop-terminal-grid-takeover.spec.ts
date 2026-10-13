@@ -57,6 +57,8 @@ test('another window sizing the PTY: the pane offers a take-over and reclaims it
   expect(r.ok(), await r.text()).toBeTruthy();
   const id = ((await r.json()) as { id: string }).id;
 
+  // The pane only opens a session of the ACTIVE workspace.
+  await page.addInitScript((w) => localStorage.setItem('otto_workspace', w as string), wsId);
   await page.goto(`/#/agents/${id}`);
   const host = page.locator('.term-host');
   await expect(host).toBeVisible({ timeout: 30_000 });

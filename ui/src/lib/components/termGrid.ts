@@ -34,7 +34,11 @@ export interface GridStep {
 }
 
 export function gridStep(v: GridView): GridStep {
-  let owed = v.owed || (v.differs && v.owner !== 'self');
+  // Only output PAINTED here at a foreign grid is owed a rebuild: while our own
+  // snapshot is on its way (a fresh attach) nothing is painted yet, and that
+  // snapshot rebuilds the screen anyway. Owing one then made a stray rebuild
+  // land seconds later — and a rebuild resets the screen (selection gone).
+  let owed = v.owed || (v.differs && v.owner !== 'self' && !v.snapshotAsked);
   let rebuild = false;
   if (!v.differs && v.owner === 'self' && owed && !v.snapshotAsked) {
     owed = false;

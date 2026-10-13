@@ -16,7 +16,9 @@ use otto_core::{new_id, Error, Id, Result};
 use otto_pty::{resolve_grid, CommandSpec, PtyHandle};
 use otto_rbac::AuthRepo;
 use otto_state::{ActivityRepo, NewSession, NewTrail, SessionsRepo};
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{broadcast, Mutex};
+
+use crate::agy::{agy_cli_root, scan_agy_conversation};
 
 use crate::providers::ProviderRegistry;
 
@@ -843,58 +845,6 @@ fn codex_rollout_match(
     let session_id = p.get("session_id").and_then(|s| s.as_str())?.to_string();
     let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
     Some((session_id, mtime))
-}
-
-/// Root directory agy (Antigravity Gemini CLI) writes conversations to:
-/// `~/.gemini/antigravity-cli`. Holds `conversations/<id>.db|.pb` (one per
-/// conversation, named by its UUID) plus a `cache/last_conversations.json`
-/// map of `cwd -> most-recent conversation id`.
-fn agy_cli_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".gemini")
-        .join("antigravity-cli")
-}
-
-/// One scan-and-pick pass: read `cache/last_conversations.json`, look up `cwd`,
-/// and accept the mapped conversation id when its `conversations/<id>.{db,pb}`
-/// file exists, is modified at/after `floor`, and isn't already `claimed`. Split
-/// out from the capture loop (`spawn_session_id_capture`) so it's synchronously
-/// testable. agy mints its own conversation id (like codex); the cwd-keyed map
-/// makes this inherently sole-candidate.
-fn scan_agy_conversation(
-    cli_root: &std::path::Path,
-    cwd: &str,
-    floor: std::time::SystemTime,
-    claimed: &std::collections::HashSet<&str>,
-) -> Option<String> {
-    let map_path = cli_root.join("cache").join("last_conversations.json");
-    let raw = std::fs::read_to_string(&map_path).ok()?;
-    let map: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let id = map.get(cwd).and_then(|v| v.as_str())?;
-    if claimed.contains(id) {
-        return None;
-    }
-    if !agy_conversation_fresh(cli_root, id, floor) {
-        return None;
-    }
-    Some(id.to_string())
-}
-
-/// True when agy's conversation file `conversations/<id>.db|.pb` exists and was
-/// modified at/after `floor` — i.e. created/touched by THIS launch, not a stale
-/// pre-existing conversation that happened to share the same cwd.
-fn agy_conversation_fresh(
-    cli_root: &std::path::Path,
-    id: &str,
-    floor: std::time::SystemTime,
-) -> bool {
-    let dir = cli_root.join("conversations");
-    ["db", "pb"].iter().any(|ext| {
-        std::fs::metadata(dir.join(format!("{id}.{ext}")))
-            .and_then(|m| m.modified())
-            .map(|m| m >= floor)
-            .unwrap_or(false)
-    })
 }
 
 /// The command that puts a reopened `shell` session back into the agent
@@ -1747,17 +1697,6 @@ async fn await_retired_exit(id: &Id, mut rx: tokio::sync::watch::Receiver<Option
     }
 }
 
-/// A session's PTY grid as its terminal viewers must know it: the real
-/// `cols`×`rows` (0×0 while no process is live) and the ATTACHED connection
-/// that owns the size, if any. Published to every viewer as a WS `grid`
-/// frame so a viewer can tell it is drawing another grid's output.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GridState {
-    pub cols: u16,
-    pub rows: u16,
-    pub owner: Option<u64>,
-}
-
 /// RAII guard for a WS terminal attachment: decrements the session's attached-
 /// viewer count when dropped, on every WS `serve_terminal` return path.
 pub struct AttachGuard {
@@ -1865,12 +1804,8 @@ pub struct SessionManager {
     engine_turns: Arc<DashMap<Id, usize>>,
     /// Size-authority owner per session: the conn that most recently typed.
     size_owner: Arc<DashMap<Id, u64>>,
-    /// Per-session [`GridState`] feed for attached terminal viewers (the WS
-    /// `grid` frame): the PTY's real grid and who sizes it. Without it a
-    /// viewer cannot tell that another viewer re-sized the PTY, and keeps
-    /// painting another grid's output into its own (stale bottom rows,
-    /// hard-wrapped TUI frames) until a restart.
-    grids: Arc<DashMap<Id, watch::Sender<GridState>>>,
+    /// Grid feed for terminal viewers (crate::grid, the WS `grid` frame).
+    grids: Arc<crate::grid::GridFeeds>,
     /// Per-session authority locks issue epochs rechecked by the PTY writer.
     room_authority: crate::room_authority::RoomAuthorityMap,
     /// Last observed cumulative CPU (ms) of each live session's DESCENDANT
@@ -2013,7 +1948,7 @@ impl SessionManager {
             viewed: Arc::new(DashMap::new()),
             engine_turns: Arc::new(DashMap::new()),
             size_owner: Arc::new(DashMap::new()),
-            grids: Arc::new(DashMap::new()),
+            grids: Default::default(),
             room_authority: Default::default(),
             suspend_cpu: Arc::new(DashMap::new()),
             deferred_holders: Arc::new(DashMap::new()),
@@ -3374,7 +3309,6 @@ impl SessionManager {
         self.networks
             .activate(session.id.clone(), network, handle.on_exit());
         self.live.insert(session.id.clone(), Arc::clone(&handle));
-        // A (re)spawn sets a new grid: viewers learn it.
         self.publish_grid(&session.id);
         self.start_status_task(
             session.id.clone(),
@@ -3718,13 +3652,10 @@ impl SessionManager {
                 self.attached_conns.remove_if(id, |_, v| v.is_empty());
             }
         }
-        // The owner leaving makes the grid un-owned for the viewers that
-        // remain (their primary pane may take it).
-        // Removal is keyed on nobody listening (not on the attach count): a
-        // viewer attaching right now may already hold a receiver. The leaving
-        // socket dropped its own receiver before its guard.
+        // The owner leaving un-owns the grid for the viewers that remain (the
+        // leaving socket dropped its receiver before this guard).
         self.publish_grid(id);
-        self.grids.remove_if(id, |_, tx| tx.receiver_count() == 0);
+        self.grids.forget_if_unwatched(id);
         // Authority is STICKY: a departing owner does NOT release it. While
         // the user is away from the pane the session must keep the pane's
         // grid — releasing let a passive tile/preview re-pin the PTY narrow
@@ -3781,47 +3712,23 @@ impl SessionManager {
         }
     }
 
-    /// The PTY grid of `id` and its ATTACHED size owner, as viewers see it.
-    /// An owner that detached (authority is sticky) reads as `None`: the
-    /// remaining viewers may take the grid back.
-    pub fn grid_state(&self, id: &Id) -> GridState {
+    /// `id`'s grid + ATTACHED size owner as viewers see it (crate::grid).
+    pub fn grid_state(&self, id: &Id) -> crate::grid::GridState {
         let (cols, rows) = self.live_handle(id).map(|h| h.size()).unwrap_or((0, 0));
-        let owner = self.size_owner.get(id).map(|e| *e).filter(|o| {
-            self.attached_conns
-                .get(id)
-                .is_some_and(|conns| conns.contains(o))
-        });
-        GridState { cols, rows, owner }
+        let attached = |o: &u64| self.attached_conns.get(id).is_some_and(|c| c.contains(o));
+        let owner = self.size_owner.get(id).map(|e| *e).filter(attached);
+        crate::grid::GridState { cols, rows, owner }
     }
 
-    /// Subscribe to `id`'s [`GridState`] (one feed per session, created on
-    /// first use; the WS terminal loop turns each change into a `grid` frame).
-    pub fn grid_watch(&self, id: &Id) -> watch::Receiver<GridState> {
-        let now = self.grid_state(id);
-        let rx = self
-            .grids
-            .entry(id.clone())
-            .or_insert_with(|| watch::channel(now).0)
-            .subscribe();
-        self.publish_grid(id);
-        rx
+    /// Subscribe to `id`'s grid feed (the WS loop sends each change).
+    pub fn grid_watch(&self, id: &Id) -> tokio::sync::watch::Receiver<crate::grid::GridState> {
+        self.grids.watch(id, self.grid_state(id))
     }
 
-    /// Push the current [`GridState`] to `id`'s viewers when it changed.
-    /// Called after every grid resize and every size-authority change.
+    /// Push `id`'s grid to its viewers when it changed (every resize and
+    /// size-authority change calls this).
     pub fn publish_grid(&self, id: &Id) {
-        let Some(tx) = self.grids.get(id).map(|t| t.clone()) else {
-            return;
-        };
-        let now = self.grid_state(id);
-        tx.send_if_modified(|g| {
-            if *g == now {
-                false
-            } else {
-                *g = now;
-                true
-            }
-        });
+        self.grids.publish(id, || self.grid_state(id));
     }
 
     /// Whether `conn_id` may resize `id` under the size-authority policy:
@@ -6033,7 +5940,6 @@ impl SessionManager {
             self.passive_resume.insert(id.clone(), ());
         }
         self.live.insert(id.clone(), Arc::clone(&handle));
-        // A (re)spawn sets a new grid: viewers learn it.
         self.publish_grid(id);
         self.repo.update_status(id, SessionStatus::Running).await?;
         let _ = self.events.send(Event::SessionStatus {
@@ -6205,7 +6111,6 @@ impl SessionManager {
         let pid = handle.pid();
         let handle = Arc::new(handle);
         self.live.insert(sid.clone(), Arc::clone(&handle));
-        // A (re)spawn sets a new grid: viewers learn it.
         self.publish_grid(&sid);
         // Not activity: a restart must not reset the idle clock (A14).
         if let Err(e) = self
@@ -7460,6 +7365,8 @@ mod tests {
 
     #[path = "archive.rs"]
     mod archive;
+    #[path = "grid.rs"]
+    mod grid;
 
     /// Sweep 2026-10-11 M2: an agent may open a worker in a repo registered
     /// in its workspace even outside the workspace root; an unregistered
@@ -8384,83 +8291,6 @@ mod tests {
         assert_eq!(handle.size(), (100, 30));
         mgr.human_resize(&id, &owner, false, 90, 25).await.unwrap();
         assert_eq!(handle.size(), (90, 25));
-        let _ = handle.kill();
-    }
-
-    /// Every viewer learns the PTY's real grid and who sizes it (the WS
-    /// `grid` frame): a remote viewer typing re-sizes the PTY, and the local
-    /// pane must see that (and see the owner leave) to take the grid back.
-    #[tokio::test]
-    async fn grid_feed_tracks_resizes_claims_and_the_owner_leaving() {
-        let (mgr, repo, ws, owner) = test_manager().await;
-        let id = seed_session(&repo, &ws, &owner, None).await;
-        let spec = CommandSpec {
-            program: "/bin/cat".into(),
-            args: vec![],
-            cwd: Some("/".into()),
-            env: vec![],
-        };
-        let handle = Arc::new(PtyHandle::spawn_sized(&spec, 150, 40).unwrap());
-        mgr.live.insert(id.clone(), Arc::clone(&handle));
-        let local = mgr.attach(&id);
-        let mut rx = mgr.grid_watch(&id);
-        assert_eq!(
-            *rx.borrow_and_update(),
-            GridState {
-                cols: 150,
-                rows: 40,
-                owner: None
-            }
-        );
-
-        // A remote browser attaches, types (claims) and resizes.
-        let remote = mgr.attach(&id);
-        mgr.claim_input_authority(&id, remote.conn_id());
-        mgr.human_resize(&id, &owner, false, 100, 30).await.unwrap();
-        assert!(rx.has_changed().unwrap());
-        assert_eq!(
-            *rx.borrow_and_update(),
-            GridState {
-                cols: 100,
-                rows: 30,
-                owner: Some(remote.conn_id())
-            }
-        );
-        assert!(!mgr.may_resize(&id, local.conn_id()));
-
-        // The remote tab closes: authority stays sticky, but viewers see the
-        // grid as un-owned so the local pane may take it back.
-        drop(remote);
-        assert_eq!(rx.borrow_and_update().owner, None);
-        assert!(
-            !mgr.may_resize(&id, local.conn_id()),
-            "sticky until a claim"
-        );
-
-        // The local pane claims and re-sizes: one feed, its own grid again.
-        mgr.human_claim_size(&id, &owner, false, local.conn_id())
-            .await
-            .unwrap();
-        mgr.human_resize(&id, &owner, false, 150, 40).await.unwrap();
-        assert_eq!(
-            *rx.borrow_and_update(),
-            GridState {
-                cols: 150,
-                rows: 40,
-                owner: Some(local.conn_id())
-            }
-        );
-
-        // Same-size resizes and repeated claims publish nothing.
-        mgr.human_resize(&id, &owner, false, 150, 40).await.unwrap();
-        mgr.claim_input_authority(&id, local.conn_id());
-        assert!(!rx.has_changed().unwrap());
-
-        // The last viewer leaving (its receiver gone first, as the WS loop
-        // drops it before its guard) drops the feed.
-        drop(rx);
-        drop(local);
-        assert!(!mgr.grids.contains_key(&id));
         let _ = handle.kill();
     }
 

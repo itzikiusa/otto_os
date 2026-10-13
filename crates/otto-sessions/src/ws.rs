@@ -35,6 +35,7 @@ use otto_pty::PtyHandle;
 use serde::Deserialize;
 use tokio::sync::{broadcast, watch, Semaphore};
 
+use crate::grid::{grid_frame, next_grid, send_grid};
 use crate::share_throttle;
 
 use crate::http::SessionsCtx;
@@ -1606,51 +1607,6 @@ fn spawn_input_writer<S: SessionsCtx>(
     )
 }
 
-/// The `grid` frame for one viewer: the PTY grid and whether THIS
-/// connection (`"self"`), another attached one (`"other"`) or nobody
-/// attached (`"none"`) owns its size.
-fn grid_frame(g: crate::manager::GridState, conn_id: u64) -> String {
-    let owner = match g.owner {
-        Some(o) if o == conn_id => "self",
-        Some(_) => "other",
-        None => "none",
-    };
-    serde_json::json!({ "type": "grid", "cols": g.cols, "rows": g.rows, "owner": owner })
-        .to_string()
-}
-
-/// Send a pending [`GridState`] change now (before a snapshot taken at that
-/// grid), so the client never judges a snapshot against the old grid.
-async fn flush_grid(
-    rx: &mut Option<watch::Receiver<crate::manager::GridState>>,
-    socket: &mut WebSocket,
-    conn_id: u64,
-) -> Result<(), ()> {
-    let Some(r) = rx.as_mut() else { return Ok(()) };
-    if !r.has_changed().unwrap_or(false) {
-        return Ok(());
-    }
-    let g = *r.borrow_and_update();
-    socket
-        .send(Message::Text(grid_frame(g, conn_id).into()))
-        .await
-        .map_err(|_| ())
-}
-
-/// Next [`GridState`] change; `None` once the feed is gone (never ready
-/// again while `rx` is `None`).
-async fn next_grid(
-    rx: &mut Option<watch::Receiver<crate::manager::GridState>>,
-) -> Option<crate::manager::GridState> {
-    match rx.as_mut() {
-        Some(r) => match r.changed().await {
-            Ok(()) => Some(*r.borrow_and_update()),
-            Err(_) => None,
-        },
-        None => std::future::pending().await,
-    }
-}
-
 async fn serve_terminal<S: SessionsCtx>(
     mut socket: WebSocket,
     ctx: S,
@@ -1716,15 +1672,11 @@ async fn serve_terminal<S: SessionsCtx>(
     // The PTY grid + who sizes it (`grid` frames): sent now and on every
     // change, so this viewer knows when it is drawing another grid's output.
     let mut grid_rx = Some(ctx.manager().grid_watch(&session_id));
-    if let Some(rx) = grid_rx.as_mut() {
-        let g = *rx.borrow_and_update();
-        if socket
-            .send(Message::Text(grid_frame(g, conn_id).into()))
-            .await
-            .is_err()
-        {
-            return;
-        }
+    if send_grid(&mut grid_rx, &mut socket, conn_id, true)
+        .await
+        .is_err()
+    {
+        return;
     }
 
     let mut handle: Option<Arc<PtyHandle>> = ctx.manager().live_handle(&session_id);
@@ -1914,16 +1866,11 @@ async fn serve_terminal<S: SessionsCtx>(
             }
             // The PTY grid or its owner changed (a resize, a claim, the
             // owner leaving, a respawn) → one `grid` frame.
-            changed = next_grid(&mut grid_rx) => {
-                match changed {
-                    Some(g) => {
-                        if socket.send(Message::Text(grid_frame(g, conn_id).into())).await.is_err() {
-                            return;
-                        }
-                    }
-                    None => grid_rx = None,
-                }
-            }
+            changed = next_grid(&mut grid_rx) => match changed {
+                Some(g) if socket.send(Message::Text(grid_frame(g, conn_id).into())).await.is_err() => return,
+                Some(_) => {}
+                None => grid_rx = None,
+            },
             // Child exit → {"type":"exit","code":N}; socket stays open.
             code = next_exit(&mut exit_rx) => {
                 exit_rx = None;
@@ -2115,7 +2062,7 @@ async fn serve_terminal<S: SessionsCtx>(
                                 let _ = ctx.manager().human_resize(&session_id, &input_user, input_scoped, c, r).await;
                             }
                         }
-                        if flush_grid(&mut grid_rx, &mut socket, conn_id).await.is_err() {
+                        if send_grid(&mut grid_rx, &mut socket, conn_id, false).await.is_err() {
                             return;
                         }
                         if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
@@ -2183,10 +2130,8 @@ async fn serve_terminal<S: SessionsCtx>(
                             (None, Some(h)) => snapshot_frame(h, want, binary_snapshots).await,
                             (_, None) => Snap::build(Vec::new(), 0, false),
                         };
-                        // The grid this snapshot is at goes out FIRST: the
-                        // client judges the snapshot against it (else it saw
-                        // the pre-resize grid and asked for a second one).
-                        if flush_grid(&mut grid_rx, &mut socket, conn_id).await.is_err() {
+                        // The grid this snapshot is at goes out FIRST.
+                        if send_grid(&mut grid_rx, &mut socket, conn_id, false).await.is_err() {
                             return;
                         }
                         // Sent inline, i.e. before any subsequent live bytes.

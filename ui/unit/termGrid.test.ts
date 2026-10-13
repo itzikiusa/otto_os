@@ -30,6 +30,15 @@ test('a snapshot already on its way is the rebuild (no second one on attach)', (
   assert.equal(s.owed, true, 'still owed until that snapshot lands');
 });
 
+test('a fresh attach owes nothing: its own snapshot rebuilds the screen', () => {
+  // The first grid frame (the old size, nobody attached owns it) lands while
+  // the attach snapshot is in flight — owing a rebuild then reset the screen
+  // seconds later and dropped the user's selection.
+  const s = gridStep({ ...base, differs: true, owner: 'none', snapshotAsked: true });
+  assert.equal(s.owed, false);
+  assert.equal(s.claim, true, 'the primary pane still takes an un-owned foreign grid');
+});
+
 test('the other viewer leaving: the visible primary pane takes the grid back', () => {
   assert.equal(gridStep({ ...base, differs: true, owner: 'none' }).claim, true);
   assert.equal(gridStep({ ...base, differs: true, owner: 'none', visible: false }).claim, false, 'never from a hidden tab');
