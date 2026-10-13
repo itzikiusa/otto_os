@@ -95,6 +95,18 @@
     /** The xterm reflowed locally (or was put back to the PTY grid on
      *  parking) without the PTY repainting: the adopter asks for a snapshot. */
     needsCompact: boolean;
+    /** The daemon's latest `grid` frame (docs/contracts/ws.md "Grid feed"). */
+    grid: GridFeed | null;
+    /** Output arrived laid out for ANOTHER viewer's grid: the adopter rebuilds
+     *  from one snapshot once it sizes the PTY again. */
+    gridDirty: boolean;
+  }
+
+  /** What a `grid` frame tells a viewer: the PTY's real grid + who sizes it. */
+  interface GridFeed {
+    cols: number;
+    rows: number;
+    owner: 'self' | 'other' | 'none';
   }
 
   function disposeParked(e: ParkedEngine): void {
@@ -175,7 +187,7 @@
         return;
       }
       if (typeof ev.data !== 'string') return;
-      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; binary?: boolean; status?: ParkedStatus; code?: number; message?: string };
+      let msg: { type?: string; window?: unknown; epoch?: number; data?: string; binary?: boolean; status?: ParkedStatus; code?: number; message?: string; cols?: number; rows?: number; owner?: GridFeed['owner'] };
       try {
         msg = JSON.parse(ev.data);
       } catch {
@@ -204,6 +216,14 @@
         case 'error':
           e.term.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
           break;
+        case 'grid': {
+          const g: GridFeed = { cols: msg.cols ?? 0, rows: msg.rows ?? 0, owner: msg.owner ?? 'none' };
+          e.grid = g;
+          // Another viewer sized the PTY while we were parked: what we parse
+          // from now on is laid out for its grid, not ours.
+          if (g.cols > 0 && g.owner !== 'self' && (g.cols !== e.term.cols || g.rows !== e.term.rows)) e.gridDirty = true;
+          break;
+        }
       }
     };
   }
@@ -224,8 +244,9 @@
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { wsConnect, wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
-  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
+  import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermClaimFrame, WsTermFlowFrame, WsTermGridFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
+  import { gridStep } from './termGrid';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
   import { reconnectDelay } from './guestReconnect';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
@@ -840,6 +861,9 @@
     connectedSid = sessionId;
     compactPending = false;
     snapshotEpoch = null;
+    // The new socket's first `grid` frame describes the PTY afresh, and the
+    // snapshot it requests on open rebuilds the screen anyway.
+    resetGridFeed();
     // The snapshot this socket requests on open rebuilds the screen anyway.
     localReflowed = false;
     compactDeferred = false;
@@ -872,6 +896,10 @@
   /** Apply a `scrollback` snapshot (JSON or binary form, perf 01 N3). */
   function applySnapshot(epoch: number | null, snap: Uint8Array | null): void {
     compactQueue.done(compactClient);
+    // A snapshot captured at OUR grid replaces whatever another grid painted;
+    // one captured at a foreign grid leaves the pane still owing a rebuild.
+    snapshotAsked = false;
+    if (!gridDiffers()) gridRebuild = false;
     // Every snapshot replaces the daemon's old output subscription. Never
     // discard a reply: output between request and capture exists ONLY in it.
     // Selection/scroll guards belong before requesting an optional compact.
@@ -949,6 +977,7 @@
         lastRows = term.rows;
         localReflowed = false;
       }
+      snapshotAsked = true;
       sendJson(req);
       sendResize(true);
       verifyFitSoon();
@@ -1018,6 +1047,9 @@
             break;
           case 'error':
             term?.write(`\r\n\x1b[31m[otto] ${msg.code}: ${msg.message ?? ''}\x1b[0m\r\n`);
+            break;
+          case 'grid':
+            onGridFrame(msg as WsTermGridFrame);
             break;
           case 'probe_ack': {
             const ack = msg as WsTermProbeAckFrame;
@@ -1306,8 +1338,83 @@
     flow.hold(document.visibilityState === 'hidden' && !isFocusedPane());
   }
 
+  // ── Grid feed (docs/contracts/ws.md "Grid feed") ───────────────────────────
+  // The daemon tells every viewer the PTY's REAL grid and who sizes it. Before
+  // it, `lastCols`/`lastRows` (what THIS socket last sent) were all a pane knew,
+  // so a remote browser that typed (and re-sized the PTY) left the local pane
+  // painting another grid's output: TUI frames on the wrong cells, and with
+  // fewer PTY rows a bottom strip the TUI never repaints. Only a session
+  // restart cleared it.
+  let ptyGrid: { cols: number; rows: number } | null = null;
+  let gridOwner: GridFeed['owner'] = 'none';
+  /** Output arrived laid out for another viewer's grid: rebuild from ONE
+   *  snapshot as soon as the PTY is at our grid and ours again. */
+  let gridRebuild = false;
+  /** Another attached viewer sizes the PTY to a different grid (the primary
+   *  pane offers a one-click take-over). */
+  let foreignGrid = $state<{ cols: number; rows: number } | null>(null);
+  /** A snapshot this socket asked for is still on its way: it IS the
+   *  rebuild (the attach snapshot is taken after the attach resize). */
+  let snapshotAsked = false;
+
+  function resetGridFeed(): void {
+    ptyGrid = null;
+    gridOwner = 'none';
+    gridRebuild = false;
+    foreignGrid = null;
+    snapshotAsked = false;
+  }
+
+  /** The PTY grid is known (a live process) and differs from this xterm's. */
+  function gridDiffers(): boolean {
+    return !!term && !!ptyGrid && ptyGrid.cols > 0 && (ptyGrid.cols !== term.cols || ptyGrid.rows !== term.rows);
+  }
+
+  /** Claim size authority AND resize to this pane's grid in one step. */
+  function claimGrid(): void {
+    if (!term || readOnly) return;
+    sendJson({ type: 'claim', cols: term.cols, rows: term.rows } satisfies WsTermClaimFrame);
+    lastCols = term.cols;
+    lastRows = term.rows;
+  }
+
+  /** Re-evaluate after a `grid` frame or a local grid change (termGrid.ts:
+   *  owe / do a rebuild, offer the take-over, auto-claim). `autoClaim` only
+   *  on a `grid` frame — a local refit never claims on its own. */
+  function settleGrid(autoClaim = false): void {
+    const step = gridStep({
+      differs: gridDiffers(),
+      owner: gridOwner,
+      owed: gridRebuild,
+      snapshotAsked,
+      primary: claimOnAttach,
+      readOnly,
+      visible: document.visibilityState === 'visible',
+    });
+    gridRebuild = step.owed;
+    if (step.rebuild) rebuildFromServer();
+    const next = step.foreign && ptyGrid ? ptyGrid : null;
+    if (next?.cols !== foreignGrid?.cols || next?.rows !== foreignGrid?.rows) foreignGrid = next ? { ...next } : null;
+    if (autoClaim && step.claim) claimGrid();
+  }
+
+  function onGridFrame(f: WsTermGridFrame): void {
+    ptyGrid = { cols: f.cols, rows: f.rows };
+    gridOwner = f.owner;
+    settleGrid(true);
+  }
+
+  /** The window came back (focus / visible): the primary pane re-takes a
+   *  grid another viewer changed meanwhile — the "looked at it from another
+   *  computer, came back, terminal broken" case. */
+  function onWindowBack(): void {
+    if (document.visibilityState !== 'visible' || !claimOnAttach || readOnly || !connected) return;
+    if (gridDiffers()) claimGrid();
+  }
+
   function sendResize(force = false): void {
     if (!term) return;
+    settleGrid();
     // Reflect the live grid on the host element — handy for debugging stale
     // grids (shows up as a too-small data-cols) and asserted by the resize E2E.
     container?.setAttribute('data-cols', String(term.cols));
@@ -2137,8 +2244,8 @@
     // tiled-overview tile + phone tab) and last-resize-wins let a passive
     // small viewer pin the size (sessions stuck at 80 cols in a 150-col
     // pane). The server only honors resizes from the typing/focused owner;
-    // clicking into a pane reclaims it, then re-push our grid.
-    sendJson({ type: 'claim' });
+    // clicking into a pane reclaims it WITH our grid (one step server-side).
+    claimGrid();
     sendResize(true);
     // The pane the user works in renders on the GPU (L4): take a slot from
     // the least recently focused terminal when the budget is full.
@@ -2272,6 +2379,8 @@
       lastCols,
       lastRows,
       needsCompact: needsCompact && preferDom,
+      grid: ptyGrid ? { ...ptyGrid, owner: gridOwner } : null,
+      gridDirty: gridRebuild,
     };
     wireParked(key, e);
     termPark.put(key, e);
@@ -2314,6 +2423,9 @@
     lastRows = e.lastRows;
     // Reflowed before parking: the forced sync in afterAdopt compacts.
     localReflowed = e.needsCompact;
+    ptyGrid = e.grid ? { cols: e.grid.cols, rows: e.grid.rows } : null;
+    gridOwner = e.grid?.owner ?? 'none';
+    gridRebuild = e.gridDirty;
     keyLat?.reset();
     connectedSid = sid;
     closedByUs = false;
@@ -2357,6 +2469,10 @@
       sendResize(true);
       verifyFitSoon();
       forceViewportRefresh();
+      // Painted at another viewer's grid while parked: take the grid back
+      // (primary pane) and rebuild once it is ours (onGridFrame / settleGrid).
+      if (gridRebuild && claimOnAttach && !readOnly) claimGrid();
+      settleGrid();
     });
   }
 
@@ -2479,6 +2595,8 @@
     document.addEventListener('visibilitychange', onPageVis);
     document.addEventListener('visibilitychange', onGpuWake);
     window.addEventListener('focus', onGpuWake);
+    document.addEventListener('visibilitychange', onWindowBack);
+    window.addEventListener('focus', onWindowBack);
     const gpuIo = typeof IntersectionObserver === 'function'
       ? new IntersectionObserver((entries) => {
           onScreen = entries[entries.length - 1].isIntersecting;
@@ -2637,6 +2755,8 @@
       gpuClients.delete(gpuClient);
       document.removeEventListener('visibilitychange', onGpuWake);
       document.removeEventListener('visibilitychange', onPageVis);
+      document.removeEventListener('visibilitychange', onWindowBack);
+      window.removeEventListener('focus', onWindowBack);
       compactQueue.cancel(compactClient);
       window.removeEventListener('focus', onGpuWake);
       gpuIo?.disconnect();
@@ -2884,11 +3004,24 @@
     if (!term || !connected) return;
     cancelResizeTimer();
     resizeForcePending = false;
-    if (safeFit() && (term.cols !== lastCols || term.rows !== lastRows)) {
+    safeFit();
+    // A deliberate "this pane": take the size back WITH our grid. A bare
+    // resize from a non-owner is ignored server-side, so the snapshot used to
+    // come back at the other viewer's grid and the pane stayed broken.
+    if (!readOnly) claimGrid();
+    else if (term.cols !== lastCols || term.rows !== lastRows) {
       lastCols = term.cols;
       lastRows = term.rows;
       sendJson({ type: 'resize', cols: lastCols, rows: lastRows });
     }
+    gridRebuild = false;
+    rebuildFromServer();
+  }
+
+  /** Rebuild the screen from ONE server snapshot (the redraw / grid-rebuild
+   *  core): reflow state cleared, any queued compact superseded. */
+  function rebuildFromServer(): void {
+    if (!term || !connected) return;
     localReflowed = false;
     if (resizeCompactTimer !== null) {
       clearTimeout(resizeCompactTimer);
@@ -2896,6 +3029,7 @@
     }
     // Explicit redraws may be requested even while reading scrollback.
     compactPending = false;
+    snapshotAsked = true;
     sendJson({ type: 'scrollback', lines: term.options.scrollback ?? scrollback });
   }
 </script>
@@ -3067,6 +3201,13 @@
       </div>
     {:else if !connected}
       <div class="term-overlay dim"><span class="ov-status">Connecting…</span></div>
+    {:else if foreignGrid}
+      <!-- Another window (a remote browser, a phone tab) sizes this session's
+           terminal: what is drawn here is laid out for ITS grid. -->
+      <div class="term-overlay" data-foreign-grid="{foreignGrid.cols}x{foreignGrid.rows}">
+        <span class="ov-status warning" title="Another window typed in this session last, so the terminal is sized for it ({foreignGrid.cols}×{foreignGrid.rows}). Output here is laid out for that size.">Sized for another window</span>
+        <button class="btn" onclick={() => { claimGrid(); term?.focus(); }} title="Size the session to this pane and redraw it">Use this pane</button>
+      </div>
     {/if}
 
     {#if readOnly}

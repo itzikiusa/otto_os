@@ -386,6 +386,18 @@ stops acknowledging output: the daemon holds or drops what it would have sent
 and the pane catches up with one snapshot when it returns. If a pane still looks garbled, **⋯ → Redraw terminal** (or ⌘K
 "Redraw terminal") rebuilds the screen from the session without reconnecting.
 
+**One session, several windows.** A session's PTY has ONE size, set by the
+window that typed into it last (or clicked into it). When another window
+takes it — a remote browser, a phone tab — the daemon tells every attached
+pane (the `grid` frame), and the open pane shows **Sized for another window**
+with **Use this pane**. The pane also takes the size back by itself when you
+return to its window (focus, or the window becoming visible) and as soon as
+the other window closes, then rebuilds its screen from one snapshot. Before
+this, the pane kept drawing output laid out for the other window's size: a
+bottom strip the agent never repainted when that window had fewer rows, or
+broken TUI frames, until the session was restarted. **Redraw terminal** now
+takes the size back too.
+
 ### Watching, splitting, tiling
 
 - **Split view** (`Splits.svelte` + `SplitNode.svelte`) — a nested split **tree**:
@@ -1318,6 +1330,13 @@ devices' sessions stay hidden here (they still run on the daemon)."* This is a
   processes (`pgrep -fl pty-holder`), one per kept session.
 - **Custom provider not appearing.** Confirm it's in the `providers` settings
   JSON and that `cmd` is on `PATH` (`GET /meta.tools` reports detected tools).
+- **The bottom of the terminal stops updating, or the pane looks broken after
+  you used the session from another computer or a phone.** Another window
+  sized the session. Click **Use this pane** on the "Sized for another window"
+  notice, click into the terminal, or use **Redraw terminal** — each takes the
+  size back and rebuilds the screen; no restart needed. The daemon log shows
+  each change as `pty resize A -> B` and each refused one as `terminal resize
+  denied (not size owner)`.
 - **A TUI pane is garbled after switching tabs** (blank rows, fragments on the
   wrong rows, stray characters at the right edge). Use **⋯ → Redraw terminal**
   (⌘K "Redraw terminal"). To see which layout step produced the stray grid,

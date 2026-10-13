@@ -122,6 +122,26 @@ export interface WsTermScrollbackRequestFrame {
   rows?: number;
 }
 
+/** Client → server `/ws/term` size-authority claim (docs/contracts/ws.md §1
+ *  "Size authority"): sent on focus, when the window comes back and on
+ *  Redraw. With `cols` + `rows` the server also resizes the PTY to them. */
+export interface WsTermClaimFrame {
+  type: 'claim';
+  cols?: number;
+  rows?: number;
+}
+
+/** Server → client `/ws/term` grid feed ("Grid feed"): the PTY's real grid
+ *  (0×0 while no process is live) and who sizes it — this socket (`self`),
+ *  another attached one (`other`) or nobody attached (`none`). Sent after
+ *  the attach `status` and on every change. */
+export interface WsTermGridFrame {
+  type: 'grid';
+  cols: number;
+  rows: number;
+  owner: 'self' | 'other' | 'none';
+}
+
 /** Client → server `/ws/term` latency probe (docs/contracts/ws.md §1
  *  "Latency probe"): answered at once with a `probe_ack` echoing `id`. */
 export interface WsTermProbeFrame {
