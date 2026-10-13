@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Shared Jira issue picker block — used by both ReviewPanel and AttachIssue.
+  // Shared issue picker block (Jira or Linear, per account) — used by both ReviewPanel and AttachIssue.
   // Handles account selection, project selection, and debounced search.
   import { api } from '../../lib/api/client';
   import { toastError } from '../../lib/toastError';
@@ -47,7 +47,7 @@
       accounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (accounts.length > 0) selectedAccountId = accounts[0].id;
     } catch (e) {
-      toastError('Couldn’t load Jira accounts', e);
+      toastError('Couldn’t load issue-tracker accounts', e);
     } finally {
       accountsLoading = false;
     }
@@ -150,9 +150,9 @@
 {:else if accounts.length === 0}
   <div class="picker-empty">
     <Icon name="ticket" size={14} />
-    <span>No Jira accounts configured.</span>
+    <span>No Jira or Linear accounts configured.</span>
     <button class="btn small ghost" onclick={() => goToJiraSettings()}>
-      Settings → Jira
+      Settings → Jira &amp; Linear
     </button>
   </div>
 {:else}

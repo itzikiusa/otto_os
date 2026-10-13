@@ -4306,10 +4306,12 @@ export interface ReviewProofPackExport {
 }
 
 // ---------------------------------------------------------------------------
-// Issue tracking (Jira)
+// Issue tracking (Jira, Linear)
 // ---------------------------------------------------------------------------
 
-export type IssueProviderKind = 'jira';
+/** The tracker an issue account belongs to — it decides where searches, fetches
+ *  and comments go (Jira REST or the Linear GraphQL API). */
+export type IssueProviderKind = 'jira' | 'linear';
 
 export interface IssueAccount {
   id: Id;

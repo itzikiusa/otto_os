@@ -192,6 +192,9 @@ when Jira has them, so a caller can group results without fetching each issue.
 In the UI pick **JQL** in the search box's **Match** menu (Enter runs it); agents
 pass `jql` to `otto.search_issues` / `otto_search_issues`.
 
+Linear accounts use the same search box and API with a JSON `filter` instead
+of JQL — see [Linear](./linear.md).
+
 ### What fields are pulled on import
 
 - **Jira issue (`GET /issue/{account_id}/{key}`):** `summary`, `status`,

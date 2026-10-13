@@ -3871,14 +3871,10 @@ async fn execute_node(
                                         .ok()
                                         .flatten();
                                 last = match token {
-                                    Some(t) => otto_issues::JiraClient::new(
-                                        &account.base_url,
-                                        &account.email,
-                                        &t,
-                                    )
-                                    .get_issue_full(&key)
-                                    .await
-                                    .map_err(|e| e.to_string()),
+                                    Some(t) => otto_issues::Tracker::for_account(&account, &t)
+                                        .get_issue_full(&key)
+                                        .await
+                                        .map_err(|e| e.to_string()),
                                     None => Err(format!(
                                         "missing token for issue account {}",
                                         account.id

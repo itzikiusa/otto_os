@@ -1,9 +1,12 @@
-//! otto-issues — Jira issue-tracking integration: HTTP router + Jira API client.
+//! otto-issues — issue tracking (Jira, Linear) + Confluence: HTTP router, the
+//! provider clients, and the [`Tracker`] facade that picks one per account.
 
 pub mod adf;
 pub mod confluence;
 pub mod http;
 pub mod jira;
+pub mod linear;
+pub mod tracker;
 
 pub use adf::{adf_to_markdown, text_to_adf};
 pub use confluence::{
@@ -16,3 +19,5 @@ pub use jira::{
     DevPr, DevStatus, EditableField, FieldOption, IssueComment, IssueFull, JiraAttachment,
     JiraChangeItem, JiraChangelogEntry, JiraClient, JiraField, JiraLink, JiraTransition, JiraUser,
 };
+pub use linear::LinearClient;
+pub use tracker::{provider_name, require_confluence, RawQuery, Tracker};

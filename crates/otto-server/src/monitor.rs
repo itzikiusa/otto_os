@@ -412,8 +412,8 @@ fn provider_label(p: GitProviderKind) -> &'static str {
     }
 }
 
-fn issue_provider_label(_a: &IssueAccount) -> &'static str {
-    "Jira"
+fn issue_provider_label(a: &IssueAccount) -> &'static str {
+    otto_issues::provider_name(a.provider)
 }
 
 // ---------------------------------------------------------------------------

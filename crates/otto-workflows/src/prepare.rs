@@ -102,8 +102,8 @@ fn scan_jira_key(text: &str) -> Option<String> {
     None
 }
 
-/// The Jira accounts a `prepare_context` fetch may use, in the order to try
-/// them: an explicit `params.account_id` alone; else every one of the run
+/// The issue-tracker accounts (Jira or Linear — issue keys look alike) a
+/// `prepare_context` fetch may use, in the order to try them: an explicit `params.account_id` alone; else every one of the run
 /// user's own accounts (oldest first — with several Jira sites connected the
 /// caller tries each until one knows the key, instead of failing on whichever
 /// came first); else the daemon's accounts (single-user / admin-configured
@@ -122,7 +122,8 @@ pub async fn resolve_jira_accounts<C: WorkflowCtx>(
             .map_err(|e| e.to_string());
     }
     let is_jira = |a: &otto_core::domain::IssueAccount| {
-        matches!(a.provider, otto_core::domain::IssueProviderKind::Jira)
+        use otto_core::domain::IssueProviderKind as P;
+        matches!(a.provider, P::Jira | P::Linear)
     };
     if let Ok(accounts) = ctx.issues_store().list_accounts(run_user).await {
         let mine: Vec<_> = accounts.into_iter().filter(is_jira).collect();

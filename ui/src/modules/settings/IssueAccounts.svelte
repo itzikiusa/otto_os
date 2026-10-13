@@ -5,10 +5,10 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
-  // Jira / issue-tracking accounts settings page.
+  // Issue-tracker accounts (Jira, Linear) settings page.
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { IssueAccount } from '../../lib/api/types';
+  import type { IssueAccount, IssueProviderKind } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -26,6 +26,7 @@
   // Edit state — null means "Add" mode, non-null means "Edit" mode.
   let editing: IssueAccount | null = $state(null);
 
+  let provider = $state<IssueProviderKind>('jira');
   let label = $state('');
   let baseUrl = $state('');
   let email = $state('');
@@ -34,6 +35,16 @@
   let tokenExpiresAt = $state('');
 
   const isEdit = $derived(editing !== null);
+  const isLinear = $derived(provider === 'linear');
+  /** Display name of an account's tracker. */
+  function providerName(p: IssueProviderKind): string {
+    return p === 'linear' ? 'Linear' : 'Jira';
+  }
+  /** Jira signs in with site + email + token; Linear with the API key alone
+   *  (the base URL is just the workspace link). */
+  const formReady = $derived(
+    label.trim() !== '' && (isLinear || (baseUrl.trim() !== '' && email.trim() !== '')),
+  );
   /** Repointing an account at another origin (scheme, host or port) must not
    *  carry the stored token there (it would be sent as Basic auth to the new
    *  origin): a changed origin needs a fresh token — the daemon's own rule. */
@@ -81,8 +92,8 @@
   });
 
   // ── Connection test ────────────────────────────────────────────────────────
-  // There's no dedicated test route for Jira; listing the projects the token
-  // can see exercises the same base URL + email + token and is read-only.
+  // There's no dedicated test route; listing the projects (Jira) or teams
+  // (Linear) the token can see exercises the same credential and is read-only.
   type TestResult = { ok: true; projects: number } | { ok: false; error: string } | 'busy';
   let testResults: Record<string, TestResult> = $state({});
 
@@ -96,9 +107,9 @@
     }
   }
 
-  function testLabel(r: Exclude<TestResult, 'busy'>): string {
+  function testLabel(a: IssueAccount, r: Exclude<TestResult, 'busy'>): string {
     return r.ok
-      ? `Connected · ${plural(r.projects, 'project')} visible`
+      ? `Connected · ${plural(r.projects, a.provider === 'linear' ? 'team' : 'project')} visible`
       : `Couldn’t connect: ${r.error}`;
   }
 
@@ -116,6 +127,7 @@
 
   function openAdd(): void {
     editing = null;
+    provider = 'jira';
     label = '';
     baseUrl = '';
     email = '';
@@ -126,6 +138,7 @@
 
   function openEdit(a: IssueAccount): void {
     editing = a;
+    provider = a.provider;
     label = a.label;
     baseUrl = a.base_url;
     email = a.email;
@@ -143,18 +156,18 @@
     busy = true;
     try {
       const a = await api.post<IssueAccount>('/issue/accounts', {
-        provider: 'jira',
+        provider,
         label: label.trim(),
         base_url: baseUrl.trim(),
-        email: email.trim(),
+        email: isLinear ? '' : email.trim(),
         token,
         token_expires_at: fromDateInput(tokenExpiresAt),
       });
       accounts = [...accounts, a];
       closeModal();
-      toasts.success('Jira account added', a.label);
+      toasts.success(`${providerName(a.provider)} account added`, a.label);
     } catch (e) {
-      toasts.error("Couldn’t add the Jira account", loadErrorText(e));
+      toasts.error(`Couldn’t add the ${providerName(provider)} account`, loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -177,9 +190,9 @@
       const { [updated.id]: _stale, ...rest } = testResults;
       testResults = rest;
       closeModal();
-      toasts.success('Jira account updated', updated.label);
+      toasts.success(`${providerName(updated.provider)} account updated`, updated.label);
     } catch (e) {
-      toasts.error("Couldn’t save the Jira account", loadErrorText(e));
+      toasts.error(`Couldn’t save the ${providerName(provider)} account`, loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -195,9 +208,9 @@
     try {
       await api.del(`/issue/accounts/${a.id}`);
       accounts = accounts.filter((x) => x.id !== a.id);
-      toasts.success('Jira account deleted', a.label);
+      toasts.success(`${providerName(a.provider)} account deleted`, a.label);
     } catch (e) {
-      toasts.error('Couldn’t delete the Jira account', loadErrorText(e));
+      toasts.error(`Couldn’t delete the ${providerName(a.provider)} account`, loadErrorText(e));
     } finally {
       const next = { ...deleting };
       delete next[a.id];
@@ -207,7 +220,7 @@
 </script>
 
 <div class="settings-section">
-  <PageHeader title={sectionLabel('jira')} subtitle="Search and attach Jira issues">
+  <PageHeader title={sectionLabel('jira')} subtitle="Search and attach Jira and Linear issues">
     {#snippet actions()}
       <!-- While the list is empty the EmptyState owns the one "Add account". -->
       {#if accounts.length > 0}
@@ -217,13 +230,13 @@
   </PageHeader>
   <PageBody width="readable">
 
-  <LoadState what="Jira accounts" variant="page" {loading} error={loadError} empty={accounts.length === 0} onretry={() => void load()} rows={2}>
+  <LoadState what="issue-tracker accounts" variant="page" {loading} error={loadError} empty={accounts.length === 0} onretry={() => void load()} rows={2}>
     {#snippet emptyView()}
       <EmptyState
         variant="page"
         icon="ticket"
-        title="No Jira accounts yet"
-        body="Add a Jira Cloud account to search issues, attach them to sessions and publish from Product. The API token is stored in the macOS Keychain."
+        title="No Jira or Linear accounts yet"
+        body="Add a Jira Cloud or Linear account to search issues, attach them to sessions and publish from Product. The token is stored in the macOS Keychain."
         actionLabel="Add account"
         actionIcon="plus"
         onaction={openAdd}
@@ -248,6 +261,7 @@
           <div class="grow">
             <div class="acct-label">
               <span class="acct-name" title={a.label}>{a.label}</span>
+              <span class="chip">{providerName(a.provider)}</span>
               {#if warn === 'expired'}
                 <span class="chip bad" title="The token has expired — edit the account and paste a new one">Token expired</span>
               {:else if warn === 'soon'}
@@ -255,7 +269,7 @@
               {/if}
             </div>
             <div class="acct-sub">
-              {a.email} · <span class="mono">{a.base_url}</span>
+              {#if a.email}{a.email} · {/if}<span class="mono">{a.base_url}</span>
               {#if a.token_expires_at && !warn}
                 · <span class="expiry">{expiryLabel(a.token_expires_at)}</span>
               {/if}
@@ -263,7 +277,7 @@
             {#if r}
               <div class="test-result" role="status" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
                 {#if r !== 'busy'}<Icon name={r.ok ? 'check' : 'warning'} size={12} />{/if}
-                {r === 'busy' ? 'Testing…' : testLabel(r)}
+                {r === 'busy' ? 'Testing…' : testLabel(a, r)}
               </div>
             {/if}
           </div>
@@ -296,22 +310,34 @@
 </div>
 
 {#if addOpen}
-  <Modal title={isEdit ? 'Edit Jira account' : 'Add Jira account'} onclose={closeModal}>
+  <Modal title={isEdit ? `Edit ${providerName(provider)} account` : 'Add issue-tracker account'} onclose={closeModal}>
+    {#if !isEdit}
+      <div class="field">
+        <span class="field-label" id="ia-provider-label">Tracker</span>
+        <div class="segmented" role="group" aria-labelledby="ia-provider-label">
+          {#each ['jira', 'linear'] as const as p (p)}
+            <button class:active={provider === p} aria-pressed={provider === p} onclick={() => (provider = p)}>{providerName(p)}</button>
+          {/each}
+        </div>
+        <span class="hint">Searches, fetches and comments go to the tracker the account belongs to.</span>
+      </div>
+    {/if}
     <div class="field">
       <label for="ia-label">Label</label>
-      <input dir="auto" id="ia-label" class="input" bind:value={label} placeholder="Work Jira" />
+      <input dir="auto" id="ia-label" class="input" bind:value={label} placeholder={isLinear ? 'Work Linear' : 'Work Jira'} />
     </div>
     <div class="field">
-      <label for="ia-base">Base URL</label>
+      <label for="ia-base">{isLinear ? 'Workspace URL' : 'Base URL'}{#if isLinear} <span class="dim">(optional)</span>{/if}</label>
       <input dir="ltr"
         id="ia-base"
         class="input mono"
         bind:value={baseUrl}
-        placeholder="https://yourcompany.atlassian.net"
+        placeholder={isLinear ? 'https://linear.app/yourteam' : 'https://yourcompany.atlassian.net'}
         spellcheck="false"
         autocomplete="off"
       />
     </div>
+    {#if !isLinear}
     <div class="field">
       <label for="ia-email">Email</label>
       <input dir="ltr"
@@ -324,8 +350,9 @@
         autocomplete="off"
       />
     </div>
+    {/if}
     <div class="field">
-      <label for="ia-token">API token</label>
+      <label for="ia-token">{isLinear ? 'API key' : 'API token'}</label>
       <input
         id="ia-token"
         class="input"
@@ -338,6 +365,11 @@
         <span class="hint warn-hint" role="alert">The site changed — paste a token for the new site. The stored token is never sent to a different host.</span>
       {:else if isEdit}
         <span class="hint">Leave blank to keep the existing token.</span>
+      {:else if isLinear}
+        <span class="hint">
+          Write-only — never shown again after saving. Create a key in Linear at
+          <strong>Settings → Security &amp; access → Personal API keys</strong>.
+        </span>
       {:else}
         <span class="hint">
           Write-only — never shown again after saving. Create a token at
@@ -356,7 +388,7 @@
       {#if isEdit}
         <button
           class="btn primary"
-          disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === '' || needsToken}
+          disabled={busy || !formReady || needsToken}
           onclick={save}
         >
           {busy ? 'Saving…' : 'Save changes'}
@@ -364,7 +396,7 @@
       {:else}
         <button
           class="btn primary"
-          disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === '' || token === ''}
+          disabled={busy || !formReady || token === ''}
           onclick={create}
         >
           {busy ? 'Adding…' : 'Add account'}

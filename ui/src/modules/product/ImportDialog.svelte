@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Import Story dialog — choose a Jira/Confluence account, pick source kind,
+  // Import Story dialog — choose a Jira/Linear/Confluence account, pick source kind,
   // search for and pick a source, optionally set cwd + watch. Calls product.importStory()
   // then selects the new story and closes.
   import Modal from '../../lib/components/Modal.svelte';
@@ -26,6 +26,13 @@
 
   let accountId = $state('');
   let sourceKind: 'jira' | 'confluence' = $state('jira');
+  // A Linear account has issues only ('jira' is the tracker-issue kind for
+  // either provider; the account decides where it is fetched from).
+  const accountProvider = $derived(accounts.find((a) => a.id === accountId)?.provider ?? 'jira');
+  const isLinear = $derived(accountProvider === 'linear');
+  $effect(() => {
+    if (isLinear && sourceKind === 'confluence') sourceKind = 'jira';
+  });
 
   // Picked via SourceSearch
   let selectedKey = $state('');
@@ -126,7 +133,7 @@
   {#snippet children()}
     {#if accountsLoading || accountsError}
       <LoadState
-        what="your Jira / Confluence accounts"
+        what="your Jira / Linear / Confluence accounts"
         variant="compact"
         loading={accountsLoading}
         error={accountsError}
@@ -136,7 +143,7 @@
     {:else if accounts.length === 0}
       <div class="no-accounts">
         <Icon name="ticket" size={16} />
-        <span>No Jira or Confluence account is connected yet. Add one to import issues and pages.</span>
+        <span>No Jira, Linear or Confluence account is connected yet. Add one to import issues and pages.</span>
       </div>
       <button class="btn small" onclick={() => { onclose(); router.go('settings/jira'); }}>
         <Icon name="plus" size={12} /> Add account in Settings
@@ -159,13 +166,15 @@
           <label class="kind-opt" class:active={sourceKind === 'jira'}>
             <input type="radio" bind:group={sourceKind} value="jira" onchange={resetSelection} />
             <Icon name="ticket" size={13} />
-            Jira issue
+            {isLinear ? 'Linear issue' : 'Jira issue'}
           </label>
-          <label class="kind-opt" class:active={sourceKind === 'confluence'}>
-            <input type="radio" bind:group={sourceKind} value="confluence" onchange={resetSelection} />
-            <Icon name="globe" size={13} />
-            Confluence page
-          </label>
+          {#if !isLinear}
+            <label class="kind-opt" class:active={sourceKind === 'confluence'}>
+              <input type="radio" bind:group={sourceKind} value="confluence" onchange={resetSelection} />
+              <Icon name="globe" size={13} />
+              Confluence page
+            </label>
+          {/if}
         </div>
       </div>
 
@@ -189,6 +198,7 @@
           <SourceSearch
             {accountId}
             {sourceKind}
+            provider={accountProvider}
             onpick={(s) => { selectedKey = s.key; selectedLabel = s.label; }}
           />
         </div>

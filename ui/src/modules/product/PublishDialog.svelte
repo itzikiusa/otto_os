@@ -64,7 +64,7 @@
     const raw = e instanceof Error ? e.message : String(e);
     let why = '';
     if (e instanceof ApiError) {
-      if (e.status === 401 || e.status === 403) why = ' The account was refused — check its token in Settings → Integrations → Jira.';
+      if (e.status === 401 || e.status === 403) why = ' The account was refused — check its token in Settings → Integrations → Jira & Linear accounts.';
       else if (e.status === 404) why = ' The project, space or parent page was not found.';
       else if (e.status === 409) why = ' It conflicts with the current state on the server.';
     } else if (e instanceof TypeError) why = " Otto can’t reach the daemon.";
@@ -72,7 +72,11 @@
     formErrorDetail = raw;
   }
 
-  const title = $derived(mode === 'story' ? 'Publish as Jira story' : 'Publish as Confluence RFC');
+  /** The selected account's tracker (a story publishes to Jira or Linear;
+   *  Confluence needs an Atlassian account). */
+  const tracker = $derived(accounts.find((a) => a.id === accountId)?.provider === 'linear' ? 'Linear' : 'Jira');
+  const container = $derived(tracker === 'Linear' ? 'team' : 'project');
+  const title = $derived(mode === 'story' ? `Publish as ${tracker} story` : 'Publish as Confluence RFC');
 
   // ── Preview: WHAT is sent (the same version the daemon publishes — newest
   // suggested, else draft, else source; mirrors `best_content_version`). ─────
@@ -123,7 +127,7 @@
     if (mode === 'story') {
       const p = projects.find((x) => x.key === projectKey);
       return p
-        ? `Creates a ${issueType || 'Story'} in ${p.name} (${p.key}), visible to everyone with access to that Jira project.`
+        ? `Creates a ${issueType || 'Story'} in ${p.name} (${p.key}), visible to everyone with access to that ${tracker} ${container}.`
         : '';
     }
     const sp = spaces.find((x) => x.key === spaceKey);
@@ -141,13 +145,14 @@
   async function loadAccounts(): Promise<void> {
     accountsLoading = true;
     try {
-      accounts = await api.get<IssueAccount[]>('/issue/accounts');
+      const all = await api.get<IssueAccount[]>('/issue/accounts');
+      accounts = mode === 'story' ? all : all.filter((a) => a.provider === 'jira');
       if (accounts.length > 0) {
         accountId = accounts[0].id;
         await onAccountChange();
       }
     } catch (e) {
-      setError("Couldn’t load your Jira / Confluence accounts", e);
+      setError("Couldn’t load your issue-tracker accounts", e);
     } finally {
       accountsLoading = false;
     }
@@ -252,7 +257,7 @@
           project_key: projectKey,
           issue_type: issueType || 'Story',
         });
-        toasts.success('Published as Jira story', detail.story.title);
+        toasts.success(`Published as ${tracker} story`, detail.story.title);
         if (!current()) return;
         // Select the resulting story.
         if (detail.story.id !== product.selectedId) {
@@ -272,7 +277,7 @@
       if (current()) onclose();
     } catch (e) {
       if (!current()) return;
-      setError(mode === 'story' ? "Couldn’t publish to Jira" : "Couldn’t publish to Confluence", e);
+      setError(mode === 'story' ? `Couldn’t publish to ${tracker}` : "Couldn’t publish to Confluence", e);
       if (e instanceof ApiError && e.status === 409) {
         reviewedContent = null;
         previewError = 'The content changed. Reload the preview and review it before publishing again.';
@@ -295,7 +300,7 @@
       </div>
       <button class="btn small" onclick={() => { formError = ''; formErrorDetail = ''; void loadAccounts(); }}>Retry</button>
     {:else if accounts.length === 0}
-      <div class="no-accounts">No Jira or Confluence account is connected yet — add one to publish.</div>
+      <div class="no-accounts">{mode === 'story' ? 'No Jira or Linear account is connected yet — add one to publish.' : 'No Jira (Atlassian) account is connected yet — Confluence needs one to publish.'}</div>
       <button class="btn small" onclick={() => { onclose(); router.go('settings/jira'); }}>
         <Icon name="plus" size={12} /> Add account in Settings
       </button>
@@ -319,7 +324,7 @@
       {#if mode === 'story'}
         <!-- Project -->
         <div class="field">
-          <label class="label" for="pd-project">Project</label>
+          <label class="label" for="pd-project">{tracker === 'Linear' ? 'Team' : 'Project'}</label>
           {#if projectsLoading}
             <Skeleton rows={1} height={27} label="projects" />
           {:else if projectsError}

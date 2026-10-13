@@ -231,4 +231,29 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].token_expires_at, Some(exp2));
     }
+
+    #[tokio::test]
+    async fn linear_accounts_store_alongside_jira_ones() {
+        let pool = mem_pool().await;
+        let repo = IssuesRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let a = repo
+            .create_account(NewIssueAccount {
+                user_id: user.clone(),
+                provider: IssueProviderKind::Linear,
+                label: "linear".into(),
+                // Linear authenticates with the API key alone.
+                email: String::new(),
+                token_ref: "ref-l".into(),
+                base_url: "https://linear.app".into(),
+                token_expires_at: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(a.provider, IssueProviderKind::Linear);
+        let mine = repo.list_accounts(&user).await.unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].provider, IssueProviderKind::Linear);
+        assert_eq!(mine[0].email, "");
+    }
 }

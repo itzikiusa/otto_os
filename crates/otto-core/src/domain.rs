@@ -462,12 +462,15 @@ pub struct GitAccount {
 #[serde(rename_all = "snake_case")]
 pub enum IssueProviderKind {
     Jira,
+    /// Linear (GraphQL API at api.linear.app; the token is an API key).
+    Linear,
 }
 
 impl IssueProviderKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "jira" => Some(Self::Jira),
+            "linear" => Some(Self::Linear),
             _ => None,
         }
     }
@@ -475,6 +478,7 @@ impl IssueProviderKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Jira => "jira",
+            Self::Linear => "linear",
         }
     }
 }

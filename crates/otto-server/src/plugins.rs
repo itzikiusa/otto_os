@@ -791,9 +791,12 @@ async fn host_jira_accounts(State(ctx): State<ServerCtx>, headers: HeaderMap) ->
         return *r;
     }
     match ctx.issues_store.list_all_accounts().await {
+        // Jira credentials only — the host API hands plugins Atlassian
+        // `email:token` pairs; a Linear key is not one.
         Ok(accts) => Json(
             accts
                 .into_iter()
+                .filter(|a| a.provider == otto_core::domain::IssueProviderKind::Jira)
                 .map(|a| HostJiraAccount {
                     id: a.id.to_string(),
                     label: a.label,
@@ -837,6 +840,9 @@ async fn host_jira_credentials(
         Ok(a) => a,
         Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     };
+    if account.provider != otto_core::domain::IssueProviderKind::Jira {
+        return (StatusCode::NOT_FOUND, "not a Jira account").into_response();
+    }
     let token = match otto_core::secrets::get_async(&ctx.secrets, &account.token_ref).await {
         Ok(Some(t)) => t,
         Ok(None) => return (StatusCode::NOT_FOUND, "token missing").into_response(),

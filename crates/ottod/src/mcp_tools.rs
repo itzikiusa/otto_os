@@ -1202,8 +1202,8 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_search_issues",
-                "description": "Read-only: search Jira by `jql` (raw JQL) or `query` (text / key, optional `project`). `limit` ≤100, page with `start_at`.",
-                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string" }, "start_at": { "type": "integer" }, "limit": { "type": "integer" } } }
+                "description": "Read-only: search the account's tracker by `jql` (Jira), `filter` (Linear IssueFilter as JSON text) or `query` (text / key, optional `project` = Jira project / Linear team). `limit` ≤100, page with `start_at`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string" }, "filter": { "type": "string" }, "start_at": { "type": "integer" }, "limit": { "type": "integer" } } }
             },
             {
                 "name": "otto_list_issue_transitions",
@@ -2509,6 +2509,7 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
                     ("q", "query"),
                     ("project", "project"),
                     ("jql", "jql"),
+                    ("filter", "filter"),
                     ("start_at", "start_at"),
                     ("limit", "limit"),
                 ],

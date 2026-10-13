@@ -100,6 +100,8 @@
   let issueAccounts = $state<IssueAccount[]>([]);
   let accountsError = $state<string | null>(null);
   let issueAccountId = $state<string>('');
+  /** The selected account's tracker name — copy and "Open in" follow it. */
+  const tracker = $derived(issueAccounts.find((a) => a.id === issueAccountId)?.provider === 'linear' ? 'Linear' : 'Jira');
   let work = $state<MyWorkIssue[]>([]);
   let workLoading = $state(true);
   let workError = $state<string | null>(null);
@@ -312,8 +314,8 @@
     <button
       class="fx-ext"
       onclick={() => openExternal(node.issue.url)}
-      title="Open in Jira"
-      aria-label="Open {node.issue.key} in Jira"
+      title="Open in {tracker}"
+      aria-label="Open {node.issue.key} in {tracker}"
     >
       <Icon name="external" size={12} />
     </button>
@@ -401,34 +403,34 @@
     <!-- ── MY WORK (Jira) ── -->
     <section class="fx-section">
       <header class="fx-head">
-        <span class="fx-title">My Jira work</span>
+        <span class="fx-title">My {tracker} work</span>
         {#if !workLoading && work.length > 0}<span class="fx-count">{work.length}</span>{/if}
         <span class="grow"></span>
         {#if issueAccounts.length > 1}
-          <select class="input fx-account" bind:value={issueAccountId} title="Jira account">
+          <select class="input fx-account" bind:value={issueAccountId} title="Issue-tracker account">
             {#each issueAccounts as a (a.id)}
               <option value={a.id}>{a.label}</option>
             {/each}
           </select>
         {/if}
         {#if issueAccountId}
-          <button class="icon-btn" onclick={() => void loadWork(issueAccountId)} title="Refresh my Jira work" aria-label="Refresh my Jira work">
+          <button class="icon-btn" onclick={() => void loadWork(issueAccountId)} title="Refresh my {tracker} work" aria-label="Refresh my {tracker} work">
             <Icon name="refresh" size={14} />
           </button>
         {/if}
       </header>
 
       {#if accountsError}
-        <LoadState variant="compact" what="Jira accounts" error={accountsError} empty onretry={() => void loadAccounts()} />
+        <LoadState variant="compact" what="issue-tracker accounts" error={accountsError} empty onretry={() => void loadAccounts()} />
       {:else if issueAccounts.length === 0 && !workLoading}
         <div class="fx-empty dim fx-empty-row">
-          <span>Connect a Jira account to see the issues assigned to you here.</span>
-          <button class="btn small" onclick={() => router.go('settings/jira')}><Icon name="ticket" size={12} /> Add Jira account…</button>
+          <span>Connect a Jira or Linear account to see the issues assigned to you here.</span>
+          <button class="btn small" onclick={() => router.go('settings/jira')}><Icon name="ticket" size={12} /> Add account…</button>
         </div>
       {:else if workLoading}
         <div style="padding: 10px"><Skeleton rows={5} height={24} /></div>
       {:else if workError}
-        <LoadState variant="compact" what="your Jira work" error={workError} empty onretry={() => void loadWork(issueAccountId)} />
+        <LoadState variant="compact" what="your {tracker} work" error={workError} empty onretry={() => void loadWork(issueAccountId)} />
       {:else if work.length === 0}
         <div class="fx-empty dim">No open issues are assigned to you.</div>
       {:else}
@@ -467,9 +469,9 @@
           class="btn small ghost"
           onclick={() => quickIssue && openExternal(quickIssue.url)}
           disabled={!quickIssue}
-          title="Open in Jira"
+          title="Open in {tracker}"
         >
-          <Icon name="external" size={12} /> Open in Jira
+          <Icon name="external" size={12} /> Open in {tracker}
         </button>
         <button class="fx-quick-close" onclick={closeQuick} title="Close issue quick view" aria-label="Close issue quick view"><Icon name="x" size={14} /></button>
       </header>

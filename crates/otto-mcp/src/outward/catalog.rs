@@ -583,13 +583,13 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
         // ================= Issues (Jira / Confluence) =================
         json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
-            "description":"Search Jira: `jql` (raw JQL) or `query` (text / key, optional `project`); neither → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
+            "description":"Search the account's tracker (Jira or Linear): `jql` (Jira), `filter` (Linear IssueFilter JSON) or `query` (text / key, optional `project` = Jira project / Linear team); none → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
             "inputSchema":{"type":"object","properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"project":{"type":"string"},
-                "jql":{"type":"string"},
+                "jql":{"type":"string"},"filter":{"type":"object"},
                 "start_at":{"type":"integer"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.get_issue","mutating":false,"category":"Issues",
-            "description":"Get one Jira issue's full detail (description, comments, changelog, links) by key. Available status changes come from otto.list_issue_transitions. Read-only.",
+            "description":"Get one Jira/Linear issue's full detail (description, comments, changelog, links) by key. Available status changes come from otto.list_issue_transitions. Read-only.",
             "inputSchema":{"type":"object","required":["key"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
         json!({"name":"otto.search_confluence","mutating":false,"category":"Issues",
@@ -621,18 +621,18 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"page_id":{"type":"string","description":PAGE_REF_DESC},"body_md":{"type":"string"},
                 "body_html":{"type":"string"}}}}),
         json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
-            "description":"Add a comment to a Jira issue. DANGEROUS: outward-facing — approval-gated.",
+            "description":"Add a comment to a Jira/Linear issue. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["key","body"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"body":{"type":"string"}}}}),
         json!({"name":"otto.transition_issue","mutating":true,"category":"Issues",
-            "description":"Transition a Jira issue to a new status. `transition_id` is a transition id from otto.list_issue_transitions, or its name / target status name (e.g. \"In Progress\") — resolved against the issue's available transitions. DANGEROUS — approval-gated.",
+            "description":"Transition a Jira/Linear issue to a new status. `transition_id` is a transition id from otto.list_issue_transitions, or its name / target status name (e.g. \"In Progress\") — resolved against the issue's available transitions. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["key","transition_id"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"transition_id":{"type":"string","description":"Transition id, name, or target status name."}}}}),
         json!({"name":"otto.list_issue_accounts","mutating":false,"category":"Issues",
             "description":"List YOUR Jira/Confluence accounts — `{items}` with id, label, email, base_url, provider (never the token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
             "inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"otto.list_issue_transitions","mutating":false,"category":"Issues",
-            "description":"List a Jira issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",
+            "description":"List a Jira/Linear issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",
             "inputSchema":{"type":"object","required":["key"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"}}}}),
         // ================= Swarm =================

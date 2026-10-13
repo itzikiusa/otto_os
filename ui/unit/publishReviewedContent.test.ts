@@ -14,7 +14,7 @@ function fixture(mode: 'story' | 'rfc', content: string | null = body) {
   const state = componentFunctions(component, ['loadPreview', 'submit', 'setError'], {
     alive: true, previewSequence: 0, previewStoryId: null, previewError: '', previewBody: null, reviewedContent: null,
     submitting: false, formError: '', formErrorDetail: '', mode, accountId: 'account', projectKey: 'PRJ',
-    issueType: 'Story', spaceKey: 'RFC', parentId: '42', rfcTitle: 'My reviewed RFC title',
+    issueType: 'Story', spaceKey: 'RFC', parentId: '42', rfcTitle: 'My reviewed RFC title', tracker: 'Jira',
     crypto: webcrypto, TextEncoder, ApiError,
     product: {
       captureSelection() { const id = this.selectedId; return () => this.selectedId === id; },
