@@ -215,7 +215,6 @@ impl Ctx {
         .await
         .map_err(|_| format!("upstream timeout after {}s", CALL_TIMEOUT.as_secs()))?
         .map_err(|e| format!("request failed: {e}"))?;
-
         let status = resp.status();
         // Read the body with a size cap. reqwest's `bytes()` would buffer the
         // whole thing; we guard on Content-Length first, then re-check the actual
@@ -1197,13 +1196,13 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "otto_list_issue_accounts",
-                "description": "Read-only: YOUR Jira/Confluence accounts — `{items}` with id, label, email, base_url, provider (never the token). Issue tools take `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account.",
+                "description": "Read-only: YOUR Jira (+ Confluence) / Linear accounts — `{items}` with id, label, email, base_url, provider (`jira`/`linear`) (never the token). Issue tools take `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "otto_search_issues",
-                "description": "Read-only: search the account's tracker by `jql` (Jira), `filter` (Linear IssueFilter as JSON text) or `query` (text / key, optional `project` = Jira project / Linear team). `limit` ≤100, page with `start_at`.",
-                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string" }, "filter": { "type": "string" }, "start_at": { "type": "integer" }, "limit": { "type": "integer" } } }
+                "description": "Read-only: search the account's tracker by `jql` (Jira), `filter` (Linear IssueFilter JSON) or `query` (text / key, optional `project` = Jira project / Linear team). `limit` ≤100, page with `start_at`.",
+                "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string", "description": ISSUE_ACCOUNT_DESC }, "query": { "type": "string" }, "project": { "type": "string" }, "jql": { "type": "string" }, "filter": { "type": "object" }, "start_at": { "type": "integer" }, "limit": { "type": "integer" } } }
             },
             {
                 "name": "otto_list_issue_transitions",
@@ -2303,7 +2302,7 @@ async fn resolve_repo_arg(ctx: &Ctx, args: &Value) -> Result<Value, String> {
 /// Append `&key=<value>` for every `(key, arg)` whose argument is a non-empty
 /// string or a number, percent-encoding string values. Optional query filters
 /// for the AWS/K8s reads (`?region=`, `?prefix=`, `?ns=` …) all follow this
-/// shape; booleans are rendered `true`/`false`.
+/// shape; booleans render `true`/`false`, objects as their JSON text.
 fn opt_query(args: &Value, pairs: &[(&str, &str)]) -> String {
     let mut q = String::new();
     for (key, arg) in pairs {
@@ -2311,6 +2310,7 @@ fn opt_query(args: &Value, pairs: &[(&str, &str)]) -> String {
             Some(Value::String(s)) if !s.is_empty() => q.push_str(&format!("&{key}={}", seg(s))),
             Some(Value::Number(n)) => q.push_str(&format!("&{key}={n}")),
             Some(Value::Bool(b)) => q.push_str(&format!("&{key}={b}")),
+            Some(v @ Value::Object(_)) => q.push_str(&format!("&{key}={}", seg(&v.to_string()))),
             _ => {}
         }
     }

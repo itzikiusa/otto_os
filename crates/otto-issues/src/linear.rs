@@ -236,7 +236,12 @@ impl LinearClient {
             offset += got;
             cursor = end;
         }
-        Ok(Vec::new())
+        // Too far past the last remembered cursor to walk in one request —
+        // an error, so a capped walk never reads as "no more results".
+        Err(Error::Invalid(format!(
+            "linear {what}: offset {start_at} is too far from the last loaded page — \
+             run the search again from the start"
+        )))
     }
 
     /// Teams, as the tracker's "projects" (`key` = team key). `true` when
@@ -605,8 +610,10 @@ impl LinearClient {
         let data = self
             .gql(
                 "labels",
-                "query { issueLabels(first: 250) { nodes { id name isGroup team { key } } } }",
-                json!({}),
+                "query($key: String!) { issueLabels(first: 250, filter: { or: [\
+                 { team: { null: true } }, { team: { key: { eq: $key } } }] }) { \
+                 nodes { id name isGroup team { key } } } }",
+                json!({ "key": team_key }),
             )
             .await?;
         Ok(data["issueLabels"]["nodes"]

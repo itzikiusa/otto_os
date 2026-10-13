@@ -26,6 +26,19 @@ pub struct NewIssueAccount {
     pub token_expires_at: Option<DateTime<Utc>>,
 }
 
+/// One listing row, or `None` (logged) when it can't be read — e.g. a
+/// provider a newer build added. One such row must not hide every other
+/// account from the lists the UI, monitor and capabilities read.
+fn listable(r: &sqlx::sqlite::SqliteRow) -> Option<IssueAccount> {
+    match row_to_account(r) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            tracing::warn!(id = %r.get::<String, _>("id"), "skipping unreadable issue account: {e}");
+            None
+        }
+    }
+}
+
 fn row_to_account(r: &sqlx::sqlite::SqliteRow) -> Result<IssueAccount> {
     let api_base_url: Option<String> = r.get("api_base_url");
     Ok(IssueAccount {
@@ -89,7 +102,7 @@ impl IssuesRepo {
                 .fetch_all(&self.pool)
                 .await
                 .map_err(dberr("issue accounts"))?;
-        rows.iter().map(row_to_account).collect()
+        Ok(rows.iter().filter_map(listable).collect())
     }
 
     /// Every issue account across all users. Used by the credential monitor.
@@ -98,7 +111,7 @@ impl IssuesRepo {
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("issue accounts"))?;
-        rows.iter().map(row_to_account).collect()
+        Ok(rows.iter().filter_map(listable).collect())
     }
 
     pub async fn delete_account(&self, id: &Id) -> Result<()> {

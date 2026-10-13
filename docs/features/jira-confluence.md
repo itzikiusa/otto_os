@@ -50,7 +50,7 @@ issues, transition them, assign them, and update descriptions/pages — see §7�
 
 | Concern | Location |
 |---|---|
-| Add / edit / delete accounts (UI) | **Settings → Jira Accounts** (`ui/src/modules/settings/IssueAccounts.svelte`) |
+| Add / edit / delete accounts (UI) | **Settings → Jira & Linear accounts** (`ui/src/modules/settings/IssueAccounts.svelte`) |
 | Daemon crate | `crates/otto-issues/` — Axum router (`http.rs`), Jira client (`jira.rs`), Confluence client (`confluence.rs`), ADF↔Markdown (`adf.rs`), storage-XHTML↔Markdown (in `confluence.rs`) |
 | Domain types | `crates/otto-core/src/domain.rs` (`IssueAccount`, `IssueProviderKind`, `IssueProject`, `IssueSummary`, `IssueDetail`) |
 | Request types | `crates/otto-core/src/api.rs` (`CreateIssueAccountReq`, `UpdateIssueAccountReq`) |
@@ -93,7 +93,7 @@ inheriting exactly your permissions (see [§9 Security](#9-security) and
 
 ### Step 2 — Add the account in Otto
 
-1. Open **Settings → Jira Accounts** and click **Add Account**.
+1. Open **Settings → Jira & Linear accounts** and click **Add Account**.
 2. Fill the four fields:
 
    | Field | What to enter | Notes |

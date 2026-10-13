@@ -267,8 +267,7 @@ async fn resolve_jira(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> 
 async fn resolve_confluence(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     // Same rule as Jira: the first connected site that has the page.
     let page = first_readable(ctx, run, "Confluence page", |a, token| async move {
-        otto_issues::require_confluence(&a)?;
-        otto_issues::ConfluenceClient::new(&a.base_url, &a.email, &token)
+        otto_issues::ConfluenceClient::for_account(&a, &token)?
             .get_page(&run.source_ref)
             .await
     })

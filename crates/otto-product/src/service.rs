@@ -180,8 +180,7 @@ impl ProductService {
                 })
             }
             "confluence" => {
-                otto_issues::require_confluence(account)?;
-                let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+                let client = ConfluenceClient::for_account(account, &token)?;
                 let page = client.get_page(source_key).await?;
                 let body_md =
                     otto_issues::storage_to_markdown_async(page.body_storage.clone()).await;
@@ -417,7 +416,7 @@ impl ProductService {
                 .collect()
             }
             "confluence" => {
-                let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+                let client = ConfluenceClient::for_account(&account, &token)?;
                 match since_ts {
                     Some(ts) => client.list_comments_since(&story.source_key, ts).await?,
                     None => client.list_comments(&story.source_key).await?,
@@ -520,7 +519,7 @@ impl ProductService {
                 client.add_comment(&story.source_key, &body_md).await?
             }
             "confluence" => {
-                let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+                let client = ConfluenceClient::for_account(&account, &token)?;
                 client
                     .add_comment(&story.source_key, &markdown_to_storage(&body_md))
                     .await?
@@ -611,7 +610,7 @@ impl ProductService {
                     .await?;
             }
             "confluence" => {
-                let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+                let client = ConfluenceClient::for_account(&account, &token)?;
                 let page = client.get_page(&story.source_key).await?;
                 // Optimistic concurrency: the edit was made against the page
                 // version Otto last synced. Writing on top of whatever is current
@@ -835,7 +834,7 @@ impl ProductService {
         let resolved_space: String = if let Some(sk) = space_key {
             sk.to_string()
         } else if story.source_kind == "confluence" {
-            let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+            let conf_client = ConfluenceClient::for_account(&account, &token)?;
             let src_page = conf_client.get_page(&story.source_key).await?;
             src_page.space_key
         } else {
@@ -845,7 +844,7 @@ impl ProductService {
         };
 
         // 5. Create or update the Confluence page.
-        let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+        let conf_client = ConfluenceClient::for_account(&account, &token)?;
         // A REGENERATED run has no page of its own yet, but the story already
         // has its "Test Cases — …" page from an earlier run: creating another
         // page with that title failed with Confluence's duplicate-title 400.
@@ -1615,7 +1614,7 @@ impl ProductService {
         let token = self.account_token(&account).await?;
 
         let page_title = title.unwrap_or(&story.title);
-        let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+        let conf_client = ConfluenceClient::for_account(&account, &token)?;
 
         // Create the Confluence page.
         let page = conf_client
@@ -1818,12 +1817,18 @@ impl ProductService {
 
             // If original is Confluence, add a best-effort comment with the Jira link.
             if story.source_kind == "confluence" {
-                let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+                // Best-effort and Atlassian-only: a story published to a
+                // Linear account has no Confluence to comment on.
                 let comment_md = format!("Linked Jira story: {issue_url}");
-                if let Err(e) = conf_client
-                    .add_comment(&story.source_key, &markdown_to_storage(&comment_md))
-                    .await
-                {
+                let commented = match ConfluenceClient::for_account(&account, &token) {
+                    Ok(conf_client) => {
+                        conf_client
+                            .add_comment(&story.source_key, &markdown_to_storage(&comment_md))
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = commented {
                     tracing::warn!(
                         "publish_as_story: failed to add Confluence comment on {}: {e}",
                         story.source_key

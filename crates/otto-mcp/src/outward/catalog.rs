@@ -629,7 +629,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["key","transition_id"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"transition_id":{"type":"string","description":"Transition id, name, or target status name."}}}}),
         json!({"name":"otto.list_issue_accounts","mutating":false,"category":"Issues",
-            "description":"List YOUR Jira/Confluence accounts — `{items}` with id, label, email, base_url, provider (never the token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
+            "description":"List YOUR Jira (+ Confluence) / Linear accounts — `{items}` with id, label, email, base_url, provider (`jira`/`linear`) (never the token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
             "inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"otto.list_issue_transitions","mutating":false,"category":"Issues",
             "description":"List a Jira/Linear issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",

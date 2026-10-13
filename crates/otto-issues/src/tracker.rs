@@ -348,6 +348,15 @@ mod tests {
         ));
         assert!(l.editmeta("ENG-1").await.unwrap().is_empty());
         assert!(require_confluence(&account(IssueProviderKind::Jira)).is_ok());
+        // The account-based Confluence constructor never hands a Linear key on.
+        assert!(crate::ConfluenceClient::for_account(
+            &account(IssueProviderKind::Linear),
+            "lin_api_x"
+        )
+        .is_err());
+        assert!(
+            crate::ConfluenceClient::for_account(&account(IssueProviderKind::Jira), "t").is_ok()
+        );
         assert!(matches!(
             require_confluence(&account(IssueProviderKind::Linear)),
             Err(Error::Invalid(m)) if m.contains("Linear account")

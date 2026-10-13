@@ -23,7 +23,7 @@ use otto_state::{IssuesRepo, NewIssueAccount};
 use crate::confluence::ConfluenceClient;
 use crate::confluence::{markdown_to_storage, ConfluencePageSummary, PageComment};
 use crate::jira::{CommentRef, DevStatus, EditableField, IssueFull, JiraTransition, JiraUser};
-use crate::tracker::{require_confluence, RawQuery, Tracker};
+use crate::tracker::{RawQuery, Tracker};
 
 /// The base URL stored for a Linear account created without one.
 const LINEAR_WEB: &str = "https://linear.app";
@@ -452,11 +452,10 @@ async fn list_spaces_cf<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    require_confluence(&account)?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
-    let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+    let client = ConfluenceClient::for_account(&account, &token)?;
     let (spaces, truncated) = client.list_spaces_paged().await?;
     Ok(Json(listing(spaces, truncated, wants_meta(&params))))
 }
@@ -500,11 +499,10 @@ async fn search_pages_cf<S: IssuesCtx>(
         .unwrap_or(0);
     let limit = limit_param(&params, 25);
     let account = load_authorized_account(&s, &account_id, &user).await?;
-    require_confluence(&account)?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
-    let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
+    let client = ConfluenceClient::for_account(&account, &token)?;
     let results = client
         .search_cql(&cql, space.as_deref(), start, limit)
         .await?;
@@ -530,15 +528,10 @@ async fn confluence_client_for<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
         .clone();
     let account = load_authorized_account(s, &account_id, user).await?;
-    require_confluence(&account)?;
     let token = otto_core::secrets::get_async(s.secrets(), &account.token_ref)
         .await?
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
-    Ok(ConfluenceClient::new(
-        &account.base_url,
-        &account.email,
-        &token,
-    ))
+    ConfluenceClient::for_account(&account, &token)
 }
 
 /// Resolve a request body that may arrive as Markdown or as Confluence storage
