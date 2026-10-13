@@ -177,36 +177,44 @@
     jiraOpen = false;
     jiraKey = '';
   }
+  function trackerName(a: IssueAccount): string {
+    return a.provider === 'linear' ? 'Linear' : 'Jira';
+  }
+
   async function submitJira(): Promise<void> {
     const key = jiraKey.trim().toUpperCase();
     if (!key) {
-      toasts.warn('Enter a Jira project key');
+      toasts.warn('Enter a Jira project or Linear team key');
       return;
     }
     if (busy) return;
-    // Several Jira sites connected: the server won't guess which one — ask.
+    // Several tracker accounts connected: the server won't guess which one — ask.
     let account: IssueAccount | undefined;
     try {
       const accounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (accounts.length > 1) {
-        const picked = await confirmer.choose(`Which Jira should ${key} be created in?`, {
-          title: 'Choose a Jira account',
+        const picked = await confirmer.choose(`Which account should ${key} be created in?`, {
+          title: 'Choose an issue-tracker account',
           options: accounts.map((a) => ({
-            label: `${a.label} — ${a.base_url.replace(/^https?:\/\//, '')}`,
+            label: `${a.label} (${trackerName(a)}) — ${a.base_url.replace(/^https?:\/\//, '')}`,
             value: a.id,
           })),
         });
         if (!picked.value) return;
         account = accounts.find((a) => a.id === picked.value);
+      } else {
+        account = accounts[0];
       }
     } catch (e) {
-      toastError('Couldn’t load Jira accounts', e);
+      toastError('Couldn’t load issue-tracker accounts', e);
       return;
     }
+    const tracker = account ? trackerName(account) : 'Jira';
+    const container = tracker === 'Linear' ? 'team' : 'project';
     // Creating an issue is outward-facing: say where it lands and who sees it.
     const ok = await confirmOutward({
-      verb: 'Create Jira issue',
-      where: account ? `Jira project ${key} on ${account.base_url}` : `Jira project ${key}`,
+      verb: `Create ${tracker} issue`,
+      where: account ? `${tracker} ${container} ${key} on ${account.base_url}` : `${tracker} ${container} ${key}`,
       what: finding.title || finding.body.split('\n')[0],
       who: 'Everyone with access to the project; watchers may be notified.',
     });
@@ -215,12 +223,12 @@
     try {
       const f = await findingToJira(finding.id, { project_key: key, account_id: account?.id });
       onupdated(f);
-      toasts.success('Jira issue created', f.jira_key ?? undefined);
+      toasts.success(`${tracker} issue created`, f.jira_key ?? undefined);
       jiraOpen = false;
       jiraKey = '';
     } catch (e) {
-      // 400 {code:'invalid'} when no Jira account is configured — show its message.
-      toastError('Couldn’t convert it to a Jira issue', e);
+      // 400 {code:'invalid'} when no account is configured — show its message.
+      toastError(`Couldn’t convert it to a ${tracker} issue`, e);
     } finally {
       busy = '';
     }

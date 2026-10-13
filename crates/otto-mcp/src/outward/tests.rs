@@ -740,6 +740,18 @@ fn route_for_maps_git_issues_swarm_memory_usage() {
         c.path
     );
     assert!(c.path.ends_with("&limit=100"), "got {}", c.path);
+    // A Linear filter object is sent as its JSON text.
+    let c = route_for(
+        "search_issues",
+        &json!({"account_id":"a1","filter":{"team":{"key":{"eq":"ENG"}}}}),
+    )
+    .unwrap();
+    assert!(
+        c.path
+            .contains("&filter=%7B%22team%22%3A%7B%22key%22%3A%7B%22eq%22%3A%22ENG%22%7D%7D%7D"),
+        "got {}",
+        c.path
+    );
     // Confluence: raw CQL needs no `query`; full-text maps to mode=text.
     let c = route_for(
         "search_confluence",

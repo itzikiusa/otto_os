@@ -12,7 +12,7 @@ Product is the product owner's workspace. Import a Jira issue or Confluence page
 
 ## Getting started
 
-1. Add your Atlassian account in **Settings → Jira** (a label, your Atlassian site URL, your email and an API token).
+1. Add your Atlassian account in **Settings → Jira & Linear accounts** (a label, your Atlassian site URL, your email and an API token), or a Linear account (a label and an API key) to import Linear issues.
 2. Open **Product** in the sidebar and choose **Import**. Pick the account, choose **Jira issue** or **Confluence page**, then search by project or space, or paste a key or URL.
 3. Optionally set a **Repo path** so agents can map the story to your code, and tick **Watch this story for changes**.
 4. Open the story and go to **Discover → Analysis**. Choose lenses and providers, then **Run analysis**.

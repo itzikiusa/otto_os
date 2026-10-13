@@ -99,6 +99,14 @@ pub struct ConfluenceClient {
 }
 
 impl ConfluenceClient {
+    /// The client for an issue account — refused (400) for a non-Atlassian
+    /// account, so a Linear API key is never sent to a `/wiki` path. Prefer
+    /// this over [`Self::new`] wherever an `IssueAccount` is at hand.
+    pub fn for_account(account: &otto_core::domain::IssueAccount, token: &str) -> Result<Self> {
+        crate::tracker::require_confluence(account)?;
+        Ok(Self::new(&account.base_url, &account.email, token))
+    }
+
     /// Construct a new client.
     ///
     /// `site_base` may end with `/wiki` or `/` — both are stripped so that

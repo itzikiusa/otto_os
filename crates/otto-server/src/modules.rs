@@ -3182,8 +3182,7 @@ async fn run_pr_review_inner(
                             account.id
                         ))
                     })?;
-                let client =
-                    otto_issues::JiraClient::new(&account.base_url, &account.email, &token);
+                let client = otto_issues::Tracker::for_account(&account, &token);
                 let detail = client.get_issue(key).await?;
                 let ctx_str = format!(
                     "## Linked Jira story\n{} — {} [{}]\n\n{}\n\n---\n\n",

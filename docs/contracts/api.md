@@ -1785,20 +1785,29 @@ discovery project's task statuses (all done → `done`; any error → `error`).
 | GET /product/stories/{sid}/discovery-runs | ws viewer | — | DiscoveryRunSummary[] (newest first; derived status + done/total) |
 | GET /product/discovery-runs/{rid} | ws viewer | — | DiscoveryRunDetail (tasks, per-task run summaries, `kind=discovery` board messages, report_md) |
 
-## Issue trackers (Jira / Confluence)
+## Issue trackers (Jira / Linear / Confluence)
 
 Issue accounts are per-user (member, owner-scoped); content reads/writes proxy the
-configured Jira/Confluence account.
+configured account. The account's `provider` (`jira` | `linear`) decides where every
+`/issue/...` call goes — callers use the same routes for both and never name the
+provider. Linear is reached over its GraphQL API (`https://api.linear.app/graphql`,
+the token is a personal API key `lin_api_…` sent bare, anything else as `Bearer`).
+Mapping: Jira project → Linear **team** (`key`, e.g. `ENG`), issue key → identifier
+(`ENG-123`), transition → workflow state (the transition `id` is the state id),
+issue type → label (Linear has none; listings report `Issue` / `Sub-issue`).
+Jira-only operations on a Linear account answer **400** naming the provider
+(attachment download, `PUT …/fields`); `…/editmeta` returns `[]`. Every
+`/issue/confluence/...` route answers **400** for a Linear account.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /issue/accounts | member | — | `IssueAccount[]` (own; token never present) |
-| POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
+| POST /issue/accounts | member | CreateIssueAccountReq (`provider` `jira` needs `email` + `base_url`; `linear` needs only `token` — `email` may be empty and an empty `base_url` is stored as `https://linear.app`) | IssueAccount |
 | PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq (absent fields keep their value; `token_expires_at` is tri-state — absent keeps, `null` clears, an ISO timestamp sets) | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
-| GET /issue/projects | member | — | available projects (`IssueProject[]`). `?meta=1` → `ListingPage<IssueProject>` `{items, truncated}` — `truncated` = the walk stopped at its page cap (20 × 100) and later projects are not shown |
-| GET /issue/search | member | — | issue search results. `?q=` free text / issue key (+ `&project=`), or `?jql=` raw JQL run verbatim (wins over `q`/`project`; Jira's 400 explains a bad query). `&limit=` 1–100 (default 25). Each `IssueSummary` also carries `parent_key`, `assignee`, `fix_versions`, `updated` when Jira has them. `?start_at=` offset paging (windows of `limit`; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
-| GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (`assignee = currentUser()`, statusCategory != Done, newest first, one page of 100) with parent/project context for the Focus view hierarchy |
+| GET /issue/projects | member | — | available projects (`IssueProject[]`; Linear: teams, `key` = team key). `?meta=1` → `ListingPage<IssueProject>` `{items, truncated}` — `truncated` = the walk stopped at its page cap (20 × 100) and later projects are not shown |
+| GET /issue/search | member | — | issue search results. `?q=` free text / issue key (+ `&project=` — a Linear team key), or a raw provider-native query that wins over `q`/`project`: `?jql=` (Jira, run verbatim; Jira's 400 explains a bad query), `?filter=` (Linear `IssueFilter` JSON object, e.g. `{"state":{"type":{"eq":"started"}}}`, newest activity first), or `?query=` (read in the account's own language). A query in the other provider's language (JQL to a Linear account, a filter to Jira) is **400** before any upstream call. Linear results are cursor-paged; the daemon memoises the cursor per offset for 10 min, like the Jira token walk below. `&limit=` 1–100 (default 25). Each `IssueSummary` also carries `parent_key`, `assignee`, `fix_versions`, `updated` when Jira has them. `?start_at=` offset paging (windows of `limit`; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
+| GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (Jira: `assignee = currentUser()`, statusCategory != Done; Linear: the viewer's assigned issues not completed / canceled, `project_*` = the team; newest first, one page of 100) with parent/project context for the Focus view hierarchy |
 | GET /issue/confluence/spaces | member | — | Confluence spaces (`ConfluenceSpace[]`). `?meta=1` → `{items, truncated}` (`truncated` = stopped at the 20-page cap) |
 | GET /issue/confluence/search | member | — | Confluence page search: `?q=` title (numeric = page id), `&mode=text` for title + body, optional `&space=`; or `?cql=` raw CQL run verbatim. `&start=` / `&limit=` (1–100, default 25) page through hits |
 | GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
@@ -1808,8 +1817,8 @@ configured Jira/Confluence account.
 | POST /issue/confluence/pages/{page_id}/comments?account_id= | member | AddConfluenceCommentReq (`body_md` **or** `body_html`) | `CommentRef` |
 | GET /issue/{account_id}/{key} | member | — | issue summary |
 | GET /issue/{account_id}/{key}/full | member | — | full issue detail |
-| GET /issue/{account_id}/{key}/devstatus?issueId=<id> | member | — | `DevStatus` (branches/commits/PRs; best-effort, empty if no dev tool connected); `issueId` optional — when present skips a round-trip to resolve the numeric id |
-| GET /issue/{account_id}/{key}/transitions | member | — | available transitions |
+| GET /issue/{account_id}/{key}/devstatus?issueId=<id> | member | — | `DevStatus` (branches/commits/PRs; best-effort, empty if no dev tool connected); `issueId` optional (Jira) — when present skips a round-trip to resolve the numeric id. Linear: `pull_requests` from the issue's GitHub / GitLab / Bitbucket PR attachments; no branches or commits |
+| GET /issue/{account_id}/{key}/transitions | member | — | available transitions (Linear: the team's other workflow states, board order) |
 | POST /issue/{account_id}/{key}/transitions | member | DoTransitionReq | apply a transition |
 | GET /issue/{account_id}/{key}/assignable | member | — | assignable users |
 | PUT /issue/{account_id}/{key}/assignee | member | AssignReq | assign the issue |
@@ -1818,7 +1827,7 @@ configured Jira/Confluence account.
 | GET /issue/{account_id}/{key}/editmeta | member | — | editable fields (`EditableField[]`) |
 | PUT /issue/{account_id}/{key}/fields | member | `{ "fields": { "<fieldId>": <value>, ... } }` | full issue detail (re-fetched after update) |
 | PUT /issue/{account_id}/{key}/description | member | `{ "body_md": "…markdown…" }` | full issue detail (re-fetched after update). **409** when the current description holds content the Markdown round-trip can't carry (media/screenshots, mentions, smart links, status, dates, emoji, extensions) — the save would delete it, so it is refused. |
-| GET /issue/{account_id}/{project_key}/issue-types | member | — | issue types for a project |
+| GET /issue/{account_id}/{project_key}/issue-types | member | — | issue types for a project (Linear: `Issue` plus the labels usable in the team; creating with a label name applies that label) |
 
 Fields body shape: `{ "fields": { <jiraFieldId>: <jiraShapedValue>, … } }` — values are sent
 in Jira's native shape (number; `{"id":"…"}` for a single option/version/component/priority;

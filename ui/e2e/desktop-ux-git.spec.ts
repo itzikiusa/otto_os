@@ -115,7 +115,7 @@ test('Focus account failure offers Retry instead of account setup', async ({ pag
   await expect(section.getByText('Connect a Jira account', { exact: false })).toHaveCount(0);
   fail = false;
   await section.getByRole('button', { name: 'Retry' }).click();
-  await expect(section.getByRole('button', { name: 'Add Jira account…' })).toBeVisible();
+  await expect(section.getByRole('button', { name: 'Add account…' })).toBeVisible();
 });
 
 test('graph diff stays LTR inside an RTL UI', async ({ page }) => {

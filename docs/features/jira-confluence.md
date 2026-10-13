@@ -50,7 +50,7 @@ issues, transition them, assign them, and update descriptions/pages — see §7�
 
 | Concern | Location |
 |---|---|
-| Add / edit / delete accounts (UI) | **Settings → Jira Accounts** (`ui/src/modules/settings/IssueAccounts.svelte`) |
+| Add / edit / delete accounts (UI) | **Settings → Jira & Linear accounts** (`ui/src/modules/settings/IssueAccounts.svelte`) |
 | Daemon crate | `crates/otto-issues/` — Axum router (`http.rs`), Jira client (`jira.rs`), Confluence client (`confluence.rs`), ADF↔Markdown (`adf.rs`), storage-XHTML↔Markdown (in `confluence.rs`) |
 | Domain types | `crates/otto-core/src/domain.rs` (`IssueAccount`, `IssueProviderKind`, `IssueProject`, `IssueSummary`, `IssueDetail`) |
 | Request types | `crates/otto-core/src/api.rs` (`CreateIssueAccountReq`, `UpdateIssueAccountReq`) |
@@ -93,7 +93,7 @@ inheriting exactly your permissions (see [§9 Security](#9-security) and
 
 ### Step 2 — Add the account in Otto
 
-1. Open **Settings → Jira Accounts** and click **Add Account**.
+1. Open **Settings → Jira & Linear accounts** and click **Add Account**.
 2. Fill the four fields:
 
    | Field | What to enter | Notes |
@@ -191,6 +191,9 @@ Each hit also carries `parent_key`, `assignee`, `fix_versions` and `updated`
 when Jira has them, so a caller can group results without fetching each issue.
 In the UI pick **JQL** in the search box's **Match** menu (Enter runs it); agents
 pass `jql` to `otto.search_issues` / `otto_search_issues`.
+
+Linear accounts use the same search box and API with a JSON `filter` instead
+of JQL — see [Linear](./linear.md).
 
 ### What fields are pulled on import
 

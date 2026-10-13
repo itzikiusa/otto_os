@@ -457,7 +457,7 @@ async fn to_jira(
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::Invalid("Jira token missing".to_string())))?;
-    let client = otto_issues::JiraClient::new(&account.base_url, &account.email, &token);
+    let client = otto_issues::Tracker::for_account(&account, &token);
     let issue_type = body.issue_type.clone().unwrap_or_else(|| "Bug".to_string());
     let created = client
         .create_issue(

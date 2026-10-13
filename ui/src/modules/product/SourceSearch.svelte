@@ -1,8 +1,8 @@
 <script lang="ts">
-  // SourceSearch — unified Jira issue / Confluence page picker.
+  // SourceSearch — unified tracker issue (Jira / Linear) / Confluence page picker.
   // Mirrors the structure and CSS of JiraIssuePicker.svelte.
   import { api } from '../../lib/api/client';
-  import type { IssueProject, IssueSummary, ListingPage } from '../../lib/api/types';
+  import type { IssueProject, IssueProviderKind, IssueSummary, ListingPage } from '../../lib/api/types';
   import { truncatedNote, unwrapListing } from '../../lib/listingPage';
   import type { ConfluenceSpace, ConfluencePageSummary } from './types';
   import { loadErrorText } from '../../lib/loadError';
@@ -13,6 +13,7 @@
   import { openExternal } from '../../lib/external';
   import {
     CQL_CHEATSHEET, CQL_DOCS, CQL_TEMPLATES, JQL_CHEATSHEET, JQL_DOCS, JQL_TEMPLATES, fillTemplate,
+    LINEAR_CHEATSHEET, LINEAR_DOCS, LINEAR_TEMPLATES, fillLinearTemplate,
   } from './queryTemplates';
 
   interface PickedItem {
@@ -23,9 +24,14 @@
   interface Props {
     accountId: string;
     sourceKind: 'jira' | 'confluence';
+    /** The account's tracker: Linear's raw query is an IssueFilter JSON
+     *  object and its "projects" are teams. */
+    provider?: IssueProviderKind;
     onpick: (sel: PickedItem) => void;
   }
-  let { accountId, sourceKind, onpick }: Props = $props();
+  let { accountId, sourceKind, provider = 'jira', onpick }: Props = $props();
+  const linear = $derived(provider === 'linear' && sourceKind === 'jira');
+  const projectNoun = $derived(linear ? 'team' : 'project');
 
   // --- Jira state ---
   let projects: IssueProject[] = $state([]);
@@ -180,12 +186,14 @@
   // Raw-mode help: examples to start from + a one-screen syntax sheet.
   let syntaxOpen = $state(false);
   let queryInput: HTMLInputElement | undefined = $state();
-  const rawLang = $derived(sourceKind === 'jira' ? 'JQL' : 'CQL');
+  const rawLang = $derived(linear ? 'Linear filter' : sourceKind === 'jira' ? 'JQL' : 'CQL');
+  const rawDocs = $derived(linear ? LINEAR_DOCS : sourceKind === 'jira' ? JQL_DOCS : CQL_DOCS);
+  const rawSheet = $derived(linear ? LINEAR_CHEATSHEET : sourceKind === 'jira' ? JQL_CHEATSHEET : CQL_CHEATSHEET);
   function showExamples(e: MouseEvent): void {
     const key = sourceKind === 'jira' ? selectedProjectKey : selectedSpaceKey;
-    const list = sourceKind === 'jira' ? JQL_TEMPLATES : CQL_TEMPLATES;
+    const list = linear ? LINEAR_TEMPLATES : sourceKind === 'jira' ? JQL_TEMPLATES : CQL_TEMPLATES;
     ctxMenu.show(e, list.map((t) => {
-      const q = fillTemplate(t.query, key);
+      const q = linear ? fillLinearTemplate(t.query, key) : fillTemplate(t.query, key);
       return {
         label: t.label,
         title: q,
@@ -248,7 +256,7 @@
         const proj = projectOverride ?? selectedProjectKey;
         const projectParam = proj ? `&project=${encodeURIComponent(proj)}` : '';
         const queryParam = rawMode
-          ? `jql=${encodeURIComponent(q)}`
+          ? `${linear ? 'filter' : 'jql'}=${encodeURIComponent(q)}`
           : `q=${encodeURIComponent(q)}${projectParam}`;
         const page = await api.get<IssueSummary[]>(
           `/issue/search?account_id=${encodeURIComponent(accountId)}&${queryParam}&start_at=${startAt}`,
@@ -311,11 +319,13 @@
 
   const searchPlaceholder = $derived(
     rawMode
-      ? (sourceKind === 'jira'
+      ? (linear
+        ? '{"state":{"type":{"eq":"started"}}} — Enter to run'
+        : sourceKind === 'jira'
         ? 'fixVersion = "6.23.0" ORDER BY key — Enter to run'
         : 'space = DEV AND label = "release" — Enter to run')
       : sourceKind === 'jira'
-        ? (selectedProjectKey ? 'Number (5218) or name…' : 'PROJ-123, number, or text…')
+        ? (selectedProjectKey ? 'Number (5218) or name…' : linear ? 'ENG-123 or text…' : 'PROJ-123, number, or text…')
         : mode === 'body' ? 'Words in the title or page body…' : 'Page title or id…',
   );
 
@@ -338,18 +348,18 @@
 <!-- Project / Space selector -->
 {#if sourceKind === 'jira'}
   <div class="picker-field">
-    <label class="picker-label" for="ss-project">Project</label>
+    <label class="picker-label" for="ss-project">{linear ? 'Team' : 'Project'}</label>
     {#if listLoading}
-      <Skeleton rows={1} height={27} label="projects" />
+      <Skeleton rows={1} height={27} label="{projectNoun}s" />
     {:else}
       <select id="ss-project" class="picker-select" bind:value={selectedProjectKey}>
-        <option value="">All projects</option>
+        <option value="">All {projectNoun}s</option>
         {#each projects as p (p.key)}
           <option value={p.key}>{p.name} ({p.key})</option>
         {/each}
       </select>
       {#if listTruncated}
-        <p class="trunc-note" role="note">{truncatedNote('projects', projects.length)}</p>
+        <p class="trunc-note" role="note">{truncatedNote(`${projectNoun}s`, projects.length)}</p>
       {/if}
     {/if}
   </div>
@@ -392,7 +402,7 @@
     >
       {#if sourceKind === 'jira'}
         <option value="text">Text or key</option>
-        <option value="raw">JQL</option>
+        <option value="raw">{linear ? 'Linear filter' : 'JQL'}</option>
       {:else}
         <option value="text">Title</option>
         <option value="body">Title + body</option>
@@ -420,21 +430,21 @@
       <button type="button" class="help-btn" aria-expanded={syntaxOpen} onclick={() => (syntaxOpen = !syntaxOpen)}>
         <Icon name={syntaxOpen ? 'chevronDown' : 'chevronRight'} size={12} /> {rawLang} syntax
       </button>
-      <button type="button" class="help-btn" title="Open Atlassian’s {rawLang} reference in the browser"
-        onclick={() => void openExternal(sourceKind === 'jira' ? JQL_DOCS : CQL_DOCS)}>
+      <button type="button" class="help-btn" title="Open the {rawLang} reference in the browser"
+        onclick={() => void openExternal(rawDocs)}>
         <Icon name="external" size={12} /> Reference
       </button>
     </div>
     {#if syntaxOpen}
       <dl class="cheatsheet" aria-label="{rawLang} cheat sheet">
-        {#each sourceKind === 'jira' ? JQL_CHEATSHEET : CQL_CHEATSHEET as [term, text] (term)}
+        {#each rawSheet as [term, text] (term)}
           <dt>{term}</dt>
           <dd class="mono">{text}</dd>
         {/each}
       </dl>
     {/if}
     <p class="raw-note">
-      Enter runs it as written — the {sourceKind === 'jira' ? 'project' : 'space'} filter above only fills the examples.
+      Enter runs it as written — the {sourceKind === 'jira' ? projectNoun : 'space'} filter above only fills the examples.
     </p>
   {/if}
 </div>

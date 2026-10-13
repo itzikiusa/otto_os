@@ -2377,7 +2377,7 @@ pub(crate) fn build_jql(q: &str, project: Option<&str>) -> String {
     }
 }
 
-fn is_issue_key(s: &str) -> bool {
+pub(crate) fn is_issue_key(s: &str) -> bool {
     // ^[A-Z][A-Z0-9]+-\d+$
     let mut chars = s.chars();
     // Must start with uppercase letter

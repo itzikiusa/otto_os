@@ -96,9 +96,10 @@ can open: admin-only panes are hidden rather than shown disabled.
 - Tokens live in the macOS Keychain and are used for PR actions and HTTPS
   pushes.
 
-**Jira**
+**Jira & Linear accounts**
 - Add, edit and delete Jira accounts (label, base URL, email, API token,
-  optional expiry). Expired or soon-to-expire tokens show a badge.
+  optional expiry) and Linear accounts (label, API key, optional workspace
+  URL). Expired or soon-to-expire tokens show a badge.
 
 **Channels** — see [Channels](#/walkthroughs/channels)
 - Slack, Telegram and inbound webhook integrations for the current workspace.

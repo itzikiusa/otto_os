@@ -50,7 +50,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'tokens', label: 'Personal access tokens', group: 'general', keywords: 'api token pat key secret cli script ci' },
   // ── Integrations ──
   { id: 'git-accounts', label: 'Git accounts', group: 'integrations', keywords: 'github gitlab bitbucket token pr push https credentials' },
-  { id: 'jira', label: 'Jira accounts', group: 'integrations', keywords: 'atlassian confluence issues tickets token' },
+  { id: 'jira', label: 'Jira & Linear accounts', group: 'integrations', keywords: 'atlassian confluence linear issues tickets token api key' },
   { id: 'channels', label: 'Slack, Telegram & webhooks', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
   { id: 'mcp-servers', label: 'MCP servers', group: 'integrations', keywords: 'model context protocol tools workspace' },
   { id: 'language-servers', label: 'Language servers', group: 'integrations', keywords: 'lsp completion gopls rust-analyzer typescript install path' },

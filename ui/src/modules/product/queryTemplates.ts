@@ -1,5 +1,5 @@
-// Product → source search: ready-made JQL / CQL for the search box's raw
-// mode, so nobody has to remember the syntax. `{P}` is the selected Jira
+// Product → source search: ready-made JQL / CQL / Linear filters for the
+// search box's raw mode, so nobody has to remember the syntax. `{P}` is the selected Jira
 // project (or Confluence space) key; a template that needs one says so and is
 // filled with a placeholder the user overwrites when nothing is selected.
 // Pure — unit-tested (unit/queryTemplates.test.ts).
@@ -47,8 +47,32 @@ export const CQL_CHEATSHEET: [string, string][] = [
   ['Combine', 'AND  OR  NOT  ( … )  then ORDER BY field ASC|DESC'],
 ];
 
+/** Linear's raw query is an IssueFilter JSON object; `{P}` is the team key. */
+const OPEN = '"state":{"type":{"nin":["completed","canceled"]}}';
+export const LINEAR_TEMPLATES: QueryTemplate[] = [
+  { label: 'My open issues', query: `{"assignee":{"isMe":{"eq":true}},${OPEN}}` },
+  { label: 'In progress in a team', query: '{"team":{"key":{"eq":"{P}"}},"state":{"type":{"eq":"started"}}}' },
+  { label: 'Current cycle', query: '{"team":{"key":{"eq":"{P}"}},"cycle":{"isActive":{"eq":true}}}' },
+  { label: 'In a project', query: '{"project":{"name":{"eq":"Q4 launch"}}}' },
+  { label: 'Sub-issues of an issue', query: '{"team":{"key":{"eq":"{P}"}},"parent":{"number":{"eq":123}}}' },
+  { label: 'Updated in the last 7 days', query: '{"team":{"key":{"eq":"{P}"}},"updatedAt":{"gt":"-P7D"}}' },
+  { label: 'Urgent and high priority, open', query: `{"team":{"key":{"eq":"{P}"}},"priority":{"gte":1,"lte":2},${OPEN}}` },
+  { label: 'Unassigned, not done', query: `{"team":{"key":{"eq":"{P}"}},"assignee":{"null":true},${OPEN}}` },
+  { label: 'With a label', query: '{"team":{"key":{"eq":"{P}"}},"labels":{"name":{"eq":"Bug"}}}' },
+  { label: 'Title contains', query: '{"team":{"key":{"eq":"{P}"}},"title":{"containsIgnoreCase":"login"}}' },
+  { label: 'Created by me this month', query: '{"creator":{"isMe":{"eq":true}},"createdAt":{"gt":"-P1M"}}' },
+];
+
+export const LINEAR_CHEATSHEET: [string, string][] = [
+  ['Fields', 'team, state, assignee, creator, priority (1 urgent … 4 low), labels, project, cycle, parent, title, description, createdAt, updatedAt, dueDate, estimate'],
+  ['Comparators', 'eq  neq  in  nin  lt  lte  gt  gte  null  contains  containsIgnoreCase  startsWith'],
+  ['Values', 'state type: triage backlog unstarted started completed canceled · me: {"isMe":{"eq":true}} · relative dates: "-P7D" "-P2W"'],
+  ['Combine', '{"and":[ … ]}  {"or":[ … ]} — sibling fields are ANDed'],
+];
+
 export const JQL_DOCS = 'https://support.atlassian.com/jira-software-cloud/docs/use-advanced-search-with-jira-query-language-jql/';
 export const CQL_DOCS = 'https://developer.atlassian.com/cloud/confluence/advanced-searching-using-cql/';
+export const LINEAR_DOCS = 'https://linear.app/developers/filtering';
 
 /** The template with `{P}` → the selected key (quoted when it needs it), or
  *  the `KEY` placeholder when nothing is selected. */
@@ -56,4 +80,11 @@ export function fillTemplate(query: string, key: string): string {
   const k = key.trim();
   const v = k === '' ? 'KEY' : /^[A-Za-z0-9_]+$/.test(k) ? k : `"${k.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
   return query.replaceAll('{P}', v);
+}
+
+/** A Linear filter template with `{P}` → the team key (JSON-escaped, since
+ *  it sits inside a string literal), or `KEY` when no team is selected. */
+export function fillLinearTemplate(query: string, key: string): string {
+  const k = key.trim();
+  return query.replaceAll('{P}', k === '' ? 'KEY' : JSON.stringify(k).slice(1, -1));
 }

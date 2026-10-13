@@ -764,6 +764,15 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             {
                 path.push_str(&format!("&jql={}", seg(j)));
             }
+            // Linear IssueFilter: an object, or the same JSON already as text.
+            let filter = match args.get("filter") {
+                Some(Value::Object(_)) => args.get("filter").map(Value::to_string),
+                Some(Value::String(f)) if !f.trim().is_empty() => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(f) = filter {
+                path.push_str(&format!("&filter={}", seg(&f)));
+            }
             if let Some(n) = args.get("start_at").and_then(u64_lenient) {
                 path.push_str(&format!("&start_at={n}"));
             }

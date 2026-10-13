@@ -36,15 +36,15 @@ test('filter narrows the nav; Enter opens the first match titled like its nav ro
   await expect(nav(page).getByRole('button', { name: /Personal access tokens/ })).toBeVisible();
   await filter(page).fill('jira');
   const first = nav(page).locator('.settings-nav-item').first();
-  await expect(first.locator('.settings-nav-label')).toHaveText('Jira accounts');
+  await expect(first.locator('.settings-nav-label')).toHaveText('Jira & Linear accounts');
   // Group headings give way to a flat result list with the group as detail.
   await expect(nav(page).locator('.settings-nav-heading')).toHaveCount(0);
   await expect(first.locator('.settings-nav-detail')).toHaveText('Integrations');
 
   await filter(page).press('Enter');
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#/settings/jira');
-  await expect(title(page)).toHaveText('Jira accounts');
-  await expect(activeRow(page)).toHaveText('Jira accounts');
+  await expect(title(page)).toHaveText('Jira & Linear accounts');
+  await expect(activeRow(page)).toHaveText('Jira & Linear accounts');
 
   // No match → a quiet line, not an empty column.
   await filter(page).fill('zzz no such section');
