@@ -583,7 +583,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "strategy":{"type":"string","enum":["merge","squash","rebase"]},"delete_source_branch":{"type":"boolean"}}}}),
         // ================= Issues (Jira / Confluence) =================
         json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
-            "description":"Search Jira or Linear: `jql` (Jira), `filter` (Linear IssueFilter) or `query` (text / key, optional `project`/team); none → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
+            "description":"Issue search: `jql` (Jira), `filter` (Linear) or `query` (text/key; opt. `project`); none → yours. Hits: key, summary, status, issue_type, url, parent_key, assignee, fix_versions, updated. `limit` ≤100, page with `start_at`. Read-only.",
             "inputSchema":{"type":"object","properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"query":{"type":"string"},"project":{"type":"string"},
                 "jql":{"type":"string"},"filter":{"type":"object"},
@@ -629,7 +629,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["key","transition_id"],"properties":{
                 "account_id":{"type":"string","description":ISSUE_ACCOUNT_REF_DESC},"key":{"type":"string"},"transition_id":{"type":"string","description":"Transition id, name, or target status name."}}}}),
         json!({"name":"otto.list_issue_accounts","mutating":false,"category":"Issues",
-            "description":"List YOUR Jira/Linear accounts — `{items}` with id, label, email, base_url, provider (never the token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
+            "description":"List YOUR Jira/Linear accounts — `{items}`: id, label, email, base_url, provider (no token). Every Issues tool takes `account_id` = one of these ids OR its label / email / base URL, and may omit it when you have exactly one account. Read-only.",
             "inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"otto.list_issue_transitions","mutating":false,"category":"Issues",
             "description":"List an issue's available status transitions `[{id, name, to_status}]` — the ids (or names) otto.transition_issue accepts. Read-only.",
