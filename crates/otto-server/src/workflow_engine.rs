@@ -1293,6 +1293,39 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
     }
 }
 
+/// Wait for a run-gate permit — keeping the run's FIFO place — unless the
+/// queued run is canceled first (`None`; also `None` when the gate closed).
+async fn park_until_permit_or_cancel<'a>(
+    gate: &'a tokio::sync::Semaphore,
+    pool: &otto_state::DbPool,
+    run_id: &Id,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut cancels = otto_state::workflows::subscribe_cancels();
+    let repo = WorkflowsRepo::new(pool.clone());
+    // A cancel that landed before we subscribed.
+    if repo.is_canceled(run_id).await {
+        return None;
+    }
+    let acquire = gate.acquire();
+    tokio::pin!(acquire);
+    loop {
+        tokio::select! {
+            permit = &mut acquire => return permit.ok(),
+            ev = cancels.recv() => {
+                let ours = match ev {
+                    Ok(id) => id == *run_id,
+                    Err(RecvError::Lagged(_)) => true,
+                    Err(RecvError::Closed) => false,
+                };
+                if ours && repo.is_canceled(run_id).await {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
 /// way to launch [`run_workflow`] — every trigger path (manual run, retry,
 /// webhook, schedule/event trigger, chat, scheduled task) goes through it so
@@ -1382,9 +1415,12 @@ pub fn spawn_run(
                     &[],
                     false,
                 );
-                match gate.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => return, // gate closed — daemon shutting down
+                // Watch for a cancel while parked: the driver guard is alive
+                // all along, and a retry of the canceled run answered 409
+                // "still stopping" for as long as the queue stayed full.
+                match park_until_permit_or_cancel(gate, &ctx.pool, &run_id).await {
+                    Some(p) => p,
+                    None => return, // canceled while queued, or gate closed
                 }
             }
         };
@@ -2997,6 +3033,14 @@ async fn run_workflow_with_budget(
         );
     }
 
+    // A stopped run stops its agents and reviewers NOW: the drain below can
+    // take minutes (each queued chat post has a 30 s timeout on a slow or
+    // offline Slack), and the agents kept editing the worktree meanwhile.
+    // The finalize paths repeat this (idempotent).
+    if canceled || timed_out {
+        stop_run_reviews(&ctx, &repo, &workflow.workspace_id, &run_id, &states).await;
+        kill_run_sessions(&ctx, &states).await;
+    }
     // Flush all streamed progress lines (close the channel, await the pump) so the
     // per-step updates land in the thread BEFORE the final summary is delivered.
     drop(progress);
@@ -8650,6 +8694,57 @@ fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| crate::workflow_context::slug(node_id));
     format!("workflow-canvas/{run_id}/{name}.{ext}")
+}
+
+#[cfg(test)]
+mod queue_cancel_tests {
+    /// A run canceled while parked behind a full run gate stops waiting at
+    /// once (its driver guard drops, so a retry isn't refused for hours).
+    #[tokio::test]
+    async fn a_queued_run_canceled_in_the_queue_stops_waiting() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace};
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',1,?)")
+            .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+        let repo = otto_state::WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws".into(),
+                "WF",
+                "",
+                "",
+                &otto_core::workflows::WorkflowGraph::default(),
+                &"u".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        let full = tokio::sync::Semaphore::new(0);
+        let park = super::park_until_permit_or_cancel(&full, &pool, &run.id);
+        let cancel = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            repo.request_cancel(&run.id).await.unwrap();
+        };
+        let (parked, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(park, cancel)
+        })
+        .await
+        .expect("stopped waiting");
+        assert!(parked.is_none());
+        // A free slot is still taken normally.
+        let open = tokio::sync::Semaphore::new(1);
+        let run2 = repo
+            .create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        assert!(super::park_until_permit_or_cancel(&open, &pool, &run2.id)
+            .await
+            .is_some());
+    }
 }
 
 #[cfg(test)]

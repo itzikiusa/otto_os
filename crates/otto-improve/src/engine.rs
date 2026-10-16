@@ -697,23 +697,63 @@ impl ImprovementEngine {
         let current = read_edit_target(Path::new(&edit.target_path)).await?;
         if current != edit.before_content {
             return self
-                .improvements
-                .set_edit_status(edit_id, ImprovementEditStatus::Conflict, Some(actor))
+                .decide(
+                    edit_id,
+                    ImprovementEditStatus::Pending,
+                    ImprovementEditStatus::Conflict,
+                    actor,
+                )
                 .await;
         }
+        // Claim the decision BEFORE touching the file, so a concurrent
+        // reject (or second approve) loses cleanly; a failed write gives the
+        // edit back as pending.
+        let applied = self
+            .decide(
+                edit_id,
+                ImprovementEditStatus::Pending,
+                ImprovementEditStatus::Applied,
+                actor,
+            )
+            .await?;
         if let Some(parent) = std::path::Path::new(&edit.target_path).parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        if edit.kind == ImprovementEditKind::Remove {
-            remove_edit_target(Path::new(&edit.target_path)).await?;
+        let written = if edit.kind == ImprovementEditKind::Remove {
+            remove_edit_target(Path::new(&edit.target_path)).await
         } else {
             tokio::fs::write(&edit.target_path, &edit.after_content)
                 .await
-                .map_err(|e| Error::Internal(format!("write {}: {e}", edit.target_path)))?;
+                .map_err(|e| Error::Internal(format!("write {}: {e}", edit.target_path)))
+        };
+        if let Err(e) = written {
+            let _ = self
+                .improvements
+                .set_edit_status_if(
+                    edit_id,
+                    ImprovementEditStatus::Applied,
+                    ImprovementEditStatus::Pending,
+                    None,
+                )
+                .await;
+            return Err(e);
         }
+        Ok(applied)
+    }
+
+    /// One decision on an edit, as a compare-and-set from `from` — the loser
+    /// of two concurrent decisions gets "not pending" instead of overwriting.
+    async fn decide(
+        &self,
+        edit_id: &Id,
+        from: ImprovementEditStatus,
+        to: ImprovementEditStatus,
+        actor: &str,
+    ) -> Result<ImprovementEdit> {
         self.improvements
-            .set_edit_status(edit_id, ImprovementEditStatus::Applied, Some(actor))
-            .await
+            .set_edit_status_if(edit_id, from, to, Some(actor))
+            .await?
+            .ok_or_else(|| Error::Invalid(format!("edit is no longer {}", from.as_str())))
     }
 
     /// Reject a pending edit (no file change).
@@ -722,9 +762,13 @@ impl ImprovementEngine {
         if edit.status != ImprovementEditStatus::Pending {
             return Err(Error::Invalid("edit is not pending".into()));
         }
-        self.improvements
-            .set_edit_status(edit_id, ImprovementEditStatus::Rejected, Some(actor))
-            .await
+        self.decide(
+            edit_id,
+            ImprovementEditStatus::Pending,
+            ImprovementEditStatus::Rejected,
+            actor,
+        )
+        .await
     }
 
     /// Roll back an applied edit, restoring `before_content` (deletes the file
@@ -787,9 +831,13 @@ impl ImprovementEngine {
                 remove_edit_target(Path::new(&edit.target_path)).await?;
             }
         }
-        self.improvements
-            .set_edit_status(edit_id, ImprovementEditStatus::RolledBack, Some(actor))
-            .await
+        self.decide(
+            edit_id,
+            ImprovementEditStatus::Applied,
+            ImprovementEditStatus::RolledBack,
+            actor,
+        )
+        .await
     }
 
     // ---- helpers ----
@@ -1894,6 +1942,36 @@ mod tests {
             tokio::fs::read_to_string(path).await.unwrap(),
             "new user work"
         );
+    }
+
+    /// Two decisions on one edit: exactly one wins, and the edit's status
+    /// always matches the file.
+    #[tokio::test]
+    async fn concurrent_approve_and_reject_have_one_winner() {
+        for _ in 0..5 {
+            let (engine, ws, _, dir) = harness().await;
+            let path = dir.path().join("MEMORY.md");
+            tokio::fs::write(&path, "original").await.unwrap();
+            let edit = removal_edit(
+                &engine,
+                &ws,
+                &path,
+                Some("original"),
+                ImprovementEditStatus::Pending,
+            )
+            .await;
+            let (a, r) = tokio::join!(
+                engine.approve_edit(&edit.id, "agent"),
+                engine.reject_edit(&edit.id, "person")
+            );
+            assert!(a.is_ok() != r.is_ok(), "exactly one decision wins");
+            let status = engine.improvements.get_edit(&edit.id).await.unwrap().status;
+            match status {
+                ImprovementEditStatus::Applied => assert!(!path.exists()),
+                ImprovementEditStatus::Rejected => assert!(path.exists()),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

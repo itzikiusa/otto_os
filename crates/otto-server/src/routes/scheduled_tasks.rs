@@ -576,6 +576,37 @@ async fn remove(
 ) -> ApiResult<Json<Value>> {
     let task = ctx.scheduled_tasks.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
+    // A run still going would outlive the delete: the cascade removed its
+    // row, but the engine still delivered the report (Slack / email /
+    // webhook) and left its agent session / workflow running. Stop it first.
+    let running = ctx
+        .scheduled_tasks
+        .list_runs(&id, 1)
+        .await
+        .map_err(ApiError)?
+        .into_iter()
+        .find(|r| r.status == "running");
+    if let Some(run) = running {
+        if !scheduled_tasks_engine::cancel_run(&run.id) {
+            return Err(ApiError(Error::Conflict(
+                "a run of this task is finishing (saving and delivering its report) — delete the \
+                 task once it has finished"
+                    .into(),
+            )));
+        }
+        let repo = ctx.scheduled_tasks.clone();
+        crate::api_helpers::wait_until_settled(|| {
+            let repo = repo.clone();
+            let run_id = run.id.clone();
+            async move {
+                repo.get_run(&run_id)
+                    .await
+                    .map(|r| r.status != "running")
+                    .unwrap_or(true)
+            }
+        })
+        .await;
+    }
     ctx.scheduled_tasks.delete(&id).await.map_err(ApiError)?;
     Ok(Json(json!({"ok": true})))
 }
@@ -895,6 +926,60 @@ mod tests {
             StatusCode::OK
         );
         assert_eq!(patch("adm", evil).await, StatusCode::OK);
+    }
+
+    /// Deleting a task with a run in flight stops that run (and waits for it
+    /// to wind down) before the row goes — the run used to outlive the delete
+    /// and still deliver its report.
+    #[tokio::test]
+    async fn deleting_a_task_stops_its_running_run_first() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws").await;
+        let now = chrono::Utc::now();
+        sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES ('owner', 'owner', 'x', 'owner', 1, ?)")
+            .bind(now.to_rfc3339()).execute(&pool).await.unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let mut new = otto_state::NewScheduledTask::defaults("ws".into(), "t".into());
+        new.prompt = "sleep 30".into();
+        new.provider = "shell".into();
+        new.cwd = tmp.path().to_string_lossy().into_owned();
+        new.created_by = Some("owner".into());
+        new.schedule = json!({"cadence":"interval","every_min":60});
+        let task = ctx.scheduled_tasks.create(new).await.unwrap();
+        let run = scheduled_tasks_engine::spawn_run(&ctx, &task, "manual")
+            .await
+            .unwrap();
+        let owner = otto_core::domain::User {
+            id: "owner".into(),
+            username: "owner".into(),
+            display_name: "owner".into(),
+            is_root: true,
+            disabled: false,
+            created_at: now,
+        };
+        let mut req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/scheduled-tasks/{}", task.id))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(otto_core::auth::AuthUser(owner));
+        let started = std::time::Instant::now();
+        let status = routes()
+            .with_state(ctx.clone())
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, StatusCode::OK);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        // The run's execution has ended: nothing is left to cancel.
+        assert!(!scheduled_tasks_engine::cancel_run(&run.id));
+        assert!(ctx.scheduled_tasks.get(&task.id).await.is_err());
     }
 
     #[test]

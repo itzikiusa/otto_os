@@ -130,6 +130,19 @@ pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<St
     tokio::spawn(async move {
         ctx2.seed_tasks(&project2, &creator, &goal).await;
         if start {
+            // The same gates as the start/resume routes: a channel message
+            // used to flip an ABORTED or budget-paused swarm back to active
+            // (clearing its pause reason) and spend past the cap.
+            let _operation = crate::runtime::engine::operation_guard(&swarm_id).await;
+            if let Some(why) = channel_start_refused(&ctx2, &swarm_id, &workspace_id).await {
+                notify_origin(
+                    &ctx2,
+                    &project2,
+                    &format!("Tasks were added, but the swarm was not started: {why}."),
+                )
+                .await;
+                return;
+            }
             let _ = ctx2
                 .swarm_repo()
                 .set_swarm_status(&swarm_id, "active")
@@ -141,6 +154,40 @@ pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<St
     });
 
     Ok(project.id)
+}
+
+/// Why a channel/webhook launch must not (re)start the swarm, if it must not:
+/// it was aborted, it is auto-paused for a budget/limit reason, or the
+/// workspace's spend cap blocks new work.
+async fn channel_start_refused(
+    ctx: &SwarmRt,
+    swarm_id: &str,
+    workspace_id: &str,
+) -> Option<String> {
+    let swarm = ctx
+        .swarm_repo()
+        .get_swarm(&swarm_id.to_string())
+        .await
+        .ok()?;
+    if let Some(why) = start_refusal(&swarm.status, swarm.pause_reason.as_deref()) {
+        return Some(why);
+    }
+    ctx.budget_blocked(workspace_id).await.map(|reason| {
+        format!(
+            "the workspace budget is exceeded ({})",
+            reason.unwrap_or_else(|| "cap reached".into())
+        )
+    })
+}
+
+/// [`channel_start_refused`]'s pure status part.
+fn start_refusal(status: &str, pause_reason: Option<&str>) -> Option<String> {
+    if status == "aborted" {
+        return Some("it was aborted — start it from Otto".into());
+    }
+    pause_reason
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| format!("it is paused ({r}) — resume it from Otto"))
 }
 
 /// Reply/escalate back to the channel that launched `project` (if any). Best-effort.
@@ -291,7 +338,17 @@ fn strip_keyword<'a>(text: &'a str, kw: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_keyword;
+    use super::{start_refusal, strip_keyword};
+
+    #[test]
+    fn a_channel_never_restarts_an_aborted_or_auto_paused_swarm() {
+        assert!(start_refusal("aborted", None).is_some());
+        assert!(start_refusal("paused", Some("max_total_runs reached")).is_some());
+        assert!(start_refusal("active", None).is_none());
+        // An ordinary (manual) pause carries no reason: a launch may start it.
+        assert!(start_refusal("paused", None).is_none());
+        assert!(start_refusal("idle", Some("  ")).is_none());
+    }
 
     #[test]
     fn keyword_strip_is_case_insensitive_and_char_safe() {

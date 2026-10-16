@@ -273,6 +273,50 @@ fn artifact_stem(dir: &Path, key: &str) -> Option<(PathBuf, String)> {
     ))
 }
 
+/// The attempt number a run writes into its pending completion manifest: one
+/// more than an unfinished previous attempt at the period, or 0 for a person's
+/// own Run (which also clears an earlier Stop).
+fn next_attempt(prev: Option<&serde_json::Value>, manual: bool) -> u64 {
+    if manual {
+        return 0;
+    }
+    prev.filter(|m| m["complete"] != true)
+        .and_then(|m| m["attempt"].as_u64())
+        .map_or(1, |n| n + 1)
+}
+
+/// Whether the hourly catch-up may (re)run a period, from its durable pending
+/// manifest: not after a person stopped it, and at most
+/// [`MAX_PERIOD_ATTEMPTS`] scheduled attempts — across daemon restarts too
+/// (the in-memory counter alone reset on every restart).
+fn catch_up_allowed(dir: &Path, key: &str) -> bool {
+    let Some((base, stem)) = artifact_stem(dir, key) else {
+        return true;
+    };
+    match completion_manifest(&base.join(format!("completion-{stem}.json"))) {
+        Some(m) if m["complete"] != true => {
+            m["stopped"] != true
+                && m["attempt"].as_u64().unwrap_or(0) < u64::from(MAX_PERIOD_ATTEMPTS)
+        }
+        _ => true,
+    }
+}
+
+/// Mark a period's pending manifest as stopped by a person — only while it
+/// still belongs to the run that was stopped.
+fn mark_stopped(path: &Path, run_id: &str) -> std::io::Result<()> {
+    let Some(mut m) = completion_manifest(path) else {
+        return Ok(());
+    };
+    if m["run_id"] != run_id || m["complete"] == true {
+        return Ok(());
+    }
+    m["stopped"] = serde_json::Value::Bool(true);
+    let temp = path.with_extension("json.pending.tmp");
+    std::fs::write(&temp, m.to_string())?;
+    std::fs::rename(temp, path)
+}
+
 fn completion_manifest(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
@@ -567,9 +611,14 @@ fn session_working(
         return false;
     }
     match status {
-        S::Exited => false,
+        // Reconnectable = no live process: suspended by the idle sweep (a
+        // background session is suspended after 5 min unwatched — before
+        // this run's own 10-min idle grace) or left by a daemon restart.
+        // Counting it as working kept a dead run "generating" for the whole
+        // 2 h cap, attached new Runs to it and blocked its period.
+        S::Exited | S::Reconnectable => false,
         S::Idle => now - last_active_at < idle_grace,
-        _ => true,
+        S::Running | S::Working => true,
     }
 }
 
@@ -989,12 +1038,14 @@ pub async fn run_insights<C: InsightsCtx>(
         // Fence this period before dispatch. A crash or failed submission now
         // leaves a pending manifest, so catch-up must finish the partial report.
         let (path, id) = (manifest_path.clone(), sid.clone());
+        let manual = mode == RunMode::Manual;
         let prepared = ctx::blocking(move || -> std::io::Result<()> {
             std::fs::create_dir_all(path.parent().expect("manifest parent"))?;
+            let attempt = next_attempt(completion_manifest(&path).as_ref(), manual);
             let temp = path.with_extension("json.pending.tmp");
             std::fs::write(
                 &temp,
-                serde_json::json!({"run_id":id,"complete":false}).to_string(),
+                serde_json::json!({"run_id":id,"complete":false,"attempt":attempt}).to_string(),
             )?;
             std::fs::rename(temp, path)
         })
@@ -1150,6 +1201,12 @@ async fn cancel_run<C: InsightsCtx>(
     let sid: otto_core::Id = run.run_id;
     let _ = ctx.manager().kill_session(&sid).await;
     let _ = ctx.manager().archive(&sid).await;
+    // A Stop means "don't auto-retry this period" — not one more attempt the
+    // hourly catch-up re-spawns an hour later.
+    if let Some((base, stem)) = artifact_stem(&dir, &run.report_key) {
+        let (path, id) = (base.join(format!("completion-{stem}.json")), sid.clone());
+        let _ = ctx::blocking(move || mark_stopped(&path, &id)).await;
+    }
     info!(session = %sid, "insights: run cancelled");
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -1477,7 +1534,8 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
                     continue;
                 }
             }
-            if !attempts.admit(&period_key(kind, start, end)) {
+            let key = period_key(kind, start, end);
+            if !catch_up_allowed(&dir, &key) || !attempts.admit(&key) {
                 continue;
             }
             in_flight.lock().await.insert(kind.word());
@@ -1534,12 +1592,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_catch_up_cap_survives_restarts_and_honours_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let key = "weekly:20260610_20260616";
+        let (base, stem) = artifact_stem(dir, key).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        let manifest = base.join(format!("completion-{stem}.json"));
+        assert!(catch_up_allowed(dir, key), "no manifest yet");
+        let write = |v: serde_json::Value| std::fs::write(&manifest, v.to_string()).unwrap();
+        write(serde_json::json!({"run_id": "s1", "complete": false, "attempt": 2}));
+        assert!(catch_up_allowed(dir, key));
+        write(serde_json::json!({"run_id": "s1", "complete": false, "attempt": 3}));
+        assert!(!catch_up_allowed(dir, key), "capped, even after a restart");
+        // A person's Stop: only the run it targeted is marked.
+        write(serde_json::json!({"run_id": "s1", "complete": false, "attempt": 1}));
+        mark_stopped(&manifest, "other").unwrap();
+        assert!(catch_up_allowed(dir, key));
+        mark_stopped(&manifest, "s1").unwrap();
+        assert!(!catch_up_allowed(dir, key), "stopped by a person");
+        // Attempt numbering: +1 on a scheduled retry, 0 for a manual Run.
+        let m = completion_manifest(&manifest).unwrap();
+        assert_eq!(next_attempt(Some(&m), false), 2);
+        assert_eq!(next_attempt(Some(&m), true), 0);
+        assert_eq!(next_attempt(None, false), 1);
+    }
+
+    #[test]
     fn a_period_is_attempted_a_bounded_number_of_times() {
         let mut a = PeriodAttempts::default();
         for _ in 0..MAX_PERIOD_ATTEMPTS {
-            assert!(a.admit("daily:2026-10-15_2026-10-15"));
+            assert!(a.admit("daily:20261015_20261015"));
         }
-        assert!(!a.admit("daily:2026-10-15_2026-10-15"), "capped");
+        assert!(!a.admit("daily:20261015_20261015"), "capped");
         assert!(a.admit("weekly:2026-10-05_2026-10-11"), "per period");
         // The next period starts fresh once the old one is no longer due.
         a.retain_due(&["daily:2026-10-16_2026-10-16".to_string()]);
@@ -1568,6 +1653,10 @@ mod tests {
             "stalled"
         );
         assert!(!session_working(S::Exited, false, recent, started, now));
+        assert!(
+            !session_working(S::Reconnectable, false, recent, started, now),
+            "suspended / restart-orphaned: no live process"
+        );
         assert!(
             !session_working(S::Working, true, recent, started, now),
             "archived"

@@ -2409,8 +2409,9 @@ daemon restart (attempt N)" in the run view), after which the run fails
 like before. A scoped re-entry (retry-node, or the reconciler's own resume)
 persists its scope on the row (`resume_scope_json`), so a restart
 mid-retry resumes with the same scope instead of failing. The run's 10h
-wall-clock budget is anchored to the row's `started_at` (not process
-uptime), so crash-loop resumes cannot extend it. Backed by migration
+active-time budget is per execution (a fresh run, a retry, a restart
+resume) and excludes time parked at a `human_approval` gate; crash-loop
+resumes are bounded by the resume cap above. Backed by migration
 **0108** (`workflow_runs.resume_scope_json` / `interrupted_at` /
 `resume_attempts`, `workflows.on_restart` + the same on
 `workflow_versions`).
@@ -4490,7 +4491,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 137a | POST /api/v1/scheduled-tasks/preview | scheduled_tasks edit | `{schedule, timezone?}` | `{next_fire_times: string[]}` — the next five fires (RFC 3339 UTC) of an UNSAVED schedule via the scheduler's cadence evaluator; 400 on an invalid schedule/timezone (same checks as create); empty for a spent `once`; saves nothing |
 | 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
 | 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
-| 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first (session killed, hand-off workflow cancelled, nothing delivered) and the delete waits for it to settle; `409` while a run is finishing (saving/delivering its report) |
 | 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun — the manual run, returned at once in `running` (it executes in the background; completion arrives as `scheduled_task_run_updated`, or poll the runs list). 409 while a run of the task is already in progress |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
 | 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
@@ -4537,12 +4538,12 @@ writes) + the workspace-role axis on the agent's workspace.
 | POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time | PersonalAgent |
 | GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
-| DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first and the delete waits for it to settle; `409` while a run is finishing |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
 | POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?, idempotency_key?}` — optional 1–128 ASCII `idempotency_key` deduplicates create retries within an agent, including a lost response after commit; the same key with different schedule/timezone/directive/permission returns 409. Permission is persisted atomically at creation. `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
+| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (that schedule's directive and permission, even when the schedule is paused; without one, a generic check-in directive) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
 | POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |

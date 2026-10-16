@@ -403,6 +403,35 @@ async fn remove(
     let repo = agents(&ctx);
     let agent = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
+    // Stop a run still going first: the cascade removed its row, but the
+    // engine still delivered its report and left its session running.
+    let running = repo
+        .list_runs(&id, 1)
+        .await
+        .map_err(ApiError)?
+        .into_iter()
+        .find(|r| r.status == "running");
+    if let Some(run) = running {
+        if !personal_agents_engine::cancel_run(&run.id) {
+            return Err(ApiError(Error::Conflict(
+                "the agent is finishing a run (saving and delivering its report) — delete it once \
+                 that run has finished"
+                    .into(),
+            )));
+        }
+        let waiter = repo.clone();
+        crate::api_helpers::wait_until_settled(|| {
+            let repo = waiter.clone();
+            let run_id = run.id.clone();
+            async move {
+                repo.get_run(&run_id)
+                    .await
+                    .map(|r| r.status != "running")
+                    .unwrap_or(true)
+            }
+        })
+        .await;
+    }
     repo.delete(&id).await.map_err(ApiError)?;
     Ok(Json(json!({"ok": true})))
 }

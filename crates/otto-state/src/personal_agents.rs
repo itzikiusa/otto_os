@@ -1819,6 +1819,64 @@ mod tests {
         }
     }
 
+    /// A content-only edit while a run is in flight must not orphan that
+    /// run's settlement (it re-ran and re-delivered on the next tick); a
+    /// stale captured scan is still refused.
+    #[tokio::test]
+    async fn a_directive_edit_mid_run_still_settles_the_occurrence() {
+        let (repo, agent, captured) = recovery_schedule().await;
+        repo.admit_captured_run(
+            &new_id(),
+            &agent,
+            Some(&captured),
+            "schedule",
+            "directed",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.update_schedule(
+            &captured.id,
+            AgentSchedulePatch {
+                directive: Some("a new directive".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // The form re-sending the SAME cadence/enabled flag changes nothing.
+        repo.update_schedule(
+            &captured.id,
+            AgentSchedulePatch {
+                schedule: Some(captured.schedule.clone()),
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(repo
+            .settle_captured_schedule(&captured, "2026-10-08T09:05:00Z", None)
+            .await
+            .unwrap());
+        // ...while the directive edit fenced the stale captured scan.
+        let agent = repo.get(&agent.id).await.unwrap();
+        assert!(matches!(
+            repo.admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&captured),
+                "schedule",
+                "directed",
+                false,
+                None
+            )
+            .await,
+            Err(otto_core::Error::Conflict(_))
+        ));
+    }
+
     /// "Run now" of a paused (or spent `once`) schedule borrows its directive
     /// without claiming the occurrence; a scheduled dispatch still can't.
     #[tokio::test]

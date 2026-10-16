@@ -985,8 +985,9 @@ failing it:
   view shows *"Resumed after a daemon
   restart (attempt N)"*. A retry-node re-entry persists its scope
   (`resume_scope_json`) so even a restart mid-retry resumes with the same
-  scope. The 10h run wall-clock is anchored to the run row's `started_at`,
-  so crash-loop resumes can't extend it. (Migration `0108_workflow_resume`.)
+  scope. The 10h run time budget is per execution (fresh run, retry,
+  restart resume) and excludes time parked at an approval gate; crash-loop
+  resumes are bounded by the resume cap. (Migration `0108_workflow_resume`.)
 
 ### Run repos & branches (`repos[]` input)
 

@@ -485,24 +485,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             if let Ok(loop_) = ctx.goal_loops_repo().get(&loop_id).await {
                 cleanup_executor_sessions(&ctx, &loop_.workspace_id, &loop_id).await;
             }
-            let was_current = deregister(&ctx, &loop_id, &handle);
-            // A Stop that landed during the cleanup above saw our handle, so
-            // it only flagged `cancel` and left finalizing to us — the loop
-            // stayed Paused while Stop answered 200. `stop_loop` flags under
-            // the registry lock and `deregister` takes it, so once we are out
-            // of the registry this read is final; a later Stop finalizes
-            // itself. (A Resume that replaced our entry also flags `cancel`
-            // — that loop is running again and is not ours to stop.)
-            if was_current && handle.cancel.load(Ordering::Relaxed) {
-                finalize(
-                    &ctx,
-                    &loop_id,
-                    GoalLoopStatus::Stopped,
-                    Some("stopped by user"),
-                    None,
-                )
-                .await;
-            }
+            release_honouring_stop(&ctx, &loop_id, &handle).await;
             return;
         }
         // The deadline wrapper owns settlement after cooperative cleanup.
@@ -566,7 +549,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
         }
         if limits.max_cost_usd.is_some() {
             block(&ctx, &loop_id, "Per-loop cost accounting is unavailable. Remove the cost limit and use iteration/runtime limits to resume.").await;
-            deregister(&ctx, &loop_id, &handle);
+            release_honouring_stop(&ctx, &loop_id, &handle).await;
             return;
         }
 
@@ -860,7 +843,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 if !ledger.review_passed {
                     clear_evaluation_continuation(&ctx, &loop_id).await;
                     block(&ctx, &loop_id, "Completion review has unresolved findings. Inspect the review evidence before resuming.").await;
-                    deregister(&ctx, &loop_id, &handle);
+                    release_honouring_stop(&ctx, &loop_id, &handle).await;
                     return;
                 }
             }
@@ -899,7 +882,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 title: "Goal loop blocked — needs input".into(),
                 body: summary.clone(),
             });
-            deregister(&ctx, &loop_id, &handle);
+            release_honouring_stop(&ctx, &loop_id, &handle).await;
             return;
         }
         // verdict == "continue" (or anything else) → next iteration.
@@ -1064,6 +1047,33 @@ async fn finalize(
 
 /// Block the loop (awaiting user) without treating it as terminal-finished: the
 /// repo write banks the window (only if still anchored), clears it, sets Blocked. Resume re-spawns a controller.
+/// Leave the registry after parking the loop (Paused / Blocked). A Stop that
+/// landed while we were still registered — during the session cleanup that
+/// parking does — saw our handle, so it only flagged `cancel` and left
+/// finalizing to us: the loop stayed Paused/Blocked while Stop answered 200.
+/// `stop_loop` flags under the registry lock and `deregister` takes it, so
+/// once we are out of the registry this read is final; a later Stop finalizes
+/// itself. (A Resume that replaced our entry also flags `cancel` — that loop
+/// is running again and is not ours to stop.)
+async fn release_honouring_stop(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) {
+    let was_current = deregister(ctx, loop_id, handle);
+    if stop_landed_while_registered(was_current, handle) {
+        finalize(
+            ctx,
+            loop_id,
+            GoalLoopStatus::Stopped,
+            Some("stopped by user"),
+            None,
+        )
+        .await;
+    }
+}
+
+/// [`release_honouring_stop`]'s decision (pure).
+fn stop_landed_while_registered(was_current: bool, handle: &LoopHandle) -> bool {
+    was_current && handle.cancel.load(Ordering::Relaxed)
+}
+
 async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) {
     let loop_ = match ctx.goal_loops_repo().get(loop_id).await {
         Ok(l) => l,
@@ -2017,6 +2027,23 @@ mod goal_loop_tests {
             &recovery_goal(serde_json::json!({})),
             None
         ));
+    }
+
+    /// A Stop flagged while the parking controller was still registered is
+    /// settled by that controller; a Resume's replacement never is.
+    #[test]
+    fn a_stop_during_parking_is_settled_by_the_controller() {
+        let h = LoopHandle::new();
+        assert!(!stop_landed_while_registered(true, &h), "no Stop");
+        h.cancel.store(true, Ordering::Relaxed);
+        assert!(
+            stop_landed_while_registered(true, &h),
+            "Stop while registered"
+        );
+        assert!(
+            !stop_landed_while_registered(false, &h),
+            "replaced by a Resume: not ours to stop"
+        );
     }
 
     #[tokio::test]

@@ -203,6 +203,11 @@ pub async fn approve(
                 )
                 .await?;
             log_approval(ctx, &run, "approved", req.note.as_deref()).await;
+            // Open pages refresh on `otto_run_updated` only — an approval
+            // given elsewhere (Slack) left them offering Approve/Deny.
+            if let Ok(fresh) = ctx.runs.get(run_id).await {
+                run_engine::emit(ctx, &fresh);
+            }
             let ctx2 = ctx.clone();
             let rid = run_id.clone();
             tokio::spawn(async move {
@@ -230,6 +235,7 @@ pub async fn approve(
                 .await?;
             log_approval(ctx, &run, "rejected", req.note.as_deref()).await;
             if let Ok(fresh) = ctx.runs.get(run_id).await {
+                run_engine::emit(ctx, &fresh);
                 run_engine::project(ctx, &fresh).await;
                 crate::run_callback::deliver(&ctx.runs, &fresh).await;
             }
@@ -300,8 +306,8 @@ pub(crate) async fn check_repo_for_run(
     }
 }
 
-/// Cancel a non-terminal run. Forceful (not a CAS) — the engine's next CAS then
-/// no-ops, and the worktree is cleaned up.
+/// Cancel a non-terminal run (a CAS against the terminal statuses — the
+/// engine's next CAS then no-ops), and clean the worktree up.
 pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
     let run = ctx.runs.get(run_id).await?;
     if run.status.is_terminal() {
@@ -312,7 +318,11 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
         }
         return Ok(run);
     }
-    ctx.runs.set_status(run_id, RunStatus::Cancelled).await?;
+    if !ctx.runs.cancel_if_active(run_id).await? {
+        // It ended between the read above and this write: leave its real
+        // outcome (and its worktree) alone.
+        return ctx.runs.get(run_id).await;
+    }
     let _ = ctx
         .runs
         .add_event(NewRunEvent {
@@ -341,6 +351,7 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
     // read taken now is guaranteed to see it (S2-302).
     let fresh = ctx.runs.get(run_id).await.unwrap_or_else(|_| run.clone());
     stop_owned_work(ctx, &fresh).await;
+    run_engine::emit(ctx, &fresh);
     run_engine::project(ctx, &fresh).await;
     crate::run_callback::deliver(&ctx.runs, &fresh).await;
     crate::run_workspace::remove_worktree(ctx, &run).await;
