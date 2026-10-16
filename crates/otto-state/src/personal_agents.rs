@@ -913,7 +913,11 @@ impl PersonalAgentsRepo {
                 "personal agent dispatch is stale or already running".into(),
             ));
         }
-        if let Some(schedule) = schedule {
+        // Only a SCHEDULED dispatch claims its occurrence. A manual "Run now"
+        // of one schedule just borrows its directive/permission — it never
+        // moves the cursor — so a paused or spent `once` schedule must not
+        // answer it with 409 "changed or was already dispatched".
+        if let Some(schedule) = schedule.filter(|_| trigger == "schedule") {
             let changed = sqlx::query("UPDATE personal_agent_schedules SET admission_generation = admission_generation + 1
                 WHERE id = ? AND agent_id = ? AND enabled = 1 AND schedule_generation = ? AND admission_generation = ?")
                 .bind(&schedule.id).bind(&agent.id).bind(schedule.schedule_generation).bind(schedule.admission_generation)
@@ -1813,6 +1817,53 @@ mod tests {
             assert!(current.last_run_at.is_none());
             assert_eq!(current.schedule, replacement);
         }
+    }
+
+    /// "Run now" of a paused (or spent `once`) schedule borrows its directive
+    /// without claiming the occurrence; a scheduled dispatch still can't.
+    #[tokio::test]
+    async fn manual_run_of_a_paused_schedule_is_admitted() {
+        let (repo, agent, captured) = recovery_schedule().await;
+        let paused = repo
+            .update_schedule(
+                &captured.id,
+                AgentSchedulePatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&paused),
+                "schedule",
+                "directed",
+                false,
+                None
+            )
+            .await,
+            Err(otto_core::Error::Conflict(_))
+        ));
+        let agent = repo.get(&agent.id).await.unwrap();
+        let run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&paused),
+                "manual",
+                "directed",
+                false,
+                None,
+            )
+            .await
+            .expect("manual run of a paused schedule");
+        assert_eq!(run.schedule_id.as_deref(), Some(captured.id.as_str()));
+        let after = repo.get_schedule(&captured.id).await.unwrap();
+        assert_eq!(after.admission_generation, paused.admission_generation);
+        assert!(after.last_run_at.is_none());
     }
 
     /// A re-timing edit re-arms in the same write: the schedule never shows
