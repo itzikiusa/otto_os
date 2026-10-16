@@ -4,6 +4,8 @@
 // re-renders it every second. Mirrors the singleton-store idiom in
 // viewport.svelte.ts. SSR-safe: no interval when `window` is absent.
 
+import { untrack } from 'svelte';
+
 class Clock {
   ms = $state(Date.now());
   /** Changes once a minute (A3): readers of minute-grain labels ("4h idle")
@@ -62,7 +64,20 @@ function toMs(ts: number | string | Date): number {
 export function rel(ts: number | string | Date): string {
   const t = toMs(ts);
   if (!t) return '';
-  const diff = clock.ms - t;
+  // Subscribe only as finely as the label can change. Under an hour it flips
+  // at second/minute offsets of `t`, so it follows the 1 s tick; an "Nh ago",
+  // "Nd ago" or date label follows the minute tick instead (an hour flip shows
+  // at most 59 s late). History, Insights, run lists… are mostly hours-old
+  // rows: every one of them used to re-run its label every second.
+  const cur = untrack(() => clock.ms);
+  let nowMs: number;
+  if (Math.abs(cur - t) >= 3_600_000) {
+    void clock.minuteMs;
+    nowMs = cur;
+  } else {
+    nowMs = clock.ms;
+  }
+  const diff = nowMs - t;
   const future = diff < 0;
   const s = Math.floor(Math.abs(diff) / 1000);
   let body: string;
