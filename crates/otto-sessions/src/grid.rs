@@ -106,3 +106,87 @@ pub(crate) async fn send_grid(
         .await
         .map_err(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(g: GridState, conn: u64) -> serde_json::Value {
+        serde_json::from_str(&grid_frame(g, conn)).unwrap()
+    }
+
+    /// docs/contracts/ws.md "Grid feed": `owner` is relative to the viewer.
+    #[test]
+    fn the_grid_frame_names_the_owner_relative_to_each_viewer() {
+        let g = GridState {
+            cols: 100,
+            rows: 30,
+            owner: Some(7),
+        };
+        assert_eq!(
+            frame(g, 7),
+            serde_json::json!({"type": "grid", "cols": 100, "rows": 30, "owner": "self"})
+        );
+        assert_eq!(frame(g, 8)["owner"], "other");
+        let idle = GridState::default();
+        assert_eq!(
+            frame(idle, 7),
+            serde_json::json!({"type": "grid", "cols": 0, "rows": 0, "owner": "none"})
+        );
+    }
+
+    #[test]
+    fn a_feed_publishes_only_changes_and_only_while_watched() {
+        let feeds = GridFeeds::default();
+        let id: Id = "s1".into();
+        // Nobody watching: the state closure is never even evaluated.
+        feeds.publish(&id, || panic!("computed for an unwatched session"));
+        assert!(!feeds.contains(&id));
+
+        let start = GridState {
+            cols: 80,
+            rows: 24,
+            owner: None,
+        };
+        let mut rx = feeds.watch(&id, start);
+        assert_eq!(*rx.borrow_and_update(), start);
+        feeds.publish(&id, || start);
+        assert!(!rx.has_changed().unwrap(), "same grid → no frame");
+        let resized = GridState {
+            cols: 120,
+            owner: Some(1),
+            ..start
+        };
+        feeds.publish(&id, || resized);
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), resized);
+
+        // A second viewer joins the existing feed (its initial value is ignored).
+        let rx2 = feeds.watch(&id, GridState::default());
+        assert_eq!(*rx2.borrow(), resized);
+
+        // Still watched → kept; once every receiver is gone → dropped.
+        drop(rx);
+        feeds.forget_if_unwatched(&id);
+        assert!(feeds.contains(&id));
+        drop(rx2);
+        feeds.forget_if_unwatched(&id);
+        assert!(!feeds.contains(&id));
+    }
+
+    #[tokio::test]
+    async fn next_grid_ends_when_the_feed_is_removed() {
+        let feeds = GridFeeds::default();
+        let id: Id = "s1".into();
+        let mut rx = Some(feeds.watch(&id, GridState::default()));
+        let g = GridState {
+            cols: 9,
+            rows: 9,
+            owner: None,
+        };
+        feeds.publish(&id, || g);
+        assert_eq!(next_grid(&mut rx).await, Some(g));
+        feeds.remove(&id);
+        assert_eq!(next_grid(&mut rx).await, None, "sender gone → feed over");
+    }
+}
