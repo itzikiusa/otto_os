@@ -3516,9 +3516,11 @@ mod tests {
         assert!(reached, "the page is descending by instant");
         // Same instant in two zones is a tie; unparsable input falls back to
         // string order instead of panicking.
-        assert!(
-            cmp_created("2026-10-25T00:00:00.000+0000", "2026-10-25T03:00:00.000+0300").is_eq()
-        );
+        assert!(cmp_created(
+            "2026-10-25T00:00:00.000+0000",
+            "2026-10-25T03:00:00.000+0300"
+        )
+        .is_eq());
         assert!(cmp_created("2026-10-25T00:00:00Z", "2026-10-25T00:00:01.5+00:00").is_lt());
         assert!(cmp_created("", "2026-01-01T00:00:00Z").is_lt());
     }

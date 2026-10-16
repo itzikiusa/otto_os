@@ -1369,7 +1369,9 @@ fn parse_diff_git_paths(line: &str) -> (Option<String>, Option<String>) {
     let mid = (rest.len().saturating_sub(1)) / 2;
     let symmetric = (rest.starts_with("a/")
         && rest.get(mid..).is_some_and(|t| t.starts_with(" b/"))
-        && rest.get(2..mid).is_some_and(|old| rest.get(mid + 3..) == Some(old)))
+        && rest
+            .get(2..mid)
+            .is_some_and(|old| rest.get(mid + 3..) == Some(old)))
     .then_some((mid, mid + 1));
     let split = symmetric
         .or_else(|| rest.rfind(" \"b/").map(|i| (i, i + 1)))
