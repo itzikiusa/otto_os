@@ -212,9 +212,14 @@ impl Bitbucket {
                 return Ok(members.clone());
             }
         }
+        // Every page (`next`): a workspace past 100 members cached a cut list.
         let path = format!("/workspaces/{workspace}/members?pagelen=100");
-        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
-        let members: Vec<Member> = varr(&v, &["values"]).iter().map(member_from).collect();
+        let members: Vec<Member> = self
+            .paginate_values(&path)
+            .await?
+            .iter()
+            .map(member_from)
+            .collect();
         CACHE
             .get_or_init(Default::default)
             .lock()
@@ -814,8 +819,9 @@ impl super::GitProvider for Bitbucket {
             "{}?pagelen=100",
             Self::pr_path(r, &format!("/{number}/commits"))
         );
-        let v = self.get_json_cached(&path).await?;
-        let commits = varr(&v, &["values"])
+        // Every page (`next`): a PR past 100 commits lost the rest.
+        let v = self.paginate_values(&path).await?;
+        let commits = v
             .iter()
             .map(|c| {
                 let sha = vstr(c, &["hash"]);

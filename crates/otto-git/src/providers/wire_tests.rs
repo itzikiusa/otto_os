@@ -481,6 +481,84 @@ mod gitlab {
         let bodies: Vec<&str> = detail.comments.iter().map(|c| c.body.as_str()).collect();
         assert_eq!(bodies, vec!["first", "second"]);
     }
+
+    #[tokio::test]
+    async fn mr_commits_and_members_read_every_page() {
+        let server = MockServer::start().await;
+        let gl = Gitlab::new("tok".into(), Some(server.uri()));
+        let commit = |id: &str| {
+            json!({"id": id, "short_id": id, "title": id, "author_name": "Dev",
+                   "created_at": "2026-09-01T10:00:00Z"})
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/v4/next"))
+            .and(query_param("page", "2"))
+            .and(query_param("kind", "commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([commit("c2")])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/api/v4/projects/.+/merge_requests/7/commits$",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "link",
+                        format!(
+                            r#"<{}/api/v4/next?page=2&kind=commits>; rel="next""#,
+                            server.uri()
+                        )
+                        .as_str(),
+                    )
+                    .set_body_json(json!([commit("c1")])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/next"))
+            .and(query_param("page", "2"))
+            .and(query_param("kind", "members"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{"username": "m101", "name": "Member 101"}])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v4/projects/.+/members/all$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "link",
+                        format!(
+                            r#"<{}/api/v4/next?page=2&kind=members>; rel="next""#,
+                            server.uri()
+                        )
+                        .as_str(),
+                    )
+                    .set_body_json(json!([{"username": "m1", "name": "Member 1"}])),
+            )
+            .mount(&server)
+            .await;
+
+        let shas: Vec<String> = gl
+            .list_pr_commits(&rr(), 7)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(shas, ["c1", "c2"]);
+        let members: Vec<String> = gl
+            .list_collaborators(&rr(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(members, ["m1", "m101"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -511,6 +589,80 @@ mod bitbucket {
             "user": { "display_name": "Dev" },
             "created_on": "2026-09-01T10:00:00Z",
         })
+    }
+
+    /// PR commits and workspace members follow `next`: both stopped at the
+    /// first 100 (and the member list was cached cut for 10 minutes).
+    #[tokio::test]
+    async fn pr_commits_and_workspace_members_read_every_page() {
+        let server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        // A workspace no other test uses: the member list is cached per name.
+        let r = RemoteRef {
+            owner: "paged-ws".into(),
+            repo: "app".into(),
+        };
+        let commit = |h: &str| {
+            json!({"hash": h, "message": format!("{h}\n\nbody"),
+                   "author": {"raw": "Dev <d@x>"}, "date": "2026-09-01T10:00:00Z"})
+        };
+        Mock::given(method("GET"))
+            .and(path("/repositories/paged-ws/app/pullrequests/7/commits"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [commit("c2")],
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repositories/paged-ws/app/pullrequests/7/commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [commit("c1")],
+                "next": format!(
+                    "{}/repositories/paged-ws/app/pullrequests/7/commits?page=2",
+                    server.uri()
+                ),
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let member = |n: &str| json!({"user": {"uuid": format!("{{{n}}}"), "nickname": n, "display_name": n}});
+        Mock::given(method("GET"))
+            .and(path("/workspaces/paged-ws/members"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [member("m101")],
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/workspaces/paged-ws/members"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [member("m1")],
+                "next": format!("{}/workspaces/paged-ws/members?page=2", server.uri()),
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let shas: Vec<String> = bb
+            .list_pr_commits(&r, 7)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(shas, ["c1", "c2"]);
+        let names: Vec<String> = bb
+            .list_collaborators(&r, "")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["m1", "m101"]);
     }
 
     #[tokio::test]
