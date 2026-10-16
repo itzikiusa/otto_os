@@ -33,6 +33,12 @@ pub struct ProviderSpec {
     /// provider isn't resumable at all. Drives whether the `provider_session_id`
     /// is recorded at spawn (assigned) or filled in by a post-spawn capture task.
     pub captures_session_id: bool,
+    /// True for a settings-configured command (custom provider or a built-in
+    /// override): when it isn't an executable on `$PATH` — a shell alias or
+    /// function from the user's rc files — [`ProviderRegistry::build_spec`]
+    /// launches it through the interactive login shell ([`shell_wrapped`]).
+    /// Built-ins keep exec'ing their binary directly.
+    pub shell_fallback: bool,
 }
 
 /// Shape accepted from the settings override JSON
@@ -74,6 +80,43 @@ pub struct ProviderRegistry {
 
 fn expand(template: &str, sid: &str, cwd: &str) -> String {
     template.replace("{sid}", sid).replace("{cwd}", cwd)
+}
+
+/// Whether `program` names an executable Otto can `exec` directly: a path
+/// (contains `/`) that exists, or a bare name found as an executable file on
+/// `$PATH`. False for shell aliases / functions defined in the user's rc files
+/// (`alias claude-work='CLAUDE_CONFIG_DIR=… claude'`) — those exist only inside
+/// an interactive shell.
+pub fn resolves_on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let is_exec = |p: &std::path::Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if program.contains('/') {
+        return is_exec(std::path::Path::new(program));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_exec(&dir.join(program))))
+}
+
+/// Launch `program args…` through the user's interactive login shell
+/// (`$SHELL -ilc '<program> "$@"' <program> args…`) so a command that only
+/// exists as an alias or function in `~/.zshrc` / `~/.bashrc` resolves the way
+/// it does in the user's terminal. Args stay out of the script (passed as
+/// positional `$@`), so later appends to the returned args — `--add-dir`,
+/// `--model`, read-only flags — still reach the command unquoted-safe.
+pub fn shell_wrapped(program: &str, args: Vec<String>) -> (String, Vec<String>) {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let mut wrapped = vec![
+        "-ilc".to_string(),
+        format!("{program} \"$@\""),
+        program.to_string(),
+    ];
+    wrapped.extend(args);
+    (shell, wrapped)
 }
 
 impl ProviderRegistry {
@@ -220,6 +263,7 @@ impl ProviderRegistry {
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 // Otto assigns the id via `--session-id {sid}`.
                 captures_session_id: false,
+                shell_fallback: false,
             },
         );
         map.insert(
@@ -248,6 +292,7 @@ impl ProviderRegistry {
                 update_command: Some("codex update".into()),
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 captures_session_id: true,
+                shell_fallback: false,
             },
         );
         map.insert(
@@ -280,6 +325,7 @@ impl ProviderRegistry {
                 // `--model  Model for the current CLI session`.
                 model_args: Some(vec!["--model".into(), "{model}".into()]),
                 captures_session_id: true,
+                shell_fallback: false,
             },
         );
         map.insert(
@@ -291,6 +337,7 @@ impl ProviderRegistry {
                 update_command: None,
                 model_args: None,
                 captures_session_id: false,
+                shell_fallback: false,
             },
         );
 
@@ -314,6 +361,7 @@ impl ProviderRegistry {
                             // Custom providers use Otto-assigned ids (the `{sid}`
                             // template); rollout-style capture is built-in only.
                             captures_session_id: false,
+                            shell_fallback: true,
                         },
                     );
                 }
@@ -431,9 +479,19 @@ impl ProviderRegistry {
         } else {
             &spec.args
         };
+        let program = expand(&spec.cmd, sid, cwd);
+        let args: Vec<String> = args.iter().map(|a| expand(a, sid, cwd)).collect();
+        // A command that isn't an executable on PATH (a shell alias/function
+        // from the user's rc files) can't be exec'd directly — run it through
+        // the login shell instead of failing with "No such file or directory".
+        let (program, args) = if !spec.shell_fallback || resolves_on_path(&program) {
+            (program, args)
+        } else {
+            shell_wrapped(&program, args)
+        };
         Ok(CommandSpec {
-            program: expand(&spec.cmd, sid, cwd),
-            args: args.iter().map(|a| expand(a, sid, cwd)).collect(),
+            program,
+            args,
             cwd: Some(cwd.to_string()),
             env: vec![],
         })
@@ -448,6 +506,42 @@ mod tests {
         reg.build_spec(provider, "SID", "/tmp/cwd", resume)
             .expect("build_spec")
             .args
+    }
+
+    #[test]
+    fn path_resolution_distinguishes_executables_from_aliases() {
+        assert!(resolves_on_path("/bin/sh"));
+        assert!(resolves_on_path("sh"));
+        assert!(!resolves_on_path("otto-no-such-alias-xyz"));
+        assert!(!resolves_on_path("/no/such/bin"));
+    }
+
+    /// A custom provider whose command is a shell alias (not on PATH) launches
+    /// through the user's interactive login shell, with its args (and anything
+    /// appended later) passed positionally rather than spliced into the script.
+    #[test]
+    fn unresolved_custom_command_runs_through_login_shell() {
+        let reg = ProviderRegistry::new(Some(&serde_json::json!({
+            "claudework": {"cmd": "otto-no-such-alias-xyz", "args": ["--session-id", "{sid}"]}
+        })));
+        let spec = reg
+            .build_spec("claudework", "SID", "/tmp/cwd", false)
+            .expect("build_spec");
+        assert_eq!(
+            &spec.args[..3],
+            &[
+                "-ilc",
+                "otto-no-such-alias-xyz \"$@\"",
+                "otto-no-such-alias-xyz"
+            ]
+        );
+        assert_eq!(&spec.args[3..], &["--session-id", "SID"]);
+        let resolvable = ProviderRegistry::new(Some(&serde_json::json!({
+            "plain": {"cmd": "/bin/sh", "args": ["-c", "true"]}
+        })));
+        let spec = resolvable.build_spec("plain", "S", "/tmp", false).unwrap();
+        assert_eq!(spec.program, "/bin/sh");
+        assert_eq!(spec.args, ["-c", "true"]);
     }
 
     /// Default (skip on): every built-in agent CLI carries its skip-permissions
