@@ -81,7 +81,7 @@ async fn run(shared: SharedRoom, index: usize, mut socket: WebSocket) {
         tokio::select! {
             // FIFO broadcast establishes generation state before stream events.
             notice=rx.recv()=>match notice {
-                Ok(notice)=>if notice.to.is_none_or(|recipient|recipient==index) {
+                Ok(notice)=>if notice.to.includes(index) {
                     let closed=matches!(notice.event,Event::Closed{..});
                     if send(&mut socket,&notice.event).await.is_err() || closed {break;}
                 },

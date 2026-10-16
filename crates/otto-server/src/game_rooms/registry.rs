@@ -12,14 +12,32 @@ use std::{
 use tokio::sync::{broadcast, Mutex};
 
 pub(super) const GRACE: Duration = Duration::from_secs(20);
+/// Member entries ever admitted to one room, including guests who left.
+pub(super) const MAX_MEMBER_ENTRIES: usize = 16;
 pub(super) type SharedRoom = Arc<Mutex<Room>>;
 #[derive(Default)]
 pub struct Registry {
     rooms: Mutex<HashMap<String, SharedRoom>>,
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Target {
+    All,
+    One(usize),
+    /// Every member except the host (snapshot fan-out).
+    Guests,
+}
+impl Target {
+    pub fn includes(self, index: usize) -> bool {
+        match self {
+            Target::All => true,
+            Target::One(member) => member == index,
+            Target::Guests => index != 0,
+        }
+    }
+}
 #[derive(Clone)]
 pub(super) struct Notice {
-    pub to: Option<usize>,
+    pub to: Target,
     pub event: Event,
 }
 pub(super) struct Member {
@@ -28,7 +46,6 @@ pub(super) struct Member {
     connection: u64,
     disconnected: Option<Instant>,
     seq: u64,
-    rematch: bool,
     stream_rate: Rate,
     control_rate: Rate,
 }
@@ -86,23 +103,28 @@ fn conflict(message: &str) -> Error {
     Error::Conflict(message.into())
 }
 impl Member {
-    fn new(name: String, role: Role, token: &str) -> Self {
+    fn new(name: String, role: Role, slot: usize, token: &str) -> Self {
         Self {
             view: MemberView {
                 id: uuid::Uuid::new_v4().to_string(),
                 name,
                 role,
+                slot,
                 connected: false,
                 ready: false,
+                left: false,
+                rematch: false,
             },
             hash: hash(token),
             connection: 0,
             disconnected: Some(Instant::now()),
             seq: 0,
-            rematch: false,
             stream_rate: Rate::new(90.0),
             control_rate: Rate::new(15.0),
         }
+    }
+    fn active(&self) -> bool {
+        !self.view.left
     }
 }
 impl Registry {
@@ -113,11 +135,7 @@ impl Registry {
         config: Config,
     ) -> Result<Credential> {
         let name = name(display)?;
-        let valid = match config.game {
-            GameKind::Shooter => ["station", "foundry", "dunes"],
-            GameKind::Kart => ["coast", "forest", "neon"],
-        };
-        if !valid.contains(&config.map.as_str()) {
+        if !config.game.maps().contains(&config.map.as_str()) {
             return Err(Error::Invalid("Choose a map for this game".into()));
         }
         let mut rooms = self.rooms.lock().await;
@@ -142,7 +160,7 @@ impl Registry {
         let credential = token();
         let invite = token();
         let id = uuid::Uuid::new_v4().to_string();
-        let host = Member::new(name, Role::Host, &credential);
+        let host = Member::new(name, Role::Host, 0, &credential);
         let response = Credential {
             room_id: id.clone(),
             member_id: host.view.id.clone(),
@@ -164,7 +182,7 @@ impl Registry {
                 round: 1,
                 generation: 0,
                 phase: Phase::Lobby,
-                tx: broadcast::channel(64).0,
+                tx: broadcast::channel(256).0,
                 result: None,
             })),
         );
@@ -181,6 +199,7 @@ impl Registry {
     pub(super) async fn forget(&self, id: &str) {
         self.rooms.lock().await.remove(id);
     }
+    /// The invite admits guests until the room is full or the match starts.
     pub(super) async fn join(&self, id: &str, invite: &str, display: &str) -> Result<Credential> {
         let name = name(display)?;
         if invite.len() != 43 {
@@ -192,11 +211,15 @@ impl Registry {
         if room.invite != Some(hash(invite)) || room.created.elapsed() > Duration::from_secs(600) {
             return Err(Error::Unauthorized);
         }
-        if room.members.len() != 1 || room.phase != Phase::Lobby {
+        let active = room.members.iter().filter(|m| m.active()).count();
+        if active >= room.config.game.capacity()
+            || room.members.len() >= MAX_MEMBER_ENTRIES
+            || room.phase != Phase::Lobby
+        {
             return Err(conflict("Game room is full"));
         }
         let credential = token();
-        let guest = Member::new(name, Role::Guest, &credential);
+        let guest = Member::new(name, Role::Guest, room.members.len(), &credential);
         let response = Credential {
             room_id: id.into(),
             member_id: guest.view.id.clone(),
@@ -206,7 +229,6 @@ impl Registry {
             invite: None,
             invite_url: None,
         };
-        room.invite = None;
         room.members.push(guest);
         room.changed();
         Ok(response)
@@ -220,7 +242,7 @@ impl Registry {
         room.live()?;
         room.members
             .iter()
-            .position(|member| member.hash == hash(credential))
+            .position(|member| member.active() && member.hash == hash(credential))
             .ok_or(Error::Unauthorized)
     }
 }
@@ -232,11 +254,14 @@ impl Room {
         }
         Ok(())
     }
-    pub(super) fn paused(&self) -> bool {
-        self.phase == Phase::Playing && !self.both_connected()
+    fn active(&self) -> impl Iterator<Item = &Member> {
+        self.members.iter().filter(|m| m.active())
     }
-    fn both_connected(&self) -> bool {
-        self.members.len() == 2 && self.members.iter().all(|m| m.view.connected)
+    pub(super) fn paused(&self) -> bool {
+        self.phase == Phase::Playing && !self.all_connected()
+    }
+    fn all_connected(&self) -> bool {
+        self.active().all(|m| m.view.connected)
     }
     pub(super) fn view(&self) -> View {
         View {
@@ -249,11 +274,11 @@ impl Room {
             members: self.members.iter().map(|m| m.view.clone()).collect(),
         }
     }
-    pub(super) fn emit(&self, to: Option<usize>, event: Event) {
+    pub(super) fn emit(&self, to: Target, event: Event) {
         let _ = self.tx.send(Notice { to, event });
     }
     fn changed(&self) {
-        self.emit(None, Event::State { room: self.view() });
+        self.emit(Target::All, Event::State { room: self.view() });
     }
     fn advance(&mut self) {
         self.generation += 1;
@@ -264,6 +289,9 @@ impl Room {
     pub(super) fn connect(&mut self, index: usize) -> Result<u64> {
         self.live()?;
         let member = self.members.get_mut(index).ok_or(Error::Unauthorized)?;
+        if member.view.left {
+            return Err(Error::Unauthorized);
+        }
         if member.view.connected {
             return Err(conflict("This player is already connected"));
         }
@@ -275,7 +303,7 @@ impl Room {
         self.changed();
         if let Some(result) = &self.result {
             self.emit(
-                Some(index),
+                Target::One(index),
                 Event::Finished {
                     round: self.round,
                     generation: self.generation,
@@ -298,17 +326,37 @@ impl Room {
         self.advance();
         self.changed();
     }
+    /// A guest leaves for good; the room carries on without them.
+    fn depart(&mut self, index: usize) {
+        let member = &mut self.members[index];
+        member.view.left = true;
+        member.view.connected = false;
+        member.view.ready = false;
+        member.view.rematch = false;
+        member.disconnected = None;
+        self.advance();
+        self.changed();
+    }
     pub(super) fn maintain(&mut self, now: Instant) {
         if self.phase == Phase::Closed {
             return;
         }
         if now.duration_since(self.created) > Duration::from_secs(3600) {
-            self.close("Game room expired");
-        } else if self.members.iter().any(|m| {
-            m.disconnected
-                .is_some_and(|at| now.duration_since(at) > GRACE)
-        }) {
-            self.close("A player disconnected; create a new game");
+            return self.close("Game room expired");
+        }
+        let expired = |m: &Member| {
+            m.active()
+                && m.disconnected
+                    .is_some_and(|at| now.duration_since(at) > GRACE)
+        };
+        if self.members.first().is_some_and(expired) {
+            return self.close("The host disconnected; create a new game");
+        }
+        let gone: Vec<usize> = (1..self.members.len())
+            .filter(|&i| expired(&self.members[i]))
+            .collect();
+        for index in gone {
+            self.depart(index);
         }
     }
     pub(super) fn close(&mut self, reason: &str) {
@@ -318,7 +366,7 @@ impl Room {
         self.phase = Phase::Closed;
         self.invite = None;
         self.emit(
-            None,
+            Target::All,
             Event::Closed {
                 reason: reason.into(),
             },
@@ -332,7 +380,7 @@ impl Room {
         Ok(())
     }
     fn playing(&self) -> Result<()> {
-        if self.phase != Phase::Playing || !self.both_connected() {
+        if self.phase != Phase::Playing || !self.all_connected() {
             return Err(conflict("Game is not running"));
         }
         Ok(())
@@ -348,7 +396,7 @@ impl Room {
     pub(super) fn apply(&mut self, index: usize, connection: u64, command: Command) -> Result<()> {
         self.live()?;
         let member = self.members.get_mut(index).ok_or(Error::Unauthorized)?;
-        if !member.view.connected || member.connection != connection {
+        if member.view.left || !member.view.connected || member.connection != connection {
             return Err(Error::Unauthorized);
         }
         if matches!(command, Command::Snapshot { .. } | Command::Input { .. }) {
@@ -357,8 +405,17 @@ impl Room {
             member.control_rate.take(5.0, 15.0)?;
         }
         match command {
-            Command::Ping => self.emit(Some(index), Event::Pong),
-            Command::Leave => self.close("A player left the game"),
+            Command::Ping => self.emit(Target::One(index), Event::Pong),
+            Command::Leave if index == 0 => self.close("The host ended the game"),
+            Command::Leave => {
+                self.emit(
+                    Target::One(index),
+                    Event::Closed {
+                        reason: "You left the game".into(),
+                    },
+                );
+                self.depart(index);
+            }
             Command::Ready { ready } => {
                 if self.phase != Phase::Lobby {
                     return Err(conflict("Ready is only available in the lobby"));
@@ -370,10 +427,10 @@ impl Room {
                 Self::host(index)?;
                 self.epoch(round, generation)?;
                 if self.phase != Phase::Lobby
-                    || !self.both_connected()
-                    || !self.members.iter().all(|m| m.view.ready)
+                    || self.active().count() < 2
+                    || !self.active().all(|m| m.view.connected && m.view.ready)
                 {
-                    return Err(conflict("Both players must be connected and ready"));
+                    return Err(conflict("Every player must be connected and ready"));
                 }
                 self.phase = Phase::Playing;
                 self.changed();
@@ -386,15 +443,13 @@ impl Room {
             } => {
                 Self::host(index)?;
                 self.packet(index, round, generation, seq, &data, 16384)?;
-                self.emit(
-                    Some(1),
-                    Event::Snapshot {
-                        round,
-                        generation,
-                        seq,
-                        data,
-                    },
-                );
+                let event = Event::Snapshot {
+                    round,
+                    generation,
+                    seq,
+                    data,
+                };
+                self.emit(Target::Guests, event);
             }
             Command::Input {
                 round,
@@ -402,19 +457,18 @@ impl Room {
                 seq,
                 data,
             } => {
-                if index != 1 {
-                    return Err(Error::Forbidden("Only the guest may relay input".into()));
+                if index == 0 {
+                    return Err(Error::Forbidden("Only guests relay input".into()));
                 }
                 self.packet(index, round, generation, seq, &data, 1024)?;
-                self.emit(
-                    Some(0),
-                    Event::Input {
-                        round,
-                        generation,
-                        seq,
-                        data,
-                    },
-                );
+                let event = Event::Input {
+                    round,
+                    generation,
+                    seq,
+                    slot: index,
+                    data,
+                };
+                self.emit(Target::One(0), event);
             }
             Command::Finish {
                 round,
@@ -428,31 +482,32 @@ impl Room {
                 self.phase = Phase::Finished;
                 self.result = Some(result.clone());
                 self.changed();
-                self.emit(
-                    None,
-                    Event::Finished {
-                        round,
-                        generation,
-                        result,
-                    },
-                );
+                let event = Event::Finished {
+                    round,
+                    generation,
+                    result,
+                };
+                self.emit(Target::All, event);
             }
             Command::Rematch => {
-                if self.phase != Phase::Finished || !self.both_connected() {
+                if self.phase != Phase::Finished {
                     return Err(conflict("Finish the game before requesting a rematch"));
                 }
-                self.members[index].rematch = true;
-                if self.members.iter().all(|m| m.rematch) {
-                    self.round += 1;
-                    self.advance();
-                    self.phase = Phase::Lobby;
-                    self.result = None;
-                    for member in &mut self.members {
-                        member.rematch = false;
-                        member.view.ready = false;
-                    }
+                if index != 0 {
+                    // Guests ask; the host decides when the next round starts.
+                    self.members[index].view.rematch = true;
                     self.changed();
+                    return Ok(());
                 }
+                self.round += 1;
+                self.advance();
+                self.phase = Phase::Lobby;
+                self.result = None;
+                for member in &mut self.members {
+                    member.view.rematch = false;
+                    member.view.ready = false;
+                }
+                self.changed();
             }
         }
         Ok(())
