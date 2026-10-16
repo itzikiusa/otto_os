@@ -500,15 +500,14 @@ async fn update_schedule(
                 timezone: req.timezone,
                 directive: req.directive,
                 enabled: req.enabled,
+                // One write with the edit, so no tick sees the new cadence
+                // against the old cursor.
+                rearm_at: (rearm || reset_once).then(|| chrono::Utc::now().to_rfc3339()),
+                reset_once,
             },
         )
         .await
         .map_err(ApiError)?;
-    if rearm || reset_once {
-        let _ = repo
-            .rearm_schedule(&schedule_id, &chrono::Utc::now().to_rfc3339(), reset_once)
-            .await;
-    }
     if cadence_changed || rearm {
         refresh_next_run(&repo, &updated).await;
     }

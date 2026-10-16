@@ -344,6 +344,13 @@ pub struct AgentSchedulePatch {
     pub timezone: Option<String>,
     pub directive: Option<String>,
     pub enabled: Option<bool>,
+    /// Re-arm the schedule at this instant in the SAME write (see
+    /// [`PersonalAgentsRepo::rearm_schedule`]): a separate follow-up write
+    /// left a window where a tick saw the new cadence against the old cursor
+    /// and fired at once — and a failed re-arm was silently dropped.
+    pub rearm_at: Option<String>,
+    /// With `rearm_at`: also forget a fired `once` (its cursor is the flag).
+    pub reset_once: bool,
 }
 
 /// Fields for opening a run row (status starts `running`).
@@ -778,6 +785,8 @@ impl PersonalAgentsRepo {
                timezone = COALESCE(?, timezone), \
                directive = COALESCE(?, directive), \
                enabled = COALESCE(?, enabled), \
+               armed_at = COALESCE(?, armed_at), \
+               last_run_at = CASE WHEN ? THEN NULL ELSE last_run_at END, \
                updated_at = ? \
              WHERE id = ?",
         )
@@ -785,6 +794,8 @@ impl PersonalAgentsRepo {
         .bind(p.timezone)
         .bind(p.directive)
         .bind(p.enabled.map(|b| b as i64))
+        .bind(p.rearm_at.as_deref())
+        .bind(p.rearm_at.is_some() && p.reset_once)
         .bind(fmt(Utc::now()))
         .bind(id)
         .execute(&self.pool)
@@ -1802,6 +1813,52 @@ mod tests {
             assert!(current.last_run_at.is_none());
             assert_eq!(current.schedule, replacement);
         }
+    }
+
+    /// A re-timing edit re-arms in the same write: the schedule never shows
+    /// the new cadence against the old cursor (a tick in between fired it).
+    #[tokio::test]
+    async fn update_schedule_rearms_in_the_same_write() {
+        let (repo, _, captured) = recovery_schedule().await;
+        repo.set_schedule_runtime(&captured.id, Some("2026-10-08T09:00:00Z"), None)
+            .await
+            .unwrap();
+        let updated = repo
+            .update_schedule(
+                &captured.id,
+                AgentSchedulePatch {
+                    schedule: Some(json!({"cadence":"once", "at":"2026-10-09T09:00:00Z"})),
+                    rearm_at: Some("2026-10-08T10:00:00Z".into()),
+                    reset_once: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.armed_at.as_deref(), Some("2026-10-08T10:00:00Z"));
+        assert!(
+            updated.last_run_at.is_none(),
+            "a re-timed once forgets it fired"
+        );
+
+        // Without `rearm_at` the cursor and arm instant are left alone, and a
+        // stray `reset_once` alone never clears the cursor.
+        repo.set_schedule_runtime(&captured.id, Some("2026-10-09T09:00:00Z"), None)
+            .await
+            .unwrap();
+        let kept = repo
+            .update_schedule(
+                &captured.id,
+                AgentSchedulePatch {
+                    directive: Some("new words".into()),
+                    reset_once: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(kept.armed_at.as_deref(), Some("2026-10-08T10:00:00Z"));
+        assert_eq!(kept.last_run_at.as_deref(), Some("2026-10-09T09:00:00Z"));
     }
 
     #[tokio::test]
