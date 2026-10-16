@@ -277,6 +277,65 @@ fn strip_mention(text: &str) -> &str {
     t
 }
 
+/// Turn Slack's wire encoding of a message's `text` back into what the person
+/// typed. Slack escapes `&`, `<` and `>` as `&amp;` / `&lt;` / `&gt;` in every
+/// message and wraps links, mentions and broadcasts in `<…>` control
+/// sequences — forwarded raw, a pasted `if a < b && c` reached the agent as
+/// `if a &lt; b &amp;&amp; c`. A raw `<` is therefore always a control
+/// sequence: `<url|label>` → the url (with the label when it differs),
+/// `<@U1|dana>` → `@dana`, `<#C1|ops>` → `#ops`, `<!here>` → `@here`; the
+/// entities are decoded last so an escaped `&amp;lt;` stays a literal `&lt;`.
+fn decode_slack_text(text: &str) -> String {
+    fn control(inner: &str) -> String {
+        let (target, label) = match inner.split_once('|') {
+            Some((t, l)) => (t, Some(l)),
+            None => (inner, None),
+        };
+        if let Some(id) = target.strip_prefix('@') {
+            return format!("@{}", label.unwrap_or(id));
+        }
+        if let Some(id) = target.strip_prefix('#') {
+            return format!("#{}", label.unwrap_or(id));
+        }
+        if let Some(special) = target.strip_prefix('!') {
+            // `<!subteam^S1|@team>`, `<!date^…|fallback>` carry their text in
+            // the label; `<!here>` / `<!channel>` / `<!everyone>` don't.
+            return match label {
+                Some(l) => l.to_string(),
+                None => format!("@{special}"),
+            };
+        }
+        let bare = target.strip_prefix("mailto:").unwrap_or(target);
+        match label {
+            // Slack's auto-link writes the url (minus scheme) as the label.
+            Some(l) if !l.is_empty() && l != bare && !target.ends_with(&format!("//{l}")) => {
+                format!("{l} ({bare})")
+            }
+            _ => bare.to_string(),
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('>') {
+            Some(close) => {
+                out.push_str(&control(&after[..close]));
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 /// Message subtypes that announce channel membership changes rather than carry
 /// user content. They must never spawn an agent session: a batch invite emits
 /// one `channel_join` per user (a session flood), and Slack refuses thread
@@ -1066,7 +1125,7 @@ async fn handle_event(
     }
 
     let raw_text = content["text"].as_str().unwrap_or("");
-    let text = strip_mention(raw_text).to_string();
+    let text = decode_slack_text(strip_mention(raw_text));
 
     // Download any attached files to local paths so the agent can read them
     // (Slack `url_private` needs the bot token, so the agent can't fetch them
@@ -1267,6 +1326,44 @@ async fn download_slack_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_text_is_decoded_from_slack_wire_format() {
+        // Entities: code pasted into Slack reaches the agent as typed.
+        assert_eq!(
+            decode_slack_text("if a &lt; b &amp;&amp; c &gt; d"),
+            "if a < b && c > d"
+        );
+        // A literal "&lt;" the person typed arrives as "&amp;lt;" — keep it.
+        assert_eq!(decode_slack_text("write &amp;lt; here"), "write &lt; here");
+        // Links: auto-links collapse to the url, labelled ones keep both.
+        assert_eq!(
+            decode_slack_text("see <https://x.io/a?b=1&amp;c=2|x.io/a?b=1&amp;c=2>"),
+            "see https://x.io/a?b=1&c=2"
+        );
+        assert_eq!(decode_slack_text("<https://x.io>"), "https://x.io");
+        assert_eq!(
+            decode_slack_text("<https://x.io/pr/7|the PR>"),
+            "the PR (https://x.io/pr/7)"
+        );
+        assert_eq!(
+            decode_slack_text("mail <mailto:a@b.co|a@b.co>"),
+            "mail a@b.co"
+        );
+        // Mentions, channels, broadcasts, user groups.
+        assert_eq!(
+            decode_slack_text("ask <@U1|dana> or <@U2> in <#C1|ops> <!here> <!subteam^S1|@devs>"),
+            "ask @dana or @U2 in #ops @here @devs"
+        );
+        // No markup: unchanged; an unterminated `<` can't be a sequence.
+        assert_eq!(decode_slack_text("plain text"), "plain text");
+        assert_eq!(decode_slack_text("odd <tail"), "odd <tail");
+        // The leading bot mention is still stripped first.
+        assert_eq!(
+            decode_slack_text(strip_mention("<@UBOT> run `x &gt; 1`")),
+            "run `x > 1`"
+        );
+    }
 
     #[tokio::test]
     async fn rejected_work_is_acknowledged_only_after_a_delivered_notice() {
