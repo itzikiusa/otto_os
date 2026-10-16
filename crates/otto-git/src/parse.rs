@@ -337,6 +337,22 @@ pub fn parse_branches(out: &str) -> Vec<BranchInfo> {
 // Log
 // ---------------------------------------------------------------------------
 
+/// A commit's `%aI` date. Git prints whatever the object stores, and imported
+/// or tool-written commits carry dates RFC 3339 rejects (`+59:00` / `+24:00`
+/// offsets, a 7-digit year); one such commit used to fail the WHOLE log page,
+/// so the history graph never loaded while it was in the walk. Fall back to
+/// the wall-clock part read as UTC, else the epoch — never an error.
+fn commit_date(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    let raw = raw.trim();
+    if let Ok(d) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return d.with_timezone(&chrono::Utc);
+    }
+    raw.get(..19)
+        .and_then(|wall| chrono::NaiveDateTime::parse_from_str(wall, "%Y-%m-%dT%H:%M:%S").ok())
+        .map(|n| n.and_utc())
+        .unwrap_or_default()
+}
+
 /// Parse `git log --pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%P%x1f%D%x1e` output.
 /// Fields: sha, short_sha, author, dateISO, subject, parents (space-sep), refs (comma-sep).
 pub fn parse_log(out: &str) -> Result<Vec<CommitInfo>> {
@@ -350,9 +366,7 @@ pub fn parse_log(out: &str) -> Result<Vec<CommitInfo>> {
         if fields.len() < 5 {
             return Err(Error::Internal(format!("bad log record: {rec:?}")));
         }
-        let date = chrono::DateTime::parse_from_rfc3339(fields[3])
-            .map_err(|e| Error::Internal(format!("bad commit date {}: {e}", fields[3])))?
-            .with_timezone(&chrono::Utc);
+        let date = commit_date(fields[3]);
 
         // parents field (index 5): space-separated full SHAs; may be absent for old format
         let parents: Vec<String> = if fields.len() > 5 {
@@ -1348,9 +1362,17 @@ fn parse_diff_git_paths(line: &str) -> (Option<String>, Option<String>) {
         Some(r) => r,
         None => return (None, None),
     };
-    let split = rest
-        .rfind(" \"b/")
-        .map(|i| (i, i + 1))
+    // An unrenamed path is `a/P b/P`: split at the middle when both halves
+    // agree, so a path that itself contains " b/" (`Plan b/run.sh`) isn't cut
+    // at its inner " b/" — mode-only / binary / empty-file blocks have no
+    // `---`/`+++` lines to correct the name, and it read as a rename.
+    let mid = (rest.len().saturating_sub(1)) / 2;
+    let symmetric = (rest.starts_with("a/")
+        && rest.get(mid..).is_some_and(|t| t.starts_with(" b/"))
+        && rest.get(2..mid).is_some_and(|old| rest.get(mid + 3..) == Some(old)))
+    .then_some((mid, mid + 1));
+    let split = symmetric
+        .or_else(|| rest.rfind(" \"b/").map(|i| (i, i + 1)))
         .or_else(|| rest.rfind(" b/").map(|i| (i, i + 1)));
     if let Some((end_old, start_new)) = split {
         let old = unquote_c(rest[..end_old].trim());
@@ -1606,6 +1628,43 @@ u UU N... 100644 100644 100644 100644 h1 h2 h3 with space.rs\0";
         assert_eq!(log[0].subject, "feat: one");
         assert_eq!(log[0].date.to_rfc3339(), "2026-06-01T08:00:00+00:00");
         assert_eq!(log[1].subject, "fix: two");
+    }
+
+    #[test]
+    fn log_parse_survives_dates_rfc3339_rejects() {
+        // What git prints for imported commits with a +5900 / +2400 offset or a
+        // far-future timestamp: one of them used to fail the whole page.
+        let out = concat!(
+            "a1\u{1f}a\u{1f}A\u{1f}2020-09-15T23:26:40+59:00\u{1f}one\u{1e}\n",
+            "b2\u{1f}b\u{1f}B\u{1f}2020-09-15T23:26:40+24:00\u{1f}two\u{1e}\n",
+            "c3\u{1f}c\u{1f}C\u{1f}3170843-11-07T09:46:39Z\u{1f}three\u{1e}\n",
+            "d4\u{1f}d\u{1f}D\u{1f}2026-05-31T09:00:00Z\u{1f}four\u{1e}"
+        );
+        let log = parse_log(out).unwrap();
+        assert_eq!(log.len(), 4);
+        assert_eq!(log[0].date.to_rfc3339(), "2020-09-15T23:26:40+00:00");
+        assert_eq!(log[2].date.timestamp(), 0);
+        assert_eq!(log[3].date.to_rfc3339(), "2026-05-31T09:00:00+00:00");
+    }
+
+    #[test]
+    fn diff_git_header_with_inner_b_slash_is_not_a_rename() {
+        // Mode-only change: no ---/+++ lines, the header alone names the file.
+        let d = parse_diff(
+            "diff --git a/Plan b/run.sh b/Plan b/run.sh\nold mode 100644\nnew mode 100755\n",
+        );
+        assert_eq!(d.files.len(), 1);
+        assert_eq!(d.files[0].path, "Plan b/run.sh");
+        assert_eq!(d.files[0].old_path, None);
+        // A real rename still splits at the last " b/".
+        assert_eq!(
+            parse_diff_git_paths("diff --git a/x b/y.txt b/z.txt"),
+            (Some("x b/y.txt".into()), Some("z.txt".into()))
+        );
+        assert_eq!(
+            parse_diff_git_paths("diff --git a/src/é.rs b/src/é.rs"),
+            (Some("src/é.rs".into()), Some("src/é.rs".into()))
+        );
     }
 
     #[test]
