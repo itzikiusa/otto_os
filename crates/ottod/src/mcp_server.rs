@@ -162,9 +162,7 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
     // A notification (no `id`) is never answered — and never EXECUTES
     // anything: an id-less `tools/call` used to run the governed tool with
     // nobody receiving its result, then reply with `"id": null`.
-    if id.is_none() {
-        return None;
-    }
+    id.as_ref()?;
     match method {
         "initialize" => Some(rpc_ok(
             id.unwrap_or(Value::Null),
