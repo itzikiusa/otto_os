@@ -970,6 +970,25 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             break;
         }
         let wf = wf?;
+        // A binding matches EVERY message in its channel — including a reply
+        // ("also check X") in the thread of the run it already started, which
+        // launched a parallel copy (own worktree + agents) that a later
+        // `abort` then picked over the original. One run per thread.
+        if let Some(active) = self
+            .find_active_run_for_thread(&repo, workspace_id, channel, chat, thread)
+            .await
+            .filter(|r| {
+                r.workflow_id == wf.id && r.input.get("thread").and_then(Value::as_str) == thread
+            })
+        {
+            return Some(WorkflowChatAck {
+                reply: format!(
+                    "**{}** is already running in this thread (run `{}`). Reply `status` · \
+                     `skip` · `abort` · `help` to control it.",
+                    wf.name, active.id
+                ),
+            });
+        }
         let input = json!({
             "trigger": "chat",
             "origin_workspace_id": workspace_id,

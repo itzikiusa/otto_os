@@ -135,7 +135,7 @@ async fn start_review_for_branch(
                     .and_then(serde_json::Value::as_str)
                 {
                     if let Ok(review) = ctx.reviews_store.get_review(&id.to_string()).await {
-                        if matches!(review.status, ReviewStatus::Done | ReviewStatus::Running) {
+                        if review_adoptable(&review) {
                             return Ok((
                                 review.id,
                                 resolved,
@@ -265,4 +265,49 @@ async fn start_review_for_branch(
         });
     }
     Ok((review_id, resolved, no_changes, diff_len))
+}
+
+/// Whether a workflow step may ADOPT the review its checkpoint names instead
+/// of launching a new one: a review still running (restart adoption), or a
+/// finished one whose reviewers all completed. A finished review with a
+/// failed or partial reviewer is not adopted — "Retry step" on a review step
+/// that failed `require_pass` for missing coverage re-scored the same
+/// incomplete review on every retry and could never pass.
+fn review_adoptable(review: &otto_core::domain::Review) -> bool {
+    match review.status {
+        ReviewStatus::Running => true,
+        ReviewStatus::Done => otto_review::engine::review_run_complete(&review.agents, false),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod adoption_tests {
+    use super::review_adoptable;
+
+    fn review(status: &str, agents: &[&str]) -> otto_core::domain::Review {
+        let agents: Vec<_> = agents
+            .iter()
+            .map(|s| {
+                serde_json::json!({"name": "r", "provider": "claude", "model": "",
+                    "status": s, "note": "", "comment_count": 0})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": "rv", "repo_id": "repo", "pr_number": 0, "status": status,
+            "agents": agents, "comments": [], "created_at": "2026-10-16T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_complete_or_running_reviews_are_adopted() {
+        assert!(review_adoptable(&review("done", &["done", "done"])));
+        assert!(!review_adoptable(&review("done", &["error", "done"])));
+        assert!(review_adoptable(&review(
+            "running",
+            &["running", "pending"]
+        )));
+        assert!(!review_adoptable(&review("error", &["done", "done"])));
+    }
 }

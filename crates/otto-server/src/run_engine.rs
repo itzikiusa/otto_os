@@ -700,7 +700,29 @@ async fn poll_review(ctx: &ServerCtx, review_id: &Id, budget: Duration) -> Resul
         }
         return Err(error);
     }
+    // `Done` is also how a review ends when EVERY reviewer failed (CLI
+    // missing, auth expired): no findings, the summarizer correctly returns
+    // none — and the approval prompt read "0 findings (0 blocking)" for a
+    // change nobody looked at.
+    if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+        if !any_reviewer_finished(&review.agents) {
+            return Err(Error::Internal(
+                "every code reviewer failed — finding counts unknown (open the review)".into(),
+            ));
+        }
+    }
     Ok(crate::modules::review_findings_counts(ctx, review_id).await)
+}
+
+/// Whether at least one REVIEWER row (the summarizer is always the last row)
+/// finished. A review with no rows at all is left to the status check.
+fn any_reviewer_finished(agents: &[otto_core::domain::ReviewAgentState]) -> bool {
+    match agents.split_last() {
+        Some((_summarizer, reviewers)) if !reviewers.is_empty() => {
+            reviewers.iter().any(|a| a.status == "done")
+        }
+        _ => true,
+    }
 }
 
 fn review_is_terminal(s: otto_core::domain::ReviewStatus) -> bool {
@@ -1184,6 +1206,32 @@ mod tests {
         assert!(review_outcome(None, b).is_err());
         assert!(review_is_terminal(ReviewStatus::Cancelled));
         assert!(!review_is_terminal(ReviewStatus::Running));
+    }
+
+    // A Done review whose reviewers ALL failed has no trustworthy counts.
+    #[test]
+    fn a_review_with_no_finished_reviewer_reports_no_counts() {
+        use super::any_reviewer_finished;
+        let row = |status: &str| {
+            serde_json::from_value::<otto_core::domain::ReviewAgentState>(serde_json::json!({
+                "name": "r", "provider": "claude", "model": "", "status": status,
+                "note": "", "comment_count": 0
+            }))
+            .unwrap()
+        };
+        assert!(!any_reviewer_finished(&[
+            row("error"),
+            row("error"),
+            row("done")
+        ]));
+        assert!(any_reviewer_finished(&[
+            row("error"),
+            row("done"),
+            row("done")
+        ]));
+        // The summarizer alone (or nothing) is left to the status check.
+        assert!(any_reviewer_finished(&[row("done")]));
+        assert!(any_reviewer_finished(&[]));
     }
 
     use super::*;

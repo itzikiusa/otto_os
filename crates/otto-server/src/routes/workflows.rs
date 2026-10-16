@@ -713,7 +713,9 @@ pub async fn retry_run_node(
         .get(&wf.workspace_id)
         .await
         .map_err(ApiError)?;
-    let retry_nodes: Vec<String> = if req.include_downstream {
+    let include_downstream =
+        retry_includes_downstream(&wf.graph, &run.nodes, node_id, req.include_downstream);
+    let retry_nodes: Vec<String> = if include_downstream {
         workflow_engine::descendants_inclusive(&wf.graph, node_id)
             .into_iter()
             .collect()
@@ -723,11 +725,11 @@ pub async fn retry_run_node(
     let scope = otto_core::workflows::RunScope {
         continue_unfinished: false,
         start_node: Some(node_id.to_string()),
-        only_node: !req.include_downstream,
+        only_node: !include_downstream,
         adopt_start: false,
     };
     repo(&ctx)
-        .prepare_retry(&id, &retry_nodes, req.include_downstream, &scope)
+        .prepare_retry(&id, &retry_nodes, include_downstream, &scope)
         .await
         .map_err(ApiError)?;
     workflow_engine::spawn_run(
@@ -741,6 +743,30 @@ pub async fn retry_run_node(
     );
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     Ok(Json(run))
+}
+
+/// Whether a retry re-executes `node_id`'s descendants too: when asked, and
+/// ALSO when any descendant never succeeded. A single-step retry of a failed
+/// middle step used to re-run only that step — its downstream steps kept
+/// their "skipped (upstream did not succeed)" state, no step was in error any
+/// more, and the run finished Success (✅ to chat/webhook) although the
+/// review / PR steps after it never ran.
+fn retry_includes_downstream(
+    graph: &otto_core::workflows::WorkflowGraph,
+    nodes: &[otto_core::workflows::NodeRunState],
+    node_id: &str,
+    requested: bool,
+) -> bool {
+    use otto_core::workflows::NodeStatus;
+    requested
+        || workflow_engine::descendants_inclusive(graph, node_id)
+            .iter()
+            .filter(|d| d.as_str() != node_id)
+            .any(|d| {
+                nodes
+                    .iter()
+                    .any(|n| &n.node_id == d && n.status != NodeStatus::Success)
+            })
 }
 
 /// `POST /workflow-runs/{id}/cancel` — request a running workflow to stop. Takes
@@ -2469,6 +2495,60 @@ mod tests {
                 input
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_scope_tests {
+    use super::retry_includes_downstream;
+
+    #[test]
+    fn retrying_a_failed_middle_step_also_runs_what_it_blocked() {
+        let graph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "implement", "kind": "agent"},
+                {"id": "review", "kind": "review_run"},
+                {"id": "pr", "kind": "git_pr"}
+            ],
+            "edges": [
+                {"id": "e1", "source": "implement", "target": "review"},
+                {"id": "e2", "source": "review", "target": "pr"}
+            ]
+        }))
+        .unwrap();
+        let nodes = |states: [(&str, &str); 3]| -> Vec<otto_core::workflows::NodeRunState> {
+            states
+                .iter()
+                .map(|(id, st)| {
+                    serde_json::from_value(serde_json::json!({"node_id": id, "status": st}))
+                        .unwrap()
+                })
+                .collect()
+        };
+        let failed_first = nodes([
+            ("implement", "error"),
+            ("review", "skipped"),
+            ("pr", "skipped"),
+        ]);
+        assert!(retry_includes_downstream(
+            &graph,
+            &failed_first,
+            "implement",
+            false
+        ));
+        // The last step (nothing downstream) stays a single-step retry.
+        let failed_last = nodes([
+            ("implement", "success"),
+            ("review", "success"),
+            ("pr", "error"),
+        ]);
+        assert!(!retry_includes_downstream(
+            &graph,
+            &failed_last,
+            "pr",
+            false
+        ));
+        assert!(retry_includes_downstream(&graph, &failed_last, "pr", true));
     }
 }
 

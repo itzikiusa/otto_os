@@ -109,6 +109,11 @@ struct CancelWatch {
     rx: tokio::sync::broadcast::Receiver<Id>,
     poll: tokio::time::Interval,
     ticks: u32,
+    /// An announcement for this run was received but its status check has
+    /// not completed yet. A `select!` that drops [`Self::next`] mid-check
+    /// (a log line won the race) used to lose the consumed announcement —
+    /// the stop then waited for the 30 s safety read while the agent worked.
+    pending: bool,
 }
 
 impl CancelWatch {
@@ -118,6 +123,7 @@ impl CancelWatch {
             rx: otto_state::workflows::subscribe_cancels(),
             poll: tokio::time::interval(period),
             ticks: 0,
+            pending: false,
         }
     }
 
@@ -126,6 +132,12 @@ impl CancelWatch {
     async fn next(&mut self, repo: &WorkflowsRepo, take_skip: impl Fn() -> bool) -> CancelWake {
         use tokio::sync::broadcast::error::RecvError;
         loop {
+            if self.pending {
+                if repo.is_canceled(&self.run_id).await {
+                    return CancelWake::Canceled;
+                }
+                self.pending = false;
+            }
             tokio::select! {
                 ev = self.rx.recv() => {
                     // Ours, or a lag (re-check). Closed can't happen: the bus
@@ -135,9 +147,9 @@ impl CancelWatch {
                         Err(RecvError::Lagged(_)) => true,
                         Err(RecvError::Closed) => false,
                     };
-                    if ours && repo.is_canceled(&self.run_id).await {
-                        return CancelWake::Canceled;
-                    }
+                    // Checked at the top of the loop, so a drop mid-check
+                    // keeps the announcement for the next call.
+                    self.pending |= ours;
                 }
                 _ = self.poll.tick() => {
                     let safety = self.ticks.is_multiple_of(CANCEL_SAFETY_TICKS);
@@ -1494,16 +1506,33 @@ async fn write_terminal(
     nodes: &[NodeRunState],
     error: Option<&str>,
 ) -> otto_core::Result<Option<i64>> {
+    write_status_retrying(repo, run_id, expected, status, nodes, error, true).await
+}
+
+/// [`write_terminal`]'s retry loop, shared with the run's START write
+/// (Pending→Running): one transient failure there left the row `pending`
+/// while the run executed — the UI showed it queued throughout, and every
+/// `human_approval` gate answered 409 (approvals need `running`) until its
+/// 24 h timeout failed the run.
+async fn write_status_retrying(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    expected: &[RunStatus],
+    status: RunStatus,
+    nodes: &[NodeRunState],
+    error: Option<&str>,
+    terminal: bool,
+) -> otto_core::Result<Option<i64>> {
     let mut attempt = 0u64;
     loop {
         match repo
-            .update_run_if(run_id, expected, status, nodes, error, true)
+            .update_run_if(run_id, expected, status, nodes, error, terminal)
             .await
         {
             Ok(r) => return Ok(r),
             Err(e) if attempt < 3 => {
                 attempt += 1;
-                tracing::warn!(%run_id, attempt, "workflow terminal write failed, retrying: {e}");
+                tracing::warn!(%run_id, attempt, "workflow status write failed, retrying: {e}");
                 tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
             }
             Err(e) => return Err(e),
@@ -2225,16 +2254,16 @@ async fn run_workflow_with_budget(
     // unconditional write flipped it back to `running` and executed the whole
     // workflow the user saw canceled. Every LATER in-loop write uses
     // `update_run_progress` (nodes only, no status) for the same reason.
-    match repo
-        .update_run_if(
-            &run_id,
-            &[RunStatus::Pending],
-            RunStatus::Running,
-            &states,
-            None,
-            false,
-        )
-        .await
+    match write_status_retrying(
+        &repo,
+        &run_id,
+        &[RunStatus::Pending],
+        RunStatus::Running,
+        &states,
+        None,
+        false,
+    )
+    .await
     {
         Ok(Some(rev)) => emit_run_updated(
             &ctx,
@@ -6060,7 +6089,7 @@ async fn execute_node(
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
             let ext = canvas_node_ext(mode);
-            let rel = format!("workflow-canvas/{run_id}/{}.{ext}", node.id);
+            let rel = canvas_rel(run_id, &node.id, ext);
             let path = ctx.data_dir.join(&rel);
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -8596,6 +8625,35 @@ fn canvas_node_ext(mode: &str) -> &'static str {
         "excalidraw" => "json",
         "d2" => "d2",
         _ => "mmd",
+    }
+}
+
+/// Data-dir-relative file of a `canvas` step's diagram. Step ids are only
+/// checked for being non-empty and unique, so an id like `../../../tmp/x`
+/// wrote (and created directories) outside the data dir; such an id falls
+/// back to its slug, while an ordinary id keeps its exact file name.
+fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
+    let name = otto_core::paths::safe_component(node_id)
+        .filter(|n| !n.starts_with('.'))
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::workflow_context::slug(node_id));
+    format!("workflow-canvas/{run_id}/{name}.{ext}")
+}
+
+#[cfg(test)]
+mod canvas_rel_tests {
+    #[test]
+    fn a_canvas_step_id_cannot_leave_the_canvas_dir() {
+        assert_eq!(
+            super::canvas_rel("r1", "canvas_1", "mmd"),
+            "workflow-canvas/r1/canvas_1.mmd"
+        );
+        let escaped = super::canvas_rel("r1", "../../../../tmp/x", "mmd");
+        assert_eq!(escaped, "workflow-canvas/r1/tmp-x.mmd");
+        assert_eq!(
+            super::canvas_rel("r1", "..", "d2"),
+            "workflow-canvas/r1/step.d2"
+        );
     }
 }
 
