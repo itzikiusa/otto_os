@@ -307,7 +307,7 @@ impl CanvasRepo {
     pub async fn list_refs_for_session(&self, session_id: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(
             "SELECT s.id, s.workspace_id, s.story_id, s.title, s.thumbnail, s.section,
-                    json_extract(s.doc_json, '$.format') AS format, s.created_at, s.updated_at
+                    s.format, s.created_at, s.updated_at
              FROM canvas_scenes s
              JOIN canvas_scene_refs r ON r.scene_id = s.id
              WHERE r.session_id = ?
