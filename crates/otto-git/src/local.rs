@@ -1731,7 +1731,9 @@ impl LocalGit {
         let out = self
             .run_read(&[
                 "branch",
-                "--format=%(refname:short)%09%(upstream:short)%09%(HEAD)",
+                // `lstrip=2`, not `:short`: a branch named like a tag
+                // abbreviates to `heads/<name>` (see `refs_with_base`).
+                "--format=%(refname:lstrip=2)%09%(upstream:short)%09%(HEAD)",
             ])
             .await?;
         Ok(crate::parse::parse_branches(&out))
@@ -7420,6 +7422,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("tag {name} present"));
             assert_eq!(t.sha, root, "tag {name} resolves to the tagged COMMIT");
         }
+    }
+
+    /// A branch sharing its name with a tag: `%(refname:short)` disambiguates
+    /// it to `heads/v1.0`, which the PR form then sent as the head branch.
+    #[tokio::test]
+    async fn branches_keep_plain_names_when_a_tag_shares_one() {
+        let (_tmp, dir) = fixture_n_commits(1);
+        sh_git(&dir, &["branch", "v1.0"]);
+        sh_git(&dir, &["tag", "v1.0"]);
+        let names: Vec<String> = LocalGit::new(&dir)
+            .branches()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(names.contains(&"v1.0".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("heads/")), "{names:?}");
     }
 
     #[tokio::test]
