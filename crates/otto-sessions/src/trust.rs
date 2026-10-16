@@ -80,14 +80,40 @@ fn atomic_replace(path: &Path, contents: &[u8], read_fp: Fingerprint) -> Result<
     Ok(true)
 }
 
+/// `(config file, grant key)` → the file's [`Fingerprint`] when that grant was
+/// last confirmed present. Every spawn re-asks for the same cwd, and the
+/// answer used to cost a full read + parse of `~/.claude.json` (megabytes on a
+/// long-lived install) under [`CONFIG_LOCK`]; while the file is unchanged a
+/// `stat` now answers. Any save (a CLI rewriting it, ours) changes the
+/// fingerprint and the next call re-reads.
+type TrustedMemo = std::collections::HashMap<(PathBuf, String), (u64, SystemTime)>;
+/// Memo entries kept before it is cleared (one per trusted cwd × CLI).
+const TRUSTED_MEMO_MAX: usize = 512;
+
+fn trusted_memo() -> MutexGuard<'static, TrustedMemo> {
+    static MEMO: std::sync::OnceLock<Mutex<TrustedMemo>> = std::sync::OnceLock::new();
+    MEMO.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// Read `path` (missing ⇒ empty), let `merge` produce the new contents (`None`
 /// ⇒ already trusted, nothing to write) and [`atomic_replace`] it, re-reading
 /// and re-merging when a CLI saved the file in between. Holds
-/// [`config_lock`] throughout. Returns whether the file was written.
+/// [`config_lock`] throughout. Returns whether the file was written. `key`
+/// names the grant `merge` checks (the cwd): an unchanged file that already
+/// held it is not read again ([`trusted_memo`]).
 fn update_config(
     path: &Path,
+    key: &str,
     merge: impl Fn(&str) -> Result<Option<String>, String>,
 ) -> Result<bool, String> {
+    let memo_key = (path.to_path_buf(), key.to_string());
+    if let Some(fp) = fingerprint(path) {
+        if trusted_memo().get(&memo_key) == Some(&fp) {
+            return Ok(false);
+        }
+    }
     let _guard = config_lock();
     for _ in 0..WRITE_ATTEMPTS {
         let read_fp = fingerprint(path);
@@ -97,6 +123,16 @@ fn update_config(
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
         let Some(next) = merge(current.as_str())? else {
+            // Already granted in the bytes read. Remembered under the
+            // fingerprint taken BEFORE that read: if the file changed in
+            // between, the next stat differs and simply re-reads.
+            if let Some(fp) = read_fp {
+                let mut memo = trusted_memo();
+                if memo.len() >= TRUSTED_MEMO_MAX {
+                    memo.clear();
+                }
+                memo.insert(memo_key, fp);
+            }
             return Ok(false);
         };
         if let Some(dir) = path.parent() {
@@ -129,6 +165,16 @@ pub fn ensure_trusted(provider: &str, cwd: &str) {
     if let Err(e) = result {
         tracing::warn!(provider, cwd, "could not pre-trust folder: {e}");
     }
+}
+
+/// [`ensure_trusted`] off the async runtime. Every agent spawn/resume calls
+/// it, and it reads + fully parses `~/.claude.json` (routinely megabytes: it
+/// holds every project the CLI ever opened) under the process-wide
+/// [`CONFIG_LOCK`] — inline, that parked the tokio worker (and, in a review or
+/// workflow fan-out, every worker queued on the lock) for the whole parse.
+pub async fn ensure_trusted_async(provider: &str, cwd: &str) {
+    let (provider, cwd) = (provider.to_string(), cwd.to_string());
+    let _ = tokio::task::spawn_blocking(move || ensure_trusted(&provider, &cwd)).await;
 }
 
 /// Pre-trust a THROWAWAY `cwd` created under the stable Otto scratch `root`
@@ -186,7 +232,7 @@ fn home() -> Result<PathBuf, String> {
 fn trust_claude(cwd: &str) -> Result<(), String> {
     let path = home()?.join(".claude.json");
     let variants = path_variants(cwd);
-    let written = update_config(&path, |current| {
+    let written = update_config(&path, cwd, |current| {
         claude_with_trust(current, &variants).map_err(|e| format!("{}: {e}", path.display()))
     })?;
     if written {
@@ -246,7 +292,9 @@ fn claude_with_trust(current: &str, variants: &[String]) -> Result<Option<String
 fn trust_codex(cwd: &str) -> Result<(), String> {
     let path = home()?.join(".codex").join("config.toml");
     let variants = path_variants(cwd);
-    if update_config(&path, |current| Ok(codex_with_trust(current, &variants)))? {
+    if update_config(&path, cwd, |current| {
+        Ok(codex_with_trust(current, &variants))
+    })? {
         tracing::info!(cwd, "pre-trusted folder for codex");
     }
     Ok(())
@@ -287,7 +335,7 @@ fn trust_grok(cwd: &str) -> Result<(), String> {
     let path = home()?.join(".grok").join("trusted_folders.toml");
     let variants = path_variants(cwd);
     let now = chrono::Utc::now().timestamp();
-    if update_config(&path, |current| {
+    if update_config(&path, cwd, |current| {
         Ok(grok_with_trust(current, &variants, &home_str, now))
     })? {
         tracing::info!(cwd, "pre-trusted folder for grok");
@@ -461,9 +509,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("config.toml");
         let variants = v(&["/w"]);
-        assert!(update_config(&path, |c| Ok(codex_with_trust(c, &variants))).unwrap());
+        assert!(update_config(&path, "/w", |c| Ok(codex_with_trust(c, &variants))).unwrap());
         let first = std::fs::read_to_string(&path).unwrap();
-        assert!(!update_config(&path, |c| Ok(codex_with_trust(c, &variants))).unwrap());
+        assert!(!update_config(&path, "/w", |c| Ok(codex_with_trust(c, &variants))).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+    }
+
+    /// Perf: once a grant is confirmed, an UNCHANGED config file is not read
+    /// or merged again (each spawn used to re-parse `~/.claude.json`); any
+    /// change to the file (size/mtime) makes the next call re-read it.
+    #[test]
+    fn confirmed_grant_skips_the_reparse_until_the_file_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let variants = v(&["/memo"]);
+        let merges = AtomicUsize::new(0);
+        let merge = |c: &str| {
+            merges.fetch_add(1, Ordering::SeqCst);
+            Ok(codex_with_trust(c, &variants))
+        };
+        assert!(update_config(&path, "/memo", merge).unwrap()); // grant written
+        assert!(!update_config(&path, "/memo", merge).unwrap()); // read: present → memoised
+        let after_confirm = merges.load(Ordering::SeqCst);
+        for _ in 0..5 {
+            assert!(!update_config(&path, "/memo", merge).unwrap());
+        }
+        assert_eq!(
+            merges.load(Ordering::SeqCst),
+            after_confirm,
+            "unchanged file re-read"
+        );
+        // Another grant key is not answered by this one's memo.
+        assert!(update_config(&path, "/other", |c| Ok(codex_with_trust(
+            c,
+            &v(&["/other"])
+        )))
+        .unwrap());
+        // That write changed the file: the first key re-reads once, then memoises again.
+        assert!(!update_config(&path, "/memo", merge).unwrap());
+        assert_eq!(merges.load(Ordering::SeqCst), after_confirm + 1);
+        // A CLI stripping the grant changes the file too → re-granted.
+        std::fs::write(&path, "").unwrap();
+        assert!(update_config(&path, "/memo", merge).unwrap());
     }
 }
