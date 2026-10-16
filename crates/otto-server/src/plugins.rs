@@ -661,6 +661,16 @@ struct AssetPath {
     path: String,
 }
 
+/// The manifest's `ui` directory must resolve INSIDE the plugin's own source
+/// dir. `/plugins/{slug}/ui/*` is served without a bearer (the plugin page
+/// loads before it holds one), so a manifest saying `"ui": "/"` or `"../.."`
+/// would otherwise turn it into an unauthenticated file server.
+fn ui_dir_inside_source(source: &str, c_base: &std::path::Path) -> bool {
+    std::path::Path::new(source)
+        .canonicalize()
+        .is_ok_and(|src| c_base.starts_with(src))
+}
+
 async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Response {
     let rec = match ctx.plugins.repo().get(&p.slug).await {
         Ok(Some(r)) if r.enabled => r,
@@ -680,7 +690,7 @@ async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Re
     let (Ok(c_base), Ok(c_target)) = (base.canonicalize(), target.canonicalize()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if !c_target.starts_with(&c_base) {
+    if !c_target.starts_with(&c_base) || !ui_dir_inside_source(&rec.source, &c_base) {
         return StatusCode::FORBIDDEN.into_response();
     }
     // Off the runtime worker: a plugin bundle can be MBs (perf SI-08).
@@ -995,6 +1005,19 @@ pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod proxy_timeout_tests {
     use super::*;
+
+    #[test]
+    fn a_ui_dir_outside_the_plugin_is_refused() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("ui")).unwrap();
+        let source = src.path().to_string_lossy();
+        let inside = src.path().join("ui").canonicalize().unwrap();
+        assert!(ui_dir_inside_source(&source, &inside));
+        for escape in ["/", ".."] {
+            let c = src.path().join(escape).canonicalize().unwrap();
+            assert!(!ui_dir_inside_source(&source, &c), "{escape}");
+        }
+    }
 
     #[tokio::test]
     async fn replacing_enabled_plugin_stops_old_process_and_disables_rotated_token() {
