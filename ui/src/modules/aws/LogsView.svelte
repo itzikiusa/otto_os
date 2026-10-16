@@ -175,7 +175,9 @@
   let rangeId = $state('15m');
   let pattern = $state('');
   let appliedPattern = $state('');
-  let events = $state<AwsLogEvent[]>([]);
+  // Raw: replaced wholesale (pushEvents), never mutated — a deep proxy over a
+  // 5000-row ring re-wrapped every row on each 2 s tail append.
+  let events = $state.raw<AwsLogEvent[]>([]);
   let eventsToken = $state<string | null>(null);
   let eventsLoading = $state(false);
   let eventsError = $state('');
