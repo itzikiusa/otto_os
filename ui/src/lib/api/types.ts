@@ -1132,6 +1132,7 @@ export interface GoalLoopDefinition {
 export interface GoalLoopLimits {
   max_iterations: number;
   max_runtime_secs: number;
+  /** 1..=86400 (create/update answer 400 outside it). */
   per_phase_timeout_secs: number;
   max_cost_usd?: number | null;
   max_attempts_per_executor: number;

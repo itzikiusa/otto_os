@@ -485,7 +485,24 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
             if let Ok(loop_) = ctx.goal_loops_repo().get(&loop_id).await {
                 cleanup_executor_sessions(&ctx, &loop_.workspace_id, &loop_id).await;
             }
-            deregister(&ctx, &loop_id, &handle);
+            let was_current = deregister(&ctx, &loop_id, &handle);
+            // A Stop that landed during the cleanup above saw our handle, so
+            // it only flagged `cancel` and left finalizing to us — the loop
+            // stayed Paused while Stop answered 200. `stop_loop` flags under
+            // the registry lock and `deregister` takes it, so once we are out
+            // of the registry this read is final; a later Stop finalizes
+            // itself. (A Resume that replaced our entry also flags `cancel`
+            // — that loop is running again and is not ours to stop.)
+            if was_current && handle.cancel.load(Ordering::Relaxed) {
+                finalize(
+                    &ctx,
+                    &loop_id,
+                    GoalLoopStatus::Stopped,
+                    Some("stopped by user"),
+                    None,
+                )
+                .await;
+            }
             return;
         }
         // The deadline wrapper owns settlement after cooperative cleanup.
@@ -964,14 +981,16 @@ fn is_current(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) -> bo
         .unwrap_or(false)
 }
 
-fn deregister(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) {
+/// Remove our registry entry; `true` when it was still ours (a newer
+/// start_loop may have replaced it).
+fn deregister(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) -> bool {
     let mut reg = ctx.goal_loops().lock().unwrap();
-    // Only remove the entry if it is still OURS (a newer start_loop may have
-    // replaced it).
-    if let Some(h) = reg.get(&loop_id.to_string()) {
-        if Arc::ptr_eq(&h.cancel, &handle.cancel) {
+    match reg.get(&loop_id.to_string()) {
+        Some(h) if Arc::ptr_eq(&h.cancel, &handle.cancel) => {
             reg.remove(&loop_id.to_string());
+            true
         }
+        _ => false,
     }
 }
 
