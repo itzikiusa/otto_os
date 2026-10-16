@@ -32,6 +32,10 @@ const SWARM_RUN_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Attempts before giving up (kills the stuck session + respawns between tries).
 const SWARM_MAX_ATTEMPTS: u32 = 3;
 const SWARM_RETRY_BACKOFF: Duration = Duration::from_secs(3);
+/// How long a verify / fix turn waits for its (busy) agent or a free slot,
+/// re-trying the reservation every [`RESERVE_RETRY`].
+const RESERVE_WAIT_MAX: Duration = Duration::from_secs(30 * 60);
+const RESERVE_RETRY: Duration = Duration::from_secs(5);
 
 // --- per-swarm cancel registry --------------------------------------------
 
@@ -206,30 +210,44 @@ pub async fn run_swarm_agent(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| cwd.to_string());
     let cwd: &str = &cwd_canon;
-    let operation = crate::runtime::engine::operation_guard(swarm_id).await;
-    if cancel.cancelled() {
-        return (None, String::new());
-    }
-    let run = match ctx
-        .swarm_repo()
-        .reserve_run(
-            NewRun {
-                swarm_id: swarm_id.to_string(),
-                workspace_id: ws.id.clone(),
-                project_id: project_id.map(|s| s.to_string()),
-                task_id: task_id.map(|s| s.to_string()),
-                agent_id: nominal_agent_id.to_string(),
-                kind: kind.to_string(),
-                trigger: "manual".to_string(),
-            },
-            !matches!(kind, "verify" | "fix"),
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("swarm_agent_run: create_run: {e}");
+    // A verify / fix turn runs on the LEADER, which may be busy with another
+    // turn (or the swarm at capacity) right then — e.g. two devs under one
+    // manager finishing together. Refusing at once returned "no verdict", so
+    // a required goal was recorded `error` and the task blocked for good.
+    // Those turns wait (bounded, cancellable) for the agent / a slot instead.
+    let waits = matches!(kind, "verify" | "fix");
+    let mut waited = Duration::ZERO;
+    let (run, operation) = loop {
+        let operation = crate::runtime::engine::operation_guard(swarm_id).await;
+        if cancel.cancelled() {
             return (None, String::new());
+        }
+        match ctx
+            .swarm_repo()
+            .reserve_run(
+                NewRun {
+                    swarm_id: swarm_id.to_string(),
+                    workspace_id: ws.id.clone(),
+                    project_id: project_id.map(|s| s.to_string()),
+                    task_id: task_id.map(|s| s.to_string()),
+                    agent_id: nominal_agent_id.to_string(),
+                    kind: kind.to_string(),
+                    trigger: "manual".to_string(),
+                },
+                !waits,
+            )
+            .await
+        {
+            Ok(r) => break (r, operation),
+            Err(otto_core::Error::Conflict(_)) if waits && waited < RESERVE_WAIT_MAX => {
+                drop(operation);
+                tokio::time::sleep(RESERVE_RETRY).await;
+                waited += RESERVE_RETRY;
+            }
+            Err(e) => {
+                tracing::warn!("swarm_agent_run: create_run: {e}");
+                return (None, String::new());
+            }
         }
     };
     let run_id = run.id.clone();
