@@ -569,13 +569,11 @@ impl super::GitProvider for Bitbucket {
         /// 40 × 500 rows = 20k files; a cursor still open past that is
         /// reported as `truncated` rather than silently passing as whole.
         const MAX_PAGES: usize = 40;
-        let mut page = self
-            .send_json(
-                reqwest::Method::GET,
-                &Self::pr_path(r, &format!("/{number}/diffstat?pagelen=500")),
-                None,
-            )
-            .await?;
+        let first = Self::pr_path(r, &format!("/{number}/diffstat?pagelen=500"));
+        // `next` is fetched with the account's credentials: same origin only
+        // (the rule `paginate_values` applies).
+        let origin = reqwest::Url::parse(&self.url(&first)).ok();
+        let mut page = self.send_json(reqwest::Method::GET, &first, None).await?;
         let mut files = Vec::new();
         let mut fetched = 1usize;
         let truncated = loop {
@@ -584,6 +582,10 @@ impl super::GitProvider for Bitbucket {
                 break false;
             };
             if fetched >= MAX_PAGES {
+                break true;
+            }
+            if !super::client::same_origin(origin.as_ref(), &self.url(&next)) {
+                tracing::warn!("bitbucket: ignoring cross-origin diffstat `next` link");
                 break true;
             }
             page = self.get_json_cached(&next).await?;

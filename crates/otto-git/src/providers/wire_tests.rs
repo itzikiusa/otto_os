@@ -778,6 +778,32 @@ mod bitbucket {
         assert_eq!(p2.items[0].number, 2);
     }
 
+    /// A diffstat `next` on another origin is never followed with the
+    /// account's credentials: the summary stops there, marked truncated.
+    #[tokio::test]
+    async fn pr_diff_summary_never_follows_a_cross_origin_next() {
+        let server = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests/7/diffstat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [{"status": "modified", "lines_added": 1, "lines_removed": 0,
+                            "old": {"path": "a"}, "new": {"path": "a"}}],
+                "next": format!("{}/steal?page=2", elsewhere.uri()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"values": []})))
+            .expect(0)
+            .mount(&elsewhere)
+            .await;
+        let d = bb.get_pr_diff_summary(&rr(), 7).await.unwrap().unwrap();
+        assert_eq!(d.files.len(), 1);
+        assert_eq!(d.truncated, Some(true));
+    }
+
     /// Summary-first: the file list comes from `diffstat` (paged by `next`),
     /// never the unified diff — every status maps, a rename keeps its origin,
     /// counts are Bitbucket's `lines_added/removed`.
