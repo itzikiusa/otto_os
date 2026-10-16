@@ -89,15 +89,7 @@ pub async fn merge_task_branch(
     }
 
     // The integration worktree is Otto-owned and kept clean, so auto_stash:false.
-    match git
-        .merge_branch(
-            agent_branch,
-            &integration_branch,
-            LocalMergeStrategy::MergeCommit,
-            false,
-        )
-        .await
-    {
+    match merge_or_back_out(&git, agent_branch, &integration_branch).await {
         Ok(res) => {
             if res.status == "merged" {
                 // The branch's work is integrated — stop tracking its files for the
@@ -112,5 +104,77 @@ pub async fn merge_task_branch(
             }
         }
         Err(e) => MergeOutcome::err(integration_branch, format!("merge: {e}")),
+    }
+}
+
+/// Merge `source` into `target` in the integration worktree; on conflicts,
+/// back the merge out again. Nobody resolves conflicts HERE — the fix task
+/// works in the dev's own worktree — so a merge left half-done made every
+/// later merge into the integration branch fail with "a merge is already in
+/// progress" (each finished task then blocked) until someone found the
+/// hidden worktree by hand.
+async fn merge_or_back_out(
+    git: &otto_git::LocalGit,
+    source: &str,
+    target: &str,
+) -> otto_core::Result<otto_core::api::MergeResult> {
+    let res = git
+        .merge_branch(source, target, LocalMergeStrategy::MergeCommit, false)
+        .await?;
+    if res.status == "conflicts" {
+        if let Err(e) = git.merge_abort().await {
+            tracing::warn!("swarm merge: abort conflicted merge of {source} into {target}: {e}");
+        }
+    }
+    Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(clippy::disallowed_methods)] // test: blocking git setup
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn commit(dir: &std::path::Path, file: &str, body: &str, msg: &str) {
+        std::fs::write(dir.join(file), body).unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-qm", msg]);
+    }
+
+    /// A conflicted merge is backed out, so the next task's merge still lands.
+    #[tokio::test]
+    async fn a_conflict_does_not_wedge_later_merges() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let d = tmp.path();
+        run_git(d, &["init", "-q", "-b", "integration"]);
+        run_git(d, &["config", "user.email", "t@example.com"]);
+        run_git(d, &["config", "user.name", "t"]);
+        commit(d, "a.txt", "base\n", "base");
+        run_git(d, &["checkout", "-qb", "conflicting"]);
+        commit(d, "a.txt", "theirs\n", "theirs");
+        run_git(d, &["checkout", "-q", "integration"]);
+        run_git(d, &["checkout", "-qb", "clean"]);
+        commit(d, "b.txt", "new\n", "clean");
+        run_git(d, &["checkout", "-q", "integration"]);
+        commit(d, "a.txt", "ours\n", "ours");
+
+        let lg = otto_git::LocalGit::new(d);
+        let first = merge_or_back_out(&lg, "conflicting", "integration")
+            .await
+            .unwrap();
+        assert_eq!(first.status, "conflicts");
+        assert_eq!(first.conflicted_files, vec!["a.txt".to_string()]);
+        let second = merge_or_back_out(&lg, "clean", "integration")
+            .await
+            .unwrap();
+        assert_eq!(second.status, "merged");
     }
 }
