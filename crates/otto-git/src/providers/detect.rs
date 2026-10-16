@@ -12,7 +12,11 @@ pub fn detect(remote_url: &str) -> Option<(GitProviderKind, RemoteRef)> {
     let (host, path) = split_host_path(url)?;
     let kind = match host.to_ascii_lowercase().as_str() {
         "github.com" | "www.github.com" => GitProviderKind::Github,
-        "bitbucket.org" | "www.bitbucket.org" => GitProviderKind::Bitbucket,
+        // `altssh.*` / `ssh.github.com`: each forge's documented SSH-over-443
+        // host for networks that block port 22 — the public forge itself.
+        "bitbucket.org" | "www.bitbucket.org" | "altssh.bitbucket.org" => {
+            GitProviderKind::Bitbucket
+        }
         "gitlab.com" | "www.gitlab.com" => GitProviderKind::Gitlab,
         h if h.contains("gitlab") => GitProviderKind::Gitlab, // self-hosted gitlab.<corp>.com
         h if h.contains("github") => GitProviderKind::Github, // GitHub Enterprise (github.corp.com)
@@ -46,7 +50,16 @@ pub fn remote_host(url: &str) -> Option<String> {
 
 /// GitHub's own public hosts (anything else detected as GitHub is Enterprise).
 pub(crate) fn is_github_dot_com(host: &str) -> bool {
-    matches!(host, "github.com" | "www.github.com" | "api.github.com")
+    matches!(
+        host,
+        "github.com" | "www.github.com" | "api.github.com" | "ssh.github.com"
+    )
+}
+
+/// gitlab.com's own public hosts (anything else detected as GitLab is
+/// self-hosted).
+pub(crate) fn is_gitlab_dot_com(host: &str) -> bool {
+    matches!(host, "gitlab.com" | "www.gitlab.com" | "altssh.gitlab.com")
 }
 
 /// Forge discriminator for the repo payload: which PR backend a remote maps
@@ -95,6 +108,26 @@ mod tests {
             owner: owner.into(),
             repo: repo.into(),
         }
+    }
+
+    #[test]
+    fn ssh_over_443_hosts_are_the_public_forges() {
+        use crate::providers::check_remote_reachable;
+        let gh = "ssh://git@ssh.github.com:443/octo/hello.git";
+        assert_eq!(detect(gh), Some((Github, rr("octo", "hello"))));
+        assert!(check_remote_reachable(Github, gh, None).is_ok());
+        let gl = "ssh://git@altssh.gitlab.com:443/grp/sub/app.git";
+        assert_eq!(detect(gl), Some((Gitlab, rr("grp/sub", "app"))));
+        assert!(check_remote_reachable(Gitlab, gl, None).is_ok());
+        assert_eq!(
+            detect("ssh://git@altssh.bitbucket.org:443/ws/app.git"),
+            Some((Bitbucket, rr("ws", "app")))
+        );
+        // A real GitHub Enterprise / self-hosted GitLab is still refused.
+        let ghe = "https://github.corp.example/octo/hello.git";
+        assert!(check_remote_reachable(Github, ghe, None).is_err());
+        let glsh = "https://gitlab.corp.example/grp/app.git";
+        assert!(check_remote_reachable(Gitlab, glsh, None).is_err());
     }
 
     #[test]
