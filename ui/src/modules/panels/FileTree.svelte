@@ -18,6 +18,7 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { emptyHistory, folderCrumbs, historyTarget, parentFolder, resolveJump, settleFolder } from '../../lib/components/folderNavigation';
   import { lsGet, lsSet } from '../../lib/storage';
+  import { ListWindow } from '../git/list-window.svelte';
   import { marked } from 'marked';
   import type { FsBrowse, FsEntry, FsRead } from '../../lib/api/types';
 
@@ -352,6 +353,11 @@
   }
 
   const visibleNodes = $derived(flatten(rootNodes, showHidden || !navigation));
+  // Windowed past 300 rows (ListWindow): opening node_modules or a build
+  // output folder listed every entry as a button + icons — thousands of rows
+  // mounted (and re-diffed on every expand) in a pane that shows ~40.
+  const treeWin = new ListWindow('.tree-item');
+  const treeRange = $derived(treeWin.range(visibleNodes.length));
   const hiddenCount = $derived(navigation && !showHidden ? rootNodes.filter((n) => n.entry.name.startsWith('.')).length : 0);
 
   // Basename of root for display.
@@ -503,8 +509,9 @@
       {/if}
       <!-- Tree pane -->
       <div class="tree-pane" class:has-viewer={!!viewerFile}>
-        <div class="tree-list">
-          {#each visibleNodes as node (node.entry.path)}
+        <div class="tree-list" {@attach treeWin.attach}>
+          {#if treeRange.top > 0}<div style="height:{treeRange.top}px" aria-hidden="true"></div>{/if}
+          {#each visibleNodes.slice(treeRange.start, treeRange.end) as node (node.entry.path)}
             <div class="tree-item">
             <button
               class="tree-row"
@@ -541,6 +548,7 @@
             {/if}
             </div>
           {/each}
+          {#if treeRange.bottom > 0}<div style="height:{treeRange.bottom}px" aria-hidden="true"></div>{/if}
           {#if visibleNodes.length === 0}
             <div class="empty-dir dim">
               {#if hiddenCount > 0}Only hidden items here. <button class="btn small ghost" onclick={toggleHidden}>Show hidden</button>{:else}Empty folder{/if}
