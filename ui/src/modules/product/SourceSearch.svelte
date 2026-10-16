@@ -268,7 +268,10 @@
         );
         if (!current()) return;
         if (append) {
-          jiraResults = [...jiraResults, ...page];
+          // Offset paging over a live list: an issue updated between pages
+          // can come back again — a repeated key breaks the keyed list.
+          const seen = new Set(jiraResults.map((i) => i.key));
+          jiraResults = [...jiraResults, ...page.filter((i) => !seen.has(i.key))];
         } else {
           jiraResults = page;
         }
@@ -302,6 +305,9 @@
       if (!append) {
         jiraResults = [];
         confluenceResults = [];
+        // No list on screen → no Load more for the previous query's pages.
+        jiraHasMore = false;
+        jiraOffset = 0;
       }
     } finally {
       if (current()) {
