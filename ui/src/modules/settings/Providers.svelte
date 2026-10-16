@@ -26,16 +26,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
-
-  interface ProviderDef {
-    cmd: string;
-    args?: string[];
-    resume_args?: string[] | null;
-    update_command?: string | null;
-    /** Model-flag template, `{model}` substituted at spawn (e.g. `--model {model}`).
-     *  Unset = the CLI takes no model flag; pickers hide the model control. */
-    model_args?: string[] | null;
-  }
+  import { formToProvider, joinArgs, providerToForm, type ProviderDef } from './providerForm';
 
   interface CliAutoUpdate {
     enabled: boolean;
@@ -222,11 +213,7 @@
     const p = custom[n];
     editing = n;
     name = n;
-    cmd = p.cmd;
-    args = (p.args ?? []).join(' ');
-    resumeArgs = (p.resume_args ?? []).join(' ');
-    updateCmd = p.update_command ?? '';
-    modelArgs = (p.model_args ?? []).join(' ');
+    ({ cmd, args, resumeArgs, updateCmd, modelArgs } = providerToForm(p));
     formError = '';
     formOpen = true;
   }
@@ -407,16 +394,10 @@
       return;
     }
     formError = '';
-    const def: ProviderDef = {
-      cmd: cmd.trim(),
-      args: args.trim() === '' ? [] : args.trim().split(/\s+/),
-    };
-    const ra = resumeArgs.trim();
-    if (ra !== '') def.resume_args = ra.split(/\s+/);
-    const uc = updateCmd.trim();
-    if (uc !== '') def.update_command = uc;
-    const ma = modelArgs.trim();
-    if (ma !== '') def.model_args = ma.split(/\s+/);
+    const def = formToProvider(
+      { cmd, args, resumeArgs, updateCmd, modelArgs },
+      editing ? custom[editing] : undefined,
+    );
 
     const next = { ...custom };
     if (editing && editing !== n) delete next[editing];
@@ -483,6 +464,11 @@
             {#each providers as p (p)}
               <option value={p}>{p}</option>
             {/each}
+            <!-- A saved default that's since been removed, renamed or hidden:
+                 without its own option the select showed “Auto” for it. -->
+            {#if defaultProvider !== '' && !providers.includes(defaultProvider)}
+              <option value={defaultProvider}>{defaultProvider} (unavailable)</option>
+            {/if}
           </select>
           <span class="hint">Used unless a session, workflow or channel picks another agent.</span>
         </div>
@@ -622,11 +608,11 @@
         {#each Object.entries(custom) as [n, p] (n)}
           <div class="item" class:off={disabled.has(n)}>
             <span class="mono name">{n}</span>
-            <span class="dim sm mono meta" title={`${p.cmd} ${(p.args ?? []).join(' ')}`}>{p.cmd} {(p.args ?? []).join(' ')}</span>
+            <span class="dim sm mono meta" title={`${p.cmd} ${joinArgs(p.args)}`}>{p.cmd} {joinArgs(p.args)}</span>
             <span class="grow"></span>
             {#if p.resume_args?.length}<span class="chip" title="Resume arguments set">resume</span>{/if}
             {#if p.update_command}<span class="chip" title={`Update command: ${p.update_command}`}>update</span>{/if}
-            {#if p.model_args?.length}<span class="chip" title={`Model flag: ${(p.model_args ?? []).join(' ')}`}>model</span>{/if}
+            {#if p.model_args?.length}<span class="chip" title={`Model flag: ${joinArgs(p.model_args)}`}>model</span>{/if}
             {@render enableToggle(n)}
             <button class="btn small ghost" onclick={() => openEdit(n)}>Edit…</button>
             <button class="btn small danger" onclick={() => remove(n)} disabled={saving}>Remove…</button>
@@ -730,7 +716,8 @@
     </form>
     <p class="hint">
       <code>{'{sid}'}</code> and <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the model flag
-      template. Leave the model template empty if the CLI takes no model flag.
+      template. Quote an argument that contains spaces (<code>--system 'be terse'</code>). Leave the model template
+      empty if the CLI takes no model flag.
     </p>
     {#if formError}<p class="field-err" role="alert">{formError}</p>{/if}
     {#snippet footer()}
