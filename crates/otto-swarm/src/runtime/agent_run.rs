@@ -112,6 +112,42 @@ pub fn end(swarm_id: &str, kind: &str) {
     registry().lock().unwrap().remove(&key(swarm_id, kind));
 }
 
+/// An admitted plan/recruit turn ([`admit`]). Dropping it releases the slot
+/// — on every path, including a handler future dropped mid-await (the client
+/// went away, or the UI's "Stop planning" aborted its request): a plain
+/// [`end`] after the awaits never ran then, and every later Plan / Recruit
+/// of the swarm answered 409 "already running" until a daemon restart.
+pub struct AgentTurn {
+    pub cancel: CancelState,
+    swarm_id: String,
+    kind: &'static str,
+}
+
+impl Drop for AgentTurn {
+    fn drop(&mut self) {
+        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let key = key(&self.swarm_id, self.kind);
+        // Only our own entry (never a later turn's handle).
+        if reg
+            .get(&key)
+            .is_some_and(|cs| cs.same_generation(&self.cancel))
+        {
+            reg.remove(&key);
+        }
+    }
+}
+
+/// [`begin`] as an RAII [`AgentTurn`]. Callers move it into the spawned task
+/// that drives the turn, so the run rows settle and the slot frees when the
+/// WORK ends, not when the HTTP request does (Stop still reaches it).
+pub fn admit(swarm_id: &str, kind: &'static str) -> otto_core::Result<AgentTurn> {
+    Ok(AgentTurn {
+        cancel: begin(swarm_id, kind)?,
+        swarm_id: swarm_id.to_string(),
+        kind,
+    })
+}
+
 /// Stop the in-flight `kind` turn for `swarm_id` (every kind when `None`):
 /// flag retries off + kill any live session(s). Returns whether anything was
 /// running.
@@ -535,5 +571,33 @@ mod registry_tests {
             .unwrap()
             .contains_key(&key("sw-reg-test", "recruit")));
         end("sw-reg-test", "recruit");
+    }
+
+    /// A turn whose driver was dropped mid-flight (client gone, Stop aborted
+    /// the request) still frees the slot; a stale guard never removes a
+    /// newer turn's handle.
+    #[tokio::test]
+    async fn a_dropped_turn_frees_its_slot() {
+        let turn = admit("sw-drop-test", "plan").unwrap();
+        let fut = async move {
+            let _turn = turn;
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), fut)
+                .await
+                .is_err()
+        );
+        let again = admit("sw-drop-test", "plan").expect("slot freed by the drop");
+        // A guard for a handle that is no longer registered leaves the live one.
+        let stale = AgentTurn {
+            cancel: CancelState::detached(),
+            swarm_id: "sw-drop-test".into(),
+            kind: "plan",
+        };
+        drop(stale);
+        assert!(admit("sw-drop-test", "plan").is_err(), "live turn kept");
+        drop(again);
+        assert!(admit("sw-drop-test", "plan").is_ok());
     }
 }
