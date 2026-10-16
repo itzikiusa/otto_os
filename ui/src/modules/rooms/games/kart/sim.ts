@@ -137,7 +137,8 @@ export function tick(state: KartState, inputs: (KartInput | undefined)[]): void 
     const after = Math.ceil(state.countdown);
     for (const r of state.racers) {
       const input = r.human ? inputs[r.id] : undefined;
-      const gas = r.human ? (input?.throttle ?? 0) > 0.5 : state.countdown < 1.2 && state.countdown > 0.5;
+      // CPUs press the throttle around "1" and hold it through GO.
+      const gas = r.human ? (input?.throttle ?? 0) > 0.5 : state.countdown < 1.2;
       // Rocket start: press the throttle around "2 … 1" and hold through GO.
       if (gas && r.startCharge < 0) r.startCharge = state.countdown;
       if (!gas) r.startCharge = -1;

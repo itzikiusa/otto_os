@@ -83,7 +83,8 @@
         const state = kartNet.decodeSnapshot(event.data, (slot, racer) => (slot >= 0 ? memberName(slot) : RACERS.find(r => r.id === racer)?.name ?? 'CPU'));
         if (state) { kartLink.snapshots!.push({ state, at }); if (kartLink.snapshots!.length > 4) kartLink.snapshots!.shift(); }
       } else {
-        const state = shooterNet.decodeSnapshot(event.data, slot => memberName(slot));
+        const prev = shooterLink.snapshots!.at(-1)?.state.loot ?? null;
+        const state = shooterNet.decodeSnapshot(event.data, slot => memberName(slot), prev);
         if (state) { shooterLink.snapshots!.push({ state, at }); if (shooterLink.snapshots!.length > 4) shooterLink.snapshots!.shift(); }
       }
     }
@@ -115,11 +116,11 @@
     const result = standings(state).map(r => ({ place: r.place, name: r.name.slice(0, 40), time: Math.round(r.time * 1000) / 1000 }));
     client.send({ type: 'finish', round: room.round, generation: room.generation, result: { game: 'kart', standings: result } });
   }
-  function shooterFrame(state: ShooterState, events: ShooterEvent[]) { sendSnapshot(shooterNet.encodeSnapshot(state, events)); }
+  function shooterFrame(state: ShooterState, events: ShooterEvent[], withLoot: boolean) { sendSnapshot(shooterNet.encodeSnapshot(state, events, withLoot)); }
   function shooterInput(input: ShooterInput, fighter: FighterId) { if (live() && room) client.send({ type: 'input', round: room.round, generation: room.generation, seq: ++seq, data: shooterNet.encodeInput(input, fighter) }); }
   function shooterFinish(state: ShooterState) {
     if (!isHost || !room) return;
-    shooterFrame(state, state.events);
+    shooterFrame(state, state.events, true);
     const result = shooterResults(state).map(r => ({ place: r.place, name: r.name.slice(0, 40), kills: r.kills }));
     client.send({ type: 'finish', round: room.round, generation: room.generation, result: { game: 'shooter', standings: result } });
   }

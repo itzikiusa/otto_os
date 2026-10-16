@@ -40,6 +40,7 @@
   let hud = $state.raw<KartState | null>(null);
   let notice = $state(''), noticeKind = $state('');
   let rouletteIcon = $state(0);
+  let waitingFor = $state<string[]>([]);
   const audio = new GameAudio(['voice-3', 'voice-2', 'voice-1', 'voice-go', 'item', 'tick', 'boost', 'turbo', 'spin', 'explode', 'bump', 'lap', 'finallap', 'drop', 'shield', 'land', 'pickup', 'voice-win', 'voice-congrats', 'voice-over', 'select']);
   let renderer: KartRenderer | undefined, input: InputState | undefined;
   let stop: (() => void) | undefined;
@@ -56,8 +57,8 @@
     return {
       throttle: up && !down ? 1 : down && !up ? -1 : 0,
       steer: (right ? 1 : 0) - (left ? 1 : 0),
-      drift: i.down('Space', 'ShiftLeft', 'ShiftRight', 'Drift'),
-      item: i.down('KeyE', 'KeyF', 'Enter', 'Item'),
+      drift: i.down('Space', 'ShiftLeft', 'ShiftRight', 'Drift') || i.hit('Space', 'Drift'),
+      item: i.down('KeyE', 'KeyF', 'Enter', 'Item') || i.hit('KeyE', 'KeyF', 'Enter', 'Item'),
       respawn: i.down('KeyR'),
     };
   }
@@ -125,7 +126,7 @@
     for (const r of order) {
       const own = r.id === mine;
       g.beginPath(); g.arc(mx(r.x), mz(r.z), own ? 7 : 5, 0, Math.PI * 2);
-      g.fillStyle = racerDef(r.racer).colour; g.fill();
+      g.fillStyle = racerDef(r.racer).color; g.fill();
       g.lineWidth = own ? 3 : 1.5; g.strokeStyle = own ? '#fff' : 'rgba(0,0,0,0.6)'; g.stroke();
     }
   }
@@ -157,6 +158,8 @@
     stop?.();
     const abort = new AbortController();
     let disposed = false, frame = 0, last = performance.now(), lastHud = 0, lastSend = 0, lastEvent = 0, rouletteAt = 0;
+    const bootAt = performance.now();
+    const latch = { item: false, drift: false, respawn: false };
     let state: KartState | null = setup ? createRace(setup.track, setup.seats, setup.difficulty, setup.seed) : null;
     let pending: KartEvent[] = [];
     let finished = false;
@@ -199,11 +202,20 @@
         if (state.phase === 'intro' || state.phase === 'countdown') {
           for (const r of state.racers) if (r.human && r.slot !== selfSlot) { const c = link?.inputs?.get(r.slot)?.racer; if (c) r.racer = c; }
         }
-        if (!paused && !(menu && !link)) stepRace(state, inputs, dt);
+        // Hold the intro until every guest has reported in (their racer pick
+        // arrives with their first input), for at most twelve seconds.
+        const waiting = state.phase === 'intro' && now - bootAt < 12_000 && state.racers.some(r => r.human && r.slot !== selfSlot && !link?.inputs?.has(r.slot));
+        waitingFor = waiting ? state.racers.filter(r => r.human && r.slot !== selfSlot && !link?.inputs?.has(r.slot)).map(r => r.name) : [];
+        if (!paused && !(menu && !link) && !waiting) stepRace(state, inputs, dt);
         pending.push(...state.events.filter(e => e.id > lastEvent));
-      } else if (now - lastSend > 33) {
-        oninput?.(mine, racer);
-        lastSend = now;
+      } else {
+        // Latch taps (item, hop) so a press between two sends still reaches the host.
+        latch.item ||= mine.item; latch.drift ||= mine.drift; latch.respawn ||= mine.respawn;
+        if (now - lastSend > 33) {
+          oninput?.({ ...mine, item: latch.item, drift: latch.drift, respawn: latch.respawn }, racer);
+          latch.item = latch.drift = latch.respawn = false;
+          lastSend = now;
+        }
       }
       for (const e of state.events) if (e.id > lastEvent) { onEvent(state, e, mineIndex); lastEvent = e.id; }
       if (!isGuest && onframe && now - lastSend > 50) { onframe(state, pending); pending = []; lastSend = now; }
@@ -279,7 +291,7 @@
     </div>
     <ol class="kart-ranking" aria-label="Race positions">
       {#each [...hud.racers].sort((a, b) => a.place - b.place) as r (r.id)}
-        <li class:me={r.id === selfIndex}><span class="kart-dot" style:background={racerDef(r.racer).colour}></span><b>{r.place}</b><span class="kart-rname">{r.name}</span>{#if r.finish !== null}<em>✓</em>{/if}</li>
+        <li class:me={r.id === selfIndex}><span class="kart-dot" style:background={racerDef(r.racer).color}></span><b>{r.place}</b><span class="kart-rname">{r.name}</span>{#if r.finish !== null}<em>✓</em>{/if}</li>
       {/each}
     </ol>
     <div class="kart-place" aria-live="polite"><strong>{self.place}</strong><span>{ordinal(self.place).replace(/^\d+/, '')}</span></div>
@@ -287,7 +299,7 @@
     {#if self.drift !== 0}<div class="kart-drift" data-level={self.driftLevel} aria-hidden="true"><i></i><i></i><i></i></div>{/if}
     {#if notice}<div class="kart-notice" data-kind={noticeKind} aria-live="polite">{notice}</div>{/if}
     {#if self.wrong > 1 && hud.phase === 'race'}<div class="kart-wrong" role="alert">Wrong way!</div>{/if}
-    {#if hud.phase === 'intro'}<div class="kart-intro"><h2>{trackFor(hud.track).def.name}</h2><p>{hud.racers.length} racers · {hud.laps} laps · {hud.difficulty} CPUs</p></div>{/if}
+    {#if hud.phase === 'intro'}<div class="kart-intro"><h2>{trackFor(hud.track).def.name}</h2><p>{waitingFor.length ? `Waiting for ${waitingFor.join(', ')}…` : `${hud.racers.length} racers · ${hud.laps} laps · ${hud.difficulty} CPUs`}</p></div>{/if}
     {#if !active && hud.phase !== 'done' && !menu && !paused}<div class="kart-hint">Click the race to drive · W/S gas &amp; brake · A/D steer · Space drift / trick · E item · Q look back · R rescue</div>{/if}
     {#if paused && hud.phase !== 'done'}<div class="kart-overlay" role="status"><h2>Waiting for players</h2><p>The race is paused while someone reconnects.</p><button class="btn" onclick={onexit}>Leave race</button></div>
     {:else if hud.phase === 'done'}
@@ -316,14 +328,15 @@
   .kart-play { position: relative; flex: 1; min-height: 420px; overflow: hidden; background: var(--surface); isolation: isolate; user-select: none; }
   .kart-play:fullscreen { width: 100vw; height: 100vh; }
   .kart-stage { position: absolute; inset: 0; }
-  .kart-stage :global(canvas) { display: block; width: 100%; height: 100%; outline: none; }
+  .kart-stage :global(canvas) { display: block; width: 100%; height: 100%; }
+  .kart-stage :global(canvas:focus-visible) { outline: 2px solid var(--accent-line-strong); outline-offset: -2px; }
   .kart-overlay { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
   .kart-overlay h2 { margin: 0; font-size: var(--fs-2xl); }
   .kart-overlay p { margin: 0; max-width: 560px; color: var(--text-dim); line-height: 1.6; }
   .kart-top { position: absolute; inset-block-start: 14px; inset-inline: 14px; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; pointer-events: none; }
   .kart-lap, .kart-item, .kart-tools, .kart-ranking, .kart-place, .kart-minimap { background: var(--scrim-media); color: var(--on-scrim); border: 1px solid color-mix(in srgb, var(--on-scrim) 18%, transparent); border-radius: var(--radius-l); }
   .kart-lap { padding: 10px 16px; display: grid; grid-template-columns: auto auto; column-gap: 12px; align-items: baseline; min-width: 150px; }
-  .kart-lap span { font-size: var(--fs-s); text-transform: uppercase; letter-spacing: .08em; opacity: .85; }
+  .kart-lap span { font-size: var(--fs-s); text-transform: uppercase; letter-spacing: .06em; opacity: .85; }
   .kart-lap strong { font-size: calc(var(--fs-hero) * 1.1); font-style: italic; line-height: 1; }
   .kart-lap small { font-size: var(--fs-l); opacity: .8; }
   .kart-lap time { grid-column: 1 / -1; font-variant-numeric: tabular-nums; font-size: var(--fs-l); margin-block-start: 4px; }
@@ -332,15 +345,13 @@
   .kart-item { width: 104px; height: 104px; display: grid; place-items: center; position: relative; border-width: 3px; }
   .kart-item img, .kart-item svg { width: 76px; height: 76px; object-fit: contain; }
   .kart-item svg { fill: var(--warning); stroke: var(--on-scrim); stroke-width: 1; }
-  .kart-item.rolling img { animation: kart-roll .08s linear infinite; }
   .kart-item b { position: absolute; inset-block-end: 4px; inset-inline-end: 8px; font-size: var(--fs-l); }
   .kart-item-name { position: absolute; inset-block-start: calc(100% + 6px); white-space: nowrap; font-size: var(--fs-s); background: var(--scrim-media); padding: 2px 8px; border-radius: var(--radius-s); }
-  .kart-item-empty { font-size: var(--fs-s); opacity: .6; text-transform: uppercase; letter-spacing: .1em; }
-  @keyframes kart-roll { from { transform: translateY(-6px); } to { transform: translateY(6px); } }
+  .kart-item-empty { font-size: var(--fs-s); opacity: .6; text-transform: uppercase; letter-spacing: .06em; }
   .kart-tools { display: flex; gap: 6px; padding: 6px; pointer-events: auto; }
   .kart-tools :global(.btn) { background: color-mix(in srgb, var(--on-scrim) 14%, transparent); color: var(--on-scrim); border-color: color-mix(in srgb, var(--on-scrim) 25%, transparent); }
   .kart-ranking { position: absolute; inset-inline-end: 14px; inset-block-start: 80px; list-style: none; margin: 0; padding: 8px; display: grid; gap: 2px; min-width: 170px; font-size: var(--fs-s); pointer-events: none; }
-  .kart-ranking li { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: var(--radius-s); }
+  .kart-ranking li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: var(--radius-s); }
   .kart-ranking li.me { background: color-mix(in srgb, var(--on-scrim) 22%, transparent); font-weight: 600; }
   .kart-ranking b { width: 14px; text-align: end; font-variant-numeric: tabular-nums; }
   .kart-rname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
@@ -351,15 +362,15 @@
   .kart-place span { font-size: var(--fs-2xl); font-style: italic; margin-inline-start: 2px; }
   .kart-minimap { position: absolute; inset-inline-start: 14px; inset-block-end: 14px; width: 200px; height: 200px; padding: 0; pointer-events: none; }
   .kart-drift { position: absolute; inset-block-end: 26px; inset-inline-start: 50%; transform: translateX(-50%); display: flex; gap: 6px; pointer-events: none; }
-  .kart-drift i { width: 34px; height: 10px; border-radius: 5px; background: color-mix(in srgb, var(--on-scrim) 25%, transparent); }
+  .kart-drift i { width: 34px; height: 10px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--on-scrim) 25%, transparent); }
   .kart-drift[data-level='1'] i:nth-child(1), .kart-drift[data-level='2'] i:nth-child(-n+2), .kart-drift[data-level='3'] i { background: var(--info); }
   .kart-drift[data-level='2'] i:nth-child(-n+2) { background: var(--warning); }
   .kart-drift[data-level='3'] i { background: var(--cat-5); }
-  .kart-notice { position: absolute; inset-block-start: 28%; inset-inline: 12px; text-align: center; font-size: clamp(26px, 4.4vw, 48px); font-weight: 700; font-style: italic; color: var(--on-scrim); text-shadow: 0 3px 10px var(--scrim-media); pointer-events: none; }
+  .kart-notice { position: absolute; inset-block-start: 28%; inset-inline: 12px; text-align: center; font-size: clamp(26px, 4.4vw, 48px); font-weight: 600; font-style: italic; color: var(--on-scrim); text-shadow: 0 3px 10px var(--scrim-media); pointer-events: none; }
   .kart-notice[data-kind='count'] { font-size: clamp(64px, 12vw, 140px); inset-block-start: 22%; }
   .kart-notice[data-kind='small'] { font-size: clamp(18px, 2.6vw, 28px); inset-block-start: 62%; }
   .kart-notice[data-kind='bad'] { color: var(--danger); }
-  .kart-wrong { position: absolute; inset-block-start: 40%; inset-inline: 0; text-align: center; font-size: var(--fs-2xl); font-weight: 700; color: var(--on-scrim); background: color-mix(in srgb, var(--danger) 70%, transparent); padding: 8px; pointer-events: none; }
+  .kart-wrong { position: absolute; inset-block-start: 40%; inset-inline: 0; text-align: center; font-size: var(--fs-2xl); font-weight: 600; color: var(--on-scrim); background: color-mix(in srgb, var(--danger) 70%, transparent); padding: 8px; pointer-events: none; }
   .kart-intro { position: absolute; inset-block-end: 22%; inset-inline: 0; text-align: center; color: var(--on-scrim); text-shadow: 0 2px 8px var(--scrim-media); pointer-events: none; }
   .kart-intro h2 { margin: 0; font-size: clamp(28px, 5vw, 56px); font-style: italic; }
   .kart-intro p { margin: 4px 0 0; font-size: var(--fs-l); text-transform: capitalize; }
@@ -370,16 +381,15 @@
   .kart-results td:nth-child(2) { display: flex; align-items: center; gap: 8px; }
   .kart-results td img { width: 34px; height: 34px; object-fit: contain; }
   .kart-results tr.me td { background: var(--accent-soft); font-weight: 600; }
-  .kart-results-kicker { text-transform: uppercase; letter-spacing: .1em; font-size: var(--fs-s); }
+  .kart-results-kicker { text-transform: uppercase; letter-spacing: .06em; font-size: var(--fs-s); }
   .kart-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .kart-keys { font-size: var(--fs-s); }
   .kart-touch { display: none; }
-  @media (max-width: 760px) { .kart-ranking { display: none; } .kart-minimap { width: 130px; height: 130px; } .kart-lap { min-width: 0; } .kart-tools { flex-wrap: wrap; justify-content: flex-end; } }
+  @media (max-width: 640px) { .kart-ranking { display: none; } .kart-minimap { width: 130px; height: 130px; } .kart-lap { min-width: 0; } .kart-tools { flex-wrap: wrap; justify-content: flex-end; } }
   @media (pointer: coarse) {
     .kart-touch { position: absolute; inset-inline: 12px; inset-block-end: 150px; display: flex; justify-content: space-between; gap: 8px; }
     .kart-touch div { display: flex; gap: 8px; }
     .kart-touch button { touch-action: none; min-width: 64px; min-height: 56px; border-radius: var(--radius-m); border: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 80%, transparent); color: var(--text); font-size: var(--fs-m); }
     .kart-hint { display: none; }
   }
-  @media (prefers-reduced-motion: reduce) { .kart-item.rolling img { animation: none; } }
 </style>

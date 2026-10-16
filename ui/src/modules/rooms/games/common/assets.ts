@@ -39,7 +39,7 @@ export class AssetLibrary {
         this.owned.add(m);
         const std = m as THREE.MeshStandardMaterial;
         if (std.map) { this.owned.add(std.map); std.map.anisotropy = 4; }
-        // Kenney palettes are flat colour swatches; matte reads best in-game.
+        // Kenney palettes are flat color swatches; matte reads best in-game.
         if ('roughness' in std) { std.roughness = Math.max(std.roughness, 0.8); std.metalness = Math.min(std.metalness, 0.1); }
       }
     });

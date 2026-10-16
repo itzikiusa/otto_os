@@ -64,17 +64,17 @@ export function stripeTexture(a = '#ffcc00', b = '#222222'): THREE.CanvasTexture
   return finish(c);
 }
 /** Name tag sprite texture. */
-export function labelTexture(text: string, colour: string): THREE.CanvasTexture {
+export function labelTexture(text: string, color: string): THREE.CanvasTexture {
   const [c, g] = canvas(256, 64);
   g.font = '600 30px system-ui, sans-serif';
   const w = Math.min(244, g.measureText(text).width + 28);
   g.fillStyle = 'rgba(0,0,0,0.55)';
   g.beginPath(); g.roundRect((256 - w) / 2, 8, w, 46, 14); g.fill();
-  g.fillStyle = colour; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillText(text, 128, 32, 230);
   return finish(c, false);
 }
-/** Subtle ground detail that multiplies vertex colours. */
+/** Subtle ground detail that multiplies vertex colors. */
 export function groundDetailTexture(): THREE.CanvasTexture {
   const [c, g] = canvas(128, 128);
   const rng = new Rng(11);

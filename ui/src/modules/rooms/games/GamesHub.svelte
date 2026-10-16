@@ -167,7 +167,7 @@
   .games-environments img { width: 112px; height: 70px; object-fit: cover; border-radius: var(--radius-s); flex-shrink: 0; background: var(--surface-2); }
   .games-environments strong { font-size: var(--fs-m); display: block; }
   .games-environments small { font-size: var(--fs-s); color: var(--text-dim); display: block; line-height: 1.5; margin-block-start: 4px; }
-  @media (max-width: 760px) {
+  @media (max-width: 640px) {
     .games-titles { grid-template-columns: 1fr; gap: 12px; }
     .games-titles img { height: 140px; }
     .games-setup { grid-template-columns: 1fr; gap: 24px; }

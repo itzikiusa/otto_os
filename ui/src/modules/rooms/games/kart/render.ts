@@ -10,7 +10,7 @@ import { Particles } from '../common/particles';
 import { approach, clamp, fbm, hashString, lerp, makeNoise, Rng, smoothstep, wrapAngle } from '../common/math';
 import { asphaltTexture, checkerTexture, chevronTexture, curbTexture, groundDetailTexture, labelTexture, stripeTexture } from '../common/textures';
 import { nearest, pointAt, rampHeight, RAMP_LENGTH, RAMP_HEIGHT, type Near, type Track } from './tracks';
-import { racerDef, type RacerId } from './roster';
+import { racerDef, RACERS, type RacerId } from './roster';
 import type { KartEvent, KartState } from './sim';
 
 const THEMES: Record<Track['def']['theme'], Theme & { ground: number[]; far: number; water: number | null; road: string; edge: number }> = {
@@ -27,7 +27,7 @@ const _v = new THREE.Vector3();
 const _look = new THREE.Vector3();
 
 interface KartVisual {
-  root: THREE.Group; body: THREE.Group; wheels: THREE.Object3D[]; front: THREE.Object3D[];
+  racer: RacerId; root: THREE.Group; body: THREE.Group; wheels: THREE.Object3D[]; front: THREE.Object3D[];
   mixer: THREE.AnimationMixer | null; flames: THREE.Mesh[]; bubble: THREE.Mesh; label: THREE.Sprite | null;
   wheelSpin: number; tilt: number; bounce: number; visualYaw: number; spinAngle: number;
 }
@@ -67,7 +67,8 @@ export class KartRenderer {
   }
 
   async load(): Promise<void> {
-    const drivers = this.racers.map(r => racerDef(r.racer).driver).filter((d): d is string => !!d);
+    // Every seated driver is loaded up front: guests may switch racer during the intro.
+    const drivers = RACERS.map(r => r.driver).filter((d): d is string => !!d);
     await Promise.all([this.lib.loadKit('kart-kit.glb'), drivers.length ? this.lib.loadCharacters(drivers) : Promise.resolve()]);
     this.buildWorld();
     for (const r of this.racers) this.karts.push(this.buildKart(r));
@@ -287,28 +288,31 @@ export class KartRenderer {
         beside(rng.pick(keys), s, side, d, rng.range(scale[0], scale[1]), false);
       }
     };
+    // Solid structures stay beyond the reachable area: outside the walls, or
+    // past the rescue line on grass tracks (karts never drive through them).
+    const gap = track.def.edge === 'grass' ? track.def.outOfBounds + 2 : 3;
     // Start area: grandstands, banner towers, flags, tents.
     for (let s = -70; s <= 70; s += 12) {
-      beside(track.def.theme === 'city' ? 'race-grandStandCovered' : 'race-grandStand', s, 1, 13, 11);
-      if (Math.abs(s) > 20) beside('race-tentLong', s, -1, 9, 6);
+      beside(track.def.theme === 'city' ? 'race-grandStandCovered' : 'race-grandStand', s, 1, gap + 6, 11);
+      if (Math.abs(s) > 20) beside('race-tentLong', s, -1, gap + 3, 6);
     }
-    beside('race-pitsGarage', -24, -1, 11, 10); beside('race-pitsOffice', 0, -1, 11, 10); beside('race-pitsGarage', 24, -1, 11, 10);
-    for (let s = -90; s < 110; s += 30) { beside('race-bannerTowerRed', s, -1, 3.5, 6); beside('race-bannerTowerGreen', s + 15, 1, 3.5, 6); }
+    beside('race-pitsGarage', -24, -1, gap + 5, 10); beside('race-pitsOffice', 0, -1, gap + 5, 10); beside('race-pitsGarage', 24, -1, gap + 5, 10);
+    for (let s = -90; s < 110; s += 30) { beside('race-bannerTowerRed', s, -1, gap + 0.5, 6); beside('race-bannerTowerGreen', s + 15, 1, gap + 0.5, 6); }
     pointAt(track, 2, 0, _pt);
     batch.add('toy-gate-finish', _pt[0], _pt[1], _pt[2], _pt[3], (hw * 2 + 6) / 1.55, 9);
     // Billboards and flags on corners.
     for (let i = 0; i < track.count; i += 22) {
       if (Math.abs(track.curve[i]) < 0.02) continue;
       const side = track.curve[i] > 0 ? -1 : 1; // outside of the bend
-      beside(rng.chance(0.5) ? 'race-billboard' : 'race-billboardLow', track.dist[i], side, 10, 9);
-      beside(rng.pick(['race-flagRed', 'race-flagGreen', 'race-flagCheckers']), track.dist[i] + 8, side, 4, 4);
+      beside(rng.chance(0.5) ? 'race-billboard' : 'race-billboardLow', track.dist[i], side, gap + 4, 9);
+      beside(rng.pick(['race-flagRed', 'race-flagGreen', 'race-flagCheckers']), track.dist[i] + 8, side, gap, 4);
     }
     const t = track.def.theme;
     if (t === 'meadow') {
-      scatter(['nat-tree_default', 'nat-tree_oak', 'nat-tree_detailed', 'nat-tree_fat', 'race-treeLarge'], 520, 10, 150, [6, 9]);
+      scatter(['nat-tree_default', 'nat-tree_oak', 'nat-tree_detailed', 'nat-tree_fat', 'race-treeLarge'], 520, gap, 150, [6, 9]);
       scatter(['nat-plant_bushLarge', 'nat-plant_bush', 'nat-flower_redA', 'nat-flower_yellowB', 'nat-flower_purpleA', 'nat-mushroom_redGroup'], 600, 3, 40, [5, 8]);
-      scatter(['nat-tent_detailedOpen', 'nat-log_stack', 'nat-stump_old'], 50, 12, 50, [6, 8]);
-      for (let i = 0; i < track.count; i += 7) if (Math.abs(track.curve[i]) > 0.018) beside('nat-fence_simple', track.dist[i], track.curve[i] > 0 ? -1 : 1, 6, 5);
+      scatter(['nat-tent_detailedOpen', 'nat-log_stack', 'nat-stump_old'], 50, gap, 50, [6, 8]);
+      for (let i = 0; i < track.count; i += 7) if (Math.abs(track.curve[i]) > 0.018) beside('nat-fence_simple', track.dist[i], track.curve[i] > 0 ? -1 : 1, gap - 1, 5);
     } else if (t === 'city') {
       const blocks = ['city-building-a', 'city-building-b', 'city-building-c', 'city-building-d', 'city-building-e', 'city-building-f', 'city-building-g', 'city-building-h', 'city-building-i', 'city-building-j', 'city-building-k', 'city-building-l'];
       for (let s = 0; s < track.length; s += 15) for (const side of [-1, 1]) {
@@ -326,9 +330,9 @@ export class KartRenderer {
       scatter(['nat-cactus_tall', 'nat-cactus_short', 'nat-rock_largeA', 'nat-rock_largeC'], 260, 6, 70, [5, 9]);
       scatter(['nat-tree_palmTall', 'nat-tree_palmBend'], 40, 10, 60, [6, 8]);
     } else {
-      scatter(['plat-tree-pine-snow', 'plat-tree-snow', 'plat-tree-pine-snow-small'], 620, 8, 170, [4, 7]);
-      scatter(['plat-rocks', 'plat-block-snow-large', 'nat-rock_largeA'], 120, 8, 90, [4, 8]);
-      scatter(['plat-flag'], 30, 3, 6, [5, 6]);
+      scatter(['plat-tree-pine-snow', 'plat-tree-snow', 'plat-tree-pine-snow-small'], 620, gap, 170, [4, 7]);
+      scatter(['plat-rocks', 'plat-block-snow-large', 'nat-rock_largeA'], 120, gap, 90, [4, 8]);
+      scatter(['plat-stones'], 90, 4, gap - 2, [3, 5]);
     }
     const group = new THREE.Group();
     batch.build(group, true);
@@ -377,7 +381,7 @@ export class KartRenderer {
       root.add(label);
     }
     this.view.scene.add(root);
-    return { root, body, wheels, front, mixer, flames, bubble, label, wheelSpin: 0, tilt: 0, bounce: 0, visualYaw: 0, spinAngle: 0 };
+    return { racer: r.racer, root, body, wheels, front, mixer, flames, bubble, label, wheelSpin: 0, tilt: 0, bounce: 0, visualYaw: 0, spinAngle: 0 };
   }
 
   // ── Frame ────────────────────────────────────────────────────────────────
@@ -399,7 +403,18 @@ export class KartRenderer {
   frame(state: KartState, dt: number, lookBack: boolean): void {
     this.time += dt;
     const self = state.racers[this.self] ?? state.racers[0];
-    state.racers.forEach((r, i) => this.updateKart(this.karts[i], r, dt, i === this.self));
+    state.racers.forEach((r, i) => {
+      const visual = this.karts[i];
+      if (!visual) return;
+      if (visual.racer !== r.racer) {
+        // A guest picked a different racer: swap the kart model in place.
+        visual.mixer?.stopAllAction();
+        visual.root.removeFromParent();
+        this.racers[i] = { ...this.racers[i], racer: r.racer };
+        this.karts[i] = this.buildKart(this.racers[i]);
+      }
+      this.updateKart(this.karts[i], r, dt, i === this.self);
+    });
     // Item boxes spin and pop back.
     state.boxes.forEach((b, i) => {
       const box = this.boxes[i];
@@ -482,8 +497,9 @@ export class KartRenderer {
     if (state.phase === 'intro') {
       // Sweep around the grid before the countdown.
       const t = Math.min(1, state.clock / 2.5);
-      const a = self.yaw + Math.PI * (1.4 - t * 1.4);
-      const d = lerp(26, 8, t), h = lerp(12, 3.2, t);
+      const ease = t * t * (3 - 2 * t);
+      const a = self.yaw + Math.PI * (1 - ease);
+      const d = lerp(30, 8, ease), h = lerp(22, 3.4, ease);
       cam.position.set(self.x + Math.sin(a) * d, self.y + h, self.z + Math.cos(a) * d);
       cam.lookAt(self.x, self.y + 1.2, self.z);
       this.camPos.copy(cam.position); this.camLook.set(self.x, self.y + 1.2, self.z); this.camReady = true;
@@ -491,8 +507,8 @@ export class KartRenderer {
     }
     const heading = r_heading(self);
     const back = lookBack ? -1 : 1;
-    const dist = 7.6 + clamp(self.speed, 0, 40) * 0.05;
-    _v.set(self.x - Math.sin(heading) * dist * back, self.y + 3.1, self.z - Math.cos(heading) * dist * back);
+    const dist = 7.8 + clamp(self.speed, 0, 40) * 0.05;
+    _v.set(self.x - Math.sin(heading) * dist * back, self.y + 3.4, self.z - Math.cos(heading) * dist * back);
     // Keep the camera above the terrain.
     const n = nearest(this.track, _v.x, _v.z, self.hint, _near, 20);
     _v.y = Math.max(_v.y, this.track.ground(_v.x, _v.z, n) + 1.5);

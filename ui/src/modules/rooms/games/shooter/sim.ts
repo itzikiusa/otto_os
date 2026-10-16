@@ -15,7 +15,7 @@ import type { ShooterSeat } from '../setup.ts';
 export type Difficulty = 'easy' | 'normal' | 'hard';
 export const STEP = 1 / 60;
 export const MAX_FIGHTERS = 16;
-export const MAX_LOOT = 320;
+export const MAX_LOOT = 220;
 export const MAX_ROCKETS = 12;
 export const BUS_HEIGHT = 95;
 export const BUS_SPEED = 26;
@@ -84,7 +84,7 @@ export function createMatch(setup: ShooterSetup): ShooterState {
   const bus = { ax: cx - Math.cos(angle) * reach, az: cz - Math.sin(angle) * reach, bx: cx + Math.cos(angle) * reach, bz: cz + Math.sin(angle) * reach, t: 0, duration: (reach * 2) / BUS_SPEED };
   const players = setup.seats.slice(0, MAX_FIGHTERS).map((seat, i): Fighter => ({
     id: i, fighter: seat.fighter, name: seat.name, human: seat.human, slot: seat.slot,
-    x: bus.ax, y: BUS_HEIGHT, z: bus.az, vx: 0, vy: 0, vz: 0, yaw: angle + Math.PI / 2 * 0 + Math.atan2(Math.cos(angle), Math.sin(angle)) - angle, pitch: -0.3, grounded: false,
+    x: bus.ax, y: BUS_HEIGHT, z: bus.az, vx: 0, vy: 0, vz: 0, yaw: Math.atan2(Math.cos(angle), Math.sin(angle)), pitch: -0.3, grounded: false,
     mode: 'bus', hp: 100, shield: 0, kills: 0, damage: 0, place: 0, killedBy: -1, aliveTime: 0,
     weapons: [null, null, null], current: 0, ammo: emptyAmmo(),
     cooldown: 0, reload: 0, aiming: false, sprinting: false, moving: false, shootT: 0, hurtT: 0, bloom: 0,
@@ -92,7 +92,6 @@ export function createMatch(setup: ShooterSetup): ShooterState {
     bot: { goalX: 0, goalZ: 0, think: rng.range(0, 0.3), target: -1, seen: 0, strafe: 1, strafeT: 0, stuck: 0, lastX: 0, lastZ: 0, dropAt: 0, burst: 0, errX: 0, errY: 0, loot: -1, jumpT: 0 },
   }));
   for (const p of players) {
-    p.yaw = Math.atan2(bus.bx - bus.ax, bus.bz - bus.az);
     if (!p.human) {
       // Bots pick a landing spot and jump when the flight passes closest to it.
       const spot = rng.chance(0.75) ? rng.pick(map.lootSpots) : rng.pick(map.pois);
@@ -376,14 +375,15 @@ function swapWeapon(state: ShooterState, p: Fighter): void {
   emit(state, 'pickup', p.id, p.x, p.y, p.z, { value: 0 });
 }
 
-const EYE = 1.55;
+export const EYE = 1.55;
 function fire(state: ShooterState, map: ShooterMap, world: World, p: Fighter, held: Held, rng: Rng): void {
   const def = WEAPONS[held.w];
   held.mag--;
   p.cooldown = 1 / def.rate;
   p.shootT = 0.25;
   const [fx, fz] = fwd(p.yaw);
-  const ox = p.x + fz * -0.35 * -1, oy = p.y + EYE, oz = p.z - fx * 0.35;
+  // Muzzle sits over the right shoulder; right of facing (fx, fz) is (-fz, fx).
+  const ox = p.x - fz * 0.3, oy = p.y + EYE, oz = p.z + fx * 0.3;
   const cp = Math.cos(p.pitch);
   const baseX = fx * cp, baseY = Math.sin(p.pitch), baseZ = fz * cp;
   const spread = (p.aiming ? def.adsSpread : def.spread) * (p.moving ? 1.4 : 1) * (p.grounded ? 1 : 2) + p.bloom;
@@ -459,7 +459,8 @@ function eliminate(state: ShooterState, q: Fighter, from: number, weapon: Weapon
   const y = q.y;
   for (const w of q.weapons) if (w) { const [x, z] = ring(k++); dropWeapon(state, w.w, w.rarity, w.mag, x, y, z); }
   for (const kind of AMMO_KINDS) if (q.ammo[kind] > 0) { const [x, z] = ring(k++); dropLoot(state, 'ammo', kind, q.ammo[kind], x, y, z); }
-  if (q.shield > 0 || k < 2) { const [x, z] = ring(k++); dropLoot(state, 'heal', null, 25, x, y, z); }
+  // Every elimination leaves a small heal for whoever won the fight.
+  { const [x, z] = ring(k++); dropLoot(state, 'heal', null, 25, x, y, z); }
   q.weapons = [null, null, null];
   q.ammo = emptyAmmo();
 }
@@ -528,6 +529,6 @@ function stepStorm(state: ShooterState, rng: Rng): void {
 export interface ShooterResult { id: number; name: string; fighter: FighterId; human: boolean; slot: number; place: number; kills: number; damage: number; time: number }
 export function shooterResults(state: ShooterState): ShooterResult[] {
   return [...state.players].sort((a, b) => (a.place || 99) - (b.place || 99) || b.kills - a.kills)
-    .map(p => ({ id: p.id, name: p.name, fighter: p.fighter, human: p.human, slot: p.slot, place: p.place || 1, kills: p.kills, damage: Math.round(p.damage), time: p.aliveTime }));
+    .map(p => ({ id: p.id, name: p.name, fighter: p.fighter, human: p.human, slot: p.slot, place: p.place || aliveCount(state), kills: p.kills, damage: Math.round(p.damage), time: p.aliveTime }));
 }
 export { HEIGHT };

@@ -31,7 +31,7 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
   meadow: {
     id: 'meadow', name: 'Sunny Meadow', blurb: 'Rolling farmland, a lakeside sweep and a hilltop jump. A friendly first Grand Prix.',
     points: [[0, 0, 0], [100, 0, 0], [150, 20, 1], [170, 60, 3], [150, 100, 5], [110, 110, 6], [80, 140, 7], [90, 185, 8], [140, 200, 7], [200, 190, 5], [250, 210, 4], [270, 260, 4], [230, 300, 3], [150, 300, 2], [60, 290, 3], [-10, 260, 5], [-40, 210, 7], [-20, 160, 8], [-50, 110, 6], [-100, 100, 4], [-130, 60, 2], [-100, 15, 0], [-50, 0, 0]],
-    width: 17, edge: 'grass', outOfBounds: 26, itemRows: [0.16, 0.47, 0.76], boostPads: [{ at: 0.31, lane: 0.35 }, { at: 0.62, lane: -0.35 }, { at: 0.9, lane: 0 }],
+    width: 17, edge: 'grass', outOfBounds: 16, itemRows: [0.16, 0.47, 0.76], boostPads: [{ at: 0.31, lane: 0.35 }, { at: 0.62, lane: -0.35 }, { at: 0.9, lane: 0 }],
     ramps: [0.555], ice: [], hills: 9, theme: 'meadow',
   },
   downtown: {
@@ -49,7 +49,7 @@ export const TRACK_DEFS: Record<TrackId, TrackDef> = {
   frost: {
     id: 'frost', name: 'Frostbite Pass', blurb: 'Snowy pines, an icy lake crossing and a mountain-pass descent. Watch your grip.',
     points: [[0, 0, 0], [110, 0, 1], [160, -30, 3], [220, -30, 5], [260, 0, 7], [270, 50, 9], [240, 90, 11], [190, 100, 12], [160, 130, 12], [170, 180, 13], [220, 200, 14], [250, 240, 12], [220, 280, 9], [150, 290, 6], [80, 270, 4], [40, 230, 3], [0, 240, 3], [-50, 250, 4], [-90, 220, 5], [-90, 170, 4], [-60, 130, 3], [-80, 90, 2], [-90, 40, 1], [-50, 5, 0]],
-    width: 17, edge: 'grass', outOfBounds: 24, itemRows: [0.15, 0.44, 0.73], boostPads: [{ at: 0.28, lane: -0.3 }, { at: 0.57, lane: 0.3 }, { at: 0.88, lane: 0 }],
+    width: 17, edge: 'grass', outOfBounds: 15, itemRows: [0.15, 0.44, 0.73], boostPads: [{ at: 0.28, lane: -0.3 }, { at: 0.57, lane: 0.3 }, { at: 0.88, lane: 0 }],
     ramps: [0.66], ice: [[0.47, 0.55]], hills: 16, theme: 'frost',
   },
 };

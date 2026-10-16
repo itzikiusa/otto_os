@@ -1,7 +1,7 @@
 /** Builds match seats: humans in member-slot order, computer players fill the rest. */
-import { RACERS, type RacerId } from './kart/roster';
-import type { KartSeat } from './kart/sim';
-import { FIGHTERS, type FighterId } from './shooter/catalog';
+import { RACERS, type RacerId } from './kart/roster.ts';
+import type { KartSeat } from './kart/sim.ts';
+import { FIGHTERS, type FighterId } from './shooter/catalog.ts';
 
 export interface HumanSeat { slot: number; name: string; pick: string }
 
