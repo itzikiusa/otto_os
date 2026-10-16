@@ -215,12 +215,10 @@ impl SwarmTrigger for SwarmTriggerImpl {
             let body = if t.keyword.trim().is_empty() {
                 text.trim().to_string()
             } else {
-                let kw = t.keyword.trim();
-                let lower = text.trim_start();
-                if !lower.to_lowercase().starts_with(&kw.to_lowercase()) {
+                let Some(rest) = strip_keyword(text, t.keyword.trim()) else {
                     continue;
-                }
-                lower[kw.len()..].trim().to_string()
+                };
+                rest.trim().to_string()
             };
             if body.is_empty() {
                 continue;
@@ -269,3 +267,43 @@ impl SwarmTrigger for SwarmTriggerImpl {
 }
 
 use otto_core::text::clip_chars as clip;
+
+/// The message after a case-insensitive leading `kw`, or `None` when it does
+/// not start with it. Matches lowercase forms CHARACTER by character and cuts
+/// at a char boundary of the message: slicing the original at `kw.len()`
+/// after a lowercase match panicked (and dropped the message) whenever
+/// lowercasing changed a byte length — a Kelvin sign `K` matching `k`.
+fn strip_keyword<'a>(text: &'a str, kw: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    let mut want = kw.chars().flat_map(char::to_lowercase).peekable();
+    for (i, c) in text.char_indices() {
+        if want.peek().is_none() {
+            return Some(&text[i..]);
+        }
+        for lc in c.to_lowercase() {
+            if want.next() != Some(lc) {
+                return None;
+            }
+        }
+    }
+    want.peek().is_none().then_some("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_keyword;
+
+    #[test]
+    fn keyword_strip_is_case_insensitive_and_char_safe() {
+        assert_eq!(
+            strip_keyword("  Deploy the app", "deploy"),
+            Some(" the app")
+        );
+        assert_eq!(strip_keyword("deploy", "DEPLOY"), Some(""));
+        assert_eq!(strip_keyword("dep", "deploy"), None);
+        assert_eq!(strip_keyword("ship it", "deploy"), None);
+        // Kelvin sign lowercases to `k` (3 bytes vs 1): no panic, right cut.
+        assert_eq!(strip_keyword("\u{212A}8s rollout", "k8s"), Some(" rollout"));
+        assert_eq!(strip_keyword("Ünïcode go", "ünïcode"), Some(" go"));
+    }
+}
