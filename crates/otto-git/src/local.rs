@@ -4607,11 +4607,13 @@ impl LocalGit {
     /// Best-effort source ref for an in-progress merge: first line of
     /// `.git/MERGE_MSG` (e.g. "Merge branch 'feature'"), else the MERGE_HEAD sha.
     async fn merge_source(&self) -> Option<String> {
-        let git_dir = self.repo_path.join(".git");
-        let msg_path = git_dir.join("MERGE_MSG");
-        if let Ok(text) = tokio::fs::read_to_string(&msg_path).await {
-            if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
-                return Some(line.trim().to_string());
+        // The real git dir: in a linked worktree `.git` is a FILE, so
+        // `<tree>/.git/MERGE_MSG` never existed and the label fell back to a sha.
+        if let Some(git_dir) = self.git_dir().await {
+            if let Ok(text) = tokio::fs::read_to_string(git_dir.join("MERGE_MSG")).await {
+                if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
+                    return Some(line.trim().to_string());
+                }
             }
         }
         self.run(&["rev-parse", "MERGE_HEAD"])
@@ -5938,6 +5940,33 @@ mod tests {
         let st = git.status().await.unwrap();
         assert!(st.changes.iter().any(|c| c.path == "a.txt" && c.unstaged));
         assert!(st.changes.iter().any(|c| c.path == "e.txt"));
+    }
+
+    /// In a LINKED worktree `.git` is a file: the merge label must still come
+    /// from MERGE_MSG in the real git dir, not fall back to a bare sha.
+    #[tokio::test]
+    async fn merge_source_reads_merge_msg_in_a_linked_worktree() {
+        let (tmp, dir) = fixture_n_commits(1);
+        sh_git(&dir, &["checkout", "-b", "side"]);
+        write(&dir, "f.txt", "side\n");
+        sh_git(&dir, &["commit", "-am", "side"]);
+        sh_git(&dir, &["checkout", "main"]);
+        let wt = tmp.path().join("wt");
+        sh_git(
+            &dir,
+            &["worktree", "add", "-b", "wtb", wt.to_str().unwrap(), "main"],
+        );
+        write(&wt, "f.txt", "wt\n");
+        sh_git(&wt, &["commit", "-am", "wt"]);
+        let merged = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["merge", "side"])
+            .output()
+            .unwrap();
+        assert!(!merged.status.success(), "the fixture must conflict");
+        let ms = LocalGit::new(&wt).merge_status().await.unwrap();
+        assert!(ms.merging);
+        assert_eq!(ms.source.as_deref(), Some("Merge branch 'side' into wtb"));
     }
 
     /// A conflicting cherry-pick is a normal outcome: status reports the op +
