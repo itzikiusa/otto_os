@@ -11,7 +11,6 @@
 use async_trait::async_trait;
 use axum::extract::State;
 use axum::response::Response;
-use axum::Json;
 use otto_core::auth::AuthContext;
 use otto_core::Error;
 use otto_mcp::outward::{jsonrpc, OutwardTools};
@@ -49,8 +48,14 @@ pub async fn mcp_http_post(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,
     untimed: Option<axum::Extension<crate::telemetry::UntimedMark>>,
-    Json(body): Json<Value>,
+    raw: axum::body::Bytes,
 ) -> Response {
+    // Parsed here, not by the `Json` extractor: its plain-text 400 is not a
+    // JSON-RPC answer, so a client sending a malformed body got no -32700.
+    let body: Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(e) => return jsonrpc::parse_error_response(&e.to_string()),
+    };
     // A `tools/call` of `wait_session` parks like the LONG_POLLS route it
     // self-calls: keep it out of the operation timings (S9-304).
     if let Some(axum::Extension(mark)) = &untimed {

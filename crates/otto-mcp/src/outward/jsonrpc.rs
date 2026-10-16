@@ -96,6 +96,16 @@ pub async fn post_response<T: OutwardTools + ?Sized>(
     }
 }
 
+/// The answer to a body that is not JSON at all: a JSON-RPC parse error
+/// (`-32700`, id null) with HTTP 400.
+pub fn parse_error_response(detail: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(rpc_err(None, -32700, format!("parse error: {detail}"))),
+    )
+        .into_response()
+}
+
 /// Handle a single JSON-RPC message. Returns `Some(response)` for a request and
 /// `None` for a notification (no `id`).
 async fn handle_one<T: OutwardTools + ?Sized>(
@@ -241,6 +251,14 @@ mod framing_tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_json_is_a_parse_error() {
+        let (status, v) = body(parse_error_response("expected value")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"]["code"], -32700);
+        assert_eq!(v["id"], Value::Null);
     }
 
     #[tokio::test]
