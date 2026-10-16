@@ -206,6 +206,7 @@ checks on the target hardware.
 
 ## Games
 
-The Rooms toolbar also opens [Room games](./room-games.md): standalone 3D shooter
-and kart matches against another person or the computer. These do not require
+The Rooms toolbar also opens [Room games](./room-games.md): a standalone 3D
+battle-royale shooter and an eight-racer kart game, against room guests and
+computer players. These do not require
 a coding session and use separate game-only guest capabilities.
