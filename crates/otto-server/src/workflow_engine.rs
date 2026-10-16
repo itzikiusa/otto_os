@@ -6040,9 +6040,8 @@ async fn execute_node(
                         change_notes: Some(format!("from workflow node {}", node.id)),
                         created_by: user.id.clone(),
                     };
-                    if let Ok(v) = ctx.product_repo.add_version(nv).await {
-                        out.insert("version_id".into(), json!(v.id));
-                    }
+                    let v = persisted_version(ctx.product_repo.add_version(nv).await)?;
+                    out.insert("version_id".into(), json!(v));
                 }
             }
             Ok((Value::Object(out), vec![format!("{kind}: complete")]))
@@ -8628,6 +8627,19 @@ fn canvas_node_ext(mode: &str) -> &'static str {
     }
 }
 
+/// The version id a `product_*` step with `persist: true` saved. A failed
+/// save used to be dropped silently: the step succeeded without its
+/// `version_id`, and nothing said the result was never stored.
+fn persisted_version(
+    saved: otto_core::Result<otto_state::ProductStoryVersion>,
+) -> otto_core::Result<String> {
+    saved.map(|v| v.id).map_err(|e| {
+        otto_core::Error::Internal(format!(
+            "the step finished but saving its result as a product version failed: {e}"
+        ))
+    })
+}
+
 /// Data-dir-relative file of a `canvas` step's diagram. Step ids are only
 /// checked for being non-empty and unique, so an id like `../../../tmp/x`
 /// wrote (and created directories) outside the data dir; such an id falls
@@ -8642,6 +8654,13 @@ fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
 
 #[cfg(test)]
 mod canvas_rel_tests {
+    /// A failed product-version save fails the step instead of vanishing.
+    #[test]
+    fn a_failed_product_version_save_is_an_error() {
+        let failed = super::persisted_version(Err(otto_core::Error::Internal("disk full".into())));
+        assert!(failed.unwrap_err().to_string().contains("disk full"));
+    }
+
     #[test]
     fn a_canvas_step_id_cannot_leave_the_canvas_dir() {
         assert_eq!(
