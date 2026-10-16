@@ -917,6 +917,7 @@ pub fn parse_raw_numstat(out: &[u8]) -> DiffResp {
         status: FileChangeStatus,
         old_path: Option<String>,
         path: String,
+        unmerged: bool,
     }
     let text = String::from_utf8_lossy(out);
     let mut tok = text.split('\0');
@@ -951,6 +952,7 @@ pub fn parse_raw_numstat(out: &[u8]) -> DiffResp {
                 status,
                 old_path,
                 path,
+                unmerged: letter == 'U',
             });
             continue;
         }
@@ -965,6 +967,23 @@ pub fn parse_raw_numstat(out: &[u8]) -> DiffResp {
             rest.to_string()
         };
         stats.push((a.parse().ok(), d.parse().ok(), path));
+    }
+    // Mid-merge, the work-tree diff prints a conflicted path twice: a `U`
+    // record (with a `0 0` numstat row) and then its real `M` change. Keep
+    // only the real one so the file isn't listed twice; a lone `U` (the
+    // staged view) stays.
+    if raws.len() == stats.len() {
+        let mut i = 0;
+        while i < raws.len() {
+            let dup =
+                raws[i].unmerged && raws.iter().any(|o| !o.unmerged && o.path == raws[i].path);
+            if dup {
+                raws.remove(i);
+                stats.remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
     let by_path: Option<std::collections::HashMap<&str, usize>> =
         (raws.len() != stats.len()).then(|| {
@@ -2176,6 +2195,21 @@ submodule.other.url=https://example.com/other.git
         assert!(d.files.iter().all(|f| f.hunks_omitted == Some(true)));
         assert_eq!((d.total_added, d.total_deleted), (Some(4), Some(3)));
         assert!(parse_raw_numstat(b"").files.is_empty());
+    }
+
+    #[test]
+    fn a_conflicted_path_is_listed_once_mid_merge() {
+        // Real `diff --raw --numstat -z` output of the work tree during a
+        // conflicted merge: `U f` + `M f`, then a numstat row for each.
+        let worktree = b":000000 100644 0000000 0000000 U\0f\0:100644 100644 b19a1e9 0000000 M\0f\0:100644 100644 1111111 0000000 M\0g\0\
+0\t0\tf\x004\t0\tf\x001\t1\tg\0";
+        let d = parse_raw_numstat(worktree);
+        let got: Vec<(&str, Option<u32>)> =
+            d.files.iter().map(|f| (f.path.as_str(), f.added)).collect();
+        assert_eq!(got, [("f", Some(4)), ("g", Some(1))]);
+        // The staged view has only the `U` record: still listed.
+        let staged = b":100644 000000 b19a1e9 0000000 U\0f\x000\t0\tf\0";
+        assert_eq!(parse_raw_numstat(staged).files.len(), 1);
     }
 
     #[test]
