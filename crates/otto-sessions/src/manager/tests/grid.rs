@@ -77,3 +77,39 @@ async fn grid_feed_tracks_resizes_claims_and_the_owner_leaving() {
     assert!(!mgr.grids.contains(&id));
     let _ = handle.kill();
 }
+
+/// A process that exits under an attached viewer reads as 0×0 (ws.md: "0
+/// while no process is live"): the feed used to keep the dead PTY's grid, so
+/// a pane went on judging (and claiming against) a grid nothing had.
+#[tokio::test]
+async fn grid_feed_reads_zero_once_the_process_exits() {
+    let (mgr, repo, ws, owner) = test_manager().await;
+    let id = seed_session(&repo, &ws, &owner, None).await;
+    let spec = CommandSpec {
+        program: "/bin/cat".into(),
+        args: vec![],
+        cwd: Some("/".into()),
+        env: vec![],
+    };
+    let handle = Arc::new(PtyHandle::spawn_sized(&spec, 120, 40).unwrap());
+    mgr.live.insert(id.clone(), Arc::clone(&handle));
+    mgr.start_status_task(
+        id.clone(),
+        ws.id.clone(),
+        "shell".into(),
+        Arc::clone(&handle),
+        false,
+    );
+    let _viewer = mgr.attach(&id);
+    let mut rx = mgr.grid_watch(&id);
+    assert_eq!(rx.borrow_and_update().cols, 120);
+    let _ = handle.kill();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while rx.borrow_and_update().cols != 0 {
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the exit publishes 0x0");
+    assert_eq!(*rx.borrow(), GridState::default());
+}
