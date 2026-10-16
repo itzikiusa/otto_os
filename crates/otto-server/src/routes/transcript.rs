@@ -36,7 +36,9 @@ use otto_transcript::{
 };
 use serde::Deserialize;
 
-use crate::auth::{require_session_owner_or_admin, require_ws_role, CurrentUser};
+use crate::auth::{
+    require_session_owner_or_admin, require_ws_role, CurrentAuthContext, CurrentUser,
+};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
@@ -769,7 +771,22 @@ pub(crate) async fn register_work_artifact(ctx: &ServerCtx, session: &Session, a
 /// The artifact-serving allow-list (design §4.7): the session cwd, the daemon
 /// data dir, the per-user temp dir (`std::env::temp_dir()`, NOT `/tmp`) — all
 /// canonicalized; plus the fs.rs secret-store deny-list on top.
-fn artifact_path_allowed(canonical: &Path, session_cwd: &str, data_dir: &Path) -> bool {
+///
+/// `owner`: the root user on their own credential (`ui_bridge::is_human`).
+/// They read any file of this machine through `/fs/read` already, so an
+/// artifact the agent wrote to `/tmp/report.html` or named `server.pem` is
+/// served to them too. The list still binds every other caller — a viewer,
+/// an agent session's or MCP credential — since the transcript (and so the
+/// path) is agent-controlled.
+fn artifact_path_allowed(
+    canonical: &Path,
+    session_cwd: &str,
+    data_dir: &Path,
+    owner: bool,
+) -> bool {
+    if owner {
+        return true;
+    }
     let roots: Vec<PathBuf> = [Path::new(session_cwd), data_dir, &std::env::temp_dir()]
         .iter()
         .filter_map(|p| p.canonicalize().ok())
@@ -788,8 +805,10 @@ pub async fn get_artifact(
     AxPath((id, artifact_id)): AxPath<(Id, String)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
 ) -> ApiResult<Response> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let owner = user.is_root && crate::ui_bridge::is_human(&auth);
     let arts = session_artifacts(&ctx, &session).await?;
     let art = arts
         .into_iter()
@@ -808,7 +827,7 @@ pub async fn get_artifact(
     let canonical = target
         .canonicalize()
         .map_err(|e| ApiError(Error::Invalid(format!("cannot resolve artifact: {e}"))))?;
-    if !artifact_path_allowed(&canonical, &session.cwd, &ctx.data_dir) {
+    if !artifact_path_allowed(&canonical, &session.cwd, &ctx.data_dir, owner) {
         return Err(ApiError(Error::Forbidden(
             "artifact path is not permitted".into(),
         )));
@@ -1519,7 +1538,8 @@ mod tests {
         assert!(artifact_path_allowed(
             &canon,
             &cwd.path().to_string_lossy(),
-            data.path()
+            data.path(),
+            false
         ));
         // Same file, but a session whose cwd is elsewhere may not read it.
         let other = tempfile::tempdir().unwrap();
@@ -1534,15 +1554,34 @@ mod tests {
         assert!(!artifact_path_allowed(
             &env.canonicalize().unwrap(),
             &cwd.path().to_string_lossy(),
-            data.path()
+            data.path(),
+            false
         ));
         let key = cwd.path().join("id_rsa.pem");
         std::fs::write(&key, "k").unwrap();
         assert!(!artifact_path_allowed(
             &key.canonicalize().unwrap(),
             &cwd.path().to_string_lossy(),
-            data.path()
+            data.path(),
+            false
         ));
+    }
+
+    #[test]
+    fn the_owner_opens_any_artifact_the_agent_wrote() {
+        let cwd = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let key = cwd.path().join("server.pem");
+        std::fs::write(&key, "k").unwrap();
+        let key = key.canonicalize().unwrap();
+        let elsewhere = Path::new("/");
+        let cwd = cwd.path().to_string_lossy();
+        // A key-like name inside the cwd, and a path outside every root:
+        // refused to everyone else, served to the root owner.
+        assert!(!artifact_path_allowed(&key, &cwd, data.path(), false));
+        assert!(artifact_path_allowed(&key, &cwd, data.path(), true));
+        assert!(!artifact_path_allowed(elsewhere, &cwd, data.path(), false));
+        assert!(artifact_path_allowed(elsewhere, &cwd, data.path(), true));
     }
 
     #[test]
