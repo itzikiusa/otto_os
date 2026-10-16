@@ -380,7 +380,6 @@
   "private-keyframes": {},
   "radius-literal": {},
   "raw-set-interval": {
-    "src/modules/connections/SessionNetworkStatus.svelte": 1,
     "src/modules/panels/BrowserPanel.svelte": 1
   },
   "raw-toast-body": {},
