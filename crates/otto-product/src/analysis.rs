@@ -683,6 +683,14 @@ pub async fn retry_analysis_agent<C: ProductStudioHost>(
             "analysis agent {agent_id}"
         ))));
     }
+    // The summarizer is not a lens: a retry re-ran it with the LENS prompt and
+    // stored lens-shaped findings on the summary row (the UI hides Retry for
+    // it and the boot reaper refuses it; the route must too).
+    if crate::run::is_summarizer_agent(&agent.name) {
+        return Err(ApiError(Error::Invalid(
+            "the summarizer can't be retried on its own — re-run the analysis".into(),
+        )));
+    }
     // A freshly inserted original lens can be visible before it claims ownership.
     // Stop it first; retries never queue behind a currently running attempt.
     if matches!(agent.status.as_str(), "running" | "waiting" | "pending") {

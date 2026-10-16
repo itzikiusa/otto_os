@@ -122,6 +122,26 @@ impl ImprovementEngine {
         &self,
         run_id: &Id,
         ws_id: &Id,
+        trigger: ImprovementTrigger,
+        autonomy_override: Option<otto_core::domain::Autonomy>,
+        providers_override: Option<Vec<String>>,
+    ) -> Result<()> {
+        let res = self
+            .execute_run_body(
+                run_id,
+                ws_id,
+                trigger,
+                autonomy_override,
+                providers_override,
+            )
+            .await;
+        self.settle_unfinished(ws_id, run_id, res).await
+    }
+
+    async fn execute_run_body(
+        &self,
+        run_id: &Id,
+        ws_id: &Id,
         _trigger: ImprovementTrigger,
         autonomy_override: Option<otto_core::domain::Autonomy>,
         providers_override: Option<Vec<String>>,
@@ -304,6 +324,11 @@ impl ImprovementEngine {
         ws_id: &Id,
         session_id: &Id,
     ) -> Result<()> {
+        let res = self.execute_evolve_body(run_id, ws_id, session_id).await;
+        self.settle_unfinished(ws_id, run_id, res).await
+    }
+
+    async fn execute_evolve_body(&self, run_id: &Id, ws_id: &Id, session_id: &Id) -> Result<()> {
         let session = self.sessions.get(session_id).await?;
         if session.workspace_id != *ws_id {
             return Err(Error::Forbidden(
@@ -790,6 +815,40 @@ impl ImprovementEngine {
         Ok(())
     }
 
+    /// A run whose body bailed out with `?` (a database error, a session
+    /// deleted meanwhile) used to stay `running` — and `create_run` refuses
+    /// every scheduled, manual and live run of the workspace while one is, so
+    /// self-improvement stopped until a daemon restart. Settle it `failed`
+    /// (only if nothing settled it already) and pass the result through.
+    async fn settle_unfinished<T>(&self, ws_id: &Id, run_id: &Id, res: Result<T>) -> Result<T> {
+        if let Err(e) = &res {
+            let still_running = self
+                .improvements
+                .get_run(run_id)
+                .await
+                .map(|r| r.status == ImprovementRunStatus::Running)
+                .unwrap_or(true);
+            if still_running
+                && self
+                    .improvements
+                    .finish_run(
+                        run_id,
+                        ImprovementRunStatus::Failed,
+                        "",
+                        0,
+                        0,
+                        0,
+                        Some(&e.to_string()),
+                    )
+                    .await
+                    .is_ok()
+            {
+                self.emit_finished(ws_id, run_id, "failed", 0, 0);
+            }
+        }
+        res
+    }
+
     fn emit_finished(&self, ws_id: &Id, run_id: &Id, status: &str, applied: i64, pending: i64) {
         let _ = self.events.send(Event::ImprovementRunFinished {
             workspace_id: ws_id.clone(),
@@ -821,7 +880,20 @@ impl ImprovementEngine {
         trigger: ImprovementTrigger,
     ) -> Result<Id> {
         let run = self.improvements.create_run(ws_id, trigger).await?;
-        let id = run.id.clone();
+        let res = self
+            .run_for_narrative_body(run.id.clone(), ws_id, title, narrative, target_skills)
+            .await;
+        self.settle_unfinished(ws_id, &run.id, res).await
+    }
+
+    async fn run_for_narrative_body(
+        &self,
+        id: Id,
+        ws_id: &Id,
+        title: &str,
+        narrative: &str,
+        target_skills: &[String],
+    ) -> Result<Id> {
         let _ = self.events.send(Event::ImprovementRunStarted {
             workspace_id: ws_id.clone(),
             run_id: id.clone(),
@@ -1323,6 +1395,51 @@ mod tests {
             assert_eq!(current.settings["keep"], "user edit");
             assert!(cfg.enabled);
         }
+    }
+
+    /// A run whose body errors out early is settled `failed`, never left
+    /// `running` (which refused every later run of the workspace).
+    #[tokio::test]
+    async fn an_early_error_still_settles_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let workspaces = WorkspacesRepo::new(pool.clone());
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let uid = users.create("root", "pw", "root", true).await.unwrap().id;
+        let ws = workspaces
+            .create("t", dir.path().to_str().unwrap(), &uid)
+            .await
+            .unwrap();
+        let (events, _) = broadcast::channel(16);
+        let engine = ImprovementEngine {
+            improvements: ImprovementsRepo::new(pool.clone()),
+            sessions: SessionsRepo::new(pool.clone()),
+            workspaces,
+            producer: Arc::new(FakeProducer(ImprovementProposal {
+                run_summary: String::new(),
+                edits: Vec::new(),
+            })),
+            events,
+            library_root: dir.path().join("library"),
+        };
+        let run = engine
+            .improvements
+            .create_run(&ws.id, ImprovementTrigger::Live)
+            .await
+            .unwrap();
+        // The session was deleted between creating the run and executing it.
+        assert!(engine
+            .execute_evolve_session(&run.id, &ws.id, &"gone".to_string())
+            .await
+            .is_err());
+        let settled = engine.improvements.get_run(&run.id).await.unwrap();
+        assert_eq!(settled.status, ImprovementRunStatus::Failed);
+        // ...so the next run is admitted.
+        assert!(engine
+            .improvements
+            .create_run(&ws.id, ImprovementTrigger::Manual)
+            .await
+            .is_ok());
     }
 
     /// The self_improve node's Provider picker overrides the configured

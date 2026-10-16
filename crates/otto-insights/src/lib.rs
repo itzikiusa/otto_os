@@ -1343,6 +1343,34 @@ async fn post_run<C: InsightsCtx>(
 /// the actual due-check run at most once per hour.
 const SCAN_INTERVAL: Duration = Duration::from_secs(60);
 const HOURLY_GATE: Duration = Duration::from_secs(60 * 60);
+/// Scheduled attempts at one period before the scheduler leaves it alone.
+const MAX_PERIOD_ATTEMPTS: u32 = 3;
+
+/// Scheduled attempts per due period (in memory; a restart starts over).
+/// A run that never completes — the agent fails, the provider isn't signed
+/// in, the user pressed Stop — leaves the period undone, so the hourly tick
+/// used to re-spawn a full (up to 2 h) agent run every hour for the rest of
+/// the period: ~24 tries for a daily report, ~720 for a monthly one, and a
+/// Stop only bought an hour.
+#[derive(Default)]
+struct PeriodAttempts(std::collections::HashMap<String, u32>);
+
+impl PeriodAttempts {
+    /// Count one more attempt at `key`; `false` once the cap is reached.
+    fn admit(&mut self, key: &str) -> bool {
+        let n = self.0.entry(key.to_string()).or_default();
+        if *n >= MAX_PERIOD_ATTEMPTS {
+            return false;
+        }
+        *n += 1;
+        true
+    }
+
+    /// Forget periods that are no longer due (keeps the map tiny).
+    fn retain_due(&mut self, due: &[String]) {
+        self.0.retain(|k, _| due.contains(k));
+    }
+}
 
 /// Handle that cancels the supervisor on drop.
 pub struct InsightsSchedulerHandle {
@@ -1390,6 +1418,7 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
         // hour). `Mutex<HashSet>` mirrors otto-improve.
         let in_flight: Arc<Mutex<std::collections::HashSet<&'static str>>> =
             Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let mut attempts = PeriodAttempts::default();
 
         // Run the due-check immediately on startup (catch-up after the app was
         // closed), then once per hourly gate.
@@ -1404,7 +1433,7 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
                 .unwrap_or(true);
             if gate_open {
                 last_check = Some(std::time::Instant::now());
-                self.tick(&in_flight).await;
+                self.tick(&in_flight, &mut attempts).await;
             }
 
             // One timer per scan; cancel() wakes it (was 500 ms slices).
@@ -1416,10 +1445,22 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
 
     /// One hourly due-check: for each enabled cadence, if the most-recent missed
     /// period isn't done and nothing's in flight for it, run it (offset 1).
-    async fn tick(&self, in_flight: &Arc<Mutex<std::collections::HashSet<&'static str>>>) {
+    async fn tick(
+        &self,
+        in_flight: &Arc<Mutex<std::collections::HashSet<&'static str>>>,
+        attempts: &mut PeriodAttempts,
+    ) {
         let dir = insights_dir(&self.ctx);
         let cfg = read_config(&dir);
         let now = Utc::now();
+        let due: Vec<String> = Kind::ALL
+            .into_iter()
+            .map(|kind| {
+                let (start, end) = due_period(kind, now);
+                period_key(kind, start, end)
+            })
+            .collect();
+        attempts.retain_due(&due);
 
         for kind in Kind::ALL {
             if !cfg.enabled(kind) {
@@ -1435,6 +1476,9 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
                 if guard.contains(kind.word()) {
                     continue;
                 }
+            }
+            if !attempts.admit(&period_key(kind, start, end)) {
+                continue;
             }
             in_flight.lock().await.insert(kind.word());
 
@@ -1488,6 +1532,20 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_period_is_attempted_a_bounded_number_of_times() {
+        let mut a = PeriodAttempts::default();
+        for _ in 0..MAX_PERIOD_ATTEMPTS {
+            assert!(a.admit("daily:2026-10-15_2026-10-15"));
+        }
+        assert!(!a.admit("daily:2026-10-15_2026-10-15"), "capped");
+        assert!(a.admit("weekly:2026-10-05_2026-10-11"), "per period");
+        // The next period starts fresh once the old one is no longer due.
+        a.retain_due(&["daily:2026-10-16_2026-10-16".to_string()]);
+        assert!(a.admit("daily:2026-10-16_2026-10-16"));
+        assert!(a.0.len() == 1);
+    }
 
     /// S4-19b: liveness follows the session, not a 15-minute wall clock — a
     /// run still working at 40 min is alive; a stalled idle one, an exited or
