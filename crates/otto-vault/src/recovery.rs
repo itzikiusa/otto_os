@@ -79,6 +79,31 @@ fn open_revisions() -> &'static Mutex<HashMap<(String, String), OpenRevision>> {
     OPEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Manifest-less (legacy) trash files → entries, skipping any file a manifest
+/// entry already covers: its own `stored_path`, or a folder record that is one
+/// of its ancestors. One set probe per path component.
+fn legacy_trash_entries(
+    walked: impl Iterator<Item = crate::scan::WalkEntry>,
+    covered: &std::collections::HashSet<String>,
+) -> Vec<VaultTrashEntry> {
+    let is_covered = |rel: &str| {
+        covered.contains(rel)
+            || rel
+                .match_indices('/')
+                .any(|(i, _)| covered.contains(&rel[..i]))
+    };
+    walked
+        .filter(|item| !is_covered(&item.rel))
+        .map(|item| VaultTrashEntry {
+            id: format!("legacy-{}", hash(item.rel.as_bytes())),
+            original_path: item.rel.clone(),
+            stored_path: item.rel,
+            deleted_at: chrono::DateTime::from_timestamp_nanos(item.mtime_ns).to_rfc3339(),
+            kind: "file".into(),
+        })
+        .collect()
+}
+
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f)
         .await
@@ -803,27 +828,29 @@ impl VaultEngine {
         // Older versions kept files without manifests. Surface those too,
         // without mutating disk during a read. Folder records already cover
         // all their descendants, so do not list those files a second time.
-        let trash_root = Path::new(&v.root_path).join(".trash");
-        if trash_root.exists() {
-            let _guard = Self::text_parent(&v.root_path, ".trash/entry")?;
+        // The recursive walk runs on the blocking pool (it is a full `read_dir`
+        // + `lstat` pass over every trashed file, which stalled the runtime
+        // worker serving the request), and covered paths are a set lookup per
+        // ancestor instead of a scan of every manifest entry per walked file
+        // (with a `format!` each: O(files × entries) allocations).
+        let root = v.root_path.clone();
+        let covered: std::collections::HashSet<String> =
+            out.iter().map(|e| e.stored_path.clone()).collect();
+        let legacy = blocking(move || {
+            let trash_root = Path::new(&root).join(".trash");
+            if !trash_root.exists() {
+                return Ok(Vec::new());
+            }
+            let _guard = Self::text_parent(&root, ".trash/entry")?;
             let walk = crate::scan::walk(&trash_root)
                 .map_err(|e| Error::Internal(format!("list legacy trash: {e}")))?;
-            for item in walk.notes.into_iter().chain(walk.files) {
-                if out.iter().any(|e| {
-                    item.rel == e.stored_path
-                        || item.rel.starts_with(&format!("{}/", e.stored_path))
-                }) {
-                    continue;
-                }
-                out.push(VaultTrashEntry {
-                    id: format!("legacy-{}", hash(item.rel.as_bytes())),
-                    original_path: item.rel.clone(),
-                    stored_path: item.rel,
-                    deleted_at: chrono::DateTime::from_timestamp_nanos(item.mtime_ns).to_rfc3339(),
-                    kind: "file".into(),
-                });
-            }
-        }
+            Ok(legacy_trash_entries(
+                walk.notes.into_iter().chain(walk.files),
+                &covered,
+            ))
+        })
+        .await?;
+        out.extend(legacy);
         out.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
         Ok(out)
     }
@@ -951,5 +978,60 @@ mod tracked_recovery_tests {
             probe_tracked_recovery(&root.to_string_lossy()),
             vec![".otto-history".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod legacy_trash_tests {
+    use super::*;
+
+    fn walked(rel: &str) -> crate::scan::WalkEntry {
+        crate::scan::WalkEntry {
+            rel: rel.into(),
+            size: 1,
+            mtime_ns: 0,
+        }
+    }
+
+    /// Manifest-covered files (the entry itself, or anything under a folder
+    /// record) are skipped; a sibling that merely shares a name prefix is not.
+    #[test]
+    fn covered_paths_and_folder_descendants_are_skipped() {
+        let covered: std::collections::HashSet<String> = ["a.md", "dir", "deep/x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let items = [
+            "a.md",
+            "a.md.bak",
+            "dir/n.md",
+            "dir/sub/n.md",
+            "dirty.md",
+            "deep/x/y/z.md",
+            "deep/xy.md",
+        ];
+        let out = legacy_trash_entries(items.iter().map(|r| walked(r)), &covered);
+        let rels: Vec<&str> = out.iter().map(|e| e.stored_path.as_str()).collect();
+        assert_eq!(rels, ["a.md.bak", "dirty.md", "deep/xy.md"]);
+        assert!(out
+            .iter()
+            .all(|e| e.id.starts_with("legacy-") && e.kind == "file"));
+    }
+
+    /// Complexity guard: 20k walked files against 5k manifest entries was 100M
+    /// prefix comparisons (a `format!` each); it is now one set probe per path
+    /// component.
+    #[test]
+    fn large_trash_dedup_is_linear() {
+        let covered: std::collections::HashSet<String> =
+            (0..5_000).map(|i| format!("gone/{i}")).collect();
+        let items: Vec<_> = (0..20_000)
+            .map(|i| walked(&format!("legacy/f{i}.md")))
+            .collect();
+        let started = std::time::Instant::now();
+        let out = legacy_trash_entries(items.into_iter(), &covered);
+        assert_eq!(out.len(), 20_000);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 }

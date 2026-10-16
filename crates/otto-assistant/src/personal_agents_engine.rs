@@ -356,14 +356,19 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
         include_memory: false,
         ..Default::default()
     };
-    let ctx_root = otto_context::materialize::default_context_root();
-    let _ = otto_context::materialize::provision(
-        ctx.context_library(),
-        &cfg,
-        &cwd,
-        &agent.provider,
-        &ctx_root,
+    // Skill-tree copies + CLAUDE.md/AGENTS.md writes are a burst of blocking
+    // file IO, paid on every run and new chat: off the runtime worker, like
+    // the swarm's `provision_agent` (perf §15 N9).
+    let (library, cwd2, provider) = (
+        ctx.context_library().clone(),
+        cwd.clone(),
+        agent.provider.clone(),
     );
+    let _ = tokio::task::spawn_blocking(move || {
+        let ctx_root = otto_context::materialize::default_context_root();
+        otto_context::materialize::provision(&library, &cfg, &cwd2, &provider, &ctx_root)
+    })
+    .await;
     Ok(cwd)
 }
 

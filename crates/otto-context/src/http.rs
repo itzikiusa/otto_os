@@ -215,6 +215,19 @@ async fn delete_skill<C: ContextCtx>(
 // ---------------------------------------------------------------------------
 
 /// Map a library `io::Error` to the API error taxonomy.
+/// Run library/bundle filesystem work on the blocking pool. Materialize and
+/// preview copy skill trees, read and write bundle files and may build the
+/// repo map (a walk + parse of the whole working tree); a skill import unpacks
+/// a zip. Done inline, each parked the tokio worker serving the request — and
+/// with it every terminal socket scheduled on that worker.
+async fn off_runtime<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Error> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Internal(format!("context task: {e}")))
+}
+
 fn map_io(ctx: &str, e: std::io::Error) -> Error {
     match e.kind() {
         std::io::ErrorKind::NotFound => Error::NotFound(ctx.to_string()),
@@ -327,14 +340,17 @@ async fn import_skill<C: ContextCtx>(
     if body.is_empty() {
         return Err(Error::Invalid("empty upload".into()).into());
     }
-    let name = s
-        .library()
-        .import_zip(&body, q.name.as_deref())
-        .map_err(|e| map_io("import skill", e))?;
-    s.library()
-        .get_skill(&name)
-        .map(Json)
-        .ok_or_else(|| Error::Internal("skill not found after import".into()).into())
+    let library = s.library().clone();
+    let skill = off_runtime(move || {
+        let name = library
+            .import_zip(&body, q.name.as_deref())
+            .map_err(|e| map_io("import skill", e))?;
+        library
+            .get_skill(&name)
+            .ok_or_else(|| Error::Internal("skill not found after import".into()))
+    })
+    .await??;
+    Ok(Json(skill))
 }
 
 // ---------------------------------------------------------------------------
@@ -553,11 +569,15 @@ async fn materialize_ws<C: ContextCtx>(
         None => vec!["claude".to_string(), "codex".to_string(), "agy".to_string()],
     };
 
-    let ctx_root = materialize::default_context_root();
-    let provider_results: Vec<MaterializeProviderResult> = providers
-        .iter()
-        .map(|p| materialize::provision(s.library(), &cfg, &ws.root_path, p, &ctx_root).0)
-        .collect();
+    let library = s.library().clone();
+    let provider_results: Vec<MaterializeProviderResult> = off_runtime(move || {
+        let ctx_root = materialize::default_context_root();
+        providers
+            .iter()
+            .map(|p| materialize::provision(&library, &cfg, &ws.root_path, p, &ctx_root).0)
+            .collect()
+    })
+    .await?;
 
     Ok(Json(MaterializeResp { provider_results }))
 }
@@ -612,11 +632,15 @@ async fn preview_ws<C: ContextCtx>(
     // for a Viewer. Confine the override to the workspace root.
     let cwd = resolve_preview_cwd(&ws.root_path, req.cwd.as_deref())?;
 
-    let ctx_root = materialize::default_context_root();
-    let providers: Vec<ContextPreviewProvider> = providers
-        .iter()
-        .map(|p| materialize::preview(s.library(), &cfg, &cwd, p, &ctx_root))
-        .collect();
+    let library = s.library().clone();
+    let providers: Vec<ContextPreviewProvider> = off_runtime(move || {
+        let ctx_root = materialize::default_context_root();
+        providers
+            .iter()
+            .map(|p| materialize::preview(&library, &cfg, &cwd, p, &ctx_root))
+            .collect()
+    })
+    .await?;
 
     Ok(Json(ContextPreviewResp { providers }))
 }
