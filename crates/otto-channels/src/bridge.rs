@@ -403,6 +403,15 @@ fn edit_prompt(text: &str) -> String {
     format!("[edited earlier message]\n{text}")
 }
 
+/// Whether the resolved `provider` is a raw shell the channel did NOT pick
+/// itself — inherited from the workspace / global default the owner chose for
+/// their own terminals. A chat message typed into a raw shell runs verbatim as
+/// a command, so an inherited shell default falls back to the agent CLI; the
+/// channel's own explicit `preferred_cli = "shell"` stays the owner's choice.
+fn inherited_raw_shell(preferred_cli: &str, provider: &str) -> bool {
+    provider == "shell" && preferred_cli.trim() != "shell"
+}
+
 /// Derive a session title from the first inbound message so the sidebar pane is
 /// searchable (e.g. "Investigate ticket XXX"). First non-empty line, trimmed
 /// and truncated; falls back to "<Channel> chat". Set once at creation and not
@@ -1025,7 +1034,16 @@ impl Bridge {
                     otto_core::provider::workspace_default(&ws.settings),
                     otto_core::provider::global_default(global_default.as_ref()),
                 ]);
-                if !self
+                if inherited_raw_shell(&integ.preferred_cli, &provider) {
+                    warn!(
+                        channel = %adapter.channel().as_str(),
+                        workspace = %msg.workspace_id,
+                        "bridge: the inherited default is a raw shell; chat messages \
+                         start an agent instead (set the channel's agent CLI to shell \
+                         to opt in)"
+                    );
+                    provider = otto_core::provider::FALLBACK_PROVIDER.to_string();
+                } else if !self
                     .manager
                     .providers()
                     .names()
@@ -1868,6 +1886,19 @@ mod tests {
         );
         // Tabs and CRLF line breaks survive as text.
         assert_eq!(sanitize_paste_text("a\tb\r\nc"), "a\tb\nc");
+    }
+
+    #[test]
+    fn an_inherited_shell_default_never_takes_chat_input() {
+        // Workspace / global default "shell" (no channel pick) → agent CLI.
+        assert!(inherited_raw_shell("", "shell"));
+        assert!(inherited_raw_shell("  ", "shell"));
+        // The channel itself chose shell: the owner's explicit decision.
+        assert!(!inherited_raw_shell("shell", "shell"));
+        assert!(!inherited_raw_shell(" shell ", "shell"));
+        // Agent CLIs are untouched.
+        assert!(!inherited_raw_shell("", "claude"));
+        assert!(!inherited_raw_shell("codex", "codex"));
     }
 
     #[test]
