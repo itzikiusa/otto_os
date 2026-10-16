@@ -787,7 +787,7 @@ coalesced file-change invalidations plus this read path when not admitted.
 | GET /sessions/{id}/transcript/tool/{tool_id} | ws viewer + owner-or-admin | `tool_id` = a `tool_call` block's `id` | the full `tool_call` `Block` (result `text`/`patch` at the 64 KB fold cap, never `elided`) — the lazy half of the live push's oversize trim: an over-64 KB `transcript_appended` delta ships results shortened with `result.elided: true`, and the view fetches the rest here when the step is expanded. Served from the running live tail's fold when there is one (no disk read), else the fold cache. Unknown id → 404; no resolvable transcript → 404 |
 | GET /sessions/{id}/transcript/images/{img_id} | ws viewer + owner-or-admin | `img_id` from an `image` block / `ToolResult.image_ids` (hex only) | image bytes, `inline`, `X-Content-Type-Options: nosniff`. Images are extracted once to `<data>/transcripts/<provider_session_id>/img/` and never inlined in JSON |
 | GET /sessions/{id}/artifacts | ws viewer + owner-or-admin | — | `Artifact[]` newest first — files written by `Write`/`Edit`/`FileChange`, PR links (`pr-link` records + PR URLs in prose), pasted/extracted images. `id = sha1(kind + ':' + (path ?? url))`, deduped per path (last producing turn wins). Best-effort mirrored into `work_artifacts` |
-| GET /sessions/{id}/artifacts/{artifact_id} | ws viewer + owner-or-admin | opaque `artifact_id` only — never a client path | bytes; the server maps the id back to the path it folded, then `canonicalize` → allow-list (session cwd, daemon data dir, `std::env::temp_dir()`) + fs.rs deny-list (`.git`, `.env*`, keys) → 25 MB cap → `nosniff` + `Content-Security-Policy: sandbox; default-src 'none'` + `X-Frame-Options: DENY`; `inline` for raster `image/*` only, `attachment` for everything else (HTML/SVG never render on the daemon origin — the UI previews them from srcdoc in its own `sandbox=""` iframe). 403 outside the roots, 413 over the cap, 400 for a link-only artifact |
+| GET /sessions/{id}/artifacts/{artifact_id} | ws viewer + owner-or-admin | opaque `artifact_id` only — never a client path | bytes; the server maps the id back to the path it folded, then `canonicalize` → allow-list (session cwd, daemon data dir, `std::env::temp_dir()`) + fs.rs deny-list (`.git`, `.env*`, keys) — skipped for the root owner on their own credential (they read any host file via `/fs/read`; agent, MCP and non-root callers stay bound) → 25 MB cap → `nosniff` + `Content-Security-Policy: sandbox; default-src 'none'` + `X-Frame-Options: DENY`; `inline` for raster `image/*` only, `attachment` for everything else (HTML/SVG never render on the daemon origin — the UI previews them from srcdoc in its own `sandbox=""` iframe). 403 outside the roots, 413 over the cap, 400 for a link-only artifact |
 | POST /sessions/{id}/tasks | ws editor + owner-or-admin | `CreateAgentTaskReq {title, description?}` | `AgentTask` (`source: "user"`, `nudge_pending: true`); broadcasts `tasks_updated`. 400 unless the session is a `claude`/`codex` **agent** session — its own provider or the one captured running inside a terminal (`meta.nested_provider`); 409 `agent not running in this terminal` when that captured CLI has exited (the sweep likewise keeps such tasks pending); title/description are reduced to one line with every control character stripped. The nudge sweep (atomic per-task claim; PTY must be ≥ 10 s old, drawn and quiet 600 ms) submits `Otto board: new task — "<title>". <description> Add it to your task list and do it next.` via `submit_text` when the session is `idle`, or after at most 120 s while `working`; it waits (no override) while an approval/permission prompt is on screen. Then `nudge_pending: false`, `nudged_at` set |
 | GET /sessions/{id}/slash-commands | ws viewer + owner-or-admin | — | `SlashCommand[]` — what the chat composer completes after `/`: the provider CLI's built-ins (`source: builtin`) plus the user's commands/skills on disk (Claude: `~/.claude/{commands,skills}` = `user`, `<cwd>/.claude/{commands,skills}` = `project`, subdirs namespaced `dir:name`; Codex: `$CODEX_HOME/skills`, `<cwd>/.codex/skills`). Description = frontmatter `description:` or the file's first line, ≤ 160 chars. Other providers → `[]` |
 | GET /sessions/{id}/screen | ws viewer + owner-or-admin | — | `SessionScreen {live, cols, rows, lines}` — the CURRENT terminal screen as plain text for the Home "Otto School" monitors (polled ~2 s): `lines` = the emulator's plain rows (no scrollback), trailing blank rows dropped, each clipped to 240 chars, the LAST ≤ 60 rows; `cols`/`rows` = emulator size. No live PTY → `{live: false, cols: 0, rows: 0, lines: []}` (200; never spawns or resumes) |
@@ -1861,11 +1861,11 @@ blank caller list as everyone and ignores the flag.
 |---|---|---|---|
 | GET /workspaces/{id}/integrations | ws viewer | — | configured channel integrations |
 | GET /workspaces/{id}/integrations/status | ws viewer | — | `ListenerStatus[]` — live state of each enabled Slack / Telegram listener |
-| PUT /workspaces/{id}/integrations/{channel} | ws editor | UpsertIntegrationReq | Integration |
+| PUT /workspaces/{id}/integrations/{channel} | ws editor + root (bridge sessions and webhook runs act as the owner; non-root → 403) | UpsertIntegrationReq | Integration |
 | DELETE /workspaces/{id}/integrations/{channel} | ws editor | — | 204 |
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
 | GET /workspaces/{id}/integrations/slack/directory | ws editor | — | `SlackDirectory` `{users:[{id,name,handle,is_bot}], channels:[{id,name,is_private}], users_error?, channels_error?, truncated}` via the saved bot token (`users:read`, `channels:read`, `groups:read`); cached 5 min per bot, `?refresh=1` bypasses. A Slack-side failure is a per-part `*_error`, never an HTTP error |
-| POST /workspaces/{id}/integrations/seed-from-loom | ws editor | — | seed integrations from a Loom config |
+| POST /workspaces/{id}/integrations/seed-from-loom | ws editor + root | — | seed integrations from a Loom config |
 
 PUT with `enabled: true` returns **409 `conflict`** (Problem message names the other
 workspace) when the integration's inbound listener token — the Slack **app** token, or
@@ -1909,7 +1909,7 @@ the CRUD endpoints above first.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /webhooks/{workspace_id} | public-by-key (`X-Otto-Webhook-Key`) | WebhookInboundReq | 202 `{accepted, conversation}`; 429 `{code:"busy",message}` when inbound capacity is full |
-| POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
+| POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`); 404 unless the workspace webhook integration is enabled | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
 
 `SwarmTriggerReq`: `{ goal: string (required), name?: string, repo_path?: string,
 goals?: [{ title, description?, metric?, comparator?, target_value?, block_value?,
@@ -4166,7 +4166,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
 | 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |
 | 121 | POST /api/v1/proof-packs/{id}/artifacts | ws editor · ProofPack Edit | AddArtifactReq `{kind, title, content?, content_url?, status?, metadata?}` | ProofPackResp |
-| 122 | POST /api/v1/proof-packs/{id}/assemble | ws editor · ProofPack Edit; non-empty `commands` need a person's credential (agent/MCP/share → 403: they run unsandboxed in the daemon) | AssembleReq `{cwd?, base?, commands?:[{cmd, kind?}]}` | ProofPackResp |
+| 122 | POST /api/v1/proof-packs/{id}/assemble | ws editor · ProofPack Edit; non-empty `commands` need a person's credential (agent/MCP/share → 403: they run unsandboxed in the daemon); `cwd` outside the pack workspace root, its registered repos, the calling agent session cwd and the pack session cwd → 403 unless the caller is the root owner on their own credential | AssembleReq `{cwd?, base?, commands?:[{cmd, kind?}]}` | ProofPackResp |
 | 123 | POST /api/v1/proof-packs/{id}/waive | ws editor (or Admin if `OTTO_PROOF_WAIVER_MIN_ROLE=admin`) · ProofPack Edit | WaiveReq `{reason}` (≥10 chars) | ProofPackResp |
 | 124 | DELETE /api/v1/proof-artifacts/{id} | ws editor · ProofPack Edit | — | `{ok:true}` |
 | 125 | GET /api/v1/proof-artifacts/{id}/content | ws viewer · ProofPack View | — | `{content, ref_kind, kind, status, metadata}` (full stored content) |
@@ -4916,7 +4916,7 @@ webhook; classified `Exempt` in `policy.rs`):
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
+| POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}`; 400 when `repo_id` is not a repo registered in `{workspace_id}` (the run launches as root) |
 
 When a `callback_url` is supplied, the daemon POSTs the run's result back to it at
 the milestones a caller can act on — `awaiting_approval` and every terminal state
