@@ -61,6 +61,8 @@
   let jiraOffset = $state(0);
   // Whether more Jira results are likely available (last page returned a full 25).
   let jiraHasMore = $state(false);
+  // The query + mode whose results are listed (the cursor for Load more).
+  let lastRun: { q: string; mode: SearchMode; project: string } | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   // Only the newest search may land: a slow earlier query (or a multi-second
   // "load more") must never overwrite / append to a newer one. The superseded
@@ -235,10 +237,12 @@
     startAt: number,
     append: boolean,
     projectOverride?: string,
+    runMode: SearchMode = mode,
   ): Promise<void> {
     if (!accountId) return;
+    const raw = runMode === 'raw';
     // An empty raw query is not "recent issues" — it waits for Enter.
-    if (rawMode && !q.trim()) return;
+    if (raw && !q.trim()) return;
     searchCtl?.abort();
     const ctl = new AbortController();
     searchCtl = ctl;
@@ -255,7 +259,7 @@
       if (sourceKind === 'jira') {
         const proj = projectOverride ?? selectedProjectKey;
         const projectParam = proj ? `&project=${encodeURIComponent(proj)}` : '';
-        const queryParam = rawMode
+        const queryParam = raw
           ? `${linear ? 'filter' : 'jql'}=${encodeURIComponent(q)}`
           : `q=${encodeURIComponent(q)}${projectParam}`;
         const page = await api.get<IssueSummary[]>(
@@ -271,13 +275,16 @@
         jiraOffset = startAt + page.length;
         // If a full page came back, assume there may be more.
         jiraHasMore = page.length >= 25;
+        // Load more continues THIS query: raw modes don't search while
+        // typing, so the box can already hold an unrun expression.
+        lastRun = { q, mode: runMode, project };
       } else {
         const spaceParam = selectedSpaceKey
           ? `&space=${encodeURIComponent(selectedSpaceKey)}`
           : '';
-        const queryParam = rawMode
+        const queryParam = raw
           ? `cql=${encodeURIComponent(q)}`
-          : `q=${encodeURIComponent(q)}${spaceParam}${mode === 'body' ? '&mode=text' : ''}`;
+          : `q=${encodeURIComponent(q)}${spaceParam}${runMode === 'body' ? '&mode=text' : ''}`;
         const pages = await api.get<ConfluencePageSummary[]>(
           `/issue/confluence/search?account_id=${encodeURIComponent(accountId)}&${queryParam}`,
           ctl.signal,
@@ -290,7 +297,7 @@
       if (!current() || ctl.signal.aborted) return;
       searchError = loadErrorText(e);
       retrySearch = () => {
-        if (accountId === aid && sourceKind === kind && selectedSpaceKey === space && selectedProjectKey === project) void search(q, startAt, append, project);
+        if (accountId === aid && sourceKind === kind && selectedSpaceKey === space && selectedProjectKey === project) void search(q, startAt, append, project, runMode);
       };
       if (!append) {
         jiraResults = [];
@@ -306,7 +313,7 @@
   }
 
   function loadMoreJira(): void {
-    void search(query.trim(), jiraOffset, true);
+    if (lastRun) void search(lastRun.q, jiraOffset, true, lastRun.project, lastRun.mode);
   }
 
   function pickIssue(issue: IssueSummary): void {
