@@ -15,7 +15,7 @@ pub use confluence::{
 };
 pub use http::{router, IssuesCtx};
 pub use jira::{
-    build_create_issue_body, parse_issue_full, CommentRef, CreatedIssue, DevBranch, DevCommit,
+    build_create_issue_body, cmp_created, parse_issue_full, CommentRef, CreatedIssue, DevBranch, DevCommit,
     DevPr, DevStatus, EditableField, FieldOption, IssueComment, IssueFull, JiraAttachment,
     JiraChangeItem, JiraChangelogEntry, JiraClient, JiraField, JiraLink, JiraTransition, JiraUser,
 };

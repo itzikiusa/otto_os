@@ -439,7 +439,7 @@ impl ProductService {
         // already processed. RFC3339 strings sort lexicographically.
         if let Some(cursor) = since {
             let (ts, seen_ids) = parse_watch_cursor(cursor);
-            comments.retain(|c| match c.created.as_str().cmp(ts) {
+            comments.retain(|c| match otto_issues::cmp_created(&c.created, ts) {
                 std::cmp::Ordering::Greater => true,
                 std::cmp::Ordering::Equal => !seen_ids.contains(c.id.as_str()),
                 std::cmp::Ordering::Less => false,
@@ -447,7 +447,7 @@ impl ProductService {
         }
 
         // Sort ascending by created.
-        comments.sort_by(|a, b| a.created.cmp(&b.created));
+        comments.sort_by(|a, b| otto_issues::cmp_created(&a.created, &b.created));
 
         Ok(comments)
     }
@@ -1855,10 +1855,13 @@ pub(crate) fn parse_watch_cursor(cursor: &str) -> (&str, std::collections::HashS
 /// Build the watch cursor for a processed batch: newest `created` + the ids of
 /// every comment sharing that exact timestamp (see [`parse_watch_cursor`]).
 pub fn build_watch_cursor(comments: &[CommentInfo]) -> Option<String> {
-    let newest = comments.iter().map(|c| c.created.as_str()).max()?;
+    let newest = comments
+        .iter()
+        .map(|c| c.created.as_str())
+        .max_by(|a, b| otto_issues::cmp_created(a, b))?;
     let ids: Vec<&str> = comments
         .iter()
-        .filter(|c| c.created == newest)
+        .filter(|c| otto_issues::cmp_created(&c.created, newest).is_eq())
         .map(|c| c.id.as_str())
         .collect();
     Some(format!("{newest}|{}", ids.join(",")))
@@ -1948,6 +1951,26 @@ mod tests {
         assert_eq!(ts2, "2026-06-01T00:00:00.000+0000");
         assert!(seen2.is_empty());
         assert!(build_watch_cursor(&[]).is_none());
+    }
+
+    #[test]
+    fn watch_cursor_takes_the_newest_instant_across_a_dst_switch() {
+        let mk = |id: &str, created: &str| CommentInfo {
+            id: id.into(),
+            author: "a".into(),
+            body_md: "b".into(),
+            created: created.into(),
+        };
+        // 02:20+0200 (00:20 UTC) is newer than 02:50+0300 (23:50 UTC) though
+        // its string sorts lower; the cursor must not rewind to the older one.
+        let batch = vec![
+            mk("before", "2026-10-25T02:50:00.000+0300"),
+            mk("after", "2026-10-25T02:20:00.000+0200"),
+        ];
+        assert_eq!(
+            build_watch_cursor(&batch).unwrap(),
+            "2026-10-25T02:20:00.000+0200|after"
+        );
     }
 
     // -----------------------------------------------------------------------

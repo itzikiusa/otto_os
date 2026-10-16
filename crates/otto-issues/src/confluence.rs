@@ -716,7 +716,7 @@ impl ConfluenceClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if since.is_some_and(|ts| created.as_str() < ts) {
+            if since.is_some_and(|ts| crate::jira::cmp_created(&created, ts).is_lt()) {
                 continue;
             }
             let storage_xhtml = c

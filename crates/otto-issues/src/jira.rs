@@ -1064,7 +1064,7 @@ impl JiraClient {
         if since.is_some() {
             // Newest-first on the wire (or ascending on a server that ignored
             // `-created`); callers get oldest-first either way.
-            all.sort_by(|a, b| comment_created(a).cmp(comment_created(b)));
+            all.sort_by(|a, b| cmp_created(comment_created(a), comment_created(b)));
         }
 
         let comments = all.as_slice();
@@ -2685,6 +2685,25 @@ fn comment_created(c: &serde_json::Value) -> &str {
     c.get("created").and_then(|v| v.as_str()).unwrap_or("")
 }
 
+/// Order two tracker timestamps by the instant they name. Jira renders
+/// `created` in the caller's profile zone (`2026-10-25T02:50:00.000+0300`),
+/// so its offset changes at a DST switch (and when the profile zone does):
+/// compared as strings, `02:20+0200` sorted BEFORE `02:50+0300` although it
+/// is 30 minutes later, and the story watcher dropped every comment of that
+/// hour for good. Strings that don't parse (RFC 3339 or Jira's `%z` form)
+/// fall back to plain string order.
+pub fn cmp_created(a: &str, b: &str) -> std::cmp::Ordering {
+    fn instant(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .or_else(|_| chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%z"))
+            .ok()
+    }
+    match (instant(a), instant(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    }
+}
+
 /// SE-13: filter one page of a `-created` walk to comments at or after `since`
 /// and report whether the cursor was reached (an older comment is on the
 /// page, so every later page is older still). A page that is NOT descending
@@ -2696,11 +2715,11 @@ fn newest_first_page_since(
 ) -> (Vec<serde_json::Value>, bool) {
     let descending = page
         .windows(2)
-        .all(|w| comment_created(&w[0]) >= comment_created(&w[1]));
+        .all(|w| cmp_created(comment_created(&w[0]), comment_created(&w[1])).is_ge());
     let mut reached = false;
     let mut kept = Vec::with_capacity(page.len());
     for c in page {
-        if comment_created(&c) >= since {
+        if cmp_created(comment_created(&c), since).is_ge() {
             kept.push(c);
         } else {
             reached = true;
@@ -3478,6 +3497,30 @@ mod tests {
             reached,
             "an older comment on a descending page ends the walk"
         );
+    }
+
+    #[test]
+    fn comments_across_a_dst_switch_compare_by_instant() {
+        // The cursor is 23:50 UTC (+0300); the clocks then fall back an hour,
+        // so the next comment (00:20 UTC) renders as 02:20+0200 — a string
+        // that sorts before the cursor though it is 30 minutes later.
+        let cursor = "2026-10-25T02:50:00.000+0300";
+        let page = vec![
+            c("new", "2026-10-25T02:20:00.000+0200"),
+            c("seen", "2026-10-25T02:50:00.000+0300"),
+            c("old", "2026-10-25T01:00:00.000+0300"),
+        ];
+        let (kept, reached) = newest_first_page_since(page, cursor);
+        let ids: Vec<&str> = kept.iter().map(|v| v["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["new", "seen"]);
+        assert!(reached, "the page is descending by instant");
+        // Same instant in two zones is a tie; unparsable input falls back to
+        // string order instead of panicking.
+        assert!(
+            cmp_created("2026-10-25T00:00:00.000+0000", "2026-10-25T03:00:00.000+0300").is_eq()
+        );
+        assert!(cmp_created("2026-10-25T00:00:00Z", "2026-10-25T00:00:01.5+00:00").is_lt());
+        assert!(cmp_created("", "2026-01-01T00:00:00Z").is_lt());
     }
 
     #[test]
