@@ -570,6 +570,59 @@ fn require_person_for_commands(auth: &AuthContext, commands: &[AssembleCmd]) -> 
     crate::auth::require_human(auth)
 }
 
+/// Where `assemble` may read a repo from. The daemon runs `git` there as the
+/// owner, unconfined, and the diff lands in an artifact every workspace
+/// Viewer can read — so, like `/fs/*`, only the person who owns the machine
+/// (root, own credential) names any path. Everyone else — an agent session's
+/// or MCP credential, a non-root member — is confined to the pack's
+/// workspace: its root, its registered repos, the calling agent's own session
+/// cwd and the pack's session cwd (session worktrees live outside the root).
+async fn require_assemble_cwd(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    user: &otto_core::domain::User,
+    pack: &ProofPack,
+    cwd: &str,
+) -> ApiResult<()> {
+    if user.is_root && crate::ui_bridge::is_human(auth) {
+        return Ok(());
+    }
+    let refused = || {
+        ApiError(Error::Forbidden(
+            "cwd must be inside this pack's workspace, one of its repos or its session".into(),
+        ))
+    };
+    let want = tokio::fs::canonicalize(cwd).await.map_err(|_| refused())?;
+    let mut roots: Vec<String> = Vec::new();
+    if let Ok(ws) = ctx.workspaces.get(&pack.workspace_id).await {
+        roots.push(ws.root_path);
+    }
+    if let Ok(repos) = ctx.git_store.list_repos(&pack.workspace_id).await {
+        roots.extend(repos.into_iter().map(|r| r.path));
+    }
+    let pack_session = (pack.work_item_kind == WorkItemKind::Session)
+        .then(|| Id::from(pack.work_item_id.as_str()));
+    for sid in crate::feature_guard::agent_session_of(auth)
+        .cloned()
+        .into_iter()
+        .chain(pack_session)
+    {
+        if let Ok(s) = ctx.manager.get(&sid).await {
+            if s.workspace_id == pack.workspace_id {
+                roots.push(s.cwd);
+            }
+        }
+    }
+    for root in roots.iter().filter(|r| !r.trim().is_empty()) {
+        if let Ok(root) = tokio::fs::canonicalize(root).await {
+            if want.starts_with(&root) {
+                return Ok(());
+            }
+        }
+    }
+    Err(refused())
+}
+
 async fn assemble(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
@@ -581,6 +634,7 @@ async fn assemble(
     require_person_for_commands(&auth, &commands)?;
     let pack = pack_for(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(cwd) = req.cwd.as_deref() {
+        require_assemble_cwd(&ctx, &auth, &user.0, &pack, cwd).await?;
         // Best-effort diff assembly.
         let _ = engine::assemble_diff(&ctx, &pack, cwd, req.base.as_deref()).await;
         // Run any requested commands as command artifacts.
