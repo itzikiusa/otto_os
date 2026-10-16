@@ -45,12 +45,13 @@ impl Ctx {
         serde_json::from_str(&body).map_err(|e| format!("parse json: {e}"))
     }
 
-    async fn post_json(&self, path: &str, body: &Value) -> Result<Value, String> {
+    async fn post_json(&self, path: &str, body: &Value, within: Duration) -> Result<Value, String> {
         let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
         let resp = self
             .http
             .post(&url)
             .bearer_auth(&self.token)
+            .timeout(within)
             .json(body)
             .send()
             .await
@@ -114,6 +115,7 @@ impl Ctx {
             .post_json(
                 "/mcp/otto-tools/invoke",
                 &json!({ "tool": name, "arguments": args }),
+                invoke_timeout(name, args),
             )
             .await;
         match res {
@@ -133,6 +135,15 @@ impl Ctx {
     }
 }
 
+/// How long one `tools/call` may take: the daemon's own per-tool self-call
+/// budget (up to 180 s for an automation) plus slack. The flat 35 s cut long
+/// tools off while the daemon ran on — the agent saw a failure, retried, and
+/// the tool ran twice.
+fn invoke_timeout(name: &str, args: &Value) -> Duration {
+    let short = name.strip_prefix("otto.").unwrap_or(name);
+    otto_server::mcp_outward::call_timeout(short, args) + Duration::from_secs(15)
+}
+
 fn tool_result(value: &Value, is_error: bool) -> Value {
     let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
     json!({ "content": [ { "type": "text", "text": text } ], "isError": is_error })
@@ -148,7 +159,12 @@ fn rpc_err(id: Value, code: i64, message: impl Into<String>) -> Value {
 async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
-    let is_notification = id.is_none();
+    // A notification (no `id`) is never answered — and never EXECUTES
+    // anything: an id-less `tools/call` used to run the governed tool with
+    // nobody receiving its result, then reply with `"id": null`.
+    if id.is_none() {
+        return None;
+    }
     match method {
         "initialize" => Some(rpc_ok(
             id.unwrap_or(Value::Null),
@@ -172,7 +188,6 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             Some(rpc_ok(id, ctx.tools_call(&name, &args).await))
         }
-        _ if is_notification => None,
         _ => Some(rpc_err(
             id.unwrap_or(Value::Null),
             -32601,
@@ -241,4 +256,37 @@ async fn write_line(stdout: &mut tokio::io::Stdout, value: &Value) -> Result<(),
         .map_err(|e| format!("write: {e}"))?;
     stdout.flush().await.map_err(|e| format!("flush: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> Ctx {
+        // Nothing listens here: a request that went out would fail, not hang.
+        Ctx {
+            http: reqwest::Client::new(),
+            base: "http://127.0.0.1:9".into(),
+            token: "t".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn notifications_are_never_answered_or_executed() {
+        let call = json!({"jsonrpc": "2.0", "method": "tools/call",
+            "params": {"name": "otto.list_repos", "arguments": {}}});
+        assert_eq!(handle(&ctx(), call).await, None);
+        let ping = json!({"jsonrpc": "2.0", "method": "ping"});
+        assert_eq!(handle(&ctx(), ping).await, None);
+        let req = json!({"jsonrpc": "2.0", "id": 7, "method": "ping"});
+        assert_eq!(handle(&ctx(), req).await.unwrap()["id"], 7);
+    }
+
+    #[test]
+    fn long_tools_get_their_daemon_budget() {
+        let args = json!({});
+        assert!(invoke_timeout("otto.api_run_automation", &args) > Duration::from_secs(180));
+        assert!(invoke_timeout("api_run_automation", &args) > Duration::from_secs(180));
+        assert!(invoke_timeout("otto.list_repos", &args) >= Duration::from_secs(30));
+    }
 }

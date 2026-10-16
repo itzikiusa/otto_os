@@ -73,6 +73,10 @@ pub async fn post_response<T: OutwardTools + ?Sized>(
 ) -> Response {
     // A JSON-RPC batch is an array of messages; a single message is an object.
     if let Some(arr) = body.as_array() {
+        // An empty batch is itself an invalid request (one error, not 202).
+        if arr.is_empty() {
+            return Json(rpc_err(None, -32600, "invalid request: empty batch")).into_response();
+        }
         let mut out = Vec::new();
         for msg in arr {
             if let Some(resp) = handle_one(tools, auth, msg, server_version).await {
@@ -100,8 +104,22 @@ async fn handle_one<T: OutwardTools + ?Sized>(
     msg: &Value,
     server_version: &str,
 ) -> Option<Value> {
-    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-    let id = msg.get("id").cloned();
+    // Not a JSON-RPC object at all (`5`, `"x"`, a nested array): an invalid
+    // request answered with id null — it used to read as a notification and
+    // vanish silently.
+    let Some(obj) = msg.as_object() else {
+        return Some(rpc_err(
+            None,
+            -32600,
+            "invalid request: not a JSON-RPC object",
+        ));
+    };
+    let id = obj.get("id").cloned();
+    let Some(method) = obj.get("method").and_then(Value::as_str) else {
+        // A request without a method is invalid (not "method not found");
+        // an id-less object without one is nothing we answer.
+        return id.map(|id| rpc_err(Some(id), -32600, "invalid request: missing method"));
+    };
     let is_notification = id.is_none();
     // A notification (no `id`) is never answered — and never EXECUTED: a
     // notification-form `tools/call` must not run a (possibly mutating) tool
@@ -133,11 +151,16 @@ async fn handle_one<T: OutwardTools + ?Sized>(
         }
         "tools/call" => {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
-            let name = params
+            let Some(name) = params
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+            else {
+                // Not a governed call of tool "" (an audited denial): the
+                // request itself is malformed.
+                return Some(rpc_err(id, -32602, "invalid params: missing tool name"));
+            };
             let args = params
                 .get("arguments")
                 .cloned()
@@ -188,4 +211,82 @@ fn rpc_ok(id: Option<Value>, result: Value) -> Value {
 
 fn rpc_err(id: Option<Value>, code: i64, message: impl Into<String>) -> Value {
     json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "error": { "code": code, "message": message.into() } })
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Tools(AtomicUsize);
+
+    #[async_trait]
+    impl OutwardTools for Tools {
+        async fn list(&self, _: &AuthContext) -> Vec<Value> {
+            Vec::new()
+        }
+        async fn call(&self, _: &AuthContext, _: &str, _: &Value) -> Result<Value, Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"decision": "allowed"}))
+        }
+    }
+
+    async fn body(resp: Response) -> (StatusCode, Value) {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn malformed_messages_get_invalid_request_errors() {
+        let tools = Tools::default();
+        let user = otto_core::domain::User {
+            id: "u".into(),
+            username: "u".into(),
+            display_name: "U".into(),
+            is_root: false,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        let auth = AuthContext {
+            real_user: user.clone(),
+            effective_user: user,
+            scope: None,
+            mcp_only: true,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        };
+        let (status, v) = body(post_response(&tools, &auth, &json!([]), "t").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["error"]["code"], -32600);
+
+        let (_, v) = body(post_response(&tools, &auth, &json!([5]), "t").await).await;
+        assert_eq!(v[0]["error"]["code"], -32600);
+        assert_eq!(v[0]["id"], Value::Null);
+
+        let (_, v) =
+            body(post_response(&tools, &auth, &json!({"jsonrpc": "2.0", "id": 1}), "t").await)
+                .await;
+        assert_eq!(v["error"]["code"], -32600);
+        assert_eq!(v["id"], 1);
+
+        let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {}});
+        let (_, v) = body(post_response(&tools, &auth, &call, "t").await).await;
+        assert_eq!(v["error"]["code"], -32602);
+        assert_eq!(tools.0.load(Ordering::SeqCst), 0, "nothing was called");
+
+        // A notification is still accepted silently and never executed.
+        let note = json!({"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "otto.x"}});
+        let (status, _) = body(post_response(&tools, &auth, &note, "t").await).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(tools.0.load(Ordering::SeqCst), 0);
+    }
 }
