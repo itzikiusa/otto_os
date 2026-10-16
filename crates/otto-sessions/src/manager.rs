@@ -4293,10 +4293,9 @@ impl SessionManager {
         let (session_cwd, codex_root) = (session.cwd.clone(), self.codex_root_for(session));
         let probe_text =
             (self.capture_probes.get(&session.id)).map(|p| normalize_pty_input(&p.raw));
-        // The rollout walk visits every `YYYY/MM/DD` dir and reads candidate
-        // heads — with a floor of `created_at` (days back) that is the whole
-        // history. Off the runtime, like the spawn-time and nested captures;
-        // the capture lock stays held across it so claims still serialize.
+        // The rollout walk (every `YYYY/MM/DD` dir since `created_at`, plus
+        // candidate heads) runs off the runtime like the spawn-time capture;
+        // the capture lock stays held so claims still serialize.
         tokio::task::spawn_blocking(move || {
             let claimed: std::collections::HashSet<&str> =
                 claimed_rows.iter().map(String::as_str).collect();
@@ -4927,7 +4926,9 @@ impl SessionManager {
         };
         let mut renamed = 0;
         for session in sessions {
-            if !title_eligible(&session) {
+            // Live only (the doc's contract): a dead row's missing transcript
+            // was re-probed (row fetch + rollout walk) every sweep, forever.
+            if !title_eligible(&session) || !self.is_live(&session.id) {
                 continue;
             }
             match self.probe_and_apply_title(&session).await {
