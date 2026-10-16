@@ -177,6 +177,89 @@ mod github {
         assert_eq!(d.total_added, Some(90001));
     }
 
+    /// Actions green + a legacy commit status (Jenkins) red is a FAILING PR:
+    /// statuses used to be read only when there were no check-runs at all.
+    #[tokio::test]
+    async fn ci_counts_commit_statuses_next_to_check_runs() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"check_runs": [
+                    {"name": "build", "status": "completed", "conclusion": "success",
+                     "html_url": "https://github.com/acme/app/runs/1"},
+                    {"name": "lint", "status": "completed", "conclusion": "startup_failure"}
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/statuses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"context": "jenkins", "state": "failure", "target_url": "https://ci/1"},
+                {"context": "jenkins", "state": "success"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let ci = gh.fetch_ci_status(&rr(), 7).await;
+        assert_eq!(ci.state, "failure");
+        assert_eq!((ci.total, ci.passed, ci.failed), (3, 1, 2));
+        assert_eq!(
+            ci.url.as_deref(),
+            Some("https://github.com/acme/app/runs/1")
+        );
+
+        let rows = gh.list_checks(&rr(), 7).await.unwrap();
+        let named: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("build", "success"),
+                ("lint", "failure"),
+                ("jenkins", "failure")
+            ]
+        );
+    }
+
+    /// A token that can read check-runs but not statuses still lists them.
+    #[tokio::test]
+    async fn checks_survive_an_unreadable_statuses_api() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"check_runs": [
+                    {"name": "build", "status": "in_progress", "conclusion": null}
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/statuses"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+            .mount(&server)
+            .await;
+        assert_eq!(gh.list_checks(&rr(), 7).await.unwrap().len(), 1);
+        let ci = gh.fetch_ci_status(&rr(), 7).await;
+        assert_eq!((ci.state.as_str(), ci.total), ("pending", 1));
+    }
+
     #[tokio::test]
     async fn pr_diff_other_errors_still_fail() {
         let server = MockServer::start().await;
