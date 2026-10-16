@@ -5,6 +5,8 @@ import { apiCtx, seedWorkspace } from './seed';
 import { expectNoHorizontalOverflow } from './helpers';
 import type { KartState } from '../src/modules/rooms/games/kart/sim';
 import type { ShooterState } from '../src/modules/rooms/games/shooter/sim';
+import { pointAt, trackFor } from '../src/modules/rooms/games/kart/tracks';
+import { ordinal } from '../src/modules/rooms/games/common/math';
 
 // Real UI, real Kenney CC0 assets, real simulation, HTTP and WebSockets against
 // the isolated test daemon. Keyboard/mouse input is driven through the page.
@@ -28,6 +30,7 @@ test.beforeEach(async ({}, info) => {
 async function boot(page: Page, scheme: 'light' | 'dark' = 'dark') {
   await page.addInitScript(({ id, scheme }) => { localStorage.setItem('otto_workspace', id); localStorage.setItem('otto_scheme', scheme); }, { id: workspace, scheme });
   await page.goto('/#/rooms/games');
+  if (await page.locator('.game-play').count()) await page.reload();
   await expect(page.getByRole('heading', { name: 'Choose a track' })).toBeVisible({ timeout: 30_000 });
 }
 function observe(page: Page) {
@@ -59,10 +62,12 @@ test('chooser shows both games, tracks, islands and rosters', async ({ page }, i
   await expect(page.locator('.games-environments > button')).toHaveCount(4);
   await expect(page.locator('.games-roster button')).toHaveCount(8);
   await expectNoHorizontalOverflow(page);
+  await expect.poll(() => page.locator('.games-page img').evaluateAll(imgs => imgs.every(i => (i as HTMLImageElement).complete && (i as HTMLImageElement).naturalWidth > 0))).toBe(true);
   await capture(page, 'chooser-kart-light', info);
   await page.getByRole('button', { name: /Storm Royale/ }).click();
   await expect(page.getByRole('heading', { name: 'Choose an island' })).toBeVisible();
   await expect(page.locator('.games-roster button')).toHaveCount(12);
+  await expect.poll(() => page.locator('.games-page img').evaluateAll(imgs => imgs.every(i => (i as HTMLImageElement).complete && (i as HTMLImageElement).naturalWidth > 0))).toBe(true);
   await capture(page, 'chooser-shooter-light', info);
   expect(errors).toEqual([]);
 });
@@ -104,9 +109,12 @@ for (const map of [{ id: 'isle', name: 'Palm Isle' }, { id: 'mesa', name: 'Red M
     await boot(page);
     await page.getByRole('button', { name: /Storm Royale/ }).click();
     await page.getByRole('button', { name: new RegExp(map.name) }).click();
+    // Calm lobby: this test checks the drop and the world, not survival.
+    await page.getByRole('combobox', { name: /Computer difficulty/ }).selectOption('easy');
+    await page.getByRole('slider', { name: /Bots on the island/ }).fill('9');
     await page.getByRole('button', { name: 'Drop in', exact: true }).click();
     await expect(page.locator('.br-play canvas').first()).toBeVisible({ timeout: 30_000 });
-    await expect.poll(async () => (await snap<ShooterState>(page))?.players.length ?? 0, { timeout: 30_000 }).toBeGreaterThan(8);
+    await expect.poll(async () => (await snap<ShooterState>(page))?.players.length ?? 0, { timeout: 30_000 }).toBe(10);
     await capture(page, `shooter-${map.id}-balloon`, info);
     const canvas = page.locator('.br-play canvas').first();
     await canvas.focus();
@@ -132,6 +140,201 @@ for (const map of [{ id: 'isle', name: 'Palm Isle' }, { id: 'mesa', name: 'Red M
     expect(errors).toEqual([]);
   });
 }
+
+const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+const look = (page: Page, yaw: number, pitch: number) => page.locator('.game-play div').first().evaluate((el, [y, p]) => (el as HTMLDivElement & { __ottoGame: Diagnostic<unknown> }).__ottoGame.look?.(y, p), [yaw, pitch] as const);
+
+test('kart full Grand Prix: autopilot races 3 laps, uses items and reaches the results', async ({ page }, info) => {
+  test.setTimeout(300_000);
+  const errors = observe(page);
+  await boot(page);
+  await page.getByRole('combobox', { name: /Computer difficulty/ }).selectOption('easy');
+  await page.getByRole('button', { name: /Sunny Meadow/ }).click();
+  await page.getByRole('button', { name: 'Start race', exact: true }).click();
+  await expect.poll(async () => (await snap<KartState>(page))?.racers.length ?? 0, { timeout: 30_000 }).toBe(8);
+  await page.locator('.kart-play canvas').first().click();
+  await page.keyboard.down('w');
+  const track = trackFor('meadow');
+  let held: string | null = null, usedItem = false, sawItem = false, shot = false;
+  const deadline = Date.now() + 260_000;
+  for (;;) {
+    const s = await snap<KartState>(page);
+    if (s.phase === 'done' || Date.now() > deadline) break;
+    const me = s.racers.find(r => r.human)!;
+    const p = pointAt(track, me.lastS + 10 + Math.max(0, me.speed) * 0.45, 0);
+    const angle = wrap(Math.atan2(p[0] - me.x, p[2] - me.z) - me.yaw);
+    const want = angle > 0.05 ? 'a' : angle < -0.05 ? 'd' : null;
+    if (want !== held) { if (held) await page.keyboard.up(held); if (want) await page.keyboard.down(want); held = want; }
+    if (me.item && me.roll <= 0) {
+      sawItem = true;
+      if (!shot) { await capture(page, 'kart-meadow-item', info); shot = true; }
+      await page.keyboard.press('e'); usedItem = true;
+    }
+  }
+  if (held) await page.keyboard.up(held);
+  await page.keyboard.up('w');
+  const final = await snap<KartState>(page);
+  expect(final.phase).toBe('done');
+  const me = final.racers.find(r => r.human)!;
+  expect(me.lapTimes).toHaveLength(3);
+  expect(sawItem && usedItem).toBe(true);
+  await expect(page.locator('.kart-results tbody tr')).toHaveCount(8);
+  await expect(page.locator('.kart-results h2')).toContainText(me.place === 1 ? 'You win' : ordinal(me.place));
+  await capture(page, 'kart-meadow-results', info);
+  expect(errors).toEqual([]);
+});
+
+test('shooter: loot a weapon, aim at a bot and fire', async ({ page }, info) => {
+  test.setTimeout(180_000);
+  const errors = observe(page);
+  await boot(page);
+  await page.getByRole('button', { name: /Storm Royale/ }).click();
+  await page.getByRole('button', { name: /Red Mesa/ }).click();
+  // A quiet island so the scripted player can loot before anyone finds it.
+  await page.getByRole('combobox', { name: /Computer difficulty/ }).selectOption('easy');
+  await page.getByRole('slider', { name: /Bots on the island/ }).fill('2');
+  await page.getByRole('button', { name: 'Drop in', exact: true }).click();
+  await expect.poll(async () => (await snap<ShooterState>(page))?.players.length ?? 0, { timeout: 30_000 }).toBe(3);
+  const canvas = page.locator('.br-play canvas').first();
+  await canvas.focus();
+  const me = (s: ShooterState) => s.players.find(p => p.human)!;
+  await expect.poll(async () => (await snap<ShooterState>(page)).bus.t, { timeout: 15_000 }).toBeGreaterThan(2);
+  await page.keyboard.press('Space');
+  await expect.poll(async () => me(await snap<ShooterState>(page)).mode, { timeout: 60_000 }).toBe('ground');
+  // Walk to the nearest floor weapon until it is in the inventory.
+  let walking = false, targetId = -1, best = Infinity, since = Date.now();
+  const skip = new Set<number>();
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    const s = await snap<ShooterState>(page), p = me(s);
+    if (p.weapons.some(Boolean) || Date.now() > deadline || p.mode === 'dead') break;
+    const loot = s.loot.filter(l => l.kind === 'weapon' && !skip.has(l.id)).sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
+    if (!loot) break;
+    // Give up on an item that is not getting closer (blocked by a prop) and try the next.
+    const dist = Math.hypot(loot.x - p.x, loot.z - p.z);
+    if (loot.id !== targetId) { targetId = loot.id; best = dist; since = Date.now(); }
+    else if (dist < best - 0.5) { best = dist; since = Date.now(); }
+    else if (Date.now() - since > 4000) { skip.add(loot.id); await page.keyboard.press('Space'); continue; }
+    await look(page, Math.atan2(loot.x - p.x, loot.z - p.z), -0.25);
+    if (!walking) { await page.keyboard.down('w'); walking = true; }
+    if (Math.hypot(loot.x - p.x, loot.z - p.z) < 2.2) await page.keyboard.press('e');
+  }
+  if (walking) await page.keyboard.up('w');
+  const armed = me(await snap<ShooterState>(page));
+  expect(armed.weapons.some(Boolean)).toBe(true);
+  await capture(page, 'shooter-mesa-armed', info);
+  // Aim at the nearest living fighter and fire a burst.
+  const s = await snap<ShooterState>(page), p = me(s);
+  const target = s.players.filter(q => q.id !== p.id && q.mode !== 'dead').sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
+  const d = Math.hypot(target.x - p.x, target.z - p.z);
+  await look(page, Math.atan2(target.x - p.x, target.z - p.z), Math.atan2(target.y + 1 - (p.y + 1.8), d));
+  const before = (await snap<ShooterState>(page)).events.length;
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await expect.poll(async () => { const now = me(await snap<ShooterState>(page)); const w = now.weapons[now.current]; return w ? w.mag : 99; }, { timeout: 8_000 }).toBeLessThan(armed.weapons[armed.current]?.mag ?? 99);
+  await capture(page, 'shooter-mesa-firing', info);
+  await page.mouse.up();
+  void before;
+  expect(errors).toEqual([]);
+});
+
+test('shooter: the storm closes in, eliminations end the match and show results', async ({ page }, info) => {
+  test.setTimeout(240_000);
+  const errors = observe(page);
+  await boot(page);
+  await page.getByRole('button', { name: /Storm Royale/ }).click();
+  await page.getByRole('button', { name: /Palm Isle/ }).click();
+  await page.getByRole('combobox', { name: /Computer difficulty/ }).selectOption('hard');
+  await page.getByRole('slider', { name: /Bots on the island/ }).fill('15');
+  await page.getByRole('button', { name: 'Drop in', exact: true }).click();
+  await expect.poll(async () => (await snap<ShooterState>(page))?.players.length ?? 0, { timeout: 30_000 }).toBe(16);
+  await page.locator('.br-play canvas').first().focus();
+  // Wait until the flight passes the island centre, then drop into the action.
+  await expect.poll(async () => { const s = await snap<ShooterState>(page); return s.bus.t / s.bus.duration; }, { timeout: 30_000 }).toBeGreaterThan(0.45);
+  await page.keyboard.press('Space');
+  const me = (s: ShooterState) => s.players.find(p => p.human)!;
+  await expect.poll(async () => me(await snap<ShooterState>(page)).mode, { timeout: 60_000 }).toBe('ground');
+  // Head for the nearest survivor until somebody wins the fight.
+  await page.keyboard.down('w');
+  let stormShot = false, feedShot = false;
+  const deadline = Date.now() + 170_000;
+  for (;;) {
+    const s = await snap<ShooterState>(page), p = me(s);
+    if (s.phase === 'done' || Date.now() > deadline) break;
+    if (p.mode === 'ground') {
+      const target = s.players.filter(q => q.id !== p.id && q.mode === 'ground').sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
+      if (target) await look(page, Math.atan2(target.x - p.x, target.z - p.z), -0.18);
+    }
+    if (!stormShot && s.storm.stage >= 0) { stormShot = true; await capture(page, 'shooter-isle-storm', info); }
+    if (!feedShot && await page.locator('.br-feed li').count()) { feedShot = true; await capture(page, 'shooter-isle-killfeed', info); }
+  }
+  await page.keyboard.up('w');
+  await expect(page.locator('.br-play')).toHaveAttribute('data-phase', 'done', { timeout: 15_000 });
+  await expect(page.locator('.br-results tbody tr').first()).toBeVisible();
+  await expect(page.locator('.br-results h2')).toContainText(/Victory Royale|You placed/);
+  await capture(page, 'shooter-isle-results', info);
+  expect(errors).toEqual([]);
+});
+
+test('phone: chooser fits and touch controls drive a kart', async ({ page: desktop, browser, baseURL }, info) => {
+  const context = await browser.newContext({ baseURL, storageState: await desktop.context().storageState(), viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+  const page = await context.newPage();
+  try {
+    await boot(page, 'light');
+    await expectNoHorizontalOverflow(page);
+    await capture(page, 'chooser-phone', info);
+    await page.getByRole('button', { name: 'Start race', exact: true }).click();
+    await expect.poll(async () => (await snap<KartState>(page))?.phase ?? '', { timeout: 30_000 }).toBe('race');
+    await expect(page.getByRole('button', { name: 'Drift', exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    const before = (await snap<KartState>(page)).racers.find(r => r.human)!.travel;
+    await page.getByRole('button', { name: 'Steer left', exact: true }).dispatchEvent('pointerdown', { pointerId: 1 });
+    await expect.poll(async () => (await snap<KartState>(page)).racers.find(r => r.human)!.travel, { timeout: 10_000 }).toBeGreaterThan(before + 10);
+    await capture(page, 'kart-phone', info);
+  } finally { await context.close(); }
+});
+
+// Menu art: OTTO_GAMES_ART=1 renders HUD-free frames of every track and island
+// into docs/testing/room-games/art (converted to ui/public/room-games/*.webp).
+test('menu art from live frames', async ({ page }) => {
+  test.skip(process.env.OTTO_GAMES_ART !== '1', 'Art generator: set OTTO_GAMES_ART=1');
+  test.setTimeout(300_000);
+  const art = resolve('..', 'docs/testing/room-games/art');
+  mkdirSync(art, { recursive: true });
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const hide = () => page.addStyleTag({ content: '.kart-top,.kart-ranking,.kart-place,.kart-minimap,.kart-intro,.kart-hint,.kart-notice,.kart-drift,.br-top,.br-mapbox,.br-vitals,.br-inventory,.br-prompt,.br-toast,.br-cross,.br-hint,.br-overlay{display:none!important}' });
+  for (const [id, name] of [['meadow', 'Sunny Meadow'], ['downtown', 'Downtown Dash'], ['canyon', 'Canyon Run'], ['frost', 'Frostbite Pass']]) {
+    await boot(page);
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.getByRole('button', { name: 'Start race', exact: true }).click();
+    await expect.poll(async () => (await snap<KartState>(page))?.clock ?? 0, { timeout: 30_000 }).toBeGreaterThan(0.5);
+    await hide();
+    await page.locator('.kart-stage').screenshot({ path: resolve(art, `map-${id}.png`) });
+    await page.locator('.kart-play canvas').first().click();
+    await page.keyboard.down('w');
+    await expect.poll(async () => (await snap<KartState>(page)).raceTime, { timeout: 20_000 }).toBeGreaterThan(id === 'meadow' ? 2.2 : 1.5);
+    await page.keyboard.up('w');
+    if (id === 'meadow') await page.locator('.kart-stage').screenshot({ path: resolve(art, 'cover-kart.png') });
+  }
+  for (const [id, name] of [['isle', 'Palm Isle'], ['mesa', 'Red Mesa']]) {
+    await boot(page);
+    await page.getByRole('button', { name: /Storm Royale/ }).click();
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.getByRole('button', { name: 'Drop in', exact: true }).click();
+    await expect.poll(async () => (await snap<ShooterState>(page))?.bus.t ?? 0, { timeout: 30_000 }).toBeGreaterThan(5);
+    await hide();
+    await page.locator('.br-stage').screenshot({ path: resolve(art, `map-${id}.png`) });
+    if (id === 'isle') {
+      await page.locator('.br-play canvas').first().focus();
+      await page.keyboard.press('Space');
+      await expect.poll(async () => (await snap<ShooterState>(page)).players.find(p => p.human)!.mode, { timeout: 60_000 }).toBe('ground');
+      await look(page, 2.2, -0.08);
+      await expect.poll(async () => (await snap<ShooterState>(page)).clock, { timeout: 5000 }).toBeGreaterThan(0);
+      await page.locator('.br-stage').screenshot({ path: resolve(art, 'cover-shooter.png') });
+    }
+  }
+});
 
 async function guestPage(context: BrowserContext, invite: string) {
   const guest = await context.newPage();

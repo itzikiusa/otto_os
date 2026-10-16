@@ -297,7 +297,7 @@ export class KartRenderer {
       if (Math.abs(s) > 20) beside('race-tentLong', s, -1, gap + 3, 6);
     }
     beside('race-pitsGarage', -24, -1, gap + 5, 10); beside('race-pitsOffice', 0, -1, gap + 5, 10); beside('race-pitsGarage', 24, -1, gap + 5, 10);
-    for (let s = -90; s < 110; s += 30) { beside('race-bannerTowerRed', s, -1, gap + 0.5, 6); beside('race-bannerTowerGreen', s + 15, 1, gap + 0.5, 6); }
+    for (let s = -90; s < 110; s += 30) { beside('race-flagCheckers', s, -1, gap, 5); beside('race-flagRed', s + 15, 1, gap, 5); }
     pointAt(track, 2, 0, _pt);
     batch.add('toy-gate-finish', _pt[0], _pt[1], _pt[2], _pt[3], (hw * 2 + 6) / 1.55, 9);
     // Billboards and flags on corners.
@@ -499,8 +499,11 @@ export class KartRenderer {
       const t = Math.min(1, state.clock / 2.5);
       const ease = t * t * (3 - 2 * t);
       const a = self.yaw + Math.PI * (1 - ease);
-      const d = lerp(30, 8, ease), h = lerp(22, 3.4, ease);
+      const d = lerp(34, 8, ease), h = lerp(30, 3.4, ease * ease);
       cam.position.set(self.x + Math.sin(a) * d, self.y + h, self.z + Math.cos(a) * d);
+      // Keep the sweep above walls/cliffs beside the grid.
+      const n0 = nearest(this.track, cam.position.x, cam.position.z, self.hint, _near, 40);
+      cam.position.y = Math.max(cam.position.y, this.track.ground(cam.position.x, cam.position.z, n0) + 6);
       cam.lookAt(self.x, self.y + 1.2, self.z);
       this.camPos.copy(cam.position); this.camLook.set(self.x, self.y + 1.2, self.z); this.camReady = true;
       return;

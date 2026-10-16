@@ -6,6 +6,7 @@
 import { HALF, terrainHeight, type Box, type Cylinder, type ShooterMap } from './map.ts';
 
 const CELL = 12;
+const EMPTY: number[] = [];
 const N = Math.ceil((HALF * 2) / CELL);
 export const RADIUS = 0.42;
 export const HEIGHT = 1.8;
@@ -127,8 +128,8 @@ function rayCyl(ox: number, oz: number, oy: number, dx: number, dz: number, dy: 
   return y >= c.y0 && y <= c.y1 ? t : -1;
 }
 
-/** First world hit along a normalized ray within `max` metres. */
-export function raycast(w: World, ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number): Hit {
+/** First world hit along a normalized ray within `max` metres (`trunks: false` ignores tree trunks, e.g. for the camera). */
+export function raycast(w: World, ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number, trunks = true): Hit {
   let best = max, kind: Hit['kind'] = 'none';
   // Props: walk grid cells along the ray (2D DDA would be tighter; cells are coarse).
   w.mark++;
@@ -150,7 +151,7 @@ export function raycast(w: World, ox: number, oy: number, oz: number, dx: number
         const h = rayBox(ox, oy, oz, dx, dy, dz, w.map.boxes[i], best);
         if (h >= 0 && h < best) { best = h; kind = 'prop'; }
       }
-      const cyls = w.cylCells[gz * N + gx];
+      const cyls = trunks ? w.cylCells[gz * N + gx] : EMPTY;
       for (let k = 0; k < cyls.length; k++) {
         const i = cyls[k];
         if (w.cylStamp[i] === w.mark) continue;

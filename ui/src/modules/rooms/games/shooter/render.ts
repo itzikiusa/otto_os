@@ -27,6 +27,7 @@ const LOOT_RANGE = 70;
 const _v = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
+const PROBE_HEIGHTS = [1.65, 1.1];
 
 interface FighterVisual {
   fighter: FighterId; root: THREE.Group; model: THREE.Object3D; mixer: THREE.AnimationMixer; hand: THREE.Object3D | null;
@@ -111,6 +112,10 @@ export class ShooterRenderer {
       const hz = map.heights[Math.min(n - 1, iz + 1) * n + ix] - map.heights[Math.max(0, iz - 1) * n + ix];
       const slope = Math.hypot(hx, hz) / (GRID * 2);
       c.copy(low).lerp(mid, smoothstep(2, 9, h)).lerp(high, smoothstep(9, 16, h) * 0.6);
+      // Meadow patches and worn dirt for variety.
+      const patch = Math.sin(x * 0.083 + Math.cos(z * 0.05) * 2) * Math.cos(z * 0.071 + Math.sin(x * 0.04) * 2);
+      c.lerp(map.theme === 'isle' ? mid : high, smoothstep(0.2, 0.8, patch) * 0.5);
+      c.multiplyScalar(0.92 + 0.08 * Math.sin(x * 0.31) * Math.sin(z * 0.27));
       if (map.theme === 'isle') c.lerp(sand, 1 - smoothstep(0.6, 2.2, h));
       else c.lerp(sand, smoothstep(0.3, 0.6, Math.sin(x * 0.05) * Math.cos(z * 0.04) * 0.5 + 0.5) * 0.35);
       c.lerp(rock, smoothstep(0.45, 0.9, slope));
@@ -133,7 +138,7 @@ export class ShooterRenderer {
     } else {
       // Desert floor beyond the playable cliffs.
       const floor = owned(new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000), new THREE.MeshLambertMaterial({ color: theme.mid })));
-      floor.rotation.x = -Math.PI / 2; floor.position.y = 22;
+      floor.rotation.x = -Math.PI / 2; floor.position.y = -1;
       scene.add(floor);
     }
     const batch = new PropBatch(this.lib);
@@ -152,10 +157,10 @@ export class ShooterRenderer {
     // Drop balloon: Kenney delivery van slung under a striped envelope.
     const van = this.lib.instance('car-delivery');
     van.scale.setScalar(3.4);
-    const envelope = owned(new THREE.Mesh(new THREE.SphereGeometry(9, 24, 16), new THREE.MeshLambertMaterial({ color: 0x4c7bff })));
-    envelope.position.y = 18; envelope.scale.set(1, 1.15, 1);
-    const band = owned(new THREE.Mesh(new THREE.TorusGeometry(9.1, 0.8, 8, 32), new THREE.MeshLambertMaterial({ color: 0xffd23f })));
-    band.position.y = 18; band.rotation.x = Math.PI / 2;
+    const envelope = owned(new THREE.Mesh(new THREE.SphereGeometry(8, 24, 16), new THREE.MeshLambertMaterial({ color: 0x4c7bff })));
+    envelope.position.y = 17; envelope.scale.set(1, 1.15, 1);
+    const band = owned(new THREE.Mesh(new THREE.TorusGeometry(8.1, 0.7, 8, 32), new THREE.MeshLambertMaterial({ color: 0xffd23f })));
+    band.position.y = 17; band.rotation.x = Math.PI / 2;
     this.balloon.add(van, envelope, band);
     scene.add(this.balloon);
   }
@@ -222,6 +227,8 @@ export class ShooterRenderer {
     this.time += dt;
     this.stormMat.uniforms.time.value = this.time;
     const s = state.storm;
+    // The wall appears once the first circle is announced.
+    this.storm.visible = s.stage >= 0 || s.timer < 20;
     this.storm.position.set(s.cx, 70, s.cz);
     this.storm.scale.set(Math.max(0.5, s.r), 1, Math.max(0.5, s.r));
     // Balloon follows the flight path while anyone is aboard.
@@ -296,12 +303,14 @@ export class ShooterRenderer {
     if (key !== v.gunKey) {
       v.gun?.removeFromParent();
       v.gun = null; v.gunKey = key;
-      if (key && v.hand) {
+      if (key) {
+        // Held at chest height in front of the right shoulder, barrel forward
+        // (+Z); the holding pose raises the arms to meet it.
         const gun = this.lib.instance(key);
-        gun.scale.setScalar(0.34);
-        gun.position.set(0, -0.12, 0.03);
-        gun.rotation.set(Math.PI / 2, 0, 0);
-        v.hand.add(gun);
+        const pistol = held?.w === 'pistol';
+        gun.scale.setScalar(pistol ? 0.3 : 0.34);
+        gun.position.set(-0.12, 0.3, pistol ? 0.19 : 0.16);
+        v.model.add(gun);
         v.gun = gun;
       }
     }
@@ -355,21 +364,51 @@ export class ShooterRenderer {
 
   private updateCamera(state: ShooterState, p: Fighter, cam: CameraState, dt: number, own: boolean): THREE.Vector3 {
     const c = this.view.camera;
-    const cy = Math.cos(cam.pitch), fx = Math.sin(cam.yaw) * cy, fy = Math.sin(cam.pitch), fz = Math.cos(cam.yaw) * cy;
+    // From the balloon the view always looks down at the island.
+    const pitch = p.mode === 'bus' ? Math.min(cam.pitch, -0.55) : cam.pitch;
+    const cy = Math.cos(pitch), fx = Math.sin(cam.yaw) * cy, fy = Math.sin(pitch), fz = Math.cos(cam.yaw) * cy;
     const rx = -Math.cos(cam.yaw), rz = Math.sin(cam.yaw);
     let back: number, side: number, up: number;
-    if (p.mode === 'bus') { back = 22; side = 0; up = 6; }
-    else if (p.mode === 'sky' || p.mode === 'glide') { back = 9; side = 0; up = 3; }
-    else if (p.mode === 'dead' || !own) { back = 6; side = 0.6; up = 1.9; }
-    else if (cam.aiming) { back = 1.9; side = 0.75; up = 1.75; }
-    else { back = 3.8; side = 0.85; up = 1.85; }
-    const px = p.x, py = p.y + up, pz = p.z;
+    let px = p.x, pz = p.z, baseY = p.y;
+    if (p.mode === 'bus') {
+      // Ride behind the balloon basket, looking down at the island.
+      back = 26; side = 0; up = 38;
+      px = this.balloon.position.x; pz = this.balloon.position.z; baseY = this.balloon.position.y;
+    } else if (p.mode === 'sky' || p.mode === 'glide') { back = 10; side = 0; up = 3.5; }
+    else if (p.mode === 'dead' || !own) { back = 6.5; side = 0.6; up = 2.2; }
+    else if (cam.aiming) { back = 2.8; side = 1.15; up = 1.95; }
+    // Over the right shoulder: the survivor sits in the lower-left third and
+    // the crosshair stays clear.
+    else { back = 5.6; side = 1.55; up = 2.3; }
+    const py = baseY + up;
     const pivotX = px + rx * side, pivotZ = pz + rz * side;
     // Pull the camera in front of walls between the pivot and the desired spot.
-    const hit = raycast(this.world, pivotX, py, pivotZ, -fx, -fy, -fz, back + 0.3);
+    const hit = raycast(this.world, pivotX, py, pivotZ, -fx, -fy, -fz, back + 0.3, false);
     const dist = Math.max(0.6, Math.min(back, hit.t - 0.3));
     _v.set(pivotX - fx * dist, py - fy * dist, pivotZ - fz * dist);
     _v.y = Math.max(_v.y, terrainHeight(this.map, _v.x, _v.z) + 0.4);
+    // Keep the survivor in view: cast from the head and the chest to the
+    // camera; a prop in between (car, barrel, crate stack) pulls the camera in
+    // front of it, or lifts it over the prop when that would be too close.
+    if (p.mode === 'ground' || p.mode === 'dead') {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let nearest = Infinity, ox = 0, oy = 0, oz = 0, ex = 0, ey = 0, ez = 0, el = 0;
+        for (const h of PROBE_HEIGHTS) {
+          const sx = p.x, sy = p.y + h, sz = p.z;
+          const dx = _v.x - sx, dy = _v.y - sy, dz = _v.z - sz, dl = Math.hypot(dx, dy, dz);
+          if (dl < 0.5) continue;
+          const block = raycast(this.world, sx, sy, sz, dx / dl, dy / dl, dz / dl, dl, false);
+          if (block.kind !== 'none' && block.t < dl && block.t < nearest) { nearest = block.t; ox = sx; oy = sy; oz = sz; ex = dx; ey = dy; ez = dz; el = dl; }
+        }
+        if (nearest === Infinity) break;
+        if (nearest - 0.35 >= 2.2 || attempt === 2) {
+          const k = Math.max(1.2, nearest - 0.35) / el;
+          _v.set(ox + ex * k, oy + ey * k, oz + ez * k);
+          break;
+        }
+        _v.y += 1.6;
+      }
+    }
     this.camPos.lerp(_v, this.camPos.lengthSq() === 0 ? 1 : 1 - Math.exp(-28 * dt));
     c.position.copy(this.camPos);
     c.lookAt(this.camPos.x + fx, this.camPos.y + fy, this.camPos.z + fz);

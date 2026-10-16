@@ -32,7 +32,7 @@
   let renderer: ShooterRenderer | undefined, input: InputState | undefined;
   let stop: (() => void) | undefined;
   const isGuest = $derived(link?.role === 'guest');
-  const cam = { yaw: 0, pitch: -0.15, aiming: false, zoom: 70 };
+  const cam = { yaw: 0, pitch: -0.3, aiming: false, zoom: 70 };
   let slotWanted = 0;
   const numbers: { x: number; y: number; z: number; text: string; color: string; t: number }[] = [];
   const GUN_ICON: Record<string, string> = { pistol: 'gun-pistol', smg: 'gun-smg', rifle: 'gun-rifle', shotgun: 'gun-shotgun', sniper: 'gun-sniper', rocket: 'gun-rocket' };
@@ -282,7 +282,7 @@
       input?.endFrame();
       drawOverlay(now);
       if (now - lastHud > 80) {
-        hud = { ...state, players: state.players.map(q => ({ ...q, weapons: [...q.weapons] })) };
+        hud = { ...state, storm: { ...state.storm }, bus: { ...state.bus }, chests: [...state.chests], players: state.players.map(q => ({ ...q, weapons: q.weapons.map(w => w && { ...w }), ammo: { ...q.ammo } })) };
         if (p && p.mode === 'ground') {
           const chest = nearestClosedChest(state, p);
           const w = nearestWeaponLoot(state, p);
@@ -361,8 +361,8 @@
     {#if me.reload > 0 && held}<div class="br-reload" aria-label="Reloading"><span style:width={`${(1 - me.reload / WEAPONS[held.w].reload) * 100}%`}></span><em>Reloading</em></div>{/if}
     {#if me.mode !== 'dead'}
       <div class="br-vitals" aria-label="Health and shield">
-        <div class="br-bar shield"><span style:width={`${me.shield}%`}></span><b>{Math.round(me.shield)}</b></div>
-        <div class="br-bar health"><span style:width={`${me.hp}%`}></span><b>{Math.round(me.hp)}</b></div>
+        <div class="br-bar shield" role="meter" aria-label="Shield" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(me.shield)}><span style:width={`${me.shield}%`}></span><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z" /></svg>Shield {Math.round(me.shield)}</b></div>
+        <div class="br-bar health" role="meter" aria-label="Health" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(me.hp)}><span style:width={`${me.hp}%`}></span><b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3h4v7h7v4h-7v7h-4v-7H3v-4h7z" /></svg>Health {Math.round(me.hp)}</b></div>
       </div>
       <div class="br-inventory" aria-label="Weapons">
         {#each me.weapons as w, i (i)}
@@ -372,7 +372,7 @@
           </div>
         {/each}
         {#if held}<p class="br-held">{RARITY_NAMES[held.rarity]} {WEAPONS[held.w].name}</p>{/if}
-        <p class="br-ammo">{#each AMMO_KINDS as k (k)}<span title={k}>{k} {me.ammo[k]}</span>{/each}</p>
+        <p class="br-ammo" aria-label="Ammo reserve">{#each AMMO_KINDS as k (k)}<span class:has={me.ammo[k] > 0}>{k} <b>{me.ammo[k]}</b></span>{/each}</p>
       </div>
     {:else if hud.phase !== 'done'}
       <div class="br-spectate"><p>#{me.place} · {me.kills} elims · {watched ? `Spectating ${watched.name || fighterName(watched.fighter)}` : 'Match in progress'}</p>
@@ -440,11 +440,12 @@
   .br-reload span { display: block; height: 100%; border-radius: var(--radius-s); background: var(--on-scrim); }
   .br-reload em { position: absolute; inset-block-start: 8px; inset-inline: 0; text-align: center; font-size: var(--fs-s); font-style: normal; color: var(--on-scrim); }
   .br-vitals { position: absolute; inset-block-end: 18px; inset-inline-start: 18px; padding: 10px; width: min(300px, 40vw); display: grid; gap: 6px; pointer-events: none; }
-  .br-bar { position: relative; height: 18px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--on-scrim) 15%, transparent); overflow: hidden; }
+  .br-bar { position: relative; height: 22px; border-radius: var(--radius-s); background: color-mix(in srgb, var(--on-scrim) 15%, transparent); overflow: hidden; }
   .br-bar span { position: absolute; inset-block: 0; inset-inline-start: 0; }
   .br-bar.health span { background: var(--success); }
   .br-bar.shield span { background: var(--info); }
-  .br-bar b { position: relative; padding-inline-start: 8px; font-size: var(--fs-s); line-height: 18px; font-variant-numeric: tabular-nums; }
+  .br-bar b { position: relative; display: inline-flex; align-items: center; gap: 6px; padding-inline-start: 8px; font-size: var(--fs-m); font-weight: 600; line-height: 22px; font-variant-numeric: tabular-nums; text-shadow: 0 1px 2px var(--scrim-media); }
+  .br-bar svg { width: 14px; height: 14px; fill: var(--on-scrim); }
   .br-inventory { position: absolute; inset-block-end: 18px; inset-inline-end: 18px; display: grid; grid-template-columns: repeat(3, 88px); gap: 6px; pointer-events: none; }
   .br-slot { height: 78px; position: relative; display: grid; place-items: center; border-width: 2px; opacity: .8; }
   .br-slot.active { opacity: 1; transform: translateY(-6px); box-shadow: 0 0 0 2px var(--on-scrim); }
@@ -453,8 +454,11 @@
   .br-slot span { font-size: var(--fs-m); font-weight: 600; font-variant-numeric: tabular-nums; }
   .br-slot span em { font-style: normal; font-weight: 400; opacity: .7; font-size: var(--fs-s); }
   .br-empty { font-size: var(--fs-s) !important; font-weight: 400 !important; opacity: .6; }
-  .br-held, .br-ammo { grid-column: 1 / -1; margin: 0; text-align: end; color: var(--on-scrim); text-shadow: 0 1px 3px var(--scrim-media); font-size: var(--fs-s); }
-  .br-ammo { display: flex; gap: 8px; justify-content: flex-end; text-transform: capitalize; opacity: .9; }
+  .br-held, .br-ammo { grid-column: 1 / -1; margin: 0; text-align: end; color: var(--on-scrim); font-size: var(--fs-m); }
+  .br-held { justify-self: end; background: var(--scrim-media); padding: 2px 8px; border-radius: var(--radius-s); font-weight: 600; }
+  .br-ammo { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; text-transform: capitalize; }
+  .br-ammo span { background: var(--scrim-media); padding: 2px 8px; border-radius: var(--radius-s); font-variant-numeric: tabular-nums; }
+  .br-ammo span.has { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--on-scrim) 40%, transparent); }
   .br-spectate { position: absolute; inset-block-end: 18px; inset-inline-start: 50%; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
   .br-spectate p { margin: 0; font-size: var(--fs-m); }
   .br-spectate :global(.btn) { background: color-mix(in srgb, var(--on-scrim) 14%, transparent); color: var(--on-scrim); }

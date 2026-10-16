@@ -61,7 +61,7 @@ export function decodeSnapshot(data: unknown, names: (slot: number, racer: Racer
     const row = s.r[i], q = s.q[i], lt = s.lt[i];
     if (!nums(row, 30) || !nums(q, 3) || !RACER_IDS[q[0]] || !Array.isArray(lt) || lt.length > 3 || !lt.every(finite)) return null;
     const [x, y, z, yaw, vx, vz, vy, speed, steer, f, drift, driftLevel, boost, boostPower, spin, star, slow, item, itemCount, roll, travel, lap, place, finish, respawn, wrong, trick, surface, hint, lateral] = row;
-    if (item < -1 || item >= ITEM_KINDS.length || !SURFACES[surface] || place < 1 || place > MAX_RACERS || hint < -1 || hint >= track.count) return null;
+    if (item < -1 || item >= ITEM_KINDS.length || !SURFACES[surface] || place < 1 || place > s.r.length || hint < -1 || hint >= track.count || q[2] < -1 || q[2] > 15 || (q[1] === 1) !== (q[2] >= 0)) return null;
     const racer = RACER_IDS[q[0]];
     racers.push({
       id: i, racer, human: q[1] === 1, slot: q[2], name: names(q[2], racer),

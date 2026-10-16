@@ -57,8 +57,11 @@ const _pt = [0, 0, 0, 0];
 export function createRace(trackId: TrackId, seats: KartSeat[], difficulty: Difficulty, seed: number): KartState {
   const track = trackFor(trackId);
   const rng = new Rng(seed);
-  // Humans start at the back of the grid, CPUs ahead (Grand Prix style).
-  const order = [...seats.filter(s => !s.human), ...seats.filter(s => s.human)].slice(0, MAX_RACERS);
+  // Humans start mid-grid (from 4th back), CPUs fill the slots around them,
+  // so there are rivals both ahead and behind from the start.
+  const cpus = seats.filter(s => !s.human), humans = seats.filter(s => s.human);
+  const first = Math.min(3, Math.max(0, Math.min(seats.length, MAX_RACERS) - humans.length));
+  const order = [...cpus.slice(0, first), ...humans, ...cpus.slice(first)].slice(0, MAX_RACERS);
   const racers = order.map((seat, i): Racer => {
     const row = Math.floor(i / 2), side = i % 2 ? -1 : 1;
     const s = -9 - row * 7.5 - (i % 2) * 3.2;

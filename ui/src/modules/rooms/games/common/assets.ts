@@ -139,7 +139,8 @@ export class PropBatch {
     this.placements.set(key, list);
   }
   count(): number { let n = 0; for (const l of this.placements.values()) n += l.length; return n; }
-  build(group: THREE.Group, shadows: boolean): void {
+  /** Small decoration (grass, flowers…) never casts shadows: it is cheap fill, not shape. */
+  build(group: THREE.Group, shadows: boolean, decor: RegExp = /grass|flower|bush|plant_|stones|mushroom/): void {
     for (const [key, list] of this.placements) {
       const model = this.lib.model(key);
       for (const part of model.parts) {
@@ -147,7 +148,7 @@ export class PropBatch {
         list.forEach((m, i) => mesh.setMatrixAt(i, _m.multiplyMatrices(m, part.matrix)));
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
-        mesh.castShadow = shadows; mesh.receiveShadow = true;
+        mesh.castShadow = shadows && !decor.test(key); mesh.receiveShadow = true;
         mesh.name = key;
         group.add(mesh);
       }

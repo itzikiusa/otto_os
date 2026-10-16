@@ -226,7 +226,7 @@
       }
       input?.endFrame();
       if (now - lastHud > 90) {
-        hud = { ...state, racers: state.racers.map(r => ({ ...r })) };
+        hud = { ...state, boxes: state.boxes.map(b => ({ ...b })), racers: state.racers.map(r => ({ ...r, lapTimes: [...r.lapTimes] })) };
         if (state.racers[mineIndex]?.roll > 0 && now - rouletteAt > 80) { rouletteIcon = (rouletteIcon + 1) % ROULETTE.length; rouletteAt = now; audio.play('tick', { volume: 0.3 }); }
         drawMinimap(state, mineIndex);
         lastHud = now;

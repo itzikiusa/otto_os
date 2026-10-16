@@ -37,20 +37,20 @@ function put(state: KartState, r: Racer, s: number, lateral: number, speed = 0, 
 const events = (state: KartState, type: KartEventType, from = 0) => state.events.filter(e => e.id > from && e.type === type);
 const press = (k: Partial<KartInput>): KartInput => ({ ...idleInput(), ...k });
 
-test('createRace: humans start at the back of the grid, CPUs ahead', () => {
+test('createRace: humans start mid-grid with CPU rivals ahead and behind', () => {
   const seats = kartSeats([{ slot: 0, name: 'Ann', pick: 'kai' }, { slot: 1, name: 'Bo', pick: 'rosa' }], true);
   const s = createRace('meadow', seats, 'normal', 1);
   assert.equal(s.racers.length, 8);
   assert.equal(s.phase, 'intro');
   assert.equal(s.laps, LAPS);
-  assert.deepEqual(s.racers.map(r => r.human), [false, false, false, false, false, false, true, true]);
+  assert.deepEqual(s.racers.map(r => r.human), [false, false, false, true, true, false, false, false]);
   assert.deepEqual(s.racers.map(r => r.id), [0, 1, 2, 3, 4, 5, 6, 7]);
-  // Everyone starts behind the line, humans furthest back and last in the ranking.
+  // Everyone starts behind the line; the humans are 4th and 5th on the grid.
   assert.ok(s.racers.every(r => r.travel < 0 && r.lap === 0 && r.finish === null));
-  const cpuMin = Math.min(...s.racers.filter(r => !r.human).map(r => r.travel));
-  assert.ok(s.racers.filter(r => r.human).every(r => r.travel < cpuMin));
-  assert.deepEqual(s.racers.filter(r => r.human).map(r => r.place).sort(), [7, 8]);
+  assert.deepEqual(s.racers.filter(r => r.human).map(r => r.place).sort(), [4, 5]);
   assert.deepEqual(s.racers.map(r => r.place).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+  // A solo human starts 4th of 8.
+  assert.equal(createRace('meadow', kartSeats([{ slot: 0, name: 'Ann', pick: 'kai' }], true), 'easy', 1).racers.find(r => r.human)!.place, 4);
   // Grid slots don't overlap and sit on the road.
   const track = trackFor('meadow');
   for (const a of s.racers) {
