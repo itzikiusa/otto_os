@@ -211,7 +211,7 @@ async fn upsert_integration<S: ChannelsCtx>(
     let bot_token_ref = if let Some(tok) = req.bot_token.as_deref().filter(|t| !t.trim().is_empty())
     {
         let r = format!("chan-bot-{}-{}", ws_id, channel.as_str());
-        s.secrets().put(&r, tok)?;
+        otto_core::secrets::put_async(s.secrets(), &r, tok).await?;
         Some(r)
     } else {
         None
@@ -221,7 +221,7 @@ async fn upsert_integration<S: ChannelsCtx>(
     let app_token_ref = if let Some(tok) = req.app_token.as_deref().filter(|t| !t.trim().is_empty())
     {
         let r = format!("chan-app-{}-{}", ws_id, channel.as_str());
-        s.secrets().put(&r, tok)?;
+        otto_core::secrets::put_async(s.secrets(), &r, tok).await?;
         Some(r)
     } else {
         None
@@ -356,11 +356,8 @@ async fn delete_integration<S: ChannelsCtx>(
 
     // Delete keychain secrets (ignore errors — they may already be absent).
     if let Ok(Some((bot_ref, app_ref))) = s.integrations().get_refs(&ws_id, channel).await {
-        if let Some(r) = bot_ref {
-            let _ = s.secrets().delete(&r);
-        }
-        if let Some(r) = app_ref {
-            let _ = s.secrets().delete(&r);
+        for r in [bot_ref, app_ref].into_iter().flatten() {
+            let _ = otto_core::secrets::delete_async(s.secrets(), &r).await;
         }
     }
 

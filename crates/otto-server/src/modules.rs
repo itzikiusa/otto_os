@@ -1600,6 +1600,20 @@ pub(crate) fn stage_review_skills(
     stage_skill_packages_at(library, names, &bundle).map(|staged| staged.root)
 }
 
+/// Stage the WHOLE library for a review run, on the blocking pool: it lists
+/// every skill and copies each tree twice (hundreds of file ops), which ran
+/// inline on the worker driving the review — once per run and per retry.
+async fn stage_all_review_skills(library: &otto_context::Library) -> Option<String> {
+    let library = library.clone();
+    tokio::task::spawn_blocking(move || {
+        let names: Vec<String> = library.list_skills().into_iter().map(|s| s.name).collect();
+        stage_review_skills(&library, &names)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Register (or replace) the cancel flag for one review agent. Returns the
 /// fresh, un-tripped flag — replacing matters on retry, where a stale tripped
 /// flag would short-circuit the new run instantly.
@@ -2029,7 +2043,7 @@ async fn run_review_core(
     // diff into the prompt doesn't scale (and can blow past input limits); the
     // agents are real sessions with file access, so they read it on demand.
     let diff_path = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
-    if let Err(e) = std::fs::write(&diff_path, &diff_text) {
+    if let Err(e) = tokio::fs::write(&diff_path, &diff_text).await {
         tracing::warn!(review = %review_id, "could not write review diff file: {e}");
     }
     // Durable copy (0100): the prompt references the temp path above, so a
@@ -2100,15 +2114,7 @@ async fn run_review_core(
     // only ones carrying an in-tree `.claude/skills`. codex/agy don't use this
     // bundle; their lens method travels inline in the prompt. Best-effort (None →
     // even claude falls back to the inlined prompt text).
-    let review_skills_dir = {
-        let names: Vec<String> = ctx
-            .context_library
-            .list_skills()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        stage_review_skills(&ctx.context_library, &names)
-    };
+    let review_skills_dir = stage_all_review_skills(&ctx.context_library).await;
 
     // Each reviewer watches its OWN cancel flag (the per-agent Stop button).
     // Whole-review cancel trips every per-agent flag too, so review-level
@@ -4472,15 +4478,7 @@ async fn retry_review_agent(
     // lens in the agent NAME with `skill` empty, so filtering on `skill` here
     // would leave the common case with an empty bundle). codex/agy ignore the
     // bundle and re-read the lens method inline from the persisted prompt.
-    let review_skills_dir = {
-        let names: Vec<String> = ctx
-            .context_library
-            .list_skills()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        stage_review_skills(&ctx.context_library, &names)
-    };
+    let review_skills_dir = stage_all_review_skills(&ctx.context_library).await;
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
     let slots = reviewer_slots();
     let ctx_bg = ctx.clone();

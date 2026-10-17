@@ -30,29 +30,40 @@ pub async fn candidates(pool: &DbPool, req: PageRequest<'_>) -> Result<Vec<Candi
         .map(|(a, k)| (Some(a), Some(k)))
         .unwrap_or_default();
     let cwd_prefix = req.cwd.map(|cwd| format!("{}/", cwd.trim_end_matches('/')));
-    let rows = sqlx::query(
-        "SELECT * FROM sessions WHERE workspace_id = ? AND kind = 'agent'
-        AND (? OR created_by = ?) AND (? IS NULL OR status = ?)
-        AND (? IS NULL OR cwd = ? OR instr(cwd, ?) = 1)
-        AND (? IS NULL OR last_active_at < ? OR (last_active_at = ? AND id > ?))
-        ORDER BY last_active_at DESC, id ASC LIMIT ?",
-    )
-    .bind(req.workspace)
-    .bind(req.admin)
-    .bind(req.owner)
-    .bind(req.status)
-    .bind(req.status)
-    .bind(req.cwd)
-    .bind(req.cwd)
-    .bind(&cwd_prefix)
-    .bind(before_at)
-    .bind(before_at)
-    .bind(before_at)
-    .bind(before_key)
-    .bind(limit as i64)
-    .fetch_all(pool)
-    .await
-    .map_err(dberr("history candidates"))?;
+    // Only the ACTIVE predicates are emitted. Bound-parameter switches like
+    // `(? OR created_by = ?)` cannot be folded when the plan is made, so a
+    // non-admin page never used the owner index and filtered the whole
+    // workspace's history row by row; and the cursor is a range on
+    // `last_active_at` (`<=`, index-seekable) instead of an OR the planner
+    // cannot seek, so a deep page no longer rescans from the newest row.
+    let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT * FROM sessions WHERE kind = 'agent' AND workspace_id = ",
+    );
+    q.push_bind(req.workspace);
+    if !req.admin {
+        q.push(" AND created_by = ").push_bind(req.owner);
+    }
+    if let Some(status) = req.status {
+        q.push(" AND status = ").push_bind(status);
+    }
+    if let Some(cwd) = req.cwd {
+        q.push(" AND (cwd = ").push_bind(cwd);
+        q.push(" OR instr(cwd, ")
+            .push_bind(&cwd_prefix)
+            .push(") = 1)");
+    }
+    if let (Some(at), Some(key)) = (before_at, before_key) {
+        q.push(" AND last_active_at <= ").push_bind(at);
+        q.push(" AND (last_active_at < ").push_bind(at);
+        q.push(" OR id > ").push_bind(key).push(")");
+    }
+    q.push(" ORDER BY last_active_at DESC, id ASC LIMIT ")
+        .push_bind(limit as i64);
+    let rows = q
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(dberr("history candidates"))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let session = crate::sessions::row_to_session(&row)?;
@@ -273,5 +284,48 @@ mod tests {
             rows.into_iter().map(|r| r.key).collect::<Vec<_>>(),
             vec!["s00000", "s00001"]
         );
+    }
+
+    /// The SQL a non-admin page with a cursor runs must seek the owner index
+    /// in order — no `TEMP B-TREE` sort and no table scan — and still return
+    /// only the caller's rows past the cursor.
+    #[tokio::test]
+    async fn non_admin_cursor_page_seeks_the_owner_index() {
+        let pool = pool().await;
+        seed(&pool, 50).await;
+        let rows = candidates(
+            &pool,
+            PageRequest {
+                workspace: "ws",
+                owner: "owner",
+                budget: 5,
+                before: Some(("2026-01-01T00:00:00Z", "s00010")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let keys: Vec<_> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["s00012", "s00014", "s00016", "s00018", "s00020", "s00022"]
+        );
+        let plan: Vec<String> = sqlx::query(
+            "EXPLAIN QUERY PLAN SELECT * FROM sessions WHERE kind = 'agent' AND workspace_id = 'ws' \
+             AND created_by = 'owner' AND last_active_at <= 'x' AND (last_active_at < 'x' OR id > 'k') \
+             ORDER BY last_active_at DESC, id ASC LIMIT 6",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<String, _>("detail"))
+        .collect();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("idx_sessions_history_owner")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|d| d.contains("TEMP B-TREE")), "{plan:?}");
     }
 }

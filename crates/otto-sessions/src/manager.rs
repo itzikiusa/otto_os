@@ -3196,7 +3196,7 @@ impl SessionManager {
             // The legacy trust helper writes default CLI homes. Named profiles
             // let their native CLI/prompt guard persist trust in their own home.
             if account.is_none() {
-                crate::trust::ensure_trusted(&session.provider, &session.cwd);
+                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
             }
             // Otto's first-party read-only tool server: when the workspace has
             // opted in (`otto_mcp_enabled`), mint a per-session token; the
@@ -4283,41 +4283,42 @@ impl SessionManager {
     async fn late_capture_provider_id(&self, session: &Session) -> Option<String> {
         let _guard = self.codex_capture_lock.lock().await;
         let claimed_rows = self.repo.provider_session_ids().await.unwrap_or_default();
-        let claimed: std::collections::HashSet<&str> =
-            claimed_rows.iter().map(String::as_str).collect();
-        let cwd = std::fs::canonicalize(&session.cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| session.cwd.clone());
         let floor = std::time::SystemTime::from(session.created_at)
             .checked_sub(Duration::from_secs(2))
             .unwrap_or(std::time::UNIX_EPOCH);
-        match session.provider.as_str() {
-            "codex" => {
-                let probe_text = self
-                    .capture_probes
-                    .get(&session.id)
-                    .map(|p| normalize_pty_input(&p.raw));
-                match pick_codex_rollout(
-                    &self.codex_root_for(session),
-                    &cwd,
-                    floor,
-                    &claimed,
-                    probe_text.as_deref(),
-                ) {
-                    RolloutPick::Claim(sid) => Some(sid),
-                    RolloutPick::Ambiguous => {
-                        tracing::warn!(
-                            session = %session.id, cwd = %cwd,
-                            "late provider id capture: multiple unclaimed candidates — refusing to guess"
-                        );
-                        None
+        let (provider, sid) = (session.provider.clone(), session.id.clone());
+        let (session_cwd, codex_root) = (session.cwd.clone(), self.codex_root_for(session));
+        let probe_text =
+            (self.capture_probes.get(&session.id)).map(|p| normalize_pty_input(&p.raw));
+        // The rollout walk (every `YYYY/MM/DD` dir since `created_at`, plus
+        // candidate heads) runs off the runtime like the spawn-time capture;
+        // the capture lock stays held so claims still serialize.
+        tokio::task::spawn_blocking(move || {
+            let claimed: std::collections::HashSet<&str> =
+                claimed_rows.iter().map(String::as_str).collect();
+            let cwd = std::fs::canonicalize(&session_cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(session_cwd);
+            match provider.as_str() {
+                "codex" => {
+                    match pick_codex_rollout(&codex_root, &cwd, floor, &claimed, probe_text.as_deref()) {
+                        RolloutPick::Claim(sid) => Some(sid),
+                        RolloutPick::Ambiguous => {
+                            tracing::warn!(
+                                session = %sid, cwd = %cwd,
+                                "late provider id capture: multiple unclaimed candidates — refusing to guess"
+                            );
+                            None
+                        }
+                        RolloutPick::Nothing => None,
                     }
-                    RolloutPick::Nothing => None,
                 }
+                "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
+                _ => None,
             }
-            "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
-            _ => None,
-        }
+        })
+        .await
+        .unwrap_or(None)
     }
 
     /// The live PTY handle, when the session has one in this daemon.
@@ -4923,7 +4924,9 @@ impl SessionManager {
         };
         let mut renamed = 0;
         for session in sessions {
-            if !title_eligible(&session) {
+            // Live only (the doc's contract): a dead row's missing transcript
+            // was re-probed (row fetch + rollout walk) every sweep, forever.
+            if !title_eligible(&session) || !self.is_live(&session.id) {
                 continue;
             }
             match self.probe_and_apply_title(&session).await {
@@ -5462,7 +5465,8 @@ impl SessionManager {
             let Some(psid) = s.provider_session_id.as_deref() else {
                 continue;
             };
-            let verdict = crate::lifecycle::check_resumability(home, &s.provider, &s.cwd, psid);
+            let verdict =
+                crate::lifecycle::check_resumability_async(home, &s.provider, &s.cwd, psid).await;
             match verdict {
                 crate::lifecycle::Resumability::Gone => match self.remove(&s.id).await {
                     Ok(()) => {
@@ -5857,7 +5861,7 @@ impl SessionManager {
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
             if account.is_none() {
-                crate::trust::ensure_trusted(&session.provider, &session.cwd);
+                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
             }
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             spec.args.extend(otto_tools.args);

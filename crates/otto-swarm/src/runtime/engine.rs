@@ -52,8 +52,8 @@ pub(crate) async fn operation_guard(swarm_id: &str) -> tokio::sync::OwnedMutexGu
 }
 
 pub(crate) async fn run_is_active(repo: &otto_state::SwarmRepo, run_id: &str) -> bool {
-    matches!(repo.get_run(&run_id.to_string()).await,
-        Ok(run) if matches!(run.status.as_str(), "queued" | "running" | "waiting"))
+    matches!(repo.run_status(&run_id.to_string()).await,
+        Ok(Some(status)) if matches!(status.as_str(), "queued" | "running" | "waiting"))
 }
 
 /// Readiness can take minutes. Never hold the lifecycle boundary while waiting;

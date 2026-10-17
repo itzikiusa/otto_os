@@ -1645,6 +1645,18 @@ impl SwarmRepo {
         row_to_run(&row)
     }
 
+    /// Just a run's `status` (`None` = no such run). The readiness / submit
+    /// waits poll this every 250 ms for minutes; a full [`Self::get_run`]
+    /// decoded `result_json`/`summary`/`error` on every poll to read one
+    /// column.
+    pub async fn run_status(&self, id: &Id) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT status FROM swarm_runs WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("get run status"))
+    }
+
     pub async fn update_run(&self, id: &Id, p: RunPatch) -> Result<SwarmRun> {
         let cur = self.get_run(id).await?;
         let session_id = p.session_id.unwrap_or(cur.session_id);

@@ -156,8 +156,10 @@ impl ChromeProcess {
         downloads_dir: PathBuf,
     ) -> Result<Arc<Self>, LiveError> {
         if key == ProcessKey::Ephemeral {
-            // Nothing from an earlier ephemeral run survives a relaunch.
-            let _ = std::fs::remove_dir_all(&spec.user_data_dir);
+            // Nothing from an earlier ephemeral run survives a relaunch. A used
+            // Chromium profile is thousands of cache files: delete it on the
+            // blocking pool, not the worker serving this open.
+            let _ = tokio::fs::remove_dir_all(&spec.user_data_dir).await;
         }
         let Launched {
             child,

@@ -226,6 +226,23 @@ pub fn check_resumability(
     }
 }
 
+/// [`check_resumability`] on the blocking pool. A claude miss on the exact
+/// path falls back to a `read_dir` of `~/.claude/projects` plus a stat per
+/// project dir — the dead-session pruner paid that once per candidate session,
+/// inline on a runtime worker. A failed task reads as `Unknown` (keep).
+pub async fn check_resumability_async(
+    home: &Path,
+    provider: &str,
+    cwd: &str,
+    provider_session_id: &str,
+) -> Resumability {
+    let (home, provider) = (home.to_path_buf(), provider.to_string());
+    let (cwd, sid) = (cwd.to_string(), provider_session_id.to_string());
+    tokio::task::spawn_blocking(move || check_resumability(&home, &provider, &cwd, &sid))
+        .await
+        .unwrap_or(Resumability::Unknown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
