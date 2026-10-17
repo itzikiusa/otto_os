@@ -2543,6 +2543,23 @@ impl SessionManager {
         ]
     }
 
+    /// Whether the opt-in `process_sandbox` setting is on at all (any provider
+    /// may then be confined). Unreadable ⇒ `true`: callers use this to RELAX a
+    /// check, so an error must keep the strict path.
+    async fn process_sandbox_enabled(&self) -> bool {
+        if !otto_sandbox::is_supported() {
+            return false;
+        }
+        let Some(sr) = &self.settings else {
+            return false;
+        };
+        match sr.get("process_sandbox").await {
+            Ok(Some(cfg)) => cfg.get("enabled").and_then(|v| v.as_bool()) == Some(true),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
     /// Wrap `spec` in an OS-level sandbox when the `process_sandbox` setting is
     /// enabled. Confines an agent CLI's filesystem **writes** to the workspace
     /// (+ the resolved git dir so commits in a worktree still work + the agent
@@ -2945,7 +2962,14 @@ impl SessionManager {
     /// rooted at `$HOME` itself, opened at that root (its sandbox profile
     /// simply carries no cwd grant — `SandboxPolicy::for_agent` never grants
     /// a root covering `$HOME`).
-    fn check_session_cwd(&self, ws: &Workspace, cwd: &str) -> Result<()> {
+    ///
+    /// `unconfined`: the session gets no Seatbelt profile (the opt-in
+    /// `process_sandbox` setting is off and it is not read-only). Then there
+    /// is no write grant to widen, so `$HOME` ITSELF — "start Claude in ~" —
+    /// is the creator's call, like opening a terminal there. `/`, the
+    /// parents of `$HOME` and Otto's data dir stay refused, and an agent's
+    /// own credential is confined separately by [`Self::check_agent_cwd`].
+    fn check_session_cwd(&self, ws: &Workspace, cwd: &str, unconfined: bool) -> Result<()> {
         let home = std::env::var("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
@@ -2955,11 +2979,11 @@ impl SessionManager {
             return Ok(());
         };
         let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
-        let workspace_home_root = !home.as_os_str().is_empty()
-            && canon(path).is_some()
-            && canon(path) == canon(&home)
-            && canon(path) == canon(std::path::Path::new(&ws.root_path));
-        if workspace_home_root {
+        let is_home =
+            !home.as_os_str().is_empty() && canon(path).is_some() && canon(path) == canon(&home);
+        let workspace_home_root =
+            is_home && canon(path) == canon(std::path::Path::new(&ws.root_path));
+        if workspace_home_root || (is_home && unconfined) {
             return Ok(());
         }
         Err(Error::Invalid(format!(
@@ -3066,7 +3090,14 @@ impl SessionManager {
         }
         let cwd = req.cwd.clone().unwrap_or_else(|| ws.root_path.clone());
         if req.kind == SessionKind::Agent {
-            self.check_session_cwd(ws, &cwd)?;
+            let read_only = req
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("read_only"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            let unconfined = !read_only && !self.process_sandbox_enabled().await;
+            self.check_session_cwd(ws, &cwd, unconfined)?;
         }
 
         let (provider, mut spec, provider_session_id) = match spec_override {
@@ -10077,21 +10108,32 @@ mod tests {
             .expect("sole owner")
             .with_data_dir(data.path());
         for cwd in ["/", data.path().to_str().unwrap()] {
-            let err = mgr.check_session_cwd(&ws, cwd).unwrap_err();
+            let err = mgr.check_session_cwd(&ws, cwd, true).unwrap_err();
             assert!(matches!(err, Error::Invalid(_)), "{cwd}: {err:?}");
         }
         let bin = data.path().join("bin");
-        assert!(mgr.check_session_cwd(&ws, bin.to_str().unwrap()).is_err());
+        assert!(mgr
+            .check_session_cwd(&ws, bin.to_str().unwrap(), true)
+            .is_err());
         let run = data.path().join("workflow-runs/r1");
-        assert!(mgr.check_session_cwd(&ws, run.to_str().unwrap()).is_ok());
-        assert!(mgr.check_session_cwd(&ws, "/tmp").is_ok());
+        assert!(mgr
+            .check_session_cwd(&ws, run.to_str().unwrap(), false)
+            .is_ok());
+        assert!(mgr.check_session_cwd(&ws, "/tmp", false).is_ok());
         if let Ok(home) = std::env::var("HOME") {
             if std::path::Path::new(&home).is_dir() {
-                assert!(mgr.check_session_cwd(&ws, &home).is_err(), "$HOME");
+                assert!(mgr.check_session_cwd(&ws, &home, false).is_err(), "$HOME");
+                // With no sandbox profile there is no grant to widen: the
+                // creator may start an agent in ~ itself (not in its parents).
+                assert!(mgr.check_session_cwd(&ws, &home, true).is_ok());
+                if let Some(parent) = std::path::Path::new(&home).parent() {
+                    let parent = parent.to_str().unwrap();
+                    assert!(mgr.check_session_cwd(&ws, parent, true).is_err());
+                }
                 // …unless the workspace itself is rooted there.
                 let mut home_ws = ws.clone();
                 home_ws.root_path = home.clone();
-                assert!(mgr.check_session_cwd(&home_ws, &home).is_ok());
+                assert!(mgr.check_session_cwd(&home_ws, &home, false).is_ok());
             }
         }
     }
