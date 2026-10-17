@@ -7,6 +7,21 @@ pub enum GameKind {
     Shooter,
     Kart,
 }
+impl GameKind {
+    pub fn maps(self) -> &'static [&'static str] {
+        match self {
+            GameKind::Shooter => &["isle", "mesa"],
+            GameKind::Kart => &["meadow", "downtown", "canyon", "frost"],
+        }
+    }
+    /// Active members, host included (the host fills the rest with bots/CPUs).
+    pub fn capacity(self) -> usize {
+        match self {
+            GameKind::Shooter => 4,
+            GameKind::Kart => 8,
+        }
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -44,8 +59,14 @@ pub struct MemberView {
     pub id: String,
     pub name: String,
     pub role: Role,
+    /// Index in the room's member list; stable for the room's lifetime.
+    pub slot: usize,
     pub connected: bool,
     pub ready: bool,
+    /// A guest who left or outlived the reconnect grace; never reconnects.
+    pub left: bool,
+    /// A guest asked the host for a rematch.
+    pub rematch: bool,
 }
 #[derive(Clone, Serialize)]
 pub struct View {
@@ -104,6 +125,7 @@ pub enum Event {
         round: u64,
         generation: u64,
         seq: u64,
+        slot: usize,
         data: Value,
     },
     Finished {

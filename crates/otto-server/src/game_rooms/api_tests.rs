@@ -69,7 +69,7 @@ async fn public_join_and_socket_never_grant_owner_authority() {
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = reqwest::Client::new();
     let create = format!("{origin}/api/v1/game-rooms");
-    let body = json!({"name":"Host","config":{"game":"shooter","map":"station"}});
+    let body = json!({"name":"Host","config":{"game":"shooter","map":"isle"}});
     assert_eq!(
         client
             .post(&create)
@@ -111,10 +111,11 @@ async fn public_join_and_socket_never_grant_owner_authority() {
     assert_eq!(response.status(), 200);
     let guest: Value = response.json().await.unwrap();
     let gtoken = guest["token"].as_str().unwrap();
+    let bad_invite = json!({"room_id":id,"invite":"x".repeat(43),"name":"Guest"});
     assert_eq!(
         client
             .post(&join)
-            .json(&join_body)
+            .json(&bad_invite)
             .send()
             .await
             .unwrap()
@@ -176,7 +177,14 @@ async fn public_join_and_socket_never_grant_owner_authority() {
         json!({"type":"input","round":1,"generation":generation,"seq":1,"data":{"forward":1}}),
     )
     .await;
-    assert_eq!(event(&mut hs, "input").await["data"]["forward"], 1);
+    let relayed = event(&mut hs, "input").await;
+    assert_eq!(
+        (
+            relayed["data"]["forward"].as_i64(),
+            relayed["slot"].as_u64()
+        ),
+        (Some(1), Some(1))
+    );
     send(
         &mut hs,
         json!({"type":"snapshot","round":1,"generation":generation,"seq":1,"data":{"tick":99}}),
@@ -189,8 +197,8 @@ async fn public_join_and_socket_never_grant_owner_authority() {
     )
     .await;
     assert_eq!(event(&mut gs, "finished").await["result"]["winner"], 0);
-    send(&mut hs, json!({"type":"rematch"})).await;
     send(&mut gs, json!({"type":"rematch"})).await;
+    send(&mut hs, json!({"type":"rematch"})).await;
     loop {
         let state = event(&mut hs, "state").await;
         if state["room"]["round"] == 2 {
@@ -199,6 +207,14 @@ async fn public_join_and_socket_never_grant_owner_authority() {
         }
     }
     send(&mut gs, json!({"type":"leave"})).await;
+    event(&mut gs, "closed").await;
+    loop {
+        let state = event(&mut hs, "state").await;
+        if state["room"]["members"][1]["left"] == true {
+            break;
+        }
+    }
+    send(&mut hs, json!({"type":"leave"})).await;
     event(&mut hs, "closed").await;
     task.abort();
 }

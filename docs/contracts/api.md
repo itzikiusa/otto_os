@@ -6,7 +6,7 @@ Auth: `Authorization: Bearer <token>` unless marked public. Errors: HTTP status 
 `otto_core::Error` variant + body `Problem{code,message}`.
 
 **Games:** [Game rooms](./game-rooms.md) defines `POST /game-rooms`, public
-`POST /game-room-join`, capability-only two-player relay, lifecycle and limits.
+`POST /game-room-join`, capability-only multiplayer relay (host + up to 3 shooter or 7 kart guests), lifecycle and limits.
 
 **Session collaboration:** [Session rooms](./rooms.md) defines owner management,
 invitation admission, room-only credentials, chat/media/annotation actions and
