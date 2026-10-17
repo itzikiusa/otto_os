@@ -123,11 +123,36 @@ test('SourceSearch preserves existing results and retries the failed page contex
   const s = functions('../src/modules/product/SourceSearch.svelte', ['search'], {
     accountId:'account',sourceKind:'jira',searchCtl:null,searchSeq:0,searchError:'',retrySearch:null,
     selectedProjectKey:'P',selectedSpaceKey:'',searching:false,loadingMore:false,searched:true,mode:'text',rawMode:false,
-    jiraResults:[{key:'P-1'}],confluenceResults:[],jiraOffset:25,jiraHasMore:true,
+    jiraResults:[{key:'P-1'}],confluenceResults:[],jiraOffset:25,jiraHasMore:true,lastRun:null,
     AbortController,loadErrorText:String,
     api:{get:async(url:string)=>{urls.push(url);if(fail)throw new Error('offline');return [{key:'P-2'}];}},
   });
   await s.search('hello',25,true);assert.match(s.searchError,/offline/);assert.equal(s.jiraResults[0].key,'P-1');
   fail=false;s.retrySearch();await new Promise(resolve=>setTimeout(resolve,0));
   assert.equal(urls[1],urls[0]);assert.equal(s.jiraResults[1].key,'P-2');assert.equal(s.searchError,'');
+});
+
+// Raw JQL doesn't search while typing: Load more must page the query whose
+// results are listed, not an edited (unrun) box — and never a failed one.
+test('SourceSearch Load more continues the listed query and mode', async () => {
+  const urls: string[] = [];
+  let fail = false;
+  const s = functions('../src/modules/product/SourceSearch.svelte', ['search', 'loadMoreJira'], {
+    accountId:'account',sourceKind:'jira',searchCtl:null,searchSeq:0,searchError:'',retrySearch:null,
+    selectedProjectKey:'',selectedSpaceKey:'',searching:false,loadingMore:false,searched:false,mode:'raw',rawMode:true,linear:false,
+    jiraResults:[],confluenceResults:[],jiraOffset:0,jiraHasMore:false,lastRun:null,query:'',
+    AbortController,loadErrorText:String,
+    api:{get:async(url:string)=>{urls.push(url);if(fail)throw new Error('bad jql');
+      const start=Number(new URL(url,'http://x').searchParams.get('start_at'));
+      return Array.from({length:25},(_,i)=>({key:`P-${start+i}`}));}},
+  });
+  await s.search('project = P',0,false);
+  s.query='project = Q AND';         // edited, not run
+  s.mode='text'; s.rawMode=false;   // and the mode switched
+  s.loadMoreJira(); await new Promise(resolve=>setTimeout(resolve,0));
+  const last=new URL(urls[1],'http://x').searchParams;
+  assert.equal(last.get('jql'),'project = P');assert.equal(last.get('start_at'),'25');
+  assert.equal(s.jiraResults.length,50);
+  fail=true; await s.search('nope',0,false);
+  assert.equal(s.jiraResults.length,0);assert.equal(s.jiraHasMore,false);
 });

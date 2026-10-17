@@ -2,7 +2,8 @@
   // Shared issue picker block (Jira or Linear, per account) — used by both ReviewPanel and AttachIssue.
   // Handles account selection, project selection, and debounced search.
   import { api } from '../../lib/api/client';
-  import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import type { IssueAccount, IssueProject, IssueSummary, ListingPage } from '../../lib/api/types';
   import { truncatedNote, unwrapListing } from '../../lib/listingPage';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -23,6 +24,8 @@
   // --- state ---
   let accounts: IssueAccount[] = $state([]);
   let accountsLoading = $state(true);
+  /** A failed account load shows inline with Retry — not as “no accounts”. */
+  let accountsError = $state<string | null>(null);
   let selectedAccountId = $state('');
 
   let projects: IssueProject[] = $state([]);
@@ -35,6 +38,10 @@
   let results: IssueSummary[] = $state([]);
   let searching = $state(false);
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Why the last search failed — shown in the results area with Retry (a toast
+  // plus "No issues found." read as a real empty result).
+  let searchError = $state<string | null>(null);
+  let searchSeq = 0;
 
   // --- account loading ---
   $effect(() => {
@@ -43,11 +50,12 @@
 
   async function loadAccounts(): Promise<void> {
     accountsLoading = true;
+    accountsError = null;
     try {
       accounts = await api.get<IssueAccount[]>('/issue/accounts');
       if (accounts.length > 0) selectedAccountId = accounts[0].id;
     } catch (e) {
-      toastError('Couldn’t load issue-tracker accounts', e);
+      accountsError = loadErrorText(e);
     } finally {
       accountsLoading = false;
     }
@@ -61,35 +69,51 @@
     void loadProjects(aid);
   });
 
+  let projectsSeq = 0;
   async function loadProjects(accountId: string): Promise<void> {
+    // Switching accounts quickly: only the newest account's projects land.
+    const seq = ++projectsSeq;
+    const current = () => seq === projectsSeq && selectedAccountId === accountId;
     projectsLoading = true;
     projects = [];
     projectsTruncated = false;
     selectedProjectKey = '';
-    results = [];
-    query = '';
+    resetSearch();
     try {
       const page = unwrapListing(
         await api.get<ListingPage<IssueProject>>(
           `/issue/projects?account_id=${encodeURIComponent(accountId)}&meta=1`,
         ),
       );
+      if (!current()) return;
       projects = page.items;
       projectsTruncated = page.truncated;
     } catch {
       // Non-fatal: user can still search without a project filter.
-      projects = [];
+      if (current()) projects = [];
     } finally {
-      projectsLoading = false;
+      if (current()) projectsLoading = false;
     }
   }
 
   // --- reset results when project changes ---
   $effect(() => {
-    selectedProjectKey;
+    void selectedProjectKey;
+    resetSearch();
+  });
+
+  /** Drop the results AND anything still on its way for them: a search (or a
+   *  pending debounce) started under the previous account/project would land
+   *  after the switch — and picking from it attached that issue key under the
+   *  newly selected account. */
+  function resetSearch(): void {
+    ++searchSeq;
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    searching = false;
+    searchError = null;
     results = [];
     query = '';
-  });
+  }
 
   // --- search ---
   function onQueryInput(): void {
@@ -102,10 +126,6 @@
     debounceTimer = setTimeout(() => void search(q), 350);
   }
 
-  // Why the last search failed — shown in the results area with Retry (a toast
-  // plus "No issues found." read as a real empty result).
-  let searchError = $state<string | null>(null);
-  let searchSeq = 0;
 
   async function search(q: string): Promise<void> {
     if (!selectedAccountId) return;
@@ -145,8 +165,8 @@
   );
 </script>
 
-{#if accountsLoading}
-  <Skeleton rows={2} height={36} />
+{#if accountsLoading || accountsError}
+  <LoadState what="issue-tracker accounts" variant="compact" loading={accountsLoading} error={accountsError} empty rows={2} onretry={() => void loadAccounts()} />
 {:else if accounts.length === 0}
   <div class="picker-empty">
     <Icon name="ticket" size={14} />

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   // The governed-call audit ledger — every invoke (UI tester, gateway, inward
   // read-only server, outward otto.* tools) writes one redacted row here. The
@@ -40,11 +41,15 @@
   /** Bumped per (re)load so a stale "load more" never appends to new filters. */
   let generation = 0;
 
+  /** The filters of the rows on screen: Load more pages THEM, never a tool
+   *  name typed into the box but not yet applied. */
+  let applied = { server: '', tool: '', decision: '' };
+
   function query(offset: number) {
     return {
-      server_id: fServer || undefined,
-      tool: fTool.trim() || undefined,
-      decision: fDecision || undefined,
+      server_id: applied.server || undefined,
+      tool: applied.tool || undefined,
+      decision: applied.decision || undefined,
       limit: PAGE,
       offset,
     };
@@ -52,6 +57,7 @@
 
   async function load(): Promise<void> {
     const gen = ++generation;
+    applied = { server: fServer, tool: fTool.trim(), decision: fDecision };
     loading = true;
     moreError = null;
     try {
@@ -96,7 +102,9 @@
     // Server + decision selects apply immediately; the tool box applies on submit.
     void fServer;
     void fDecision;
-    void load();
+    // untrack: load() reads the tool box, which applies on Enter / Apply —
+    // tracked, every keystroke reloaded the ledger.
+    untrack(() => void load());
   });
 
   function fmtBytes(b: number | null): string {
