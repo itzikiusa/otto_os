@@ -548,3 +548,47 @@ async fn chat_working_directory_outside_the_workspace_is_refused_in_the_thread()
         "no run row is created"
     );
 }
+
+/// A channel binding matches every message — a reply in the thread of the
+/// run it already started must not launch a parallel copy of the workflow.
+#[tokio::test]
+async fn a_reply_in_a_bound_runs_thread_does_not_start_a_second_run() {
+    use otto_channels::workflow_trigger::WorkflowChatTrigger;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (ctx, pool, _token, ws_b, _b_repo, _foreign, wf) = located_workspace(&tmp).await;
+    otto_state::TriggersRepo::new(pool.clone())
+        .create(otto_state::NewWorkflowTrigger {
+            workflow_id: wf.id.clone(),
+            kind: "chat".into(),
+            spec: json!({"channel": "slack", "chat": "C1"}),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let runs = otto_state::WorkflowsRepo::new(pool.clone());
+    let active = runs
+        .create_run(
+            &wf.id,
+            &ws_b.id,
+            &json!({"trigger": "chat", "channel": "slack", "chat": "C1", "thread": "t1",
+                    "origin_workspace_id": ws_b.id}),
+            None,
+        )
+        .await
+        .unwrap();
+    let trigger = otto_workflows::chat::WorkflowChatTriggerImpl { ctx: ctx.clone() };
+    let ack = trigger
+        .try_start(
+            &ws_b.id,
+            "slack",
+            "C1",
+            Some("t1"),
+            "U1",
+            "also check the docs",
+        )
+        .await
+        .expect("the thread gets a reply");
+    assert!(ack.reply.contains("already running"), "{}", ack.reply);
+    assert!(ack.reply.contains(&active.id), "{}", ack.reply);
+    assert_eq!(runs.list_runs(&wf.id).await.unwrap().len(), 1);
+}

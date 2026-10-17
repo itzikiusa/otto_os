@@ -436,14 +436,26 @@ impl AssistantRepo {
         model: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<()> {
+        // A pin to ANOTHER provider / model / account drops the backing
+        // session: the next turn's route is read from this very row, so it
+        // always "matched" the thread and resumed the old session — a thread
+        // pinned to Codex kept answering with Claude, stamped `codex`. (The
+        // SET expressions all read the pre-update row.)
         sqlx::query(
             "UPDATE assistant_threads SET route_pinned = ?, \
+             session_id = CASE WHEN ? AND ((? IS NOT NULL AND ? IS NOT provider) \
+                 OR model IS NOT ? OR account_id IS NOT ?) THEN NULL ELSE session_id END, \
              provider = COALESCE(?, provider), \
              model = CASE WHEN ? THEN ? ELSE model END, \
              account_id = CASE WHEN ? THEN ? ELSE account_id END, \
              updated_at = ? WHERE id = ?",
         )
         .bind(pinned as i64)
+        .bind(pinned as i64)
+        .bind(provider)
+        .bind(provider)
+        .bind(model)
+        .bind(account_id)
         .bind(provider)
         .bind(pinned as i64)
         .bind(model)
@@ -1168,6 +1180,39 @@ mod tests {
             .await
             .unwrap();
         (r, task)
+    }
+
+    /// Pinning a thread to another provider/model starts a fresh session;
+    /// re-pinning the route it already runs keeps it.
+    #[tokio::test]
+    async fn a_pin_to_another_route_drops_the_backing_session() {
+        let r = repo().await;
+        let t = r.create_thread(thread("pin-owner", None)).await.unwrap();
+        r.set_thread_session(&t.id, Some("s1"), "claude", Some("opus"), None)
+            .await
+            .unwrap();
+        r.set_thread_pin(&t.id, true, Some("claude"), Some("opus"), None)
+            .await
+            .unwrap();
+        let same = r.get_thread("pin-owner", &t.id).await.unwrap();
+        assert_eq!(same.session_id.as_deref(), Some("s1"), "same route kept");
+        r.set_thread_pin(&t.id, true, Some("codex"), Some("opus"), None)
+            .await
+            .unwrap();
+        let moved = r.get_thread("pin-owner", &t.id).await.unwrap();
+        assert_eq!(moved.session_id, None, "new provider → new session");
+        assert_eq!(moved.provider, "codex");
+        r.set_thread_session(&t.id, Some("s2"), "codex", Some("opus"), None)
+            .await
+            .unwrap();
+        r.set_thread_pin(&t.id, true, None, Some("sonnet"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            r.get_thread("pin-owner", &t.id).await.unwrap().session_id,
+            None,
+            "a model-only pin switches too"
+        );
     }
 
     #[tokio::test]

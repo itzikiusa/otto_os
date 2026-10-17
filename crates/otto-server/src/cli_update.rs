@@ -475,6 +475,10 @@ async fn run_one_update(cmd: &str) -> (bool, String) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // The timeout drops this future: without it a hung updater (an npm
+        // install stuck on the network) ran on unsupervised, and the next
+        // update pass started another on top of it.
+        .kill_on_drop(true)
         .output();
 
     match tokio::time::timeout(UPDATE_TIMEOUT, fut).await {

@@ -501,8 +501,20 @@ fn validate_settings(config: &GoalLoopConfig, limits: &GoalLoopLimits) -> ApiRes
             "iteration, runtime and phase limits must be positive".into(),
         )));
     }
+    // A phase timeout becomes an `Instant` deadline: an absurd value (u64::MAX)
+    // overflowed it and panicked the loop's controller, leaving the loop
+    // `running` with no driver (Stop / Resume answered 409 until a restart).
+    if limits.per_phase_timeout_secs > MAX_PHASE_TIMEOUT_SECS {
+        return Err(ApiError(Error::Invalid(format!(
+            "per_phase_timeout_secs must be at most {MAX_PHASE_TIMEOUT_SECS} (24 h)"
+        ))));
+    }
     Ok(())
 }
+
+/// Upper bound for `per_phase_timeout_secs` (the controller itself stops
+/// after 4 h of active time, so a longer phase can never finish anyway).
+const MAX_PHASE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
 async fn verify_criterion(
     State(ctx): State<ServerCtx>,
@@ -606,5 +618,16 @@ mod human_credential_tests {
         assert!(require_human_credential(Some("internal-session"), true).is_err());
         assert!(require_human_credential(None, true).is_err());
         assert!(require_human_credential(None, false).is_ok());
+    }
+
+    #[test]
+    fn an_overflowing_phase_timeout_is_rejected() {
+        let config = GoalLoopConfig::default();
+        let mut limits = GoalLoopLimits::default();
+        assert!(validate_settings(&config, &limits).is_ok());
+        limits.per_phase_timeout_secs = u64::MAX;
+        assert!(validate_settings(&config, &limits).is_err());
+        limits.per_phase_timeout_secs = MAX_PHASE_TIMEOUT_SECS;
+        assert!(validate_settings(&config, &limits).is_ok());
     }
 }

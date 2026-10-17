@@ -502,6 +502,13 @@ impl ProductService {
             if &q.story_id != story_id {
                 continue; // defensive: skip questions belonging to a different story
             }
+            // An answered or discarded question is settled: posting it again
+            // re-sent it as a public comment AND flipped it to `posted`,
+            // dropping the PO's answer from every later agent run (they read
+            // `answered` only) and resurrecting discarded ones.
+            if matches!(q.status.as_str(), "answered" | "discarded") {
+                continue;
+            }
             questions.push(q);
         }
 
@@ -2491,11 +2498,46 @@ mod tests {
             .await
             .unwrap();
 
-        // Call post_questions with both question ids.
-        let results = svc
-            .post_questions(&story_id, &[q1.id.clone(), q2.id.clone()], None, &user_id)
+        // An answered question in the selection is left alone (not re-posted,
+        // its answer kept).
+        let q3 = repo
+            .create_question(otto_state::NewQuestion {
+                story_id: story_id.clone(),
+                analysis_id: None,
+                text: "Already settled?".into(),
+                rationale: String::new(),
+                category: "scope".into(),
+                created_by: user_id.clone(),
+            })
             .await
             .unwrap();
+        repo.update_question(
+            &q3.id,
+            QuestionPatch {
+                text: None,
+                rationale: None,
+                category: None,
+                status: Some("answered".into()),
+                answer: Some(Some("yes".into())),
+                posted_ref: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Call post_questions with all three question ids.
+        let results = svc
+            .post_questions(
+                &story_id,
+                &[q1.id.clone(), q2.id.clone(), q3.id.clone()],
+                None,
+                &user_id,
+            )
+            .await
+            .unwrap();
+        let settled = repo.get_question(&q3.id).await.unwrap();
+        assert_eq!(settled.status, "answered", "answered question untouched");
+        assert!(settled.posted_ref.is_none());
 
         // Should return 2 entries, one per question.
         assert_eq!(results.len(), 2, "expected 2 result entries");

@@ -354,6 +354,7 @@ fn resolve_channel(run: &OttoRun) -> ResolvedSource {
 
 async fn resolve_product_story(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     let story = ctx.product_repo.get_story(&run.source_ref).await?;
+    same_workspace(&run.workspace_id, &story.workspace_id, "product story")?;
     Ok(ResolvedSource {
         title: story.title.clone(),
         body_md: clean(
@@ -372,6 +373,7 @@ async fn resolve_product_story(ctx: &ServerCtx, run: &OttoRun) -> Result<Resolve
 
 async fn resolve_finding(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     let f = ctx.findings_store.get_full(&run.source_ref).await?;
+    same_workspace(&run.workspace_id, &f.workspace_id, "finding")?;
     let mut body = format!(
         "Severity: {}\n\n{}\n\n## Evidence\n{}",
         f.severity.as_str(),
@@ -396,6 +398,8 @@ async fn resolve_finding(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSourc
 
 async fn resolve_test(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     let tc_run = ctx.product_repo.get_testcase_run(&run.source_ref).await?;
+    let story = ctx.product_repo.get_story(&tc_run.story_id).await?;
+    same_workspace(&run.workspace_id, &story.workspace_id, "test case run")?;
     let cases = ctx.product_repo.list_testcases(&run.source_ref).await?;
     let failing: Vec<_> = cases
         .iter()
@@ -427,6 +431,7 @@ async fn resolve_test(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> 
 
 async fn resolve_scheduled_report(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {
     let r = ctx.scheduled_tasks.get_run(&run.source_ref).await?;
+    same_workspace(&run.workspace_id, &r.workspace_id, "scheduled-task run")?;
     let body = match &r.report_path {
         Some(p) => tokio::fs::read_to_string(p)
             .await
@@ -441,6 +446,18 @@ async fn resolve_scheduled_report(ctx: &ServerCtx, run: &OttoRun) -> Result<Reso
         repo_hint: None,
         metadata: json!({"run_id": r.id, "task_id": r.task_id}),
     })
+}
+
+/// A source named by id must belong to the run's own workspace: launch only
+/// checks the caller's role THERE, and the source body lands in the run's
+/// context, so another workspace's report / finding / story was readable
+/// through a run that merely named its id. Reported like a missing one.
+fn same_workspace(run_ws: &str, source_ws: &str, what: &str) -> Result<()> {
+    if source_ws == run_ws {
+        Ok(())
+    } else {
+        Err(Error::NotFound(what.into()))
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +478,15 @@ mod tests {
         let out = clean(&long, BODY_CAP);
         assert!(out.len() <= BODY_CAP + 20);
         assert!(out.ends_with("(truncated)"));
+    }
+
+    #[test]
+    fn a_source_of_another_workspace_reads_as_missing() {
+        assert!(same_workspace("ws-a", "ws-a", "finding").is_ok());
+        assert!(matches!(
+            same_workspace("ws-a", "ws-b", "finding"),
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[test]

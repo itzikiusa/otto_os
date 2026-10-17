@@ -256,6 +256,24 @@ impl RunsRepo {
         Ok(())
     }
 
+    /// Cancel a run unless it already ended — a CAS against every terminal
+    /// status. The unconditional write it replaces rewrote a run the engine
+    /// had just COMPLETED (between the handler's read and its write) to
+    /// `cancelled`: a second, contradictory callback, and the worktree an
+    /// approved PR still needed was deleted. Returns whether the row changed.
+    pub async fn cancel_if_active(&self, id: &Id) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE otto_runs SET status = 'cancelled', updated_at = ? \
+             WHERE id = ? AND status NOT IN ('completed', 'failed', 'rejected', 'cancelled')",
+        )
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("cancel run"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Fail a run — a CAS against every terminal status: a stage that errors
     /// out AFTER a cancel (its worktree was removed underneath it) must not
     /// overwrite `cancelled` with `failed`. Returns whether the row changed;
@@ -527,6 +545,30 @@ mod tests {
         assert_eq!(
             repo.get(&run.id).await.unwrap().status,
             RunStatus::ResolvingSource
+        );
+    }
+
+    /// A cancel racing the engine's completion never rewrites the outcome.
+    #[tokio::test]
+    async fn cancel_never_overwrites_a_finished_run() {
+        let pool = mem_pool().await;
+        let ws = seed_ws(&pool).await;
+        let repo = RunsRepo::new(pool);
+        let live = repo.create(sample(&ws)).await.unwrap();
+        assert!(repo.cancel_if_active(&live.id).await.unwrap());
+        assert_eq!(
+            repo.get(&live.id).await.unwrap().status,
+            RunStatus::Cancelled
+        );
+        let done = repo.create(sample(&ws)).await.unwrap();
+        assert!(repo
+            .set_status_cas(&done.id, RunStatus::Queued, RunStatus::Completed)
+            .await
+            .unwrap());
+        assert!(!repo.cancel_if_active(&done.id).await.unwrap());
+        assert_eq!(
+            repo.get(&done.id).await.unwrap().status,
+            RunStatus::Completed
         );
     }
 

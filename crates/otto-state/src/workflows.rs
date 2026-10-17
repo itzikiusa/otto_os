@@ -794,15 +794,15 @@ impl WorkflowsRepo {
     }
 
     /// Run ids of ALL in-flight runs (pending|running) across every workspace,
-    /// newest first (bounded). Workflows are global, so a chat reply's origin
-    /// workspace can differ from the run's own workspace — the caller matches a
-    /// run to a thread by its input's channel/chat/thread. Backs chat control
-    /// (`status`/`skip`/`abort`) of a running workflow from its thread.
+    /// newest first — the orphan sweep's scan. Unbounded on purpose (ids
+    /// only): with a cap of 200, an orphan older than the newest 200 live
+    /// runs (a long queue behind the parallel-run gate) was never swept and
+    /// blocked its workflow's triggers until a restart.
     pub async fn list_active_run_ids_global(&self) -> Result<Vec<Id>> {
         let rows = sqlx::query_scalar::<_, String>(
             "SELECT id FROM workflow_runs
              WHERE status IN ('pending','running')
-             ORDER BY started_at DESC LIMIT 200",
+             ORDER BY started_at DESC",
         )
         .fetch_all(&self.pool)
         .await
@@ -1537,6 +1537,29 @@ mod tests {
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         pool.into()
+    }
+
+    /// The orphan sweep sees EVERY live run, not just the newest 200.
+    #[tokio::test]
+    async fn active_run_scan_is_not_capped() {
+        let repo = WorkflowsRepo::new(mem_pool().await);
+        let wf = repo
+            .create(
+                &"ws".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u".into(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..205 {
+            repo.create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(repo.list_active_run_ids_global().await.unwrap().len(), 205);
     }
 
     /// Competing real publications and run admission share the SQLite boundary.

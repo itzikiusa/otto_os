@@ -2847,26 +2847,39 @@ async fn recruit(
                 .first()
                 .map(|a| a.id.clone())
                 .unwrap_or_else(|| "recruiter".to_string());
-            let cancel = crate::runtime::agent_run::begin(sid, "recruit").map_err(ApiError)?;
-            let (raw, rid) = crate::runtime::agent_run::run_swarm_agent(
-                &ctx,
-                &workspace,
-                &user.0,
-                sid,
-                None,
-                None,
-                &nominal,
-                &meta_provider,
-                None,
-                "recruit",
-                &format!("Recruit: {}", req.role),
-                &cwd,
-                &prompt,
-                |t| crate::recruiter::parse_recruited(t).is_some(),
-                &cancel,
-            )
-            .await;
-            crate::runtime::agent_run::end(sid, "recruit");
+            let turn = crate::runtime::agent_run::admit(sid, "recruit").map_err(ApiError)?;
+            // Detached: a dropped request can't strand the run row `running`
+            // or the recruit slot (the turn frees it when the work ends).
+            let job = {
+                let (ctx, workspace, user, sid) =
+                    (ctx.clone(), workspace.clone(), user.0.clone(), sid.clone());
+                let (meta_provider, cwd, prompt) =
+                    (meta_provider.clone(), cwd.clone(), prompt.clone());
+                let title = format!("Recruit: {}", req.role);
+                tokio::spawn(async move {
+                    crate::runtime::agent_run::run_swarm_agent(
+                        &ctx,
+                        &workspace,
+                        &user,
+                        &sid,
+                        None,
+                        None,
+                        &nominal,
+                        &meta_provider,
+                        None,
+                        "recruit",
+                        &title,
+                        &cwd,
+                        &prompt,
+                        |t| crate::recruiter::parse_recruited(t).is_some(),
+                        &turn.cancel,
+                    )
+                    .await
+                })
+            };
+            let (raw, rid) = job
+                .await
+                .map_err(|e| ApiError(Error::Internal(format!("recruiter task: {e}"))))?;
             let raw = raw.ok_or_else(|| {
                 ApiError(Error::Upstream(
                     "recruiter produced nothing (stopped or stuck)".into(),
@@ -2977,69 +2990,85 @@ async fn plan(
     // Multi-agent plan: run one planner per angle as a REAL, openable session
     // (watchable live in the Runs list, Stop-able), then a summarizer reconciles
     // the candidate task lists. Each turn has no wall-clock cap + stuck-retry.
-    let cancel = crate::runtime::agent_run::begin(&project.swarm_id, "plan").map_err(ApiError)?;
-    let mut candidates: Vec<String> = Vec::new();
-    let angles = crate::recruiter::PLANNER_ANGLES;
-    for (i, angle) in angles.iter().enumerate() {
-        let prompt = crate::recruiter::planner_prompt(&project.name, &goal, &preset_agents, angle);
-        let title = format!("Plan {}/{}: {}", i + 1, angles.len(), project.name);
-        let (raw, _) = crate::runtime::agent_run::run_swarm_agent(
-            &ctx,
-            &ws_obj,
-            &user.0,
-            &project.swarm_id,
-            Some(&project.id),
-            None,
-            &nominal_agent,
-            &meta_provider,
-            None,
-            "plan",
-            &title,
-            &cwd,
-            &prompt,
-            |t| crate::recruiter::extract_json(t).is_some(),
-            &cancel,
-        )
-        .await;
-        if let Some(raw) = raw {
-            if crate::recruiter::extract_json(&raw).is_some() {
-                candidates.push(raw);
+    let turn = crate::runtime::agent_run::admit(&project.swarm_id, "plan").map_err(ApiError)?;
+    // Detached: a dropped request (client gone, "Stop planning" aborting its
+    // fetch) can't strand a planner run row `running` or the plan slot — the
+    // turn frees it when the WORK ends, and Stop still reaches it meanwhile.
+    let job = {
+        let (ctx, ws_obj, user, project) =
+            (ctx.clone(), ws_obj.clone(), user.0.clone(), project.clone());
+        let (goal, preset_agents, cwd) = (goal.clone(), preset_agents.clone(), cwd.clone());
+        let (nominal_agent, meta_provider) = (nominal_agent.clone(), meta_provider.clone());
+        tokio::spawn(async move {
+            let cancel = &turn.cancel;
+            let mut candidates: Vec<String> = Vec::new();
+            let angles = crate::recruiter::PLANNER_ANGLES;
+            for (i, angle) in angles.iter().enumerate() {
+                let prompt =
+                    crate::recruiter::planner_prompt(&project.name, &goal, &preset_agents, angle);
+                let title = format!("Plan {}/{}: {}", i + 1, angles.len(), project.name);
+                let (raw, _) = crate::runtime::agent_run::run_swarm_agent(
+                    &ctx,
+                    &ws_obj,
+                    &user,
+                    &project.swarm_id,
+                    Some(&project.id),
+                    None,
+                    &nominal_agent,
+                    &meta_provider,
+                    None,
+                    "plan",
+                    &title,
+                    &cwd,
+                    &prompt,
+                    |t| crate::recruiter::extract_json(t).is_some(),
+                    cancel,
+                )
+                .await;
+                if let Some(raw) = raw {
+                    if crate::recruiter::extract_json(&raw).is_some() {
+                        candidates.push(raw);
+                    }
+                }
             }
-        }
-    }
-    let final_json = if candidates.len() > 1 {
-        let sum_prompt = crate::recruiter::planner_summarizer_prompt(
-            &project.name,
-            &goal,
-            &preset_agents,
-            &candidates,
-        );
-        let (raw, _) = crate::runtime::agent_run::run_swarm_agent(
-            &ctx,
-            &ws_obj,
-            &user.0,
-            &project.swarm_id,
-            Some(&project.id),
-            None,
-            &nominal_agent,
-            &meta_provider,
-            None,
-            "plan",
-            &format!("Plan summary: {}", project.name),
-            &cwd,
-            &sum_prompt,
-            |t| crate::recruiter::extract_json(t).is_some(),
-            &cancel,
-        )
-        .await;
-        raw.and_then(|r| crate::recruiter::extract_json(&r))
-            .or_else(|| crate::recruiter::extract_json(&candidates[0]))
-    } else {
-        candidates
-            .first()
-            .and_then(|c| crate::recruiter::extract_json(c))
+            let final_json = if candidates.len() > 1 {
+                let sum_prompt = crate::recruiter::planner_summarizer_prompt(
+                    &project.name,
+                    &goal,
+                    &preset_agents,
+                    &candidates,
+                );
+                let (raw, _) = crate::runtime::agent_run::run_swarm_agent(
+                    &ctx,
+                    &ws_obj,
+                    &user,
+                    &project.swarm_id,
+                    Some(&project.id),
+                    None,
+                    &nominal_agent,
+                    &meta_provider,
+                    None,
+                    "plan",
+                    &format!("Plan summary: {}", project.name),
+                    &cwd,
+                    &sum_prompt,
+                    |t| crate::recruiter::extract_json(t).is_some(),
+                    cancel,
+                )
+                .await;
+                raw.and_then(|r| crate::recruiter::extract_json(&r))
+                    .or_else(|| crate::recruiter::extract_json(&candidates[0]))
+            } else {
+                candidates
+                    .first()
+                    .and_then(|c| crate::recruiter::extract_json(c))
+            };
+            final_json
+        })
     };
-    crate::runtime::agent_run::end(&project.swarm_id, "plan");
+    let final_json = job
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("planner task: {e}"))))?;
     let v = final_json.ok_or_else(|| {
         ApiError(Error::Upstream(
             "planner produced no tasks (stopped or stuck)".into(),

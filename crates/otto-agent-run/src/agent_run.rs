@@ -284,7 +284,12 @@ where
     // sweep until we return (the guard drops on every path). A quiet reviewer
     // inside its `waiting_idle` window is not "idle, unattached".
     let _turn_hold = manager.hold_for_turn(sid);
-    let deadline = Instant::now() + timeout;
+    // `Instant + Duration` panics on overflow; an absurd timeout means "no
+    // deadline" in practice, so cap it far out instead of panicking.
+    let now = Instant::now();
+    let deadline = now
+        .checked_add(timeout)
+        .unwrap_or_else(|| now + Duration::from_secs(10 * 365 * 24 * 60 * 60));
     let guarded = guard.pending_aware && provider == "claude";
     let mut flagged_waiting = false;
     let mut flagged_over_budget = false;

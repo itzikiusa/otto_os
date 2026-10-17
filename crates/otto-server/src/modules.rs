@@ -4409,11 +4409,6 @@ async fn retry_review_agent(
         .and_then(|us| us.into_iter().find(|u| u.is_root))
         .ok_or_else(|| crate::error::ApiError(Error::Internal("no root user".into())))?;
 
-    // Kill the old (likely stuck) session so it doesn't linger.
-    if let Some(sid) = review.agents[index].session_id.clone() {
-        let _ = ctx.manager.archive(&sid).await;
-    }
-
     // Mark the agent pending again so the UI reflects the retry immediately.
     // Write only this agent's element (atomic per-index) so we never revert the
     // other agents' live rows.
@@ -4432,11 +4427,23 @@ async fn retry_review_agent(
             })
         };
         if let Some(row) = row {
-            let _ = ctx
+            // Claim, don't just write: a concurrent retry of the same agent
+            // loses here (409) instead of spawning a second agent.
+            if !ctx
                 .reviews_store
-                .set_agent_at(&review_id, index, &row)
-                .await;
+                .claim_agent_retry(&review_id, index, &row)
+                .await
+                .map_err(crate::error::ApiError)?
+            {
+                return Err(crate::error::ApiError(Error::Conflict(format!(
+                    "agent {index} is already being retried"
+                ))));
+            }
         }
+    }
+    // Kill the old (likely stuck) session so it doesn't linger.
+    if let Some(sid) = review.agents[index].session_id.clone() {
+        let _ = ctx.manager.archive(&sid).await;
     }
 
     let provider = review.agents[index].provider.clone();

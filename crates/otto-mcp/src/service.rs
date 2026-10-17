@@ -1179,14 +1179,14 @@ pub fn canonical_hash(v: &Value) -> String {
 /// Fail-closed audit row inserted before a tool runs, finalized on every exit.
 /// Dropped while still armed (an early `?` between insert and finalize, or the
 /// invoke future cancelled mid-call) it finalizes the row as failed off-thread.
-struct PendingAuditRow {
+pub struct PendingAuditRow {
     repo: McpCallLogRepo,
     id: String,
     armed: bool,
 }
 
 impl PendingAuditRow {
-    fn new(repo: McpCallLogRepo, id: String) -> Self {
+    pub fn new(repo: McpCallLogRepo, id: String) -> Self {
         Self {
             repo,
             id,
@@ -1195,7 +1195,7 @@ impl PendingAuditRow {
     }
 
     /// The caller finalizes the row itself.
-    fn disarm(&mut self) {
+    pub fn disarm(&mut self) {
         self.armed = false;
     }
 }

@@ -1184,6 +1184,18 @@ fn route_for_rejects_missing_args_and_unknown_tool() {
     assert!(route_for("create_pr", &json!({"repo_id":"r1","title":"T"})).is_err());
     assert!(route_for("transition_issue", &json!({"account_id":"a1","key":"K"})).is_err());
     assert!(route_for("frobnicate", &json!({})).is_err());
+    // A missing (or non-string) `content` must not overwrite a note/file
+    // with nothing; an explicit empty string still writes.
+    for tool in ["vault_write", "vault_write_file"] {
+        let base = json!({"workspace_id":"w","vault_id":1,"path":"a.md"});
+        assert!(route_for(tool, &base).is_err(), "{tool} without content");
+        let mut obj = base.clone();
+        obj["content"] = json!({});
+        assert!(route_for(tool, &obj).is_err(), "{tool} with object content");
+        let mut empty = base.clone();
+        empty["content"] = json!("");
+        assert!(route_for(tool, &empty).is_ok(), "{tool} with empty content");
+    }
 }
 
 #[test]
@@ -1911,4 +1923,24 @@ fn a_dot_segment_cannot_traverse_to_another_route() {
     // Dots inside an id are untouched; other bytes are encoded.
     assert_eq!(seg("v1.2"), "v1.2");
     assert_eq!(seg("a/b"), "a%2Fb");
+}
+
+/// A 2xx whose body breaks off mid-read is an error, not `{"ok": true}`.
+#[tokio::test]
+async fn a_truncated_success_body_is_not_success() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf).await;
+        let _ = sock
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"id\":")
+            .await;
+        // Dropped here: the connection closes 94 bytes short.
+    });
+    let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+    assert!(resp.status().is_success());
+    assert!(parse_self(resp).await.is_err());
 }

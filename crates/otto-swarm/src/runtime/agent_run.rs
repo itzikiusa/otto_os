@@ -32,6 +32,10 @@ const SWARM_RUN_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Attempts before giving up (kills the stuck session + respawns between tries).
 const SWARM_MAX_ATTEMPTS: u32 = 3;
 const SWARM_RETRY_BACKOFF: Duration = Duration::from_secs(3);
+/// How long a verify / fix turn waits for its (busy) agent or a free slot,
+/// re-trying the reservation every [`RESERVE_RETRY`].
+const RESERVE_WAIT_MAX: Duration = Duration::from_secs(30 * 60);
+const RESERVE_RETRY: Duration = Duration::from_secs(5);
 
 // --- per-swarm cancel registry --------------------------------------------
 
@@ -112,6 +116,42 @@ pub fn end(swarm_id: &str, kind: &str) {
     registry().lock().unwrap().remove(&key(swarm_id, kind));
 }
 
+/// An admitted plan/recruit turn ([`admit`]). Dropping it releases the slot
+/// — on every path, including a handler future dropped mid-await (the client
+/// went away, or the UI's "Stop planning" aborted its request): a plain
+/// [`end`] after the awaits never ran then, and every later Plan / Recruit
+/// of the swarm answered 409 "already running" until a daemon restart.
+pub struct AgentTurn {
+    pub cancel: CancelState,
+    swarm_id: String,
+    kind: &'static str,
+}
+
+impl Drop for AgentTurn {
+    fn drop(&mut self) {
+        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        let key = key(&self.swarm_id, self.kind);
+        // Only our own entry (never a later turn's handle).
+        if reg
+            .get(&key)
+            .is_some_and(|cs| cs.same_generation(&self.cancel))
+        {
+            reg.remove(&key);
+        }
+    }
+}
+
+/// [`begin`] as an RAII [`AgentTurn`]. Callers move it into the spawned task
+/// that drives the turn, so the run rows settle and the slot frees when the
+/// WORK ends, not when the HTTP request does (Stop still reaches it).
+pub fn admit(swarm_id: &str, kind: &'static str) -> otto_core::Result<AgentTurn> {
+    Ok(AgentTurn {
+        cancel: begin(swarm_id, kind)?,
+        swarm_id: swarm_id.to_string(),
+        kind,
+    })
+}
+
 /// Stop the in-flight `kind` turn for `swarm_id` (every kind when `None`):
 /// flag retries off + kill any live session(s). Returns whether anything was
 /// running.
@@ -170,30 +210,44 @@ pub async fn run_swarm_agent(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| cwd.to_string());
     let cwd: &str = &cwd_canon;
-    let operation = crate::runtime::engine::operation_guard(swarm_id).await;
-    if cancel.cancelled() {
-        return (None, String::new());
-    }
-    let run = match ctx
-        .swarm_repo()
-        .reserve_run(
-            NewRun {
-                swarm_id: swarm_id.to_string(),
-                workspace_id: ws.id.clone(),
-                project_id: project_id.map(|s| s.to_string()),
-                task_id: task_id.map(|s| s.to_string()),
-                agent_id: nominal_agent_id.to_string(),
-                kind: kind.to_string(),
-                trigger: "manual".to_string(),
-            },
-            !matches!(kind, "verify" | "fix"),
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("swarm_agent_run: create_run: {e}");
+    // A verify / fix turn runs on the LEADER, which may be busy with another
+    // turn (or the swarm at capacity) right then — e.g. two devs under one
+    // manager finishing together. Refusing at once returned "no verdict", so
+    // a required goal was recorded `error` and the task blocked for good.
+    // Those turns wait (bounded, cancellable) for the agent / a slot instead.
+    let waits = matches!(kind, "verify" | "fix");
+    let mut waited = Duration::ZERO;
+    let (run, operation) = loop {
+        let operation = crate::runtime::engine::operation_guard(swarm_id).await;
+        if cancel.cancelled() {
             return (None, String::new());
+        }
+        match ctx
+            .swarm_repo()
+            .reserve_run(
+                NewRun {
+                    swarm_id: swarm_id.to_string(),
+                    workspace_id: ws.id.clone(),
+                    project_id: project_id.map(|s| s.to_string()),
+                    task_id: task_id.map(|s| s.to_string()),
+                    agent_id: nominal_agent_id.to_string(),
+                    kind: kind.to_string(),
+                    trigger: "manual".to_string(),
+                },
+                !waits,
+            )
+            .await
+        {
+            Ok(r) => break (r, operation),
+            Err(otto_core::Error::Conflict(_)) if waits && waited < RESERVE_WAIT_MAX => {
+                drop(operation);
+                tokio::time::sleep(RESERVE_RETRY).await;
+                waited += RESERVE_RETRY;
+            }
+            Err(e) => {
+                tracing::warn!("swarm_agent_run: create_run: {e}");
+                return (None, String::new());
+            }
         }
     };
     let run_id = run.id.clone();
@@ -535,5 +589,33 @@ mod registry_tests {
             .unwrap()
             .contains_key(&key("sw-reg-test", "recruit")));
         end("sw-reg-test", "recruit");
+    }
+
+    /// A turn whose driver was dropped mid-flight (client gone, Stop aborted
+    /// the request) still frees the slot; a stale guard never removes a
+    /// newer turn's handle.
+    #[tokio::test]
+    async fn a_dropped_turn_frees_its_slot() {
+        let turn = admit("sw-drop-test", "plan").unwrap();
+        let fut = async move {
+            let _turn = turn;
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), fut)
+                .await
+                .is_err()
+        );
+        let again = admit("sw-drop-test", "plan").expect("slot freed by the drop");
+        // A guard for a handle that is no longer registered leaves the live one.
+        let stale = AgentTurn {
+            cancel: CancelState::detached(),
+            swarm_id: "sw-drop-test".into(),
+            kind: "plan",
+        };
+        drop(stale);
+        assert!(admit("sw-drop-test", "plan").is_err(), "live turn kept");
+        drop(again);
+        assert!(admit("sw-drop-test", "plan").is_ok());
     }
 }

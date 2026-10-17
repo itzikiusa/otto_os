@@ -122,6 +122,11 @@ Mon 2026-06-08 … Sun 2026-06-14; the due monthly period is 2026-05-01 …
 - **Bounded catch-up.** Only the *most recent* missed period per cadence is
   generated — Otto does not backfill a long gap of older periods automatically.
   Use a manual run with a larger `offset` to reach further back (§5).
+- **Bounded retries.** A period whose run never completes (the agent failed,
+  the provider isn't signed in) is re-tried by the scheduler at most 3 times —
+  the count lives in the period's completion manifest, so it survives restarts.
+  **Stop** on a running report means "don't auto-retry this period"; a manual
+  Run of the period starts over.
 
 ### Enable / disable in Settings → Insights
 

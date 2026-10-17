@@ -945,7 +945,10 @@ async fn run_codex_exec(prompt: &str, cwd: &str, model: Option<&str>) -> otto_co
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        // The timeout below drops the wait future: without this the timed-out
+        // `codex exec` ran on unsupervised (and kept burning tokens).
+        .kill_on_drop(true);
     if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
         cmd.arg("--model").arg(m);
     }

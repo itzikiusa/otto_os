@@ -624,6 +624,10 @@ pub(crate) async fn governed_invoke(
     // A person approved THIS call (read before the audit row is moved).
     let person_approved = audit.approval_id.is_some();
     let audit_id = ctx.mcp.call_log().insert(audit).await.map_err(ApiError)?;
+    // Armed until a finalize below runs: a call dropped mid-flight (the
+    // client cancelled or timed out on `/mcp/http`, the bridge gave up) used
+    // to leave its row `allowed`, `ok=0`, with no error, forever.
+    let mut pending_audit = otto_mcp::PendingAuditRow::new(ctx.mcp.call_log(), audit_id.clone());
 
     let started = std::time::Instant::now();
     // An internal per-session MCP credential carries an immutable session
@@ -661,6 +665,7 @@ pub(crate) async fn governed_invoke(
         let latency = started.elapsed().as_millis() as i64;
         return Ok(match r {
             Ok(value) => {
+                pending_audit.disarm();
                 let bytes = serde_json::to_vec(&value)
                     .map(|v| v.len() as i64)
                     .unwrap_or(0);
@@ -672,6 +677,7 @@ pub(crate) async fn governed_invoke(
                 json!({"decision":"allowed","executed":true,"content":value})
             }
             Err(e) => {
+                pending_audit.disarm();
                 let msg = otto_core::redact::redact_text(&e.message).value;
                 let _ = ctx
                     .mcp
@@ -723,6 +729,7 @@ pub(crate) async fn governed_invoke(
     let latency = started.elapsed().as_millis() as i64;
     match result {
         Ok(value) => {
+            pending_audit.disarm();
             let bytes = serde_json::to_vec(&value)
                 .map(|v| v.len() as i64)
                 .unwrap_or(0);
@@ -738,6 +745,7 @@ pub(crate) async fn governed_invoke(
             Ok(env)
         }
         Err(e) => {
+            pending_audit.disarm();
             let err = otto_core::redact::redact_text(&e.to_string()).value;
             let _ = ctx
                 .mcp

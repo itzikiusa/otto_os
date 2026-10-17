@@ -1194,6 +1194,24 @@ fn value_label(v: &Value) -> String {
     }
 }
 
+/// Poll `settled` (every 100 ms, at most ~15 s) until it reports true — a
+/// handler that just stopped a background run waits for the run to wind down
+/// (kill its session, cancel its workflow, settle its row) before deleting
+/// what the run still references. Returns whether it settled in time.
+pub(crate) async fn wait_until_settled<F, Fut>(mut settled: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..150 {
+        if settled().await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    settled().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

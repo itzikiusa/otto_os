@@ -700,7 +700,29 @@ async fn poll_review(ctx: &ServerCtx, review_id: &Id, budget: Duration) -> Resul
         }
         return Err(error);
     }
+    // `Done` is also how a review ends when EVERY reviewer failed (CLI
+    // missing, auth expired): no findings, the summarizer correctly returns
+    // none — and the approval prompt read "0 findings (0 blocking)" for a
+    // change nobody looked at.
+    if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+        if !any_reviewer_finished(&review.agents) {
+            return Err(Error::Internal(
+                "every code reviewer failed — finding counts unknown (open the review)".into(),
+            ));
+        }
+    }
     Ok(crate::modules::review_findings_counts(ctx, review_id).await)
+}
+
+/// Whether at least one REVIEWER row (the summarizer is always the last row)
+/// finished. A review with no rows at all is left to the status check.
+fn any_reviewer_finished(agents: &[otto_core::domain::ReviewAgentState]) -> bool {
+    match agents.split_last() {
+        Some((_summarizer, reviewers)) if !reviewers.is_empty() => {
+            reviewers.iter().any(|a| a.status == "done")
+        }
+        _ => true,
+    }
 }
 
 fn review_is_terminal(s: otto_core::domain::ReviewStatus) -> bool {
@@ -891,7 +913,7 @@ async fn fail(ctx: &ServerCtx, run: &OttoRun, err: &str) {
     }
 }
 
-fn emit(ctx: &ServerCtx, run: &OttoRun) {
+pub(crate) fn emit(ctx: &ServerCtx, run: &OttoRun) {
     let _ = ctx.events.send(Event::OttoRunUpdated {
         workspace_id: run.workspace_id.clone(),
         run_id: run.id.clone(),
@@ -1115,6 +1137,89 @@ mod tests {
         );
     }
 
+    /// A decision given anywhere (UI, Slack) is announced: open pages refresh
+    /// on `otto_run_updated` only, and kept offering Approve/Deny.
+    #[tokio::test]
+    async fn a_rejection_is_announced_to_open_pages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = crate::state::ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("u", "x", "U", false)
+            .await
+            .unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let ws = ctx.workspaces.create("w", &path, &user.id).await.unwrap();
+        let run = ctx
+            .runs
+            .create(otto_state::runs::NewRun {
+                workspace_id: ws.id,
+                title: "gated".into(),
+                source_kind: otto_core::run::SourceKind::Channel,
+                source_ref: "test".into(),
+                source_url: None,
+                goal: "test".into(),
+                mode: Default::default(),
+                provider: "codex".into(),
+                model: String::new(),
+                repo_id: None,
+                origin_kind: otto_core::run::RunOrigin::Ui,
+                origin_chat: None,
+                origin_thread: None,
+                origin_user: None,
+                callback_url: None,
+                auto_open_pr: false,
+                context_summary: None,
+                created_by: user.id,
+            })
+            .await
+            .unwrap();
+        assert!(ctx
+            .runs
+            .set_status_cas(
+                &run.id,
+                otto_core::run::RunStatus::Queued,
+                otto_core::run::RunStatus::AwaitingApproval
+            )
+            .await
+            .unwrap());
+        let mut rx = ctx.events.subscribe();
+        let req: otto_core::run::ApproveRunReq =
+            serde_json::from_value(serde_json::json!({"decision": "reject"})).unwrap();
+        crate::run_service::approve(&ctx, &run.id, &req, "u")
+            .await
+            .unwrap();
+        let mut announced = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::OttoRunUpdated { run_id, status, .. } = ev {
+                announced |= run_id == run.id && status == "rejected";
+            }
+        }
+        assert!(announced, "otto_run_updated{{rejected}} was sent");
+
+        // Opening a PR is single-flight and never repeats a recorded PR.
+        ctx.runs
+            .set_fields(
+                &run.id,
+                &otto_state::runs::RunPatch {
+                    pr_url: Some("https://example.test/pr/7".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let again = crate::run_service::open_pr(&ctx, &run.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(again, otto_core::Error::Conflict(ref m) if m.contains("/pr/7")));
+        let held = crate::run_service::claim_open_pr_for_test(&run.id);
+        let busy = crate::run_service::open_pr(&ctx, &run.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(busy, otto_core::Error::Conflict(ref m) if m.contains("being opened")));
+        drop(held);
+    }
+
     // O4: the review wait re-reads status on its own event, not on a 2 s tick.
     // (Real time, scaled down: the safety tick is far past the test.)
     #[tokio::test]
@@ -1184,6 +1289,32 @@ mod tests {
         assert!(review_outcome(None, b).is_err());
         assert!(review_is_terminal(ReviewStatus::Cancelled));
         assert!(!review_is_terminal(ReviewStatus::Running));
+    }
+
+    // A Done review whose reviewers ALL failed has no trustworthy counts.
+    #[test]
+    fn a_review_with_no_finished_reviewer_reports_no_counts() {
+        use super::any_reviewer_finished;
+        let row = |status: &str| {
+            serde_json::from_value::<otto_core::domain::ReviewAgentState>(serde_json::json!({
+                "name": "r", "provider": "claude", "model": "", "status": status,
+                "note": "", "comment_count": 0
+            }))
+            .unwrap()
+        };
+        assert!(!any_reviewer_finished(&[
+            row("error"),
+            row("error"),
+            row("done")
+        ]));
+        assert!(any_reviewer_finished(&[
+            row("error"),
+            row("done"),
+            row("done")
+        ]));
+        // The summarizer alone (or nothing) is left to the status check.
+        assert!(any_reviewer_finished(&[row("done")]));
+        assert!(any_reviewer_finished(&[]));
     }
 
     use super::*;
