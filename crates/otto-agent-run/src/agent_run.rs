@@ -307,6 +307,7 @@ where
         } else {
             None
         };
+    let result_valid = guard.result_ok.or(transcript_ok);
     loop {
         // One transcript read per tick feeds BOTH guards below. Unguarded, this
         // stays exactly where it was — after the out-file check.
@@ -320,7 +321,7 @@ where
             tokio::fs::read_to_string(out_path)
                 .await
                 .ok()
-                .is_some_and(|text| result_text_valid(&text, guard.result_ok.or(transcript_ok)))
+                .is_some_and(|text| result_text_valid(&text, result_valid))
         } else {
             false
         };
@@ -340,8 +341,7 @@ where
         };
 
         if decision != GuardDecision::Hold {
-            if let Some(text) = take_result_file(out_path, guard.result_ok.or(transcript_ok)).await
-            {
+            if let Some(text) = take_result_file(out_path, result_valid).await {
                 if decision == GuardDecision::AdoptAfterCap {
                     warn!(
                         "agent_run: adopting findings after {}m with {pending} task(s) still pending",
@@ -417,7 +417,7 @@ where
         let quiet_for = match manager.live_handle(sid) {
             Some(handle) => {
                 if handle.on_exit().borrow().is_some() {
-                    return RunOutcome::failed(Some(sid.clone()), FailReason::Exited);
+                    return ended_outcome(out_path, result_valid, sid, FailReason::Exited).await;
                 }
                 let idle = handle.last_output_at().elapsed();
                 // Guarded, the stuck clock follows the artifacts (sub-agents
@@ -447,7 +447,9 @@ where
                 }
                 quiet_for
             }
-            None => return RunOutcome::failed(Some(sid.clone()), FailReason::SessionGone),
+            None => {
+                return ended_outcome(out_path, result_valid, sid, FailReason::SessionGone).await
+            }
         };
 
         if Instant::now() >= deadline {
@@ -477,6 +479,24 @@ where
             }
         }
         tokio::time::sleep(POLL).await;
+    }
+}
+
+/// The outcome of a watch whose process is gone (exited, or its session was
+/// removed). An agent that writes its result and exits right away (a one-shot
+/// CLI, a crash after the write) lands between this tick's result check and
+/// its exit check: without one last look the finished result was reported as
+/// `Exited` and the retry's fresh attempt cleared it from disk. Pending
+/// sub-agents can no longer report back, so the file is adopted as is.
+async fn ended_outcome(
+    out_path: &Path,
+    valid: Option<fn(&str) -> bool>,
+    sid: &Id,
+    reason: FailReason,
+) -> RunOutcome {
+    match take_result_file(out_path, valid).await {
+        Some(text) => RunOutcome::ok(text, sid.clone()),
+        None => RunOutcome::failed(Some(sid.clone()), reason),
     }
 }
 
@@ -676,6 +696,29 @@ mod tests {
             .await
             .unwrap();
         assert!(take_result_file(&path, None).await.is_some());
+    }
+
+    /// A result written right before the process exited (or its session was
+    /// removed) is the run's result, not an `Exited` failure whose retry then
+    /// clears it from disk. Nothing (or a half-written file) on disk still
+    /// fails with the end reason.
+    #[tokio::test]
+    async fn a_result_written_before_the_process_ended_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("findings.json");
+        let sid: Id = "s1".into();
+        let out = ended_outcome(&path, None, &sid, FailReason::Exited).await;
+        assert_eq!(out.reason, Some(FailReason::Exited));
+        tokio::fs::write(&path, "[{\"body\":").await.unwrap();
+        let out = ended_outcome(&path, None, &sid, FailReason::SessionGone).await;
+        assert_eq!(out.reason, Some(FailReason::SessionGone));
+        assert!(path.exists(), "a partial write is left in place");
+        tokio::fs::write(&path, "[]").await.unwrap();
+        let out = ended_outcome(&path, None, &sid, FailReason::Exited).await;
+        assert!(!out.errored(), "{:?}", out.reason);
+        assert_eq!(out.raw.as_deref(), Some("[]"));
+        assert_eq!(out.session_id.as_ref(), Some(&sid));
+        assert!(!path.exists(), "adopted like any result");
     }
 
     /// S-5 (sweep 2026-10-11): a reused swarm session's result file may be

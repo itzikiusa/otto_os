@@ -3714,15 +3714,12 @@ impl SessionManager {
 
     /// `id`'s grid + ATTACHED size owner as viewers see it (crate::grid).
     pub fn grid_state(&self, id: &Id) -> crate::grid::GridState {
-        let (cols, rows) = self.live_handle(id).map(|h| h.size()).unwrap_or((0, 0));
-        let attached = |o: &u64| self.attached_conns.get(id).is_some_and(|c| c.contains(o));
-        let owner = self.size_owner.get(id).map(|e| *e).filter(attached);
-        crate::grid::GridState { cols, rows, owner }
+        crate::grid::grid_state(&self.live, &self.attached_conns, &self.size_owner, id)
     }
 
     /// Subscribe to `id`'s grid feed (the WS loop sends each change).
     pub fn grid_watch(&self, id: &Id) -> tokio::sync::watch::Receiver<crate::grid::GridState> {
-        self.grids.watch(id, self.grid_state(id))
+        self.grids.watch(id, || self.grid_state(id))
     }
 
     /// Push `id`'s grid to its viewers when it changed (every resize and
@@ -4780,6 +4777,7 @@ impl SessionManager {
             let _ = handle.kill();
             self.retiring.insert(id.clone(), handle.on_exit());
         }
+        self.publish_grid(id);
         self.forget_sweep_state(id);
         self.retire_credentials(&session).await;
         self.repo
@@ -5595,6 +5593,7 @@ impl SessionManager {
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
+        self.publish_grid(id);
         self.retire_credentials(&session).await;
         self.repo.set_archived(id, true).await?;
         self.repo.update_status(id, SessionStatus::Exited).await?;
@@ -6457,6 +6456,8 @@ impl SessionManager {
         let auth = self.auth.clone();
         let mcp_tokens = Arc::clone(&self.mcp_tokens);
         let attached = Arc::clone(&self.attached);
+        let grid_maps = (Arc::clone(&self.grids), Arc::clone(&self.attached_conns));
+        let size_owner = Arc::clone(&self.size_owner);
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
@@ -6543,6 +6544,9 @@ impl SessionManager {
                                 workspace_id: workspace_id.clone(),
                                 status: SessionStatus::Exited,
                             });
+                            // Viewers learn the grid is gone (0×0, ws.md).
+                            let (grids, conns) = &grid_maps;
+                            grids.publish(&id, || crate::grid::grid_state(&live, conns, &size_owner, &id));
                         } else {
                             // Retired by a lifecycle op that already wrote the
                             // final status (suspend → Reconnectable, restart →
