@@ -126,3 +126,37 @@ async fn cancellation_does_not_wait_for_retry_diff_and_retry_rechecks_status() {
         "rejected retry must release its lease"
     );
 }
+
+/// A Stop confirmed after the eval already finished (nothing running, no
+/// retry in flight) keeps the finished, promotable result.
+#[tokio::test]
+async fn a_late_stop_keeps_a_finished_eval() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = otto_state::db::test_pool().await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,is_root,created_at) VALUES('editor','editor','unused',0,'2026-10-08T00:00:00Z')").execute(&pool).await.unwrap();
+    let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+    let ws = ctx
+        .workspaces
+        .create("fixture", dir.path().to_str().unwrap(), &"editor".into())
+        .await
+        .unwrap();
+    let eval = ctx
+        .skill_evals_store
+        .create_eval(
+            &ws.id,
+            "fixture",
+            "fixture",
+            "fixture",
+            1,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    ctx.skill_evals_store
+        .set_status(&eval.id, SkillEvalStatus::Done, None)
+        .await
+        .unwrap();
+    cancel_run(&ctx, &eval.id).await.unwrap();
+    let saved = ctx.skill_evals_store.get_eval(&eval.id).await.unwrap();
+    assert_eq!(saved.status, SkillEvalStatus::Done);
+}

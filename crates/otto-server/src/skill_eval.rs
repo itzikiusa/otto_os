@@ -48,6 +48,17 @@ fn register_cancel(reg: &CancelRegistry, eval_id: &str) -> Arc<AtomicBool> {
     flag
 }
 
+/// Whether a worker or a validation retry of `eval_id` is registered.
+fn has_live_work(reg: &CancelRegistry, eval_id: &str) -> bool {
+    let retries = format!("{eval_id}:retry:");
+    reg.lock()
+        .map(|map| {
+            map.keys()
+                .any(|key| key == eval_id || key.starts_with(&retries))
+        })
+        .unwrap_or(true)
+}
+
 fn signal_cancel(reg: &CancelRegistry, eval_id: &str) {
     if let Ok(map) = reg.lock() {
         let retries = format!("{eval_id}:retry:");
@@ -2525,13 +2536,25 @@ pub(crate) async fn cancel_run(ctx: &ServerCtx, eval_id: &Id) -> Result<()> {
     // Serialize with rating/retry publication and promotion. Persist first: a
     // worker must not stop while its durable row still claims it is running.
     let _guard = crate::eval_score::update_guard(eval_id).await;
-    ctx.skill_evals_store
-        .set_status(
-            eval_id,
-            SkillEvalStatus::Cancelled,
-            Some("Cancelled by user"),
-        )
-        .await?;
+    if !ctx
+        .skill_evals_store
+        .cancel_running(eval_id, "Cancelled by user")
+        .await?
+    {
+        if !has_live_work(&ctx.skill_eval_cancels, eval_id) {
+            // It settled (done / error / cancelled) with nothing left running:
+            // keep its outcome.
+            return Ok(());
+        }
+        // A validation retry still preparing on a settled eval: stop it.
+        ctx.skill_evals_store
+            .set_status(
+                eval_id,
+                SkillEvalStatus::Cancelled,
+                Some("Cancelled by user"),
+            )
+            .await?;
+    }
     signal_cancel(&ctx.skill_eval_cancels, eval_id);
     if let Ok(eval) = ctx.skill_evals_store.get_eval(eval_id).await {
         archive_eval_sessions(&ctx.manager, &eval).await;
