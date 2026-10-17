@@ -276,7 +276,13 @@ async fn start_review_for_branch(
 fn review_adoptable(review: &otto_core::domain::Review) -> bool {
     match review.status {
         ReviewStatus::Running => true,
-        ReviewStatus::Done => otto_review::engine::review_run_complete(&review.agents, false),
+        // A summary that fell back to the deterministic merge counts as
+        // incomplete here too: a step that refuses fallbacks would re-adopt
+        // it on every retry and never pass.
+        ReviewStatus::Done => otto_review::engine::review_run_complete(
+            &review.agents,
+            review.summary_fallback.unwrap_or(false),
+        ),
         _ => false,
     }
 }
@@ -309,5 +315,8 @@ mod adoption_tests {
             &["running", "pending"]
         )));
         assert!(!review_adoptable(&review("error", &["done", "done"])));
+        let mut fell_back = review("done", &["done", "done"]);
+        fell_back.summary_fallback = Some(true);
+        assert!(!review_adoptable(&fell_back), "summary fell back");
     }
 }

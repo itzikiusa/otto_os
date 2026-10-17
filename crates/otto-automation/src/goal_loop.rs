@@ -1045,8 +1045,6 @@ async fn finalize(
     );
 }
 
-/// Block the loop (awaiting user) without treating it as terminal-finished: the
-/// repo write banks the window (only if still anchored), clears it, sets Blocked. Resume re-spawns a controller.
 /// Leave the registry after parking the loop (Paused / Blocked). A Stop that
 /// landed while we were still registered — during the session cleanup that
 /// parking does — saw our handle, so it only flagged `cancel` and left
@@ -1054,8 +1052,12 @@ async fn finalize(
 /// `stop_loop` flags under the registry lock and `deregister` takes it, so
 /// once we are out of the registry this read is final; a later Stop finalizes
 /// itself. (A Resume that replaced our entry also flags `cancel` — that loop
-/// is running again and is not ours to stop.)
+/// is running again and is not ours to stop.) Done under the loop's
+/// operation lock — the one the Stop / Resume routes hold — so a Resume can't
+/// slip in between leaving the registry and settling the Stop.
 async fn release_honouring_stop(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) {
+    let operation = ctx.goal_loops().operation(loop_id);
+    let _guard = operation.lock().await;
     let was_current = deregister(ctx, loop_id, handle);
     if stop_landed_while_registered(was_current, handle) {
         finalize(
@@ -1074,6 +1076,8 @@ fn stop_landed_while_registered(was_current: bool, handle: &LoopHandle) -> bool 
     was_current && handle.cancel.load(Ordering::Relaxed)
 }
 
+/// Block the loop (awaiting user) without treating it as terminal-finished: the
+/// repo write banks the window (only if still anchored), clears it, sets Blocked. Resume re-spawns a controller.
 async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) {
     let loop_ = match ctx.goal_loops_repo().get(loop_id).await {
         Ok(l) => l,

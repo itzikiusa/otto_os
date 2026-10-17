@@ -133,8 +133,10 @@ pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<St
             // The same gates as the start/resume routes: a channel message
             // used to flip an ABORTED or budget-paused swarm back to active
             // (clearing its pause reason) and spend past the cap.
-            let _operation = crate::runtime::engine::operation_guard(&swarm_id).await;
+            let operation = crate::runtime::engine::operation_guard(&swarm_id).await;
             if let Some(why) = channel_start_refused(&ctx2, &swarm_id, &workspace_id).await {
+                // Never post (a slow Slack) while holding the swarm's lock.
+                drop(operation);
                 notify_origin(
                     &ctx2,
                     &project2,

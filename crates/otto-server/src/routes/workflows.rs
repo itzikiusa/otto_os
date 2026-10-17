@@ -788,9 +788,15 @@ fn retry_includes_downstream(
             .iter()
             .filter(|d| d.as_str() != node_id)
             .any(|d| {
-                nodes
-                    .iter()
-                    .any(|n| &n.node_id == d && n.status != NodeStatus::Success)
+                // Only steps the failure BLOCKED — not ones deliberately out
+                // of this run's scope (a run-only-this-node run) or pruned by
+                // a branch condition.
+                nodes.iter().any(|n| {
+                    &n.node_id == d
+                        && n.status == NodeStatus::Skipped
+                        && n.logs.first().map(String::as_str)
+                            == Some(workflow_engine::SKIPPED_UPSTREAM)
+                })
             })
 }
 
@@ -2545,8 +2551,15 @@ mod retry_scope_tests {
             states
                 .iter()
                 .map(|(id, st)| {
-                    serde_json::from_value(serde_json::json!({"node_id": id, "status": st}))
-                        .unwrap()
+                    let logs = if *st == "skipped" {
+                        vec![crate::workflow_engine::SKIPPED_UPSTREAM]
+                    } else {
+                        vec![]
+                    };
+                    serde_json::from_value(
+                        serde_json::json!({"node_id": id, "status": st, "logs": logs}),
+                    )
+                    .unwrap()
                 })
                 .collect()
         };
@@ -2582,6 +2595,18 @@ mod retry_scope_tests {
         assert!(!scope.only_node);
         assert!(!replay, "a loop keeps its successful iterations");
         assert!(super::retry_plan(&graph, &failed_first, "implement", true).2);
+        // Steps skipped as OUTSIDE the run's scope (a run-only-this-node run)
+        // keep the retry single-step.
+        let mut scoped = failed_first.clone();
+        for n in scoped.iter_mut().skip(1) {
+            n.logs = vec!["outside run scope".into()];
+        }
+        assert!(!retry_includes_downstream(
+            &graph,
+            &scoped,
+            "implement",
+            false
+        ));
     }
 }
 

@@ -2452,7 +2452,7 @@ async fn run_workflow_with_budget(
         let node_input = match decide_node(&views) {
             NodeDecision::ErrorSkip => {
                 states[idx].status = NodeStatus::Skipped;
-                states[idx].logs = vec!["skipped (upstream did not succeed)".into()];
+                states[idx].logs = vec![SKIPPED_UPSTREAM.into()];
                 errored.insert(node_id.clone());
                 let rev = repo
                     .update_run_progress(&run_id, &states)
@@ -8683,6 +8683,10 @@ fn persisted_version(
         ))
     })
 }
+
+/// The log line of a step skipped because an upstream step failed — the
+/// marker a single-step retry looks for to re-run what its target blocked.
+pub(crate) const SKIPPED_UPSTREAM: &str = "skipped (upstream did not succeed)";
 
 /// Data-dir-relative file of a `canvas` step's diagram. Step ids are only
 /// checked for being non-empty and unique, so an id like `../../../tmp/x`

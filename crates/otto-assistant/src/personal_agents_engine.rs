@@ -930,8 +930,6 @@ async fn agent_notice<C: AssistantCtx>(
     .await;
 }
 
-/// Advance the fired schedule's cursor on completion — only for scheduled
-/// triggers, and only that schedule's (per-schedule cursor).
 /// Settle a run row, never leaving it `running`: every way of starting a run
 /// (tick, Run now, proactive, delegation) refuses while a row of the agent
 /// says `running`, and the cancel route no longer knows the run, so one failed
@@ -963,6 +961,8 @@ async fn record_finish(repo: &PersonalAgentsRepo, run_id: &str, f: FinishAgentRu
     }
 }
 
+/// Advance the fired schedule's cursor on completion — only for scheduled
+/// triggers, and only that schedule's (per-schedule cursor).
 async fn advance_cursor<C: AssistantCtx>(
     ctx: &C,
     schedule: Option<&PersonalAgentSchedule>,

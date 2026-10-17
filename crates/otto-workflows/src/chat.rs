@@ -675,6 +675,12 @@ fn binding_candidates<'a>(
     matches
 }
 
+/// Whether an active run of the bound workflow already owns this message's
+/// thread. Only a threaded message can match (see the binding path).
+fn same_thread_run(thread: Option<&str>, run_thread: Option<&str>, same_workflow: bool) -> bool {
+    thread.is_some() && same_workflow && run_thread == thread
+}
+
 /// otto-server's implementation of the channel workflow trigger.
 pub struct WorkflowChatTriggerImpl<C: WorkflowCtx> {
     pub ctx: C,
@@ -973,12 +979,18 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
         // A binding matches EVERY message in its channel — including a reply
         // ("also check X") in the thread of the run it already started, which
         // launched a parallel copy (own worktree + agents) that a later
-        // `abort` then picked over the original. One run per thread.
+        // `abort` then picked over the original. One run per thread — only
+        // for a THREADED message: a chat without threads (a Telegram group,
+        // a webhook) carries none, and each message there is its own request.
         if let Some(active) = self
             .find_active_run_for_thread(&repo, workspace_id, channel, chat, thread)
             .await
             .filter(|r| {
-                r.workflow_id == wf.id && r.input.get("thread").and_then(Value::as_str) == thread
+                same_thread_run(
+                    thread,
+                    r.input.get("thread").and_then(Value::as_str),
+                    r.workflow_id == wf.id,
+                )
             })
         {
             return Some(WorkflowChatAck {
@@ -1480,6 +1492,17 @@ mod tests {
         // With no thread on the inbound message, only the unpinned spec matches.
         let picked3 = binding_candidates(&triggers, "slack", "C1", None, false);
         assert_eq!(picked3.first().unwrap().id, unpinned.id);
+    }
+
+    /// A binding dedupes replies by thread — never a threadless chat.
+    #[test]
+    fn one_run_per_thread_but_not_per_threadless_chat() {
+        assert!(same_thread_run(Some("t1"), Some("t1"), true));
+        assert!(!same_thread_run(Some("t1"), Some("t2"), true));
+        assert!(!same_thread_run(Some("t1"), Some("t1"), false));
+        // A chat without threads (Telegram group, webhook): every message is
+        // its own request.
+        assert!(!same_thread_run(None, None, true));
     }
 
     /// `binding_candidates` returns ALL matches in preference order (not just
