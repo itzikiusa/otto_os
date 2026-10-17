@@ -8701,79 +8701,12 @@ fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
 }
 
 #[cfg(test)]
-mod queue_cancel_tests {
-    /// A run canceled while parked behind a full run gate stops waiting at
-    /// once (its driver guard drops, so a retry isn't refused for hours).
-    #[tokio::test]
-    async fn a_queued_run_canceled_in_the_queue_stops_waiting() {
-        use crate::routes::browser::tests::{mem_pool, seed_workspace};
-        let pool = mem_pool().await;
-        seed_workspace(&pool, "ws").await;
-        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',1,?)")
-            .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
-        let repo = otto_state::WorkflowsRepo::new(pool.clone());
-        let wf = repo
-            .create(
-                &"ws".into(),
-                "WF",
-                "",
-                "",
-                &otto_core::workflows::WorkflowGraph::default(),
-                &"u".into(),
-            )
-            .await
-            .unwrap();
-        let run = repo
-            .create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
-            .await
-            .unwrap();
-        let full = tokio::sync::Semaphore::new(0);
-        let park = super::park_until_permit_or_cancel(&full, &pool, &run.id);
-        let cancel = async {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            repo.request_cancel(&run.id).await.unwrap();
-        };
-        let (parked, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(park, cancel)
-        })
-        .await
-        .expect("stopped waiting");
-        assert!(parked.is_none());
-        // A free slot is still taken normally.
-        let open = tokio::sync::Semaphore::new(1);
-        let run2 = repo
-            .create_run(&wf.id, &"ws".into(), &serde_json::json!({}), None)
-            .await
-            .unwrap();
-        assert!(super::park_until_permit_or_cancel(&open, &pool, &run2.id)
-            .await
-            .is_some());
-    }
-}
+#[path = "../tests/unit/workflow_queue_cancel.rs"]
+mod queue_cancel_tests;
 
 #[cfg(test)]
-mod canvas_rel_tests {
-    /// A failed product-version save fails the step instead of vanishing.
-    #[test]
-    fn a_failed_product_version_save_is_an_error() {
-        let failed = super::persisted_version(Err(otto_core::Error::Internal("disk full".into())));
-        assert!(failed.unwrap_err().to_string().contains("disk full"));
-    }
-
-    #[test]
-    fn a_canvas_step_id_cannot_leave_the_canvas_dir() {
-        assert_eq!(
-            super::canvas_rel("r1", "canvas_1", "mmd"),
-            "workflow-canvas/r1/canvas_1.mmd"
-        );
-        let escaped = super::canvas_rel("r1", "../../../../tmp/x", "mmd");
-        assert_eq!(escaped, "workflow-canvas/r1/tmp-x.mmd");
-        assert_eq!(
-            super::canvas_rel("r1", "..", "d2"),
-            "workflow-canvas/r1/step.d2"
-        );
-    }
-}
+#[path = "../tests/unit/workflow_canvas_persist.rs"]
+mod canvas_rel_tests;
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // isolated fixtures use sync fs / process / secret store

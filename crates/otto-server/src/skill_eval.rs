@@ -3696,5 +3696,5 @@ mod output_tests;
 mod recovery_tests;
 
 #[cfg(test)]
-#[path = "skill_eval_retry_latency_tests.rs"]
+#[path = "../tests/unit/skill_eval_retry_latency.rs"]
 mod retry_latency_tests;
