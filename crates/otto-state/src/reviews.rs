@@ -192,6 +192,38 @@ impl ReviewsRepo {
         Ok(())
     }
 
+    /// [`Self::set_agent_at`] as a claim for a single-agent Retry: written only
+    /// while the review is not running and that agent is still SETTLED
+    /// (`done` / `error` / `skipped`). Two concurrent retries both passed the
+    /// handler's snapshot check, both spawned an agent into the same index,
+    /// and the replaced cancel flag left one of them unstoppable. `false` when
+    /// another retry (or a live run) got there first.
+    pub async fn claim_agent_retry(
+        &self,
+        id: &Id,
+        index: usize,
+        agent: &ReviewAgentState,
+    ) -> Result<bool> {
+        let elem = serde_json::to_string(agent)
+            .map_err(|e| Error::Internal(format!("serialize agent: {e}")))?;
+        let path = format!("$[{index}]");
+        let status_path = format!("$[{index}].status");
+        let changed = sqlx::query(
+            "UPDATE pr_reviews SET agents_json = json_replace(agents_json, ?, json(?)) \
+             WHERE id = ? AND status != 'running' \
+               AND json_extract(agents_json, ?) IN ('done', 'error', 'skipped')",
+        )
+        .bind(&path)
+        .bind(&elem)
+        .bind(id)
+        .bind(&status_path)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("claim agent retry"))?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
     /// Add a draft comment to a review.
     pub async fn add_comment(
         &self,
@@ -576,6 +608,43 @@ mod tests {
         ctx.head_sha = Some("abc1234".into());
         repo.set_run_context(&id, &ctx).await.unwrap();
         assert_eq!(repo.get_run_context(&id).await.unwrap(), Some(ctx));
+    }
+
+    /// Two retries of one settled agent: only the first claims it; a live
+    /// review or agent can't be claimed at all.
+    #[tokio::test]
+    async fn an_agent_retry_is_claimed_once() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO pr_reviews (id, repo_id, pr_number, status, created_at)
+             VALUES (?, 'r', 1, 'done', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        repo.set_agents(&id, &[agent("a", "error"), agent("b", "running")])
+            .await
+            .unwrap();
+        let pending = agent("a", "pending");
+        assert!(repo.claim_agent_retry(&id, 0, &pending).await.unwrap());
+        assert!(
+            !repo.claim_agent_retry(&id, 0, &pending).await.unwrap(),
+            "the second retry loses"
+        );
+        assert!(
+            !repo
+                .claim_agent_retry(&id, 1, &agent("b", "pending"))
+                .await
+                .unwrap(),
+            "a live agent is not retried"
+        );
+        assert_eq!(
+            repo.get_review(&id).await.unwrap().agents[0].status,
+            "pending"
+        );
     }
 
     /// Regression for the "agents look capped/stuck at PENDING" bug: each agent
