@@ -290,7 +290,7 @@ pub fn check_remote_reachable(
             return Ok(());
         }
         return match detect::remote_host(remote_url) {
-            Some(host) if !matches!(host.as_str(), "gitlab.com" | "www.gitlab.com") => {
+            Some(host) if !detect::is_gitlab_dot_com(&host) => {
                 Err(otto_core::Error::Invalid(format!(
                     "{host} looks like a self-hosted GitLab: set this git account's API base \
                      URL (Settings → Git Accounts) — without it Otto would call gitlab.com"

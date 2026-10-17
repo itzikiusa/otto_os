@@ -245,7 +245,8 @@ impl LocalGit {
     }
 }
 
-/// A porcelain group header: `<40-hex sha> <orig-line> <final-line> [<count>]`.
+/// A porcelain group header: `<sha> <orig-line> <final-line> [<count>]` — a
+/// 40-hex SHA-1 or a 64-hex SHA-256 object id.
 struct BlameHeader {
     sha: String,
     orig: u32,
@@ -259,7 +260,7 @@ struct BlameHeader {
 fn parse_header(line: &str) -> Option<BlameHeader> {
     let mut it = line.split(' ');
     let sha = it.next()?;
-    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !crate::local::is_full_oid(sha) {
         return None;
     }
     let orig = it.next()?.parse().ok()?;
@@ -783,6 +784,20 @@ mod tests {
         assert_eq!(lines[2].orig_line, 3);
         assert_eq!(lines[2].line_start, 4);
         assert_eq!(lines[2].text, vec!["line four"]);
+    }
+
+    /// A SHA-256 repository's blame headers carry 64-hex ids; every one was
+    /// rejected, so blame came back empty there.
+    #[test]
+    fn parse_blame_reads_sha256_object_ids() {
+        let sha = "ab".repeat(32);
+        let porcelain = format!(
+            "{sha} 1 1 1\nauthor Ada\nauthor-time 1700000000\nsummary s\nfilename a\n\tx\n"
+        );
+        let lines = parse_blame(&porcelain);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].sha, sha);
+        assert_eq!(lines[0].text, vec!["x"]);
     }
 
     /// A filename that begins with `-` is legal on disk; it must blame (it rides

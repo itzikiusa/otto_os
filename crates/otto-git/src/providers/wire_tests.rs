@@ -177,6 +177,89 @@ mod github {
         assert_eq!(d.total_added, Some(90001));
     }
 
+    /// Actions green + a legacy commit status (Jenkins) red is a FAILING PR:
+    /// statuses used to be read only when there were no check-runs at all.
+    #[tokio::test]
+    async fn ci_counts_commit_statuses_next_to_check_runs() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"check_runs": [
+                    {"name": "build", "status": "completed", "conclusion": "success",
+                     "html_url": "https://github.com/acme/app/runs/1"},
+                    {"name": "lint", "status": "completed", "conclusion": "startup_failure"}
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/statuses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"context": "jenkins", "state": "failure", "target_url": "https://ci/1"},
+                {"context": "jenkins", "state": "success"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let ci = gh.fetch_ci_status(&rr(), 7).await;
+        assert_eq!(ci.state, "failure");
+        assert_eq!((ci.total, ci.passed, ci.failed), (3, 1, 2));
+        assert_eq!(
+            ci.url.as_deref(),
+            Some("https://github.com/acme/app/runs/1")
+        );
+
+        let rows = gh.list_checks(&rr(), 7).await.unwrap();
+        let named: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("build", "success"),
+                ("lint", "failure"),
+                ("jenkins", "failure")
+            ]
+        );
+    }
+
+    /// A token that can read check-runs but not statuses still lists them.
+    #[tokio::test]
+    async fn checks_survive_an_unreadable_statuses_api() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"check_runs": [
+                    {"name": "build", "status": "in_progress", "conclusion": null}
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/app/commits/deadbeef/statuses"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+            .mount(&server)
+            .await;
+        assert_eq!(gh.list_checks(&rr(), 7).await.unwrap().len(), 1);
+        let ci = gh.fetch_ci_status(&rr(), 7).await;
+        assert_eq!((ci.state.as_str(), ci.total), ("pending", 1));
+    }
+
     #[tokio::test]
     async fn pr_diff_other_errors_still_fail() {
         let server = MockServer::start().await;
@@ -481,6 +564,84 @@ mod gitlab {
         let bodies: Vec<&str> = detail.comments.iter().map(|c| c.body.as_str()).collect();
         assert_eq!(bodies, vec!["first", "second"]);
     }
+
+    #[tokio::test]
+    async fn mr_commits_and_members_read_every_page() {
+        let server = MockServer::start().await;
+        let gl = Gitlab::new("tok".into(), Some(server.uri()));
+        let commit = |id: &str| {
+            json!({"id": id, "short_id": id, "title": id, "author_name": "Dev",
+                   "created_at": "2026-09-01T10:00:00Z"})
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/v4/next"))
+            .and(query_param("page", "2"))
+            .and(query_param("kind", "commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([commit("c2")])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/api/v4/projects/.+/merge_requests/7/commits$",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "link",
+                        format!(
+                            r#"<{}/api/v4/next?page=2&kind=commits>; rel="next""#,
+                            server.uri()
+                        )
+                        .as_str(),
+                    )
+                    .set_body_json(json!([commit("c1")])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/next"))
+            .and(query_param("page", "2"))
+            .and(query_param("kind", "members"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{"username": "m101", "name": "Member 101"}])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v4/projects/.+/members/all$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "link",
+                        format!(
+                            r#"<{}/api/v4/next?page=2&kind=members>; rel="next""#,
+                            server.uri()
+                        )
+                        .as_str(),
+                    )
+                    .set_body_json(json!([{"username": "m1", "name": "Member 1"}])),
+            )
+            .mount(&server)
+            .await;
+
+        let shas: Vec<String> = gl
+            .list_pr_commits(&rr(), 7)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(shas, ["c1", "c2"]);
+        let members: Vec<String> = gl
+            .list_collaborators(&rr(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(members, ["m1", "m101"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +674,80 @@ mod bitbucket {
         })
     }
 
+    /// PR commits and workspace members follow `next`: both stopped at the
+    /// first 100 (and the member list was cached cut for 10 minutes).
+    #[tokio::test]
+    async fn pr_commits_and_workspace_members_read_every_page() {
+        let server = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        // A workspace no other test uses: the member list is cached per name.
+        let r = RemoteRef {
+            owner: "paged-ws".into(),
+            repo: "app".into(),
+        };
+        let commit = |h: &str| {
+            json!({"hash": h, "message": format!("{h}\n\nbody"),
+                   "author": {"raw": "Dev <d@x>"}, "date": "2026-09-01T10:00:00Z"})
+        };
+        Mock::given(method("GET"))
+            .and(path("/repositories/paged-ws/app/pullrequests/7/commits"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [commit("c2")],
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repositories/paged-ws/app/pullrequests/7/commits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [commit("c1")],
+                "next": format!(
+                    "{}/repositories/paged-ws/app/pullrequests/7/commits?page=2",
+                    server.uri()
+                ),
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let member = |n: &str| json!({"user": {"uuid": format!("{{{n}}}"), "nickname": n, "display_name": n}});
+        Mock::given(method("GET"))
+            .and(path("/workspaces/paged-ws/members"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [member("m101")],
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/workspaces/paged-ws/members"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [member("m1")],
+                "next": format!("{}/workspaces/paged-ws/members?page=2", server.uri()),
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let shas: Vec<String> = bb
+            .list_pr_commits(&r, 7)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(shas, ["c1", "c2"]);
+        let names: Vec<String> = bb
+            .list_collaborators(&r, "")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["m1", "m101"]);
+    }
+
     #[tokio::test]
     async fn list_prs_two_pages_sets_has_more() {
         let server = MockServer::start().await;
@@ -541,6 +776,32 @@ mod bitbucket {
         let p2 = bb.list_prs(&rr(), PrState::Open, 2, 50).await.unwrap();
         assert!(!p2.has_more, "no `next` ⇒ last page");
         assert_eq!(p2.items[0].number, 2);
+    }
+
+    /// A diffstat `next` on another origin is never followed with the
+    /// account's credentials: the summary stops there, marked truncated.
+    #[tokio::test]
+    async fn pr_diff_summary_never_follows_a_cross_origin_next() {
+        let server = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/repositories/acme/app/pullrequests/7/diffstat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "values": [{"status": "modified", "lines_added": 1, "lines_removed": 0,
+                            "old": {"path": "a"}, "new": {"path": "a"}}],
+                "next": format!("{}/steal?page=2", elsewhere.uri()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"values": []})))
+            .expect(0)
+            .mount(&elsewhere)
+            .await;
+        let d = bb.get_pr_diff_summary(&rr(), 7).await.unwrap().unwrap();
+        assert_eq!(d.files.len(), 1);
+        assert_eq!(d.truncated, Some(true));
     }
 
     /// Summary-first: the file list comes from `diffstat` (paged by `next`),
