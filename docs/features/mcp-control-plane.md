@@ -121,7 +121,9 @@ Open `#/mcp/servers` (**External servers**) → **Add server**. Choose a transpo
   Otto daemon* (the UI warns of this). Changing a stdio server's command later is
   also Admin.
 - **`http`** — a remote Streamable-HTTP endpoint (`url`, `headers`). Requires MCP
-  Edit. Every remote URL is SSRF-checked (see §9).
+  Edit. Every remote URL is SSRF-checked (see §9); a URL that names a local
+  address by literal (`localhost`, `127.0.0.1`, a LAN or Tailscale IP) is
+  connected to directly, since only the owner can set it.
 
 Secret env values / auth headers go in the **`secret_env` / `secret_headers`** fields
 — these are written to the macOS Keychain (`mcp-{id}`) and **never** stored in the DB
@@ -795,6 +797,11 @@ the injected raw entry.
   the per-op client **pins the vetted IP** (`.resolve`) so a DNS rebind can't redirect
   the connect — or the auth header — to loopback/metadata; redirects use the netguard
   policy. Auth headers go only to the pinned address.
+  Exception: an owner-typed LOCAL literal (`http://localhost:…`, loopback,
+  RFC1918/ULA, CGNAT) connects unguarded with same-origin redirects only — setting a
+  URL already needs the owner's own credential, and the same person can register a
+  stdio server. Metadata/link-local stay refused, and a hostname is always vetted at
+  connect time (`otto_netguard::is_explicit_local_target`).
 - **Secrets.** `secret_env` / `secret_headers` values live solely in the Keychain
   (`mcp-{id}`); the DB stores only key names; responses mask them. Otto's governed
   outbound client resolves them at call time. The legacy direct `.mcp.json` merge

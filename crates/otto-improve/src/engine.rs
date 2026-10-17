@@ -122,6 +122,26 @@ impl ImprovementEngine {
         &self,
         run_id: &Id,
         ws_id: &Id,
+        trigger: ImprovementTrigger,
+        autonomy_override: Option<otto_core::domain::Autonomy>,
+        providers_override: Option<Vec<String>>,
+    ) -> Result<()> {
+        let res = self
+            .execute_run_body(
+                run_id,
+                ws_id,
+                trigger,
+                autonomy_override,
+                providers_override,
+            )
+            .await;
+        self.settle_unfinished(ws_id, run_id, res).await
+    }
+
+    async fn execute_run_body(
+        &self,
+        run_id: &Id,
+        ws_id: &Id,
         _trigger: ImprovementTrigger,
         autonomy_override: Option<otto_core::domain::Autonomy>,
         providers_override: Option<Vec<String>>,
@@ -304,6 +324,11 @@ impl ImprovementEngine {
         ws_id: &Id,
         session_id: &Id,
     ) -> Result<()> {
+        let res = self.execute_evolve_body(run_id, ws_id, session_id).await;
+        self.settle_unfinished(ws_id, run_id, res).await
+    }
+
+    async fn execute_evolve_body(&self, run_id: &Id, ws_id: &Id, session_id: &Id) -> Result<()> {
         let session = self.sessions.get(session_id).await?;
         if session.workspace_id != *ws_id {
             return Err(Error::Forbidden(
@@ -672,23 +697,63 @@ impl ImprovementEngine {
         let current = read_edit_target(Path::new(&edit.target_path)).await?;
         if current != edit.before_content {
             return self
-                .improvements
-                .set_edit_status(edit_id, ImprovementEditStatus::Conflict, Some(actor))
+                .decide(
+                    edit_id,
+                    ImprovementEditStatus::Pending,
+                    ImprovementEditStatus::Conflict,
+                    actor,
+                )
                 .await;
         }
+        // Claim the decision BEFORE touching the file, so a concurrent
+        // reject (or second approve) loses cleanly; a failed write gives the
+        // edit back as pending.
+        let applied = self
+            .decide(
+                edit_id,
+                ImprovementEditStatus::Pending,
+                ImprovementEditStatus::Applied,
+                actor,
+            )
+            .await?;
         if let Some(parent) = std::path::Path::new(&edit.target_path).parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        if edit.kind == ImprovementEditKind::Remove {
-            remove_edit_target(Path::new(&edit.target_path)).await?;
+        let written = if edit.kind == ImprovementEditKind::Remove {
+            remove_edit_target(Path::new(&edit.target_path)).await
         } else {
             tokio::fs::write(&edit.target_path, &edit.after_content)
                 .await
-                .map_err(|e| Error::Internal(format!("write {}: {e}", edit.target_path)))?;
+                .map_err(|e| Error::Internal(format!("write {}: {e}", edit.target_path)))
+        };
+        if let Err(e) = written {
+            let _ = self
+                .improvements
+                .set_edit_status_if(
+                    edit_id,
+                    ImprovementEditStatus::Applied,
+                    ImprovementEditStatus::Pending,
+                    None,
+                )
+                .await;
+            return Err(e);
         }
+        Ok(applied)
+    }
+
+    /// One decision on an edit, as a compare-and-set from `from` — the loser
+    /// of two concurrent decisions gets "not pending" instead of overwriting.
+    async fn decide(
+        &self,
+        edit_id: &Id,
+        from: ImprovementEditStatus,
+        to: ImprovementEditStatus,
+        actor: &str,
+    ) -> Result<ImprovementEdit> {
         self.improvements
-            .set_edit_status(edit_id, ImprovementEditStatus::Applied, Some(actor))
-            .await
+            .set_edit_status_if(edit_id, from, to, Some(actor))
+            .await?
+            .ok_or_else(|| Error::Invalid(format!("edit is no longer {}", from.as_str())))
     }
 
     /// Reject a pending edit (no file change).
@@ -697,9 +762,13 @@ impl ImprovementEngine {
         if edit.status != ImprovementEditStatus::Pending {
             return Err(Error::Invalid("edit is not pending".into()));
         }
-        self.improvements
-            .set_edit_status(edit_id, ImprovementEditStatus::Rejected, Some(actor))
-            .await
+        self.decide(
+            edit_id,
+            ImprovementEditStatus::Pending,
+            ImprovementEditStatus::Rejected,
+            actor,
+        )
+        .await
     }
 
     /// Roll back an applied edit, restoring `before_content` (deletes the file
@@ -762,9 +831,13 @@ impl ImprovementEngine {
                 remove_edit_target(Path::new(&edit.target_path)).await?;
             }
         }
-        self.improvements
-            .set_edit_status(edit_id, ImprovementEditStatus::RolledBack, Some(actor))
-            .await
+        self.decide(
+            edit_id,
+            ImprovementEditStatus::Applied,
+            ImprovementEditStatus::RolledBack,
+            actor,
+        )
+        .await
     }
 
     // ---- helpers ----
@@ -788,6 +861,40 @@ impl ImprovementEngine {
             })
             .await?;
         Ok(())
+    }
+
+    /// A run whose body bailed out with `?` (a database error, a session
+    /// deleted meanwhile) used to stay `running` — and `create_run` refuses
+    /// every scheduled, manual and live run of the workspace while one is, so
+    /// self-improvement stopped until a daemon restart. Settle it `failed`
+    /// (only if nothing settled it already) and pass the result through.
+    async fn settle_unfinished<T>(&self, ws_id: &Id, run_id: &Id, res: Result<T>) -> Result<T> {
+        if let Err(e) = &res {
+            let still_running = self
+                .improvements
+                .get_run(run_id)
+                .await
+                .map(|r| r.status == ImprovementRunStatus::Running)
+                .unwrap_or(true);
+            if still_running
+                && self
+                    .improvements
+                    .finish_run(
+                        run_id,
+                        ImprovementRunStatus::Failed,
+                        "",
+                        0,
+                        0,
+                        0,
+                        Some(&e.to_string()),
+                    )
+                    .await
+                    .is_ok()
+            {
+                self.emit_finished(ws_id, run_id, "failed", 0, 0);
+            }
+        }
+        res
     }
 
     fn emit_finished(&self, ws_id: &Id, run_id: &Id, status: &str, applied: i64, pending: i64) {
@@ -821,7 +928,20 @@ impl ImprovementEngine {
         trigger: ImprovementTrigger,
     ) -> Result<Id> {
         let run = self.improvements.create_run(ws_id, trigger).await?;
-        let id = run.id.clone();
+        let res = self
+            .run_for_narrative_body(run.id.clone(), ws_id, title, narrative, target_skills)
+            .await;
+        self.settle_unfinished(ws_id, &run.id, res).await
+    }
+
+    async fn run_for_narrative_body(
+        &self,
+        id: Id,
+        ws_id: &Id,
+        title: &str,
+        narrative: &str,
+        target_skills: &[String],
+    ) -> Result<Id> {
         let _ = self.events.send(Event::ImprovementRunStarted {
             workspace_id: ws_id.clone(),
             run_id: id.clone(),
@@ -1325,6 +1445,51 @@ mod tests {
         }
     }
 
+    /// A run whose body errors out early is settled `failed`, never left
+    /// `running` (which refused every later run of the workspace).
+    #[tokio::test]
+    async fn an_early_error_still_settles_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let workspaces = WorkspacesRepo::new(pool.clone());
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let uid = users.create("root", "pw", "root", true).await.unwrap().id;
+        let ws = workspaces
+            .create("t", dir.path().to_str().unwrap(), &uid)
+            .await
+            .unwrap();
+        let (events, _) = broadcast::channel(16);
+        let engine = ImprovementEngine {
+            improvements: ImprovementsRepo::new(pool.clone()),
+            sessions: SessionsRepo::new(pool.clone()),
+            workspaces,
+            producer: Arc::new(FakeProducer(ImprovementProposal {
+                run_summary: String::new(),
+                edits: Vec::new(),
+            })),
+            events,
+            library_root: dir.path().join("library"),
+        };
+        let run = engine
+            .improvements
+            .create_run(&ws.id, ImprovementTrigger::Live)
+            .await
+            .unwrap();
+        // The session was deleted between creating the run and executing it.
+        assert!(engine
+            .execute_evolve_session(&run.id, &ws.id, &"gone".to_string())
+            .await
+            .is_err());
+        let settled = engine.improvements.get_run(&run.id).await.unwrap();
+        assert_eq!(settled.status, ImprovementRunStatus::Failed);
+        // ...so the next run is admitted.
+        assert!(engine
+            .improvements
+            .create_run(&ws.id, ImprovementTrigger::Manual)
+            .await
+            .is_ok());
+    }
+
     /// The self_improve node's Provider picker overrides the configured
     /// Self-Improvement providers when non-empty, and falls back to them when empty.
     #[tokio::test]
@@ -1777,6 +1942,36 @@ mod tests {
             tokio::fs::read_to_string(path).await.unwrap(),
             "new user work"
         );
+    }
+
+    /// Two decisions on one edit: exactly one wins, and the edit's status
+    /// always matches the file.
+    #[tokio::test]
+    async fn concurrent_approve_and_reject_have_one_winner() {
+        for _ in 0..5 {
+            let (engine, ws, _, dir) = harness().await;
+            let path = dir.path().join("MEMORY.md");
+            tokio::fs::write(&path, "original").await.unwrap();
+            let edit = removal_edit(
+                &engine,
+                &ws,
+                &path,
+                Some("original"),
+                ImprovementEditStatus::Pending,
+            )
+            .await;
+            let (a, r) = tokio::join!(
+                engine.approve_edit(&edit.id, "agent"),
+                engine.reject_edit(&edit.id, "person")
+            );
+            assert!(a.is_ok() != r.is_ok(), "exactly one decision wins");
+            let status = engine.improvements.get_edit(&edit.id).await.unwrap().status;
+            match status {
+                ImprovementEditStatus::Applied => assert!(!path.exists()),
+                ImprovementEditStatus::Rejected => assert!(path.exists()),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

@@ -750,82 +750,83 @@ impl ProductRepo {
     }
 
     pub async fn delete_story(&self, id: &Id) -> Result<()> {
-        // Delete child rows first (no FK cascade in SQLite without PRAGMA)
-        // testcases depend on testcase_runs; delete testcases by story_id first
-        sqlx::query("DELETE FROM product_testcases WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
+        // Child rows first (no FK cascade without the pragma), ALL in one
+        // transaction: a failure part-way (busy timeout, disk full) used to
+        // leave the story standing with its versions / analyses / notes
+        // already gone, and a writer racing the delete could slip a child row
+        // in between the statements and orphan it.
+        const STEPS: &[(&str, &str)] = &[
+            // testcases depend on testcase_runs; delete testcases by story_id first
+            (
+                "DELETE FROM product_testcases WHERE story_id = ?",
+                "delete story testcases",
+            ),
+            (
+                "DELETE FROM product_testcase_runs WHERE story_id = ?",
+                "delete story testcase_runs",
+            ),
+            // analysis_agents depend on analyses; delete agents via analyses
+            (
+                "DELETE FROM product_analysis_agents
+                 WHERE analysis_id IN (SELECT id FROM product_analyses WHERE story_id = ?)",
+                "delete story analysis_agents",
+            ),
+            (
+                "DELETE FROM product_analyses WHERE story_id = ?",
+                "delete story analyses",
+            ),
+            (
+                "DELETE FROM product_story_versions WHERE story_id = ?",
+                "delete story versions",
+            ),
+            (
+                "DELETE FROM product_questions WHERE story_id = ?",
+                "delete story questions",
+            ),
+            (
+                "DELETE FROM product_notes WHERE story_id = ?",
+                "delete story notes",
+            ),
+            (
+                "DELETE FROM product_events WHERE story_id = ?",
+                "delete story events",
+            ),
+            (
+                "DELETE FROM product_transcripts WHERE story_id = ?",
+                "delete story transcripts",
+            ),
+            // Design artifacts: annotation rows hang off attachments, so they go
+            // first. The files under `data_dir/product/attachments/<sid>/` are
+            // removed best-effort by the server delete route (the repo has no fs).
+            (
+                "DELETE FROM product_mockup_annotations WHERE story_id = ?",
+                "delete story mockup annotations",
+            ),
+            (
+                "DELETE FROM product_attachments WHERE story_id = ?",
+                "delete story attachments",
+            ),
+            // Epic tree: deleting a parent re-parents its children to top level —
+            // never cascades (a child's own rows are user work).
+            (
+                "UPDATE product_stories SET parent_id = NULL WHERE parent_id = ?",
+                "re-parent story children",
+            ),
+            ("DELETE FROM product_stories WHERE id = ?", "delete story"),
+        ];
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(dberr("delete story testcases"))?;
-        sqlx::query("DELETE FROM product_testcase_runs WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story testcase_runs"))?;
-        // analysis_agents depend on analyses; delete agents via analyses
-        sqlx::query(
-            "DELETE FROM product_analysis_agents
-             WHERE analysis_id IN (SELECT id FROM product_analyses WHERE story_id = ?)",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("delete story analysis_agents"))?;
-        sqlx::query("DELETE FROM product_analyses WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story analyses"))?;
-        sqlx::query("DELETE FROM product_story_versions WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story versions"))?;
-        sqlx::query("DELETE FROM product_questions WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story questions"))?;
-        sqlx::query("DELETE FROM product_notes WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story notes"))?;
-        sqlx::query("DELETE FROM product_events WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story events"))?;
-        sqlx::query("DELETE FROM product_transcripts WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story transcripts"))?;
-        // Design artifacts: annotation rows hang off attachments, so they go
-        // first. The files under `data_dir/product/attachments/<sid>/` are
-        // removed best-effort by the server delete route (the repo has no fs).
-        sqlx::query("DELETE FROM product_mockup_annotations WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story mockup annotations"))?;
-        sqlx::query("DELETE FROM product_attachments WHERE story_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story attachments"))?;
-        // Epic tree: deleting a parent re-parents its children to top level —
-        // never cascades (a child's own rows are user work).
-        sqlx::query("UPDATE product_stories SET parent_id = NULL WHERE parent_id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("re-parent story children"))?;
-        sqlx::query("DELETE FROM product_stories WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("delete story"))?;
+            .map_err(dberr("delete story begin"))?;
+        for (sql, what) in STEPS {
+            sqlx::query(*sql)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr(what))?;
+        }
+        tx.commit().await.map_err(dberr("delete story commit"))?;
         Ok(())
     }
 
@@ -2532,6 +2533,43 @@ mod tests {
         // Versions should be gone
         let versions_after = repo.list_versions(&story.id).await.unwrap();
         assert_eq!(versions_after.len(), 0);
+    }
+
+    /// A delete that fails part-way leaves the story WHOLE — its versions
+    /// used to be gone already while the story row survived.
+    #[tokio::test]
+    async fn delete_story_failing_late_keeps_every_child_row() {
+        let pool = mem_pool().await;
+        let repo = ProductRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool, &user).await;
+        let story = repo
+            .create_story(new_story_input(&ws, &user))
+            .await
+            .unwrap();
+        repo.add_version(NewVersion {
+            story_id: story.id.clone(),
+            kind: "source".into(),
+            title: "v1".into(),
+            body_md: "body".into(),
+            raw_json: None,
+            change_notes: None,
+            created_by: user.clone(),
+        })
+        .await
+        .unwrap();
+        // The LAST statement (the story row itself) fails.
+        sqlx::query(
+            "CREATE TRIGGER block_story_delete BEFORE DELETE ON product_stories
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(repo.delete_story(&story.id).await.is_err());
+        assert!(repo.get_story(&story.id).await.is_ok());
+        assert_eq!(repo.list_versions(&story.id).await.unwrap().len(), 1);
     }
 
     // -----------------------------------------------------------------------

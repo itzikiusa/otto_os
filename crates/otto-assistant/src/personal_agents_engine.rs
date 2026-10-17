@@ -356,14 +356,19 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
         include_memory: false,
         ..Default::default()
     };
-    let ctx_root = otto_context::materialize::default_context_root();
-    let _ = otto_context::materialize::provision(
-        ctx.context_library(),
-        &cfg,
-        &cwd,
-        &agent.provider,
-        &ctx_root,
+    // Skill-tree copies + CLAUDE.md/AGENTS.md writes are a burst of blocking
+    // file IO, paid on every run and new chat: off the runtime worker, like
+    // the swarm's `provision_agent` (perf §15 N9).
+    let (library, cwd2, provider) = (
+        ctx.context_library().clone(),
+        cwd.clone(),
+        agent.provider.clone(),
     );
+    let _ = tokio::task::spawn_blocking(move || {
+        let ctx_root = otto_context::materialize::default_context_root();
+        otto_context::materialize::provision(&library, &cfg, &cwd2, &provider, &ctx_root)
+    })
+    .await;
     Ok(cwd)
 }
 
@@ -781,20 +786,20 @@ async fn complete_agent_run<C: AssistantCtx>(
                 }
             }
         }
-        let _ = repo
-            .finish_run(
-                &run_id,
-                FinishAgentRun {
-                    status: if timed_out { "error" } else { "canceled" }.into(),
-                    error: Some(if timed_out {
-                        "stopped: the proactive run used its time budget".into()
-                    } else {
-                        "stopped from Otto before it finished".into()
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await;
+        record_finish(
+            &repo,
+            &run_id,
+            FinishAgentRun {
+                status: if timed_out { "error" } else { "canceled" }.into(),
+                error: Some(if timed_out {
+                    "stopped: the proactive run used its time budget".into()
+                } else {
+                    "stopped from Otto before it finished".into()
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
         advance_cursor(ctx, schedule, trigger, Utc::now()).await;
         prune(ctx, &agent.id).await;
         emit(
@@ -848,25 +853,24 @@ async fn complete_agent_run<C: AssistantCtx>(
                 (d, e, false)
             };
 
-            let _ = repo
-                .finish_run(
-                    &run_id,
-                    FinishAgentRun {
-                        status: "ok".into(),
-                        summary: out.summary.clone(),
-                        report_path,
-                        report_rel: report_rel_opt,
-                        delivered,
-                        delivery_error: derr.clone(),
-                        session_id: out.session_id.clone(),
-                        report_hash: Some(hash),
-                        attempts: out.attempts,
-                        skipped_delivery: skipped,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .inspect_err(|e| warn!(agent = %agent.id, "personal agent: finish_run(ok): {e}"));
+            record_finish(
+                &repo,
+                &run_id,
+                FinishAgentRun {
+                    status: "ok".into(),
+                    summary: out.summary.clone(),
+                    report_path,
+                    report_rel: report_rel_opt,
+                    delivered,
+                    delivery_error: derr.clone(),
+                    session_id: out.session_id.clone(),
+                    report_hash: Some(hash),
+                    attempts: out.attempts,
+                    skipped_delivery: skipped,
+                    ..Default::default()
+                },
+            )
+            .await;
             // The run happened — advance even when settling its row failed
             // (S4-25c), so the schedule doesn't re-fire every tick.
             advance_cursor(ctx, schedule, trigger, now).await;
@@ -878,16 +882,16 @@ async fn complete_agent_run<C: AssistantCtx>(
         Err(e) => {
             let msg = e.to_string();
             warn!(agent = %agent.id, "personal agent run failed: {msg}");
-            let _ = repo
-                .finish_run(
-                    &run_id,
-                    FinishAgentRun {
-                        status: "error".into(),
-                        error: Some(msg.clone()),
-                        ..Default::default()
-                    },
-                )
-                .await;
+            record_finish(
+                &repo,
+                &run_id,
+                FinishAgentRun {
+                    status: "error".into(),
+                    error: Some(msg.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
             advance_cursor(ctx, schedule, trigger, Utc::now()).await;
             // Failed runs count against the history cap too (an always-failing
             // agent used to grow its run list without bound).
@@ -929,6 +933,37 @@ async fn agent_notice<C: AssistantCtx>(
         user_id: agent.created_by.clone(),
     })
     .await;
+}
+
+/// Settle a run row, never leaving it `running`: every way of starting a run
+/// (tick, Run now, proactive, delegation) refuses while a row of the agent
+/// says `running`, and the cancel route no longer knows the run, so one failed
+/// `finish_run` (a busy/locked database) wedged the agent until a daemon
+/// restart. Retry the full write briefly, then fall back to a minimal `error`
+/// row (the scheduled-tasks engine's `record_finish`).
+async fn record_finish(repo: &PersonalAgentsRepo, run_id: &str, f: FinishAgentRun) {
+    let mut last_err = None;
+    for attempt in 0..3u64 {
+        match repo.finish_run(run_id, f.clone()).await {
+            Ok(()) => return,
+            Err(e) => {
+                warn!(run = %run_id, "personal agent: finish_run attempt {} failed: {e}", attempt + 1);
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
+            }
+        }
+    }
+    let minimal = FinishAgentRun {
+        status: "error".into(),
+        error: Some(format!(
+            "The run finished but its result couldn’t be saved: {}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        )),
+        ..Default::default()
+    };
+    if let Err(e) = repo.finish_run(run_id, minimal).await {
+        warn!(run = %run_id, "personal agent: minimal finish_run failed too: {e}");
+    }
 }
 
 /// Advance the fired schedule's cursor on completion — only for scheduled
@@ -1068,6 +1103,61 @@ async fn prune<C: AssistantCtx>(ctx: &C, agent_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full result write that keeps failing still leaves the row settled
+    /// (`error`), never `running` — which would refuse every later run.
+    #[tokio::test]
+    async fn a_failed_finish_still_settles_the_run() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) \
+             VALUES ('fin-ws', 'ws', '/tmp/ws', '2026-10-16T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = PersonalAgentsRepo::new(pool.clone());
+        let agent = repo
+            .create(otto_state::NewPersonalAgent::defaults(
+                "fin-ws".into(),
+                "Agent".into(),
+            ))
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(otto_state::NewAgentRun {
+                agent_id: agent.id.clone(),
+                schedule_id: None,
+                workspace_id: "fin-ws".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        // Every `ok` write fails, as a wedged database would.
+        sqlx::query(
+            "CREATE TRIGGER fail_ok BEFORE UPDATE ON personal_agent_runs \
+             WHEN NEW.status = 'ok' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        record_finish(
+            &repo,
+            &run.id,
+            FinishAgentRun {
+                status: "ok".into(),
+                summary: "done".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let settled = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(settled.status, "error");
+        assert!(settled
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("couldn’t be saved")));
+    }
 
     #[test]
     fn notification_hash_is_bound_to_destination() {

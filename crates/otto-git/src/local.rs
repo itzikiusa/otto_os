@@ -1731,7 +1731,9 @@ impl LocalGit {
         let out = self
             .run_read(&[
                 "branch",
-                "--format=%(refname:short)%09%(upstream:short)%09%(HEAD)",
+                // `lstrip=2`, not `:short`: a branch named like a tag
+                // abbreviates to `heads/<name>` (see `refs_with_base`).
+                "--format=%(refname:lstrip=2)%09%(upstream:short)%09%(HEAD)",
             ])
             .await?;
         Ok(crate::parse::parse_branches(&out))
@@ -4605,11 +4607,13 @@ impl LocalGit {
     /// Best-effort source ref for an in-progress merge: first line of
     /// `.git/MERGE_MSG` (e.g. "Merge branch 'feature'"), else the MERGE_HEAD sha.
     async fn merge_source(&self) -> Option<String> {
-        let git_dir = self.repo_path.join(".git");
-        let msg_path = git_dir.join("MERGE_MSG");
-        if let Ok(text) = tokio::fs::read_to_string(&msg_path).await {
-            if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
-                return Some(line.trim().to_string());
+        // The real git dir: in a linked worktree `.git` is a FILE, so
+        // `<tree>/.git/MERGE_MSG` never existed and the label fell back to a sha.
+        if let Some(git_dir) = self.git_dir().await {
+            if let Ok(text) = tokio::fs::read_to_string(git_dir.join("MERGE_MSG")).await {
+                if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
+                    return Some(line.trim().to_string());
+                }
             }
         }
         self.run(&["rev-parse", "MERGE_HEAD"])
@@ -4980,6 +4984,8 @@ impl LocalGit {
 
 /// `.git` as a path component, compared the way the default case-insensitive
 /// APFS/HFS+ volume resolves it: `.GIT/config` IS `.git/config` there.
+pub use crate::remote_url::{strip_url_userinfo, validate_remote_url};
+
 fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
@@ -4991,86 +4997,6 @@ fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
 /// prints the post-quantum warning to stderr on every non-PQ connection and it
 /// does NOT affect the exit status — yet it sorts first, so the old "first
 /// non-empty line" logic reported it as the failure.
-/// Accept only URLs `git clone` / `git remote add` should ever receive:
-/// `https?://`, `ssh://`, `git://` with a host and a path, or scp-like
-/// `user@host:path`. Refuses empty, whitespace, control characters, a leading
-/// `-` (git would read it as an option), and local paths / `file://` — cloning
-/// a local path is a REGISTRATION, and the UI registers those via
-/// `POST /repos {path}` instead.
-pub fn validate_remote_url(url: &str) -> Result<()> {
-    let bad = |why: &str| Err(Error::Invalid(format!("invalid remote url: {why}")));
-    let u = url.trim();
-    if u.is_empty() {
-        return bad("must not be empty");
-    }
-    if u.starts_with('-') {
-        return bad("must not start with '-'");
-    }
-    if u.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return bad("contains whitespace or a control character");
-    }
-    if let Some((scheme, rest)) = u.split_once("://") {
-        if !matches!(scheme, "http" | "https" | "ssh" | "git") {
-            return bad("scheme must be http, https, ssh or git");
-        }
-        let (host, path) = match rest.split_once('/') {
-            Some(p) => p,
-            None => return bad("missing path"),
-        };
-        // `user[:pass]@host[:port]` — only the host half has to be non-empty.
-        let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
-        if host.is_empty() {
-            return bad("missing host");
-        }
-        if path.is_empty() {
-            return bad("missing path");
-        }
-        return Ok(());
-    }
-    // scp-like `user@host:path`.
-    let ok_ident = |v: &str| {
-        !v.is_empty()
-            && v.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    };
-    let Some((user, rest)) = u.split_once('@') else {
-        return bad("expected a URL with a scheme or a user@host:path remote");
-    };
-    let Some((host, path)) = rest.split_once(':') else {
-        return bad("expected a URL with a scheme or a user@host:path remote");
-    };
-    if !ok_ident(user) || !ok_ident(host) {
-        return bad("bad user or host");
-    }
-    if path.is_empty() || path.starts_with('-') {
-        return bad("missing path");
-    }
-    Ok(())
-}
-
-/// Remove any `user:password@` userinfo from a URL so a credentialed remote a
-/// user may have pasted isn't echoed into notices/logs. Best-effort string op;
-/// returns non-URL strings unchanged. The real (credentialed) URL is still used
-/// for the actual git operation — this is only for display.
-pub fn strip_url_userinfo(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
-    };
-    let after = scheme_end + 3;
-    let rest = &url[after..];
-    let path_start = rest.find('/').unwrap_or(rest.len());
-    let authority = &rest[..path_start];
-    match authority.rfind('@') {
-        Some(at) => format!(
-            "{}{}{}",
-            &url[..after],
-            &authority[at + 1..],
-            &rest[path_start..]
-        ),
-        None => url.to_string(),
-    }
-}
-
 fn is_noise_line(l: &str) -> bool {
     let t = l.trim();
     t.is_empty()
@@ -5936,6 +5862,33 @@ mod tests {
         let st = git.status().await.unwrap();
         assert!(st.changes.iter().any(|c| c.path == "a.txt" && c.unstaged));
         assert!(st.changes.iter().any(|c| c.path == "e.txt"));
+    }
+
+    /// In a LINKED worktree `.git` is a file: the merge label must still come
+    /// from MERGE_MSG in the real git dir, not fall back to a bare sha.
+    #[tokio::test]
+    async fn merge_source_reads_merge_msg_in_a_linked_worktree() {
+        let (tmp, dir) = fixture_n_commits(1);
+        sh_git(&dir, &["checkout", "-b", "side"]);
+        write(&dir, "f.txt", "side\n");
+        sh_git(&dir, &["commit", "-am", "side"]);
+        sh_git(&dir, &["checkout", "main"]);
+        let wt = tmp.path().join("wt");
+        sh_git(
+            &dir,
+            &["worktree", "add", "-b", "wtb", wt.to_str().unwrap(), "main"],
+        );
+        write(&wt, "f.txt", "wt\n");
+        sh_git(&wt, &["commit", "-am", "wt"]);
+        let merged = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["merge", "side"])
+            .output()
+            .unwrap();
+        assert!(!merged.status.success(), "the fixture must conflict");
+        let ms = LocalGit::new(&wt).merge_status().await.unwrap();
+        assert!(ms.merging);
+        assert_eq!(ms.source.as_deref(), Some("Merge branch 'side' into wtb"));
     }
 
     /// A conflicting cherry-pick is a normal outcome: status reports the op +
@@ -7420,6 +7373,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("tag {name} present"));
             assert_eq!(t.sha, root, "tag {name} resolves to the tagged COMMIT");
         }
+    }
+
+    /// A branch sharing its name with a tag: `%(refname:short)` disambiguates
+    /// it to `heads/v1.0`, which the PR form then sent as the head branch.
+    #[tokio::test]
+    async fn branches_keep_plain_names_when_a_tag_shares_one() {
+        let (_tmp, dir) = fixture_n_commits(1);
+        sh_git(&dir, &["branch", "v1.0"]);
+        sh_git(&dir, &["tag", "v1.0"]);
+        let names: Vec<String> = LocalGit::new(&dir)
+            .branches()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(names.contains(&"v1.0".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("heads/")), "{names:?}");
     }
 
     #[tokio::test]

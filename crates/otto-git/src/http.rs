@@ -309,13 +309,11 @@ pub(crate) async fn repo_ctx<S: GitCtx>(
 /// Keychain FFI call (an XPC round-trip to `securityd`, plus whatever an EDR
 /// agent adds); on a loaded box it parks a tokio worker for tens of
 /// milliseconds, and it sits on request paths as hot as the Git page's 10 s
-/// auto-fetch. The trait stays sync — we wrap at the call sites.
+/// auto-fetch. The trait stays sync — we wrap at the call sites, through
+/// [`otto_core::secrets::get_async`] so a store-cache hit answers inline
+/// instead of paying a blocking-pool hop on every push/fetch/PR call.
 async fn secret(store: &Arc<dyn SecretStore>, key: &str) -> Result<Option<String>> {
-    let store = store.clone();
-    let key = key.to_string();
-    tokio::task::spawn_blocking(move || store.get(&key))
-        .await
-        .map_err(|e| Error::Internal(format!("keychain read: {e}")))?
+    otto_core::secrets::get_async(store, key).await
 }
 
 /// Resolve the push/pull token for a repo's bound account (None when no
@@ -717,7 +715,7 @@ async fn create_account<S: GitCtx>(
         return Err(Error::Invalid("username must not be empty".into()).into());
     }
     let token_ref = format!("gitacct-{}", new_id());
-    s.secrets().put(&token_ref, &req.token)?;
+    otto_core::secrets::put_async(s.secrets(), &token_ref, &req.token).await?;
     let created = s
         .store()
         .create_account(NewGitAccount {
@@ -735,7 +733,7 @@ async fn create_account<S: GitCtx>(
         Ok(a) => Ok(Json(a)),
         Err(e) => {
             // Don't leave an orphan secret behind.
-            let _ = s.secrets().delete(&token_ref);
+            let _ = otto_core::secrets::delete_async(s.secrets(), &token_ref).await;
             Err(e.into())
         }
     }
@@ -782,7 +780,7 @@ async fn update_account<S: GitCtx>(
     let rotated = req.token.as_deref().filter(|t| !t.is_empty());
     let token_ref = if let Some(tok) = rotated {
         let new_ref = format!("gitacct-{}", new_id());
-        s.secrets().put(&new_ref, tok)?;
+        otto_core::secrets::put_async(s.secrets(), &new_ref, tok).await?;
         new_ref
     } else {
         account.token_ref.clone()
@@ -807,14 +805,14 @@ async fn update_account<S: GitCtx>(
         Ok(updated) => {
             if rotated.is_some() {
                 // Best-effort cleanup of the old secret; don't fail if it's gone.
-                let _ = s.secrets().delete(&account.token_ref);
+                let _ = otto_core::secrets::delete_async(s.secrets(), &account.token_ref).await;
             }
             Ok(Json(updated))
         }
         Err(e) => {
             if rotated.is_some() {
                 // The row still names the old secret: drop the orphan new one.
-                let _ = s.secrets().delete(&token_ref);
+                let _ = otto_core::secrets::delete_async(s.secrets(), &token_ref).await;
             }
             Err(e.into())
         }
@@ -830,7 +828,7 @@ async fn delete_account<S: GitCtx>(
     if account.user_id != user.0.id && !user.0.is_root {
         return Err(Error::Forbidden("not the account owner".into()).into());
     }
-    let _ = s.secrets().delete(&account.token_ref);
+    let _ = otto_core::secrets::delete_async(s.secrets(), &account.token_ref).await;
     s.store().delete_account(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

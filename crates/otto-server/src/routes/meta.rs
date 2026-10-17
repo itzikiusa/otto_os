@@ -196,6 +196,12 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
         Ok(Ok(out)) => out.status.success(),
         _ => false,
     };
+    // A configured command that isn't on PATH may be a shell alias/function
+    // (`alias claude-work='CLAUDE_CONFIG_DIR=… claude'`); spawn runs those via
+    // the login shell (`otto_sessions::providers::shell_wrapped`), so ask that
+    // same shell before reporting it missing. Plain built-in names skip this.
+    let builtin_name = DETECTED_TOOLS.contains(&name) && program == name;
+    let found = found || (!builtin_name && !program.contains('/') && shell_knows(program).await);
 
     let mut version = None;
     if found && DETECTED_TOOLS.contains(&name) {
@@ -220,6 +226,30 @@ async fn detect_tool(name: &str, program: &str) -> ToolStatus {
         found,
         version,
     }
+}
+
+/// Whether the user's interactive login shell resolves `program` (alias,
+/// function or executable). The name travels as `$1`, never spliced into the
+/// script. 5s cap: rc files can be slow, and the result is cached for
+/// [`TOOLS_TTL`].
+async fn shell_knows(program: &str) -> bool {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let mut cmd = Command::new(shell);
+    cmd.args([
+        "-ilc",
+        r#"command -v "$1" >/dev/null"#,
+        "otto-probe",
+        program,
+    ])
+    .stdin(std::process::Stdio::null())
+    .kill_on_drop(true);
+    matches!(
+        timeout(Duration::from_secs(5), cmd.output()).await,
+        Ok(Ok(out)) if out.status.success()
+    )
 }
 
 // ---------------------------------------------------------------------------

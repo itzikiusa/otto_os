@@ -68,7 +68,7 @@
   }
 
   // --- workloads ---------------------------------------------------------------
-  let rows = $state<K8sMonitorWorkloadRow[]>([]);
+  let rows = $state.raw<K8sMonitorWorkloadRow[]>([]); // replaced per poll, never mutated
   let status = $state<K8sMonitorStatus | null>(null);
   let enabled = $state(true);
   let allNamespaces = $state<string[]>([]);
@@ -296,7 +296,7 @@
   }
 
   // --- events --------------------------------------------------------------------
-  let events = $state<K8sMonitorEvent[]>([]);
+  let events = $state.raw<K8sMonitorEvent[]>([]); // replaced per load, never mutated
   let eventsLoading = $state(false);
   let eventsError = $state('');
   let classFilter = $state(saved.classFilter);

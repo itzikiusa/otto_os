@@ -120,6 +120,17 @@ pub async fn trigger(
     headers: HeaderMap,
     Json(req): Json<SwarmTriggerReq>,
 ) -> Response {
+    // 0. Like `/webhooks/{ws}`: only while the workspace's webhook integration
+    //    is ENABLED — disabling it must stop the key working here too, even
+    //    when the Keychain entry is left in place.
+    if !matches!(
+        ctx.integrations_store
+            .get(&ws, otto_core::domain::Channel::Webhook)
+            .await,
+        Ok(Some(i)) if i.enabled
+    ) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     // 1. Auth against the per-workspace webhook key.
     // Unauthenticated route: the Keychain read must not park a runtime worker
     // (cache hit inline, miss on the blocking pool).

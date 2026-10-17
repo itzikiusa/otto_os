@@ -766,17 +766,20 @@ impl super::GitProvider for Gitlab {
     }
 
     async fn list_pr_commits(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCommit>> {
+        // Every page (`Link rel="next"`): an MR past 100 commits lost the rest.
         let v = self
             .http
-            .get_cached_json(
+            .paginate_json_cached(
                 self.req(
                     reqwest::Method::GET,
                     &Self::mr_path(r, &format!("/{number}/commits")),
                 )
                 .query(&[("per_page", "100")]),
+                self.http.client(),
+                self.auth_header(),
             )
             .await?;
-        let commits = varr(&v, &[])
+        let commits = v
             .iter()
             .map(|c| {
                 let sha = vstr(c, &["id"]);
@@ -808,11 +811,17 @@ impl super::GitProvider for Gitlab {
         if !q.is_empty() {
             path.push_str(&format!("&query={}", percent_encode_query(q)));
         }
+        // Every page: the picker always asks with an empty query and filters
+        // locally, so member #101+ could never be found as a reviewer.
         let v = self
             .http
-            .json(self.req(reqwest::Method::GET, &path))
+            .paginate_json_cached(
+                self.req(reqwest::Method::GET, &path),
+                self.http.client(),
+                self.auth_header(),
+            )
             .await?;
-        Ok(varr(&v, &[]).iter().map(member_to_collaborator).collect())
+        Ok(v.iter().map(member_to_collaborator).collect())
     }
 
     /// `GET /user` with the bound token: proves authentication. GitLab exposes

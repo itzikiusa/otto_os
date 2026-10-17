@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
+  import { pollWhileVisible } from '../../lib/poll';
   import type { SessionNetwork } from '../../lib/api/types';
   import NetworkProfilePicker from './NetworkProfilePicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -21,21 +22,27 @@
   };
   $effect(() => {
     const id = sessionId; void selectedProfileId; void refresh;
-    let alive = true;
-    let pending = false;
-    async function poll() {
-      if (pending || document.hidden) return;
-      pending = true;
+    // lib/poll.ts: no timer wake-ups while the window is hidden (one catch-up
+    // tick on return), no overlapping requests, failure backoff, and the
+    // in-flight read is aborted when the pane unmounts. After the first read,
+    // only a profiled (or expanded) strip keeps polling.
+    let first = true;
+    const p = pollWhileVisible(async (signal) => {
+      const due = first || untrack(() => open || selectedProfileId || network?.profile_id);
+      first = false;
+      if (!due) return;
       try {
         // Background lane: a status poll never takes an interactive socket.
-        const next = await api.bg.get<SessionNetwork>(`/sessions/${id}/network`);
-        if (alive) { network = next; error = ''; }
-      } catch (e) { if (alive) error = e instanceof Error ? e.message : String(e); }
-      finally { pending = false; }
-    }
-    void poll();
-    const timer = setInterval(() => { if (open || selectedProfileId || network?.profile_id) void poll(); }, 5000);
-    return () => { alive = false; clearInterval(timer); };
+        const next = await api.bg.get<SessionNetwork>(`/sessions/${id}/network`, signal);
+        if (signal.aborted) return;
+        network = next; error = '';
+      } catch (e) {
+        if (signal.aborted) return;
+        error = e instanceof Error ? e.message : String(e);
+        return false;
+      }
+    }, { ms: 5000 });
+    return () => p.stop();
   });
   async function choose(id: string) {
     if (!onchange) return;

@@ -1600,6 +1600,20 @@ pub(crate) fn stage_review_skills(
     stage_skill_packages_at(library, names, &bundle).map(|staged| staged.root)
 }
 
+/// Stage the WHOLE library for a review run, on the blocking pool: it lists
+/// every skill and copies each tree twice (hundreds of file ops), which ran
+/// inline on the worker driving the review — once per run and per retry.
+async fn stage_all_review_skills(library: &otto_context::Library) -> Option<String> {
+    let library = library.clone();
+    tokio::task::spawn_blocking(move || {
+        let names: Vec<String> = library.list_skills().into_iter().map(|s| s.name).collect();
+        stage_review_skills(&library, &names)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Register (or replace) the cancel flag for one review agent. Returns the
 /// fresh, un-tripped flag — replacing matters on retry, where a stale tripped
 /// flag would short-circuit the new run instantly.
@@ -2029,7 +2043,7 @@ async fn run_review_core(
     // diff into the prompt doesn't scale (and can blow past input limits); the
     // agents are real sessions with file access, so they read it on demand.
     let diff_path = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
-    if let Err(e) = std::fs::write(&diff_path, &diff_text) {
+    if let Err(e) = tokio::fs::write(&diff_path, &diff_text).await {
         tracing::warn!(review = %review_id, "could not write review diff file: {e}");
     }
     // Durable copy (0100): the prompt references the temp path above, so a
@@ -2100,15 +2114,7 @@ async fn run_review_core(
     // only ones carrying an in-tree `.claude/skills`. codex/agy don't use this
     // bundle; their lens method travels inline in the prompt. Best-effort (None →
     // even claude falls back to the inlined prompt text).
-    let review_skills_dir = {
-        let names: Vec<String> = ctx
-            .context_library
-            .list_skills()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        stage_review_skills(&ctx.context_library, &names)
-    };
+    let review_skills_dir = stage_all_review_skills(&ctx.context_library).await;
 
     // Each reviewer watches its OWN cancel flag (the per-agent Stop button).
     // Whole-review cancel trips every per-agent flag too, so review-level
@@ -4403,11 +4409,6 @@ async fn retry_review_agent(
         .and_then(|us| us.into_iter().find(|u| u.is_root))
         .ok_or_else(|| crate::error::ApiError(Error::Internal("no root user".into())))?;
 
-    // Kill the old (likely stuck) session so it doesn't linger.
-    if let Some(sid) = review.agents[index].session_id.clone() {
-        let _ = ctx.manager.archive(&sid).await;
-    }
-
     // Mark the agent pending again so the UI reflects the retry immediately.
     // Write only this agent's element (atomic per-index) so we never revert the
     // other agents' live rows.
@@ -4426,11 +4427,23 @@ async fn retry_review_agent(
             })
         };
         if let Some(row) = row {
-            let _ = ctx
+            // Claim, don't just write: a concurrent retry of the same agent
+            // loses here (409) instead of spawning a second agent.
+            if !ctx
                 .reviews_store
-                .set_agent_at(&review_id, index, &row)
-                .await;
+                .claim_agent_retry(&review_id, index, &row)
+                .await
+                .map_err(crate::error::ApiError)?
+            {
+                return Err(crate::error::ApiError(Error::Conflict(format!(
+                    "agent {index} is already being retried"
+                ))));
+            }
         }
+    }
+    // Kill the old (likely stuck) session so it doesn't linger.
+    if let Some(sid) = review.agents[index].session_id.clone() {
+        let _ = ctx.manager.archive(&sid).await;
     }
 
     let provider = review.agents[index].provider.clone();
@@ -4472,15 +4485,7 @@ async fn retry_review_agent(
     // lens in the agent NAME with `skill` empty, so filtering on `skill` here
     // would leave the common case with an empty bundle). codex/agy ignore the
     // bundle and re-read the lens method inline from the persisted prompt.
-    let review_skills_dir = {
-        let names: Vec<String> = ctx
-            .context_library
-            .list_skills()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        stage_review_skills(&ctx.context_library, &names)
-    };
+    let review_skills_dir = stage_all_review_skills(&ctx.context_library).await;
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
     let slots = reviewer_slots();
     let ctx_bg = ctx.clone();

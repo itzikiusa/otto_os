@@ -277,123 +277,73 @@ impl Github {
 
     /// [`Self::fetch_ci_status`] for a head sha already in hand — `get_pr`
     /// holds the PR, so it skips the second `pr_raw` round-trip.
+    ///
+    /// Check-runs AND legacy commit statuses: a repo with Actions passing and
+    /// a Jenkins / Codecov status failing used to read `success` because the
+    /// statuses were only consulted when there were no check-runs at all.
     pub async fn fetch_ci_status_for_sha(&self, r: &RemoteRef, sha: &str) -> CiStatus {
-        let sha = sha.to_string();
         if sha.is_empty() {
             return CiStatus::none();
         }
-        // Fetch check-runs for the commit.
-        let path = format!(
-            "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
-            r.owner, r.repo
+        let (runs, statuses) = tokio::join!(
+            self.http
+                .get_cached_json(self.req(reqwest::Method::GET, &check_runs_path(r, sha))),
+            self.http
+                .get_cached_json(self.req(reqwest::Method::GET, &statuses_path(r, sha))),
         );
-        let v = match self
-            .http
-            .get_cached_json(self.req(reqwest::Method::GET, &path))
-            .await
-        {
-            Ok(v) => v,
-            Err(_) => return CiStatus::none(),
-        };
-        let runs = varr(&v, &["check_runs"]);
-        if runs.is_empty() {
-            // Fall back to legacy commit statuses.
-            return self.fetch_commit_status(r, &sha).await;
-        }
-        let total = runs.len() as u32;
-        let mut passed = 0u32;
-        let mut failed = 0u32;
-        let mut pending = 0u32;
-        let mut run_url: Option<String> = None;
-        for run in runs {
-            let conclusion = vstr(run, &["conclusion"]);
-            let status = vstr(run, &["status"]);
-            if run_url.is_none() {
-                run_url = vstr_opt(run, &["html_url"]);
-            }
-            match (status.as_str(), conclusion.as_str()) {
-                (_, "success") | (_, "neutral") | (_, "skipped") => passed += 1,
-                (_, "failure") | (_, "cancelled") | (_, "timed_out") | (_, "action_required") => {
-                    failed += 1
-                }
-                _ => pending += 1,
-            }
-        }
-        let state = if failed > 0 {
-            "failure"
-        } else if pending > 0 {
-            "pending"
-        } else if passed == total && total > 0 {
-            "success"
-        } else {
-            "none"
-        };
-        CiStatus {
-            state: state.to_string(),
-            total,
-            passed,
-            failed,
-            url: run_url,
-        }
-    }
-
-    /// Fallback: aggregate legacy GitHub commit statuses (the older Statuses
-    /// API, still used by some third-party integrations).
-    async fn fetch_commit_status(&self, r: &RemoteRef, sha: &str) -> CiStatus {
-        let path = format!(
-            "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
-            r.owner, r.repo
-        );
-        let v = match self
-            .http
-            .get_cached_json(self.req(reqwest::Method::GET, &path))
-            .await
-        {
-            Ok(v) => v,
-            Err(_) => return CiStatus::none(),
-        };
-        let items = varr(&v, &[]);
-        if items.is_empty() {
+        if runs.is_err() && statuses.is_err() {
             return CiStatus::none();
         }
-        // Statuses are newest-first; keep only the latest per context name.
-        let mut seen: std::collections::HashSet<String> = Default::default();
-        let mut total = 0u32;
-        let mut passed = 0u32;
-        let mut failed = 0u32;
-        let mut pending = 0u32;
-        let mut url: Option<String> = None;
-        for item in items {
-            let ctx = vstr(item, &["context"]);
-            if !seen.insert(ctx) {
-                continue;
-            }
-            total += 1;
-            if url.is_none() {
-                url = vstr_opt(item, &["target_url"]);
-            }
-            match vstr(item, &["state"]).as_str() {
-                "success" => passed += 1,
-                "failure" | "error" => failed += 1,
-                _ => pending += 1,
-            }
-        }
-        let state = if failed > 0 {
-            "failure"
-        } else if pending > 0 {
-            "pending"
-        } else if passed == total && total > 0 {
-            "success"
-        } else {
-            "none"
-        };
-        CiStatus {
-            state: state.to_string(),
-            total,
-            passed,
-            failed,
-            url,
-        }
+        let mut rows = runs.map(|v| checks_from_check_runs(&v)).unwrap_or_default();
+        rows.extend(
+            statuses
+                .map(|v| checks_from_statuses(&v))
+                .unwrap_or_default(),
+        );
+        ci_from_checks(&rows)
+    }
+}
+
+fn check_runs_path(r: &RemoteRef, sha: &str) -> String {
+    format!(
+        "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
+        r.owner, r.repo
+    )
+}
+
+fn statuses_path(r: &RemoteRef, sha: &str) -> String {
+    format!(
+        "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
+        r.owner, r.repo
+    )
+}
+
+/// Fold per-check rows ([`checks_from_check_runs`] + [`checks_from_statuses`])
+/// into one [`CiStatus`]: any failure fails, else anything unfinished is
+/// pending; `success`/`neutral`/`skipped` pass. No rows → `none`.
+pub(crate) fn ci_from_checks(rows: &[PrCheck]) -> CiStatus {
+    if rows.is_empty() {
+        return CiStatus::none();
+    }
+    let total = rows.len() as u32;
+    let passed = rows
+        .iter()
+        .filter(|c| matches!(c.state.as_str(), "success" | "neutral" | "skipped"))
+        .count() as u32;
+    let failed = rows.iter().filter(|c| c.state == "failure").count() as u32;
+    let state = if failed > 0 {
+        "failure"
+    } else if passed < total {
+        "pending"
+    } else {
+        "success"
+    };
+    CiStatus {
+        state: state.to_string(),
+        total,
+        passed,
+        failed,
+        url: rows.iter().find_map(|c| c.url.clone()),
     }
 }
 
@@ -414,9 +364,11 @@ pub(crate) fn checks_from_check_runs(v: &Value) -> Vec<PrCheck> {
                 (_, "success") => "success",
                 (_, "neutral") => "neutral",
                 (_, "skipped") => "skipped",
-                (_, "failure") | (_, "cancelled") | (_, "timed_out") | (_, "action_required") => {
-                    "failure"
-                }
+                (_, "failure")
+                | (_, "cancelled")
+                | (_, "timed_out")
+                | (_, "action_required")
+                | (_, "startup_failure") => "failure",
                 _ => "pending",
             };
             PrCheck {
@@ -1189,35 +1141,28 @@ impl super::GitProvider for Github {
         self.fetch_ci_status(r, number).await
     }
 
-    /// Check-runs for the PR head sha, falling back to the legacy Statuses API
-    /// when the commit has no check-runs — the same two-step walk
-    /// [`Github::fetch_ci_status`] does, kept per row.
+    /// Check-runs for the PR head sha plus the legacy Statuses API rows — the
+    /// same pair [`Github::fetch_ci_status_for_sha`] aggregates, kept per row.
+    /// A statuses read that fails (a fine-grained token without "Commit
+    /// statuses: read") doesn't hide the check-runs it can see.
     async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
         let sha = vstr(&self.pr_raw(r, number).await?, &["head", "sha"]);
         if sha.is_empty() {
             return Ok(Vec::new());
         }
-        let path = format!(
-            "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
-            r.owner, r.repo
+        let (runs, statuses) = tokio::join!(
+            self.http
+                .json(self.req(reqwest::Method::GET, &check_runs_path(r, &sha))),
+            self.http
+                .json(self.req(reqwest::Method::GET, &statuses_path(r, &sha))),
         );
-        let v = self
-            .http
-            .json(self.req(reqwest::Method::GET, &path))
-            .await?;
-        let rows = checks_from_check_runs(&v);
-        if !rows.is_empty() {
-            return Ok(rows);
+        let mut rows = checks_from_check_runs(&runs?);
+        match statuses {
+            Ok(v) => rows.extend(checks_from_statuses(&v)),
+            Err(e) if rows.is_empty() => return Err(e),
+            Err(_) => {}
         }
-        let path = format!(
-            "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
-            r.owner, r.repo
-        );
-        let v = self
-            .http
-            .json(self.req(reqwest::Method::GET, &path))
-            .await?;
-        Ok(checks_from_statuses(&v))
+        Ok(rows)
     }
 
     /// GitHub returns `github-authentication-token-expiration` on any

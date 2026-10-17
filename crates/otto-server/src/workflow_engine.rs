@@ -109,6 +109,11 @@ struct CancelWatch {
     rx: tokio::sync::broadcast::Receiver<Id>,
     poll: tokio::time::Interval,
     ticks: u32,
+    /// An announcement for this run was received but its status check has
+    /// not completed yet. A `select!` that drops [`Self::next`] mid-check
+    /// (a log line won the race) used to lose the consumed announcement —
+    /// the stop then waited for the 30 s safety read while the agent worked.
+    pending: bool,
 }
 
 impl CancelWatch {
@@ -118,6 +123,7 @@ impl CancelWatch {
             rx: otto_state::workflows::subscribe_cancels(),
             poll: tokio::time::interval(period),
             ticks: 0,
+            pending: false,
         }
     }
 
@@ -126,6 +132,12 @@ impl CancelWatch {
     async fn next(&mut self, repo: &WorkflowsRepo, take_skip: impl Fn() -> bool) -> CancelWake {
         use tokio::sync::broadcast::error::RecvError;
         loop {
+            if self.pending {
+                if repo.is_canceled(&self.run_id).await {
+                    return CancelWake::Canceled;
+                }
+                self.pending = false;
+            }
             tokio::select! {
                 ev = self.rx.recv() => {
                     // Ours, or a lag (re-check). Closed can't happen: the bus
@@ -135,9 +147,9 @@ impl CancelWatch {
                         Err(RecvError::Lagged(_)) => true,
                         Err(RecvError::Closed) => false,
                     };
-                    if ours && repo.is_canceled(&self.run_id).await {
-                        return CancelWake::Canceled;
-                    }
+                    // Checked at the top of the loop, so a drop mid-check
+                    // keeps the announcement for the next call.
+                    self.pending |= ours;
                 }
                 _ = self.poll.tick() => {
                     let safety = self.ticks.is_multiple_of(CANCEL_SAFETY_TICKS);
@@ -1281,6 +1293,39 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
     }
 }
 
+/// Wait for a run-gate permit — keeping the run's FIFO place — unless the
+/// queued run is canceled first (`None`; also `None` when the gate closed).
+async fn park_until_permit_or_cancel<'a>(
+    gate: &'a tokio::sync::Semaphore,
+    pool: &otto_state::DbPool,
+    run_id: &Id,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut cancels = otto_state::workflows::subscribe_cancels();
+    let repo = WorkflowsRepo::new(pool.clone());
+    // A cancel that landed before we subscribed.
+    if repo.is_canceled(run_id).await {
+        return None;
+    }
+    let acquire = gate.acquire();
+    tokio::pin!(acquire);
+    loop {
+        tokio::select! {
+            permit = &mut acquire => return permit.ok(),
+            ev = cancels.recv() => {
+                let ours = match ev {
+                    Ok(id) => id == *run_id,
+                    Err(RecvError::Lagged(_)) => true,
+                    Err(RecvError::Closed) => false,
+                };
+                if ours && repo.is_canceled(run_id).await {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
 /// way to launch [`run_workflow`] — every trigger path (manual run, retry,
 /// webhook, schedule/event trigger, chat, scheduled task) goes through it so
@@ -1370,9 +1415,12 @@ pub fn spawn_run(
                     &[],
                     false,
                 );
-                match gate.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => return, // gate closed — daemon shutting down
+                // Watch for a cancel while parked: the driver guard is alive
+                // all along, and a retry of the canceled run answered 409
+                // "still stopping" for as long as the queue stayed full.
+                match park_until_permit_or_cancel(gate, &ctx.pool, &run_id).await {
+                    Some(p) => p,
+                    None => return, // canceled while queued, or gate closed
                 }
             }
         };
@@ -1494,16 +1542,33 @@ async fn write_terminal(
     nodes: &[NodeRunState],
     error: Option<&str>,
 ) -> otto_core::Result<Option<i64>> {
+    write_status_retrying(repo, run_id, expected, status, nodes, error, true).await
+}
+
+/// [`write_terminal`]'s retry loop, shared with the run's START write
+/// (Pending→Running): one transient failure there left the row `pending`
+/// while the run executed — the UI showed it queued throughout, and every
+/// `human_approval` gate answered 409 (approvals need `running`) until its
+/// 24 h timeout failed the run.
+async fn write_status_retrying(
+    repo: &WorkflowsRepo,
+    run_id: &Id,
+    expected: &[RunStatus],
+    status: RunStatus,
+    nodes: &[NodeRunState],
+    error: Option<&str>,
+    terminal: bool,
+) -> otto_core::Result<Option<i64>> {
     let mut attempt = 0u64;
     loop {
         match repo
-            .update_run_if(run_id, expected, status, nodes, error, true)
+            .update_run_if(run_id, expected, status, nodes, error, terminal)
             .await
         {
             Ok(r) => return Ok(r),
             Err(e) if attempt < 3 => {
                 attempt += 1;
-                tracing::warn!(%run_id, attempt, "workflow terminal write failed, retrying: {e}");
+                tracing::warn!(%run_id, attempt, "workflow status write failed, retrying: {e}");
                 tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
             }
             Err(e) => return Err(e),
@@ -2225,16 +2290,16 @@ async fn run_workflow_with_budget(
     // unconditional write flipped it back to `running` and executed the whole
     // workflow the user saw canceled. Every LATER in-loop write uses
     // `update_run_progress` (nodes only, no status) for the same reason.
-    match repo
-        .update_run_if(
-            &run_id,
-            &[RunStatus::Pending],
-            RunStatus::Running,
-            &states,
-            None,
-            false,
-        )
-        .await
+    match write_status_retrying(
+        &repo,
+        &run_id,
+        &[RunStatus::Pending],
+        RunStatus::Running,
+        &states,
+        None,
+        false,
+    )
+    .await
     {
         Ok(Some(rev)) => emit_run_updated(
             &ctx,
@@ -2387,7 +2452,7 @@ async fn run_workflow_with_budget(
         let node_input = match decide_node(&views) {
             NodeDecision::ErrorSkip => {
                 states[idx].status = NodeStatus::Skipped;
-                states[idx].logs = vec!["skipped (upstream did not succeed)".into()];
+                states[idx].logs = vec![SKIPPED_UPSTREAM.into()];
                 errored.insert(node_id.clone());
                 let rev = repo
                     .update_run_progress(&run_id, &states)
@@ -2968,6 +3033,14 @@ async fn run_workflow_with_budget(
         );
     }
 
+    // A stopped run stops its agents and reviewers NOW: the drain below can
+    // take minutes (each queued chat post has a 30 s timeout on a slow or
+    // offline Slack), and the agents kept editing the worktree meanwhile.
+    // The finalize paths repeat this (idempotent).
+    if canceled || timed_out {
+        stop_run_reviews(&ctx, &repo, &workflow.workspace_id, &run_id, &states).await;
+        kill_run_sessions(&ctx, &states).await;
+    }
     // Flush all streamed progress lines (close the channel, await the pump) so the
     // per-step updates land in the thread BEFORE the final summary is delivered.
     drop(progress);
@@ -6011,9 +6084,8 @@ async fn execute_node(
                         change_notes: Some(format!("from workflow node {}", node.id)),
                         created_by: user.id.clone(),
                     };
-                    if let Ok(v) = ctx.product_repo.add_version(nv).await {
-                        out.insert("version_id".into(), json!(v.id));
-                    }
+                    let v = persisted_version(ctx.product_repo.add_version(nv).await)?;
+                    out.insert("version_id".into(), json!(v));
                 }
             }
             Ok((Value::Object(out), vec![format!("{kind}: complete")]))
@@ -6060,7 +6132,7 @@ async fn execute_node(
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
             let ext = canvas_node_ext(mode);
-            let rel = format!("workflow-canvas/{run_id}/{}.{ext}", node.id);
+            let rel = canvas_rel(run_id, &node.id, ext);
             let path = ctx.data_dir.join(&rel);
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -8598,6 +8670,43 @@ fn canvas_node_ext(mode: &str) -> &'static str {
         _ => "mmd",
     }
 }
+
+/// The version id a `product_*` step with `persist: true` saved. A failed
+/// save used to be dropped silently: the step succeeded without its
+/// `version_id`, and nothing said the result was never stored.
+fn persisted_version(
+    saved: otto_core::Result<otto_state::ProductStoryVersion>,
+) -> otto_core::Result<String> {
+    saved.map(|v| v.id).map_err(|e| {
+        otto_core::Error::Internal(format!(
+            "the step finished but saving its result as a product version failed: {e}"
+        ))
+    })
+}
+
+/// The log line of a step skipped because an upstream step failed — the
+/// marker a single-step retry looks for to re-run what its target blocked.
+pub(crate) const SKIPPED_UPSTREAM: &str = "skipped (upstream did not succeed)";
+
+/// Data-dir-relative file of a `canvas` step's diagram. Step ids are only
+/// checked for being non-empty and unique, so an id like `../../../tmp/x`
+/// wrote (and created directories) outside the data dir; such an id falls
+/// back to its slug, while an ordinary id keeps its exact file name.
+fn canvas_rel(run_id: &str, node_id: &str, ext: &str) -> String {
+    let name = otto_core::paths::safe_component(node_id)
+        .filter(|n| !n.starts_with('.'))
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::workflow_context::slug(node_id));
+    format!("workflow-canvas/{run_id}/{name}.{ext}")
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/workflow_queue_cancel.rs"]
+mod queue_cancel_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/workflow_canvas_persist.rs"]
+mod canvas_rel_tests;
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // isolated fixtures use sync fs / process / secret store

@@ -151,6 +151,42 @@ fn is_blocked_v6(v6: Ipv6Addr) -> bool {
         || (s[0] == 0x2001 && s[1] == 0x0db8)
 }
 
+/// True when the URL names a local-network target BY LITERAL: the host is
+/// `localhost`, or an IP literal that is loopback, private (RFC1918 / ULA
+/// `fc00::/7`) or CGNAT (`100.64.0.0/10` — Tailscale/VPN addresses). Never
+/// link-local (incl. the `169.254.169.254` metadata address), unspecified,
+/// multicast or reserved space, and never a hostname that merely RESOLVES to
+/// a private address (that is the DNS-rebinding shape the guard exists for).
+///
+/// For an owner-configured endpoint only — an MCP server URL a person typed,
+/// whose registration already lets them spawn any command. "I asked for
+/// `http://127.0.0.1:3845/mcp`" is not an SSRF; the guard keeps vetting every
+/// other URL (and every hostname) exactly as before.
+pub fn is_explicit_local_target(url: &reqwest::Url) -> bool {
+    if !scheme_allowed(url.scheme()) {
+        return false;
+    }
+    let Some(host) = bare_host(url) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            v4.is_loopback() || v4.is_private() || (o[0] == 100 && (o[1] & 0xC0) == 0x40)
+        }
+        Ok(IpAddr::V6(v6)) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback() || v4.is_private();
+            }
+            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+        Err(_) => false,
+    }
+}
+
 /// The URL's host with IPv6 brackets stripped: `http://[::1]/` → `::1`.
 /// `Url::host_str` keeps the brackets, which used to make every IPv6 literal
 /// fail `parse::<IpAddr>()` and then fail DNS with a misleading error.
@@ -505,6 +541,39 @@ mod tests {
         assert!(!ok("file:///etc/passwd"));
         assert!(ok("https://example.com/"));
         assert!(ok("https://8.8.8.8/"));
+    }
+
+    #[test]
+    fn explicit_local_targets_are_literal_loopback_private_or_cgnat_only() {
+        let local = |u: &str| is_explicit_local_target(&reqwest::Url::parse(u).unwrap());
+        for u in [
+            "http://127.0.0.1:3845/mcp",
+            "http://localhost:8080/",
+            "http://LOCALHOST/",
+            "http://[::1]:9000/mcp",
+            "http://10.0.0.5/",
+            "https://192.168.1.20:8443/",
+            "http://172.16.4.4/",
+            "http://100.101.102.103/", // Tailscale
+            "http://[fd00::1]/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            assert!(local(u), "{u} is an explicit local target");
+        }
+        for u in [
+            "http://169.254.169.254/latest/meta-data/", // metadata stays out
+            "http://[fe80::1]/",
+            "http://0.0.0.0/",
+            "http://224.0.0.1/",
+            "http://255.255.255.255/",
+            "https://example.com/",
+            "https://8.8.8.8/",
+            "http://internal.corp/", // a NAME: still vetted at connect time
+            "http://localhost.evil.example/",
+            "file:///etc/passwd",
+        ] {
+            assert!(!local(u), "{u} is not an explicit local target");
+        }
     }
 
     #[test]

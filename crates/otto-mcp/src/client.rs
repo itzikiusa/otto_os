@@ -460,18 +460,40 @@ async fn open_stdio(
     })
 }
 
-/// SSRF-validate the URL, build the guarded client and initialize.
-async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live, String> {
-    let permit = transport_permit().await?;
+/// The HTTP client for a server URL: SSRF-guarded, unless the owner typed an
+/// explicit local target (`http://127.0.0.1:3845/mcp`, `http://localhost:…`,
+/// a LAN/Tailscale IP literal). Registering or re-pointing a server needs the
+/// owner's own credential (`root_authority`), and the same person can already
+/// register a stdio server that spawns any command — so refusing a local MCP
+/// server they named blocked a legitimate workflow (desktop apps and dev
+/// servers expose MCP on localhost) without stopping anyone. A HOSTNAME keeps
+/// the full connect-time guard, so a rebinding name still cannot pivot inward.
+async fn http_client_for(url: &str) -> Result<reqwest::Client, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    if otto_netguard::is_explicit_local_target(&parsed) {
+        return reqwest::Client::builder()
+            // A corporate proxy cannot reach this machine's loopback/LAN.
+            .no_proxy()
+            .timeout(OP_TIMEOUT)
+            .redirect(same_origin_redirects(true))
+            .build()
+            .map_err(|e| format!("http client: {e}"));
+    }
     // Up front for a clean error (and to vet an IP-literal host); the guarded
     // resolver then vets every name AT CONNECT TIME — the addresses it checks
     // are the ones dialled, so DNS cannot rebind between check and connect.
     otto_netguard::check_url(url).await?;
-    let client = otto_netguard::guarded_client_builder()
+    otto_netguard::guarded_client_builder()
         .timeout(OP_TIMEOUT)
-        .redirect(same_origin_redirects())
+        .redirect(same_origin_redirects(false))
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| format!("http client: {e}"))
+}
+
+/// SSRF-validate the URL, build the client and initialize.
+async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live, String> {
+    let permit = transport_permit().await?;
+    let client = http_client_for(url).await?;
     let resp = http_send(&client, url, headers, init_request(), None)
         .await
         .map_err(|e| format!("initialize: {e}"))?;
@@ -504,14 +526,17 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
 /// every configured custom header — reqwest strips only `Authorization` /
 /// `Cookie`, not an `X-API-Key` read from the Keychain — to wherever the
 /// server (or anything on its path) points. No DNS on the callback thread.
-fn same_origin_redirects() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
+/// `local_origin`: the first URL is an owner-named local target (see
+/// [`http_client_for`]), so a same-origin hop is that same address and needs
+/// no literal re-vetting.
+fn same_origin_redirects(local_origin: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= MAX_REDIRECTS {
             return attempt.error("too many redirects");
         }
         let origin = attempt.previous().first();
         if origin.is_some_and(|o| same_origin(o, attempt.url()))
-            && otto_netguard::check_url_literal(attempt.url())
+            && (local_origin || otto_netguard::check_url_literal(attempt.url()))
         {
             attempt.follow()
         } else {
@@ -1218,7 +1243,7 @@ mod tests {
         });
         let client = reqwest::Client::builder()
             .no_proxy()
-            .redirect(same_origin_redirects())
+            .redirect(same_origin_redirects(true))
             .build()
             .unwrap();
         let mut headers = BTreeMap::new();
@@ -1238,6 +1263,94 @@ mod tests {
             !hit.load(std::sync::atomic::Ordering::SeqCst),
             "target never contacted"
         );
+    }
+
+    /// A minimal Streamable-HTTP MCP server on `127.0.0.1:0`: answers every
+    /// POST carrying an `"id"` with `{"tools":[{"name":"t"}]}`, everything else
+    /// with 202. One request per connection (`Connection: close`).
+    async fn local_http_mcp_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Read headers + the Content-Length body.
+                loop {
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if req.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&req).to_string();
+                let id = text
+                    .split("\"id\":")
+                    .nth(1)
+                    .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+                    .and_then(|d| d.parse::<i64>().ok());
+                let head_and_body = match id {
+                    Some(id) => {
+                        let body = format!(
+                            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"tools\":[{{\"name\":\"t\"}}]}}}}"
+                        );
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    }
+                    None => {
+                        "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    }
+                };
+                let _ = s.write_all(head_and_body.as_bytes()).await;
+            }
+        });
+        (address, server)
+    }
+
+    /// The owner registered `http://127.0.0.1:<port>/mcp` (a desktop app's or
+    /// dev server's local MCP endpoint): the client connects instead of
+    /// refusing it as an SSRF target.
+    #[tokio::test]
+    async fn an_owner_named_loopback_http_server_is_reachable() {
+        let (address, server) = local_http_mcp_server().await;
+        for host in [address.to_string(), format!("localhost:{}", address.port())] {
+            let client = McpClient::new(Transport::Http {
+                url: format!("http://{host}/mcp"),
+                headers: BTreeMap::new(),
+            });
+            let tools = client.list_tools().await.expect("local server reachable");
+            assert_eq!(tools[0]["name"], json!("t"), "{host}");
+        }
+        server.abort();
+    }
+
+    /// The relaxation is for a LITERAL local target only: metadata stays
+    /// refused, and so does a public-looking name (vetted at connect time).
+    #[tokio::test]
+    async fn metadata_and_non_literal_targets_keep_the_guard() {
+        let err = http_client_for("http://169.254.169.254/latest/meta-data/")
+            .await
+            .unwrap_err();
+        assert!(err.contains("blocked address"), "{err}");
+        assert!(http_client_for("http://[fe80::1]/mcp").await.is_err());
     }
 
     #[tokio::test]

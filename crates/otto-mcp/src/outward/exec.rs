@@ -146,6 +146,16 @@ pub fn arg_str(args: &Value, key: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::Invalid(format!("missing required string argument '{key}'")))
 }
 
+/// [`arg_str`] that accepts `""` — for a body like a note's `content`, where
+/// empty is a legitimate value but ABSENT (or not a string) is a mistake.
+/// Defaulting a missing `content` to `""` overwrote the note with nothing.
+pub fn arg_str_allow_empty(args: &Value, key: &str) -> Result<String, Error> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| Error::Invalid(format!("missing required string argument '{key}'")))
+}
+
 /// One URL path segment from an untrusted value: every byte outside the
 /// unreserved set percent-encoded. A segment of only dots (`.` / `..`) would
 /// still be normalized by the URL parser as a dot segment — and so would its
@@ -1236,7 +1246,7 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let v = arg_i64(args, "vault_id")?;
             let mut body = json!({
                 "path": arg_str(args, "path")?,
-                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+                "content": arg_str_allow_empty(args, "content")?,
             });
             if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
                 body["if_hash"] = json!(h);
@@ -1251,7 +1261,7 @@ pub fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let v = arg_i64(args, "vault_id")?;
             let mut body = json!({
                 "path": arg_str(args, "path")?,
-                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+                "content": arg_str_allow_empty(args, "content")?,
             });
             if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
                 body["if_hash"] = json!(h);
@@ -1992,10 +2002,17 @@ pub async fn self_delete(client: &reqwest::Client, token: &str, url: &str) -> Re
 }
 pub async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
         return Err(Error::Upstream(self_call_error(status, &text)));
     }
+    // A body that broke off mid-read is NOT success: an empty 2xx reads as
+    // `{"ok": true}`, so a reset during a mutating call told the agent it
+    // had worked.
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| Error::Upstream(format!("{status}: reading the response failed: {e}")))?;
     Ok(parse_self_ok(&text))
 }
 

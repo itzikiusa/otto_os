@@ -6,7 +6,7 @@ Auth: `Authorization: Bearer <token>` unless marked public. Errors: HTTP status 
 `otto_core::Error` variant + body `Problem{code,message}`.
 
 **Games:** [Game rooms](./game-rooms.md) defines `POST /game-rooms`, public
-`POST /game-room-join`, capability-only two-player relay, lifecycle and limits.
+`POST /game-room-join`, capability-only multiplayer relay (host + up to 3 shooter or 7 kart guests), lifecycle and limits.
 
 **Session collaboration:** [Session rooms](./rooms.md) defines owner management,
 invitation admission, room-only credentials, chat/media/annotation actions and
@@ -787,7 +787,7 @@ coalesced file-change invalidations plus this read path when not admitted.
 | GET /sessions/{id}/transcript/tool/{tool_id} | ws viewer + owner-or-admin | `tool_id` = a `tool_call` block's `id` | the full `tool_call` `Block` (result `text`/`patch` at the 64 KB fold cap, never `elided`) — the lazy half of the live push's oversize trim: an over-64 KB `transcript_appended` delta ships results shortened with `result.elided: true`, and the view fetches the rest here when the step is expanded. Served from the running live tail's fold when there is one (no disk read), else the fold cache. Unknown id → 404; no resolvable transcript → 404 |
 | GET /sessions/{id}/transcript/images/{img_id} | ws viewer + owner-or-admin | `img_id` from an `image` block / `ToolResult.image_ids` (hex only) | image bytes, `inline`, `X-Content-Type-Options: nosniff`. Images are extracted once to `<data>/transcripts/<provider_session_id>/img/` and never inlined in JSON |
 | GET /sessions/{id}/artifacts | ws viewer + owner-or-admin | — | `Artifact[]` newest first — files written by `Write`/`Edit`/`FileChange`, PR links (`pr-link` records + PR URLs in prose), pasted/extracted images. `id = sha1(kind + ':' + (path ?? url))`, deduped per path (last producing turn wins). Best-effort mirrored into `work_artifacts` |
-| GET /sessions/{id}/artifacts/{artifact_id} | ws viewer + owner-or-admin | opaque `artifact_id` only — never a client path | bytes; the server maps the id back to the path it folded, then `canonicalize` → allow-list (session cwd, daemon data dir, `std::env::temp_dir()`) + fs.rs deny-list (`.git`, `.env*`, keys) → 25 MB cap → `nosniff` + `Content-Security-Policy: sandbox; default-src 'none'` + `X-Frame-Options: DENY`; `inline` for raster `image/*` only, `attachment` for everything else (HTML/SVG never render on the daemon origin — the UI previews them from srcdoc in its own `sandbox=""` iframe). 403 outside the roots, 413 over the cap, 400 for a link-only artifact |
+| GET /sessions/{id}/artifacts/{artifact_id} | ws viewer + owner-or-admin | opaque `artifact_id` only — never a client path | bytes; the server maps the id back to the path it folded, then `canonicalize` → allow-list (session cwd, daemon data dir, `std::env::temp_dir()`) + fs.rs deny-list (`.git`, `.env*`, keys) — skipped for the root owner on their own credential (they read any host file via `/fs/read`; agent, MCP and non-root callers stay bound) → 25 MB cap → `nosniff` + `Content-Security-Policy: sandbox; default-src 'none'` + `X-Frame-Options: DENY`; `inline` for raster `image/*` only, `attachment` for everything else (HTML/SVG never render on the daemon origin — the UI previews them from srcdoc in its own `sandbox=""` iframe). 403 outside the roots, 413 over the cap, 400 for a link-only artifact |
 | POST /sessions/{id}/tasks | ws editor + owner-or-admin | `CreateAgentTaskReq {title, description?}` | `AgentTask` (`source: "user"`, `nudge_pending: true`); broadcasts `tasks_updated`. 400 unless the session is a `claude`/`codex` **agent** session — its own provider or the one captured running inside a terminal (`meta.nested_provider`); 409 `agent not running in this terminal` when that captured CLI has exited (the sweep likewise keeps such tasks pending); title/description are reduced to one line with every control character stripped. The nudge sweep (atomic per-task claim; PTY must be ≥ 10 s old, drawn and quiet 600 ms) submits `Otto board: new task — "<title>". <description> Add it to your task list and do it next.` via `submit_text` when the session is `idle`, or after at most 120 s while `working`; it waits (no override) while an approval/permission prompt is on screen. Then `nudge_pending: false`, `nudged_at` set |
 | GET /sessions/{id}/slash-commands | ws viewer + owner-or-admin | — | `SlashCommand[]` — what the chat composer completes after `/`: the provider CLI's built-ins (`source: builtin`) plus the user's commands/skills on disk (Claude: `~/.claude/{commands,skills}` = `user`, `<cwd>/.claude/{commands,skills}` = `project`, subdirs namespaced `dir:name`; Codex: `$CODEX_HOME/skills`, `<cwd>/.codex/skills`). Description = frontmatter `description:` or the file's first line, ≤ 160 chars. Other providers → `[]` |
 | GET /sessions/{id}/screen | ws viewer + owner-or-admin | — | `SessionScreen {live, cols, rows, lines}` — the CURRENT terminal screen as plain text for the Home "Otto School" monitors (polled ~2 s): `lines` = the emulator's plain rows (no scrollback), trailing blank rows dropped, each clipped to 240 chars, the LAST ≤ 60 rows; `cols`/`rows` = emulator size. No live PTY → `{live: false, cols: 0, rows: 0, lines: []}` (200; never spawns or resumes) |
@@ -1861,11 +1861,11 @@ blank caller list as everyone and ignores the flag.
 |---|---|---|---|
 | GET /workspaces/{id}/integrations | ws viewer | — | configured channel integrations |
 | GET /workspaces/{id}/integrations/status | ws viewer | — | `ListenerStatus[]` — live state of each enabled Slack / Telegram listener |
-| PUT /workspaces/{id}/integrations/{channel} | ws editor | UpsertIntegrationReq | Integration |
+| PUT /workspaces/{id}/integrations/{channel} | ws editor + root (bridge sessions and webhook runs act as the owner; non-root → 403) | UpsertIntegrationReq | Integration |
 | DELETE /workspaces/{id}/integrations/{channel} | ws editor | — | 204 |
 | POST /workspaces/{id}/integrations/{channel}/test | ws editor | — | sends a test message (webhook: probes the callback URL) |
 | GET /workspaces/{id}/integrations/slack/directory | ws editor | — | `SlackDirectory` `{users:[{id,name,handle,is_bot}], channels:[{id,name,is_private}], users_error?, channels_error?, truncated}` via the saved bot token (`users:read`, `channels:read`, `groups:read`); cached 5 min per bot, `?refresh=1` bypasses. A Slack-side failure is a per-part `*_error`, never an HTTP error |
-| POST /workspaces/{id}/integrations/seed-from-loom | ws editor | — | seed integrations from a Loom config |
+| POST /workspaces/{id}/integrations/seed-from-loom | ws editor + root | — | seed integrations from a Loom config |
 
 PUT with `enabled: true` returns **409 `conflict`** (Problem message names the other
 workspace) when the integration's inbound listener token — the Slack **app** token, or
@@ -1909,7 +1909,7 @@ the CRUD endpoints above first.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /webhooks/{workspace_id} | public-by-key (`X-Otto-Webhook-Key`) | WebhookInboundReq | 202 `{accepted, conversation}`; 429 `{code:"busy",message}` when inbound capacity is full |
-| POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
+| POST /webhooks/swarm/{workspace_id}/{swarm_id} | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`); 404 unless the workspace webhook integration is enabled | SwarmTriggerReq | 202 `{swarm_id, project_id, started}` |
 
 `SwarmTriggerReq`: `{ goal: string (required), name?: string, repo_path?: string,
 goals?: [{ title, description?, metric?, comparator?, target_value?, block_value?,
@@ -2281,7 +2281,7 @@ workspace from the workflow/run row.
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
 | POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
-| POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active — including a just-canceled run whose engine driver has not stopped yet ("still stopping"; retry in a few seconds); `400` on a bad target. A retry starts a fresh restart-resume budget |
+| POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). A single-step retry whose target has a descendant that never succeeded (skipped because the target failed) re-runs those descendants too, as if `include_downstream` were set — otherwise the run would finish `success` with its later steps never run. Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active — including a just-canceled run whose engine driver has not stopped yet ("still stopping"; retry in a few seconds); `400` on a bad target. A retry starts a fresh restart-resume budget |
 | GET /workflows/{id}/versions | ws viewer | `?summary=true&limit=50&before_version=N` | Array, newest first. Default `limit=50`, clamped to 1–100; `before_version` is exclusive. `summary=true` returns `WorkflowVersionSummary[]` without definition bodies; otherwise returns full `WorkflowVersion[]` with the same page bound. Continue from the last version of a full page; an empty page ends history. |
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
 | POST /workflows/{id}/versions/{v}/restore | ws editor | `RestoreVersionReq {note?}` | Workflow — copies `v`'s graph back in as a **new** version (append-only history) |
@@ -2409,8 +2409,9 @@ daemon restart (attempt N)" in the run view), after which the run fails
 like before. A scoped re-entry (retry-node, or the reconciler's own resume)
 persists its scope on the row (`resume_scope_json`), so a restart
 mid-retry resumes with the same scope instead of failing. The run's 10h
-wall-clock budget is anchored to the row's `started_at` (not process
-uptime), so crash-loop resumes cannot extend it. Backed by migration
+active-time budget is per execution (a fresh run, a retry, a restart
+resume) and excludes time parked at a `human_approval` gate; crash-loop
+resumes are bounded by the resume cap above. Backed by migration
 **0108** (`workflow_runs.resume_scope_json` / `interrupted_at` /
 `resume_attempts`, `workflows.on_restart` + the same on
 `workflow_versions`).
@@ -3393,7 +3394,7 @@ The response/persisted DTOs are mirrored in `ui/src/lib/api/types.ts`:
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}, skills?: string[], review?: {reviewers: [{provider, model?, skill?, focus?}] (1..=4), max_iterations?: 1..=10}}` | `VaultDocsRun` — initial `state:"running"`; `summarizer.state:"skipped"` with one writer; the durable row exists before return. `skills` (≤4, name-validated) are complete packages staged for every provider. Review is optional and starts after authoring. |
-| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs | ws viewer | `?limit=` (default 50, cap 200) | `VaultDocsRun[]` — docs + refine runs newest-first; live runs carry their fresher in-memory snapshot. |
+| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs | ws viewer | `?limit=` (default 50, cap 200) | `VaultDocsRun[]` — this workspace's docs + refine runs of the vault (vaults are shared; another workspace's runs are never listed), newest-first; live runs carry their fresher in-memory snapshot. |
 | GET /vault/docs-agents/runs/{run_id} | ws viewer (the run's ws, re-checked) | — | `VaultDocsRun` — the UI polls every 1500ms while `running\|summarizing\|reviewing\|revising`; durable history is used when not live. |
 | POST /vault/docs-agents/runs/{run_id}/agents/{index}/retry | ws editor (the run's ws, re-checked) | — | `202` — retries one writer with a fresh session: a `running`/`pending` slot is killed and re-spawned; an `error` slot stays retryable while the run is `running` (its loop keeps listening as long as any peer writer is still moving). `409` for a terminal run or non-retryable slot; max 5 user retries per slot. A writer whose CLI process dies mid-turn gets ONE automatic respawn before surfacing the error. |
 | POST /vault/docs-agents/runs/{run_id}/summarizer/retry | ws editor (the run's ws, re-checked) | — | `202` — same for the active summarizer; failed consolidation preserves its drafts. |
@@ -3667,7 +3668,7 @@ UpdateGoalLoopReq}` and domain types `otto_core::domain::{GoalLoop, GoalLoopDeta
 |---|---|---|---|---|
 | 91 | POST /api/v1/workspaces/{id}/goal-loops/define | ws editor | DefineGoalReq | GoalLoopDraft (runs the AI definer; creates a managed definer session; `feedback` refines) |
 | 92 | GET /api/v1/workspaces/{id}/goal-loops | ws viewer | — | `GoalLoop[]` |
-| 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; starts when `autostart`) |
+| 93 | POST /api/v1/workspaces/{id}/goal-loops | ws editor | CreateGoalLoopReq | GoalLoop (validates non-empty `verify`; limits must be positive and `per_phase_timeout_secs` at most 86400, else 400; starts when `autostart`) |
 | 94 | GET /api/v1/goal-loops/{id}?summary= | ws viewer | — | GoalLoopDetail (`{loop, iterations}`). `summary=true` (additive): `plan`, `context_in` and `context_out` are `""` on every iteration except the newest — read one via row 94a |
 | 94a | GET /api/v1/goal-loops/{id}/iterations/{idx} | ws viewer | — | GoalLoopIteration — one iteration in full (`idx` is 1-based) |
 | 95 | PATCH /api/v1/goal-loops/{id} | ws editor | UpdateGoalLoopReq | GoalLoop (`name` non-terminal; `limits` not while Running; `config` Draft-only with at least one executor). All fields are validated before a single atomic update; rejection preserves every prior field. |
@@ -4166,7 +4167,7 @@ checks the caller's workspace role. Persistence: `otto_state::proof`
 | 119 | PATCH /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | `{title?, summary?}` | ProofPackResp |
 | 120 | DELETE /api/v1/proof-packs/{id} | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |
 | 121 | POST /api/v1/proof-packs/{id}/artifacts | ws editor · ProofPack Edit | AddArtifactReq `{kind, title, content?, content_url?, status?, metadata?}` | ProofPackResp |
-| 122 | POST /api/v1/proof-packs/{id}/assemble | ws editor · ProofPack Edit; non-empty `commands` need a person's credential (agent/MCP/share → 403: they run unsandboxed in the daemon) | AssembleReq `{cwd?, base?, commands?:[{cmd, kind?}]}` | ProofPackResp |
+| 122 | POST /api/v1/proof-packs/{id}/assemble | ws editor · ProofPack Edit; non-empty `commands` need a person's credential (agent/MCP/share → 403: they run unsandboxed in the daemon); `cwd` outside the pack workspace root, its registered repos, the calling agent session cwd and the pack session cwd → 403 unless the caller is the root owner on their own credential | AssembleReq `{cwd?, base?, commands?:[{cmd, kind?}]}` | ProofPackResp |
 | 123 | POST /api/v1/proof-packs/{id}/waive | ws editor (or Admin if `OTTO_PROOF_WAIVER_MIN_ROLE=admin`) · ProofPack Edit | WaiveReq `{reason}` (≥10 chars) | ProofPackResp |
 | 124 | DELETE /api/v1/proof-artifacts/{id} | ws editor · ProofPack Edit | — | `{ok:true}` |
 | 125 | GET /api/v1/proof-artifacts/{id}/content | ws viewer · ProofPack View | — | `{content, ref_kind, kind, status, metadata}` (full stored content) |
@@ -4281,7 +4282,7 @@ maps allows recovery from a missing or corrupt saved blob.
 | CP29 | GET /api/v1/workspaces/{wid}/mcp/code-search | mcp:view + ws viewer | `?q=&path=&max=` | `{query, root, matches, truncated, stopped}` — runs off the async workers; stops early at 20 000 entries, 64 MiB read or 10 s (`truncated: true`, `stopped: "walk_limit"\|"byte_budget"\|"time_budget"`) and when the request is dropped; `stopped: null` when it covered the tree or hit `max` |
 | CP30 | POST /api/v1/workspaces/{wid}/mcp/context-packet | mcp:edit + ws viewer | `{query?, story_id?, max_excerpts?}` | context packet |
 | CP31 | GET /api/v1/workspaces/{wid}/mcp/proof-pack | mcp:view + ws viewer | `?repo_id=&branch=&goal_loop_id=` | evidence bundle — `repo_id` must be registered in `{wid}` (else 404) and a `goal_loop_id` from another workspace is ignored |
-| CP32 | POST /api/v1/mcp/http | the scoped mcp token (or mcp:edit) | JSON-RPC 2.0 message/batch (`initialize`/`tools/list`/`tools/call`/`ping`) | JSON-RPC result; notifications → `202` |
+| CP32 | POST /api/v1/mcp/http | the scoped mcp token (or mcp:edit) | JSON-RPC 2.0 message/batch (`initialize`/`tools/list`/`tools/call`/`ping`) | JSON-RPC result; notifications → `202`; a body that is not JSON → `400` with a `-32700` parse error; an empty batch, a non-object message or a request without `method` → `-32600`; `tools/call` without `params.name` → `-32602` |
 | CP33 | GET /api/v1/mcp/http | the scoped mcp token (or mcp:view) | — | `405` (no standalone SSE stream — POST requests instead) |
 | CP34 | GET /api/v1/mcp/tokens | mcp:admin | — | `{tokens: McpTokenInfo[]}` (all users, no secrets) |
 | CP35 | POST /api/v1/mcp/tokens | mcp:admin | `{user_id?, label?, scope?:{tools?, allow_writes?, workspace_id?}}` | `{token, info}` (raw token shown once) |
@@ -4490,7 +4491,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 137a | POST /api/v1/scheduled-tasks/preview | scheduled_tasks edit | `{schedule, timezone?}` | `{next_fire_times: string[]}` — the next five fires (RFC 3339 UTC) of an UNSAVED schedule via the scheduler's cadence evaluator; 400 on an invalid schedule/timezone (same checks as create); empty for a spent `once`; saves nothing |
 | 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
 | 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
-| 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first (session killed, hand-off workflow cancelled, nothing delivered) and the delete waits for it to settle; `409` while a run is finishing (saving/delivering its report) |
 | 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun — the manual run, returned at once in `running` (it executes in the background; completion arrives as `scheduled_task_run_updated`, or poll the runs list). 409 while a run of the task is already in progress |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
 | 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
@@ -4537,12 +4538,12 @@ writes) + the workspace-role axis on the agent's workspace.
 | POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time | PersonalAgent |
 | GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
-| DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}`. A run in flight is stopped first and the delete waits for it to settle; `409` while a run is finishing |
 | GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
 | POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?, permission?, idempotency_key?}` — optional 1–128 ASCII `idempotency_key` deduplicates create retries within an agent, including a lost response after commit; the same key with different schedule/timezone/directive/permission returns 409. Permission is persisted atomically at creation. `permission` = `read_only` \| `directed` (default): the schedule's own permission set (see "Personal agent autonomy") (cadence format identical to scheduled tasks, plus the one-shot `{cadence:"once", run_at}` — see "Otto Assistant" — which disables the schedule after its run) | PersonalAgentSchedule |
 | PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?, permission?}` | PersonalAgentSchedule — resuming it, or a really different `schedule`/`timezone`, re-arms it (`armed_at`; missed occurrences are not caught up) and refreshes `next_run_at`; a `once` whose `run_at` changes forgets that it fired. Resuming the AGENT (`PATCH /personal-agents/{id}` `enabled` false→true) re-arms all its schedules |
 | DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
-| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
+| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (that schedule's directive and permission, even when the schedule is paused; without one, a generic check-in directive) | PersonalAgentRun — manual fire, returned at once in `running` (executes in the background; poll runs). 409 while a run of the agent — manual, delegated or scheduled — is already in progress (one run per agent at a time: its runs share a folder and memory; a due schedule waits, cursor untouched) |
 | POST /api/v1/personal-agents/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run (its session is killed, no retry); it settles `canceled`. `409` when the run isn't running |
 | GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
 | GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
@@ -4909,14 +4910,14 @@ The run advances in the background; subscribe to `Event::OttoRunUpdated` (see `w
 | GET /api/v1/runs/{id}/events | run_with_otto view + ws viewer | — | `RunEvent[]` (the stage timeline) |
 | POST /api/v1/runs/{id}/approve | run_with_otto edit + ws editor | `{decision: "approve"\|"reject", note?}` | OttoRun |
 | POST /api/v1/runs/{id}/cancel | run_with_otto edit + ws editor | — | OttoRun — stops the WORK, not just the status: the in-flight stage is dropped (its agent CLI is killed), the run's review is cancelled and its goal loop stopped; the worktree is removed only after the stage has stopped. A stage error landing after the cancel never turns the run `failed` (no failure notice, no second callback). |
-| POST /api/v1/runs/{id}/open-pr | run_with_otto edit + ws editor | — | PrSummary (requires approved + current passed/waived proof owned by this run; 409 when proof is missing/stale, the worktree is dirty, HEAD differs from captured diff evidence, or the draft source differs from the proven branch; pushes the captured commit ID to that branch with normal fast-forward rules, never auto-commits) |
+| POST /api/v1/runs/{id}/open-pr | run_with_otto edit + ws editor | — | PrSummary (requires approved + current passed/waived proof owned by this run; 409 when proof is missing/stale, the worktree is dirty, HEAD differs from captured diff evidence, or the draft source differs from the proven branch, and when a PR was already opened for the run (its URL in the message) or another open of it is in flight; pushes the captured commit ID to that branch with normal fast-forward rules, never auto-commits) |
 
 Webhook entry (public-by-key, same per-workspace `X-Otto-Webhook-Key` as the channel
 webhook; classified `Exempt` in `policy.rs`):
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}` |
+| POST /webhooks/{workspace_id}/run | public-by-key (`X-Otto-Webhook-Key` / `Authorization: Bearer`) | `{source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, callback_url?}` | 202 `{accepted, run_id, status}`; 400 when `repo_id` is not a repo registered in `{workspace_id}` (the run launches as root) |
 
 When a `callback_url` is supplied, the daemon POSTs the run's result back to it at
 the milestones a caller can act on — `awaiting_approval` and every terminal state

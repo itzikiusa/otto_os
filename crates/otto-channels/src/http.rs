@@ -167,6 +167,21 @@ async fn slack_directory<S: ChannelsCtx>(
     Ok(Json(crate::slack_directory::lookup(&token, refresh).await))
 }
 
+/// Configuring a bridge (tokens, allowed users, `open_to_all`, the webhook
+/// key) decides who may drive sessions and runs that execute AS THE OWNER
+/// (`Bridge::root_user_id`, webhook runs `created_by = root`). So only the
+/// owner — root, on their own credential — may set one up; a non-root
+/// workspace editor would otherwise mint themselves root-identity agents.
+fn require_owner_for_bridge(user: &otto_core::domain::User) -> Result<(), Error> {
+    if otto_core::auth::root_authority(user) {
+        Ok(())
+    } else {
+        Err(Error::Forbidden(
+            "only the owner can configure a channel bridge: its sessions run as the owner".into(),
+        ))
+    }
+}
+
 async fn upsert_integration<S: ChannelsCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
@@ -176,6 +191,7 @@ async fn upsert_integration<S: ChannelsCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_for_bridge(&user.0)?;
     let channel = Channel::parse(&channel_str)
         .ok_or_else(|| Error::Invalid(format!("unknown channel '{channel_str}'")))?;
 
@@ -211,7 +227,7 @@ async fn upsert_integration<S: ChannelsCtx>(
     let bot_token_ref = if let Some(tok) = req.bot_token.as_deref().filter(|t| !t.trim().is_empty())
     {
         let r = format!("chan-bot-{}-{}", ws_id, channel.as_str());
-        s.secrets().put(&r, tok)?;
+        otto_core::secrets::put_async(s.secrets(), &r, tok).await?;
         Some(r)
     } else {
         None
@@ -221,7 +237,7 @@ async fn upsert_integration<S: ChannelsCtx>(
     let app_token_ref = if let Some(tok) = req.app_token.as_deref().filter(|t| !t.trim().is_empty())
     {
         let r = format!("chan-app-{}-{}", ws_id, channel.as_str());
-        s.secrets().put(&r, tok)?;
+        otto_core::secrets::put_async(s.secrets(), &r, tok).await?;
         Some(r)
     } else {
         None
@@ -356,11 +372,8 @@ async fn delete_integration<S: ChannelsCtx>(
 
     // Delete keychain secrets (ignore errors — they may already be absent).
     if let Ok(Some((bot_ref, app_ref))) = s.integrations().get_refs(&ws_id, channel).await {
-        if let Some(r) = bot_ref {
-            let _ = s.secrets().delete(&r);
-        }
-        if let Some(r) = app_ref {
-            let _ = s.secrets().delete(&r);
+        for r in [bot_ref, app_ref].into_iter().flatten() {
+            let _ = otto_core::secrets::delete_async(s.secrets(), &r).await;
         }
     }
 
@@ -488,6 +501,7 @@ async fn seed_from_loom<S: ChannelsCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Editor)
         .await?;
+    require_owner_for_bridge(&user.0)?;
     let integrations = seed::seed_from_loom(&s, &ws_id).await?;
     Ok(Json(integrations))
 }
@@ -495,6 +509,24 @@ async fn seed_from_loom<S: ChannelsCtx>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_owner_configures_a_bridge() {
+        let mut user = otto_core::domain::User {
+            id: "u".into(),
+            username: "u".into(),
+            display_name: "u".into(),
+            is_root: false,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        assert!(matches!(
+            require_owner_for_bridge(&user),
+            Err(Error::Forbidden(_))
+        ));
+        user.is_root = true;
+        assert!(require_owner_for_bridge(&user).is_ok());
+    }
 
     fn integ(ws: &str, channel: Channel) -> Integration {
         Integration {

@@ -669,6 +669,15 @@ pub async fn retry_run_node(
             "the run is still stopping — try again in a few seconds".into(),
         )));
     }
+    // Re-read now that the old driver is gone: the snapshot above can predate
+    // its final write (a canceled step still `running`), and adopting that
+    // stale state left an out-of-scope step "running" forever in the retry.
+    let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
+    if matches!(run.status, RunStatus::Pending | RunStatus::Running) {
+        return Err(ApiError(Error::Conflict(
+            "run is still active — cancel it first or wait for it to finish".into(),
+        )));
+    }
     let node_id = req.node_id.trim();
     let target = run
         .nodes
@@ -713,21 +722,10 @@ pub async fn retry_run_node(
         .get(&wf.workspace_id)
         .await
         .map_err(ApiError)?;
-    let retry_nodes: Vec<String> = if req.include_downstream {
-        workflow_engine::descendants_inclusive(&wf.graph, node_id)
-            .into_iter()
-            .collect()
-    } else {
-        vec![node_id.to_string()]
-    };
-    let scope = otto_core::workflows::RunScope {
-        continue_unfinished: false,
-        start_node: Some(node_id.to_string()),
-        only_node: !req.include_downstream,
-        adopt_start: false,
-    };
+    let (retry_nodes, scope, replay) =
+        retry_plan(&wf.graph, &run.nodes, node_id, req.include_downstream);
     repo(&ctx)
-        .prepare_retry(&id, &retry_nodes, req.include_downstream, &scope)
+        .prepare_retry(&id, &retry_nodes, replay, &scope)
         .await
         .map_err(ApiError)?;
     workflow_engine::spawn_run(
@@ -741,6 +739,65 @@ pub async fn retry_run_node(
     );
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     Ok(Json(run))
+}
+
+/// What a retry of `node_id` re-executes: the nodes to reset, the engine
+/// scope, and whether their checkpoints are REPLAYED (dropped). Replay is
+/// only for an explicit re-run from here: a single-step retry upgraded to
+/// cover the steps it blocked (see [`retry_includes_downstream`]) still keeps
+/// the target's successful inner work — a loop resumes at its failed
+/// iteration instead of starting over at iteration 1.
+fn retry_plan(
+    graph: &otto_core::workflows::WorkflowGraph,
+    nodes: &[otto_core::workflows::NodeRunState],
+    node_id: &str,
+    requested: bool,
+) -> (Vec<String>, otto_core::workflows::RunScope, bool) {
+    let include_downstream = retry_includes_downstream(graph, nodes, node_id, requested);
+    let retry_nodes: Vec<String> = if include_downstream {
+        workflow_engine::descendants_inclusive(graph, node_id)
+            .into_iter()
+            .collect()
+    } else {
+        vec![node_id.to_string()]
+    };
+    let scope = otto_core::workflows::RunScope {
+        continue_unfinished: false,
+        start_node: Some(node_id.to_string()),
+        only_node: !include_downstream,
+        adopt_start: false,
+    };
+    (retry_nodes, scope, requested)
+}
+
+/// Whether a retry re-executes `node_id`'s descendants too: when asked, and
+/// ALSO when any descendant never succeeded. A single-step retry of a failed
+/// middle step used to re-run only that step — its downstream steps kept
+/// their "skipped (upstream did not succeed)" state, no step was in error any
+/// more, and the run finished Success (✅ to chat/webhook) although the
+/// review / PR steps after it never ran.
+fn retry_includes_downstream(
+    graph: &otto_core::workflows::WorkflowGraph,
+    nodes: &[otto_core::workflows::NodeRunState],
+    node_id: &str,
+    requested: bool,
+) -> bool {
+    use otto_core::workflows::NodeStatus;
+    requested
+        || workflow_engine::descendants_inclusive(graph, node_id)
+            .iter()
+            .filter(|d| d.as_str() != node_id)
+            .any(|d| {
+                // Only steps the failure BLOCKED — not ones deliberately out
+                // of this run's scope (a run-only-this-node run) or pruned by
+                // a branch condition.
+                nodes.iter().any(|n| {
+                    &n.node_id == d
+                        && n.status == NodeStatus::Skipped
+                        && n.logs.first().map(String::as_str)
+                            == Some(workflow_engine::SKIPPED_UPSTREAM)
+                })
+            })
 }
 
 /// `POST /workflow-runs/{id}/cancel` — request a running workflow to stop. Takes
@@ -2471,6 +2528,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/workflow_retry_scope.rs"]
+mod retry_scope_tests;
 
 #[cfg(test)]
 mod approval_gate_tests {

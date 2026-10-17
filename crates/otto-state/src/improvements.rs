@@ -392,6 +392,38 @@ impl ImprovementsRepo {
         .map_err(dberr("set edit status"))?;
         self.get_edit(id).await
     }
+
+    /// [`Self::set_edit_status`] as a compare-and-set: only from `from`.
+    /// `None` when the edit had already left that status — two decisions on
+    /// one edit (a double click, an agent's approve racing a person's reject)
+    /// used to both "win", leaving a file applied under a Rejected edit that
+    /// could then never be rolled back.
+    pub async fn set_edit_status_if(
+        &self,
+        id: &Id,
+        from: ImprovementEditStatus,
+        to: ImprovementEditStatus,
+        actor: Option<&str>,
+    ) -> Result<Option<ImprovementEdit>> {
+        let applied_at = (to == ImprovementEditStatus::Applied).then(|| fmt(Utc::now()));
+        let changed = sqlx::query(
+            "UPDATE improvement_edits SET status = ?, actor = COALESCE(?, actor), \
+             applied_at = COALESCE(?, applied_at) WHERE id = ? AND status = ?",
+        )
+        .bind(to.as_str())
+        .bind(actor)
+        .bind(&applied_at)
+        .bind(id)
+        .bind(from.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set edit status"))?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_edit(id).await.map(Some)
+    }
 }
 
 #[cfg(test)]

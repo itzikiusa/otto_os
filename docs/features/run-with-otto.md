@@ -183,7 +183,7 @@ in-flight lock, so a racing boot reaper or a double-approve can never double-adv
 
 All four surfaces call `RunService::launch`.
 
-- **Slack / Telegram** — a `/run <ref>` message (or "run with otto …") launches a run;
+- **Slack / Telegram** — a `/run <ref>` message (or one that opens with "run with otto …", or says "run with otto: …") launches a run;
   an `approve`/`reject` reply in the run's thread resolves the gate. The bridge's
   existing `allowed_users` allowlist authorizes the chat user; the action runs as the
   daemon root user. Live status + the approval prompt + the final result are posted

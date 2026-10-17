@@ -1,4 +1,4 @@
-//! Two-player game capabilities are isolated from sessions and owner credentials.
+//! Multiplayer game capabilities (host + guests) are isolated from sessions and owner credentials.
 mod registry;
 #[cfg(test)]
 mod tests;

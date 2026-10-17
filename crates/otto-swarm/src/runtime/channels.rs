@@ -130,6 +130,21 @@ pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<St
     tokio::spawn(async move {
         ctx2.seed_tasks(&project2, &creator, &goal).await;
         if start {
+            // The same gates as the start/resume routes: a channel message
+            // used to flip an ABORTED or budget-paused swarm back to active
+            // (clearing its pause reason) and spend past the cap.
+            let operation = crate::runtime::engine::operation_guard(&swarm_id).await;
+            if let Some(why) = channel_start_refused(&ctx2, &swarm_id, &workspace_id).await {
+                // Never post (a slow Slack) while holding the swarm's lock.
+                drop(operation);
+                notify_origin(
+                    &ctx2,
+                    &project2,
+                    &format!("Tasks were added, but the swarm was not started: {why}."),
+                )
+                .await;
+                return;
+            }
             let _ = ctx2
                 .swarm_repo()
                 .set_swarm_status(&swarm_id, "active")
@@ -141,6 +156,40 @@ pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<St
     });
 
     Ok(project.id)
+}
+
+/// Why a channel/webhook launch must not (re)start the swarm, if it must not:
+/// it was aborted, it is auto-paused for a budget/limit reason, or the
+/// workspace's spend cap blocks new work.
+async fn channel_start_refused(
+    ctx: &SwarmRt,
+    swarm_id: &str,
+    workspace_id: &str,
+) -> Option<String> {
+    let swarm = ctx
+        .swarm_repo()
+        .get_swarm(&swarm_id.to_string())
+        .await
+        .ok()?;
+    if let Some(why) = start_refusal(&swarm.status, swarm.pause_reason.as_deref()) {
+        return Some(why);
+    }
+    ctx.budget_blocked(workspace_id).await.map(|reason| {
+        format!(
+            "the workspace budget is exceeded ({})",
+            reason.unwrap_or_else(|| "cap reached".into())
+        )
+    })
+}
+
+/// [`channel_start_refused`]'s pure status part.
+fn start_refusal(status: &str, pause_reason: Option<&str>) -> Option<String> {
+    if status == "aborted" {
+        return Some("it was aborted — start it from Otto".into());
+    }
+    pause_reason
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| format!("it is paused ({r}) — resume it from Otto"))
 }
 
 /// Reply/escalate back to the channel that launched `project` (if any). Best-effort.
@@ -215,12 +264,10 @@ impl SwarmTrigger for SwarmTriggerImpl {
             let body = if t.keyword.trim().is_empty() {
                 text.trim().to_string()
             } else {
-                let kw = t.keyword.trim();
-                let lower = text.trim_start();
-                if !lower.to_lowercase().starts_with(&kw.to_lowercase()) {
+                let Some(rest) = strip_keyword(text, t.keyword.trim()) else {
                     continue;
-                }
-                lower[kw.len()..].trim().to_string()
+                };
+                rest.trim().to_string()
             };
             if body.is_empty() {
                 continue;
@@ -269,3 +316,53 @@ impl SwarmTrigger for SwarmTriggerImpl {
 }
 
 use otto_core::text::clip_chars as clip;
+
+/// The message after a case-insensitive leading `kw`, or `None` when it does
+/// not start with it. Matches lowercase forms CHARACTER by character and cuts
+/// at a char boundary of the message: slicing the original at `kw.len()`
+/// after a lowercase match panicked (and dropped the message) whenever
+/// lowercasing changed a byte length — a Kelvin sign `K` matching `k`.
+fn strip_keyword<'a>(text: &'a str, kw: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    let mut want = kw.chars().flat_map(char::to_lowercase).peekable();
+    for (i, c) in text.char_indices() {
+        if want.peek().is_none() {
+            return Some(&text[i..]);
+        }
+        for lc in c.to_lowercase() {
+            if want.next() != Some(lc) {
+                return None;
+            }
+        }
+    }
+    want.peek().is_none().then_some("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{start_refusal, strip_keyword};
+
+    #[test]
+    fn a_channel_never_restarts_an_aborted_or_auto_paused_swarm() {
+        assert!(start_refusal("aborted", None).is_some());
+        assert!(start_refusal("paused", Some("max_total_runs reached")).is_some());
+        assert!(start_refusal("active", None).is_none());
+        // An ordinary (manual) pause carries no reason: a launch may start it.
+        assert!(start_refusal("paused", None).is_none());
+        assert!(start_refusal("idle", Some("  ")).is_none());
+    }
+
+    #[test]
+    fn keyword_strip_is_case_insensitive_and_char_safe() {
+        assert_eq!(
+            strip_keyword("  Deploy the app", "deploy"),
+            Some(" the app")
+        );
+        assert_eq!(strip_keyword("deploy", "DEPLOY"), Some(""));
+        assert_eq!(strip_keyword("dep", "deploy"), None);
+        assert_eq!(strip_keyword("ship it", "deploy"), None);
+        // Kelvin sign lowercases to `k` (3 bytes vs 1): no panic, right cut.
+        assert_eq!(strip_keyword("\u{212A}8s rollout", "k8s"), Some(" rollout"));
+        assert_eq!(strip_keyword("Ünïcode go", "ünïcode"), Some(" go"));
+    }
+}

@@ -21,6 +21,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::agy::{agy_cli_root, scan_agy_conversation};
 
 use crate::providers::ProviderRegistry;
+use crate::titles::{parse_claude_first_prompt, parse_codex_first_prompt};
 
 /// Build `["--add-dir", path, ...]` args for providers that support `--add-dir`
 /// (claude, codex, agy — NOT shell).  Returns an empty vec for unknown/shell
@@ -921,184 +922,15 @@ fn nested_resume_command(session: &Session) -> Option<String> {
     crate::nested::resume_command(provider, sid, launched_in)
 }
 
-/// Max length (chars) of an auto-derived provider title before it is clipped.
-const PROVIDER_TITLE_MAX: usize = 60;
 /// Ceiling on how many transcript lines the auto-namer parsers scan before
 /// giving up on finding a first user prompt — bounds the read on a large
 /// transcript that genuinely never carried one (all-system/tool content).
-const PROVIDER_TITLE_SCAN_LINES: usize = 4000;
+pub(crate) const PROVIDER_TITLE_SCAN_LINES: usize = 4000;
 
 /// Byte cap on the transcript prefix the auto-namer reads (with
 /// [`PROVIDER_TITLE_SCAN_LINES`]): agent transcripts grow to hundreds of MB
 /// and the sweep runs every 20 s, so only the head is ever read.
 const PROVIDER_TITLE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
-
-/// Collapse a raw provider prompt into a one-line session title: strip control
-/// characters / newlines to single spaces, squeeze runs of whitespace, and clip
-/// to [`PROVIDER_TITLE_MAX`] chars (char-boundary safe, `…` suffix). Returns
-/// `None` for an empty/blank result so callers skip it.
-fn clean_provider_title(s: &str) -> Option<String> {
-    let mut collapsed = String::with_capacity(s.len().min(256));
-    let mut last_space = true; // leading whitespace is dropped
-    for ch in s.chars() {
-        if ch.is_whitespace() || ch.is_control() {
-            if !last_space {
-                collapsed.push(' ');
-                last_space = true;
-            }
-        } else {
-            collapsed.push(ch);
-            last_space = false;
-        }
-    }
-    let trimmed = collapsed.trim_end();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.chars().count() <= PROVIDER_TITLE_MAX {
-        return Some(trimmed.to_string());
-    }
-    let mut out: String = trimmed.chars().take(PROVIDER_TITLE_MAX).collect();
-    // Don't leave a dangling space before the ellipsis.
-    while out.ends_with(' ') {
-        out.pop();
-    }
-    out.push('…');
-    Some(out)
-}
-
-/// True when a claude/codex transcript text line is a wrapper/meta prompt rather
-/// than a real user message: command echoes (`<command-name>…`), tool output
-/// (`<local-command-stdout>`), injected context (`# AGENTS.md instructions`,
-/// `<permissions instructions>`), or a Claude caveat preamble. These are never
-/// the human's own words, so the title parsers skip them.
-fn is_wrapper_prompt(text: &str) -> bool {
-    let t = text.trim_start();
-    t.is_empty()
-        || t.starts_with('<')
-        || t.starts_with("# AGENTS.md")
-        || t.starts_with("Caveat:")
-        || t.starts_with("# CLAUDE.md")
-}
-
-/// Pull the first genuine user prompt out of a Claude Code transcript JSONL
-/// (`~/.claude/projects/<enc-cwd>/<uuid>.jsonl`). Claude records no dedicated
-/// title/summary line in this format, so the first real `type:"user"` message is
-/// the best human-meaningful name. Skips meta lines (`isMeta`), tool-result
-/// user turns (array content with no text parts), and wrapper prompts
-/// (slash-command echoes, injected CLAUDE.md/AGENTS.md). `None` when none is
-/// found within [`PROVIDER_TITLE_SCAN_LINES`].
-fn parse_claude_first_prompt(contents: &str) -> Option<String> {
-    for line in contents.lines().take(PROVIDER_TITLE_SCAN_LINES) {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
-            continue;
-        }
-        // Sidechain (subagent) turns and injected meta turns aren't the user.
-        if v.get("isMeta").and_then(|m| m.as_bool()) == Some(true)
-            || v.get("isSidechain").and_then(|m| m.as_bool()) == Some(true)
-        {
-            continue;
-        }
-        let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
-            continue;
-        };
-        let text = match content {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Array(parts) => {
-                // Concatenate text parts; a tool_result-only turn yields "".
-                let mut buf = String::new();
-                for p in parts {
-                    if p.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                            if !buf.is_empty() {
-                                buf.push(' ');
-                            }
-                            buf.push_str(t);
-                        }
-                    }
-                }
-                buf
-            }
-            _ => continue,
-        };
-        if is_wrapper_prompt(&text) {
-            continue;
-        }
-        if let Some(title) = clean_provider_title(&text) {
-            return Some(title);
-        }
-    }
-    None
-}
-
-/// Pull the first genuine user prompt out of a Codex rollout JSONL
-/// (`rollout-<ts>-<uuid>.jsonl`). Codex records the typed prompt as an
-/// `event_msg` of `payload.type == "user_message"` (`payload.message`) — the
-/// clean human message, distinct from the injected AGENTS.md context that
-/// arrives as a `response_item` user turn. Falls back to the first
-/// `response_item` user `input_text` that isn't a wrapper prompt for older
-/// rollouts that predate the `user_message` event. `None` when none is found
-/// within [`PROVIDER_TITLE_SCAN_LINES`].
-fn parse_codex_first_prompt(contents: &str) -> Option<String> {
-    let mut fallback: Option<String> = None;
-    for line in contents.lines().take(PROVIDER_TITLE_SCAN_LINES) {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let payload = v.get("payload");
-        match v.get("type").and_then(|t| t.as_str()) {
-            Some("event_msg") => {
-                let Some(p) = payload else { continue };
-                if p.get("type").and_then(|t| t.as_str()) != Some("user_message") {
-                    continue;
-                }
-                if let Some(msg) = p.get("message").and_then(|m| m.as_str()) {
-                    if !is_wrapper_prompt(msg) {
-                        if let Some(title) = clean_provider_title(msg) {
-                            return Some(title);
-                        }
-                    }
-                }
-            }
-            // Fallback for pre-`user_message` rollouts: first non-wrapper user
-            // input_text. Recorded but not returned until the scan ends, so a
-            // later real `user_message` event still wins.
-            Some("response_item") if fallback.is_none() => {
-                let Some(p) = payload else { continue };
-                if p.get("type").and_then(|t| t.as_str()) != Some("message")
-                    || p.get("role").and_then(|r| r.as_str()) != Some("user")
-                {
-                    continue;
-                }
-                if let Some(parts) = p.get("content").and_then(|c| c.as_array()) {
-                    for part in parts {
-                        if part.get("type").and_then(|t| t.as_str()) == Some("input_text") {
-                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                if !is_wrapper_prompt(t) {
-                                    fallback = clean_provider_title(t);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    fallback
-}
 
 /// Gate for [`SessionManager::refresh_provider_titles`]: only LIVE (non-exited),
 /// non-archived foreground agent sessions on a title-bearing provider
@@ -2543,6 +2375,23 @@ impl SessionManager {
         ]
     }
 
+    /// Whether the opt-in `process_sandbox` setting is on at all (any provider
+    /// may then be confined). Unreadable ⇒ `true`: callers use this to RELAX a
+    /// check, so an error must keep the strict path.
+    async fn process_sandbox_enabled(&self) -> bool {
+        if !otto_sandbox::is_supported() {
+            return false;
+        }
+        let Some(sr) = &self.settings else {
+            return false;
+        };
+        match sr.get("process_sandbox").await {
+            Ok(Some(cfg)) => cfg.get("enabled").and_then(|v| v.as_bool()) == Some(true),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
     /// Wrap `spec` in an OS-level sandbox when the `process_sandbox` setting is
     /// enabled. Confines an agent CLI's filesystem **writes** to the workspace
     /// (+ the resolved git dir so commits in a worktree still work + the agent
@@ -2945,7 +2794,14 @@ impl SessionManager {
     /// rooted at `$HOME` itself, opened at that root (its sandbox profile
     /// simply carries no cwd grant — `SandboxPolicy::for_agent` never grants
     /// a root covering `$HOME`).
-    fn check_session_cwd(&self, ws: &Workspace, cwd: &str) -> Result<()> {
+    ///
+    /// `unconfined`: the session gets no Seatbelt profile (the opt-in
+    /// `process_sandbox` setting is off and it is not read-only). Then there
+    /// is no write grant to widen, so `$HOME` ITSELF — "start Claude in ~" —
+    /// is the creator's call, like opening a terminal there. `/`, the
+    /// parents of `$HOME` and Otto's data dir stay refused, and an agent's
+    /// own credential is confined separately by [`Self::check_agent_cwd`].
+    fn check_session_cwd(&self, ws: &Workspace, cwd: &str, unconfined: bool) -> Result<()> {
         let home = std::env::var("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
@@ -2955,11 +2811,11 @@ impl SessionManager {
             return Ok(());
         };
         let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
-        let workspace_home_root = !home.as_os_str().is_empty()
-            && canon(path).is_some()
-            && canon(path) == canon(&home)
-            && canon(path) == canon(std::path::Path::new(&ws.root_path));
-        if workspace_home_root {
+        let is_home =
+            !home.as_os_str().is_empty() && canon(path).is_some() && canon(path) == canon(&home);
+        let workspace_home_root =
+            is_home && canon(path) == canon(std::path::Path::new(&ws.root_path));
+        if workspace_home_root || (is_home && unconfined) {
             return Ok(());
         }
         Err(Error::Invalid(format!(
@@ -3066,7 +2922,14 @@ impl SessionManager {
         }
         let cwd = req.cwd.clone().unwrap_or_else(|| ws.root_path.clone());
         if req.kind == SessionKind::Agent {
-            self.check_session_cwd(ws, &cwd)?;
+            let read_only = req
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("read_only"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            let unconfined = !read_only && !self.process_sandbox_enabled().await;
+            self.check_session_cwd(ws, &cwd, unconfined)?;
         }
 
         let (provider, mut spec, provider_session_id) = match spec_override {
@@ -3196,7 +3059,7 @@ impl SessionManager {
             // The legacy trust helper writes default CLI homes. Named profiles
             // let their native CLI/prompt guard persist trust in their own home.
             if account.is_none() {
-                crate::trust::ensure_trusted(&session.provider, &session.cwd);
+                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
             }
             // Otto's first-party read-only tool server: when the workspace has
             // opted in (`otto_mcp_enabled`), mint a per-session token; the
@@ -3714,15 +3577,12 @@ impl SessionManager {
 
     /// `id`'s grid + ATTACHED size owner as viewers see it (crate::grid).
     pub fn grid_state(&self, id: &Id) -> crate::grid::GridState {
-        let (cols, rows) = self.live_handle(id).map(|h| h.size()).unwrap_or((0, 0));
-        let attached = |o: &u64| self.attached_conns.get(id).is_some_and(|c| c.contains(o));
-        let owner = self.size_owner.get(id).map(|e| *e).filter(attached);
-        crate::grid::GridState { cols, rows, owner }
+        crate::grid::grid_state(&self.live, &self.attached_conns, &self.size_owner, id)
     }
 
     /// Subscribe to `id`'s grid feed (the WS loop sends each change).
     pub fn grid_watch(&self, id: &Id) -> tokio::sync::watch::Receiver<crate::grid::GridState> {
-        self.grids.watch(id, self.grid_state(id))
+        self.grids.watch(id, || self.grid_state(id))
     }
 
     /// Push `id`'s grid to its viewers when it changed (every resize and
@@ -4286,41 +4146,42 @@ impl SessionManager {
     async fn late_capture_provider_id(&self, session: &Session) -> Option<String> {
         let _guard = self.codex_capture_lock.lock().await;
         let claimed_rows = self.repo.provider_session_ids().await.unwrap_or_default();
-        let claimed: std::collections::HashSet<&str> =
-            claimed_rows.iter().map(String::as_str).collect();
-        let cwd = std::fs::canonicalize(&session.cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| session.cwd.clone());
         let floor = std::time::SystemTime::from(session.created_at)
             .checked_sub(Duration::from_secs(2))
             .unwrap_or(std::time::UNIX_EPOCH);
-        match session.provider.as_str() {
-            "codex" => {
-                let probe_text = self
-                    .capture_probes
-                    .get(&session.id)
-                    .map(|p| normalize_pty_input(&p.raw));
-                match pick_codex_rollout(
-                    &self.codex_root_for(session),
-                    &cwd,
-                    floor,
-                    &claimed,
-                    probe_text.as_deref(),
-                ) {
-                    RolloutPick::Claim(sid) => Some(sid),
-                    RolloutPick::Ambiguous => {
-                        tracing::warn!(
-                            session = %session.id, cwd = %cwd,
-                            "late provider id capture: multiple unclaimed candidates — refusing to guess"
-                        );
-                        None
+        let (provider, sid) = (session.provider.clone(), session.id.clone());
+        let (session_cwd, codex_root) = (session.cwd.clone(), self.codex_root_for(session));
+        let probe_text =
+            (self.capture_probes.get(&session.id)).map(|p| normalize_pty_input(&p.raw));
+        // The rollout walk (every `YYYY/MM/DD` dir since `created_at`, plus
+        // candidate heads) runs off the runtime like the spawn-time capture;
+        // the capture lock stays held so claims still serialize.
+        tokio::task::spawn_blocking(move || {
+            let claimed: std::collections::HashSet<&str> =
+                claimed_rows.iter().map(String::as_str).collect();
+            let cwd = std::fs::canonicalize(&session_cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(session_cwd);
+            match provider.as_str() {
+                "codex" => {
+                    match pick_codex_rollout(&codex_root, &cwd, floor, &claimed, probe_text.as_deref()) {
+                        RolloutPick::Claim(sid) => Some(sid),
+                        RolloutPick::Ambiguous => {
+                            tracing::warn!(
+                                session = %sid, cwd = %cwd,
+                                "late provider id capture: multiple unclaimed candidates — refusing to guess"
+                            );
+                            None
+                        }
+                        RolloutPick::Nothing => None,
                     }
-                    RolloutPick::Nothing => None,
                 }
+                "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
+                _ => None,
             }
-            "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
-            _ => None,
-        }
+        })
+        .await
+        .unwrap_or(None)
     }
 
     /// The live PTY handle, when the session has one in this daemon.
@@ -4780,6 +4641,7 @@ impl SessionManager {
             let _ = handle.kill();
             self.retiring.insert(id.clone(), handle.on_exit());
         }
+        self.publish_grid(id);
         self.forget_sweep_state(id);
         self.retire_credentials(&session).await;
         self.repo
@@ -4925,7 +4787,9 @@ impl SessionManager {
         };
         let mut renamed = 0;
         for session in sessions {
-            if !title_eligible(&session) {
+            // Live only (the doc's contract): a dead row's missing transcript
+            // was re-probed (row fetch + rollout walk) every sweep, forever.
+            if !title_eligible(&session) || !self.is_live(&session.id) {
                 continue;
             }
             match self.probe_and_apply_title(&session).await {
@@ -5464,7 +5328,8 @@ impl SessionManager {
             let Some(psid) = s.provider_session_id.as_deref() else {
                 continue;
             };
-            let verdict = crate::lifecycle::check_resumability(home, &s.provider, &s.cwd, psid);
+            let verdict =
+                crate::lifecycle::check_resumability_async(home, &s.provider, &s.cwd, psid).await;
             match verdict {
                 crate::lifecycle::Resumability::Gone => match self.remove(&s.id).await {
                     Ok(()) => {
@@ -5595,6 +5460,7 @@ impl SessionManager {
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
+        self.publish_grid(id);
         self.retire_credentials(&session).await;
         self.repo.set_archived(id, true).await?;
         self.repo.update_status(id, SessionStatus::Exited).await?;
@@ -5858,7 +5724,7 @@ impl SessionManager {
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
             if account.is_none() {
-                crate::trust::ensure_trusted(&session.provider, &session.cwd);
+                crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
             }
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             spec.args.extend(otto_tools.args);
@@ -6457,6 +6323,8 @@ impl SessionManager {
         let auth = self.auth.clone();
         let mcp_tokens = Arc::clone(&self.mcp_tokens);
         let attached = Arc::clone(&self.attached);
+        let grid_maps = (Arc::clone(&self.grids), Arc::clone(&self.attached_conns));
+        let size_owner = Arc::clone(&self.size_owner);
         tokio::spawn(async move {
             let mut exit_rx = handle.on_exit();
             let mut current = SessionStatus::Running;
@@ -6543,6 +6411,9 @@ impl SessionManager {
                                 workspace_id: workspace_id.clone(),
                                 status: SessionStatus::Exited,
                             });
+                            // Viewers learn the grid is gone (0×0, ws.md).
+                            let (grids, conns) = &grid_maps;
+                            grids.publish(&id, || crate::grid::grid_state(&live, conns, &size_owner, &id));
                         } else {
                             // Retired by a lifecycle op that already wrote the
                             // final status (suspend → Reconnectable, restart →
@@ -6771,6 +6642,7 @@ fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::titles::{clean_provider_title, PROVIDER_TITLE_MAX};
     use otto_core::domain::{SessionKind, Workspace};
 
     #[test]
@@ -10069,21 +9941,32 @@ mod tests {
             .expect("sole owner")
             .with_data_dir(data.path());
         for cwd in ["/", data.path().to_str().unwrap()] {
-            let err = mgr.check_session_cwd(&ws, cwd).unwrap_err();
+            let err = mgr.check_session_cwd(&ws, cwd, true).unwrap_err();
             assert!(matches!(err, Error::Invalid(_)), "{cwd}: {err:?}");
         }
         let bin = data.path().join("bin");
-        assert!(mgr.check_session_cwd(&ws, bin.to_str().unwrap()).is_err());
+        assert!(mgr
+            .check_session_cwd(&ws, bin.to_str().unwrap(), true)
+            .is_err());
         let run = data.path().join("workflow-runs/r1");
-        assert!(mgr.check_session_cwd(&ws, run.to_str().unwrap()).is_ok());
-        assert!(mgr.check_session_cwd(&ws, "/tmp").is_ok());
+        assert!(mgr
+            .check_session_cwd(&ws, run.to_str().unwrap(), false)
+            .is_ok());
+        assert!(mgr.check_session_cwd(&ws, "/tmp", false).is_ok());
         if let Ok(home) = std::env::var("HOME") {
             if std::path::Path::new(&home).is_dir() {
-                assert!(mgr.check_session_cwd(&ws, &home).is_err(), "$HOME");
+                assert!(mgr.check_session_cwd(&ws, &home, false).is_err(), "$HOME");
+                // With no sandbox profile there is no grant to widen: the
+                // creator may start an agent in ~ itself (not in its parents).
+                assert!(mgr.check_session_cwd(&ws, &home, true).is_ok());
+                if let Some(parent) = std::path::Path::new(&home).parent() {
+                    let parent = parent.to_str().unwrap();
+                    assert!(mgr.check_session_cwd(&ws, parent, true).is_err());
+                }
                 // …unless the workspace itself is rooted there.
                 let mut home_ws = ws.clone();
                 home_ws.root_path = home.clone();
-                assert!(mgr.check_session_cwd(&home_ws, &home).is_ok());
+                assert!(mgr.check_session_cwd(&home_ws, &home, false).is_ok());
             }
         }
     }

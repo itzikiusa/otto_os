@@ -100,11 +100,11 @@ pub async fn seed_from_loom<S: ChannelsCtx>(ctx: &S, ws_id: &Id) -> Result<Vec<I
     // --- Slack ---
     if let Some(slack_token) = get_key("SLACK_TOKEN") {
         let bot_ref = format!("chan-bot-{}-slack", ws_id);
-        ctx.secrets().put(&bot_ref, &slack_token)?;
+        otto_core::secrets::put_async(ctx.secrets(), &bot_ref, &slack_token).await?;
 
         let app_ref_opt = if let Some(app_tok) = get_key("SLACK_APP_TOKEN") {
             let r = format!("chan-app-{}-slack", ws_id);
-            ctx.secrets().put(&r, &app_tok)?;
+            otto_core::secrets::put_async(ctx.secrets(), &r, &app_tok).await?;
             Some(r)
         } else {
             None
@@ -135,7 +135,7 @@ pub async fn seed_from_loom<S: ChannelsCtx>(ctx: &S, ws_id: &Id) -> Result<Vec<I
     // --- Telegram ---
     if let Some(tg_token) = get_key("TELEGRAM_TOKEN") {
         let bot_ref = format!("chan-bot-{}-telegram", ws_id);
-        ctx.secrets().put(&bot_ref, &tg_token)?;
+        otto_core::secrets::put_async(ctx.secrets(), &bot_ref, &tg_token).await?;
 
         let allowed_users = get_key("TELEGRAM_ALLOWED_USERS").unwrap_or_default();
 

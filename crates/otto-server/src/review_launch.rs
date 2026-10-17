@@ -135,7 +135,7 @@ async fn start_review_for_branch(
                     .and_then(serde_json::Value::as_str)
                 {
                     if let Ok(review) = ctx.reviews_store.get_review(&id.to_string()).await {
-                        if matches!(review.status, ReviewStatus::Done | ReviewStatus::Running) {
+                        if review_adoptable(&review) {
                             return Ok((
                                 review.id,
                                 resolved,
@@ -266,3 +266,27 @@ async fn start_review_for_branch(
     }
     Ok((review_id, resolved, no_changes, diff_len))
 }
+
+/// Whether a workflow step may ADOPT the review its checkpoint names instead
+/// of launching a new one: a review still running (restart adoption), or a
+/// finished one whose reviewers all completed. A finished review with a
+/// failed or partial reviewer is not adopted — "Retry step" on a review step
+/// that failed `require_pass` for missing coverage re-scored the same
+/// incomplete review on every retry and could never pass.
+fn review_adoptable(review: &otto_core::domain::Review) -> bool {
+    match review.status {
+        ReviewStatus::Running => true,
+        // A summary that fell back to the deterministic merge counts as
+        // incomplete here too: a step that refuses fallbacks would re-adopt
+        // it on every retry and never pass.
+        ReviewStatus::Done => otto_review::engine::review_run_complete(
+            &review.agents,
+            review.summary_fallback.unwrap_or(false),
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/review_adoption.rs"]
+mod adoption_tests;

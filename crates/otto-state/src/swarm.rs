@@ -1645,6 +1645,18 @@ impl SwarmRepo {
         row_to_run(&row)
     }
 
+    /// Just a run's `status` (`None` = no such run). The readiness / submit
+    /// waits poll this every 250 ms for minutes; a full [`Self::get_run`]
+    /// decoded `result_json`/`summary`/`error` on every poll to read one
+    /// column.
+    pub async fn run_status(&self, id: &Id) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT status FROM swarm_runs WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("get run status"))
+    }
+
     pub async fn update_run(&self, id: &Id, p: RunPatch) -> Result<SwarmRun> {
         let cur = self.get_run(id).await?;
         let session_id = p.session_id.unwrap_or(cur.session_id);
@@ -1999,11 +2011,14 @@ impl SwarmRepo {
         // A turn the restart cut short is not the task's fault: give back the
         // attempt it was charged at dispatch (floor 0, like a pause refund) in
         // the same transaction that stops the run, or every daemon restart
-        // walked a task toward its `max_attempts` ceiling.
+        // walked a task toward its `max_attempts` ceiling. Only the turn kinds
+        // that were charged (`task` / `planning`): a cut-short verify or fix
+        // turn charged nothing, and refunding it handed the task a free retry.
         sqlx::query(
             "UPDATE swarm_tasks SET attempts = MAX(attempts - 1, 0), updated_at = ?
              WHERE id IN (SELECT task_id FROM swarm_runs
                           WHERE task_id IS NOT NULL
+                            AND kind IN ('task','planning')
                             AND status IN ('queued','running','waiting'))",
         )
         .bind(&now)
@@ -3605,5 +3620,25 @@ mod tests {
             1,
             "no run, no refund"
         );
+    }
+
+    /// A cut-short verify / fix turn was never charged an attempt, so a
+    /// restart must not refund one.
+    #[tokio::test]
+    async fn fail_running_does_not_refund_uncharged_verify_turns() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool.clone());
+        let swarm = active_swarm(&pool, &repo).await;
+        let task = repo
+            .create_task(new_task(&swarm.id, "verifying"))
+            .await
+            .unwrap();
+        assert_eq!(repo.bump_task_attempt(&task.id).await.unwrap(), 1);
+        let mut r = new_run(&swarm.id);
+        r.task_id = Some(task.id.clone());
+        r.kind = "verify".into();
+        repo.create_run(r).await.unwrap();
+        repo.fail_running("restart").await.unwrap();
+        assert_eq!(repo.get_task(&task.id).await.unwrap().attempts, 1);
     }
 }

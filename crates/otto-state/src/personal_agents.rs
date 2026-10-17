@@ -344,6 +344,13 @@ pub struct AgentSchedulePatch {
     pub timezone: Option<String>,
     pub directive: Option<String>,
     pub enabled: Option<bool>,
+    /// Re-arm the schedule at this instant in the SAME write (see
+    /// [`PersonalAgentsRepo::rearm_schedule`]): a separate follow-up write
+    /// left a window where a tick saw the new cadence against the old cursor
+    /// and fired at once — and a failed re-arm was silently dropped.
+    pub rearm_at: Option<String>,
+    /// With `rearm_at`: also forget a fired `once` (its cursor is the flag).
+    pub reset_once: bool,
 }
 
 /// Fields for opening a run row (status starts `running`).
@@ -778,6 +785,8 @@ impl PersonalAgentsRepo {
                timezone = COALESCE(?, timezone), \
                directive = COALESCE(?, directive), \
                enabled = COALESCE(?, enabled), \
+               armed_at = COALESCE(?, armed_at), \
+               last_run_at = CASE WHEN ? THEN NULL ELSE last_run_at END, \
                updated_at = ? \
              WHERE id = ?",
         )
@@ -785,6 +794,8 @@ impl PersonalAgentsRepo {
         .bind(p.timezone)
         .bind(p.directive)
         .bind(p.enabled.map(|b| b as i64))
+        .bind(p.rearm_at.as_deref())
+        .bind(p.rearm_at.is_some() && p.reset_once)
         .bind(fmt(Utc::now()))
         .bind(id)
         .execute(&self.pool)
@@ -902,7 +913,11 @@ impl PersonalAgentsRepo {
                 "personal agent dispatch is stale or already running".into(),
             ));
         }
-        if let Some(schedule) = schedule {
+        // Only a SCHEDULED dispatch claims its occurrence. A manual "Run now"
+        // of one schedule just borrows its directive/permission — it never
+        // moves the cursor — so a paused or spent `once` schedule must not
+        // answer it with 409 "changed or was already dispatched".
+        if let Some(schedule) = schedule.filter(|_| trigger == "schedule") {
             let changed = sqlx::query("UPDATE personal_agent_schedules SET admission_generation = admission_generation + 1
                 WHERE id = ? AND agent_id = ? AND enabled = 1 AND schedule_generation = ? AND admission_generation = ?")
                 .bind(&schedule.id).bind(&agent.id).bind(schedule.schedule_generation).bind(schedule.admission_generation)
@@ -1802,6 +1817,157 @@ mod tests {
             assert!(current.last_run_at.is_none());
             assert_eq!(current.schedule, replacement);
         }
+    }
+
+    /// A content-only edit while a run is in flight must not orphan that
+    /// run's settlement (it re-ran and re-delivered on the next tick); a
+    /// stale captured scan is still refused.
+    #[tokio::test]
+    async fn a_directive_edit_mid_run_still_settles_the_occurrence() {
+        let (repo, agent, captured) = recovery_schedule().await;
+        repo.admit_captured_run(
+            &new_id(),
+            &agent,
+            Some(&captured),
+            "schedule",
+            "directed",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.update_schedule(
+            &captured.id,
+            AgentSchedulePatch {
+                directive: Some("a new directive".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // The form re-sending the SAME cadence/enabled flag changes nothing.
+        repo.update_schedule(
+            &captured.id,
+            AgentSchedulePatch {
+                schedule: Some(captured.schedule.clone()),
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(repo
+            .settle_captured_schedule(&captured, "2026-10-08T09:05:00Z", None)
+            .await
+            .unwrap());
+        // ...while the directive edit fenced the stale captured scan.
+        let agent = repo.get(&agent.id).await.unwrap();
+        assert!(matches!(
+            repo.admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&captured),
+                "schedule",
+                "directed",
+                false,
+                None
+            )
+            .await,
+            Err(otto_core::Error::Conflict(_))
+        ));
+    }
+
+    /// "Run now" of a paused (or spent `once`) schedule borrows its directive
+    /// without claiming the occurrence; a scheduled dispatch still can't.
+    #[tokio::test]
+    async fn manual_run_of_a_paused_schedule_is_admitted() {
+        let (repo, agent, captured) = recovery_schedule().await;
+        let paused = repo
+            .update_schedule(
+                &captured.id,
+                AgentSchedulePatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            repo.admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&paused),
+                "schedule",
+                "directed",
+                false,
+                None
+            )
+            .await,
+            Err(otto_core::Error::Conflict(_))
+        ));
+        let agent = repo.get(&agent.id).await.unwrap();
+        let run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&paused),
+                "manual",
+                "directed",
+                false,
+                None,
+            )
+            .await
+            .expect("manual run of a paused schedule");
+        assert_eq!(run.schedule_id.as_deref(), Some(captured.id.as_str()));
+        let after = repo.get_schedule(&captured.id).await.unwrap();
+        assert_eq!(after.admission_generation, paused.admission_generation);
+        assert!(after.last_run_at.is_none());
+    }
+
+    /// A re-timing edit re-arms in the same write: the schedule never shows
+    /// the new cadence against the old cursor (a tick in between fired it).
+    #[tokio::test]
+    async fn update_schedule_rearms_in_the_same_write() {
+        let (repo, _, captured) = recovery_schedule().await;
+        repo.set_schedule_runtime(&captured.id, Some("2026-10-08T09:00:00Z"), None)
+            .await
+            .unwrap();
+        let updated = repo
+            .update_schedule(
+                &captured.id,
+                AgentSchedulePatch {
+                    schedule: Some(json!({"cadence":"once", "at":"2026-10-09T09:00:00Z"})),
+                    rearm_at: Some("2026-10-08T10:00:00Z".into()),
+                    reset_once: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.armed_at.as_deref(), Some("2026-10-08T10:00:00Z"));
+        assert!(
+            updated.last_run_at.is_none(),
+            "a re-timed once forgets it fired"
+        );
+
+        // Without `rearm_at` the cursor and arm instant are left alone, and a
+        // stray `reset_once` alone never clears the cursor.
+        repo.set_schedule_runtime(&captured.id, Some("2026-10-09T09:00:00Z"), None)
+            .await
+            .unwrap();
+        let kept = repo
+            .update_schedule(
+                &captured.id,
+                AgentSchedulePatch {
+                    directive: Some("new words".into()),
+                    reset_once: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(kept.armed_at.as_deref(), Some("2026-10-08T10:00:00Z"));
+        assert_eq!(kept.last_run_at.as_deref(), Some("2026-10-09T09:00:00Z"));
     }
 
     #[tokio::test]

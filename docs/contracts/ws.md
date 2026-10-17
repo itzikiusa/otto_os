@@ -1057,7 +1057,8 @@ blind timer.
   completes (conditioned on `period_done()` returning `true`).
 - `period` — human-readable label combining the kind (`daily|weekly|monthly`)
   and the run's start date.
-- `session_id` — the originating session, or `null` for a background scheduler run.
+- `session_id` — the session that produced the report (set for scheduler
+  runs too); `null` only when no session was started.
 - Scope: `Everyone` (all connected clients receive this).
 - `channels.notify_insight_ready` setting (default off) routes this to
   Slack / Telegram via `otto-channels/improve_notify.rs`.
@@ -1135,11 +1136,12 @@ blind timer.
 
 ```json
 { "type": "scheduled_task_run_updated", "workspace_id": "<Id>", "task_id": "<Id>",
-  "run_id": "<Id>", "status": "running|ok|error|canceled" }
+  "run_id": "<Id>", "status": "running|ok|error|canceled|skipped" }
 ```
 
 - Emitted by `otto_automation::scheduled_tasks_engine` when a scheduled-task run
-  starts, finishes (`ok`), errors, or is stopped from Otto (`canceled`).
+  starts, finishes (`ok`), errors, is stopped from Otto (`canceled`), or is
+  skipped because the workflow it hands off to was still busy (`skipped`).
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick
   instead of polling.
@@ -1151,11 +1153,11 @@ blind timer.
 
 ```json
 { "type": "personal_agent_run_updated", "workspace_id": "<Id>", "agent_id": "<Id>",
-  "run_id": "<Id>", "status": "running|ok|error" }
+  "run_id": "<Id>", "status": "running|ok|error|canceled" }
 ```
 
 - Emitted by `otto_assistant::personal_agents_engine` when a personal-agent run
-  starts, finishes (`ok`) or errors.
+  starts, finishes (`ok`), errors, or is stopped from Otto (`canceled`).
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Personal Agents page re-fetches the agent's run history on a matching
   tick instead of polling.

@@ -241,6 +241,23 @@ impl SkillEvalsRepo {
         Ok(())
     }
 
+    /// Cancel a RUNNING eval; `false` when it had already settled. The
+    /// unconditional status write it replaces turned an eval that finished
+    /// while the user confirmed "Stop run…" from `done` into `cancelled` —
+    /// unpromotable and unretryable for good.
+    pub async fn cancel_running(&self, id: &Id, error: &str) -> Result<bool> {
+        let changed = sqlx::query(
+            "UPDATE skill_evals SET status = 'cancelled', error = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(error)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("cancel skill eval"))?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
     /// Update the run's status (and optional error).
     pub async fn set_status(
         &self,
@@ -817,6 +834,39 @@ impl SkillEvalsRepo {
 mod tests {
     use super::*;
     use otto_core::domain::EvalFinding;
+
+    /// A cancel that loses the race to completion leaves the outcome alone.
+    #[tokio::test]
+    async fn cancel_never_overwrites_a_settled_eval() {
+        let repo = SkillEvalsRepo::new(mem_pool().await);
+        let eval = repo
+            .create_eval(
+                &"ws".into(),
+                "skill",
+                "task",
+                "fixture",
+                1,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        repo.set_status(&eval.id, SkillEvalStatus::Done, None)
+            .await
+            .unwrap();
+        assert!(!repo.cancel_running(&eval.id, "stop").await.unwrap());
+        assert_eq!(
+            repo.get_eval(&eval.id).await.unwrap().status,
+            SkillEvalStatus::Done
+        );
+        repo.set_status(&eval.id, SkillEvalStatus::Running, None)
+            .await
+            .unwrap();
+        assert!(repo.cancel_running(&eval.id, "stop").await.unwrap());
+        assert_eq!(
+            repo.get_eval(&eval.id).await.unwrap().status,
+            SkillEvalStatus::Cancelled
+        );
+    }
 
     #[tokio::test]
     async fn score_publication_and_rating_admission_roll_back_on_headline_failure() {

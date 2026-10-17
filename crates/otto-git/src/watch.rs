@@ -325,6 +325,7 @@ impl RepoWatchers {
 
 /// Top-level `.gitignore`, one level of sub-directory `.gitignore` files (the
 /// usual home of `node_modules`/`dist`/`target` rules), and `info/exclude`.
+#[allow(clippy::disallowed_methods)] // sync: runs in `touch` (spawn_blocking) and the notify thread
 fn build_ignore(root: &Path, git_dir: &Path) -> Gitignore {
     let mut b = GitignoreBuilder::new(root);
     let _ = b.add(root.join(".gitignore"));
