@@ -358,6 +358,21 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
     ctx.runs.get(run_id).await
 }
 
+/// Runs with a PR being opened right now (see [`open_pr`]).
+fn open_pr_claims() -> &'static otto_core::cancel_signal::InFlightSet {
+    static SET: std::sync::OnceLock<otto_core::cancel_signal::InFlightSet> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// Hold a run's open-PR claim (tests: a concurrent open in flight).
+#[cfg(test)]
+pub(crate) fn claim_open_pr_for_test(
+    run_id: &Id,
+) -> Option<otto_core::cancel_signal::InFlightGuard> {
+    open_pr_claims().claim(run_id)
+}
+
 /// Stop only the sessions, review and loop owned by this parent run. This is
 /// also used by failure settlement, where waiting for the engine itself would
 /// deadlock with the stage that is doing the settlement.
@@ -414,7 +429,19 @@ pub(crate) async fn stop_run_sessions(ctx: &ServerCtx, workspace_id: &Id, run_id
 /// Open the actual PR from a completed, approved run. Requires the proof pack to
 /// be passed/waived (mirrors the `gate_pr` posture) — an outward action.
 pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
+    // One open at a time per run: two concurrent requests both pushed and
+    // both asked the forge for a PR (a forge that doesn't de-duplicate
+    // opened two).
+    let _claim = open_pr_claims().claim(run_id).ok_or_else(|| {
+        Error::Conflict("a pull request for this run is already being opened".into())
+    })?;
     let run = ctx.runs.get(run_id).await?;
+    // Already opened: never a second PR for the same run.
+    if let Some(url) = run.pr_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        return Err(Error::Conflict(format!(
+            "a pull request was already opened for this run: {url}"
+        )));
+    }
     // The run column is a list snapshot. Publication checks current evidence
     // and policy, including a pack that has failed or disappeared since approval.
     let live_pack = match run.proof_pack_id.as_deref() {

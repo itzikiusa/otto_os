@@ -1196,6 +1196,28 @@ mod tests {
             }
         }
         assert!(announced, "otto_run_updated{{rejected}} was sent");
+
+        // Opening a PR is single-flight and never repeats a recorded PR.
+        ctx.runs
+            .set_fields(
+                &run.id,
+                &otto_state::runs::RunPatch {
+                    pr_url: Some("https://example.test/pr/7".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let again = crate::run_service::open_pr(&ctx, &run.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(again, otto_core::Error::Conflict(ref m) if m.contains("/pr/7")));
+        let held = crate::run_service::claim_open_pr_for_test(&run.id);
+        let busy = crate::run_service::open_pr(&ctx, &run.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(busy, otto_core::Error::Conflict(ref m) if m.contains("being opened")));
+        drop(held);
     }
 
     // O4: the review wait re-reads status on its own event, not on a 2 s tick.

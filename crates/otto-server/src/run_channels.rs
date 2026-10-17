@@ -42,12 +42,21 @@ fn approval_decision(lower: &str) -> Option<&'static str> {
 fn run_arg(text: &str) -> Option<String> {
     let t = text.trim();
     if let Some(rest) = t.strip_prefix("/run") {
-        // "/run", "/run <ref>" (but NOT "/run approve|reject" — handled earlier).
-        return Some(rest.trim().to_string());
+        // "/run", "/run <ref>" (but NOT "/run approve|reject" — handled
+        // earlier). `/runbook …` or `/running late` is not the command.
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return Some(rest.trim().to_string());
+        }
+        return None;
     }
+    // "run with otto" opens the message, or is addressed mid-sentence with a
+    // colon ("hey, run with otto: fix X"). A passing mention — "should we
+    // run with otto or not?" — used to launch a run seeded "or not?".
+    const PHRASE: &str = "run with otto";
     let lower = t.to_ascii_lowercase();
-    if let Some(idx) = lower.find("run with otto") {
-        let after = &t[idx + "run with otto".len()..];
+    let idx = lower.find(PHRASE)?;
+    let after = &t[idx + PHRASE.len()..];
+    if idx == 0 || after.starts_with(':') {
         return Some(after.trim().trim_start_matches(':').trim().to_string());
     }
     None
@@ -176,5 +185,12 @@ mod tests {
             Some("fix the login bug".to_string())
         );
         assert_eq!(run_arg("just chatting"), None);
+        assert_eq!(run_arg("/runbook for deploys"), None);
+        assert_eq!(run_arg("/running late"), None);
+        assert_eq!(run_arg("should we run with otto or not?"), None);
+        assert_eq!(
+            run_arg("Run with Otto fix the build"),
+            Some("fix the build".to_string())
+        );
     }
 }
