@@ -20,6 +20,7 @@ pub mod pr_checks;
 pub mod providers;
 pub mod push;
 pub mod recovery;
+mod remote_url;
 #[cfg(test)]
 mod spawn_budget_tests;
 mod status_cache;
