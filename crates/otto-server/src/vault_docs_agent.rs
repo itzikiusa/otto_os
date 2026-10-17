@@ -963,7 +963,7 @@ async fn list_runs(
         .map_err(ApiError)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let rows = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone())
-        .list_for_vault(vault_id, limit)
+        .list_for_vault(&ws_id, vault_id, limit)
         .await
         .map_err(ApiError)?;
 
@@ -985,7 +985,7 @@ async fn list_runs(
         // A live run whose first upsert failed (DB hiccup) is registry-only —
         // still surface it rather than letting it vanish from the list.
         for e in reg.values() {
-            if e.run.vault_id == vault_id && !seen.contains(&e.run.id) {
+            if e.run.vault_id == vault_id && e.run.ws_id == ws_id && !seen.contains(&e.run.id) {
                 runs.push(e.run.clone());
             }
         }

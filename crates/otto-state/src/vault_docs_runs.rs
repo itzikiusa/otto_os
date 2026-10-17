@@ -106,13 +106,22 @@ impl VaultDocsRunsRepo {
     }
 
     /// Newest-first runs of one vault.
-    pub async fn list_for_vault(&self, vault_id: i64, limit: i64) -> Result<Vec<VaultDocsRunRow>> {
+    /// The vault's runs started from workspace `ws_id`, newest first. Vaults
+    /// are global, so a vault-only filter listed OTHER workspaces' runs
+    /// (prompts, sessions, written paths, findings) to a viewer of this one.
+    pub async fn list_for_vault(
+        &self,
+        ws_id: &str,
+        vault_id: i64,
+        limit: i64,
+    ) -> Result<Vec<VaultDocsRunRow>> {
         let rows = sqlx::query(
-            "SELECT * FROM vault_docs_runs WHERE vault_id = ?1
+            "SELECT * FROM vault_docs_runs WHERE vault_id = ?1 AND ws_id = ?3
              ORDER BY started_at DESC, id DESC LIMIT ?2",
         )
         .bind(vault_id)
         .bind(limit)
+        .bind(ws_id)
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("list vault docs runs"))?;
@@ -247,14 +256,20 @@ mod tests {
             .await
             .unwrap();
 
-        let v1 = repo.list_for_vault(1, 50).await.unwrap();
+        let v1 = repo.list_for_vault("ws1", 1, 50).await.unwrap();
         assert_eq!(
             v1.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             vec!["b", "a"]
         );
-        assert_eq!(repo.list_for_vault(1, 1).await.unwrap().len(), 1);
-        assert_eq!(repo.list_for_vault(2, 50).await.unwrap()[0].id, "c");
-        assert!(repo.list_for_vault(3, 50).await.unwrap().is_empty());
+        assert_eq!(repo.list_for_vault("ws1", 1, 1).await.unwrap().len(), 1);
+        assert_eq!(repo.list_for_vault("ws1", 2, 50).await.unwrap()[0].id, "c");
+        assert!(repo.list_for_vault("ws1", 3, 50).await.unwrap().is_empty());
+        // Another workspace's run of the same (global) vault is not listed.
+        let mut foreign = row("d", 1, "docs", "done", "2026-07-12T13:00:00Z");
+        foreign.ws_id = "ws2".into();
+        repo.upsert(&foreign).await.unwrap();
+        assert_eq!(repo.list_for_vault("ws1", 1, 50).await.unwrap().len(), 2);
+        assert_eq!(repo.list_for_vault("ws2", 1, 50).await.unwrap()[0].id, "d");
     }
 
     #[tokio::test]
