@@ -597,8 +597,14 @@ pub async fn run_workflow(
     // The run's location must be a registered repo (S3-302): an explicit
     // `repo_id`, a `working_directory` and `repos` may only name a repo
     // registered in Otto (any workspace, or a linked worktree of one) or this
-    // workspace's root — never an arbitrary folder. 400 otherwise.
-    workflow_engine::ensure_run_location(&ctx, &ws, &raw_input)
+    // workspace's root. A person's manual run, when that person is the root
+    // user, may also name an existing absolute directory. Workspace Admin and
+    // a Workflows capability are delegated product roles; neither is a
+    // host-folder permission. An agent credential keeps `is_root` on the user
+    // row and does not receive the exception. Chat and other external starts
+    // do not come through here, so a root workflow owner does not widen them.
+    let allow_host_folder = user.is_root && crate::ui_bridge::is_human(&auth.0);
+    workflow_engine::ensure_run_location_as(&ctx, &ws, &raw_input, allow_host_folder)
         .await
         .map_err(ApiError)?;
     let input = seed_review_mode(raw_input, req.review_mode.as_deref()).map_err(ApiError)?;

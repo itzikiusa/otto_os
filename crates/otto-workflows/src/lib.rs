@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod chat;
 pub mod checkpoint;
 pub mod context;
+pub mod location;
 pub mod prepare;
 pub mod retry;
 pub mod triggers;

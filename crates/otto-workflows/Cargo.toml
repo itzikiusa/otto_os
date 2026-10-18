@@ -12,6 +12,9 @@ license.workspace = true
 [dependencies]
 otto-core = { workspace = true }
 otto-state = { workspace = true }
+# Run-location path checks: tilde expansion and a hardened git worktree probe.
+dirs = { workspace = true }
+otto-git = { workspace = true }
 # `prepare_context` renders a fetched `IssueFull` to markdown.
 otto-issues = { workspace = true }
 # The chat workflow trigger implements `otto_channels::WorkflowChatTrigger`.

@@ -6019,8 +6019,10 @@ async fn open_agent_session(
         meta["work"] = serde_json::json!({ "origin": "delegation" });
     }
     // The delegating lead, stamped by the server from the credential (never
-    // the body): `/sessions/{id}/message` lets an agent's own token reach
-    // only itself and the workers it opened here (S11-02).
+    // the body). `/sessions/{id}/message` lets an agent's own token reach any
+    // non-shell agent session that this user could message, including a
+    // sibling it did not open. A shell or SSH sibling stays refused unless
+    // `delegated_by` names this agent (S11-02).
     match crate::feature_guard::agent_session_of(&auth) {
         Some(lead) => meta[DELEGATED_BY_META] = serde_json::json!(lead),
         None => {

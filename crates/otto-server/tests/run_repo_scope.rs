@@ -403,10 +403,11 @@ async fn located_workspace(
     (ctx, pool, token, ws_b, b_repo, foreign, wf)
 }
 
-/// S3-302 (route level): a manual run's `working_directory` / `repos` may only
-/// name the workflow's workspace root or a registered repo (of ANY workspace),
-/// and paths inside them. Anything else is a 400 naming the path, before any
-/// run row.
+/// S3-302 (route level): a manual run's `working_directory` / `repos` may name
+/// the workflow's workspace root or a registered repo (of ANY workspace), and
+/// paths inside them. The caller here is root, so an existing absolute folder
+/// outside those roots is also accepted. Relative paths, `..`, `/`, a missing
+/// path, a file, and an unknown repo name stay 400, before any run row.
 #[tokio::test]
 async fn manual_run_location_is_limited_to_registered_repos() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -421,14 +422,18 @@ async fn manual_run_location_is_limited_to_registered_repos() {
             .send()
     };
     let escape = format!("{}/../elsewhere", ws_b.root_path);
+    let missing = foreign.join("no-such-folder");
+    let climb = foreign.join("missing-child/../still-missing");
+    let file = foreign.join("notes.txt");
+    std::fs::write(&file, "x").unwrap();
     let refused = [
-        json!({"working_directory": foreign.to_string_lossy()}),
-        json!({"working_directory": format!("{}, {}", b_repo.display(), foreign.display())}),
         json!({"working_directory": "relative/dir"}),
+        json!({"working_directory": climb.to_string_lossy()}),
         json!({"working_directory": escape}),
         json!({"working_directory": "/"}),
+        json!({"working_directory": missing.to_string_lossy()}),
+        json!({"working_directory": file.to_string_lossy()}),
         json!({"repos": [{"repo": "repo-of-another-ws", "name": "main", "type": "branch"}]}),
-        json!({"repos": [{"repo": foreign.to_string_lossy(), "name": foreign.to_string_lossy()}]}),
         json!({"repos": [{"repo": "./relative", "name": "main", "type": "branch"}]}),
     ];
     for input in refused {
@@ -439,6 +444,55 @@ async fn manual_run_location_is_limited_to_registered_repos() {
         assert!(
             msg.contains("registered") || msg.contains("absolute") || msg.contains("'..'"),
             "{input}: {body}"
+        );
+        // A human root caller is allowed an existing host directory, so a path
+        // that still fails says what that exception requires.
+        if msg.contains("existing host directory") {
+            assert!(
+                msg.contains("already exist")
+                    && msg.contains("be a directory")
+                    && msg.contains("no '..'"),
+                "{input}: {body}"
+            );
+        }
+    }
+    // Every human-root refusal appends the same host-directory rule. The
+    // specific reason depends on which check failed: a relative path is not
+    // described as an existing host directory.
+    let explained = [
+        (
+            json!({"working_directory": "relative/dir"}),
+            "absolute path",
+        ),
+        (
+            json!({"working_directory": climb.to_string_lossy()}),
+            "may not contain '..'",
+        ),
+        (
+            json!({"working_directory": escape}),
+            "existing host directory",
+        ),
+        (
+            json!({"working_directory": missing.to_string_lossy()}),
+            "existing host directory",
+        ),
+        (
+            json!({"working_directory": file.to_string_lossy()}),
+            "existing host directory",
+        ),
+        (json!({"working_directory": "/"}), "existing host directory"),
+    ];
+    for (input, reason) in explained {
+        let r = run(input.clone()).await.unwrap();
+        let body: serde_json::Value = r.json().await.unwrap();
+        let msg = body["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains(reason)
+                && msg.contains("already exist")
+                && msg.contains("be a directory")
+                && msg.contains("no '..'")
+                && msg.contains("filesystem root"),
+            "root failure must explain the host-directory rule ({reason}): {input}: {body}"
         );
     }
     // Sweep 2026-10-11 A2: an unregistered `org/name` is a repo NAME, so the
@@ -462,12 +516,15 @@ async fn manual_run_location_is_limited_to_registered_repos() {
             .is_empty(),
         "no run row is created for a refused location"
     );
-    // Inside the root, a registered repo, and a path inside one: accepted.
+    // Inside the root, a registered repo, a path inside one, and — because
+    // this caller is root — an existing unregistered directory.
     for wd in [
         ws_b.root_path.clone(),
         format!("{}/sub", ws_b.root_path),
         b_repo.to_string_lossy().into_owned(),
         format!("{}/src/new", b_repo.display()),
+        foreign.to_string_lossy().into_owned(),
+        format!("{}, {}", b_repo.display(), foreign.display()),
     ] {
         let r = run(json!({"working_directory": wd})).await.unwrap();
         assert_eq!(
@@ -481,6 +538,17 @@ async fn manual_run_location_is_limited_to_registered_repos() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    let r = run(json!({
+        "repos": [{"repo": foreign.to_string_lossy(), "name": foreign.to_string_lossy()}]
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "root manual run: {}",
+        r.text().await.unwrap_or_default()
+    );
     // A repo registered in ANOTHER workspace: accepted by path, name and id.
     let a_repo = tmp.path().join("a-repo");
     std::fs::create_dir_all(&a_repo).unwrap();
@@ -521,13 +589,162 @@ async fn manual_run_location_is_limited_to_registered_repos() {
     server.abort();
 }
 
+/// The host-folder exception is the root user on a manual run. A workspace
+/// Editor and a workspace Admin, both with Workflows Edit, still get 400 for
+/// an existing folder that is not a registered repo. Their own workspace root
+/// still runs, so the refusal is the location rule.
+#[tokio::test]
+async fn manual_run_outside_registered_repos_stays_refused_for_non_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (ctx, pool, _token, ws_b, _b_repo, foreign, wf) = located_workspace(&tmp).await;
+    let users = otto_state::UsersRepo::new(pool.clone());
+    let grants = otto_state::GrantsRepo::new(pool.clone());
+    let editor = users
+        .create("editor", "unused", "Editor", false)
+        .await
+        .unwrap();
+    let admin = users
+        .create("ws-admin", "unused", "Workspace Admin", false)
+        .await
+        .unwrap();
+    for user in [&editor, &admin] {
+        grants
+            .set_grants(&user.id, &[(Feature::Workflows, Capability::Edit)])
+            .await
+            .unwrap();
+    }
+    ctx.workspaces
+        .set_member(&ws_b.id, &editor.id, WorkspaceRole::Editor)
+        .await
+        .unwrap();
+    ctx.workspaces
+        .set_member(&ws_b.id, &admin.id, WorkspaceRole::Admin)
+        .await
+        .unwrap();
+    let editor_token = otto_rbac::AuthRepo::new(pool.clone())
+        .issue(&editor.id)
+        .await
+        .unwrap();
+    let admin_token = otto_rbac::AuthRepo::new(pool.clone())
+        .issue(&admin.id)
+        .await
+        .unwrap();
+    let (origin, server) = serve(&ctx).await;
+    let client = reqwest::Client::new();
+    for token in [editor_token, admin_token] {
+        let foreign_run = client
+            .post(format!("{origin}/workflows/{}/run", wf.id))
+            .bearer_auth(&token)
+            .json(&json!({ "input": {"working_directory": foreign.to_string_lossy()} }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign_run.status(), 400);
+        let body: serde_json::Value = foreign_run.json().await.unwrap();
+        let msg = body["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("not a registered repo") && !msg.contains("existing host directory"),
+            "non-root refusal stays the registered-repo rule: {body}"
+        );
+        let inside = client
+            .post(format!("{origin}/workflows/{}/run", wf.id))
+            .bearer_auth(&token)
+            .json(&json!({ "input": {"working_directory": ws_b.root_path} }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            inside.status(),
+            200,
+            "{}",
+            inside.text().await.unwrap_or_default()
+        );
+    }
+    server.abort();
+}
+
+/// A root user's agent session token is a different credential class from the
+/// person's login. It may still run inside the workspace root, and an existing
+/// folder outside registered repos stays 400 with the registered-repo wording.
+#[tokio::test]
+async fn root_agent_token_does_not_get_the_host_folder_exception() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (ctx, pool, _token, ws_b, _b_repo, foreign, wf) = located_workspace(&tmp).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let session_id = "root-agent-session";
+    sqlx::query(
+        "INSERT INTO sessions \
+         (id, workspace_id, kind, provider, title, status, cwd, created_by, created_at, last_active_at) \
+         VALUES (?, ?, 'agent', 'claude', 'root agent', 'idle', ?, ?, ?, ?)",
+    )
+    .bind(session_id)
+    .bind(&ws_b.id)
+    .bind(&ws_b.root_path)
+    .bind(&wf.created_by)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (agent_token, _) = otto_rbac::AuthRepo::new(pool.clone())
+        .issue_session_api_token(&wf.created_by, &session_id.to_string())
+        .await
+        .unwrap();
+    let authed = otto_rbac::AuthRepo::new(pool.clone())
+        .authenticate(&agent_token)
+        .await
+        .unwrap();
+    assert_eq!(authed.managed_session_id.as_deref(), Some(session_id));
+    assert!(!otto_server::ui_bridge::is_human(&authed));
+
+    let (origin, server) = serve(&ctx).await;
+    let client = reqwest::Client::new();
+    let foreign_run = client
+        .post(format!("{origin}/workflows/{}/run", wf.id))
+        .bearer_auth(&agent_token)
+        .json(&json!({ "input": {"working_directory": foreign.to_string_lossy()} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_run.status(), 400);
+    let body: serde_json::Value = foreign_run.json().await.unwrap();
+    let msg = body["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("not a registered repo") && !msg.contains("existing host directory"),
+        "agent credential of root stays on the registered-repo rule: {body}"
+    );
+    let inside = client
+        .post(format!("{origin}/workflows/{}/run", wf.id))
+        .bearer_auth(&agent_token)
+        .json(&json!({ "input": {"working_directory": ws_b.root_path} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        inside.status(),
+        200,
+        "{}",
+        inside.text().await.unwrap_or_default()
+    );
+    server.abort();
+}
+
 /// S3-302 (chat path): a chat `Working Directory:` outside every registered
-/// repo starts nothing and the reply in the thread says why.
+/// repo starts nothing and the reply in the thread says why. The workflow
+/// owner is root; that does not widen an external trigger.
 #[tokio::test]
 async fn chat_working_directory_outside_the_workspace_is_refused_in_the_thread() {
     use otto_channels::workflow_trigger::WorkflowChatTrigger;
     let tmp = tempfile::TempDir::new().unwrap();
     let (ctx, pool, _token, ws_b, _b_repo, foreign, wf) = located_workspace(&tmp).await;
+    let owner = otto_state::UsersRepo::new(pool.clone())
+        .get(&wf.created_by)
+        .await
+        .unwrap();
+    assert!(
+        owner.is_root,
+        "this workflow's owner is root; chat must still refuse the foreign folder"
+    );
     let trigger = otto_workflows::chat::WorkflowChatTriggerImpl { ctx: ctx.clone() };
     let text = format!(
         "@otto\nAction: Workflow\nName: Locate\nMsg: do it\nWorking Directory: {}\n",
@@ -539,6 +756,11 @@ async fn chat_working_directory_outside_the_workspace_is_refused_in_the_thread()
         .expect("the thread gets a reply");
     assert!(ack.reply.contains("Can't start"), "{}", ack.reply);
     assert!(ack.reply.contains("not a registered repo"), "{}", ack.reply);
+    assert!(
+        !ack.reply.contains("existing host directory"),
+        "an external trigger does not offer the root host-directory rule: {}",
+        ack.reply
+    );
     assert!(
         otto_state::WorkflowsRepo::new(pool.clone())
             .list_runs(&wf.id)

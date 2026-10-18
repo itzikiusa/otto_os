@@ -4659,8 +4659,10 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
  "otto-channels",
  "otto-core",
+ "otto-git",
  "otto-issues",
  "otto-state",
  "serde",
