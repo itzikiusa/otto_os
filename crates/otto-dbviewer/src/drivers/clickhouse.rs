@@ -50,6 +50,7 @@ use crate::types::{
 #[derive(Default)]
 pub struct ClickhouseDriver {
     clients: ResourceCache<reqwest::Client>,
+    map_arrays: ResourceCache<bool>,
     native: ResourceCache<Arc<klickhouse::Client>>,
     /// Per-connection schema snapshot cache backing smart completion.
     completions: crate::complete::CompletionCache,
@@ -117,12 +118,6 @@ const OFF_RUNTIME_PARSE_BYTES: usize = 1024 * 1024;
 /// is decoded on the blocking pool so no runtime worker parses megabytes.
 const STREAM_PARSE_CHUNK_BYTES: usize = 256 * 1024;
 
-/// Native transport: once the row cap is reached, drain at most this many
-/// further blocks (the injected LIMIT normally ends the stream right away).
-/// Past that the stream is dropped and the cached client evicted, so the
-/// server-side query dies with its connection instead of being drained whole.
-const NATIVE_DRAIN_BLOCKS: usize = 8;
-
 /// Native blocks with at least this many cells are decoded on the blocking pool.
 const NATIVE_OFF_RUNTIME_CELLS: usize = 16 * 1024;
 
@@ -177,6 +172,9 @@ struct Conn {
     /// `KILL QUERY WHERE query_id = '<id>'` can target it. `None` for
     /// introspection/completion (no need to cancel those).
     query_id: Option<String>,
+    /// Unique to a submitted batch; preserves SET/USE without cross-tab state.
+    session_id: Option<String>,
+    map_arrays: bool,
     /// Per-statement wall-clock timeout (seconds), sent as the ClickHouse
     /// `max_execution_time` HTTP request setting. `None` = no limit.
     timeout_secs: Option<u64>,
@@ -200,7 +198,7 @@ struct Conn {
 struct JsonResponse {
     #[serde(default)]
     meta: Vec<MetaCol>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_rows_preserving_maps")]
     data: Vec<Vec<Value>>,
     #[serde(default)]
     statistics: Statistics,
@@ -234,6 +232,95 @@ impl JsonResponse {
             ..RawRows::default()
         }
     }
+}
+
+/// Older servers emit Map as JSON objects, including duplicate keys. Serde's
+/// Value visitor overwrites those keys; retain duplicates as ordered pairs.
+struct LosslessJson(Value);
+impl<'de> Deserialize<'de> for LosslessJson {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = LosslessJson;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("JSON value")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(LosslessJson(Value::Null))
+            }
+            fn visit_bool<E: serde::de::Error>(
+                self,
+                v: bool,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(LosslessJson(Value::Bool(v)))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<Self::Value, E> {
+                Ok(LosslessJson(Value::from(v)))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<Self::Value, E> {
+                Ok(LosslessJson(Value::from(v)))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<Self::Value, E> {
+                Ok(LosslessJson(Value::from(v)))
+            }
+            fn visit_str<E: serde::de::Error>(
+                self,
+                v: &str,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(LosslessJson(Value::String(v.into())))
+            }
+            fn visit_string<E: serde::de::Error>(
+                self,
+                v: String,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(LosslessJson(Value::String(v)))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(LosslessJson(value)) = seq.next_element()? {
+                    values.push(value);
+                }
+                Ok(LosslessJson(Value::Array(values)))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut pairs = Vec::new();
+                let mut keys = std::collections::HashSet::new();
+                let mut duplicate = false;
+                while let Some((key, LosslessJson(value))) =
+                    map.next_entry::<String, LosslessJson>()?
+                {
+                    duplicate |= !keys.insert(key.clone());
+                    pairs.push((key, value));
+                }
+                Ok(LosslessJson(if duplicate {
+                    Value::Array(
+                        pairs
+                            .into_iter()
+                            .map(|(k, v)| Value::Array(vec![Value::String(k), v]))
+                            .collect(),
+                    )
+                } else {
+                    Value::Object(pairs.into_iter().collect())
+                }))
+            }
+        }
+        decoder.deserialize_any(Visitor)
+    }
+}
+fn deserialize_rows_preserving_maps<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> std::result::Result<Vec<Vec<Value>>, D::Error> {
+    Vec::<Vec<LosslessJson>>::deserialize(decoder).map(|rows| {
+        rows.into_iter()
+            .map(|row| row.into_iter().map(|v| v.0).collect())
+            .collect()
+    })
 }
 
 impl ClickhouseDriver {
@@ -418,6 +505,17 @@ impl ClickhouseDriver {
         if conn.readonly {
             conn.readonly_refused = self.readonly_memo(&cfg.cache_key());
         }
+        conn.map_arrays = self.map_arrays.get_or_try_init(cfg.cache_key(), cfg.lifecycle.as_ref(), |_| true, async {
+            // Negotiate before executing user SQL; never replay a user query
+            // after an unsupported-setting error on an older server.
+            let response = conn.client.post(&conn.base).headers(conn.headers.clone())
+                .timeout(Duration::from_secs(5))
+                .body("SELECT count() FROM system.settings WHERE name = 'output_format_json_map_as_array_of_tuples' FORMAT TSV")
+                .send().await.map_err(req_err)?;
+            if !response.status().is_success() { return Ok(false); }
+            let bytes = response.bytes().await.map_err(req_err)?;
+            Ok(bytes.as_ref() == b"1\n")
+        }).await?;
         Ok(conn)
     }
 
@@ -445,7 +543,7 @@ impl ClickhouseDriver {
         let url_host = cfg
             .param_str("__tunnel_host")
             .unwrap_or_else(|| cfg.host.clone());
-        let base = format!("{scheme}://{url_host}:{}/", cfg.port);
+        let base = format!("{scheme}://{}/", host_port(&url_host, cfg.port));
 
         let user = cfg.user.clone().unwrap_or_else(|| "default".to_string());
         let key = cfg.password.clone().unwrap_or_default();
@@ -470,8 +568,30 @@ impl ClickhouseDriver {
             client,
             base,
             headers,
-            timezone,
-            database: active_db.map(str::to_string),
+            timezone: if cfg
+                .params
+                .get("__ch_session_continued")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                None
+            } else {
+                timezone
+            },
+            database: if cfg
+                .params
+                .get("__ch_session_continued")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                None
+            } else {
+                active_db
+                    .map(str::to_string)
+                    .or_else(|| cfg.database.clone())
+            },
+            session_id: cfg.param_str("__ch_session"),
+            map_arrays: false,
             query_id,
             timeout_secs,
             readonly: cfg
@@ -502,34 +622,48 @@ impl ClickhouseDriver {
             .await
     }
 
-    /// Run one SQL statement over the native protocol and normalize the decoded
-    /// blocks into a transport-agnostic [`RawRows`]. This is the native twin of
-    /// [`Conn::query_json`]: connect (cached, TLS per cfg), stream result
-    /// `Block`s, and decode each column's `Value`s to JSON dynamically.
-    /// Uncapped — introspection/export callers; the interactive path goes
-    /// through [`Self::native_query_capped`].
-    async fn native_query(&self, cfg: &ResolvedConfig, sql: &str) -> Result<RawRows> {
-        self.native_query_capped(cfg, sql, None).await
-    }
-
-    /// Like [`Self::native_query`] but stops collecting once `row_cap` rows are
-    /// held (further blocks are drained undecoded), bounding daemon RAM for
-    /// interactive statements the auto-LIMIT injector couldn't rewrite. Callers
-    /// pass their page size + 1 so truncation detection still works.
-    async fn native_query_capped(
+    /// Decode native blocks within interactive row/byte budgets.
+    async fn native_query_scoped(
         &self,
         cfg: &ResolvedConfig,
         sql: &str,
         row_cap: Option<usize>,
+        active_db: Option<&str>,
     ) -> Result<RawRows> {
         use futures_util::StreamExt;
 
-        let client = self.native_client(cfg).await?;
+        // A selected database must not mutate the cached profile connection:
+        // another tab may concurrently query a different database. Scoped
+        // connections are operation-owned, so close/eviction cannot orphan them.
+        let readonly = cfg
+            .params
+            .get("__read_only_execution")
+            .and_then(Value::as_bool)
+            == Some(true);
+        // A shared native client serializes requests internally. An operation
+        // cancelled while queued could otherwise execute after its caller exits.
+        // Only an explicit sequential batch owns/reuses one session connection.
+        let standalone = cfg.param_str("__ch_session").is_none();
+        let client = if readonly
+            || standalone
+            || active_db.is_some_and(|db| Some(db) != cfg.database.as_deref())
+        {
+            let mut scoped = cfg.clone();
+            scoped.database = active_db
+                .map(str::to_string)
+                .or_else(|| cfg.database.clone());
+            Arc::new(native_connect(&scoped).await?)
+        } else {
+            self.native_client(cfg).await?
+        };
         let mut stream = client.query_raw(sql).await.map_err(native_err)?;
 
         let mut meta: Vec<(String, String)> = Vec::new();
         let mut data: Vec<Vec<Value>> = Vec::new();
-        let mut drained = 0usize;
+        let mut budget = types::ByteBudget::default();
+        let mut cells_truncated = false;
+        let mut truncated_bytes = false;
+        let mut partial = false;
         while let Some(block) = stream.next().await {
             let block = block.map_err(native_err)?;
             // The first non-empty block establishes the column order/types; the
@@ -545,20 +679,9 @@ impl ClickhouseDriver {
             if block.rows == 0 {
                 continue;
             }
-            // Past the cap: drain a few blocks undecoded (the injected LIMIT
-            // normally ends the stream here, keeping the cached connection
-            // reusable). A statement still streaming after that is abandoned:
-            // drop the stream (klickhouse discards the rest) and evict the
-            // cached client, so later queries don't queue behind it and the
-            // server query dies with the connection once in-flight users finish.
             if row_cap.is_some_and(|cap| data.len() >= cap) {
-                drained += 1;
-                if drained > NATIVE_DRAIN_BLOCKS {
-                    drop(stream);
-                    drop(self.native.remove(&cfg.cache_key()));
-                    break;
-                }
-                continue;
+                partial = true;
+                break;
             }
             let take = row_cap.map_or(usize::MAX, |cap| cap - data.len());
             let cells = (block.rows as usize).saturating_mul(block.column_types.len());
@@ -569,14 +692,77 @@ impl ClickhouseDriver {
             } else {
                 decode_native_block(&block, take)
             };
-            data.extend(rows);
+            if row_cap.is_none() {
+                data.extend(rows);
+                continue;
+            }
+            for row in rows {
+                let row: Vec<_> = row
+                    .into_iter()
+                    .map(|v| types::cap_cell_tracked(v, &mut cells_truncated))
+                    .collect();
+                let bytes = row.iter().map(|v| types::approx_json_len(v) + 1).sum();
+                if !budget.charge(bytes) && !data.is_empty() {
+                    truncated_bytes = true;
+                    partial = true;
+                    break;
+                }
+                data.push(row);
+            }
+            if partial {
+                break;
+            }
         }
 
+        // klickhouse drops its row channel on a protocol/type decode failure
+        // without forwarding that error. Never present that as an empty result.
+        if !partial && client.is_closed() {
+            return Err(native_closed_error());
+        }
         Ok(RawRows {
             meta,
             data,
+            prepared: row_cap.is_some(),
+            cells_truncated,
+            truncated_bytes,
+            partial,
             ..RawRows::default()
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn native_query_controlled(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        row_cap: Option<usize>,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<RawRows> {
+        let id = query_id.unwrap_or_else(new_query_id);
+        let marked = format!("/* otto-query:{id} */\n{sql}");
+        let seconds = timeout_secs.unwrap_or(DEFAULT_MAX_EXECUTION_SECS);
+        match tokio::time::timeout(
+            Duration::from_secs(seconds),
+            self.native_query_scoped(cfg, &marked, row_cap, active_db),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                if result.partial {
+                    let _ = native_kill(cfg, &id).await;
+                }
+                Ok(result)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                let _ = native_kill(cfg, &id).await;
+                Err(types::upstream(format!(
+                    "clickhouse: native query timed out after {seconds}s"
+                )))
+            }
+        }
     }
 
     /// Run a row-returning statement over whichever transport `cfg` selects.
@@ -591,13 +777,9 @@ impl ClickhouseDriver {
     /// `active_db` (when `Some`) and, when `query_id` is set, tags the HTTP
     /// request so a concurrent cancel can `KILL QUERY` it. On the HTTP transport
     /// this sets the `database` / `query_id` / `max_execution_time` request
-    /// params. NATIVE TRANSPORT TODO: the native client's default database is
-    /// fixed at connect time (cached per config), so active-db scoping is not
-    /// applied there yet — unqualified names resolve against the profile's
-    /// database. The native transport also doesn't expose a per-query `query_id`
-    /// or per-statement timeout here, so native queries aren't server-cancellable
-    /// or timeout-bounded (cancel / timeout become no-ops there). Most connections
-    /// use HTTP.
+    /// params. Native uses an operation-owned connection when the selected
+    /// database differs from the profile. Native timeout is client-side and
+    /// cancellation identifies an unguessable query marker on a control connection.
     async fn query_rows_db(
         &self,
         cfg: &ResolvedConfig,
@@ -626,8 +808,7 @@ impl ClickhouseDriver {
     /// stops at the cap or the response byte budget (killing the server query);
     /// `server_cap` additionally asks the server to stop producing rows
     /// (`max_result_rows` + `result_overflow_mode=break`). The native transport
-    /// has no server-side `max_execution_time` or cancellable `query_id`, so
-    /// `timeout_secs` is enforced there as a client-side wall clock.
+    /// uses a client-side deadline followed by a server KILL on timeout.
     #[allow(clippy::too_many_arguments)]
     async fn query_rows_db_capped(
         &self,
@@ -655,7 +836,8 @@ impl ClickhouseDriver {
                 }
             }
             Transport::Native => {
-                native_with_timeout(timeout_secs, self.native_query_capped(cfg, sql, row_cap)).await
+                self.native_query_controlled(cfg, sql, row_cap, active_db, query_id, timeout_secs)
+                    .await
             }
         }
     }
@@ -670,7 +852,7 @@ impl ClickhouseDriver {
 
     /// Like [`Self::query_text`] but scopes to `active_db` and tags the HTTP
     /// request with `query_id` (see [`Self::query_rows_db`] for the
-    /// native-transport TODO).
+    /// native database isolation).
     async fn query_text_db(
         &self,
         cfg: &ResolvedConfig,
@@ -698,7 +880,9 @@ impl ClickhouseDriver {
                 conn.query_raw(sql).await
             }
             Transport::Native => {
-                let raw = native_with_timeout(timeout_secs, self.native_query(cfg, sql)).await?;
+                let raw = self
+                    .native_query_controlled(cfg, sql, None, active_db, query_id, timeout_secs)
+                    .await?;
                 // SHOW CREATE / single-value replies come back as one row, one
                 // string cell; stringify whatever the first cell is.
                 let text = raw
@@ -843,20 +1027,31 @@ impl ClickhouseDriver {
         timeout_secs: Option<u64>,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        // Server-side cancel via query_id only exists on the HTTP transport.
+        // HTTP uses query_id; native uses the same id in a query marker.
         let http = transport_for(cfg) == Transport::Http;
+        let mut batch_cfg = cfg.clone();
+        batch_cfg.database = active_db
+            .map(str::to_string)
+            .or_else(|| cfg.database.clone());
+        batch_cfg.params["__ch_session"] = Value::String(new_query_id());
+        batch_cfg.params["__ch_session_continued"] = Value::Bool(false);
+        let batch_key = batch_cfg.cache_key();
         let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
-        for span in spans {
+        for (index, span) in spans.iter().enumerate() {
+            // Native already has a dedicated session connection. HTTP must not
+            // reset USE/session_timezone on each subsequent request.
+            if http {
+                batch_cfg.params["__ch_session_continued"] = Value::Bool(index > 0);
+            }
+            let cfg = &batch_cfg;
             let stmt = span.text.as_str();
             let query_id = new_query_id();
-            if http {
-                token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
-            }
+            token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
             let outcome = if returns_rows(stmt) {
                 self.exec_ch_read(
                     cfg,
                     stmt,
-                    active_db,
+                    None,
                     Some(query_id),
                     timeout_secs,
                     max_rows,
@@ -864,7 +1059,7 @@ impl ClickhouseDriver {
                 )
                 .await
             } else {
-                self.exec_ch_write(cfg, stmt, active_db, Some(query_id), timeout_secs)
+                self.exec_ch_write(cfg, stmt, None, Some(query_id), timeout_secs)
                     .await
             };
             match outcome {
@@ -881,6 +1076,12 @@ impl ClickhouseDriver {
                 }
             }
         }
+        drop(self.native.remove(&batch_key));
+        drop(self.clients.remove(&batch_key));
+        self.map_arrays.remove(&batch_key);
+        self.map_arrays.remove(&batch_cfg.cache_key());
+        // HTTP continued requests have a distinct client cache key.
+        drop(self.clients.remove(&batch_cfg.cache_key()));
         Ok(types::fold_batch_results(results))
     }
 }
@@ -888,6 +1089,15 @@ impl ClickhouseDriver {
 /// Build a fresh `reqwest::Client` from the resolved config, materializing any
 /// inline CA for custom-CA TLS. Never called directly by the driver methods —
 /// they go through [`ClickhouseDriver::client`] for caching.
+/// IPv6 literals need brackets in both HTTP URLs and native socket addresses.
+fn host_port(host: &str, port: u16) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 fn build_client(cfg: &ResolvedConfig) -> Result<reqwest::Client> {
     // Bound connection establishment (TCP+TLS) so a misconfigured endpoint (e.g.
     // HTTPS against a plain-HTTP port, or the native 9000/9440 port) fails fast
@@ -921,7 +1131,7 @@ impl Conn {
     /// Run a statement that returns rows, asking for `FORMAT JSONCompact`, and
     /// parse the reply.
     async fn query_json(&self, sql: &str) -> Result<JsonResponse> {
-        let body = format!("{sql}\nFORMAT JSONCompact");
+        let body = output_format_sql(sql, "JSONCompact");
         let text = self.post(body).await?;
         // A big reply (up to HTTP_RESPONSE_BYTE_CAP) is hundreds of ms of JSON
         // parsing — do that on the blocking pool, not a runtime worker every
@@ -996,8 +1206,22 @@ impl Conn {
     /// and maps it to the server's message).
     async fn send(&self, body: String, readonly: bool) -> Result<reqwest::Response> {
         let mut req = compressed(self.client.post(&self.base).headers(self.headers.clone()));
+        if self.map_arrays {
+            req = req.query(&[
+                ("output_format_json_map_as_array_of_tuples", "1"),
+                ("output_format_json_named_tuples_as_objects", "0"),
+            ]);
+        }
+        // Do not depend on server/profile defaults for browser-safe JSON numbers.
+        req = req.query(&[
+            ("output_format_json_quote_64bit_integers", "1"),
+            ("output_format_json_quote_decimals", "1"),
+        ]);
         if readonly {
             req = req.query(&[("readonly", "2")]);
+        }
+        if let Some(session) = &self.session_id {
+            req = req.query(&[("session_id", session.as_str()), ("session_timeout", "60")]);
         }
         if let Some(tz) = &self.timezone {
             // ClickHouse 23.4+ honours session_timezone as a request setting.
@@ -1088,7 +1312,7 @@ impl Conn {
     async fn query_json_capped(&self, sql: &str, row_cap: usize) -> Result<RawRows> {
         use futures_util::StreamExt as _;
         let resp = self
-            .send_checked(format!("{sql}\nFORMAT JSONCompact"))
+            .send_checked(output_format_sql(sql, "JSONCompact"))
             .await?;
         let mut state = CompactStream::new(Some(row_cap));
         // `carry` = bytes after the last newline seen; `pending` = complete
@@ -1191,8 +1415,25 @@ impl Conn {
     /// non-2xx the error body is small, so we read it fully to surface the
     /// server's message; on success the body is left unread for the caller to
     /// stream chunk-by-chunk to disk.
-    async fn post_stream(&self, body: String) -> Result<reqwest::Response> {
+    async fn post_stream(&self, body: String, json_array: bool) -> Result<reqwest::Response> {
         let mut req = compressed(self.client.post(&self.base).headers(self.headers.clone()));
+        if self.map_arrays {
+            req = req.query(&[
+                ("output_format_json_map_as_array_of_tuples", "1"),
+                ("output_format_json_named_tuples_as_objects", "0"),
+            ]);
+        }
+        req = req.query(&[
+            ("output_format_json_quote_64bit_integers", "1"),
+            ("output_format_json_quote_decimals", "1"),
+            (
+                "output_format_json_array_of_rows",
+                if json_array { "1" } else { "0" },
+            ),
+        ]);
+        if self.readonly {
+            req = req.query(&[("readonly", "2")]);
+        }
         if let Some(tz) = &self.timezone {
             req = req.query(&[("session_timezone", tz.as_str())]);
         }
@@ -1236,12 +1477,14 @@ async fn native_connect(cfg: &ResolvedConfig) -> Result<klickhouse::Client> {
     let use_tls = cfg.tls.enabled() || cfg.port % 10000 == 9440;
     // The TCP endpoint is always the resolved (post-tunnel) host:port — for a
     // tunnel that's 127.0.0.1:<local-forward>; otherwise the real host.
-    let endpoint = format!("{}:{}", cfg.host, cfg.port);
+    let endpoint = host_port(&cfg.host, cfg.port);
 
     if !use_tls {
-        return klickhouse::Client::connect(&endpoint, options)
+        let client = klickhouse::Client::connect(&endpoint, options)
             .await
-            .map_err(native_err);
+            .map_err(native_err)?;
+        configure_native(&client, cfg).await?;
+        return Ok(client);
     }
 
     // Native TLS: SNI = the real hostname. Through an SSH tunnel the TCP target
@@ -1262,9 +1505,31 @@ async fn native_connect(cfg: &ResolvedConfig) -> Result<klickhouse::Client> {
     let server_name = rustls_pki_types::ServerName::try_from(sni)
         .map_err(|e| types::invalid(format!("clickhouse: invalid TLS server name: {e}")))?;
 
-    klickhouse::Client::connect_tls(&endpoint, options, server_name, &connector)
+    let client = klickhouse::Client::connect_tls(&endpoint, options, server_name, &connector)
         .await
-        .map_err(native_err)
+        .map_err(native_err)?;
+    configure_native(&client, cfg).await?;
+    Ok(client)
+}
+
+async fn configure_native(client: &klickhouse::Client, cfg: &ResolvedConfig) -> Result<()> {
+    let timezone = cfg
+        .param_str("timezone")
+        .filter(|tz| !tz.is_empty())
+        .unwrap_or_else(|| "UTC".into());
+    client
+        .execute(format!("SET session_timezone = '{}'", esc(&timezone)))
+        .await
+        .map_err(native_err)?;
+    if cfg
+        .params
+        .get("__read_only_execution")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        client.execute("SET readonly=2").await.map_err(native_err)?;
+    }
+    Ok(())
 }
 
 /// Build a `tokio_rustls::TlsConnector` for the native transport from `cfg.tls`:
@@ -1485,8 +1750,8 @@ impl CompactStream {
                     return Ok(());
                 }
                 let cells = t.strip_suffix(',').unwrap_or(t);
-                match serde_json::from_str::<Vec<Value>>(cells) {
-                    Ok(row) => self.accept_row(row),
+                match serde_json::from_str::<Vec<LosslessJson>>(cells) {
+                    Ok(row) => self.accept_row(row.into_iter().map(|v| v.0).collect()),
                     // A mid-stream failure with in-band exceptions off: the
                     // server appended its raw `Code: N. DB::Exception: …` text.
                     Err(e) => {
@@ -1612,19 +1877,19 @@ async fn feed_compact(mut state: CompactStream, bytes: Vec<u8>) -> Result<Compac
 /// JSON. The column vectors are resolved once per block (not per cell).
 fn decode_native_block(block: &klickhouse::block::Block, take: usize) -> Vec<Vec<Value>> {
     // Columns are ordered by `column_types` (an IndexMap preserves SELECT order).
-    let cols: Vec<Option<&Vec<klickhouse::Value>>> = block
+    let cols: Vec<_> = block
         .column_types
-        .keys()
-        .map(|name| block.column_data.get(name))
+        .iter()
+        .map(|(name, ty)| (block.column_data.get(name), ty))
         .collect();
     let n = (block.rows as usize).min(take);
     let mut out = Vec::with_capacity(n);
     for r in 0..n {
         out.push(
             cols.iter()
-                .map(|col| {
+                .map(|(col, ty)| {
                     col.and_then(|c| c.get(r))
-                        .map(value_to_json)
+                        .map(|value| typed_value_to_json(value, ty))
                         .unwrap_or(Value::Null)
                 })
                 .collect(),
@@ -1704,29 +1969,37 @@ fn single_select(sql: &str) -> bool {
 /// Map a `klickhouse` error to an Upstream error (a 502 — the database's fault).
 /// A server exception keeps `Code: N. DB::Exception: …` (the HTTP shape) and
 /// sends its stack trace to the debug log, never into the message.
-fn native_err(e: klickhouse::KlickhouseError) -> otto_core::Error {
-    otto_core::Error::Upstream(crate::errors::ch_native_message(&e))
+fn native_closed_error() -> otto_core::Error {
+    types::upstream("ClickHouse native connection closed before result completion (possibly an unsupported result type). Use the HTTP transport, or explicitly select toJSONString(column) for the affected column. The query was not retried; a write may already have executed.")
 }
 
-/// Enforce a per-statement wall clock on the NATIVE transport (which has no
-/// server-side `max_execution_time` request setting and no cancellable
-/// `query_id` — without this a hung native query blocked forever while
-/// `cancel()` was a silent no-op). `None` runs unbounded, as before.
-async fn native_with_timeout<T>(
-    timeout_secs: Option<u64>,
-    fut: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    match timeout_secs {
-        Some(secs) => tokio::time::timeout(Duration::from_secs(secs), fut)
-            .await
-            .map_err(|_| {
-                types::upstream(format!(
-                    "clickhouse: native query timed out after {secs}s (client-side — the \
-                     native transport has no server-side cancel)"
-                ))
-            })?,
-        None => fut.await,
+fn native_err(e: klickhouse::KlickhouseError) -> otto_core::Error {
+    let mut message = crate::errors::ch_native_message(&e);
+    if matches!(e, klickhouse::KlickhouseError::TypeParseError(_)) {
+        message.push_str(". This native client cannot decode this ClickHouse type. Use the HTTP transport, or explicitly select toJSONString(column) for the affected column. The query was not retried.");
     }
+    otto_core::Error::Upstream(message)
+}
+
+/// klickhouse generates its wire query_id internally. An unguessable leading
+/// comment identifies our request without matching another tab/user's query.
+/// A fresh control connection prevents cancellation queueing behind the query.
+async fn native_kill(cfg: &ResolvedConfig, id: &str) -> Result<()> {
+    let prefix = format!("/* otto-query:{id} */");
+    let sql = format!(
+        "KILL QUERY WHERE startsWith(query, '{}') AND user = currentUser() ASYNC",
+        esc(&prefix)
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut control = cfg.clone();
+        if let Some(params) = control.params.as_object_mut() {
+            params.remove("__read_only_execution");
+        }
+        let client = native_connect(&control).await?;
+        client.execute(sql).await.map_err(native_err)
+    })
+    .await
+    .map_err(|_| types::upstream("clickhouse: native cancellation timed out"))?
 }
 
 // --- Native value decoding --------------------------------------------------
@@ -1736,6 +2009,66 @@ async fn native_with_timeout<T>(
 /// number, String/FixedString → string, Date/DateTime → ISO string, Nullable →
 /// null/inner, Array/Tuple/Map → nested JSON. Exotic types fall back to the
 /// value's own string form (`Display`), so nothing ever breaks the grid.
+fn typed_value_to_json(value: &klickhouse::Value, ty: &klickhouse::Type) -> Value {
+    use klickhouse::{Type as T, Value as V};
+    match (value, ty) {
+        (V::Null, _) => Value::Null,
+        (_, T::Nullable(inner) | T::LowCardinality(inner)) => typed_value_to_json(value, inner),
+        (V::Enum8(n), T::Enum8(entries)) => entries
+            .iter()
+            .find(|(_, v)| v == n)
+            .map(|(label, _)| Value::String(label.clone()))
+            .unwrap_or_else(|| value_to_json(value)),
+        (V::Enum16(n), T::Enum16(entries)) => entries
+            .iter()
+            .find(|(_, v)| v == n)
+            .map(|(label, _)| Value::String(label.clone()))
+            .unwrap_or_else(|| value_to_json(value)),
+        (V::Array(values), T::Array(inner)) => Value::Array(
+            values
+                .iter()
+                .map(|v| typed_value_to_json(v, inner))
+                .collect(),
+        ),
+        (V::Tuple(values), T::Tuple(types)) => Value::Array(
+            values
+                .iter()
+                .zip(types)
+                .map(|(v, t)| typed_value_to_json(v, t))
+                .collect(),
+        ),
+        (V::Map(keys, values), T::Map(key_type, value_type)) => Value::Array(
+            keys.iter()
+                .zip(values)
+                .map(|(key, value)| {
+                    Value::Array(vec![
+                        typed_value_to_json(key, key_type),
+                        typed_value_to_json(value, value_type),
+                    ])
+                })
+                .collect(),
+        ),
+        (V::DateTime(dt), _) => chrono::DateTime::<klickhouse::Tz>::try_from(*dt)
+            .map(|t| Value::String(t.format("%Y-%m-%d %H:%M:%S").to_string()))
+            .unwrap_or_else(|_| value_to_json(value)),
+        (V::DateTime64(dt), T::DateTime64(precision, tz)) => {
+            chrono::DateTime::<chrono::Utc>::try_from(*dt)
+                .map(|t| {
+                    let t = t.with_timezone(tz);
+                    let mut text = t.format("%Y-%m-%d %H:%M:%S").to_string();
+                    if *precision > 0 {
+                        let fraction = format!("{:09}", t.timestamp_subsec_nanos());
+                        text.push('.');
+                        text.push_str(&fraction[..(*precision).min(9)]);
+                    }
+                    Value::String(text)
+                })
+                .unwrap_or_else(|_| value_to_json(value))
+        }
+        _ => value_to_json(value),
+    }
+}
+
 fn value_to_json(v: &klickhouse::Value) -> Value {
     use klickhouse::Value as V;
     match v {
@@ -1746,7 +2079,7 @@ fn value_to_json(v: &klickhouse::Value) -> Value {
         V::Int8(x) => json_num_i(*x as i64),
         V::Int16(x) => json_num_i(*x as i64),
         V::Int32(x) => json_num_i(*x as i64),
-        V::Int64(x) => json_num_i(*x),
+        V::Int64(x) => Value::String(x.to_string()),
         V::Int128(x) => Value::String(x.to_string()),
         V::Int256(_) => Value::String(v.to_string()),
 
@@ -1754,7 +2087,7 @@ fn value_to_json(v: &klickhouse::Value) -> Value {
         V::UInt8(x) => json_num_u(*x as u64),
         V::UInt16(x) => json_num_u(*x as u64),
         V::UInt32(x) => json_num_u(*x as u64),
-        V::UInt64(x) => json_num_u(*x),
+        V::UInt64(x) => Value::String(x.to_string()),
         V::UInt128(x) => Value::String(x.to_string()),
         V::UInt256(_) => Value::String(v.to_string()),
 
@@ -1960,18 +2293,112 @@ fn esc_ident(s: &str) -> String {
     s.replace('\\', "\\\\").replace('`', "``")
 }
 
+/// Replace an explicit output FORMAT while preserving the SQL and SETTINGS.
+/// Input formats on INSERT never enter this helper. Token locations avoid
+/// mistaking a literal/comment/quoted identifier for an output clause.
+fn output_format_sql(sql: &str, format: &str) -> String {
+    use sqlparser::{
+        dialect::ClickHouseDialect,
+        tokenizer::{Token, Tokenizer},
+    };
+    let sql = sql.trim_end().trim_end_matches(';');
+    if let Ok(tokens) = Tokenizer::new(&ClickHouseDialect {}, sql).tokenize_with_location() {
+        let significant: Vec<_> = tokens
+            .iter()
+            .filter(|t| !matches!(t.token, Token::Whitespace(_)))
+            .collect();
+        let mut depth = 0usize;
+        for (i, token) in significant.iter().enumerate() {
+            match &token.token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Word(w)
+                    if depth == 0
+                        && w.quote_style.is_none()
+                        && w.value.eq_ignore_ascii_case("FORMAT") =>
+                {
+                    let Some(name) = significant.get(i + 1) else {
+                        continue;
+                    };
+                    if !matches!(&name.token, Token::Word(w) if w.quote_style.is_none()) {
+                        continue;
+                    }
+                    // FORMAT follows a complete expression/clause, never an
+                    // operator introducing a column named `format`.
+                    if i == 0
+                        || !matches!(
+                            &significant[i - 1].token,
+                            Token::Word(_)
+                                | Token::RParen
+                                | Token::RBracket
+                                | Token::Number(..)
+                                | Token::SingleQuotedString(_)
+                        )
+                    {
+                        continue;
+                    }
+                    // FORMAT is a suffix clause; reject expression/alias uses.
+                    if i > 0
+                        && matches!(
+                            &significant[i - 1].token,
+                            Token::Period
+                                | Token::Comma
+                                | Token::Word(sqlparser::tokenizer::Word {
+                                    keyword: sqlparser::keywords::Keyword::AS
+                                        | sqlparser::keywords::Keyword::SELECT
+                                        | sqlparser::keywords::Keyword::FROM
+                                        | sqlparser::keywords::Keyword::JOIN,
+                                    ..
+                                })
+                        )
+                    {
+                        continue;
+                    }
+                    if significant.get(i + 2).is_some_and(|next| {
+                        !matches!(
+                        &next.token, Token::Word(w) if w.value.eq_ignore_ascii_case("SETTINGS"))
+                    }) {
+                        continue;
+                    }
+                    let mut line = 1u64;
+                    let mut column = 1u64;
+                    for (offset, ch) in sql.char_indices() {
+                        if line == name.span.start.line && column == name.span.start.column {
+                            let end = offset + name.token.to_string().len();
+                            return format!("{}{format}{}", &sql[..offset], &sql[end..]);
+                        }
+                        if ch == '\n' {
+                            line += 1;
+                            column = 1;
+                        } else {
+                            column += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    format!("{sql}\nFORMAT {format}")
+}
+
 /// Does this statement return a rowset? (first keyword decides).
 fn returns_rows(sql: &str) -> bool {
-    let first = sql
-        .trim_start()
-        .split(|c: char| c.is_whitespace() || c == '(')
-        .find(|w| !w.is_empty())
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    matches!(
-        first.as_str(),
-        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH"
-    )
+    use sqlparser::{
+        dialect::ClickHouseDialect,
+        tokenizer::{Token, Tokenizer},
+    };
+    let Ok(tokens) = Tokenizer::new(&ClickHouseDialect {}, sql).tokenize() else {
+        return false;
+    };
+    let first = tokens
+        .iter()
+        .find(|t| !matches!(t, Token::Whitespace(_) | Token::LParen));
+    matches!(first, Some(Token::Word(w)) if w.quote_style.is_none() && matches!(
+        w.value.to_ascii_uppercase().as_str(),
+        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH" |
+        "EXISTS" | "CHECK" | "KILL" | "BACKUP" | "RESTORE"
+    ))
 }
 
 /// System databases that exist on every server; keep them but sort last.
@@ -1996,9 +2423,8 @@ impl Driver for ClickhouseDriver {
             joins: true,
             transactions: false,
             multi_statement: true,
-            // Server-side cancel via `KILL QUERY WHERE query_id=…` — only tagged on
-            // the HTTP transport, but advertised as capable; the native transport's
-            // cancel is a harmless no-op.
+            // HTTP query ids and native query markers support server-side KILL
+            // through independent control requests on both transports.
             cancel: true,
             // `EXPLAIN` / `EXPLAIN json=1`.
             explain: true,
@@ -2339,12 +2765,14 @@ impl Driver for ClickhouseDriver {
         for (key, value) in self.native.take_where(|key| key == cache_key) {
             captured.native.insert_ready(key, value);
         }
+        self.map_arrays.remove(cache_key);
         self.completions.invalidate(cache_key);
         Some(std::sync::Arc::new(captured))
     }
 
     async fn close(&self, cache_key: &str) {
         self.clients.remove(cache_key);
+        self.map_arrays.remove(cache_key);
         self.native.remove(cache_key);
         self.completions.invalidate(cache_key);
         self.readonly_refused
@@ -2366,6 +2794,7 @@ impl Driver for ClickhouseDriver {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         for (key, _) in &http {
+            self.map_arrays.remove(key);
             memo.remove(key);
         }
         http.len() + native.len()
@@ -2421,8 +2850,7 @@ impl Driver for ClickhouseDriver {
 
         // Convert ms → seconds (round up) for ClickHouse's `max_execution_time`.
         let timeout_secs = req.timeout_ms.filter(|&t| t > 0).map(|t| t.div_ceil(1000));
-        // Server-side cancel via query_id only exists on the HTTP transport.
-        let http = transport_for(cfg) == Transport::Http;
+        // HTTP uses query_id; native uses the same id in a query marker.
 
         // A true batch (>1 statement) runs each statement in order, tagging each
         // with its own query_id so a cancel hits the running one; the single path
@@ -2438,11 +2866,9 @@ impl Driver for ClickhouseDriver {
 
         // Tag this execution with a fresh server-side query_id (HTTP transport)
         // and record it in the token, so a concurrent cancel can KILL it. The
-        // native transport ignores it (cancel becomes a no-op there).
+        // native transport carries it in an unguessable leading comment.
         let query_id = new_query_id();
-        if http {
-            token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
-        }
+        token.set(QueryHandle::ClickhouseQueryId(query_id.clone()));
 
         if returns_rows(stmt) {
             let ri = types::inject_row_limit(stmt, max_rows.saturating_add(1), req.offset);
@@ -2476,6 +2902,9 @@ impl Driver for ClickhouseDriver {
         let QueryHandle::ClickhouseQueryId(qid) = handle else {
             return Ok(());
         };
+        if transport_for(cfg) == Transport::Native {
+            return native_kill(cfg, qid).await;
+        }
         // `query_id` is a server-generated UUID; still escape defensively for the
         // string literal.
         let sql = format!("KILL QUERY WHERE query_id = '{}'", esc(qid));
@@ -2603,10 +3032,9 @@ impl Driver for ClickhouseDriver {
     /// SSH tunnel) we ask ClickHouse for an explicit `FORMAT <fmt>` and stream the
     /// response body (`reqwest` `bytes_stream()`) straight to the file — constant
     /// memory, native formatting, and it lands on the user's LOCAL path (NOT a
-    /// server-side `INTO OUTFILE` that would write to the tunnel host). The `json`
-    /// array format has no single-pass CH FORMAT, so it falls back to the
-    /// daemon-side row formatter (logged); on the native transport we stream
-    /// result blocks and format rows ourselves.
+    /// server-side `INTO OUTFILE` that would write to the tunnel host). Capped
+    /// exports decode streaming rows to enforce the cap even with an existing
+    /// SQL LIMIT; native exports likewise stream and format result blocks.
     async fn export_to_writer(
         &self,
         cfg: &ResolvedConfig,
@@ -2627,39 +3055,185 @@ impl Driver for ClickhouseDriver {
         }
         let active_db = node.map(str::trim).filter(|s| !s.is_empty());
 
-        // HTTP + a streamable FORMAT → native streaming, the preferred path.
+        // JSONEachRow can stream a single array directly with
+        // output_format_json_array_of_rows: no whole-result decode or byte cap.
         if transport_for(cfg) == Transport::Http {
-            if let Some(ch_format) = format.clickhouse_format() {
-                return self
-                    .export_http_format(cfg, sql, active_db, ch_format, max_rows, format, w)
-                    .await;
-            }
-            // JSON-array format: no single CH FORMAT — fall back to the buffered
-            // daemon-side formatter (logged so it's never silent).
-            tracing::warn!(
-                "clickhouse export: 'json' array format has no streaming CH FORMAT — \
-                 buffering the result to format it daemon-side"
-            );
-            let resp = self
-                .query_rows_db(cfg, &capped_sql(sql, max_rows), active_db, None)
-                .await?;
-            return write_rawrows(w, format, &resp, max_rows);
+            let ch_format = format.clickhouse_format().unwrap_or("JSONEachRow");
+            return self
+                .export_http_format(cfg, sql, active_db, ch_format, max_rows, format, w)
+                .await;
         }
 
-        // Native transport: stream result blocks (already done by native_query,
-        // which decodes block-by-block) and format rows ourselves. The native
-        // client doesn't expose active-db scoping here (see query_rows_db TODO),
-        // so unqualified names resolve against the profile database.
-        tracing::warn!(
-            "clickhouse export: native transport materialises decoded blocks before \
-             formatting (no FORMAT streaming); large exports may use more memory than HTTP"
-        );
-        let resp = self.native_query(cfg, &capped_sql(sql, max_rows)).await?;
-        write_rawrows(w, format, &resp, max_rows)
+        self.export_native(cfg, sql, active_db, format, max_rows, w)
+            .await
     }
 }
 
 impl ClickhouseDriver {
+    async fn export_native(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        format: ExportFormat,
+        max_rows: Option<usize>,
+        w: Box<dyn std::io::Write + Send>,
+    ) -> Result<ExportCounts> {
+        use futures_util::StreamExt;
+        let mut scoped = cfg.clone();
+        scoped.database = active_db
+            .map(str::to_string)
+            .or_else(|| cfg.database.clone());
+        let client = native_connect(&scoped).await?;
+        let id = new_query_id();
+        let query = format!("/* otto-query:{id} */\n{}", capped_sql(sql, max_rows));
+        let mut stream = client.query_raw(query).await.map_err(native_err)?;
+        let mut sink = ExportSink::new(w, format);
+        let mut header = false;
+        let mut count = 0usize;
+        while let Some(block) = stream.next().await {
+            let block = block.map_err(native_err)?;
+            let remaining = max_rows.unwrap_or(usize::MAX).saturating_sub(count);
+            let had_header = header;
+            let (next_sink, wrote_header, rows) =
+                tokio::task::spawn_blocking(move || -> Result<_> {
+                    let mut wrote_header = had_header;
+                    if !had_header && !block.column_types.is_empty() {
+                        let columns: Vec<_> = block
+                            .column_types
+                            .iter()
+                            .map(|(name, ty)| Column::typed(name, ty.to_string()))
+                            .collect();
+                        sink.write_header(&columns).map_err(types::upstream)?;
+                        wrote_header = true;
+                    }
+                    let rows = decode_native_block(&block, remaining);
+                    for row in &rows {
+                        sink.write_row(row).map_err(types::upstream)?;
+                    }
+                    Ok((sink, wrote_header, rows.len()))
+                })
+                .await
+                .map_err(types::upstream)??;
+            sink = next_sink;
+            header = wrote_header;
+            count += rows;
+            if max_rows.is_some_and(|cap| count >= cap) {
+                drop(stream);
+                let _ = native_kill(cfg, &id).await;
+                break;
+            }
+        }
+        if !max_rows.is_some_and(|cap| count >= cap) && client.is_closed() {
+            return Err(native_closed_error());
+        }
+        tokio::task::spawn_blocking(move || sink.finish().map_err(types::upstream))
+            .await
+            .map_err(types::upstream)?
+    }
+
+    /// Decode complete JSON row lines, retaining at most one incomplete line.
+    /// This client-side cap does not alter nested queries or explicit SQL LIMITs.
+    async fn export_http_capped(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        format: ExportFormat,
+        cap: usize,
+        w: Box<dyn std::io::Write + Send>,
+    ) -> Result<ExportCounts> {
+        use futures_util::StreamExt as _;
+        let id = new_query_id();
+        let conn = self.connect_id(cfg, active_db, Some(id)).await?;
+        let response = conn
+            .post_stream(
+                output_format_sql(sql, "JSONCompactEachRowWithNamesAndTypes"),
+                false,
+            )
+            .await?;
+        let mut decoder = BodyDecoder::for_response(&response)?;
+        let mut stream = response.bytes_stream();
+        let mut pending = Vec::new();
+        let mut names: Option<Vec<String>> = None;
+        let mut header = false;
+        let mut rows = 0usize;
+        let mut sink = ExportSink::new(w, format);
+        let result: Result<()> = async {
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(req_err)?;
+                let keep_reading = decoder.decode_to(&chunk, |chunk| {
+                    pending.extend_from_slice(chunk);
+                    let mut consumed = 0;
+                    while let Some(end) = pending[consumed..].iter().position(|byte| *byte == b'\n')
+                    {
+                        let end = consumed + end;
+                        let line = &pending[consumed..end];
+                        consumed = end + 1;
+                        if line.is_empty() {
+                            continue;
+                        }
+                        match names.as_ref() {
+                            None => {
+                                names =
+                                    Some(serde_json::from_slice(line).map_err(types::upstream)?);
+                            }
+                            Some(names) if !header => {
+                                let types: Vec<String> =
+                                    serde_json::from_slice(line).map_err(types::upstream)?;
+                                let columns: Vec<_> = names
+                                    .iter()
+                                    .zip(types)
+                                    .map(|(name, ty)| Column::typed(name, ty))
+                                    .collect();
+                                sink.write_header(&columns).map_err(types::upstream)?;
+                                header = true;
+                            }
+                            Some(_) => {
+                                let row: Vec<LosslessJson> =
+                                    serde_json::from_slice(line).map_err(types::upstream)?;
+                                sink.write_row(&row.into_iter().map(|v| v.0).collect::<Vec<_>>())
+                                    .map_err(types::upstream)?;
+                                rows += 1;
+                            }
+                        }
+                        if header && rows >= cap {
+                            return Ok(false);
+                        }
+                    }
+                    pending.drain(..consumed);
+                    if pending.len() > HTTP_RESPONSE_BYTE_CAP {
+                        return Err(types::upstream(
+                            "ClickHouse export row exceeds response byte limit",
+                        ));
+                    }
+                    Ok(true)
+                })?;
+                if !keep_reading {
+                    return Ok(());
+                }
+            }
+            if !pending.iter().all(u8::is_ascii_whitespace) {
+                return Err(types::upstream(
+                    "ClickHouse export ended with an incomplete row",
+                ));
+            }
+            if !header {
+                return Err(types::upstream(
+                    "ClickHouse export did not return column metadata",
+                ));
+            }
+            Ok(())
+        }
+        .await;
+        drop(stream);
+        if rows >= cap || result.is_err() {
+            conn.spawn_kill();
+        }
+        result?;
+        sink.finish().map_err(types::upstream)
+    }
+
     /// The HTTP `FORMAT`-streaming export: issue `<sql> FORMAT <ch_format>` and
     /// splice the response body through `w` chunk-by-chunk. Row count isn't known
     /// from the streamed bytes, so it's reported as 0 (bytes are exact).
@@ -2676,18 +3250,24 @@ impl ClickhouseDriver {
     ) -> Result<ExportCounts> {
         use futures_util::StreamExt as _;
 
+        if let Some(cap) = max_rows {
+            return self
+                .export_http_capped(cfg, sql, active_db, format, cap, w)
+                .await;
+        }
         let conn = self.connect_id(cfg, active_db, None).await?;
-        let body = format!("{}\nFORMAT {ch_format}", capped_sql(sql, max_rows));
-        let resp = conn.post_stream(body).await?;
+        let body = output_format_sql(sql, ch_format);
+        let resp = conn.post_stream(body, format == ExportFormat::Json).await?;
 
-        let mut sink = ExportSink::new(w, format);
+        let mut sink = ExportSink::new(w, ExportFormat::Ndjson);
         let mut body = BodyDecoder::for_response(&resp)?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(req_err)?;
-            let chunk = body.decode(&chunk)?;
-            sink.write_raw(&chunk)
-                .map_err(|e| otto_core::Error::Internal(format!("write export chunk: {e}")))?;
+            body.decode_to(&chunk, |bytes| {
+                sink.write_raw(bytes).map_err(types::upstream)?;
+                Ok(true)
+            })?;
         }
         sink.finish()
             .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
@@ -2752,14 +3332,18 @@ impl BodyDecoder {
         }
     }
 
-    /// Decode one body chunk (identity borrows it unchanged).
-    fn decode<'a>(&mut self, chunk: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>> {
+    /// Deliver bounded decompressed windows; exports never allocate the full
+    /// expansion of a highly compressible network chunk.
+    fn decode_to(
+        &mut self,
+        chunk: &[u8],
+        mut consume: impl FnMut(&[u8]) -> Result<bool>,
+    ) -> Result<bool> {
         use zstd::stream::raw::{InBuffer, Operation as _, OutBuffer};
         let (dec, window) = match self {
-            Self::Identity => return Ok(std::borrow::Cow::Borrowed(chunk)),
+            Self::Identity => return consume(chunk),
             Self::Zstd { dec, window } => (dec, window),
         };
-        let mut out = Vec::with_capacity(chunk.len().saturating_mul(4));
         let mut input = InBuffer::around(chunk);
         loop {
             let mut output = OutBuffer::around(&mut window[..]);
@@ -2767,16 +3351,29 @@ impl BodyDecoder {
                 otto_core::Error::Upstream(format!("clickhouse: corrupt zstd response: {e}"))
             })?;
             let n = output.pos();
-            out.extend_from_slice(&window[..n]);
-            if out.len() > ZSTD_CHUNK_DECODE_CAP {
-                return Err(response_cap_error());
+            if n > 0 && !consume(&window[..n])? {
+                return Ok(false);
             }
-            // Input consumed and the window not filled ⇒ everything decodable
-            // so far has been flushed.
             if input.pos() == chunk.len() && n < window.len() {
                 break;
             }
         }
+        Ok(true)
+    }
+
+    /// Interactive replies retain a strict per-chunk allocation bound.
+    fn decode<'a>(&mut self, chunk: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>> {
+        if matches!(self, Self::Identity) {
+            return Ok(std::borrow::Cow::Borrowed(chunk));
+        }
+        let mut out = Vec::with_capacity(chunk.len().saturating_mul(4));
+        self.decode_to(chunk, |bytes| {
+            if out.len().saturating_add(bytes.len()) > ZSTD_CHUNK_DECODE_CAP {
+                return Err(response_cap_error());
+            }
+            out.extend_from_slice(bytes);
+            Ok(true)
+        })?;
         Ok(std::borrow::Cow::Owned(out))
     }
 }
@@ -2789,31 +3386,6 @@ fn capped_sql(sql: &str, max_rows: Option<usize>) -> String {
         Some(n) => types::inject_row_limit(sql, n, None).sql,
         None => sql.to_string(),
     }
-}
-
-/// Write a materialised [`RawRows`] (the JSON-array fallback / native path)
-/// through the row formatter to `w`, honouring `max_rows`.
-fn write_rawrows(
-    w: Box<dyn std::io::Write + Send>,
-    format: ExportFormat,
-    resp: &RawRows,
-    max_rows: Option<usize>,
-) -> Result<ExportCounts> {
-    let columns: Vec<Column> = resp
-        .meta
-        .iter()
-        .map(|(name, ty)| Column::typed(name, ty))
-        .collect();
-    let mut sink = ExportSink::new(w, format);
-    sink.write_header(&columns)
-        .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
-    let take = max_rows.unwrap_or(usize::MAX);
-    for row in resp.data.iter().take(take) {
-        sink.write_row(row)
-            .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
-    }
-    sink.finish()
-        .map_err(|e| otto_core::Error::Internal(format!("finish export file: {e}")))
 }
 
 // --- Static completion sources ----------------------------------------------
@@ -3010,742 +3582,8 @@ const FUNCTIONS: &[(&str, &str)] = &[
 // --- Unit tests (no network) ------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
+mod tests;
 
-    #[test]
-    fn streamed_clickhouse_cells_keep_truncation_provenance() {
-        let mut stream = CompactStream::new(Some(1));
-        stream.phase = StreamPhase::Data;
-        stream.accept_row(vec![
-            serde_json::json!({"nested": "x".repeat(types::MAX_CELL_CHARS + 1)}),
-        ]);
-        assert!(stream.finish().unwrap().cells_truncated);
-    }
-
-    #[test]
-    fn mid_stream_exception_field_is_an_error_not_partial_rows() {
-        let body = r#"{"meta":[{"name":"x","type":"UInt8"}],"data":[[1],[2],[3]],"rows":3,"exception":"Code: 241. DB::Exception: Memory limit (for query) exceeded. (MEMORY_LIMIT_EXCEEDED) (version 24.8.4.13 (official build))"}"#;
-        let err = decode_json_reply(body).unwrap_err();
-        assert_eq!(
-            err,
-            "Code: 241. DB::Exception: Memory limit (for query) exceeded. (MEMORY_LIMIT_EXCEEDED)\nSTREAMED_ROWS: 3"
-        );
-    }
-
-    #[test]
-    fn mid_stream_broken_json_surfaces_the_server_error() {
-        let body = "{\"meta\":[{\"name\":\"x\",\"type\":\"UInt8\"}],\"data\":[[1],[2]\nCode: 159. DB::Exception: Timeout exceeded: elapsed 30.0001 seconds, maximum: 30. (TIMEOUT_EXCEEDED) (version 24.8.4.13 (official build))\n";
-        let err = decode_json_reply(body).unwrap_err();
-        assert!(
-            err.starts_with("Code: 159. DB::Exception: Timeout exceeded"),
-            "{err}"
-        );
-        assert!(
-            err.ends_with("(TIMEOUT_EXCEEDED)\nSTREAMED_ROWS: unknown"),
-            "{err}"
-        );
-        assert!(!err.contains("trailing characters"));
-        // A plain broken body with no server error keeps serde's text.
-        assert!(decode_json_reply("{\"data\":[[1]").is_err());
-        // A clean reply still decodes.
-        let ok = decode_json_reply(r#"{"meta":[],"data":[[1]]}"#).unwrap();
-        assert_eq!(ok.data.len(), 1);
-    }
-
-    #[test]
-    fn capabilities_are_honest() {
-        let c = ClickhouseDriver::default().capabilities();
-        assert_eq!(c.engine, Engine::Clickhouse);
-        assert!(c.sql && c.joins && c.multi_statement);
-        assert!(!c.transactions);
-        assert!(c.cancel, "KILL QUERY WHERE query_id supported (HTTP)");
-        assert!(c.explain);
-    }
-
-    fn base_cfg(port: u16) -> ResolvedConfig {
-        ResolvedConfig {
-            lifecycle: None,
-            engine: Engine::Clickhouse,
-            host: "127.0.0.1".into(),
-            port,
-            user: None,
-            password: None,
-            database: None,
-            tls: types::TlsConfig::default(),
-            params: json!({}),
-        }
-    }
-
-    /// The MCP path's server-derived flag turns on the native read-only mode;
-    /// ordinary runs never send it.
-    #[test]
-    fn read_only_execution_flag_selects_server_readonly_mode() {
-        let plain = ClickhouseDriver::connection_from_client(
-            &base_cfg(8123),
-            None,
-            None,
-            None,
-            reqwest::Client::new(),
-        )
-        .unwrap();
-        assert!(!plain.readonly);
-        let mut cfg = base_cfg(8123);
-        cfg.params = json!({ "__read_only_execution": true });
-        let guarded = ClickhouseDriver::connection_from_client(
-            &cfg,
-            None,
-            None,
-            None,
-            reqwest::Client::new(),
-        )
-        .unwrap();
-        assert!(guarded.readonly);
-        assert!(is_readonly_setting_refused(
-            "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)"
-        ));
-        assert!(!is_readonly_setting_refused(
-            "Code: 164. DB::Exception: Cannot execute query in readonly mode. (READONLY)"
-        ));
-    }
-
-    #[test]
-    fn detects_statements_that_return_rows() {
-        assert!(returns_rows("SELECT 1"));
-        assert!(returns_rows("  select count() from t"));
-        assert!(returns_rows("WITH x AS (SELECT 1) SELECT * FROM x"));
-        assert!(returns_rows("SHOW TABLES"));
-        assert!(returns_rows("DESCRIBE TABLE t"));
-        assert!(returns_rows("desc t"));
-        assert!(returns_rows("EXPLAIN SELECT 1"));
-        assert!(returns_rows("(SELECT 1)"));
-
-        assert!(!returns_rows("INSERT INTO t VALUES (1)"));
-        assert!(!returns_rows("CREATE TABLE t (a Int32) ENGINE = Memory"));
-        assert!(!returns_rows("ALTER TABLE t ADD COLUMN b Int32"));
-        assert!(!returns_rows("DROP TABLE t"));
-        assert!(!returns_rows("  optimize table t final"));
-        assert!(!returns_rows(""));
-    }
-
-    #[test]
-    fn escapes_identifier_quotes() {
-        assert_eq!(esc("plain"), "plain");
-        assert_eq!(esc("o'brien"), "o''brien");
-        assert_eq!(esc("a'b'c"), "a''b''c");
-        assert_eq!(esc_ident("plain"), "plain");
-        assert_eq!(esc_ident("we`ird"), "we``ird");
-    }
-
-    /// CH honours `\` escapes in string literals AND backtick idents — an
-    /// unescaped trailing backslash was a quote break-out (injection).
-    #[test]
-    fn escapes_backslashes_in_literals_and_idents() {
-        // `\'` alone would read as an ESCAPED quote; `\\''` stays inert.
-        assert_eq!(esc("evil\\"), "evil\\\\");
-        assert_eq!(esc("a\\'b"), "a\\\\''b");
-        assert_eq!(esc_ident("t\\"), "t\\\\");
-        assert_eq!(esc_ident("a\\`b"), "a\\\\``b");
-    }
-
-    #[test]
-    fn transport_selected_by_port() {
-        // HTTP ports → HTTP.
-        assert_eq!(transport_for(&base_cfg(8123)), Transport::Http);
-        assert_eq!(transport_for(&base_cfg(8443)), Transport::Http);
-        assert_eq!(transport_for(&base_cfg(18123)), Transport::Http);
-        // Native protocol ports → native.
-        assert_eq!(transport_for(&base_cfg(9000)), Transport::Native);
-        assert_eq!(transport_for(&base_cfg(9440)), Transport::Native);
-        // Forwarded native ports (tunnel local forward keeps the trailing
-        // 9000/9440) → still native.
-        assert_eq!(transport_for(&base_cfg(19000)), Transport::Native);
-        assert_eq!(transport_for(&base_cfg(19440)), Transport::Native);
-        // An arbitrary local-forward port falls back to HTTP unless overridden.
-        assert_eq!(transport_for(&base_cfg(34567)), Transport::Http);
-    }
-
-    #[test]
-    fn native_port_recognition() {
-        assert!(is_native_port(9000));
-        assert!(is_native_port(9440));
-        assert!(is_native_port(19000));
-        assert!(is_native_port(19440));
-        assert!(!is_native_port(8123));
-        assert!(!is_native_port(8443));
-        assert!(!is_native_port(18123));
-        assert!(!is_native_port(3306));
-    }
-
-    #[test]
-    fn transport_param_forces_native() {
-        // An explicit transport=native param overrides the port heuristic — for
-        // any forward port that doesn't carry a recognizable native suffix.
-        let mut cfg = base_cfg(34567);
-        cfg.params = json!({ "transport": "native" });
-        assert_eq!(transport_for(&cfg), Transport::Native);
-
-        // Case-insensitive.
-        cfg.params = json!({ "transport": "Native" });
-        assert_eq!(transport_for(&cfg), Transport::Native);
-    }
-
-    #[test]
-    fn value_scalars_to_json() {
-        use klickhouse::Value as V;
-        assert_eq!(value_to_json(&V::Null), Value::Null);
-        assert_eq!(value_to_json(&V::Int32(-7)), json!(-7));
-        assert_eq!(value_to_json(&V::UInt64(5)), json!(5));
-        assert_eq!(value_to_json(&V::Float64(1.5)), json!(1.5));
-        assert_eq!(value_to_json(&V::String(b"hello".to_vec())), json!("hello"));
-        // 128-bit ints render as strings (out of f64/i64 range safely).
-        assert_eq!(
-            value_to_json(&V::Int128(170141183460469231731687303715884105727i128)),
-            json!("170141183460469231731687303715884105727")
-        );
-    }
-
-    #[test]
-    fn value_array_and_tuple_to_json() {
-        use klickhouse::Value as V;
-        let arr = V::Array(vec![V::Int32(1), V::Int32(2), V::Int32(3)]);
-        assert_eq!(value_to_json(&arr), json!([1, 2, 3]));
-
-        let tup = V::Tuple(vec![V::String(b"a".to_vec()), V::Int32(9)]);
-        assert_eq!(value_to_json(&tup), json!(["a", 9]));
-    }
-
-    #[test]
-    fn value_map_to_json_object() {
-        use klickhouse::Value as V;
-        let map = V::Map(
-            vec![V::String(b"k1".to_vec()), V::String(b"k2".to_vec())],
-            vec![V::Int32(1), V::Int32(2)],
-        );
-        assert_eq!(value_to_json(&map), json!({ "k1": 1, "k2": 2 }));
-    }
-
-    #[test]
-    fn strips_surrounding_quotes() {
-        assert_eq!(strip_quotes("'1.2.3.4'".to_string()), "1.2.3.4");
-        assert_eq!(strip_quotes("plain".to_string()), "plain");
-    }
-
-    #[test]
-    fn json_cell_to_text_unwraps_strings() {
-        assert_eq!(
-            json_cell_to_text(&json!("CREATE TABLE x")),
-            "CREATE TABLE x"
-        );
-        assert_eq!(json_cell_to_text(&json!(42)), "42");
-        assert_eq!(json_cell_to_text(&Value::Null), "");
-    }
-
-    // --- Streaming run reader / readonly memo / bulk graph (perf wave) ------
-
-    /// A `FORMAT JSONCompact` reply laid out the way ClickHouse writes it.
-    fn compact_reply(rows: &[&str], tail_extra: &str) -> String {
-        let mut s = String::from(
-            "{\n\t\"meta\":\n\t[\n\t\t{\n\t\t\t\"name\": \"n\",\n\t\t\t\"type\": \"UInt64\"\n\t\t},\n\t\t{\n\t\t\t\"name\": \"s\",\n\t\t\t\"type\": \"String\"\n\t\t}\n\t],\n\n\t\"data\":\n\t[\n",
-        );
-        s.push_str(
-            &rows
-                .iter()
-                .map(|r| format!("\t\t{r}"))
-                .collect::<Vec<_>>()
-                .join(",\n"),
-        );
-        s.push_str("\n\t],\n\n\t\"rows\": 2,\n");
-        s.push_str(tail_extra);
-        s.push_str("\n\t\"statistics\":\n\t{\n\t\t\"elapsed\": 0.001,\n\t\t\"rows_read\": 2,\n\t\t\"bytes_read\": 16\n\t}\n}\n");
-        s
-    }
-
-    fn feed_all(state: &mut CompactStream, body: &str) -> std::result::Result<(), String> {
-        state.push_lines(body.as_bytes())
-    }
-
-    #[test]
-    fn compact_stream_decodes_rows_meta_and_statistics() {
-        let body = compact_reply(&[r#"[1, "a"]"#, r#"[2, "b,]"]"#], "");
-        let mut st = CompactStream::new(Some(10));
-        feed_all(&mut st, &body).unwrap();
-        let raw = st.finish().unwrap();
-        assert_eq!(
-            raw.meta,
-            vec![("n".into(), "UInt64".into()), ("s".into(), "String".into())]
-        );
-        assert_eq!(
-            raw.data,
-            vec![vec![json!(1), json!("a")], vec![json!(2), json!("b,]")]]
-        );
-        assert_eq!(raw.bytes_read, 16);
-        assert!(raw.prepared && !raw.partial && !raw.truncated_bytes);
-    }
-
-    #[test]
-    fn compact_stream_stops_at_the_row_cap() {
-        let body = compact_reply(&["[1, \"a\"]", "[2, \"b\"]"], "");
-        let mut st = CompactStream::new(Some(1));
-        feed_all(&mut st, &body).unwrap();
-        assert!(st.stopped);
-        let raw = st.finish().unwrap();
-        assert_eq!(raw.data.len(), 1);
-        // The whole reply was in hand, so the trailer still yields statistics.
-        assert!(!raw.partial && raw.prepared);
-        assert_eq!(raw.bytes_read, 16);
-
-        // Hanging up inside the rows: rows kept, statistics unknown.
-        let cut = &body[..body.rfind("\n\t],").unwrap()];
-        let mut st = CompactStream::new(Some(1));
-        feed_all(&mut st, cut).unwrap();
-        let raw = st.finish().unwrap();
-        assert_eq!(raw.data.len(), 1);
-        assert!(raw.partial);
-    }
-
-    #[test]
-    fn compact_stream_stops_at_the_byte_budget_keeping_at_least_one_row() {
-        let body = compact_reply(&["[1, \"aaaaaaaaaa\"]", "[2, \"bbbbbbbbbb\"]"], "");
-        let mut st = CompactStream::new(Some(10));
-        st.budget = types::ByteBudget::new(5);
-        feed_all(&mut st, &body).unwrap();
-        let raw = st.finish().unwrap();
-        assert_eq!(raw.data.len(), 1);
-        assert!(raw.truncated_bytes && !raw.partial);
-    }
-
-    #[test]
-    fn compact_stream_in_band_exception_is_an_error() {
-        let body = compact_reply(
-            &["[1, \"a\"]"],
-            "\t\"exception\": \"Code: 241. DB::Exception: Memory limit exceeded. (MEMORY_LIMIT_EXCEEDED)\",",
-        );
-        let mut st = CompactStream::new(Some(10));
-        feed_all(&mut st, &body).unwrap();
-        let err = st.finish().unwrap_err();
-        assert!(err.contains("MEMORY_LIMIT_EXCEEDED"), "{err}");
-        assert!(err.ends_with("STREAMED_ROWS: 1"), "{err}");
-    }
-
-    #[test]
-    fn compact_stream_raw_trailing_exception_mid_rows_is_an_error() {
-        let mut body = compact_reply(&["[1, \"a\"]"], "");
-        body.truncate(body.rfind("\n\t],").unwrap());
-        body.push_str(",\nCode: 241. DB::Exception: Memory limit exceeded. (MEMORY_LIMIT_EXCEEDED) (version 24.8)\n");
-        let mut st = CompactStream::new(Some(10));
-        let err = feed_all(&mut st, &body).unwrap_err();
-        assert!(err.contains("MEMORY_LIMIT_EXCEEDED"), "{err}");
-    }
-
-    #[test]
-    fn compact_stream_falls_back_to_whole_body_for_single_line_json() {
-        let body = r#"{"meta":[{"name":"x","type":"UInt8"}],"data":[[1],[2]],"rows":2,"statistics":{"bytes_read":7}}"#;
-        let mut st = CompactStream::new(Some(10));
-        feed_all(&mut st, body).unwrap();
-        let raw = st.finish().unwrap();
-        assert_eq!(raw.data.len(), 2);
-        assert_eq!(raw.bytes_read, 7);
-        // The whole-body path leaves capping/budgeting to `exec_ch_read`.
-        assert!(!raw.prepared);
-    }
-
-    #[test]
-    fn single_select_counts_select_keywords() {
-        assert!(single_select("SELECT * FROM t FORMAT JSON"));
-        assert!(single_select("select 1 settings max_threads = 1"));
-        assert!(!single_select("SELECT 1 UNION ALL SELECT 2"));
-        assert!(!single_select(
-            "SELECT * FROM t WHERE id IN (SELECT id FROM u)"
-        ));
-        assert!(!single_select("SHOW TABLES"));
-        assert!(single_select("SELECT selected_at FROM t"));
-    }
-
-    #[test]
-    fn bulk_graph_groups_columns_and_flags_truncation() {
-        let tables = RawRows {
-            data: vec![
-                vec![json!("a"), json!("MergeTree")],
-                vec![json!("b_mv"), json!("MaterializedView")],
-                vec![json!("c"), json!("MergeTree")],
-            ],
-            ..RawRows::default()
-        };
-        let columns = RawRows {
-            data: vec![
-                vec![json!("a"), json!("id"), json!("UInt64"), json!(1)],
-                vec![
-                    json!("a"),
-                    json!("note"),
-                    json!("Nullable(String)"),
-                    json!(0),
-                ],
-                vec![json!("b_mv"), json!("x"), json!("Int32"), json!("0")],
-            ],
-            ..RawRows::default()
-        };
-        let g = build_bulk_graph("shop", &tables, &columns, 2);
-        assert!(g.truncated);
-        assert_eq!(g.tables.len(), 2);
-        assert_eq!(g.tables[0].id, "db:shop/table:a");
-        assert_eq!(g.tables[0].columns.len(), 2);
-        assert!(g.tables[0].columns[0].primary_key);
-        assert!(g.tables[0].columns[1].nullable && !g.tables[0].columns[1].primary_key);
-        assert_eq!(g.tables[1].kind, NodeKind::View);
-        assert!(g.edges.is_empty());
-        let g = build_bulk_graph("shop", &tables, &columns, 3);
-        assert!(!g.truncated);
-        assert!(g.tables[2].columns.is_empty());
-    }
-
-    /// One request seen by [`FakeCh`]: (request target, body).
-    type Seen = Arc<std::sync::Mutex<Vec<(String, String)>>>;
-
-    /// Minimal HTTP/1.1 server standing in for ClickHouse: records every
-    /// request and hands the socket to `respond` to write the reply.
-    async fn fake_ch<F, Fut>(respond: F) -> (std::net::SocketAddr, Seen)
-    where
-        F: Fn(String, String, tokio::net::TcpStream) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        use tokio::io::AsyncReadExt;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let seen: Seen = Arc::default();
-        let seen2 = Arc::clone(&seen);
-        let respond = Arc::new(respond);
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    return;
-                };
-                let seen = Arc::clone(&seen2);
-                let respond = Arc::clone(&respond);
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut tmp = [0u8; 4096];
-                    let head_end = loop {
-                        let n = sock.read(&mut tmp).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
-                        }
-                        buf.extend_from_slice(&tmp[..n]);
-                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                            break i + 4;
-                        }
-                    };
-                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-                    let len = head
-                        .lines()
-                        .find_map(|l| {
-                            let (k, v) = l.split_once(':')?;
-                            k.eq_ignore_ascii_case("content-length")
-                                .then(|| v.trim().parse::<usize>().ok())?
-                        })
-                        .unwrap_or(0);
-                    while buf.len() < head_end + len {
-                        let n = sock.read(&mut tmp).await.unwrap_or(0);
-                        if n == 0 {
-                            break;
-                        }
-                        buf.extend_from_slice(&tmp[..n]);
-                    }
-                    let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
-                    let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
-                    seen.lock().unwrap().push((target.clone(), body.clone()));
-                    respond(target, body, sock).await;
-                });
-            }
-        });
-        (addr, seen)
-    }
-
-    async fn reply(mut sock: tokio::net::TcpStream, status: &str, body: &str) {
-        use tokio::io::AsyncWriteExt;
-        let msg = format!(
-            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = sock.write_all(msg.as_bytes()).await;
-        let _ = sock.shutdown().await;
-    }
-
-    fn test_conn(addr: std::net::SocketAddr) -> Conn {
-        Conn {
-            client: reqwest::Client::builder().no_proxy().build().unwrap(),
-            base: format!("http://{addr}/"),
-            headers: HeaderMap::new(),
-            timezone: None,
-            database: None,
-            query_id: Some("otto-q1".into()),
-            timeout_secs: None,
-            readonly: false,
-            readonly_refused: Arc::new(AtomicBool::new(false)),
-            result_row_cap: None,
-        }
-    }
-
-    /// DB-01: a ~200 MB reply resolves to `row_cap` rows, the reader hangs up
-    /// long before the server finishes writing, and the query is KILLed.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn capped_run_reader_stops_early_on_a_huge_reply_and_kills_the_query() {
-        use std::sync::atomic::AtomicUsize;
-        use tokio::io::AsyncWriteExt;
-        const TOTAL_ROWS: usize = 200_000;
-        let written = Arc::new(AtomicUsize::new(0));
-        let finished = Arc::new(AtomicBool::new(false));
-        let (w, f) = (Arc::clone(&written), Arc::clone(&finished));
-        let (addr, seen) = fake_ch(move |_target, body, mut sock| {
-            let (written, finished) = (Arc::clone(&w), Arc::clone(&f));
-            async move {
-                if body.starts_with("KILL QUERY") {
-                    return reply(sock, "200 OK", "").await;
-                }
-                let head = compact_reply(&[], "");
-                let head = &head[..head.rfind("\t[\n").unwrap() + 3];
-                let pad = "x".repeat(1000);
-                let mut out = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{head}");
-                for i in 0..TOTAL_ROWS {
-                    out.push_str(&format!("\t\t[{i}, \"{pad}\"],\n"));
-                    if out.len() >= 64 * 1024 {
-                        if sock.write_all(out.as_bytes()).await.is_err() {
-                            break;
-                        }
-                        out.clear();
-                    }
-                    written.store(i + 1, Ordering::Relaxed);
-                }
-                finished.store(true, Ordering::Relaxed);
-            }
-        })
-        .await;
-
-        let conn = test_conn(addr);
-        let raw = conn
-            .query_json_capped("SELECT * FROM big", 101)
-            .await
-            .unwrap();
-        assert_eq!(raw.data.len(), 101);
-        assert!(raw.prepared && raw.partial && !raw.truncated_bytes);
-        assert_eq!(raw.data[100][0], json!(100));
-
-        // The server's writer sees the hang-up and stops well short of the end.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !finished.load(Ordering::Relaxed) && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let rows_written = written.load(Ordering::Relaxed);
-        assert!(
-            rows_written < TOTAL_ROWS / 4,
-            "reader consumed too much: server wrote {rows_written} rows"
-        );
-        // …and the server-side query is killed by its query_id.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let killed = seen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(_, b)| b == "KILL QUERY WHERE query_id = 'otto-q1'");
-            if killed {
-                break;
-            }
-            assert!(Instant::now() < deadline, "no KILL QUERY was sent");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-
-    /// DB-01 server-side cap: `max_result_rows` + `result_overflow_mode=break`
-    /// ride on the request only when `result_row_cap` is set.
-    #[tokio::test]
-    async fn server_row_cap_is_sent_as_request_settings() {
-        let body = compact_reply(&["[1, \"a\"]"], "");
-        let (addr, seen) = fake_ch(move |_t, _b, sock| {
-            let body = body.clone();
-            async move { reply(sock, "200 OK", &body).await }
-        })
-        .await;
-        let mut conn = test_conn(addr);
-        conn.query_json_capped("SELECT 1", 5).await.unwrap();
-        conn.result_row_cap = Some(5);
-        let raw = conn.query_json_capped("SELECT 1", 5).await.unwrap();
-        assert_eq!(raw.data.len(), 1);
-        assert_eq!(raw.bytes_read, 16);
-        let seen = seen.lock().unwrap();
-        assert!(!seen[0].0.contains("max_result_rows"), "{}", seen[0].0);
-        assert!(seen[1].0.contains("max_result_rows=5"), "{}", seen[1].0);
-        assert!(
-            seen[1].0.contains("result_overflow_mode=break"),
-            "{}",
-            seen[1].0
-        );
-    }
-
-    /// DB2-05: a zstd body decodes chunk by chunk to exactly the original bytes
-    /// however the network splits it; identity passes through; an encoding we
-    /// never asked for is a clear error, not garbage rows.
-    #[test]
-    fn zstd_body_decodes_across_arbitrary_chunk_splits() {
-        let rows: Vec<String> = (0..5_000).map(|i| format!("[{i}, \"row {i}\"]")).collect();
-        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
-        let plain = compact_reply(&refs, "");
-        let packed = zstd::stream::encode_all(plain.as_bytes(), 3).unwrap();
-        assert!(packed.len() * 5 < plain.len(), "JSONCompact compresses ≥5×");
-        for split in [1usize, 7, 4096, packed.len()] {
-            let mut dec = BodyDecoder::for_encoding(Some("zstd")).unwrap();
-            let mut out = Vec::new();
-            for chunk in packed.chunks(split) {
-                out.extend_from_slice(&dec.decode(chunk).unwrap());
-            }
-            assert_eq!(out, plain.as_bytes(), "split {split}");
-        }
-        let mut id = BodyDecoder::for_encoding(None).unwrap();
-        assert!(matches!(
-            id.decode(b"abc").unwrap(),
-            std::borrow::Cow::Borrowed(b"abc")
-        ));
-        assert!(BodyDecoder::for_encoding(Some("br")).is_err());
-        let mut dec = BodyDecoder::for_encoding(Some("zstd")).unwrap();
-        assert!(dec.decode(b"definitely not zstd").is_err());
-    }
-
-    /// DB2-05 end to end: every request asks for compression, and a compressed
-    /// JSONCompact reply streams into the same rows as a plain one.
-    #[tokio::test]
-    async fn compressed_reply_streams_into_rows() {
-        let plain = compact_reply(&["[1, \"a\"]", "[2, \"b\"]"], "");
-        let packed = zstd::stream::encode_all(plain.as_bytes(), 3).unwrap();
-        let (addr, seen) = fake_ch(move |_t, _b, mut sock| {
-            let packed = packed.clone();
-            async move {
-                use tokio::io::AsyncWriteExt;
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    packed.len()
-                );
-                let _ = sock.write_all(head.as_bytes()).await;
-                let _ = sock.write_all(&packed).await;
-                let _ = sock.shutdown().await;
-            }
-        })
-        .await;
-        let conn = test_conn(addr);
-        let raw = conn.query_json_capped("SELECT 1", 10).await.unwrap();
-        assert_eq!(raw.data.len(), 2);
-        assert_eq!(raw.data[1][1], json!("b"));
-        let seen = seen.lock().unwrap();
-        assert!(
-            seen[0].0.contains("enable_http_compression=1"),
-            "{}",
-            seen[0].0
-        );
-    }
-
-    /// DB-02: the first `readonly` refusal is remembered — later requests skip
-    /// the doomed attempt (2 round trips once, then 1 per request).
-    #[tokio::test]
-    async fn readonly_refusal_is_memoized_per_connection() {
-        let (addr, seen) = fake_ch(|target, _b, sock| async move {
-            if target.contains("readonly=2") {
-                reply(
-                    sock,
-                    "500 Internal Server Error",
-                    "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)",
-                )
-                .await
-            } else {
-                reply(sock, "200 OK", "1\n").await
-            }
-        })
-        .await;
-        let mut conn = test_conn(addr);
-        conn.readonly = true;
-        assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
-        assert!(conn.readonly_refused.load(Ordering::Relaxed));
-        assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
-        assert_eq!(conn.post("SELECT 1".into()).await.unwrap(), "1\n");
-        let seen = seen.lock().unwrap();
-        // readonly attempt + fixed probe + retry, then one request each.
-        assert_eq!(seen.len(), 5, "{seen:?}");
-        assert_eq!(
-            seen.iter()
-                .filter(|(t, _)| t.contains("readonly=2"))
-                .count(),
-            1
-        );
-    }
-
-    /// S6-03: a user statement that FORGES the refusal text (a read the
-    /// classifier passes) must not switch the native `readonly=2` barrier off
-    /// — the fixed probe reports a writable profile, so the error surfaces and
-    /// nothing is memoised.
-    #[tokio::test]
-    async fn forged_readonly_refusal_never_disables_the_barrier() {
-        let (addr, seen) = fake_ch(|target, body, sock| async move {
-            if body.contains("getSetting('readonly')") {
-                reply(sock, "200 OK", "0\n").await
-            } else if target.contains("readonly=2") {
-                reply(
-                    sock,
-                    "500 Internal Server Error",
-                    "Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)",
-                )
-                .await
-            } else {
-                reply(sock, "200 OK", "1\n").await
-            }
-        })
-        .await;
-        let mut conn = test_conn(addr);
-        conn.readonly = true;
-        let forged = "SELECT throwIf(1, 'Code: 164. Cannot modify ''readonly'' setting')";
-        assert!(conn.post(forged.into()).await.is_err());
-        assert!(!conn.readonly_refused.load(Ordering::Relaxed));
-        // The next request still asks for readonly=2 (the fake refuses every
-        // readonly=2 request, so it is followed by another probe — the
-        // request itself is what must carry the barrier).
-        let _ = conn.post("SELECT 1".into()).await;
-        let seen = seen.lock().unwrap();
-        assert!(
-            seen.iter()
-                .any(|(t, b)| b == "SELECT 1" && t.contains("readonly=2")),
-            "{seen:?}"
-        );
-        assert!(
-            !seen
-                .iter()
-                .any(|(t, b)| b == "SELECT 1" && !t.contains("readonly=2")),
-            "{seen:?}"
-        );
-        assert!(!seen
-            .iter()
-            .any(|(t, b)| !t.contains("readonly=2") && b.contains("throwIf")));
-    }
-
-    #[test]
-    fn readonly_memo_is_shared_per_cache_key() {
-        let d = ClickhouseDriver::default();
-        let a = d.readonly_memo("k1");
-        a.store(true, Ordering::Relaxed);
-        assert!(d.readonly_memo("k1").load(Ordering::Relaxed));
-        assert!(!d.readonly_memo("k2").load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn evict_idle_drops_only_stale_handles() {
-        let d = ClickhouseDriver::default();
-        let cfg = base_cfg(8123);
-        d.client(&cfg).await.unwrap();
-        assert_eq!(d.evict_idle(Duration::from_secs(3600)).await, 0);
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        assert_eq!(d.evict_idle(Duration::from_millis(1)).await, 1);
-        assert!(d.clients.get_ready(&cfg.cache_key()).is_none());
-    }
-}
-
-/// Decode timing for the streamed `JSONCompact` reader (DB2-04).
 #[cfg(test)]
 mod perf_bench {
     use super::*;

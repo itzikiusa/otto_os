@@ -1704,13 +1704,13 @@
         {#if result.truncated && result.truncated_reason === 'bytes'}
           <span
             class="trunc-badge"
-            title="The response reached the 32 MB size budget — more rows exist. Use Export all rows… to get every row as a file, or select fewer or narrower columns."
+            title="The response reached the 32 MB size budget. Narrow the query to retrieve omitted data."
             >first {result.stats.row_count.toLocaleString()} rows (32 MB budget)</span
           >
         {:else if result.truncated}
           <span
             class="trunc-badge"
-            title="Row cap reached — more rows exist. Raise the Limit or add an explicit LIMIT to fetch more."
+            title="Row cap reached — more rows exist. Raise the row limit or narrow the query to fetch more."
             >capped at {result.stats.row_count.toLocaleString()}</span
           >
         {/if}
@@ -1736,10 +1736,10 @@
           >
             <Icon name="edit" size={12} />Editable · double-click a cell
           </span>
-        {:else if statement && flow.editReason}
-          <span class="edit-note" title={flow.editReason}>{flow.editReason}</span>
         {:else if result.message}
           <span class="msg" title={result.message}>{result.message}</span>
+        {:else if statement && flow.editReason}
+          <span class="edit-note" title={flow.editReason}>{flow.editReason}</span>
         {/if}
       </div>
     {/if}

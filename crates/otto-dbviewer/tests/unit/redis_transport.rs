@@ -19,42 +19,89 @@ async fn command<S: AsyncRead + Unpin>(read: &mut BufReader<S>) -> io::Result<Op
     }
     Ok(Some(out))
 }
+fn eval_simple_cmd(cmd: &[String], db: &mut String, seen: &Arc<Mutex<Vec<Vec<String>>>>) -> String {
+    match cmd[0].as_str() {
+        "SCAN" => {
+            let scan_count = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|v| v[0] == "SCAN")
+                .count();
+            let key = if scan_count == 1 {
+                "oversize-type"
+            } else {
+                "healthy-type"
+            };
+            format!("*2\r\n$1\r\n0\r\n*1\r\n${}\r\n{key}\r\n", key.len())
+        }
+        "TYPE" if cmd[1] == "oversize-type" => "$1000000000\r\n".to_string(),
+        "TYPE" if cmd[1] == "oversize-hash" => "+hash\r\n".to_string(),
+        "TYPE" if cmd[1] == "stream-key" => "+stream\r\n".to_string(),
+        "TYPE" if cmd[1] == "json-key" => "+ReJSON-RL\r\n".to_string(),
+        "TYPE" if cmd[1] == "ts-key" => "+TSDB-TYPE\r\n".to_string(),
+        "TYPE" => "+list\r\n".to_string(),
+        "TTL" | "LLEN" | "HLEN" => ":1\r\n".to_string(),
+        "XLEN" => ":2\r\n".to_string(),
+        "INCR" => ":11\r\n".to_string(),
+        "OBJECT" => "+listpack\r\n".to_string(),
+        "LRANGE" if cmd[1] == "oversize-preview" => "*1\r\n$1000000000\r\n".to_string(),
+        "LRANGE" => "*1\r\n$3\r\nabc\r\n".to_string(),
+        "XRANGE" => "*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n".to_string(),
+        "JSON.GET" => "$13\r\n{\"ok\":\"json\"}\r\n".to_string(),
+        "TS.GET" => "*2\r\n:1700000000\r\n$4\r\n42.5\r\n".to_string(),
+        "HSCAN" => "*2\r\n:0\r\n*2\r\n+field\r\n$1000000000\r\n".to_string(),
+        "SELECT" => {
+            *db = cmd[1].clone();
+            "+OK\r\n".to_string()
+        }
+        "BLPOP" => "*2\r\n$4\r\njobs\r\n$5\r\njob-1\r\n".to_string(),
+        "GET" if cmd[1] == "large" => "$1000000000\r\n".to_string(),
+        "GET" if cmd[1] == "nested" => "*1000000000\r\n".to_string(),
+        "SET" if cmd[1] == "large-reply" => "$1000000000\r\n".to_string(),
+        "GET" => format!("${}\r\n{}\r\n", db.len(), db),
+        "PING" => "+PONG\r\n".to_string(),
+        "ECHO" => format!("${}\r\n{}\r\n", cmd[1].len(), cmd[1]),
+        "FAIL" => "-ERR fixture rejected command\r\n".to_string(),
+        _ => "+OK\r\n".to_string(),
+    }
+}
+
 async fn peer<S: AsyncRead + AsyncWrite + Unpin>(stream: S, seen: Arc<Mutex<Vec<Vec<String>>>>) {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
     let mut db = "0".to_string();
+    let mut queued: Option<Vec<Vec<String>>> = None;
     while let Ok(Some(cmd)) = command(&mut read).await {
         seen.lock().unwrap().push(cmd.clone());
         let response = match cmd[0].as_str() {
-            "SCAN" => {
-                let scan_count = seen
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|v| v[0] == "SCAN")
-                    .count();
-                let key = if scan_count == 1 {
-                    "oversize-type"
-                } else {
-                    "healthy-type"
-                };
-                format!("*2\r\n$1\r\n0\r\n*1\r\n${}\r\n{key}\r\n", key.len())
-            }
-            "TYPE" if cmd[1] == "oversize-type" => "$1000000000\r\n".to_string(),
-            "TYPE" if cmd[1] == "oversize-hash" => "+hash\r\n".to_string(),
-            "TYPE" => "+list\r\n".to_string(),
-            "TTL" | "LLEN" | "HLEN" => ":1\r\n".to_string(),
-            "OBJECT" => "+listpack\r\n".to_string(),
-            "LRANGE" if cmd[1] == "oversize-preview" => "*1\r\n$1000000000\r\n".to_string(),
-            "LRANGE" => "*1\r\n$3\r\nabc\r\n".to_string(),
-            "HSCAN" => "*2\r\n:0\r\n*2\r\n+field\r\n$1000000000\r\n".to_string(),
-            "SELECT" => {
-                db = cmd[1].clone();
+            "MULTI" => {
+                queued = Some(Vec::new());
                 "+OK\r\n".to_string()
             }
-            "GET" if cmd[1] == "large" => "$1000000000\r\n".to_string(),
-            "GET" if cmd[1] == "nested" => "*1000000000\r\n".to_string(),
-            "SET" if cmd[1] == "large-reply" => "$1000000000\r\n".to_string(),
+            "DISCARD" => {
+                queued = None;
+                "+OK\r\n".to_string()
+            }
+            "EXEC" => {
+                if let Some(cmds) = queued.take() {
+                    let mut out = format!("*{}\r\n", cmds.len());
+                    for qcmd in &cmds {
+                        out.push_str(&eval_simple_cmd(qcmd, &mut db, &seen));
+                    }
+                    out
+                } else {
+                    "-ERR EXEC without MULTI\r\n".to_string()
+                }
+            }
+            _ if queued.is_some() => {
+                queued.as_mut().unwrap().push(cmd);
+                "+QUEUED\r\n".to_string()
+            }
+            "BLPOP" if cmd.get(1).map(String::as_str) == Some("slow-jobs") => {
+                tokio::time::sleep(Duration::from_secs(35)).await;
+                "*2\r\n$9\r\nslow-jobs\r\n$8\r\nafter-35\r\n".to_string()
+            }
             "GET" if cmd[1] == "delay" => {
                 tokio::time::sleep(Duration::from_millis(80)).await;
                 "+ready\r\n".to_string()
@@ -64,11 +111,7 @@ async fn peer<S: AsyncRead + AsyncWrite + Unpin>(stream: S, seen: Arc<Mutex<Vec<
                 let _ = read.read(&mut eof).await;
                 return;
             }
-            "GET" => format!("${}\r\n{}\r\n", db.len(), db),
-            "PING" => "+PONG\r\n".to_string(),
-            "ECHO" => format!("${}\r\n{}\r\n", cmd[1].len(), cmd[1]),
-            "FAIL" => "-ERR fixture rejected command\r\n".to_string(),
-            _ => "+OK\r\n".to_string(),
+            _ => eval_simple_cmd(&cmd, &mut db, &seen),
         };
         // Force actual headers/body/footer fragmentation across writes.
         for chunk in response.as_bytes().chunks(3) {
@@ -508,4 +551,181 @@ async fn tls_verification_rejects_wrong_ca_and_hostname() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn stream_and_module_object_detail_plus_batch_run_with_more_results_and_error_entry() {
+    use crate::driver::Driver;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = cfg(listener.local_addr().unwrap().port());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let peer_seen = seen.clone();
+    let task = tokio::spawn(async move {
+        let mut handles = Vec::new();
+        // 1 cached connection for object_detail + 3 operation-isolated connections for run()
+        for _ in 0..4 {
+            let (socket, _) = listener.accept().await.unwrap();
+            let s = peer_seen.clone();
+            handles.push(tokio::spawn(peer(socket, s)));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+    });
+    let driver = super::super::RedisDriver::default();
+
+    // L13: stream, ReJSON-RL, and TSDB-TYPE object_detail previews.
+    let stream_detail = driver
+        .object_detail(&cfg, &types::NodePath::parse("kdb:1/key:stream-key"))
+        .await
+        .unwrap();
+    assert_eq!(stream_detail.extra["type"], serde_json::json!("stream"));
+    assert_eq!(stream_detail.extra["length"], serde_json::json!(2));
+    assert_eq!(
+        stream_detail.extra["preview"],
+        serde_json::json!([["1-0", ["f1", "v1"]]])
+    );
+
+    let json_detail = driver
+        .object_detail(&cfg, &types::NodePath::parse("kdb:1/key:json-key"))
+        .await
+        .unwrap();
+    assert_eq!(json_detail.extra["type"], serde_json::json!("ReJSON-RL"));
+    assert_eq!(
+        json_detail.extra["preview"],
+        serde_json::json!("{\"ok\":\"json\"}")
+    );
+
+    let ts_detail = driver
+        .object_detail(&cfg, &types::NodePath::parse("kdb:1/key:ts-key"))
+        .await
+        .unwrap();
+    assert_eq!(ts_detail.extra["type"], serde_json::json!("TSDB-TYPE"));
+    assert_eq!(
+        ts_detail.extra["preview"],
+        serde_json::json!([1700000000, "42.5"])
+    );
+
+    // L14: multi-command batch with single-quoted JSON, inline comment, and mid-batch failure.
+    let req = types::QueryRequest {
+        statement: "PING # health check\nECHO '{\"a\": \"b c\"}'\nFAIL\nPING".into(),
+        node: Some("kdb:1".into()),
+        ..Default::default()
+    };
+    let batch = driver.run(&cfg, &req).await.unwrap();
+    assert_eq!(batch.rows, vec![vec![serde_json::json!("PONG")]]);
+    assert_eq!(batch.statement.as_deref(), Some("PING # health check"));
+    assert_eq!(batch.more_results.len(), 2);
+    assert_eq!(
+        batch.more_results[0].rows,
+        vec![vec![serde_json::json!("{\"a\": \"b c\"}")]]
+    );
+    assert!(batch.more_results[1].errored);
+    assert_eq!(batch.more_results[1].statement.as_deref(), Some("FAIL"));
+    assert!(batch.more_results[1]
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("fixture rejected command"));
+
+    // L16: SELECT, MULTI/EXEC transaction, and BLPOP with >30s timeout on an operation-isolated connection.
+    let tx_req = types::QueryRequest {
+        statement: "SELECT 5\nMULTI\nINCR counter\nGET db\nEXEC\nBLPOP jobs 1".into(),
+        node: Some("kdb:1".into()),
+        timeout_ms: Some(45_000),
+        ..Default::default()
+    };
+    let tx_batch = driver.run(&cfg, &tx_req).await.unwrap();
+    assert_eq!(tx_batch.rows, vec![vec![serde_json::json!("OK")]]); // SELECT 5
+    assert_eq!(tx_batch.more_results.len(), 5);
+    assert_eq!(
+        tx_batch.more_results[0].rows,
+        vec![vec![serde_json::json!("OK")]]
+    ); // MULTI
+    assert_eq!(
+        tx_batch.more_results[1].rows,
+        vec![vec![serde_json::json!("QUEUED")]]
+    ); // INCR counter (queued)
+    assert_eq!(
+        tx_batch.more_results[2].rows,
+        vec![vec![serde_json::json!("QUEUED")]]
+    ); // GET db (queued)
+    assert_eq!(
+        tx_batch.more_results[3].rows,
+        vec![vec![serde_json::json!(11)], vec![serde_json::json!("5")]]
+    ); // EXEC -> [11, "5"]
+    assert_eq!(
+        tx_batch.more_results[4].rows,
+        vec![
+            vec![serde_json::json!("jobs")],
+            vec![serde_json::json!("job-1")]
+        ]
+    ); // BLPOP jobs 1
+
+    // L16: Subsequent run() starts on a fresh connection pinned to kdb:1 (SELECT 5 did not leak).
+    let check_db = types::QueryRequest {
+        statement: "GET db".into(),
+        node: Some("kdb:1".into()),
+        ..Default::default()
+    };
+    let db_res = driver.run(&cfg, &check_db).await.unwrap();
+    assert_eq!(db_res.rows, vec![vec![serde_json::json!("1")]]);
+
+    drop(driver);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn configurable_response_timeout_governs_delayed_replies() {
+    let info = redis::RedisConnectionInfo::default()
+        .set_username("fixture")
+        .set_password("fixture-secret")
+        .set_db(1);
+
+    // 1. A short transport response_timeout (25ms) aborts an 80ms `GET delay` reply and retires the connection.
+    let (client, server) = tokio::io::duplex(64);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let short_task = tokio::spawn(peer(server, seen));
+    let mut short_conn = Connection::from_stream_with_timeout(
+        client,
+        &info,
+        limits(),
+        Some(Duration::from_millis(25)),
+    )
+    .await
+    .unwrap();
+    let err = redis::cmd("GET")
+        .arg("delay")
+        .query_async::<String>(&mut short_conn)
+        .await
+        .unwrap_err();
+    assert!(err.is_timeout(), "expected transport timeout: {err}");
+    assert!(!short_conn.is_alive());
+    drop(short_conn);
+    let _ = short_task.await;
+
+    // 2. An extended transport response_timeout (500ms) allows the 80ms `GET delay` reply to succeed.
+    let (client, server) = tokio::io::duplex(64);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ext_task = tokio::spawn(peer(server, seen));
+    let mut ext_conn = Connection::from_stream_with_timeout(
+        client,
+        &info,
+        limits(),
+        Some(Duration::from_millis(500)),
+    )
+    .await
+    .unwrap();
+    let val: String = redis::cmd("GET")
+        .arg("delay")
+        .query_async(&mut ext_conn)
+        .await
+        .expect("500ms transport response_timeout should allow 80ms reply");
+    assert_eq!(val, "ready");
+    assert!(ext_conn.is_alive());
+    drop(ext_conn);
+    let _ = ext_task.await;
 }

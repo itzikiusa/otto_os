@@ -30,6 +30,9 @@ pub fn parse_value(input: &str) -> Result<Value> {
     let mut p = Parser::new(input);
     let v = p.value()?;
     p.skip_trivia();
+    if p.unterminated_comment {
+        return Err(err("unterminated block comment"));
+    }
     if p.pos < p.src.len() {
         return Err(err(format!(
             "unexpected trailing characters near offset {}",
@@ -47,6 +50,7 @@ struct Parser<'a> {
     src: &'a [u8],
     text: &'a str,
     pos: usize,
+    unterminated_comment: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -55,6 +59,7 @@ impl<'a> Parser<'a> {
             src: text.as_bytes(),
             text,
             pos: 0,
+            unterminated_comment: false,
         }
     }
 
@@ -89,13 +94,16 @@ impl<'a> Parser<'a> {
                 }
                 Some(b'/') if self.peek(1) == Some(b'*') => {
                     self.pos += 2;
+                    let mut closed = false;
                     while self.pos < self.src.len() {
                         if self.at() == Some(b'*') && self.peek(1) == Some(b'/') {
                             self.pos += 2;
+                            closed = true;
                             break;
                         }
                         self.pos += 1;
                     }
+                    self.unterminated_comment |= !closed;
                 }
                 _ => break,
             }
@@ -214,7 +222,10 @@ impl<'a> Parser<'a> {
                     b'\n' => {} // escaped newline = line continuation
                     b'u' => {
                         let cp = self.read_hex4()?;
-                        out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                        out.push(
+                            char::from_u32(cp)
+                                .ok_or_else(|| err("surrogate escapes require mongosh"))?,
+                        );
                     }
                     other if other < 0x80 => out.push(other as char),
                     other => {
@@ -312,8 +323,10 @@ impl<'a> Parser<'a> {
         match name.as_str() {
             "true" => return Ok(Value::Bool(true)),
             "false" => return Ok(Value::Bool(false)),
-            "null" | "undefined" => return Ok(Value::Null),
-            "NaN" | "Infinity" => return Ok(Value::Null),
+            "null" => return Ok(Value::Null),
+            "undefined" | "NaN" | "Infinity" | "Date" => {
+                return Err(err("this JavaScript value requires mongosh"));
+            }
             "new" => {
                 self.skip_trivia();
                 if !matches!(self.at(), Some(b) if is_ident_start(b)) {
@@ -434,6 +447,9 @@ fn sentinel(key: &str, value: Value) -> Value {
 
 /// Map a constructor name + args to an EJSON sentinel.
 fn build_constructor(name: &str, args: Vec<Value>) -> Result<Value> {
+    if args.len() > 1 {
+        return Err(err("multi-argument constructors require mongosh"));
+    }
     match name {
         "Date" | "ISODate" => {
             let s = match args.first() {
@@ -544,9 +560,10 @@ mod tests {
     }
 
     #[test]
-    fn literals_null_bool_undefined() {
-        let v = parse_value("{ a: null, b: true, c: false, d: undefined }").unwrap();
-        assert_eq!(v, json!({ "a": null, "b": true, "c": false, "d": null }));
+    fn literals_null_bool_and_unsupported_undefined() {
+        let v = parse_value("{ a: null, b: true, c: false }").unwrap();
+        assert_eq!(v, json!({ "a": null, "b": true, "c": false }));
+        assert!(parse_value("undefined").is_err());
     }
 
     #[test]

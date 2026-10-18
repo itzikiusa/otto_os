@@ -26,7 +26,10 @@ fn cfg() -> ResolvedConfig {
         lifecycle: None,
         engine: Engine::Mongodb,
         host: "127.0.0.1".into(),
-        port: 17017,
+        port: std::env::var("OTTO_MONGO_PARITY_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(17017),
         user: Some("otto".into()),
         password: Some("ottopw".into()),
         database: Some("shopdb".into()),
@@ -399,5 +402,347 @@ async fn mongo_query_plan_returns_stage_tree() {
     assert!(
         !plan.root.op.is_empty(),
         "plan root should carry a stage op"
+    );
+}
+
+/// Unsupported native forms must execute through mongosh without dropping
+/// options; fixture writes use a unique collection and are cleaned up.
+#[tokio::test]
+#[ignore = "requires OTTO_DBV_E2E Mongo fixture and mongosh"]
+async fn mongo_shell_fallback_preserves_options_and_returns_values() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MongoDriver::default();
+    let mut config = cfg();
+    if let Ok(port) = std::env::var("OTTO_MONGO_PARITY_PORT") {
+        config.port = port.parse().unwrap();
+    }
+    let collection = format!("otto_parity_{}", std::process::id());
+    let run = |statement: String| QueryRequest {
+        statement,
+        max_rows: Some(2),
+        timeout_ms: Some(10_000),
+        ..Default::default()
+    };
+    let inserted = driver
+        .run(
+            &config,
+            &run(format!(
+                "db.{collection}.updateOne({{k: 1}}, {{$set: {{value: 9}}}}, {{upsert: true}})"
+            )),
+        )
+        .await
+        .expect("upsert options preserved by shell");
+    assert!(!inserted.rows.is_empty(), "write result is visible");
+    let result = driver
+        .run(
+            &config,
+            &run(format!(
+                "db.{collection}.findOne({{k: 1}}, {{_id: 0, value: 1}})"
+            )),
+        )
+        .await
+        .expect("findOne shell fallback");
+    assert!(result
+        .rows
+        .iter()
+        .flatten()
+        .any(|v| v.to_string().contains("value")));
+    let count = driver
+        .run(
+            &config,
+            &run(format!("db.{collection}.countDocuments({{k: 1}})")),
+        )
+        .await
+        .expect("native count");
+    assert_eq!(count.rows[0][0], json!(1));
+    driver
+        .run(
+            &config,
+            &run(format!(
+                "db.{collection}.insertMany([{{k:2,late:17}},{{k:3}},{{k:4}},{{k:5}}])"
+            )),
+        )
+        .await
+        .expect("seed cursor");
+    for format in [
+        otto_dbviewer::export::ExportFormat::Json,
+        otto_dbviewer::export::ExportFormat::Ndjson,
+    ] {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        driver
+            .export_to_writer(
+                &config,
+                &format!("db.{collection}.find({{}}).sort({{k:1}})"),
+                None,
+                format,
+                None,
+                Box::new(file.reopen().unwrap()),
+            )
+            .await
+            .expect("JSON export");
+        let bytes = std::fs::read_to_string(file.path()).unwrap();
+        let docs: Vec<serde_json::Value> =
+            if matches!(format, otto_dbviewer::export::ExportFormat::Json) {
+                serde_json::from_str(&bytes).unwrap()
+            } else {
+                bytes
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect()
+            };
+        assert_eq!(docs[1]["late"], json!(17), "sparse key must survive export");
+        assert!(
+            docs[0]["_id"].get("$oid").is_some(),
+            "ObjectId must keep its type"
+        );
+    }
+    let distinct = driver
+        .run(&config, &run(format!("db.{collection}.distinct('k')")))
+        .await
+        .expect("native distinct");
+    assert_eq!(distinct.rows.len(), 2);
+    assert!(distinct.truncated);
+    let cursor_count = driver
+        .run(&config, &run(format!("db.{collection}.find({{}}).count()")))
+        .await
+        .expect("native cursor count");
+    assert_eq!(cursor_count.rows[0][0], json!(5));
+    // Legacy count accepts $where; countDocuments' aggregation rejects it.
+    // This distinguishes the server operations even when normal counts agree.
+    let legacy = driver
+        .run(
+            &config,
+            &run(format!(
+                "db.{collection}.count({{$where: 'return this.k > 0'}})"
+            )),
+        )
+        .await
+        .expect("legacy count command semantics");
+    assert_eq!(legacy.rows[0][0], json!(5));
+    assert!(
+        driver
+            .run(
+                &config,
+                &run(format!(
+                    "db.{collection}.countDocuments({{$where: 'return this.k > 0'}})"
+                ))
+            )
+            .await
+            .is_err(),
+        "countDocuments must retain aggregation restrictions"
+    );
+    let json_count = driver
+        .run(
+            &config,
+            &run(json!({
+                "collection": collection, "op": "count", "filter": {"k": 1}
+            })
+            .to_string()),
+        )
+        .await
+        .expect("JSON legacy count");
+    assert_eq!(json_count.rows[0][0], json!(1));
+    let plan = driver
+        .run(
+            &config,
+            &run(format!("db.{collection}.find({{}}).explain()")),
+        )
+        .await
+        .expect("native explain accepts timeout and cancellation comment");
+    assert_eq!(plan.columns[0].name, "queryPlan");
+    let exact = driver
+        .run(
+            &config,
+            &run(format!("db.{collection}.find({{}}).limit(2)")),
+        )
+        .await
+        .expect("native explicit limit");
+    assert_eq!(exact.rows.len(), 2);
+    assert!(
+        !exact.truncated,
+        "explicit limit is the entire requested result"
+    );
+    let cursor = driver
+        .run(
+            &config,
+            &run(format!(
+                "db.{collection}.find({{}}, {{_id:0,k:1}}).sort({{k:-1}}).skip(1)"
+            )),
+        )
+        .await
+        .expect("shell cursor");
+    assert_eq!(cursor.rows.len(), 2);
+    assert!(cursor.truncated);
+    assert!(cursor.rows[0][0].as_str().unwrap().contains("4"));
+    let count = driver
+        .run(
+            &config,
+            &run(format!(
+                "db.{collection}.countDocuments({{}}, {{skip:1, limit:2}})"
+            )),
+        )
+        .await
+        .expect("shell count options");
+    assert!(count.rows[0][0].as_str().unwrap().contains("2"));
+    let admin = driver
+        .run(&config, &run("db.runCommand({ping: 1})".into()))
+        .await
+        .expect("administrative command fallback");
+    assert!(admin.rows[0][0].as_str().unwrap().contains("ok"));
+    let raw = driver
+        .run(&config, &run("const answer = 42; print(answer);".into()))
+        .await
+        .expect("raw script preserved");
+    assert_eq!(raw.rows[0][0], json!("42"));
+    for script in [
+        "do { print('42'); } while(false)",
+        "switch(1) { case 1: print('42'); break; }",
+        "if\t(true) { print('42'); }",
+        "/* leading */ const x=42; print(x);",
+    ] {
+        let result = driver
+            .run(&config, &run(script.into()))
+            .await
+            .unwrap_or_else(|error| panic!("raw script {script}: {error}"));
+        assert_eq!(result.rows[0][0], json!("42"), "{script}");
+    }
+    let sibling = driver
+        .run(
+            &config,
+            &run(
+                "/* active database */\ndb.getSiblingDB('otto_parity_sibling')\n.getName()".into(),
+            ),
+        )
+        .await
+        .expect("single sibling DB expression returns its value");
+    assert!(sibling.rows[0][0]
+        .as_str()
+        .unwrap()
+        .contains("otto_parity_sibling"));
+    let selected = driver
+        .run(
+            &config,
+            &QueryRequest {
+                node: Some("otto_parity_selected".into()),
+                ..run("db.getName()".into())
+            },
+        )
+        .await
+        .expect("selected database in shell");
+    assert!(selected.rows[0][0]
+        .as_str()
+        .unwrap()
+        .contains("otto_parity_selected"));
+    driver
+        .run(&config, &run(format!("db.{collection}.drop()")))
+        .await
+        .expect("cleanup collection via shell fallback");
+}
+
+#[tokio::test]
+#[ignore = "requires OTTO_DBV_E2E Mongo fixture and mongosh"]
+async fn mongo_shell_timeout_bounds_long_running_scripts() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let mut config = cfg();
+    if let Ok(port) = std::env::var("OTTO_MONGO_PARITY_PORT") {
+        config.port = port.parse().unwrap();
+    }
+    let started = std::time::Instant::now();
+    let error = MongoDriver::default()
+        .run(
+            &config,
+            &QueryRequest {
+                statement: "print('started'); sleep(30000);".into(),
+                timeout_ms: Some(1200),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[tokio::test]
+#[ignore = "requires OTTO_DBV_E2E Mongo fixture"]
+async fn mongo_cancellation_isolates_repeated_client_query_ids() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    use otto_dbviewer::types::{CancelToken, QueryHandle};
+    let config = cfg();
+    let driver = std::sync::Arc::new(MongoDriver::default());
+    let first_token = CancelToken::new();
+    let second_token = CancelToken::new();
+    let start = |token: CancelToken| {
+        let driver = driver.clone();
+        let config = config.clone();
+        tokio::spawn(async move {
+            driver
+                .run_tracked(
+                    &config,
+                    &QueryRequest {
+                        statement: "db.customers.find({$where: 'sleep(10000) || true'})".into(),
+                        query_id: Some("same-client-id".into()),
+                        ..Default::default()
+                    },
+                    &token,
+                )
+                .await
+        })
+    };
+    let first = start(first_token.clone());
+    let second = start(second_token.clone());
+    let handles = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let (Some(a), Some(b)) = (first_token.handle(), second_token.handle()) {
+                break (a, b);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (QueryHandle::MongoComment(a), QueryHandle::MongoComment(b)) = (&handles.0, &handles.1)
+    else {
+        panic!("missing Mongo tags")
+    };
+    assert_ne!(a, b);
+    let client = mongodb::Client::with_uri_str(format!(
+        "mongodb://otto:ottopw@127.0.0.1:{}/?authSource=admin",
+        config.port
+    ))
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let result = client.database("admin").run_command(mongodb::bson::doc! {
+                "aggregate":1, "pipeline":[{"$currentOp":{"allUsers":true}}, {"$match":{"command.comment":{"$in":[a,b]}}}], "cursor":{}
+            }).await.unwrap();
+            if result.get_document("cursor").unwrap().get_array("firstBatch").unwrap().len() == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("both tagged queries reached server");
+    driver.cancel(&config, &handles.0).await.unwrap();
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cancelled.is_err());
+    assert!(
+        !second.is_finished(),
+        "cancelling first must leave second query running"
+    );
+    driver.cancel(&config, &handles.1).await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
     );
 }

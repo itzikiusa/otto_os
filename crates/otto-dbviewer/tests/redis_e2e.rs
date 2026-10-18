@@ -316,3 +316,198 @@ async fn redis_completion() {
         "completion should be commands-only (no key-prefix Field items)"
     );
 }
+
+/// Live parity verification for L13–L16 against an isolated Redis container
+/// (`OTTO_REDIS_PARITY_PORT`, defaulting to 26379 or 16379).
+#[tokio::test]
+#[ignore]
+async fn redis_parity_quotes_batches_transactions_select_and_blocking() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let port = std::env::var("OTTO_REDIS_PARITY_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(26379);
+    let password = std::env::var("OTTO_REDIS_PARITY_PASSWORD").ok();
+    let cfg = ResolvedConfig {
+        lifecycle: None,
+        engine: Engine::Redis,
+        host: "127.0.0.1".into(),
+        port,
+        user: None,
+        password,
+        database: Some("0".into()),
+        tls: TlsConfig::default(),
+        params: json!({}),
+    };
+    let d = RedisDriver::default();
+
+    // 1. L14 sdssplitargs quote & escape parity against real Redis server.
+    let quotes_batch = d
+        .run(
+            &cfg,
+            &query("ECHO \"a\\q\"\nECHO 'a\\\\b'\nECHO \"\\X41\"\nECHO \"\\x41\"\nECHO foo\"bar\""),
+        )
+        .await
+        .expect("quote batch");
+    assert_eq!(quotes_batch.rows, vec![vec![json!("aq")]]);
+    assert_eq!(quotes_batch.more_results.len(), 4);
+    assert_eq!(
+        quotes_batch.more_results[0].rows,
+        vec![vec![json!("a\\\\b")]]
+    );
+    assert_eq!(quotes_batch.more_results[1].rows, vec![vec![json!("X41")]]);
+    assert_eq!(quotes_batch.more_results[2].rows, vec![vec![json!("A")]]);
+    assert_eq!(
+        quotes_batch.more_results[3].rows,
+        vec![vec![json!("foobar")]]
+    );
+
+    // Adjacent unquoted token after closing quote must fail with validation error.
+    let adj_err = d
+        .run(&cfg, &query("ECHO \"foo\"bar"))
+        .await
+        .expect_err("closing quote followed by token must error");
+    assert!(adj_err
+        .to_string()
+        .contains("closing quote must be followed by whitespace"));
+
+    // 2. L16 MULTI/EXEC transaction on the same operation-isolated connection,
+    // including nested runtime error element inside EXEC array.
+    let tx = d
+        .run(
+            &cfg,
+            &query(
+                "DEL parity:tx:k parity:tx:str\nSET parity:tx:str hello\nMULTI\nINCR parity:tx:k\nLPUSH parity:tx:str bad\nGET parity:tx:k\nEXEC",
+            ),
+        )
+        .await
+        .expect("MULTI/EXEC batch");
+    assert_eq!(tx.more_results.len(), 6);
+    assert_eq!(tx.more_results[1].rows, vec![vec![json!("OK")]]); // MULTI
+    assert_eq!(tx.more_results[2].rows, vec![vec![json!("QUEUED")]]); // INCR
+    assert_eq!(tx.more_results[3].rows, vec![vec![json!("QUEUED")]]); // LPUSH
+    assert_eq!(tx.more_results[4].rows, vec![vec![json!("QUEUED")]]); // GET
+    let exec_rows = &tx.more_results[5].rows;
+    assert_eq!(exec_rows.len(), 3);
+    assert_eq!(exec_rows[0], vec![json!(1)]);
+    assert!(
+        exec_rows[1][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("WRONGTYPE"),
+        "runtime error inside EXEC should be rendered as a row cell: {:?}",
+        exec_rows[1]
+    );
+    assert_eq!(exec_rows[2], vec![json!("1")]);
+
+    // 3. L16 Operation isolation: an uncommitted MULTI or SELECT in one run()
+    // must NOT leak to the next run() call or cached metadata connections.
+    let _ = d
+        .run(
+            &cfg,
+            &query("SELECT 7\nSET parity:db7:only yes\nMULTI\nINCR parity:db7:uncommitted"),
+        )
+        .await
+        .expect("uncommitted MULTI in db7");
+    let next_call = d
+        .run(&cfg, &query("GET parity:db7:only\nEXEC"))
+        .await
+        .expect("subsequent run on db0");
+    assert_eq!(
+        next_call.rows,
+        vec![vec![json!("(nil)")]],
+        "subsequent run() must start on db0, not leaked db7"
+    );
+    assert!(
+        next_call.more_results[0].errored,
+        "EXEC without MULTI on fresh connection must error"
+    );
+
+    // 4. L16 Blocking command (BLPOP + XREAD BLOCK) with >30s configured timeout_ms.
+    let mut blpop_req = query("RPUSH parity:list item-1\nBLPOP parity:list 1\nXREAD COUNT 1 BLOCK 50 STREAMS parity:empty:stream 0-0");
+    blpop_req.timeout_ms = Some(45_000);
+    let blpop_res = d.run(&cfg, &blpop_req).await.expect("BLPOP + XREAD BLOCK");
+    assert_eq!(blpop_res.more_results.len(), 2);
+    assert_eq!(
+        blpop_res.more_results[0].rows,
+        vec![vec![json!("parity:list")], vec![json!("item-1")]]
+    );
+    assert_eq!(
+        blpop_res.more_results[1].rows,
+        vec![vec![json!("(nil)")]],
+        "XREAD BLOCK timeout returns (nil)"
+    );
+
+    // 5. L16 Bounded client-socket cleanup on cancellation: cancelling an in-flight
+    // blocking `run()` drops the isolated connection and removes its client entry
+    // from Redis `CLIENT LIST` within a bounded window (< 1s).
+    let _ = d.run(&cfg, &query("DEL parity:cancel:list")).await;
+    let cancel_req = query("CLIENT SETNAME otto-cancel-probe\nBLPOP parity:cancel:list 20");
+    let timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        d.run(&cfg, &cancel_req),
+    )
+    .await;
+    assert!(
+        timed_out.is_err(),
+        "BLPOP on empty list should block until cancelled"
+    );
+    let mut cleaned = false;
+    for _ in 0..20 {
+        let cl = d
+            .run(&cfg, &query("CLIENT LIST"))
+            .await
+            .expect("CLIENT LIST");
+        let text = cl.rows[0][0].as_str().unwrap_or_default();
+        if !text.contains("name=otto-cancel-probe") {
+            cleaned = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        cleaned,
+        "cancelled isolated run() connection should disappear from CLIENT LIST within 500ms"
+    );
+
+    // 6. L16 Genuine >30s blocking proof: `BLPOP parity:block:31s 40` with
+    // `timeout_ms: Some(45_000)` survives past the 30s default transport timeout
+    // and wakes up when a producer pushes after 31s.
+    let _ = d.run(&cfg, &query("DEL parity:block:31s")).await;
+    let pusher_cfg = cfg.clone();
+    let pusher = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+        let pd = RedisDriver::default();
+        pd.run(&pusher_cfg, &query("RPUSH parity:block:31s after-31s"))
+            .await
+            .expect("delayed RPUSH at 31s");
+    });
+    let mut long_block = query("BLPOP parity:block:31s 40");
+    long_block.timeout_ms = Some(45_000);
+    let long_started = std::time::Instant::now();
+    let long_res = d
+        .run(&cfg, &long_block)
+        .await
+        .expect("BLPOP >30s with timeout_ms=45000 should succeed at 31s");
+    let elapsed = long_started.elapsed();
+    pusher.await.expect("pusher task");
+    assert!(
+        elapsed >= std::time::Duration::from_secs(30),
+        "BLPOP should have blocked >30s (elapsed={elapsed:?})"
+    );
+    assert_eq!(
+        long_res.rows,
+        vec![vec![json!("parity:block:31s")], vec![json!("after-31s")]]
+    );
+
+    // Cleanup
+    let _ = d
+        .run(
+            &cfg,
+            &query("DEL parity:tx:k parity:tx:str parity:list parity:cancel:list parity:block:31s\nSELECT 7\nDEL parity:db7:only parity:db7:uncommitted"),
+        )
+        .await;
+}

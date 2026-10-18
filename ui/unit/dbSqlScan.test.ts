@@ -4,9 +4,30 @@ import {
   analyzeStatement,
   countStatements,
   extractVars,
+  looksLikeMongoshScript,
   stmtPreview,
+  statementAtCursor,
   type SplitMode,
 } from '../src/modules/database/sql-util.ts';
+
+test('MySQL delimiter scripts run intact from inside a routine', () => {
+  const sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT :x; SELECT 2; END$$\nDELIMITER ;\nCALL p();";
+  assert.equal(statementAtCursor(sql, sql.indexOf('SELECT 2')), sql);
+  assert.equal(countStatements(sql), 1);
+  assert.deepEqual(analyzeStatement(sql), { count: 1, vars: ['x'] });
+});
+
+test('quoted MySQL delimiter scripts retain their whole buffer', () => {
+  const sql = "DELIMITER 'x y'\nSELECT 1x y\nDELIMITER ;\nSELECT 2;";
+  assert.equal(statementAtCursor(sql, sql.indexOf('SELECT 2')), sql);
+  assert.equal(countStatements(sql), 1);
+});
+
+test('delimiter text inside a string or comment does not change execution selection', () => {
+  for (const sql of ["SELECT '\nDELIMITER $$\n'; SELECT 2;", "/*\nDELIMITER $$\n*/ SELECT 1; SELECT 2;"]) {
+    assert.equal(statementAtCursor(sql, sql.indexOf('SELECT 2')), 'SELECT 2');
+  }
+});
 
 // The editor derives "Run all N" and the Variables bar from `analyzeStatement`
 // (one pass, no mask array) instead of `countStatements` + `extractVars` (two
@@ -95,4 +116,30 @@ test('stmtPreview bounds list rows and tooltips', () => {
   assert.ok(p.endsWith('…'));
   assert.ok(!p.includes('\n'));
   assert.equal(stmtPreview('x'.repeat(300), 300), 'x'.repeat(300));
+});
+
+
+test('Mongo script keywords tolerate whitespace and leading comments without matching document keys', () => {
+  for (const script of [
+    "do { print('42'); } while(false)",
+    "switch(1) { case 1: print('42'); break; }",
+    "for await (const x of [42]) { print(x); }",
+    "if\t(true) { print('42'); }",
+    "/* leading */ const x=42; print(x);",
+    "/* multi\nline */ /* second */ do { print('42'); } while(false)",
+    "async function answer() { return 42; }\nprint(await answer());",
+  ]) assert.equal(looksLikeMongoshScript(script), true, script);
+  for (const key of ['if', 'do', 'switch', 'const', 'async', 'print']) {
+    const query = `db.c.find({\n ${key} /* key */ : 1\n})`;
+    assert.equal(looksLikeMongoshScript(query), false, query);
+  }
+});
+
+
+test('Mongo shell marker text in native literals and trailing comments stays native', () => {
+  for (const query of [
+    "db.c.find({note:'process.env'})",
+    "db.c.find({note:'db.getSiblingDB('})",
+    "db.c.find({}) // process.env db.getSiblingDB(",
+  ]) assert.equal(looksLikeMongoshScript(query), false, query);
 });

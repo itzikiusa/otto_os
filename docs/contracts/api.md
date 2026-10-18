@@ -1054,7 +1054,9 @@ straight to a buffered file writer so daemon memory stays bounded regardless of
 result size — MySQL via the sqlx row cursor, MongoDB by iterating the `Cursor`,
 ClickHouse (HTTP) by requesting an explicit `FORMAT` and splicing the response
 body (so a tunnelled ClickHouse writes the user's local path, **not** a
-server-side `INTO OUTFILE` on the tunnel host). Only row-returning statements are
+server-side `INTO OUTFILE` on the tunnel host). ClickHouse native transport streams
+decoded blocks; HTTP JSON arrays stream with `output_format_json_array_of_rows=1`.
+Redis uses its bounded result path. Only row-returning statements are
 exportable; a write/DDL is rejected (and a write on a guarded production/read-only
 connection is blocked as elsewhere). Gated at the same role as `query` (`ws
 editor`; global connections: `Database:Edit`).
@@ -1105,8 +1107,27 @@ Redis) the detached run is aborted instead (`aborted`); after a native cancel th
 run gets a short grace period to end on its own (`cancelled`) before it is
 aborted. A mongosh script also honours the request's `timeout_ms`.
 
-**MongoDB cancel.** A tracked run (`query_id` set) stamps its `find` /
-`aggregate` / `countDocuments` with `comment: "otto:<query_id>"` (a cursor's
+**MySQL local-file commands.** `LOAD DATA LOCAL INFILE` and `LOAD XML LOCAL
+INFILE` use the existing root-only host-file permission, even on legacy
+connections. The driver transfers only the explicit statement filename, requires
+a regular file within the 100 MiB import bound, and uses a dedicated connection.
+Native FIELDS/LINES/SET clauses are sent unchanged. Saved connection parameters
+cannot authorize file transfers; other callers use the upload/import endpoint.
+
+**MongoDB distinct.** Native queries accept `db.collection.distinct("field")`
+and `db.collection.distinct("field", {filter})`, or the JSON command
+`{collection: "collection", op: "distinct", field: "field", filter: {}}`.
+The operation is read-only and returns one typed value per row under the
+`value` column. `max_rows` caps displayed values and sets `truncated`; no
+`auto_limited` or `next_cursor` is returned because distinct is not a cursor.
+MongoDB's BSON response size limit still applies to the full server reply.
+The native parser rejects third-argument options and chains. Unsupported shell
+expressions may use mongosh fallback under the normal write policy; JSON command
+errors do not fall back. Query plans and streaming exports remain limited to
+native find/aggregate. Fallback is never triggered by a database execution error.
+
+**MongoDB cancel.** Each run stamps its `find` /
+`aggregate` / `count` / `countDocuments` / `distinct` with a unique server-owned `comment: "otto:<execution_id>"` (a cursor's
 `getMore`s inherit it). Cancel runs `[{$currentOp: {allUsers: true, localOps:
 true}}, {$match: {"command.comment": tag}}, {$project: {opid: 1}}]` on `admin`
 and issues `{killOp: 1, op: <opid>}` per match, on a separate pooled connection.

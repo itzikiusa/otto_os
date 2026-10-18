@@ -758,3 +758,410 @@ async fn mysql_batch_preserves_explicit_limit_forms() {
         );
     }
 }
+
+/// Native commands must use COM_QUERY and shape rows from EXECUTE/admin commands.
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_native_commands_and_dynamic_result_rows() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    let result = driver.run(&cfg(), &query(
+        "USE shopdb; PREPARE otto_parity FROM 'SELECT 42 AS answer'; EXECUTE otto_parity; DEALLOCATE PREPARE otto_parity; SELECT DATABASE()"
+    )).await.unwrap();
+    assert_eq!(result.more_results.len(), 4, "{result:?}");
+    assert_eq!(result.more_results[1].rows, vec![vec![json!(42)]]);
+    assert_eq!(result.more_results[1].columns[0].name, "answer");
+    assert_eq!(result.more_results[3].rows[0][0], json!("shopdb"));
+}
+
+/// CTE DML must retain its acknowledgement, despite its WITH prefix.
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_cte_write_affected_rows() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    let result = driver.run(&cfg(), &query(
+        "CREATE TEMPORARY TABLE otto_cte_parity (id INT); INSERT INTO otto_cte_parity VALUES (1), (2); WITH ids AS (SELECT 1 AS id) UPDATE otto_cte_parity t JOIN ids ON ids.id=t.id SET t.id=3; SELECT id FROM otto_cte_parity ORDER BY id"
+    )).await.unwrap();
+    assert_eq!(result.more_results[1].rows_affected, Some(1), "{result:?}");
+    assert_eq!(
+        result.more_results[2].rows,
+        vec![vec![json!(2)], vec![json!(3)]]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_time_duration_and_precise_values() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    let result = driver.run(&cfg(), &query(
+        "SELECT CAST('-125:30:15.123456' AS TIME(6)), CAST('838:59:59' AS TIME), CAST('18446744073709551615' AS UNSIGNED), CAST('12345678901234567890.123456' AS DECIMAL(30,6)), CAST(NULL AS TIME), X'00FF', CAST('-01:02:03' AS TIME)"
+    )).await.unwrap();
+    assert_eq!(
+        result.rows[0],
+        vec![
+            json!("-125:30:15.123456"),
+            json!("838:59:59"),
+            json!("18446744073709551615"),
+            json!("12345678901234567890.123456"),
+            json!(null),
+            json!("AP8="),
+            json!("-01:02:03")
+        ]
+    );
+}
+
+/// Provision via a separate raw connection so the CALL reader is tested
+/// independently from client-script DELIMITER support. The unique routine is
+/// removed even when the assertion later fails.
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_call_keeps_each_result_boundary() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    use sqlx::Connection as _;
+    let mut conn = sqlx::MySqlConnection::connect("mysql://otto:ottopw@127.0.0.1:13306/shopdb")
+        .await
+        .unwrap();
+    let name = format!(
+        "otto_parity_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE PROCEDURE `{name}`() BEGIN SELECT 1 AS a UNION ALL SELECT 2; SELECT 'second' AS b, 3 AS c; END"
+    ))).execute(&mut conn).await.unwrap();
+    let driver = MysqlDriver::default();
+    let response = driver
+        .run(
+            &cfg(),
+            &QueryRequest {
+                statement: format!("CALL `{name}`(); SELECT 'after' AS d"),
+                max_rows: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP PROCEDURE `{name}`")))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let result = response.unwrap();
+    assert_eq!(result.rows, vec![vec![json!(1)]]);
+    assert!(result.truncated);
+    assert_eq!(result.more_results.len(), 3, "{result:?}");
+    assert_eq!(result.more_results[0].columns[0].name, "b");
+    assert_eq!(
+        result.more_results[0].rows,
+        vec![vec![json!("second"), json!(3)]]
+    );
+    assert_eq!(result.more_results[1].rows_affected, Some(0));
+    assert_eq!(result.more_results[2].rows, vec![vec![json!("after")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_empty_select_keeps_columns() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let result = MysqlDriver::default()
+        .run(
+            &cfg(),
+            &query("SELECT 42 AS answer, 'text' AS label WHERE FALSE"),
+        )
+        .await
+        .unwrap();
+    assert!(result.rows.is_empty());
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|col| col.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["answer", "label"]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_timeout_covers_lowercase_commands_and_batches() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    for sql in [
+        "select sleep(10)",
+        "DO SLEEP(10)",
+        "SELECT 1; DO SLEEP(10); SELECT 2",
+    ] {
+        let started = std::time::Instant::now();
+        let error = driver
+            .run(
+                &cfg(),
+                &QueryRequest {
+                    statement: sql.into(),
+                    timeout_ms: Some(100),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{sql}: {error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{sql}"
+        );
+        assert_eq!(
+            driver.run(&cfg(), &query("SELECT 7")).await.unwrap().rows[0][0],
+            json!(7)
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_delimiter_routine_script_executes_as_native_batch() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let name = format!(
+        "otto_script_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let driver = MysqlDriver::default();
+    let result = driver.run(&cfg(), &query(&format!(
+        "DELIMITER $$\nCREATE PROCEDURE `{name}`() BEGIN SELECT 11 AS first_result; SELECT 22 AS second_value; END$$\nDELIMITER ;\nCALL `{name}`();"
+    ))).await;
+    // Clean this test's own uniquely named routine even if CALL failed.
+    driver
+        .run(
+            &cfg(),
+            &query(&format!("DROP PROCEDURE IF EXISTS `{name}`")),
+        )
+        .await
+        .unwrap();
+    let result = result.unwrap();
+    assert_eq!(result.more_results.len(), 3, "{result:?}");
+    assert_eq!(result.more_results[0].rows, vec![vec![json!(11)]]);
+    assert_eq!(result.more_results[1].rows, vec![vec![json!(22)]]);
+    assert_eq!(result.more_results[2].rows_affected, Some(0));
+}
+
+#[derive(Clone, Default)]
+struct ExportBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for ExportBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_streaming_export_preserves_empty_schema_and_native_values() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    use otto_dbviewer::export::ExportFormat;
+    let driver = MysqlDriver::default();
+    for (sql, limit, expected) in [
+        ("SELECT 1 AS answer WHERE FALSE", None, "answer\n"),
+        ("SELECT 1 AS answer", Some(0), "answer\n"),
+        (
+            "SELECT CAST('-125:30:15.123456' AS TIME(6)) AS duration",
+            None,
+            "duration\n-125:30:15.123456\n",
+        ),
+    ] {
+        let buffer = ExportBuffer::default();
+        driver
+            .export_to_writer(
+                &cfg(),
+                sql,
+                None,
+                ExportFormat::CsvWithNames,
+                limit,
+                Box::new(buffer.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap(),
+            expected
+        );
+    }
+    let error = driver
+        .export_to_writer(
+            &cfg(),
+            "SELECT 1; SELECT 2",
+            None,
+            ExportFormat::Csv,
+            None,
+            Box::new(ExportBuffer::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("one row-returning statement"));
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_batch_transaction_rolls_back_and_session_variables_do_not_leak() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    let result = driver.run(&cfg(), &query(
+        "CREATE TEMPORARY TABLE otto_tx_parity (id INT) ENGINE=InnoDB; SET @otto_parity=99; START TRANSACTION; INSERT INTO otto_tx_parity VALUES (7); ROLLBACK; SELECT COUNT(*) AS count, @otto_parity AS variable FROM otto_tx_parity"
+    )).await.unwrap();
+    assert_eq!(
+        result.more_results.last().unwrap().rows[0],
+        vec![json!(0), json!(99)]
+    );
+    let later = driver
+        .run(&cfg(), &query("SELECT @otto_parity"))
+        .await
+        .unwrap();
+    assert_eq!(later.rows[0][0], json!(null));
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_governed_read_retires_nontransactional_session_state() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    let mut cfg = cfg();
+    cfg.params = json!({"__read_only_execution": true});
+    let result = driver
+        .run(&cfg, &query("SELECT @otto_governed_parity:=99"))
+        .await
+        .unwrap();
+    assert_eq!(result.rows[0][0], json!(99));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let later = driver
+        .run(&cfg, &query("SELECT @otto_governed_parity"))
+        .await
+        .unwrap();
+    assert_eq!(later.rows[0][0], json!(null));
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated SQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_call_preserves_empty_result_metadata_and_ack() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let name = format!(
+        "otto_empty_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let driver = MysqlDriver::default();
+    let response = driver.run(&cfg(), &query(&format!(
+        "DELIMITER $$\nCREATE PROCEDURE `{name}`() BEGIN SELECT 1 AS empty_first WHERE FALSE; SELECT 'x' AS empty_second, 2 AS other WHERE FALSE; SELECT 3 AS last_result; END$$\nDELIMITER ;\nCALL `{name}`();"
+    ))).await;
+    driver
+        .run(
+            &cfg(),
+            &query(&format!("DROP PROCEDURE IF EXISTS `{name}`")),
+        )
+        .await
+        .unwrap();
+    let result = response.unwrap();
+    assert_eq!(result.more_results.len(), 4, "{result:?}");
+    let first = &result.more_results[0];
+    assert!(first.rows.is_empty());
+    assert_eq!(first.columns[0].name, "empty_first");
+    assert_eq!(
+        first.rows_affected, None,
+        "empty SELECT is not a command acknowledgement"
+    );
+    let second = &result.more_results[1];
+    assert!(second.rows.is_empty());
+    assert_eq!(
+        second
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["empty_second", "other"]
+    );
+    assert_eq!(second.rows_affected, None);
+    assert_eq!(result.more_results[2].rows, vec![vec![json!(3)]]);
+    assert!(result.more_results[3].columns.is_empty());
+    assert_eq!(
+        result.more_results[3].rows_affected,
+        Some(0),
+        "CALL acknowledgement stays distinct"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MySQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_batch_uses_current_mode_after_set_and_execute() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    for change in [
+        "SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'",
+        "PREPARE mode_stmt FROM 'SET SESSION sql_mode=\"NO_BACKSLASH_ESCAPES\"'; EXECUTE mode_stmt",
+    ] {
+        let sql = format!(
+            r"{change}; SELECT 'ends\' AS value; SET SESSION sql_mode=''; SELECT 'normal\\' AS value; SELECT 77 AS last_result"
+        );
+        let result = driver.run(&cfg(), &query(&sql)).await.unwrap();
+        let rows: Vec<_> = result
+            .more_results
+            .iter()
+            .filter(|r| !r.rows.is_empty())
+            .map(|r| r.rows.clone())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                vec![vec![json!("ends\\")]],
+                vec![vec![json!("normal\\")]],
+                vec![vec![json!(77)]]
+            ],
+            "{result:?}"
+        );
+        assert!(!result.more_results.iter().any(|r| r.errored), "{result:?}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MySQL fixture (OTTO_DBV_E2E)"]
+async fn mysql_native_boundaries_survive_ansi_quotes_chunk() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+    let driver = MysqlDriver::default();
+    let result = driver.run(&cfg(), &query(r#"SET SESSION sql_mode='ANSI_QUOTES'; SELECT 1 AS "ends\"; SELECT 'second' AS last_result;"#)).await.unwrap();
+    assert_eq!(result.more_results.len(), 2, "{result:?}");
+    assert_eq!(result.more_results[0].columns[0].name, "ends\\");
+    assert_eq!(result.more_results[0].rows, vec![vec![json!(1)]]);
+    assert_eq!(result.more_results[1].columns[0].name, "last_result");
+    assert_eq!(result.more_results[1].rows, vec![vec![json!("second")]]);
+}

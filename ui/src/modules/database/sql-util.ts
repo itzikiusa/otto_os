@@ -226,11 +226,26 @@ function segments(sql: string, mode: SplitMode = 'sql'): { from: number; to: num
 
 const stripTrailingSemi = (s: string) => s.replace(/;\s*$/, '').trim();
 
+/** MySQL client directives carry parser state across statements. Send the
+ * whole buffer so Run inside a routine cannot execute a body fragment alone.
+ * The server removes directives and splits on their selected delimiter. */
+function hasMysqlDelimiter(sql: string, mode: SplitMode): boolean {
+  if (mode !== 'sql' || !/^\s*delimiter[ \t]+[^\r\n]+$/im.test(sql)) return false;
+  const mask = codeMask(sql, mode);
+  const lines = /^[ \t]*delimiter[ \t]+[^\r\n]+$/gim;
+  for (const match of sql.matchAll(lines)) {
+    const start = match.index + match[0].search(/\S/);
+    if (mask[start]) return true;
+  }
+  return false;
+}
+
 /**
  * Non-empty statement count — drives the editor's "Run all" affordance (the
  * plain Run intentionally narrows to selection / statement-at-cursor).
  */
 export function countStatements(sql: string, mode: SplitMode = 'sql'): number {
+  if (hasMysqlDelimiter(sql, mode)) return 1;
   return segments(sql, mode).filter((s) => stripTrailingSemi(sql.slice(s.from, s.to))).length;
 }
 
@@ -379,7 +394,7 @@ export function analyzeStatement(
   }
   if (line) endLine();
   else if (segHas) count++;
-  return { count, vars };
+  return { count: hasMysqlDelimiter(sql, mode) ? 1 : count, vars };
 }
 
 /**
@@ -388,6 +403,7 @@ export function analyzeStatement(
  * whitespace after the last delimiter, returns the nearest preceding statement.
  */
 export function statementAtCursor(sql: string, cursor: number, mode: SplitMode = 'sql'): string {
+  if (hasMysqlDelimiter(sql, mode)) return sql.trim();
   const segs = segments(sql, mode).map((s) => ({
     ...s,
     text: stripTrailingSemi(sql.slice(s.from, s.to)),
@@ -536,29 +552,36 @@ export function renderVar(spec: VarSpec, mode: SplitMode = 'sql'): string {
  * mongosh-availability check before the user runs anything.
  */
 export function looksLikeMongoshScript(statement: string): boolean {
-  const openers = [
-    'const ', 'let ', 'var ', 'function ', 'if (', 'if(', 'for (', 'for(',
-    'while (', 'while(', 'try ', 'try{', 'throw ', 'print(',
-  ];
-  let inBlockComment = false;
+  const keywords = new Set([
+    'const', 'let', 'var', 'function', 'async', 'class', 'if', 'for', 'while',
+    'do', 'switch', 'try', 'throw', 'return', 'break', 'continue', 'debugger',
+  ]);
+  const stripPrefixComments = (text: string, state: { block: boolean }): string => {
+    for (;;) {
+      text = text.trimStart();
+      if (state.block) {
+        const end = text.indexOf('*/');
+        if (end < 0) return '';
+        text = text.slice(end + 2);
+        state.block = false;
+      } else if (text.startsWith('/*')) {
+        text = text.slice(2);
+        state.block = true;
+      } else if (text.startsWith('//')) return '';
+      else return text;
+    }
+  };
+  const state = { block: false };
   for (const raw of statement.split('\n')) {
-    const line = raw.trim();
-    if (inBlockComment) {
-      if (line.includes('*/')) inBlockComment = false;
-      continue;
-    }
-    if (line === '' || line.startsWith('//')) continue;
-    if (line.startsWith('/*')) {
-      inBlockComment = !line.includes('*/');
-      continue;
-    }
+    const line = stripPrefixComments(raw, state);
+    const keyword = /^[A-Za-z0-9_$]*/.exec(line)![0];
+    const tail = stripPrefixComments(line.slice(keyword.length), { block: false });
+    // Reserved words are valid unquoted document keys, not script openers.
     if (
-      openers.some((kw) => line.startsWith(kw)) ||
-      line.includes('db.getSiblingDB(') ||
-      line.includes('process.env')
-    ) {
-      return true;
-    }
+      (!tail.startsWith(':') && keywords.has(keyword)) ||
+      (keyword === 'print' && tail.startsWith('(')) ||
+      line.startsWith('db.getSiblingDB(') || line.startsWith('process.env')
+    ) return true;
   }
   return false;
 }

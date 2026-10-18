@@ -198,6 +198,7 @@ impl ResolvedConfig {
         let mut cache_params = self.params.clone();
         if let Some(map) = cache_params.as_object_mut() {
             map.remove("__read_only_execution");
+            map.remove("__mysql_local_infile_authorized");
         }
         let raw = format!(
             "{engine}|{host}|{port}|{user}|pw{password_len}|{database}|\
@@ -1354,41 +1355,62 @@ pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
 /// the native parser handles: a multi-line `insertOne({...})` body, a JSON
 /// command document or translated SQL contains none of these openers.
 pub fn looks_like_mongosh_script(statement: &str) -> bool {
-    const OPENERS: [&str; 14] = [
-        "const ",
-        "let ",
-        "var ",
-        "function ",
-        "if (",
-        "if(",
-        "for (",
-        "for(",
-        "while (",
-        "while(",
-        "try ",
-        "try{",
-        "throw ",
-        "print(",
-    ];
+    // Keep this token/boundary recognizer aligned with the editor. Strip only
+    // leading comments: keywords inside native document values are not code.
+    fn strip_prefix_comments<'a>(mut text: &'a str, in_block: &mut bool) -> &'a str {
+        loop {
+            text = text.trim_start();
+            if *in_block {
+                let Some(end) = text.find("*/") else {
+                    return "";
+                };
+                text = &text[end + 2..];
+                *in_block = false;
+            } else if let Some(rest) = text.strip_prefix("/*") {
+                text = rest;
+                *in_block = true;
+            } else if text.starts_with("//") {
+                return "";
+            } else {
+                return text;
+            }
+        }
+    }
     let mut in_block_comment = false;
     for raw in statement.lines() {
-        let line = raw.trim();
-        if in_block_comment {
-            if line.contains("*/") {
-                in_block_comment = false;
-            }
-            continue;
-        }
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        if line.starts_with("/*") {
-            in_block_comment = !line.contains("*/");
-            continue;
-        }
-        if OPENERS.iter().any(|kw| line.starts_with(kw))
-            || line.contains("db.getSiblingDB(")
-            || line.contains("process.env")
+        let line = strip_prefix_comments(raw, &mut in_block_comment);
+        let end = line
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+            .count();
+        let keyword = &line[..end];
+        let mut tail_comment = false;
+        let tail = strip_prefix_comments(&line[end..], &mut tail_comment);
+        // Reserved words can be unquoted BSON keys; never hijack `do: 1`.
+        if !tail.starts_with(':')
+            && matches!(
+                keyword,
+                "const"
+                    | "let"
+                    | "var"
+                    | "function"
+                    | "async"
+                    | "class"
+                    | "if"
+                    | "for"
+                    | "while"
+                    | "do"
+                    | "switch"
+                    | "try"
+                    | "throw"
+                    | "return"
+                    | "break"
+                    | "continue"
+                    | "debugger"
+            )
+            || keyword == "print" && tail.starts_with('(')
+            || line.starts_with("db.getSiblingDB(")
+            || line.starts_with("process.env")
         {
             return true;
         }
@@ -1416,29 +1438,12 @@ fn sql_is_write(statement: &str) -> bool {
     false
 }
 
-/// The engine-aware SQL write classifier behind [`statement_is_write`]. A
-/// statement is a write when ANY of three independent checks says so:
-///
-/// 1. the Generic split ([`sql_is_write`]) — the historical guard;
-/// 2. the ENGINE's own split (the one its driver executes with). Lexers
-///    disagree about string / comment / identifier boundaries between
-///    dialects; where they do, the guard must never see fewer statements than
-///    the executor runs, so each dialect's statements are classified too;
-/// 3. for MySQL / PostgreSQL, every statement led by a keyword that has a
-///    write form (`SELECT` / `WITH` / `EXPLAIN`) must PARSE, with that
-///    engine's sqlparser dialect, into a provable read
-///    ([`crate::access::read_is_provable`]; `DESC`/`DESCRIBE` included, being
-///    MySQL synonyms of `EXPLAIN`). A first-keyword allowlist cannot
-///    see a write nested in a read-looking statement; the parser can, and a
-///    statement it cannot parse is unproven — so it counts as a write.
-///
-/// ClickHouse has no read-looking statement that writes (no `SELECT … INTO`,
-/// no data-changing CTE), and sqlparser does not cover its dialect well enough
-/// to make a parse failure meaningful, so it stops after step 2.
+/// The engine-aware SQL write classifier behind [`statement_is_write`].
+/// Split with the exact dialect the executor uses. A second Generic split can
+/// invent statements inside backtick identifiers or PostgreSQL dollar strings.
+/// MySQL/PostgreSQL read-looking forms must also parse as a provable read;
+/// ClickHouse uses its native read forms because sqlparser coverage is partial.
 fn sql_is_write_for(engine: Engine, statement: &str) -> bool {
-    if sql_is_write(statement) {
-        return true;
-    }
     let dialect = match engine {
         Engine::Mysql => SqlDialect::Mysql,
         Engine::Postgres => SqlDialect::Postgres,
@@ -1446,10 +1451,11 @@ fn sql_is_write_for(engine: Engine, statement: &str) -> bool {
         Engine::Redis | Engine::Mongodb => SqlDialect::Generic,
     };
     let spans = split_statements(statement, dialect);
-    if spans
-        .iter()
-        .any(|span| !sql_first_keyword_is_read(&span.text))
-    {
+    if spans.iter().any(|span| {
+        !sql_first_keyword_is_read(&span.text)
+            && !(engine == Engine::Clickhouse
+                && matches!(sql_first_keyword(&span.text).as_str(), "EXISTS" | "CHECK"))
+    }) {
         return true;
     }
     if matches!(engine, Engine::Mysql | Engine::Postgres) {
@@ -1485,6 +1491,11 @@ pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
             | "XA"
             | "SAVEPOINT"
             | "PREPARE"
+            | "EXECUTE"
+            | "DEALLOCATE"
+            | "COMMIT"
+            | "ROLLBACK"
+            | "END"
             | "HANDLER"
             | "DECLARE"
             | "CALL"
@@ -1496,20 +1507,24 @@ pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
         return true;
     }
     let upper = statement.to_ascii_uppercase();
+    let words: Vec<&str> = upper
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+        .filter(|word| !word.is_empty())
+        .collect();
     // `SELECT … INTO TEMP t` (PostgreSQL: a session temp table) and
     // `SELECT … INTO @v` / `SELECT @v := …` (MySQL: a session user variable).
     // Any `INTO` word in a SELECT/WITH counts — over-flagging only costs a
     // fresh pooled connection; under-flagging leaks state to the next request.
     let select_writes_session = matches!(kw.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES")
-        && (upper
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-            .any(|w| w == "INTO")
-            || upper.contains(":="));
+        && (words.contains(&"INTO") || upper.contains(":="));
     select_writes_session
-        || (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
-        || upper.contains("GET_LOCK(")
+        || (kw == "CREATE" && (words.contains(&"TEMPORARY") || words.contains(&"TEMP")))
+        // Function names remain tokens even with whitespace/comments before `(`.
+        // False positives in literals only retire a pooled connection; missing
+        // an actual call can expose its session state to the next request.
+        || words.contains(&"GET_LOCK")
         || upper.contains("ADVISORY_LOCK")
-        || upper.contains("SET_CONFIG(")
+        || words.contains(&"SET_CONFIG")
 }
 
 /// True when a single SQL statement's first keyword is a known row-returning
@@ -1556,21 +1571,7 @@ fn sql_first_keyword(statement: &str) -> String {
 /// Redis: a write unless every command on its own line is a known read-only
 /// command. The console runs one command per line (`#` comments ignored).
 fn redis_is_write(statement: &str) -> bool {
-    for line in statement.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let cmd = line
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_uppercase();
-        if !REDIS_READ_COMMANDS.contains(&cmd.as_str()) {
-            return true;
-        }
-    }
-    false
+    !crate::drivers::redis::statement_is_read_only(statement)
 }
 
 /// True when any command line is `KEYS`. It is a read, but it walks the whole
@@ -1578,35 +1579,8 @@ fn redis_is_write(statement: &str) -> bool {
 /// guarded connections ask for confirmation and the MCP path refuses it in
 /// favour of `SCAN`.
 pub fn redis_uses_keys(statement: &str) -> bool {
-    statement.lines().any(|line| {
-        let line = line.trim();
-        !line.starts_with('#')
-            && line
-                .split_whitespace()
-                .next()
-                .is_some_and(|cmd| cmd.eq_ignore_ascii_case("KEYS"))
-    })
+    crate::drivers::redis::statement_uses_keys(statement)
 }
-
-/// Read-only Redis commands (conservative subset — anything not listed counts
-/// as a write, including admin/scripting commands like EVAL we can't vet).
-///
-/// `CONFIG` and `CLIENT` are intentionally absent: they have mutating subcommands
-/// (`CONFIG SET`, `CLIENT KILL`) and we don't parse the subcommand here, so the
-/// whole family classifies as a write and requires `confirm_write` on a guarded
-/// connection.
-#[rustfmt::skip]
-const REDIS_READ_COMMANDS: &[&str] = &[
-    "GET", "MGET", "STRLEN", "GETRANGE", "EXISTS", "TYPE", "TTL", "PTTL", "KEYS", "SCAN",
-    "HGET", "HMGET", "HGETALL", "HKEYS", "HVALS", "HLEN", "HEXISTS", "HSCAN", "HSTRLEN",
-    "LRANGE", "LINDEX", "LLEN", "SMEMBERS", "SISMEMBER", "SMISMEMBER", "SCARD", "SSCAN",
-    "SRANDMEMBER", "SINTER", "SUNION", "SDIFF", "ZRANGE", "ZREVRANGE", "ZRANGEBYSCORE",
-    "ZREVRANGEBYSCORE", "ZRANGEBYLEX", "ZSCORE", "ZMSCORE", "ZRANK", "ZREVRANK", "ZCARD",
-    "ZCOUNT", "ZSCAN", "OBJECT", "DBSIZE", "RANDOMKEY", "DUMP", "MEMORY", "PING", "ECHO",
-    "INFO", "TIME", "COMMAND", "GETBIT", "BITCOUNT", "BITPOS",
-    "PFCOUNT", "GEOPOS", "GEODIST", "GEOSEARCH", "GEOHASH", "XLEN", "XRANGE", "XREVRANGE",
-    "XINFO", "LPOS",
-];
 
 /// Mongo: read-only only when EVERY statement the driver would execute parses
 /// to a read-only op; anything else is treated as a write.
@@ -1996,6 +1970,38 @@ mod tests {
         ));
         // A commented-out const does not make a plain command a script.
         assert!(!looks_like_mongosh_script("// const x = 1;\ndb.c.find({})"));
+    }
+
+    #[test]
+    fn mongosh_statement_keywords_and_document_keys() {
+        for script in [
+            "do { print('42'); } while(false)",
+            "switch(1) { case 1: print('42'); break; }",
+            "for await (const x of [42]) { print(x); }",
+            "if\t(true) { print('42'); }",
+            "/* leading */ const x=42; print(x);",
+            "/* multi\nline */ /* second */ do { print('42'); } while(false)",
+            "async function answer() { return 42; }\nprint(await answer());",
+        ] {
+            assert!(looks_like_mongosh_script(script), "{script}");
+            assert!(statement_is_write(Engine::Mongodb, script));
+        }
+        for key in ["if", "do", "switch", "const", "async", "print"] {
+            let query = format!("db.c.find({{\n {key} /* key */ : 1\n}})");
+            assert!(!looks_like_mongosh_script(&query), "{query}");
+        }
+    }
+
+    #[test]
+    fn mongosh_markers_in_native_values_are_not_scripts() {
+        for query in [
+            "db.c.find({note:'process.env'})",
+            "db.c.find({note:'db.getSiblingDB('})",
+            "db.c.find({}) // process.env db.getSiblingDB(",
+        ] {
+            assert!(!looks_like_mongosh_script(query), "{query}");
+            assert!(!statement_is_write(Engine::Mongodb, query), "{query}");
+        }
     }
 
     /// A script is ALWAYS classified as a write — even when it opens with a
@@ -2644,6 +2650,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn write_classifier_uses_executor_quoting() {
+        for (engine, sql) in [
+            (Engine::Mysql, "SELECT `a;b` FROM t"),
+            (Engine::Clickhouse, "SELECT `a;b` FROM t"),
+            (Engine::Postgres, "SELECT $$a;b$$"),
+        ] {
+            assert!(!statement_is_write(engine, sql), "{engine:?}: {sql}");
+            assert!(statement_is_write(engine, &format!("{sql}; DROP TABLE t")));
+        }
+    }
+
+    #[test]
+    fn session_state_detection_accepts_sql_whitespace_and_comments() {
+        for sql in [
+            "SELECT GET_LOCK ('lock', 0)",
+            "SELECT GET_LOCK/* spacing */('lock', 0)",
+            "SELECT set_config /* spacing */ ('search_path', 'private', false)",
+            "CREATE\nTEMPORARY TABLE t (id int)",
+            "CREATE/* spacing */TEMP TABLE t (id int)",
+            "EXECUTE prepared_statement",
+            "COMMIT AND CHAIN",
+            "ROLLBACK AND CHAIN",
+        ] {
+            assert!(sql_leaves_session_state(sql), "{sql}");
+        }
+        assert!(!sql_leaves_session_state("SELECT id FROM ordinary_table"));
+    }
+
     /// The guard never classifies fewer writes than the engine's own split —
     /// the statements the driver will actually execute.
     #[test]
@@ -2781,12 +2816,11 @@ mod tests {
         assert!(is_write("FLUSHALL"));
         // EVAL can write — must be conservatively a write.
         assert!(is_write("EVAL \"return 1\" 0"));
-        // CONFIG / CLIENT have mutating subcommands and we don't parse the
-        // subcommand — the whole family is a write.
+        // Read/write policy follows the subcommand; native ACLs still apply.
         assert!(is_write("CONFIG SET maxmemory 100mb"));
-        assert!(is_write("CONFIG GET maxmemory"));
+        assert!(!is_write("CONFIG GET maxmemory"));
         assert!(is_write("CLIENT KILL ID 5"));
-        assert!(is_write("CLIENT LIST"));
+        assert!(!is_write("CLIENT LIST"));
     }
 
     #[test]

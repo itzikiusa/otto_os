@@ -105,8 +105,8 @@ impl Driver for MongoDriver {
             // `run_many` executes a `;`-separated script sequentially (already
             // supported — the flag now tells the truth).
             multi_statement: true,
-            // Server-side cancel: every tracked find/aggregate/count is stamped
-            // with `comment: "otto:<query_id>"`, and `cancel` resolves it through
+            // Server-side cancel: every tracked find/aggregate/count/distinct is stamped
+            // with `comment: "otto:<execution_id>"`, and `cancel` resolves it through
             // `$currentOp` → `killOp` on a separate connection. A server that
             // denies `inprog`/`killop` degrades to a logged no-op (the client's
             // HTTP wait still ends), so advertising `true` never over-promises
@@ -546,7 +546,7 @@ impl Driver for MongoDriver {
     }
 
     /// Tracked run: when the request carries a `query_id`, stamp every read
-    /// (find/aggregate/count) with `comment: "otto:<query_id>"` and publish that
+    /// (find/aggregate/count/distinct) with `comment: "otto:<execution_id>"` and publish that
     /// tag through `token`, so a concurrent [`Driver::cancel`] can find the op in
     /// `$currentOp` and `killOp` it. Writes, index ops and `mongosh` scripts run
     /// untagged: the write option types carry no `comment`, a script is a
@@ -558,11 +558,9 @@ impl Driver for MongoDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        let tag = req
-            .query_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(mongo_comment_tag);
+        // Client query ids are only UI handles and may collide across owners
+        // or connections. The server-side cancel marker belongs to this run.
+        let tag = Some(mongo_comment_tag());
         if let Some(t) = &tag {
             token.set(QueryHandle::MongoComment(t.clone()));
         }
@@ -574,7 +572,21 @@ impl Driver for MongoDriver {
         // `types::looks_like_mongosh_script`), so guarded connections already
         // demanded their confirmation.
         if crate::types::looks_like_mongosh_script(&req.statement) {
-            return self.run_script(cfg, req).await;
+            if req.explain {
+                return Err(types::invalid(
+                    "explain requires a supported native find or aggregate",
+                ));
+            }
+            // Recognize a complete db method chain independently of comments
+            // and line wrapping, while preserving actual scripts verbatim.
+            if let Some(statement) = single_db_expression(&req.statement) {
+                let single = QueryRequest {
+                    statement,
+                    ..req.clone()
+                };
+                return self.run_script(cfg, &single, true).await;
+            }
+            return self.run_script(cfg, req, false).await;
         }
         // A pasted script may hold several statements (e.g. a `deleteOne(...)`
         // followed by an `insertOne(...)`). Split on top-level `;` and run each
@@ -605,6 +617,7 @@ impl Driver for MongoDriver {
         let QueryHandle::MongoComment(tag) = handle else {
             return Ok(());
         };
+        mongo_cancel_with_timeout(std::time::Duration::from_secs(5), async {
         let client = self.connect(cfg).await?;
         let admin = client.database("admin");
         let ops = match current_ops(&admin, current_op_pipeline(tag)).await {
@@ -635,6 +648,7 @@ impl Driver for MongoDriver {
             }
         }
         Ok(())
+        }).await
     }
 
     async fn completion(
@@ -745,7 +759,7 @@ impl Driver for MongoDriver {
         let db_name = resolve_db(cfg, node)?;
         let client = self.connect(cfg).await?;
         let db = client.database(&db_name);
-        let raw = mongo_explain_value(&db, &parsed).await?;
+        let raw = mongo_explain_value(&db, &parsed, None, None).await?;
         let root = crate::plan::from_mongo_queryplanner(&raw);
         Ok(DbQueryPlan {
             engine: "mongodb".into(),
@@ -849,20 +863,30 @@ impl Driver for MongoDriver {
                 }
             }
             let doc = next.map_err(types::upstream)?;
-            if !header_written {
-                // Fix the column order from the first document (`_id` first).
+            if !header_written || matches!(format, ExportFormat::Json | ExportFormat::Ndjson) {
+                // JSON has no fixed header: preserve sparse fields per document.
+                // Delimited exports retain the first document's column order.
                 columns = first_doc_columns(&doc);
                 let cols: Vec<Column> = columns.iter().cloned().map(Column::new).collect();
                 sink.write_header(&cols)
                     .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
                 header_written = true;
             }
-            // Project onto the fixed columns for delimited formats; pass the full
-            // document shape (keyed by the fixed columns, with extras dropped) for
-            // JSON/NDJSON too so the row aligns with the header.
+            // JSON formats keep the full document and BSON sentinels; delimited
+            // formats retain their established readable scalar representation.
             let row: Vec<Value> = columns
                 .iter()
-                .map(|c| doc.get(c).map(bson_to_json).unwrap_or(Value::Null))
+                .map(|c| {
+                    doc.get(c)
+                        .map(|value| {
+                            if matches!(format, ExportFormat::Json | ExportFormat::Ndjson) {
+                                bson_to_json_typed(value)
+                            } else {
+                                bson_to_json(value)
+                            }
+                        })
+                        .unwrap_or(Value::Null)
+                })
                 .collect();
             sink.write_row(&row)
                 .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
@@ -945,7 +969,20 @@ impl MongoDriver {
         } else {
             None
         };
-        let parsed = parse_command(translated.as_deref().unwrap_or(&req.statement))?;
+        let parsed = match parse_command(translated.as_deref().unwrap_or(&req.statement)) {
+            Ok(parsed) => parsed,
+            Err(error)
+                if translated.is_some()
+                    || req.statement.trim_start().starts_with('{')
+                    || req.explain =>
+            {
+                return Err(error)
+            }
+            // Classification uses this same strict parser: unrecognized shell
+            // expressions have already passed the service's write-policy gate.
+            // Never retry a failed native operation: it may have side effects.
+            Err(_) => return self.run_script(cfg, req, true).await,
+        };
         // The active database arrives in `req.node` as a plain name (the UI's
         // active-DB selector, e.g. "promotions"), matching how SQL engines treat
         // `node`, or as a `db:<name>/…` path. It wins over the connection's
@@ -965,7 +1002,7 @@ impl MongoDriver {
 
         // `.explain()` (or the request's explain flag) → return the query plan.
         if parsed.explain || req.explain {
-            return explain_plan(&db, &parsed, started).await;
+            return explain_plan(&db, &parsed, started, max_time_ms, comment).await;
         }
 
         // The cancel tag rides on every read as the command `comment` (server
@@ -973,21 +1010,45 @@ impl MongoDriver {
         let comment_bson = comment.map(|c| Bson::String(c.to_string()));
 
         let mut result = match parsed.op {
-            MongoOp::Count => {
-                let filter = parsed.filter.unwrap_or_default();
-                let mut count_opts = mongodb::options::CountOptions::default();
-                if let Some(ms) = max_time_ms {
-                    count_opts.max_time = Some(std::time::Duration::from_millis(ms as u64));
-                }
-                count_opts.comment = comment_bson;
-                let n = coll
-                    .count_documents(filter)
-                    .with_options(count_opts)
+            MongoOp::Distinct => {
+                let field = parsed
+                    .distinct_field
+                    .as_deref()
+                    .expect("validated distinct field");
+                let mut opts = mongodb::options::DistinctOptions::default();
+                opts.max_time = max_time_ms.map(|ms| std::time::Duration::from_millis(ms as u64));
+                opts.comment = comment_bson;
+                let values = coll
+                    .distinct(field, parsed.filter.unwrap_or_default())
+                    .with_options(opts)
                     .await
                     .map_err(types::upstream)?;
+                Ok(distinct_to_result(values, max_rows, started))
+            }
+            MongoOp::Count | MongoOp::CountDocuments => {
+                let n = if parsed.op == MongoOp::Count {
+                    let command = legacy_count_command(
+                        &parsed.collection,
+                        parsed.filter,
+                        max_time_ms,
+                        comment,
+                    );
+                    let reply = db.run_command(command).await.map_err(types::upstream)?;
+                    mongo_count_value(&reply)?
+                } else {
+                    let mut count_opts = mongodb::options::CountOptions::default();
+                    if let Some(ms) = max_time_ms {
+                        count_opts.max_time = Some(std::time::Duration::from_millis(ms as u64));
+                    }
+                    count_opts.comment = comment_bson;
+                    coll.count_documents(parsed.filter.unwrap_or_default())
+                        .with_options(count_opts)
+                        .await
+                        .map_err(types::upstream)?
+                };
                 let mut result = QueryResult::message(n.to_string());
                 result.columns = vec![Column::typed("count", "int")];
-                result.rows = vec![vec![json!(n)]];
+                result.rows = vec![vec![types::u64_to_json(n)]];
                 result.stats = QueryStats {
                     duration_ms: started.elapsed().as_millis() as u64,
                     row_count: 1,
@@ -1023,7 +1084,10 @@ impl MongoDriver {
                     action = action.sort(s);
                 }
                 let limit = parsed.limit.unwrap_or(max_rows as i64).min(max_rows as i64);
-                action = action.limit(limit + 1);
+                // An explicit limit is the complete requested result, not a
+                // truncated page. Probe only when the explorer cap is tighter.
+                let probe = parsed.limit.is_none_or(|n| n > max_rows as i64);
+                action = action.limit(limit + i64::from(probe));
                 // Server-side pagination: the pager's `offset` maps to Mongo `skip`
                 // (SQL engines map it to `OFFSET`). Applied only when there's no
                 // explicit user `.limit(n)` — same rule as the SQL auto-limiter, so
@@ -1657,7 +1721,12 @@ impl MongoDriver {
     /// genuine shell semantics, and a faked JS subset would silently diverge
     /// from what the same file does under mongosh — so run the real thing.
     /// Output is the shell's stdout, one line per row.
-    async fn run_script(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+    async fn run_script(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &QueryRequest,
+        expression: bool,
+    ) -> Result<QueryResult> {
         /// A bootstrap script legitimately builds indexes; an interactive query
         /// console still needs SOME bound. Generous on purpose.
         const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -1685,7 +1754,12 @@ impl MongoDriver {
             mongosh_script_prelude(&uri, selected.as_deref()).as_bytes(),
         )
         .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
-        std::io::Write::write_all(&mut file, req.statement.as_bytes())
+        let body = if expression {
+            mongosh_expression(&req.statement, req.max_rows.unwrap_or(DEFAULT_MAX_ROWS))
+        } else {
+            req.statement.clone()
+        };
+        std::io::Write::write_all(&mut file, body.as_bytes())
             .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
 
         let mut cmd = tokio::process::Command::new("mongosh");
@@ -1700,11 +1774,9 @@ impl MongoDriver {
         let mut child = match cmd.spawn() {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(types::invalid(
-                    "this input is a mongosh SCRIPT (variables/functions/control flow), which \
-                     Otto runs through the real `mongosh` CLI — but `mongosh` was not found on \
-                     the daemon's PATH. Install it (`brew install mongosh`), or open a terminal \
-                     session on this connection (Connections → this MongoDB), which runs \
-                     mongosh directly.",
+                    "this input requires mongosh (a script or a shell expression beyond the native parser), \
+                     but `mongosh` was not found on the daemon's PATH. Install it (`brew install mongosh`) \
+                     and ensure it is available on the daemon's PATH before retrying.",
                 ));
             }
             Err(e) => return Err(types::upstream(format!("spawn mongosh: {e}"))),
@@ -1722,7 +1794,14 @@ impl MongoDriver {
             let (out, err, status) = tokio::join!(
                 drain_script_pipe(
                     stdout,
-                    ScriptOutput::new(SCRIPT_MAX_LINES, SCRIPT_MAX_BYTES)
+                    ScriptOutput::new(
+                        if expression {
+                            req.max_rows.unwrap_or(DEFAULT_MAX_ROWS)
+                        } else {
+                            SCRIPT_MAX_LINES
+                        },
+                        SCRIPT_MAX_BYTES
+                    )
                 ),
                 drain_script_pipe(stderr, ScriptOutput::new(0, 0)),
                 child.wait(),
@@ -1774,7 +1853,14 @@ impl MongoDriver {
         Ok(QueryResult {
             columns: vec![Column::new("output")],
             rows,
-            message: Some("mongosh script finished".into()),
+            message: Some(
+                if expression {
+                    "Executed with mongosh; Extended JSON output"
+                } else {
+                    "mongosh script finished"
+                }
+                .into(),
+            ),
             stats: QueryStats {
                 duration_ms: started.elapsed().as_millis() as u64,
                 row_count,
@@ -1784,6 +1870,61 @@ impl MongoDriver {
             ..QueryResult::empty()
         })
     }
+}
+
+/// A single db property/call chain can safely be displayed as an expression.
+/// Consecutive newline-separated statements without semicolons remain scripts.
+fn single_db_expression(source: &str) -> Option<String> {
+    let statements = split_statements(source);
+    if statements.len() != 1 {
+        return None;
+    }
+    let statement = statements.into_iter().next()?;
+    let mut rest = statement.strip_prefix("db.")?.to_string();
+    loop {
+        rest = clean_statement(&rest)?;
+        let len = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+            .count();
+        if len == 0 {
+            return None;
+        }
+        let tail = clean_statement(&rest[len..]);
+        let Some(mut tail) = tail else {
+            return Some(statement);
+        };
+        if tail.starts_with('(') {
+            let (_, after) = extract_balanced(&tail).ok()?;
+            tail = match clean_statement(after) {
+                Some(after) => after,
+                None => return Some(statement),
+            };
+        }
+        rest = tail.strip_prefix('.')?.to_string();
+    }
+}
+
+/// Render an otherwise unsupported shell expression without losing its value.
+/// Cursor consumption stops after one truncation probe; raw scripts use their
+/// original body and retain their own print/control-flow behavior.
+fn mongosh_expression(statement: &str, max_rows: usize) -> String {
+    format!(
+        r#"(async () => {{
+const value = await (
+{statement}
+);
+const emit = item => print(EJSON.stringify(item, {{relaxed: false}}));
+if (value && typeof value.hasNext === 'function' && typeof value.next === 'function') {{
+  try {{
+    for (let n = 0; n <= {max_rows} && await value.hasNext(); n++) emit(await value.next());
+  }} finally {{ if (typeof value.close === 'function') await value.close(); }}
+}} else if (Array.isArray(value)) {{
+  for (const item of value.slice(0, {max_rows} + 1)) emit(item);
+}} else if (value !== undefined) {{ emit(value); }}
+}})();
+"#
+    )
 }
 
 /// The wall-clock bound for a mongosh script: the request's `timeout_ms` when
@@ -1965,12 +2106,13 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String
             if cfg.user.is_some() {
                 query.push(format!(
                     "authSource={}",
-                    cfg.param_str("auth_source")
-                        .unwrap_or_else(|| "admin".into())
+                    pct(&cfg
+                        .param_str("auth_source")
+                        .unwrap_or_else(|| "admin".into()))
                 ));
             }
             if let Some(rs) = cfg.param_str("replica_set") {
-                query.push(format!("replicaSet={rs}"));
+                query.push(format!("replicaSet={}", pct(&rs)));
             }
             if cfg.tls.enabled() {
                 let files = TlsFiles::materialize(&cfg.tls)?;
@@ -1995,7 +2137,12 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String
             };
             format!(
                 "mongodb://{auth}{host}:{port}/{db}{query}",
-                host = cfg.host,
+                host = if cfg.host.contains(':') && !cfg.host.starts_with('[') {
+                    format!("[{}]", cfg.host)
+                } else {
+                    cfg.host.clone()
+                },
+                db = pct(&db),
                 port = cfg.port
             )
         }
@@ -2026,6 +2173,53 @@ fn mongosh_script_prelude(uri: &str, database: Option<&str>) -> String {
     prelude
 }
 
+/// Bound the separate control connection too: Stop must reach the service's
+/// task-abort fallback even when server selection or $currentOp stalls.
+async fn mongo_cancel_with_timeout<F>(duration: std::time::Duration, future: F) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    tokio::time::timeout(duration, future)
+        .await
+        .map_err(|_| types::upstream("MongoDB native cancellation timed out"))?
+}
+
+/// Legacy count is a separate server command: without a query it may use
+/// metadata, unlike countDocuments' aggregation. Cursor count() ignores its
+/// find cursor limit unless explicitly requested (unsupported forms use mongosh).
+fn legacy_count_command(
+    collection: &str,
+    filter: Option<Document>,
+    max_time_ms: Option<i64>,
+    comment: Option<&str>,
+) -> Document {
+    let mut command = doc! { "count": collection };
+    if let Some(filter) = filter {
+        command.insert("query", filter);
+    }
+    if let Some(ms) = max_time_ms {
+        command.insert("maxTimeMS", ms);
+    }
+    if let Some(comment) = comment {
+        command.insert("comment", comment);
+    }
+    command
+}
+
+fn mongo_count_value(reply: &Document) -> Result<u64> {
+    let value = match reply.get("n") {
+        Some(Bson::Int32(n)) => u64::try_from(*n).ok(),
+        Some(Bson::Int64(n)) => u64::try_from(*n).ok(),
+        Some(Bson::Double(n))
+            if n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n < u64::MAX as f64 =>
+        {
+            Some(*n as u64)
+        }
+        _ => None,
+    };
+    value.ok_or_else(|| types::upstream("Mongo count returned an invalid nonnegative integer n"))
+}
+
 // --- command parsing --------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2033,6 +2227,8 @@ enum MongoOp {
     Find,
     Aggregate,
     Count,
+    CountDocuments,
+    Distinct,
     UpdateOne,
     UpdateMany,
     ReplaceOne,
@@ -2065,6 +2261,8 @@ struct ParsedCommand {
     index_options: Option<Document>,
     /// Index name (or key spec as a string) for dropIndex.
     index_name: Option<String>,
+    /// Field path whose distinct values are requested.
+    distinct_field: Option<String>,
     /// True when `.explain()` was chained — return the query plan, don't execute.
     explain: bool,
 }
@@ -2084,6 +2282,8 @@ struct Parsed {
     index_keys: Option<Document>,
     index_options: Option<Document>,
     index_name: Option<String>,
+    /// Field path whose distinct values are requested.
+    distinct_field: Option<String>,
     explain: bool,
 }
 
@@ -2182,7 +2382,7 @@ fn clean_statement(slice: &str) -> Option<String> {
 
 /// Parse a statement into a normalized command. Supports a JSON command object
 /// (`{collection, op, filter, projection, sort, limit, pipeline}`) and a
-/// `db.<coll>.find({...})` / `.aggregate([...])` / `.countDocuments({...})`
+/// `db.<coll>.find({...})` / `.aggregate([...])` / `.countDocuments({...})` / `.distinct("field", {...})`
 /// shorthand with optional `.limit(n)` / `.sort({...})`.
 fn parse_command(statement: &str) -> Result<Parsed> {
     let trimmed = statement.trim();
@@ -2196,11 +2396,27 @@ fn parse_command(statement: &str) -> Result<Parsed> {
         parse_shorthand(trimmed)?
     };
 
-    let op = parsed
-        .op_kind
-        .ok_or_else(|| types::invalid("could not determine operation (find/aggregate/count)"))?;
+    let op = parsed.op_kind.ok_or_else(|| {
+        types::invalid("could not determine operation (find/aggregate/count/distinct)")
+    })?;
     if parsed.collection.is_empty() {
         return Err(types::invalid("no collection specified"));
+    }
+    if op == MongoOp::Distinct {
+        if parsed
+            .distinct_field
+            .as_deref()
+            .is_none_or(|f| f.is_empty())
+        {
+            return Err(types::invalid(
+                "distinct requires a non-empty string field name",
+            ));
+        }
+        if parsed.limit.is_some() || parsed.sort.is_some() || parsed.projection.is_some() {
+            return Err(types::invalid(
+                "distinct returns values, not a cursor; limit/sort/projection are unsupported",
+            ));
+        }
     }
     Ok(Parsed {
         collection: parsed.collection,
@@ -2215,6 +2431,7 @@ fn parse_command(statement: &str) -> Result<Parsed> {
         index_keys: parsed.index_keys,
         index_options: parsed.index_options,
         index_name: parsed.index_name,
+        distinct_field: parsed.distinct_field,
         explain: parsed.explain,
     })
 }
@@ -2230,7 +2447,11 @@ pub(crate) fn statement_is_read_only(stmt: &str) -> bool {
         return false;
     };
     match parsed.op {
-        MongoOp::Find | MongoOp::Count | MongoOp::GetIndexes => true,
+        MongoOp::Find
+        | MongoOp::Count
+        | MongoOp::CountDocuments
+        | MongoOp::Distinct
+        | MongoOp::GetIndexes => true,
         // Aggregation reads — unless a top-level stage writes ($out/$merge must
         // be top-level pipeline stages, so checking stage keys is exact).
         MongoOp::Aggregate => !parsed
@@ -2249,6 +2470,14 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
         .as_object()
         .ok_or_else(|| types::invalid("command must be a JSON object"))?;
 
+    if obj.get("op").is_some_and(|v| !v.is_string())
+        || obj.get("explain").is_some_and(|v| !v.is_boolean())
+        || obj.get("pipeline").is_some_and(|v| !v.is_array())
+    {
+        return Err(types::invalid(
+            "command op must be a string, explain a boolean, and pipeline an array",
+        ));
+    }
     let collection = obj
         .get("collection")
         .and_then(Value::as_str)
@@ -2263,7 +2492,68 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
         } else {
             "find"
         });
-    let op_kind = Some(op_from_str(op_str)?);
+    let op = op_from_str(op_str)?;
+    let op_kind = Some(op);
+    if matches!(
+        op_kind,
+        Some(
+            MongoOp::UpdateOne
+                | MongoOp::UpdateMany
+                | MongoOp::ReplaceOne
+                | MongoOp::DeleteOne
+                | MongoOp::DeleteMany
+        )
+    ) && !obj.get("filter").is_some_and(Value::is_object)
+    {
+        return Err(types::invalid(
+            "update/delete requires an explicit filter object",
+        ));
+    }
+    for key in obj.keys() {
+        let allowed = matches!(key.as_str(), "collection" | "op" | "explain")
+            || match op {
+                MongoOp::Find => matches!(key.as_str(), "filter" | "projection" | "sort" | "limit"),
+                MongoOp::Aggregate => key == "pipeline",
+                MongoOp::Count | MongoOp::CountDocuments => key == "filter",
+                MongoOp::Distinct => matches!(key.as_str(), "field" | "filter"),
+                MongoOp::UpdateOne | MongoOp::UpdateMany | MongoOp::ReplaceOne => {
+                    matches!(key.as_str(), "filter" | "update")
+                }
+                MongoOp::InsertOne | MongoOp::InsertMany => {
+                    matches!(key.as_str(), "document" | "documents")
+                }
+                MongoOp::DeleteOne | MongoOp::DeleteMany => key == "filter",
+                MongoOp::CreateIndex => matches!(key.as_str(), "index_keys" | "index_options"),
+                MongoOp::DropIndex => key == "index_name",
+                MongoOp::GetIndexes => false,
+            };
+        if !allowed {
+            return Err(types::invalid(format!(
+                "unsupported {op_str} option '{key}'; use mongosh syntax for additional options"
+            )));
+        }
+    }
+    let limit = match obj.get("limit") {
+        None => None,
+        Some(value) => {
+            let n = value.as_i64().filter(|&n| n >= 0).ok_or_else(|| {
+                types::invalid("JSON command limit must be a non-negative integer")
+            })?;
+            (n > 0).then_some(n)
+        }
+    };
+    if op_kind == Some(MongoOp::Distinct) {
+        for key in obj.keys() {
+            if !matches!(
+                key.as_str(),
+                "collection" | "op" | "field" | "filter" | "explain"
+            ) {
+                return Err(types::invalid(format!(
+                    "unsupported distinct option '{key}'"
+                )));
+            }
+        }
+    }
 
     let to_doc = |v: Option<&Value>| -> Result<Option<Document>> {
         match v {
@@ -2303,7 +2593,7 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
         filter: to_doc(obj.get("filter"))?,
         projection: to_doc(obj.get("projection"))?,
         sort: to_doc(obj.get("sort"))?,
-        limit: obj.get("limit").and_then(Value::as_i64),
+        limit,
         pipeline,
         update: to_doc(obj.get("update"))?,
         documents,
@@ -2313,6 +2603,7 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
             .get("index_name")
             .and_then(Value::as_str)
             .map(str::to_string),
+        distinct_field: obj.get("field").and_then(Value::as_str).map(str::to_string),
         explain: obj.get("explain").and_then(Value::as_bool).unwrap_or(false),
     })
 }
@@ -2320,9 +2611,11 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
 /// Tolerant `db.<coll>.<op>(<arg>)` parser with optional `.limit(n)`/`.sort({})`.
 fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
     let s = raw.strip_prefix("db.").unwrap_or(raw);
-    // collection name = up to the first '.'
-    let dot = s
-        .find('.')
+    // The last dot before the first call separates a dotted collection name
+    // from its method (e.g. db.system.profile.find()).
+    let head = s.split_once('(').map(|(head, _)| head).unwrap_or(s);
+    let dot = head
+        .rfind('.')
         .ok_or_else(|| types::invalid("expected db.<collection>.<op>(...)"))?;
     let collection = s[..dot].trim().to_string();
     let rest = &s[dot + 1..];
@@ -2342,6 +2635,36 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
         let method = cursor_t[..paren].trim().to_string();
         let (arg, after) = extract_balanced(&cursor_t[paren..])?;
 
+        // Only cursor operations can be chained. Never reinterpret an invalid
+        // chain as a different collection operation or silently drop options.
+        if let Some(op) = cmd.op_kind {
+            let allowed = match op {
+                MongoOp::Find => matches!(
+                    method.as_str(),
+                    "sort" | "limit" | "projection" | "explain" | "count"
+                ),
+                MongoOp::Aggregate => method == "explain",
+                _ => false,
+            };
+            if !allowed || cmd.explain || (method == "count" && !arg.trim().is_empty()) {
+                return Err(types::invalid("unsupported Mongo method chain"));
+            }
+        } else if matches!(method.as_str(), "sort" | "limit" | "projection" | "explain") {
+            return Err(types::invalid("cursor method requires find or aggregate"));
+        }
+        let max_args = match method.as_str() {
+            "find" | "distinct" | "updateOne" | "updateMany" | "replaceOne" | "createIndex" => 2,
+            "explain" | "getIndexes" | "getIndices" => 0,
+            _ => 1,
+        };
+        let argc = if arg.trim().is_empty() {
+            0
+        } else {
+            split_top_level_args(&arg).len()
+        };
+        if argc > max_args {
+            return Err(types::invalid("Mongo options require mongosh execution"));
+        }
         match method.as_str() {
             "find" => {
                 cmd.op_kind = Some(MongoOp::Find);
@@ -2362,8 +2685,42 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
                 cmd.op_kind = Some(MongoOp::Aggregate);
                 cmd.pipeline = Some(parse_pipeline_arg(&arg)?);
             }
+            "distinct" => {
+                if cmd.op_kind.is_some()
+                    || cmd.limit.is_some()
+                    || cmd.sort.is_some()
+                    || cmd.projection.is_some()
+                    || cmd.explain
+                {
+                    return Err(types::invalid(
+                        "distinct must be called directly on a collection",
+                    ));
+                }
+                let parts = split_top_level_args(&arg);
+                if !(1..=2).contains(&parts.len()) {
+                    return Err(types::invalid("distinct expects a field name and an optional filter; options are unsupported"));
+                }
+                let field = mongo_parse::parse_value(parts[0].trim())?;
+                cmd.distinct_field = Some(
+                    field
+                        .as_str()
+                        .filter(|f| !f.is_empty())
+                        .ok_or_else(|| {
+                            types::invalid("distinct requires a non-empty string field name")
+                        })?
+                        .to_string(),
+                );
+                if let Some(filter) = parts.get(1) {
+                    cmd.filter = Some(parse_doc_arg(filter)?);
+                }
+                cmd.op_kind = Some(MongoOp::Distinct);
+            }
             "countDocuments" | "count" => {
-                cmd.op_kind = Some(MongoOp::Count);
+                cmd.op_kind = Some(if method == "count" {
+                    MongoOp::Count
+                } else {
+                    MongoOp::CountDocuments
+                });
                 if !arg.trim().is_empty() {
                     cmd.filter = Some(parse_doc_arg(&arg)?);
                 }
@@ -2411,6 +2768,9 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
                 cmd.documents = Some(parse_pipeline_arg(&arg)?);
             }
             "deleteOne" | "deleteMany" => {
+                if arg.trim().is_empty() {
+                    return Err(types::invalid("delete requires an explicit filter"));
+                }
                 cmd.op_kind = Some(if method == "deleteOne" {
                     MongoOp::DeleteOne
                 } else {
@@ -2434,7 +2794,12 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
             }
             "dropIndex" => {
                 cmd.op_kind = Some(MongoOp::DropIndex);
-                cmd.index_name = Some(arg.trim().trim_matches('"').trim_matches('\'').to_string());
+                let name = mongo_parse::parse_value(arg.trim())?;
+                cmd.index_name = Some(
+                    name.as_str()
+                        .ok_or_else(|| types::invalid("dropIndex key documents require mongosh"))?
+                        .to_string(),
+                );
             }
             // Takes no arguments; anything passed is ignored, as in mongosh.
             "getIndexes" | "getIndices" => {
@@ -2445,7 +2810,16 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
                 cmd.explain = true;
             }
             "limit" => {
-                cmd.limit = arg.trim().parse::<i64>().ok();
+                let limit = arg
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| types::invalid("limit must be an integer"))?;
+                if limit < 0 {
+                    return Err(types::invalid(
+                        "negative single-batch limits require mongosh",
+                    ));
+                }
+                cmd.limit = (limit > 0).then_some(limit);
             }
             "sort" => {
                 cmd.sort = Some(parse_doc_arg(&arg)?);
@@ -2458,12 +2832,34 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
             }
         }
 
-        // Advance past the closing paren, then any leading '.'.
-        cursor = after.trim_start();
-        cursor = cursor.strip_prefix('.').unwrap_or(cursor);
+        // Comments after a method are trivia, not another method or option.
+        // Reject unclosed block comments instead of swallowing malformed input.
+        cursor = skip_mongo_trivia(after)?;
+        if !cursor.is_empty() {
+            cursor = cursor
+                .strip_prefix('.')
+                .filter(|rest| !rest.trim().is_empty())
+                .ok_or_else(|| types::invalid("expected '.' between Mongo method calls"))?;
+        }
     }
 
     Ok(cmd)
+}
+
+fn skip_mongo_trivia(mut source: &str) -> Result<&str> {
+    loop {
+        source = source.trim_start();
+        if let Some(rest) = source.strip_prefix("//") {
+            source = rest.split_once('\n').map_or("", |(_, tail)| tail);
+        } else if let Some(rest) = source.strip_prefix("/*") {
+            source = rest
+                .split_once("*/")
+                .map(|(_, tail)| tail)
+                .ok_or_else(|| types::invalid("unterminated Mongo block comment"))?;
+        } else {
+            return Ok(source);
+        }
+    }
 }
 
 /// Given a string starting with '(', return (inside, remainder-after-close).
@@ -2562,7 +2958,9 @@ fn op_from_str(op: &str) -> Result<MongoOp> {
     match op {
         "find" => Ok(MongoOp::Find),
         "aggregate" => Ok(MongoOp::Aggregate),
-        "count" | "countDocuments" => Ok(MongoOp::Count),
+        "count" => Ok(MongoOp::Count),
+        "countDocuments" => Ok(MongoOp::CountDocuments),
+        "distinct" => Ok(MongoOp::Distinct),
         "updateOne" => Ok(MongoOp::UpdateOne),
         "updateMany" => Ok(MongoOp::UpdateMany),
         "replaceOne" => Ok(MongoOp::ReplaceOne),
@@ -2579,11 +2977,10 @@ fn op_from_str(op: &str) -> Result<MongoOp> {
 
 // --- server-side cancel (comment tag → $currentOp → killOp) ------------------
 
-/// The `comment` a tracked run stamps on its reads, keyed by the client's
-/// `query_id`: `otto:<query_id>`. Namespaced so a `$currentOp` match can never
-/// pick up a comment some other tool set to the same bare id.
-fn mongo_comment_tag(query_id: &str) -> String {
-    format!("otto:{query_id}")
+/// A server-owned, opaque cancellation marker for one execution. Client ids
+/// may repeat across owners/connections and must never identify database work.
+fn mongo_comment_tag() -> String {
+    format!("otto:{}", otto_core::new_id())
 }
 
 /// `$currentOp` pipeline that resolves a comment tag to opids:
@@ -2710,6 +3107,10 @@ fn json_to_document(v: &Value) -> Result<Document> {
 fn json_to_bson(v: &Value) -> Result<Bson> {
     match v {
         Value::Object(map) => {
+            if map.len() == 2 && map.contains_key("$code") && map.contains_key("$scope") {
+                return serde_json::from_value(v.clone())
+                    .map_err(|e| types::invalid(format!("invalid Extended JSON: {e}")));
+            }
             if map.len() == 1 {
                 if let Some(decoded) = decode_ejson(map) {
                     return decoded;
@@ -2761,6 +3162,9 @@ fn decode_ejson(map: &Map<String, Value>) -> Option<Result<Bson>> {
         "$regularExpression" => decode_regex(val),
         "$binary" => decode_binary(val),
         "$timestamp" => decode_timestamp(val),
+        "$numberDouble" | "$minKey" | "$maxKey" | "$undefined" | "$symbol" | "$code"
+        | "$dbPointer" => serde_json::from_value(Value::Object(map.clone()))
+            .map_err(|e| types::invalid(format!("invalid Extended JSON: {e}"))),
         _ => return None,
     };
     Some(decoded)
@@ -2920,9 +3324,10 @@ fn bson_to_json(b: &Bson) -> Value {
 fn bson_to_json_typed(b: &Bson) -> Value {
     match b {
         Bson::ObjectId(oid) => json!({ "$oid": oid.to_hex() }),
-        Bson::DateTime(dt) => {
-            json!({ "$date": dt.try_to_rfc3339_string().unwrap_or_else(|_| dt.to_string()) })
-        }
+        Bson::DateTime(dt) => dt
+            .try_to_rfc3339_string()
+            .map(|value| json!({"$date": value}))
+            .unwrap_or_else(|_| b.clone().into_canonical_extjson()),
         Bson::Decimal128(d) => json!({ "$numberDecimal": d.to_string() }),
         Bson::Int64(n) if n.unsigned_abs() > JSON_SAFE_INT => {
             json!({ "$numberLong": n.to_string() })
@@ -2935,7 +3340,15 @@ fn bson_to_json_typed(b: &Bson) -> Value {
                 .map(|(k, v)| (k.clone(), bson_to_json_typed(v)))
                 .collect(),
         ),
-        // Everything else already has an unambiguous JSON projection.
+        Bson::Double(n) if !n.is_finite() => b.clone().into_canonical_extjson(),
+        Bson::RegularExpression(_)
+        | Bson::MinKey
+        | Bson::MaxKey
+        | Bson::Undefined
+        | Bson::Symbol(_)
+        | Bson::JavaScriptCode(_)
+        | Bson::JavaScriptCodeWithScope(_)
+        | Bson::DbPointer(_) => b.clone().into_canonical_extjson(),
         _ => bson_to_json(b),
     }
 }
@@ -2950,7 +3363,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 /// every other subtype as the canonical `{"$binary": {"base64": "…", "subType":
 /// "<2 hex, lowercase>"}}`, which [`decode_binary`] takes back verbatim.
 fn binary_to_json_typed(bin: &BsonBinary) -> Value {
-    if matches!(bin.subtype, BinarySubtype::Uuid | BinarySubtype::UuidOld) {
+    if bin.subtype == BinarySubtype::Uuid {
         if let Ok(bytes) = <[u8; 16]>::try_from(bin.bytes.as_slice()) {
             return json!({ "$uuid": BsonUuid::from_bytes(bytes).to_string() });
         }
@@ -3338,8 +3751,10 @@ async fn explain_plan(
     db: &mongodb::Database,
     parsed: &Parsed,
     started: Instant,
+    max_time_ms: Option<i64>,
+    comment: Option<&str>,
 ) -> Result<QueryResult> {
-    let plan = mongo_explain_value(db, parsed).await?;
+    let plan = mongo_explain_value(db, parsed, max_time_ms, comment).await?;
     let mut result = QueryResult::empty();
     result.columns = vec![Column::typed("queryPlan", "json")];
     result.rows = vec![vec![plan]];
@@ -3389,12 +3804,21 @@ fn explain_inner(parsed: &Parsed) -> Result<Document> {
 
 /// Run the server `explain` command (queryPlanner verbosity) and return the plan
 /// document as JSON — shared by the interactive explain and the query-plan endpoint.
-async fn mongo_explain_value(db: &mongodb::Database, parsed: &Parsed) -> Result<Value> {
+async fn mongo_explain_value(
+    db: &mongodb::Database,
+    parsed: &Parsed,
+    max_time_ms: Option<i64>,
+    comment: Option<&str>,
+) -> Result<Value> {
     let inner = explain_inner(parsed)?;
-    let plan = db
-        .run_command(doc! { "explain": inner, "verbosity": "queryPlanner" })
-        .await
-        .map_err(types::upstream)?;
+    let mut command = doc! { "explain": inner, "verbosity": "queryPlanner" };
+    if let Some(ms) = max_time_ms {
+        command.insert("maxTimeMS", ms);
+    }
+    if let Some(tag) = comment {
+        command.insert("comment", tag);
+    }
+    let plan = db.run_command(command).await.map_err(types::upstream)?;
     Ok(bson_to_json(&Bson::Document(plan)))
 }
 
@@ -3555,9 +3979,27 @@ fn approx_bson_len(v: &Bson) -> usize {
     }
 }
 
-/// Shape already-materialized documents into a [`QueryResult`]. Split out of
-/// [`collect_docs`] so command replies that arrive as a `firstBatch` array
-/// (`listIndexes`) get the identical column-union treatment as a cursor.
+/// Shape scalar distinct values into the same bounded grid as document reads.
+fn distinct_to_result(values: Vec<Bson>, max_rows: usize, started: Instant) -> QueryResult {
+    // Mongo returns one BSON array (not a cursor); cap the displayed rows and
+    // reuse the grid's byte/cell budgets without claiming cursor pagination.
+    let truncated = values.len() > max_rows;
+    let docs = values
+        .into_iter()
+        .take(max_rows)
+        .map(|v| doc! {"value": v})
+        .collect();
+    let mut result = docs_to_result(docs, truncated, started);
+    if result.columns.is_empty() {
+        result.columns.push(Column::new("value"));
+    }
+    if result.truncated {
+        result.message = Some("Distinct values were capped for display. Increase the row limit or use an aggregation for large results; Export all rows supports find/aggregate only.".into());
+    }
+    result
+}
+
+/// Shape materialized documents using the same budgets as cursor reads.
 fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> QueryResult {
     // Union of top-level keys in stable first-seen order, `_id` pinned first.
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -3714,6 +4156,10 @@ const MONGO_METHODS: &[(&str, &str)] = &[
     ("find", "read documents matching a filter"),
     ("aggregate", "run an aggregation pipeline"),
     ("countDocuments", "count documents matching a filter"),
+    (
+        "distinct",
+        "unique field values, optionally matching a filter",
+    ),
 ];
 
 const MONGO_OPERATORS: &[(&str, &str)] = &[
@@ -3852,6 +4298,46 @@ mod sql_e2e {
         (guard, client)
     }
 
+    #[tokio::test]
+    #[ignore = "requires docker"]
+    async fn mongo_distinct_e2e() {
+        const DISTINCT_PORT: u16 = 47022;
+        let (_guard, client) = start_container("otto-mongo-distinct-e2e", DISTINCT_PORT).await;
+        client
+            .database("shop")
+            .collection::<Document>("distinct_values")
+            .insert_many([
+                doc! {"tags": ["a", "b"], "active": true},
+                doc! {"tags": ["b", "c"], "active": true},
+                doc! {"tags": ["hidden"], "active": false},
+            ])
+            .await
+            .unwrap();
+        let driver = MongoDriver::default();
+        let request = QueryRequest {
+            statement: "db.distinct_values.distinct('tags', {active:true})".into(),
+            max_rows: Some(10),
+            timeout_ms: Some(5000),
+            ..Default::default()
+        };
+        let result = driver.run(&cfg_on(DISTINCT_PORT), &request).await.unwrap();
+        let values: BTreeSet<_> = result.rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+        assert_eq!(values, BTreeSet::from(["a", "b", "c"]));
+        assert!(!result.truncated);
+        let capped = driver
+            .run(
+                &cfg_on(DISTINCT_PORT),
+                &QueryRequest {
+                    max_rows: Some(1),
+                    ..request
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(capped.rows.len(), 1);
+        assert!(capped.truncated);
+    }
+
     fn id_cells(r: &QueryResult) -> Vec<Value> {
         let idx = r
             .columns
@@ -3862,7 +4348,7 @@ mod sql_e2e {
     }
 
     /// A tracked `find` blocked in a server-side `$where: sleep(5000)` (5 docs
-    /// ⇒ ≥25 s untouched) is stamped `comment: "otto:<query_id>"`, shows up in
+    /// ⇒ ≥25 s untouched) is stamped `comment: "otto:<execution_id>"`, shows up in
     /// `$currentOp` under that tag, and `cancel` kills it: the run ends with an
     /// error well inside 5 s.
     #[tokio::test]
@@ -3894,7 +4380,8 @@ mod sql_e2e {
         let QueryHandle::MongoComment(tag) = &handle else {
             panic!("expected a MongoComment handle, got {handle:?}")
         };
-        assert_eq!(tag, "otto:e2e-cancel");
+        assert!(tag.starts_with("otto:"));
+        assert_ne!(tag, "otto:e2e-cancel");
         // …and the op is visible in `$currentOp` under it once the server
         // starts evaluating the `$where`.
         let admin = client.database("admin");

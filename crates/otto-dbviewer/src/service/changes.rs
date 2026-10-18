@@ -172,13 +172,21 @@ impl DbViewerService {
             let target = child.as_deref().ok_or_else(|| {
                 Error::Forbidden("approved execution requires one explicit database target".into())
             })?;
-            for grant in r.with_lifecycle(r.driver.native_grants(&r.config)).await? {
-                if grant.child != target
-                    || (grant.operation != "db_browse" && !operations.contains(&grant.operation))
-                {
-                    return Err(crate::native_access::setup_error(
-                        "migration credential exceeds the approved target or operation scope",
-                    ));
+            // Root skips this compare. The owner does too only when the
+            // resolved profile is the logical connection's own account.
+            // Alternate profiles and non-owners still match native grants
+            // against the approved target. Read-only and the explicit target
+            // above stay in force for the owner.
+            if !(user.id == conn.created_by && r.profile_id == conn.id) {
+                for grant in r.with_lifecycle(r.driver.native_grants(&r.config)).await? {
+                    if grant.child != target
+                        || (grant.operation != "db_browse"
+                            && !operations.contains(&grant.operation))
+                    {
+                        return Err(crate::native_access::setup_error(
+                            "migration credential exceeds the approved target or operation scope",
+                        ));
+                    }
                 }
             }
         }
@@ -197,7 +205,7 @@ impl DbViewerService {
         let attempt = self
             .approved_attempt(change_id, attempt_id, user_id)
             .await?;
-        let r = self
+        let mut r = self
             .approved_preflight(
                 &attempt.connection_id,
                 user_id,
@@ -223,6 +231,13 @@ impl DbViewerService {
             confirm_write: false,
             ..Default::default()
         };
+        self.prepare_local_infile(
+            &attempt.connection_id,
+            user_id,
+            &attempt.script,
+            &mut r.config,
+        )
+        .await?;
         let token = CancelToken::new();
         let execution = r.with_lifecycle(r.driver.run_tracked(&r.config, &req, &token));
         tokio::pin!(execution);

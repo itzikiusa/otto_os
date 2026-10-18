@@ -63,6 +63,16 @@ pub fn translate(sql: &str) -> Result<String> {
             "SQL→Mongo supports a single base collection",
         ));
     }
+    if select.distinct.is_some() {
+        return Err(types::invalid(
+            "DISTINCT is not supported; use Mongo distinct or aggregate",
+        ));
+    }
+    if query.with.is_some() || query.fetch.is_some() || !query.locks.is_empty() {
+        return Err(types::invalid(
+            "WITH, FETCH and locking clauses are not supported",
+        ));
+    }
     if select.having.is_some() {
         return Err(types::invalid("HAVING is not supported"));
     }
@@ -487,11 +497,19 @@ fn limit_value(query: &Query) -> Result<Option<i64>> {
         return Ok(None);
     };
     match lc {
-        LimitClause::LimitOffset { limit: Some(e), .. } => match expr_to_json(e)? {
-            J::Number(n) => Ok(n.as_i64()),
+        LimitClause::LimitOffset {
+            limit: Some(e),
+            offset: None,
+            limit_by,
+        } if limit_by.is_empty() => match expr_to_json(e)? {
+            J::Number(n) => n.as_i64().filter(|&n| n > 0).map(Some).ok_or_else(|| {
+                types::invalid("SQL LIMIT must be a positive integer; LIMIT 0 is not supported")
+            }),
             _ => Err(types::invalid("LIMIT must be an integer")),
         },
-        _ => Ok(None),
+        _ => Err(types::invalid(
+            "OFFSET, LIMIT BY and LIMIT ALL are not supported",
+        )),
     }
 }
 
@@ -522,9 +540,15 @@ fn projection_has_aggregate(items: &[SelectItem]) -> bool {
 
 fn is_count_star(expr: &Expr) -> bool {
     if let Expr::Function(f) = expr {
-        if f.name.to_string().eq_ignore_ascii_case("count") {
+        if f.name.to_string().eq_ignore_ascii_case("count")
+            && f.over.is_none()
+            && f.filter.is_none()
+            && f.within_group.is_empty()
+        {
             if let FunctionArguments::List(list) = &f.args {
                 return list.args.len() == 1
+                    && list.duplicate_treatment.is_none()
+                    && list.clauses.is_empty()
                     && matches!(
                         &list.args[0],
                         FunctionArg::Unnamed(FunctionArgExpr::Wildcard)
@@ -549,7 +573,13 @@ fn projection_doc(items: &[SelectItem], ctx: &Ctx) -> Result<Option<J>> {
     for it in items {
         let expr = match it {
             SelectItem::UnnamedExpr(e) => e,
-            SelectItem::ExprWithAlias { expr, .. } => expr,
+            SelectItem::ExprWithAlias { expr, alias } => {
+                m.insert(
+                    alias.value.clone(),
+                    json!(format!("${}", field_path(expr, ctx)?)),
+                );
+                continue;
+            }
             _ => return Err(types::invalid("unsupported SELECT item")),
         };
         m.insert(field_path(expr, ctx)?, json!(1));
@@ -639,10 +669,31 @@ fn accumulator(expr: &Expr, alias: Option<String>, ctx: &Ctx) -> Result<(String,
         ));
     };
     let fname = f.name.to_string().to_ascii_lowercase();
+    if f.over.is_some() || f.filter.is_some() || !f.within_group.is_empty() {
+        return Err(types::invalid(
+            "window/filtered/ordered aggregates are not supported",
+        ));
+    }
+    if let FunctionArguments::List(list) = &f.args {
+        if list.duplicate_treatment.is_some() || list.args.len() != 1 || !list.clauses.is_empty() {
+            return Err(types::invalid(
+                "aggregate modifiers require native Mongo aggregation",
+            ));
+        }
+    }
     let arg_field = first_func_field(f, ctx);
+    if arg_field.is_none() && !(fname == "count" && is_count_star(expr)) {
+        return Err(types::invalid("aggregate requires a field, or COUNT(*)"));
+    }
     let field_ref = || json!(format!("${}", arg_field.clone().unwrap_or_default()));
 
     let (op, value): (&str, J) = match fname.as_str() {
+        "count" if arg_field.is_some() => (
+            "$sum",
+            json!({"$cond": [
+                {"$ne": [{"$ifNull": [field_ref(), null]}, null]}, 1, 0
+            ]}),
+        ),
         "count" => ("$sum", json!(1)),
         "sum" => ("$sum", field_ref()),
         "avg" => ("$avg", field_ref()),
