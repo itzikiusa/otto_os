@@ -103,6 +103,22 @@ jobs:
           tar -xzf "$archive" -C "$tool_dir" cargo-nextest
           echo "$tool_dir" >> "$GITHUB_PATH"
 
+      # Mongo shell fallback spawns a host binary; the server container's
+      # mongosh is not on the test runner PATH. Pin the locally verified shell.
+      - name: Install mongosh
+        run: |
+          archive="$RUNNER_TEMP/mongosh-2.5.9-linux-x64.tgz"
+          tool_dir="$RUNNER_TEMP/otto-test-tools"
+          curl --fail --location --silent --show-error --retry 3 \
+            'https://downloads.mongodb.com/compass/mongosh-2.5.9-linux-x64.tgz' \
+            --output "$archive"
+          printf '%s  %s\n' '0644b6ac0b99dd52f46bdc4085aae19bb6d51226ef346c51418321769e76363e' "$archive" | sha256sum --check
+          mkdir -p "$tool_dir"
+          tar -xzf "$archive" -C "$tool_dir"
+          shell_dir="$tool_dir/mongosh-2.5.9-linux-x64/bin"
+          echo "$shell_dir" >> "$GITHUB_PATH"
+          "$shell_dir/mongosh" --version
+
       - name: Build the driver test binaries
         run: cargo nextest run -p otto-dbviewer -p otto-brokers --no-run
 
@@ -127,6 +143,8 @@ jobs:
       - name: Driver suites (ignored live-server tests)
         env:
           OTTO_DBV_E2E: '1'
+          OTTO_REDIS_PARITY_PORT: '16379'
+          OTTO_REDIS_PARITY_PASSWORD: 'ottoredis'
           OTTO_BROKERS_E2E: '1'
         run: >-
           cargo nextest run -p otto-dbviewer -p otto-brokers --profile ci

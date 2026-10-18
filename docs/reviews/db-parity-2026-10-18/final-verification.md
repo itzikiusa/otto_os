@@ -69,3 +69,12 @@ LOCAL preflight uses a conservative byte check for the literal keyword (not
 SQL-mode-dependent splitting) before loading host authority. Ordinary requests
 retain their state-read budget and pool; the driver still validates each actual
 LOAD and exact filename. The complete nextest rerun passed all 5,806 cases (124 skipped), including all six prior failures.
+
+## CI fixture follow-up
+
+The first Linux live-driver run passed 92 of 95 cases. Two shell tests failed
+because mongosh was absent from the runner PATH; the Redis parity case targeted
+the isolated local-review port instead of CI's seeded server. The workflow now
+installs checksum-pinned mongosh 2.5.9 (smoke-verified on Ubuntu 24.04) and passes
+the seeded Redis port/password explicitly. No driver behavior or assertions were
+weakened. The corrected CI run remains pending at this snapshot.
