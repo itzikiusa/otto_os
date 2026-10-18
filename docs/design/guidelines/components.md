@@ -251,6 +251,7 @@ Rules for plain tables and dense lists:
 | `title` | `string` | Required. Header text and `aria-label`. |
 | `width` | `number` | Default 460. Clamped to `calc(100vw - 24px)`. |
 | `onclose` | `() => void` | Required. Esc, backdrop click and ✕ all call it. A backdrop click only counts when the press **started** on the backdrop (a text-selection drag that ends there does not close it). |
+| `height` | optional number | Preferred stable height in pixels for changing forms (e.g. New Session); capped to the backdrop height. Omit for content-sized sheets. |
 | `children` | snippet | Body (scrolls; the sheet caps at the window height). |
 | `footer` | snippet | Action row, right-aligned. |
 | `dismissable` | `boolean` | Default `true`. `false` blocks Esc, backdrop click and the ✕ while a form is busy (mid-submit); close it yourself when the work settles. |

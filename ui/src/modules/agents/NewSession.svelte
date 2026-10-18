@@ -422,7 +422,7 @@
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" onclose={requestClose} dismissable={!busy}>
+<Modal title="New session" height={800} onclose={requestClose} dismissable={!busy}>
   <!-- Workspace: the current one, or none (a workspace-less session in the
        daemon's hidden scratch workspace). With no workspace at all only "No
        workspace" exists, pre-selected. -->
