@@ -581,6 +581,26 @@ pub fn agent_input_rule(
     ))
 }
 
+/// Agent-to-agent MESSAGING (`/message`, broadcast, relay, a plan's
+/// broadcast/command step): [`agent_input_rule`]'s delegated form, plus any
+/// sibling **agent** session — agents coordinate with each other. A message
+/// is a conversation turn (paste + Enter, recorded agent-originated on the
+/// target's trail), never raw keystrokes, and the target is checked here to
+/// be an agent CLI so a plain shell (`kind=agent, provider=shell` — an
+/// unsandboxed PTY, even with a nested agent in it) or a connection sibling
+/// stays out of reach. The caller's own owner-or-admin + resource checks still apply,
+/// and a read-only agent cannot reach these write routes at all (feature
+/// guard). `/input`, `/ws/term` and the lifecycle routes keep the strict rule.
+pub fn agent_message_rule(own: Option<&Id>, target: &Session) -> Result<(), Error> {
+    if own.is_some()
+        && target.kind == otto_core::domain::SessionKind::Agent
+        && target.provider != "shell"
+    {
+        return Ok(());
+    }
+    agent_input_rule(own, &target.id, &target.meta, true)
+}
+
 /// [`agent_input_rule`] (delegated form) for the per-session lifecycle routes.
 /// The auth middleware always inserts the [`AuthContext`]; a router mounted
 /// without it (unit harnesses) is treated as a person, like before.

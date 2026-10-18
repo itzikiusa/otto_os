@@ -72,8 +72,9 @@ async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Result<Session
 
 /// Who is typing into a session through the REST fan-out routes: the person
 /// the credential belongs to, and — when the credential is an agent
-/// session's own token — that session (S11-305). An agent caller reaches only
-/// itself and the workers it opened, and what it sends is recorded as
+/// session's own token — that session (S11-305). An agent caller reaches
+/// itself, the workers it opened and its sibling agent sessions
+/// ([`agent_message_rule`]), and what it sends is recorded as
 /// agent-originated, never as the person's message.
 #[derive(Clone, Copy)]
 struct Typist<'a> {
@@ -94,7 +95,7 @@ impl<'a> Typist<'a> {
 async fn submit_session_text(ctx: &ServerCtx, who: Typist<'_>, id: &Id, text: &str) -> Result<()> {
     let user_id = who.user_id;
     let session = input_session(ctx, user_id, id).await?;
-    agent_input_rule(who.agent, &session.id, &session.meta, true)?;
+    agent_message_rule(who.agent, &session)?;
     ctx.manager
         .human_submit_text_checked(id, user_id, false, text, || async {
             input_session(ctx, user_id, id).await.map(|_| ())
@@ -117,7 +118,7 @@ async fn input_agents(ctx: &ServerCtx, who: Typist<'_>, ws_id: &Id) -> Result<Ve
                     | otto_core::domain::SessionStatus::Working
                     | otto_core::domain::SessionStatus::Idle
             )
-            && agent_input_rule(who.agent, &session.id, &session.meta, true).is_ok()
+            && agent_message_rule(who.agent, &session).is_ok()
             && input_session(ctx, who.user_id, &session.id).await.is_ok()
         {
             allowed.push(session);
@@ -1348,8 +1349,8 @@ struct ExecHelper {
     ws_id: Id,
     user: User,
     /// The caller's own agent session when the plan arrived on an agent
-    /// credential: its broadcast/command steps reach only that session and its
-    /// workers (S11-305).
+    /// credential: its broadcast/command steps reach that session, its workers
+    /// and sibling agent sessions — never a shell sibling (S11-305).
     agent: Option<Id>,
 }
 
@@ -6088,7 +6089,7 @@ pub const DELEGATED_BY_META: &str = otto_sessions::http::DELEGATED_BY_META;
 /// terminal (S11-02 / S1-11) and on broadcast/relay (S11-305 / S1-303). The
 /// one rule lives with the sessions router, which applies it to the lifecycle
 /// routes (PATCH, restart, kill, archive, …) too.
-pub use otto_sessions::http::agent_input_rule;
+pub use otto_sessions::http::{agent_input_rule, agent_message_rule};
 
 /// `POST /sessions/{id}/message` — deliver ONE message to ONE live agent
 /// session as if typed + Enter: the targeted counterpart of
@@ -6108,13 +6109,8 @@ async fn session_message(
     let session = input_session(&ctx, &user.id, &session_id)
         .await
         .map_err(ApiError)?;
-    agent_input_rule(
-        crate::feature_guard::agent_session_of(&auth),
-        &session.id,
-        &session.meta,
-        true,
-    )
-    .map_err(ApiError)?;
+    agent_message_rule(crate::feature_guard::agent_session_of(&auth), &session)
+        .map_err(ApiError)?;
     if session.kind != SessionKind::Agent {
         return Err(ApiError(Error::Invalid(
             "messages can only be sent to agent sessions".into(),
