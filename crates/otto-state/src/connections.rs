@@ -176,11 +176,18 @@ impl ConnectionsRepo {
         environment: Option<Environment>,
         read_only: Option<bool>,
     ) -> Result<Connection> {
+        // A profile is one logical write: a late FK failure must not leave a
+        // new target paired with the old credentials or environment protections.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("update connection begin"))?;
         if let Some(v) = name {
             sqlx::query("UPDATE connections SET name = ? WHERE id = ?")
                 .bind(v)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("update connection"))?;
         }
@@ -188,7 +195,7 @@ impl ConnectionsRepo {
             sqlx::query("UPDATE connections SET params_json = ? WHERE id = ?")
                 .bind(v.to_string())
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("update connection"))?;
         }
@@ -196,7 +203,7 @@ impl ConnectionsRepo {
             sqlx::query("UPDATE connections SET secret_ref = ? WHERE id = ?")
                 .bind(v)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("update connection"))?;
         }
@@ -204,7 +211,7 @@ impl ConnectionsRepo {
             sqlx::query("UPDATE connections SET first_command = ? WHERE id = ?")
                 .bind(v)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("update connection"))?;
         }
@@ -212,7 +219,7 @@ impl ConnectionsRepo {
             sqlx::query("UPDATE connections SET section_id = ? WHERE id = ?")
                 .bind(v)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("update connection"))?;
         }
@@ -220,7 +227,7 @@ impl ConnectionsRepo {
             sqlx::query("UPDATE connections SET environment = ? WHERE id = ?")
                 .bind(v.as_str())
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("update connection"))?;
         }
@@ -228,11 +235,20 @@ impl ConnectionsRepo {
             sqlx::query("UPDATE connections SET read_only = ? WHERE id = ?")
                 .bind(i64::from(v))
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(dberr("update connection"))?;
         }
-        self.get(id).await
+        let row = sqlx::query("SELECT * FROM connections WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("updated connection"))?;
+        let connection = row_to_connection(&row)?;
+        tx.commit()
+            .await
+            .map_err(dberr("update connection commit"))?;
+        Ok(connection)
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {

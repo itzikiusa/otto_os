@@ -99,23 +99,7 @@ pub(crate) async fn provider_for_repo(
     ctx: &ServerCtx,
     repo: &Repo,
 ) -> Result<(Arc<dyn GitProvider>, RemoteRef)> {
-    repo.provider
-        .ok_or_else(|| Error::Invalid("repo has no git provider".into()))?;
-    let account_id = repo
-        .git_account_id
-        .as_ref()
-        .ok_or_else(|| Error::Invalid("repo has no git account".into()))?;
-    let account = ctx.git_store.get_account(account_id).await?;
-    let remote_url = repo
-        .remote_url
-        .as_deref()
-        .ok_or_else(|| Error::Invalid("repo has no remote url".into()))?;
-    let (_, remote_ref) = otto_git::detect(remote_url)
-        .ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote_url}")))?;
-    let token = otto_core::secrets::get_async(&ctx.secrets, &account.token_ref)
-        .await?
-        .ok_or_else(|| Error::Invalid(format!("token missing for git account {}", account.id)))?;
-    Ok((otto_git::make_provider(&account, token), remote_ref))
+    otto_git::http::bound_provider_ctx(ctx, repo).await
 }
 
 /// Fetch + normalize the run's source into a [`ResolvedSource`]. `repo` is the

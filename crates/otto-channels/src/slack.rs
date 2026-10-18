@@ -188,9 +188,6 @@ fn sweep_stale_attachments(dir: &std::path::Path, max_age: Duration) -> usize {
     removed
 }
 
-/// Longest `Retry-After` Otto honours from Slack before giving up on a call.
-const MAX_RETRY_AFTER_SECS: u64 = 120;
-
 /// Decode a Web API response into its JSON body, or an error naming `method`.
 /// An HTTP 429 becomes `slack <method>: ratelimited (retry after Ns)` with N
 /// from the `Retry-After` header — the mirror keys its back-off on
@@ -218,12 +215,12 @@ pub(crate) async fn api_json(
 }
 
 /// Parse a `Retry-After` header (delta-seconds); absent/garbled → 1 s, and
-/// capped at [`MAX_RETRY_AFTER_SECS`].
+/// never shortened: it is a server-imposed minimum, not our retry budget.
 fn retry_after_secs(header: Option<&str>) -> u64 {
     header
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(1)
-        .clamp(1, MAX_RETRY_AFTER_SECS)
+        .max(1)
 }
 
 /// `apps.connections.open` errors that retrying can't fix: the app token is
@@ -544,10 +541,9 @@ impl SlackAdapter {
                 ("length", length.to_string()),
             ])
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
 
-        let val: serde_json::Value = resp.json().await?;
+        let val = api_json(resp, "files.getUploadURLExternal").await?;
         if !val["ok"].as_bool().unwrap_or(false) {
             let err = val["error"].as_str().unwrap_or("unknown").to_string();
             return Err(anyhow::anyhow!("slack files.getUploadURLExternal: {err}"));
@@ -568,12 +564,23 @@ impl SlackAdapter {
     ///
     /// The bytes are sent verbatim so binary files are not corrupted.
     async fn put_bytes_to_upload_url(&self, upload_url: &str, bytes: &[u8]) -> anyhow::Result<()> {
-        self.http
+        let response = self
+            .http
             .post(upload_url)
             .body(bytes.to_vec())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("slack upload PUT: {}", redact_url(e, upload_url)))?
+            .map_err(|e| anyhow::anyhow!("slack upload PUT: {}", redact_url(e, upload_url)))?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let seconds = retry_after_secs(
+                response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+            );
+            anyhow::bail!("slack upload PUT: ratelimited (retry after {seconds}s)");
+        }
+        response
             .error_for_status()
             .map_err(|e| anyhow::anyhow!("slack upload PUT: {}", redact_url(e, upload_url)))?;
         Ok(())
@@ -605,10 +612,9 @@ impl SlackAdapter {
             .header("Authorization", format!("Bearer {}", self.bot_token))
             .form(&params)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
 
-        let val: serde_json::Value = resp.json().await?;
+        let val = api_json(resp, "files.completeUploadExternal").await?;
         if !val["ok"].as_bool().unwrap_or(false) {
             let err = val["error"].as_str().unwrap_or("unknown").to_string();
             return Err(anyhow::anyhow!("slack files.completeUploadExternal: {err}"));
@@ -925,11 +931,25 @@ pub async fn run(
                             // Reserve work before ACK/dedup. The permit remains
                             // held through attachment I/O and the bridge turn queue.
                             seen.lock().await.insert(dedup_key, DEDUP_CAP);
+                            let order = bridge
+                                .reserve_ingress(
+                                    Channel::Slack,
+                                    &integ.workspace_id,
+                                    chat,
+                                    thread,
+                                    strip_mention(content["text"].as_str().unwrap_or("")),
+                                    event["subtype"].as_str() == Some("message_changed"),
+                                )
+                                .await;
                             let event = event.clone();
                             let integ = integ.clone();
                             let bot_token = bot_token.clone();
                             let bridge = Arc::clone(&bridge);
                             tokio::spawn(async move {
+                                let _ordered = match order {
+                                    Some(q) => Some(q.acquire().await),
+                                    None => None,
+                                };
                                 handle_event(&event, &integ, &bot_token, bridge, permit).await;
                             });
                         }
@@ -1526,13 +1546,13 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_is_parsed_and_capped() {
+    fn retry_after_is_parsed_without_shortening_the_cooldown() {
         assert_eq!(retry_after_secs(Some("7")), 7);
         assert_eq!(retry_after_secs(Some(" 30 ")), 30);
         assert_eq!(retry_after_secs(None), 1, "no header → retry soon");
         assert_eq!(retry_after_secs(Some("soon")), 1);
         assert_eq!(retry_after_secs(Some("0")), 1);
-        assert_eq!(retry_after_secs(Some("86400")), MAX_RETRY_AFTER_SECS);
+        assert_eq!(retry_after_secs(Some("86400")), 86400);
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod budget_dedup;
 pub mod ccusage;
 mod clickhouse;
 mod engine;
+mod ingestion;
 mod metrics;
 mod pricing;
 mod schema;

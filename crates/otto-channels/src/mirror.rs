@@ -8,7 +8,7 @@
 //! is set, posts the reply text itself via the adapter (the bot that received
 //! the message) — inline, or a short head + `investigation.md` upload when long.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -53,7 +53,7 @@ const EDIT_THROTTLE: Duration = Duration::from_millis(2500);
 /// recent lines that fit and note how many earlier steps were elided.
 const FEED_CHAR_BUDGET: usize = 3500;
 /// How long to poll for `provider_session_id` to appear.
-const PSID_TIMEOUT: Duration = Duration::from_secs(20);
+const PSID_TIMEOUT: Duration = Duration::from_secs(120);
 /// Poll cadence for `provider_session_id` polling.
 const PSID_POLL: Duration = Duration::from_millis(500);
 /// Character count above which we post a short head and attach the full reply
@@ -382,16 +382,19 @@ impl Mirror {
         typing_active: Arc<tokio::sync::watch::Sender<bool>>,
     ) {
         // --- Step 1: wait for provider_session_id and cwd ---
-        let (cwd, psid) = match self.wait_for_psid(&session_id, &cancel).await {
+        let (cwd, path, provider) = match self.wait_for_artifact(&session_id, &cancel).await {
             Some(v) => v,
             None => {
-                debug!(session = %session_id, "mirror: cancelled or timed-out waiting for psid");
+                if !cancel.load(Ordering::Relaxed) {
+                    let d = current_dest(&dest);
+                    let _ = d.adapter.send_notice(&d.chat, d.thread.as_deref(),
+                        "Otto could not read this agent's reply transcript. Open its session in Otto to see the result.").await;
+                }
+                debug!(session = %session_id, "mirror: cancelled or timed-out waiting for transcript");
                 self.sessions.lock().await.remove(&session_id);
                 return;
             }
         };
-
-        let path: PathBuf = otto_orchestrator::claude_pty::session_jsonl_path(&cwd, &psid);
 
         info!(session = %session_id, ?path, "mirror: starting transcript tailer");
 
@@ -411,6 +414,7 @@ impl Mirror {
                 },
                 cancel_clone,
                 poll_active,
+                &provider,
             )
             .await;
         });
@@ -440,8 +444,12 @@ impl Mirror {
         // "done — N steps", post the reply, and run self-improvement if wired.
         let mut activity_lines: Vec<String> = Vec::new();
         let mut rolling_msg_id: Option<String> = None;
-        let mut last_edit = Instant::now() - EDIT_THROTTLE * 2; // allow first edit immediately
-        let mut last_posted_final: Option<String> = None;
+        // Allow the first edit immediately.
+        let mut last_edit = Instant::now() - EDIT_THROTTLE * 2;
+        // Queued identity prevents duplicate transcript records from enqueueing
+        // the same reply; delivery success is tracked per part below.
+        let mut last_queued_final: Option<String> = None;
+        let mut pending_replies: VecDeque<PendingReply> = VecDeque::new();
         let mut status_idx: usize = 0;
         // Feed health: a permanent send error (e.g. the thread can't be replied
         // to) or too many consecutive failures disables the feed for the rest
@@ -472,7 +480,7 @@ impl Mirror {
             if new_turn.swap(false, Ordering::Relaxed) {
                 rolling_msg_id = None;
                 activity_lines.clear();
-                last_posted_final = None;
+                last_queued_final = None;
                 status_idx = 0;
                 last_edit = Instant::now() - EDIT_THROTTLE * 2; // post the new turn's first update at once
                 feed = FeedHealth::new();
@@ -489,7 +497,29 @@ impl Mirror {
             // Seen-mark the current turn state so `changed()` below only fires
             // on a flip that happened after this point.
             let turn_live = *turn_rx.borrow_and_update();
+            let retry_at = pending_replies
+                .front()
+                .map(|p| p.retry_at)
+                .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
             tokio::select! {
+                _ = tokio::time::sleep_until(retry_at), if !pending_replies.is_empty() => {
+                    let mut pending = pending_replies.pop_front().expect("guarded nonempty queue");
+                    match pending.delivery.attempt(&pending.adapter, &pending.chat, pending.thread.as_deref()).await {
+                        Ok(()) => {}
+                        Err(error) if classify_send_error(&error) == FeedSend::RateLimited => {
+                            // A definite rejection is safe to retry. Retain completed
+                            // parts and the original destination across later turns.
+                            let delay = reply_retry_delay(&error).max(Duration::from_secs(1));
+                            pending.retry_at = tokio::time::Instant::now() + delay;
+                            pending_replies.push_front(pending);
+                        }
+                        Err(error) => {
+                            warn!(session = %session_id, "mirror reply delivery failed: {error}");
+                            let _ = pending.adapter.send_notice(&pending.chat, pending.thread.as_deref(),
+                                "Otto could not confirm delivery of the full reply. Open the session in Otto for the answer; sending it again may duplicate an accepted message.").await;
+                        }
+                    }
+                }
                 maybe_evt = rx.recv() => {
                     let Some(evt) = maybe_evt else { break; };
                     if cancel.load(Ordering::Relaxed) {
@@ -560,20 +590,29 @@ impl Mirror {
                             // block, and the markup is stripped from the posted text.
                             let file_paths = extract_file_paths(&text);
                             let joined = messages.join("\u{1e}");
-                            if last_posted_final.as_deref() != Some(joined.as_str()) {
+                            if last_queued_final.as_deref() != Some(joined.as_str()) {
                                 for body in &messages {
                                     // Scrub tokens/passwords the agent may have
                                     // echoed (emails stay — they're content).
                                     let cleaned = redact_secrets(&strip_file_directives(body), true);
                                     let cleaned = cleaned.trim();
                                     if !cleaned.is_empty() {
-                                        post_reply(&adapter, &chat, thread.as_deref(), cleaned).await;
+                                        if pending_replies.len() < 64 {
+                                            pending_replies.push_back(PendingReply {
+                                                adapter: Arc::clone(&adapter), chat: chat.clone(), thread: thread.clone(),
+                                                delivery: ReplyDelivery::new(cleaned.to_owned()),
+                                                retry_at: tokio::time::Instant::now(),
+                                            });
+                                        } else {
+                                            let _ = adapter.send_notice(&chat, thread.as_deref(),
+                                                "Otto's reply delivery queue is full. Open the session in Otto for this answer.").await;
+                                        }
                                     }
                                 }
                                 for path in &file_paths {
                                     upload_file_path(&adapter, &chat, thread.as_deref(), path, &cwd).await;
                                 }
-                                last_posted_final = Some(joined);
+                                last_queued_final = Some(joined);
 
                                 // Self-improvement: learn from this just-finished
                                 // interaction and reply in-thread (spawned so the
@@ -586,7 +625,9 @@ impl Mirror {
                                     let sid2 = session_id.clone();
                                     tokio::spawn(async move {
                                         if let Some(summary) = improver.evolve_interaction(&sid2).await {
-                                            post_reply(&adapter2, &chat2, thread2.as_deref(), &summary).await;
+                                            if let Err(error) = post_reply(&adapter2, &chat2, thread2.as_deref(), &summary).await {
+                                                warn!("mirror improvement reply: {error}");
+                                            }
                                         }
                                     });
                                 }
@@ -624,6 +665,12 @@ impl Mirror {
                         ticks_since_liveness = 0;
                         match self.manager.get(&session_id).await {
                             Ok(s) if !s.archived && s.status != SessionStatus::Exited => {}
+                            _ if !pending_replies.is_empty() => {
+                                // A completed/exited agent must not discard a
+                                // reply still waiting out the provider's cooldown.
+                                typing_active.send_replace(false);
+                                continue;
+                            }
                             _ => {
                                 info!(session = %session_id, "mirror: session gone, stopping tailer");
                                 break;
@@ -657,21 +704,25 @@ impl Mirror {
         debug!(session = %session_id, "mirror: tailer finished");
     }
 
-    /// Poll `SessionManager::get` until `provider_session_id` is Some or we
-    /// time out / are cancelled. Returns `(cwd, provider_session_id)`.
-    async fn wait_for_psid(
+    /// Wait for the session manager's provider/account-aware artifact lookup.
+    /// Returns cwd, transcript path and provider; unsupported providers are
+    /// reported explicitly by the caller instead of tailing a fictitious file.
+    async fn wait_for_artifact(
         &self,
         session_id: &Id,
         cancel: &Arc<AtomicBool>,
-    ) -> Option<(String, String)> {
+    ) -> Option<(String, PathBuf, String)> {
         let deadline = Instant::now() + PSID_TIMEOUT;
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
             if let Ok(session) = self.manager.get(session_id).await {
-                if let Some(psid) = session.provider_session_id {
-                    return Some((session.cwd, psid));
+                if !matches!(session.provider.as_str(), "claude" | "codex") {
+                    return None;
+                }
+                if let Some(path) = self.manager.activity_artifact(session_id).await {
+                    return Some((session.cwd, path, session.provider));
                 }
             }
             if Instant::now() >= deadline {
@@ -721,7 +772,7 @@ fn render_tool_line(display: &str, code: Option<&str>, code_blocks: bool) -> Str
 /// backs off for [`RATE_LIMIT_COOLDOWN`], `Transient` just waits for the next
 /// throttled tick.
 #[derive(Debug, PartialEq)]
-enum FeedSend {
+pub(crate) enum FeedSend {
     Ok,
     Transient,
     RateLimited,
@@ -732,7 +783,7 @@ enum FeedSend {
 /// target refuses replies (Slack rejects threading onto join/system messages),
 /// or the destination itself is gone. Matched on the adapter's error string,
 /// which embeds the Slack API error code / the Telegram `description` verbatim.
-fn classify_send_error(e: &anyhow::Error) -> FeedSend {
+pub(crate) fn classify_send_error(e: &anyhow::Error) -> FeedSend {
     let s = e.to_string();
     // Telegram refuses an edit whose text is unchanged — the feed already
     // shows exactly this, so it is a success, not a failure to count.
@@ -1022,78 +1073,192 @@ async fn upload_file_path(
 
 /// Attempts for one final-reply post (the first try + retries).
 const REPLY_ATTEMPTS: u32 = 3;
-/// Wait before re-posting a rate-limited reply when the channel named no delay
-/// (Telegram's 429 carries none through the adapter).
+/// Wait before re-posting a rate-limited reply when the channel named no delay.
 const REPLY_RETRY_DEFAULT: Duration = Duration::from_secs(5);
-/// Longest single wait honoured before re-posting a rate-limited reply.
-const REPLY_RETRY_MAX: Duration = Duration::from_secs(30);
+/// Retry-After is a minimum imposed by the server; never shorten it.
+fn reply_retry_delay(error: &anyhow::Error) -> Duration {
+    retry_after_hint(error).unwrap_or(REPLY_RETRY_DEFAULT)
+}
 
 /// The delay a rate-limit error asks for — `… (retry after Ns)`, as the Slack
 /// adapter words an HTTP 429 with its `Retry-After`. `None` when absent.
-fn retry_after_hint(e: &anyhow::Error) -> Option<Duration> {
+pub(crate) fn retry_after_hint(e: &anyhow::Error) -> Option<Duration> {
     let s = e.to_string();
     let rest = &s[s.find("retry after ")? + "retry after ".len()..];
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse::<u64>().ok().map(Duration::from_secs)
 }
 
-/// Send one reply message, re-posting it after a rate limit. The agent's
-/// final answer is the one message of the turn that matters, and it used to be
-/// tried once: a 429 (likely right after a busy feed's edits) dropped it with
-/// only a log line, leaving the thread on "done — N steps" and no answer. Only
-/// a rate limit is retried — the platform refused the post, so a retry can't
-/// duplicate it; a timeout might have landed and is not re-sent.
-async fn send_reply_with_retry(
+/// A reply waiting for transport acceptance, with its original destination.
+struct PendingReply {
+    adapter: Arc<dyn Adapter>,
+    chat: String,
+    thread: Option<String>,
+    delivery: ReplyDelivery,
+    retry_at: tokio::time::Instant,
+}
+
+/// Keep successful parts when a later part is rejected. Upload first: the
+/// inline message can truthfully claim an attachment only after acceptance.
+struct ReplyDelivery {
+    text: String,
+    uploaded: bool,
+    sent: bool,
+}
+
+impl ReplyDelivery {
+    fn new(text: String) -> Self {
+        Self {
+            text,
+            uploaded: false,
+            sent: false,
+        }
+    }
+
+    async fn attempt(
+        &mut self,
+        adapter: &Arc<dyn Adapter>,
+        chat: &str,
+        thread: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let long = self.text.chars().count() > LONG_REPLY_THRESHOLD;
+        if long && !self.uploaded {
+            adapter
+                .upload(chat, thread, "investigation.md", self.text.as_bytes())
+                .await?;
+            self.uploaded = true;
+        }
+        if !self.sent {
+            let body = if long {
+                format!(
+                    "{}\n\n📎 full reply attached as investigation.md",
+                    truncate_to_char_boundary(&self.text, LONG_REPLY_HEAD_CHARS)
+                )
+            } else {
+                self.text.clone()
+            };
+            adapter.send_formatted(chat, thread, &body).await?;
+            self.sent = true;
+        }
+        Ok(())
+    }
+}
+
+async fn post_reply(
     adapter: &Arc<dyn Adapter>,
     chat: &str,
     thread: Option<&str>,
     text: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<()> {
+    let mut delivery = ReplyDelivery::new(text.to_owned());
     let mut attempt = 1;
     loop {
-        match adapter.send_formatted(chat, thread, text).await {
-            Ok(id) => return Ok(id),
-            Err(e)
-                if attempt < REPLY_ATTEMPTS && classify_send_error(&e) == FeedSend::RateLimited =>
+        match delivery.attempt(adapter, chat, thread).await {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < REPLY_ATTEMPTS
+                    && classify_send_error(&error) == FeedSend::RateLimited =>
             {
-                let wait = retry_after_hint(&e)
-                    .unwrap_or(REPLY_RETRY_DEFAULT)
-                    .min(REPLY_RETRY_MAX);
-                warn!("mirror reply rate-limited (attempt {attempt}), re-posting in {wait:?}: {e}");
-                tokio::time::sleep(wait).await;
+                tokio::time::sleep(reply_retry_delay(&error)).await;
                 attempt += 1;
             }
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
-    }
-}
-
-/// Post one reply message to the channel via the adapter (the bot that received
-/// the message). Long replies post a short head + an `investigation.md` upload.
-/// Uses `send_formatted` so Slack mrkdwn and Telegram Markdown entities render
-/// (bold, italic, code, links) in the relayed agent reply. Rate-limited posts
-/// are re-sent ([`send_reply_with_retry`]).
-async fn post_reply(adapter: &Arc<dyn Adapter>, chat: &str, thread: Option<&str>, text: &str) {
-    if text.chars().count() > LONG_REPLY_THRESHOLD {
-        let head = truncate_to_char_boundary(text, LONG_REPLY_HEAD_CHARS);
-        let head_msg = format!("{head}\n\n📎 full reply attached as investigation.md");
-        if let Err(e) = send_reply_with_retry(adapter, chat, thread, &head_msg).await {
-            warn!("mirror final-head-send: {e}");
-        }
-        if let Err(e) = adapter
-            .upload(chat, thread, "investigation.md", text.as_bytes())
-            .await
-        {
-            warn!("mirror upload: {e}");
-        }
-    } else if let Err(e) = send_reply_with_retry(adapter, chat, thread, text).await {
-        warn!("mirror final-send: {e}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reply_delay_never_shortens_server_cooldown() {
+        assert_eq!(
+            reply_retry_delay(&anyhow::anyhow!("ratelimited (retry after 120s)")),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            reply_retry_delay(&anyhow::anyhow!("Too Many Requests: retry after 90")),
+            Duration::from_secs(90)
+        );
+    }
+
+    #[derive(Default)]
+    struct UploadAdapter {
+        uploads: std::sync::atomic::AtomicU32,
+        messages: StdMutex<Vec<String>>,
+        head_failures: std::sync::atomic::AtomicU32,
+    }
+    #[async_trait::async_trait]
+    impl Adapter for UploadAdapter {
+        async fn send(&self, _: &str, _: Option<&str>, text: &str) -> anyhow::Result<String> {
+            if self
+                .head_failures
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n: u32| {
+                    n.checked_sub(1)
+                })
+                .is_ok()
+            {
+                anyhow::bail!("ratelimited (retry after 120s)");
+            }
+            self.messages.lock().unwrap().push(text.into());
+            Ok("head".into())
+        }
+        async fn edit(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn channel(&self) -> Channel {
+            Channel::Slack
+        }
+        async fn upload(&self, _: &str, _: Option<&str>, _: &str, _: &[u8]) -> anyhow::Result<()> {
+            if self.uploads.fetch_add(1, Ordering::Relaxed) == 0 {
+                anyhow::bail!("ratelimited (retry after 120s)");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_long_reply_upload_retains_state_without_a_false_attachment_claim() {
+        let a = Arc::new(UploadAdapter::default());
+        let adapter = a.clone() as Arc<dyn Adapter>;
+        let mut delivery = ReplyDelivery::new("x".repeat(LONG_REPLY_THRESHOLD + 1));
+        assert!(delivery.attempt(&adapter, "C1", None).await.is_err());
+        assert!(!delivery.uploaded);
+        assert!(
+            a.messages.lock().unwrap().is_empty(),
+            "must not claim attachment before upload succeeds"
+        );
+        delivery.attempt(&adapter, "C1", None).await.unwrap();
+        assert!(delivery.uploaded);
+        assert_eq!(a.uploads.load(Ordering::Relaxed), 2);
+        assert_eq!(a.messages.lock().unwrap().len(), 1);
+        delivery.attempt(&adapter, "C1", None).await.unwrap();
+        assert_eq!(a.uploads.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            a.messages.lock().unwrap().len(),
+            1,
+            "settled parts are not repeated"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_upload_is_not_repeated_when_the_head_is_rate_limited() {
+        let a = Arc::new(UploadAdapter::default());
+        a.uploads.store(1, Ordering::Relaxed); // upload endpoint is healthy
+        a.head_failures.store(1, Ordering::Relaxed);
+        let adapter = a.clone() as Arc<dyn Adapter>;
+        let mut delivery = ReplyDelivery::new("x".repeat(LONG_REPLY_THRESHOLD + 1));
+        assert!(delivery.attempt(&adapter, "C1", None).await.is_err());
+        assert!(delivery.uploaded);
+        delivery.attempt(&adapter, "C1", None).await.unwrap();
+        assert_eq!(
+            a.uploads.load(Ordering::Relaxed),
+            2,
+            "one accepted upload total"
+        );
+        assert_eq!(a.messages.lock().unwrap().len(), 1);
+    }
 
     /// Fails `send_formatted` with each queued error, then succeeds.
     struct FlakyAdapter {
@@ -1343,10 +1508,9 @@ mod tests {
             "slack chat.postMessage (formatted): ratelimited (retry after 0s)",
         ]);
         let dyn_a: Arc<dyn Adapter> = a.clone();
-        let id = send_reply_with_retry(&dyn_a, "C1", Some("1.2"), "the answer")
+        post_reply(&dyn_a, "C1", Some("1.2"), "the answer")
             .await
             .expect("delivered on the third attempt");
-        assert_eq!(id, "ts1");
         assert_eq!(a.calls.load(Ordering::Relaxed), 3);
     }
 
@@ -1355,9 +1519,7 @@ mod tests {
         // Three 429s in a row: gives up after REPLY_ATTEMPTS.
         let a = flaky(&["ratelimited (retry after 0s)"; 3]);
         let dyn_a: Arc<dyn Adapter> = a.clone();
-        assert!(send_reply_with_retry(&dyn_a, "C1", None, "x")
-            .await
-            .is_err());
+        assert!(post_reply(&dyn_a, "C1", None, "x").await.is_err());
         assert_eq!(a.calls.load(Ordering::Relaxed), REPLY_ATTEMPTS);
         // A permanent error, or a timeout that may have landed, is not re-sent.
         for err in [
@@ -1366,9 +1528,7 @@ mod tests {
         ] {
             let a = flaky(&[err]);
             let dyn_a: Arc<dyn Adapter> = a.clone();
-            assert!(send_reply_with_retry(&dyn_a, "C1", None, "x")
-                .await
-                .is_err());
+            assert!(post_reply(&dyn_a, "C1", None, "x").await.is_err());
             assert_eq!(a.calls.load(Ordering::Relaxed), 1, "{err}");
         }
     }

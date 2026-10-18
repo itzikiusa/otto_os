@@ -3,6 +3,7 @@
 //! a later checkout, commit, upstream edit or background tracking-ref update.
 
 use crate::local::{push_err, AskPass, LocalGit, SpawnClass};
+use crate::transport::TransportCredential;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,7 +33,7 @@ impl LocalGit {
     /// ordinary fast-forward rules apply (this never forces remote history).
     pub async fn push_revision(
         &self,
-        token: Option<String>,
+        token: Option<TransportCredential>,
         revision: &str,
         branch: &str,
     ) -> Result<()> {
@@ -46,7 +47,7 @@ impl LocalGit {
         let destination = format!("refs/heads/{branch}");
         self.run_read(&["check-ref-format", &destination]).await?;
         let refspec = format!("{revision}:{destination}");
-        let askpass = token.as_deref().map(AskPass::new).transpose()?;
+        let askpass = token.as_ref().map(AskPass::new).transpose()?;
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
         let (ok, out, err, code) = self
             .run_raw_class(
@@ -283,9 +284,13 @@ impl LocalGit {
         ])
     }
 
-    pub async fn push_confirmed(&self, token: Option<String>, expected: &PushTarget) -> Result<()> {
+    pub async fn push_confirmed(
+        &self,
+        token: Option<TransportCredential>,
+        expected: &PushTarget,
+    ) -> Result<()> {
         let args = self.force_push_args(expected).await?;
-        let askpass = token.as_deref().map(AskPass::new).transpose()?;
+        let askpass = token.as_ref().map(AskPass::new).transpose()?;
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
         let args: Vec<_> = args.iter().map(String::as_str).collect();
         let (ok, out, err, code) = self.run_raw_class(&args, &envs, SpawnClass::Remote).await?;

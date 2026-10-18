@@ -1499,7 +1499,7 @@ impl DesignService {
             "artifact" => {
                 let t = self.store.require_artifact(&dst_id).await?;
                 if let Some(p) = &pinned {
-                    self.resolve_version(&t, p).await?;
+                    pinned = Some(self.resolve_version(&t, p).await?.id);
                 } else if policy == "pinned" {
                     pinned = t.approved_version_id.clone().or(t.head_version_id.clone());
                 }
@@ -1792,10 +1792,10 @@ impl DesignService {
                 continue;
             }
             if apply {
-                // Measured BEFORE the delete: what this artifact's squash frees.
-                let (_, bytes) = self.store.reclaimable(&doomed).await?;
-                report.reclaimable_bytes += bytes.max(0) as u64;
-                let candidate_blobs = self.store.delete_versions(&doomed).await?;
+                let deleted = self.store.delete_versions(&doomed).await?;
+                doomed = deleted.ids;
+                report.reclaimable_bytes += deleted.reclaimable_bytes.max(0) as u64;
+                let candidate_blobs = deleted.blobs;
                 if !candidate_blobs.is_empty() {
                     // Exclusive GC fence: no save is between storing a blob
                     // (a no-op when it exists) and committing the row that

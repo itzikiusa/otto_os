@@ -194,20 +194,13 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
     let (raw, sid) = turn?;
     remember_session(ctx.canvas_repo(), &scene, &sid).await;
     if busy.stopped() {
-        // Stopped (S4-20): commit nothing. Put the backing file back to the
-        // pre-turn view (a resumed session must not build on the half-written
-        // one) and re-broadcast the pre-turn doc over the live previews.
-        let _ = tokio::fs::write(&file_path, &agent_view).await;
+        let (current_doc, result) = stopped_document(ctx.canvas_repo(), &scene.id, &dir).await?;
         let _ = ctx.events().send(Event::CanvasUpdated {
             workspace_id: scene.workspace_id.clone(),
             scene_id: scene.id.clone(),
-            doc: doc.clone(),
+            doc: current_doc,
         });
-        return Ok(Json(result_for(
-            &format,
-            &current,
-            "Stopped — the board was left as it was before this turn.".to_string(),
-        )));
+        return Ok(Json(result));
     }
 
     // The committed source = the edited file, or the reply's block as a fallback.
@@ -253,6 +246,32 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
     });
 
     Ok(Json(result_for(&format, &final_source, note)))
+}
+
+/// Cancellation discards only the agent draft, never a saved human edit.
+async fn stopped_document(
+    repo: &otto_state::CanvasRepo,
+    id: &Id,
+    dir: &std::path::Path,
+) -> ApiResult<(Value, AssistResult)> {
+    let fresh = repo
+        .portable_scene(id)
+        .await?
+        .ok_or_else(|| ApiError(Error::NotFound("canvas scene".into())))?;
+    let doc: Value = serde_json::from_str(&fresh.doc_json).map_err(Error::from)?;
+    let format = doc_format(&doc);
+    let source = current_source(&doc, &format);
+    tokio::fs::write(dir.join(file_name(&format)), &source)
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("restore stopped canvas: {e}"))))?;
+    Ok((
+        doc,
+        result_for(
+            &format,
+            &source,
+            "Stopped — your saved changes were preserved.".into(),
+        ),
+    ))
 }
 
 /// Materialize only while owning the scene's entire turn, including preparation.

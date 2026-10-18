@@ -240,9 +240,8 @@ impl VaultEngine {
     /// True when any touched path disagrees with the index: its lstat
     /// `(size, mtime)` differs from the stored signature, it vanished while
     /// indexed, or it appeared unindexed. A directory counts only when the
-    /// index disagrees about its subtree: present but nothing indexed under
-    /// it (moved/copied in), or gone while notes are indexed under it (moved
-    /// away) — FSEvents reports a folder move once, not per descendant.
+    /// last complete walk disagrees about its existence (including empty
+    /// folders) — FSEvents reports a folder move once, not per descendant.
     async fn touched_paths_differ(&self, id: i64, root: &Path, paths: HashSet<String>) -> bool {
         let sigs = match self
             .store()
@@ -288,19 +287,9 @@ impl VaultEngine {
             return true;
         }
         let state = self.index_state(id);
-        let cache = state.cache.read().unwrap();
-        let Some(ix) = cache.as_ref() else {
-            return true;
-        };
-        dirs.iter().any(|(rel, present)| {
-            let prefix = format!("{rel}/");
-            let has_children = ix
-                .records
-                .range(prefix.clone()..)
-                .next()
-                .is_some_and(|(k, _)| k.starts_with(&prefix));
-            has_children != *present
-        })
+        let indexed_dirs = state.disk_dirs.lock().unwrap();
+        dirs.iter()
+            .any(|(rel, present)| indexed_dirs.contains(rel) != *present)
     }
 
     /// Freshness window for `id`: long while its watcher is healthy.
@@ -321,6 +310,31 @@ impl VaultEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn empty_directory_events_are_detected_and_publish_generation() {
+        let e = Arc::new(VaultEngine::new(otto_state::db::test_pool().await));
+        let dir = tempfile::tempdir().unwrap();
+        let id = e
+            .store()
+            .create_vault("ws", "Dirs", dir.path().to_str().unwrap(), false)
+            .await
+            .unwrap();
+        e.scan(id).await.unwrap();
+        let before = e.status("ws", id).await.unwrap().generation;
+        let touched = || HashSet::from(["empty".to_string()]);
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        assert!(e.touched_paths_differ(id, dir.path(), touched()).await);
+        e.scan(id).await.unwrap();
+        let added = e.status("ws", id).await.unwrap().generation;
+        assert_ne!(before, added);
+        assert!(!e.touched_paths_differ(id, dir.path(), touched()).await);
+        std::fs::remove_dir(dir.path().join("empty")).unwrap();
+        assert!(e.touched_paths_differ(id, dir.path(), touched()).await);
+        e.scan(id).await.unwrap();
+        assert_ne!(added, e.status("ws", id).await.unwrap().generation);
+        assert!(!e.touched_paths_differ(id, dir.path(), touched()).await);
+    }
 
     #[tokio::test]
     async fn continuous_events_do_not_starve_index_refresh() {

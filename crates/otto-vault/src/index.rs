@@ -160,6 +160,10 @@ pub(crate) struct IndexState {
     epoch: AtomicU64,
     retired: AtomicBool,
     pub links_dirty: AtomicBool,
+    /// Physical directories from the last complete scan, including empty
+    /// ones. Watchers compare existence here rather than inferring folders
+    /// from file descendants. Listings still read one live directory level.
+    pub disk_dirs: Mutex<std::collections::HashSet<String>>,
     fence: Mutex<ScanFence>,
     #[cfg(test)]
     pub(crate) hydration_pause: Mutex<

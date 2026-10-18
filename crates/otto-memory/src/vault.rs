@@ -4,6 +4,7 @@
 //! (git / Dropbox / Syncthing) + `reindex` is the file-based way a team shares
 //! memory across machines.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use otto_core::{Error, Result};
@@ -157,11 +158,71 @@ impl VaultWriter {
     }
 
     pub fn write(&self, ws: &str, m: &Memory, links: &[String]) -> Result<PathBuf> {
+        self.write_atomic(ws, m, links, false)
+    }
+
+    /// Idempotent mirror export. Existing files may contain human edits and
+    /// are never replaced by a duplicate save or a retry after partial success.
+    pub fn write_missing(&self, ws: &str, m: &Memory, links: &[String]) -> Result<PathBuf> {
+        self.write_atomic(ws, m, links, true)
+    }
+
+    fn write_atomic(
+        &self,
+        ws: &str,
+        m: &Memory,
+        links: &[String],
+        missing_only: bool,
+    ) -> Result<PathBuf> {
         let dir = self.workspace_dir(ws);
         std::fs::create_dir_all(&dir).map_err(io)?;
         let path = self.note_path(ws, m);
-        std::fs::write(&path, to_markdown(m, links)).map_err(io)?;
+        if missing_only && existing_export(&path).map_err(io)? {
+            return Ok(path);
+        }
+        let temp = dir.join(format!(".otto-export-{}", otto_core::new_id()));
+        let result = (|| -> std::io::Result<()> {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp)?;
+            file.write_all(to_markdown(m, links).as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            if missing_only {
+                // A hard link publishes a complete file without replacing a
+                // winner from another exporter/editor (same directory/device).
+                match std::fs::hard_link(&temp, &path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if !existing_export(&path)? {
+                            return Err(e);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                std::fs::rename(&temp, &path)?;
+            }
+            std::fs::File::open(&dir)?.sync_all()
+        })();
+        let _ = std::fs::remove_file(&temp);
+        result.map_err(io)?;
         Ok(path)
+    }
+}
+
+fn existing_export(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "vault export destination is not a regular file",
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 

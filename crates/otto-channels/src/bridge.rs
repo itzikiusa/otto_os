@@ -119,7 +119,7 @@ type QueuedWait =
     std::pin::Pin<Box<dyn std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + Send>>;
 
 /// A place in a [`KeyedLocks`] queue (see `enqueue`).
-struct Queued {
+pub(crate) struct Queued {
     wait: QueuedWait,
     now: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
@@ -127,8 +127,7 @@ struct Queued {
 impl Queued {
     /// Wait for the place without a notice (the bridge always uses
     /// [`Queued::acquire_or_notify`]; the queue-order tests use this).
-    #[cfg(test)]
-    async fn acquire(self) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(crate) async fn acquire(self) -> tokio::sync::OwnedMutexGuard<()> {
         match self.now {
             Some(guard) => guard,
             None => self.wait.await,
@@ -585,6 +584,7 @@ pub struct Bridge {
     /// only — conversation-level serialization is `conv_locks`.
     sessions: Mutex<HashMap<ConvKey, Id>>,
     conv_locks: ConvLocks,
+    ingress_locks: ConvLocks,
     /// Per-session turn serialization (see `submit_to_agent`).
     turn_locks: KeyedLocks<Id>,
     /// Optional hook: if an inbound message matches a configured swarm trigger,
@@ -601,6 +601,32 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    /// Reserve normal-message order before transport preparation can suspend.
+    /// Controls deliberately bypass this queue so stop/new remain responsive.
+    pub(crate) async fn reserve_ingress(
+        &self,
+        channel: Channel,
+        workspace: &str,
+        chat: &str,
+        thread: Option<&str>,
+        text: &str,
+        edited: bool,
+    ) -> Option<Queued> {
+        if crate::admission::is_control(text, edited) {
+            return None;
+        }
+        Some(
+            self.ingress_locks
+                .enqueue(&(
+                    workspace.into(),
+                    channel.as_str().into(),
+                    chat.into(),
+                    thread.map(str::to_owned),
+                ))
+                .await,
+        )
+    }
+
     pub fn new(
         manager: Arc<SessionManager>,
         workspaces: WorkspacesRepo,
@@ -617,6 +643,7 @@ impl Bridge {
             admission: Default::default(),
             sessions: Mutex::new(HashMap::new()),
             conv_locks: ConvLocks::default(),
+            ingress_locks: ConvLocks::default(),
             turn_locks: KeyedLocks::default(),
             swarm_trigger: None,
             run_trigger: None,
@@ -647,6 +674,7 @@ impl Bridge {
             admission,
             sessions: Mutex::new(HashMap::new()),
             conv_locks: ConvLocks::default(),
+            ingress_locks: ConvLocks::default(),
             turn_locks: KeyedLocks::default(),
             swarm_trigger,
             run_trigger,
@@ -1371,6 +1399,24 @@ impl Bridge {
 #[cfg(test)]
 mod conv_lock_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ingress_reservation_precedes_async_preparation() {
+        let locks = KeyedLocks::<String>::default();
+        let a = locks.enqueue(&"same".into()).await;
+        let b = locks.enqueue(&"same".into()).await;
+        let c = locks.enqueue(&"other".into()).await;
+        let _other = c.acquire().await;
+        // B tries dispatch while A is still preparing its attachment.
+        let mut b = Box::pin(b.acquire());
+        assert!(futures_util::poll!(b.as_mut()).is_pending());
+        let a = a.acquire().await;
+        assert!(futures_util::poll!(b.as_mut()).is_pending());
+        drop(a);
+        let _b = b.await;
+        assert!(crate::admission::is_control("/stop", false));
+        assert!(!crate::admission::is_control("/stop", true));
+    }
 
     fn key(chat: &str) -> ConvKey {
         ("ws".into(), "telegram".into(), chat.into(), None)

@@ -26,11 +26,24 @@ const POOL_TTL: Duration = Duration::from_secs(30 * 60);
 const POLICY_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CONSUME: usize = 5000;
 
-struct Pooled {
-    client: Arc<KafkaClient>,
+/// One operation owns all resources needed by its client, including across
+/// uncancellable blocking calls. Eviction only prevents future reuse.
+struct ConnectionLease {
+    client: KafkaClient,
     registry: Option<Arc<SchemaRegistry>>,
-    /// Held so the SSH tunnel/proxy stays up for the life of the pooled client.
     tunnel: Option<Arc<BrokerTunnel>>,
+    /// Scrape settings belong to the same profile revision as the transport.
+    metrics: Option<(String, bool)>,
+}
+impl std::ops::Deref for ConnectionLease {
+    type Target = KafkaClient;
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+struct Pooled {
+    lease: Arc<ConnectionLease>,
     created: Instant,
     /// Last time `client_for` handed this entry out. Drives the idle reaper
     /// (`reap_idle`) so an untouched cluster's librdkafka handles + SSH SOCKS
@@ -242,6 +255,8 @@ impl BrokersService {
 
     pub async fn update_cluster(&self, id: &Id, req: UpsertClusterReq) -> Result<BrokerCluster> {
         validate(&req)?;
+        let gate = open_lock(&self.client_locks, id);
+        let _changing = gate.lock().await;
         let row = self.repo.get(id).await?;
 
         // Secret handling: absent password = keep; non-empty = set; empty = clear.
@@ -289,6 +304,8 @@ impl BrokersService {
     }
 
     pub async fn delete_cluster(&self, id: &Id) -> Result<()> {
+        let gate = open_lock(&self.client_locks, id);
+        let _changing = gate.lock().await;
         let row = self.repo.get(id).await?;
         if let Some(r) = &row.secret_ref {
             let _ = otto_core::secrets::delete_async(&self.secrets, r).await;
@@ -329,9 +346,11 @@ impl BrokersService {
     }
 
     fn evict(&self, id: &Id) {
-        self.pool.remove(id);
-        // Dropping the tunnel tears down the ssh child + local listeners.
-        self.tunnels.remove(id);
+        let evicted = (self.pool.remove(id), self.tunnels.remove(id));
+        // librdkafka destruction can join threads; keep it off runtime workers.
+        tokio::task::spawn_blocking(move || drop(evicted));
+        self.policy_cache.retain(|(cid, _), _| cid != id);
+        self.samplers.remove(id);
         // Re-probe group access after a credential/config change.
         self.group_denied.remove(id);
     }
@@ -441,7 +460,10 @@ impl BrokersService {
 
     /// Pooled client for a cluster (reconnects if missing, stale, or its tunnel
     /// has died).
-    async fn client_for(&self, id: &Id) -> Result<(Arc<KafkaClient>, Option<Arc<SchemaRegistry>>)> {
+    async fn client_for(
+        &self,
+        id: &Id,
+    ) -> Result<(Arc<ConnectionLease>, Option<Arc<SchemaRegistry>>)> {
         if let Some(hit) = self.pooled_client(id) {
             return Ok(hit);
         }
@@ -455,18 +477,22 @@ impl BrokersService {
         }
         let row = self.repo.get(id).await?;
         let (spec, registry, tunnel) = self.prepare(&row).await?;
-        let client = Arc::new(
-            tokio::task::spawn_blocking(move || KafkaClient::connect(&spec))
+        let client = Arc::new(ConnectionLease {
+            client: tokio::task::spawn_blocking(move || KafkaClient::connect(&spec))
                 .await
                 .map_err(join)??,
-        );
+            registry: registry.clone(),
+            tunnel,
+            metrics: row
+                .metrics_url
+                .clone()
+                .map(|url| (url, row.tls_skip_verify)),
+        });
         let now = Instant::now();
         self.pool.insert(
             id.clone(),
             Pooled {
-                client: client.clone(),
-                registry: registry.clone(),
-                tunnel,
+                lease: client.clone(),
                 created: now,
                 last_used: now,
             },
@@ -478,12 +504,15 @@ impl BrokersService {
     /// alive. `get_mut` so a hit refreshes `last_used` (keeps an actively-used
     /// cluster off the idle reaper); the guard is dropped on return, before any
     /// miss path touches the same shard, so there's no self-deadlock.
-    fn pooled_client(&self, id: &Id) -> Option<(Arc<KafkaClient>, Option<Arc<SchemaRegistry>>)> {
+    fn pooled_client(
+        &self,
+        id: &Id,
+    ) -> Option<(Arc<ConnectionLease>, Option<Arc<SchemaRegistry>>)> {
         let mut p = self.pool.get_mut(id)?;
-        let tunnel_ok = p.tunnel.as_ref().is_none_or(|t| t.is_alive());
+        let tunnel_ok = p.lease.tunnel.as_ref().is_none_or(|t| t.is_alive());
         if p.created.elapsed() < POOL_TTL && tunnel_ok {
             p.last_used = Instant::now();
-            return Some((p.client.clone(), p.registry.clone()));
+            return Some((p.lease.clone(), p.lease.registry.clone()));
         }
         None
     }
@@ -503,6 +532,17 @@ impl BrokersService {
             .collect();
         let mut evicted = Vec::with_capacity(stale.len());
         for id in &stale {
+            let gate = open_lock(&self.client_locks, id);
+            let Ok(_reaping) = gate.try_lock() else {
+                continue;
+            };
+            if !self
+                .pool
+                .get(id)
+                .is_some_and(|p| p.last_used.elapsed() > idle)
+            {
+                continue;
+            }
             // Dropping the `Pooled` frees the librdkafka handles; dropping the
             // tunnel entry (the other Arc holder) tears down the ssh child +
             // proxy tasks. Leave the sampler/negative-cache — cheap in-memory
@@ -512,6 +552,7 @@ impl BrokersService {
         // `rd_kafka_destroy` (run by the last client drop) flushes and joins
         // librdkafka's threads and can block for seconds — never on a runtime
         // worker. Off-runtime callers (tests) just drop inline.
+        let count = evicted.len();
         if !evicted.is_empty() {
             match tokio::runtime::Handle::try_current() {
                 Ok(h) => {
@@ -520,20 +561,24 @@ impl BrokersService {
                 Err(_) => drop(evicted),
             }
         }
-        stale.len()
+        count
     }
 
     // ---- operations -------------------------------------------------------
 
     pub async fn test(&self, id: &Id) -> Result<TestClusterResp> {
+        let gate = open_lock(&self.client_locks, id);
+        let _opening = gate.lock().await;
         let row = self.repo.get(id).await?;
         // `_tunnel` keeps the SSH proxy alive across the blocking connect/test.
         let (spec, _registry, _tunnel) = self.prepare(&row).await?;
         // Transient client so a bad config never poisons the pool.
-        let res =
-            tokio::task::spawn_blocking(move || KafkaClient::connect(&spec).and_then(|c| c.test()))
-                .await
-                .map_err(join)?;
+        let res = tokio::task::spawn_blocking(move || {
+            let _transport = _tunnel;
+            KafkaClient::connect(&spec).and_then(|c| c.test())
+        })
+        .await
+        .map_err(join)?;
         match res {
             Ok(r) => Ok(r),
             Err(e) => Ok(TestClusterResp {
@@ -547,12 +592,13 @@ impl BrokersService {
 
     pub async fn overview(&self, id: &Id) -> Result<ClusterOverview> {
         let (client, _) = self.client_for(id).await?;
+        let tunnel = client.tunnel.clone();
         let mut ov = tokio::task::spawn_blocking(move || client.overview())
             .await
             .map_err(join)??;
         // Over a tunnel the metadata is rewritten to 127.0.0.1:<local>; show the
         // real broker addresses by reverse-mapping through the proxy.
-        if let Some(t) = self.tunnels.get(id) {
+        if let Some(t) = tunnel {
             for b in &mut ov.brokers {
                 if let Some((host, port)) = t.real_endpoint(b.port as u16) {
                     b.host = host;
@@ -853,7 +899,7 @@ impl BrokersService {
     }
 
     pub async fn schema_subjects(&self, id: &Id) -> Result<Vec<SchemaSubject>> {
-        let (_, registry) = self.client_for(id).await?;
+        let (_lease, registry) = self.client_for(id).await?;
         match registry {
             Some(reg) => reg.subjects().await,
             None => Err(Error::Invalid(
@@ -868,7 +914,7 @@ impl BrokersService {
         id: &Id,
         subject: &str,
     ) -> Result<Vec<SchemaVersion>> {
-        let (_, registry) = self.client_for(id).await?;
+        let (_lease, registry) = self.client_for(id).await?;
         match registry {
             Some(reg) => reg.subject_versions(subject).await,
             None => Err(Error::Invalid(
@@ -884,7 +930,7 @@ impl BrokersService {
         subject: &str,
         version: &str,
     ) -> Result<SchemaVersionDetail> {
-        let (_, registry) = self.client_for(id).await?;
+        let (_lease, registry) = self.client_for(id).await?;
         match registry {
             Some(reg) => reg.subject_version_detail(subject, version).await,
             None => Err(Error::Invalid(
@@ -900,7 +946,7 @@ impl BrokersService {
         subject: &str,
         req: &CompatCheckReq,
     ) -> Result<CompatCheckResp> {
-        let (_, registry) = self.client_for(id).await?;
+        let (_lease, registry) = self.client_for(id).await?;
         match registry {
             Some(reg) => reg.check_compatibility(subject, req).await,
             None => Err(Error::Invalid(
@@ -1150,9 +1196,9 @@ impl BrokersService {
     }
 
     pub async fn metrics(&self, id: &Id) -> Result<ClusterMetrics> {
-        let row = self.repo.get(id).await?;
         let (client, _) = self.client_for(id).await?;
         let state = self.sampler(id);
+        let lease = client.clone();
 
         // Single-flight, adaptive-TTL watermark sweep (see `sweep_if_due`).
         sweep_if_due(open_lock(&self.sweep_locks, id), state.clone(), move || {
@@ -1160,11 +1206,11 @@ impl BrokersService {
         })
         .await?;
 
-        // Reach a private metrics endpoint through the same SSH SOCKS tunnel.
-        let socks = self.tunnels.get(id).map(|t| t.socks_url());
-        let prom = match &row.metrics_url {
-            Some(url) if !url.is_empty() => {
-                metrics::scrape(url, row.tls_skip_verify, socks.as_deref())
+        // Retain the same transport while the HTTP metrics scrape is running.
+        let socks = lease.tunnel.as_ref().map(|t| t.socks_url());
+        let prom = match &lease.metrics {
+            Some((url, skip_verify)) if !url.is_empty() => {
+                metrics::scrape(url, *skip_verify, socks.as_deref())
                     .await
                     .ok()
             }
@@ -1543,6 +1589,111 @@ fn lag_alert_from_row(
 mod single_flight_tests {
     use super::*;
 
+    struct NoSecrets;
+    impl SecretStore for NoSecrets {
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn put(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_mutation_waits_for_open_and_invalidates_its_published_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("brokers.db"))
+            .await
+            .unwrap();
+        let user = otto_core::new_id();
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,disabled,created_at) VALUES(?,?, 'hash','Fixture',1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+            .bind(&user).bind(&user).execute(&pool).await.unwrap();
+        let svc = BrokersService::new(BrokerClustersRepo::new(pool), Arc::new(NoSecrets), None);
+        let req: UpsertClusterReq = serde_json::from_value(serde_json::json!({
+            "name":"old", "bootstrap_servers":"127.0.0.1:1", "security_protocol":"plaintext"
+        }))
+        .unwrap();
+        let cluster = svc.create_cluster(None, user, req.clone()).await.unwrap();
+        // Pause an opener at its publication gate. The actual mutation must
+        // wait, then evict exactly what that opener publishes.
+        let gate = open_lock(&svc.client_locks, &cluster.id);
+        let opening = gate.lock().await;
+        let mut changed = req;
+        changed.bootstrap_servers = "127.0.0.1:2".into();
+        let update = svc.update_cluster(&cluster.id, changed);
+        tokio::pin!(update);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut update)
+                .await
+                .is_err(),
+            "update must remain pending while an opener owns the gate"
+        );
+        assert_eq!(
+            svc.repo.get(&cluster.id).await.unwrap().bootstrap_servers,
+            "127.0.0.1:1"
+        );
+        let client = Arc::new(ConnectionLease {
+            client: KafkaClient::connect(&KafkaConnSpec {
+                bootstrap_servers: "127.0.0.1:1".into(),
+                security_protocol: SecurityProtocol::Plaintext,
+                sasl_mechanism: None,
+                sasl_username: None,
+                sasl_password: None,
+                tls_skip_verify: false,
+            })
+            .unwrap(),
+            registry: None,
+            tunnel: None,
+            metrics: None,
+        });
+        let weak = Arc::downgrade(&client);
+        svc.pool.insert(
+            cluster.id.clone(),
+            Pooled {
+                lease: client.clone(),
+                created: Instant::now(),
+                last_used: Instant::now(),
+            },
+        );
+        drop(opening);
+        update.await.unwrap();
+        assert!(svc.pool.get(&cluster.id).is_none());
+        assert_eq!(
+            svc.repo.get(&cluster.id).await.unwrap().bootstrap_servers,
+            "127.0.0.1:2"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "active operation owns its entire transport bundle"
+        );
+        drop(client);
+        // Eviction cleanup runs off-runtime; wait for it rather than assume an
+        // executor scheduling order.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let opening = gate.lock().await;
+        let delete = svc.delete_cluster(&cluster.id);
+        tokio::pin!(delete);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut delete)
+                .await
+                .is_err(),
+            "delete must remain pending while an opener owns the gate"
+        );
+        assert!(svc.repo.get(&cluster.id).await.is_ok());
+        drop(opening);
+        delete.await.unwrap();
+        assert!(svc.repo.get(&cluster.id).await.is_err());
+    }
+
     /// Two polls racing a cold cache run exactly one sweep; a later poll
     /// inside the TTL runs none.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1770,9 +1921,20 @@ mod replay_integrity_tests {
         service.pool.insert(
             id.clone(),
             Pooled {
-                client: client.clone(),
-                registry: None,
-                tunnel: None,
+                lease: Arc::new(ConnectionLease {
+                    client: KafkaClient::connect(&KafkaConnSpec {
+                        bootstrap_servers: bootstrap.clone(),
+                        security_protocol: SecurityProtocol::Plaintext,
+                        sasl_mechanism: None,
+                        sasl_username: None,
+                        sasl_password: None,
+                        tls_skip_verify: false,
+                    })
+                    .unwrap(),
+                    registry: None,
+                    tunnel: None,
+                    metrics: None,
+                }),
                 created: Instant::now(),
                 last_used: Instant::now(),
             },

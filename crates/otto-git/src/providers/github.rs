@@ -22,20 +22,19 @@ const BASE: &str = "https://api.github.com";
 
 /// Percent-encode characters that must be escaped in GitHub search query values.
 fn percent_encode_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for c in s.chars() {
-        match c {
-            ' ' => out.push_str("%20"),
-            '"' => out.push_str("%22"),
-            ':' => out.push_str("%3A"),
-            '/' => out.push_str("%2F"),
-            '?' => out.push_str("%3F"),
-            '&' => out.push_str("%26"),
-            '#' => out.push_str("%23"),
-            other => out.push(other),
-        }
-    }
-    out
+    urlencoding::encode(s).into_owned()
+}
+
+#[cfg(test)]
+#[test]
+fn query_encoding_preserves_literal_plus_percent_and_unicode() {
+    let value = "C++ 100%25 café & #?";
+    let url = reqwest::Url::parse(&format!(
+        "https://example.invalid/search?q={}",
+        percent_encode_query(value)
+    ))
+    .unwrap();
+    assert_eq!(url.query_pairs().next().unwrap().1, value);
 }
 
 pub struct Github {

@@ -1787,9 +1787,19 @@ fn cap_history_request(request: &mut serde_json::Map<String, Value>) {
                         continue;
                     }
                     if let Some(Value::String(b64)) = field.get("value") {
-                        let size = b64.trim().len() / 4 * 3;
+                        let encoded = b64.trim();
+                        let size = (encoded.len() / 4 * 3).saturating_sub(
+                            encoded
+                                .chars()
+                                .rev()
+                                .take_while(|c| *c == '=')
+                                .count()
+                                .min(2),
+                        );
                         field.insert("value".into(), Value::String(String::new()));
                         field.insert("size".into(), json!(size));
+                        field.insert("missing_content".into(), Value::Bool(true));
+                        cut = true;
                         changed = true;
                     }
                 }
@@ -2643,14 +2653,13 @@ pub(crate) fn uses_env_secret(
     if !any {
         return false;
     }
-    let text = serde_json::to_string(&json!([
-        req.url,
-        req.query,
-        req.headers,
-        req.body,
-        req.auth
-    ]))
-    .unwrap_or_default();
+    let body = if req.body_mode == "form" {
+        percent_decode(&req.body)
+    } else {
+        req.body.clone()
+    };
+    let text = serde_json::to_string(&json!([req.url, req.query, req.headers, body, req.auth]))
+        .unwrap_or_default();
     substitute(&text, &probe).contains(SECRET_PROBE)
 }
 
@@ -2758,7 +2767,7 @@ pub(crate) async fn unbound_secret_host_with(
 
 /// The 409 for a secret leaving its bound host. `agent` callers are told a
 /// person has to send it; people are told how to confirm.
-fn new_host_conflict(host: &str, agent: bool) -> ApiError {
+pub(crate) fn new_host_conflict(host: &str, agent: bool) -> ApiError {
     let how = if agent {
         "a person must send it from the Otto UI (agent credentials cannot confirm)"
     } else {
@@ -2830,41 +2839,51 @@ struct MultipartField {
     value: String,
     #[serde(default)]
     filename: String,
+    #[serde(default)]
+    missing_content: bool,
 }
 
 /// Build a reqwest multipart form from the request body. Accepts either a JSON
 /// array of [`MultipartField`]s or the legacy `k=v&...` text encoding.
-fn build_multipart(body: &str, vars: &serde_json::Map<String, Value>) -> reqwest::multipart::Form {
+fn build_multipart(
+    body: &str,
+    vars: &serde_json::Map<String, Value>,
+) -> Result<reqwest::multipart::Form, String> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
 
     let mut form = reqwest::multipart::Form::new();
     if body.trim_start().starts_with('[') {
-        if let Ok(fields) = serde_json::from_str::<Vec<MultipartField>>(body) {
-            for f in fields {
-                let key = substitute(&f.key, vars);
-                if key.trim().is_empty() {
-                    continue;
-                }
-                if f.field_type == "file" {
-                    let bytes = B64.decode(f.value.trim()).unwrap_or_default();
-                    let filename = if f.filename.is_empty() {
-                        "file".to_string()
-                    } else {
-                        f.filename.clone()
-                    };
-                    let mut part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
-                    if let Some(mime) = guess_mime(&f.filename) {
-                        // guess_mime only returns valid static MIME strings.
-                        part = part.mime_str(mime).expect("valid static mime");
-                    }
-                    form = form.part(key, part);
-                } else {
-                    form = form.text(key, substitute(&f.value, vars));
-                }
+        let fields = serde_json::from_str::<Vec<MultipartField>>(body)
+            .map_err(|e| format!("Invalid multipart fields: {e}"))?;
+        for f in fields {
+            let key = substitute(&f.key, vars);
+            if key.trim().is_empty() {
+                continue;
             }
-            return form;
+            if f.field_type == "file" {
+                if f.missing_content {
+                    return Err(format!("Reselect the file for multipart field '{key}': history does not retain file contents"));
+                }
+                let bytes = B64
+                    .decode(f.value.trim())
+                    .map_err(|_| format!("Invalid base64 for multipart field '{key}'"))?;
+                let filename = if f.filename.is_empty() {
+                    "file".to_string()
+                } else {
+                    substitute(&f.filename, vars)
+                };
+                let mut part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
+                if let Some(mime) = guess_mime(&f.filename) {
+                    // guess_mime only returns valid static MIME strings.
+                    part = part.mime_str(mime).expect("valid static mime");
+                }
+                form = form.part(key, part);
+            } else {
+                form = form.text(key, substitute(&f.value, vars));
+            }
         }
+        return Ok(form);
     }
     // Legacy `k=v&...` (percent-encoded) text fields.
     for pair in body.split('&').filter(|p| !p.is_empty()) {
@@ -2878,7 +2897,7 @@ fn build_multipart(body: &str, vars: &serde_json::Map<String, Value>) -> reqwest
         }
         form = form.text(key, substitute(&v, vars));
     }
-    form
+    Ok(form)
 }
 
 /// Minimal filename-extension → MIME guess for common upload types.
@@ -3058,14 +3077,27 @@ async fn prepare_request(
             builder = builder.body(body);
         }
         "form" => {
-            let body = substitute(&req.body, vars);
+            // The editor/importer stores percent-encoded pairs. Resolve each
+            // decoded component before reqwest encodes it exactly once.
+            let fields: Vec<(String, String)> = req
+                .body
+                .split('&')
+                .filter(|p| !p.is_empty())
+                .map(|pair| {
+                    let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                    (
+                        substitute(&percent_decode(key), vars),
+                        substitute(&percent_decode(value), vars),
+                    )
+                })
+                .collect();
             if !headers.contains_key(CONTENT_TYPE) {
                 headers.insert(
                     CONTENT_TYPE,
                     HeaderValue::from_static("application/x-www-form-urlencoded"),
                 );
             }
-            builder = builder.body(body);
+            builder = builder.form(&fields);
         }
         // multipart/form-data: the body is either a JSON array of fields
         // (`[{key,type,value,filename}]`, where a `file` field's value is the
@@ -3073,9 +3105,8 @@ async fn prepare_request(
         // reqwest sets the `Content-Type: multipart/form-data; boundary=…`
         // itself, so any explicit Content-Type must be dropped.
         "multipart" => {
-            let body = substitute(&req.body, vars);
             headers.remove(CONTENT_TYPE);
-            builder = builder.multipart(build_multipart(&body, vars));
+            builder = builder.multipart(build_multipart(&req.body, vars)?);
         }
         // raw or any other mode → send as text verbatim.
         _ => {
@@ -4104,7 +4135,11 @@ fn unresolved_placeholders(
         scan(v, vars, &mut out);
     }
     if !matches!(exec.body_mode.as_str(), "none" | "") {
-        scan(&exec.body, vars, &mut out);
+        if exec.body_mode == "form" {
+            scan(&percent_decode(&exec.body), vars, &mut out);
+        } else {
+            scan(&exec.body, vars, &mut out);
+        }
     }
     scan_value(&exec.auth, vars, &mut out);
     out.into_iter().collect()
@@ -4293,7 +4328,7 @@ fn ensure_in_workspace(entity_ws: &Id, wid: &Id) -> Result<(), ApiError> {
 /// themselves contain `{{…}}` re-expand for up to 3 bounded passes (nested
 /// vars like `base_url = {{host}}/api` now resolve; the bound keeps
 /// self-referencing definitions from looping).
-fn substitute(input: &str, vars: &serde_json::Map<String, Value>) -> String {
+pub(crate) fn substitute(input: &str, vars: &serde_json::Map<String, Value>) -> String {
     let mut cur = substitute_once(input, vars);
     for _ in 0..2 {
         if !cur.contains("{{") {

@@ -114,6 +114,15 @@ pub async fn update(
 ) -> ApiResult<Json<Workspace>> {
     reject_system_workspace(&id)?;
     require_ws_role(&ctx, &user, &id, WorkspaceRole::Admin).await?;
+    if let Some(patch) = &req.settings_patch {
+        if req.settings.is_some() {
+            return Err(Error::Invalid(
+                "settings and settings_patch are mutually exclusive".into(),
+            )
+            .into());
+        }
+        WorkspacesRepo::validate_settings_patch(patch)?;
+    }
     let ws = repo(&ctx)
         .update(
             &id,
@@ -123,6 +132,9 @@ pub async fn update(
             req.archived,
         )
         .await?;
+    if let Some(patch) = &req.settings_patch {
+        return Ok(Json(repo(&ctx).patch_settings(&id, patch).await?));
+    }
     Ok(Json(ws))
 }
 
@@ -195,6 +207,45 @@ fn expand_home(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn atomic_settings_patch_validates_before_writes_and_keeps_root_access() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .create("patch-root", "x", "Root", true)
+            .await
+            .unwrap();
+        let ws = repo(&ctx)
+            .create("Original", "/tmp", &user.id)
+            .await
+            .unwrap();
+        for body in [
+            serde_json::json!({"name":"Wrong", "settings":{}, "settings_patch":{"notes":"x"}}),
+            serde_json::json!({"name":"Wrong", "settings_patch":{"context":null}}),
+            serde_json::json!({"name":"Wrong", "settings_patch":[]}),
+        ] {
+            let request = serde_json::from_value(body).unwrap();
+            let error = update(
+                Path(ws.id.clone()),
+                State(ctx.clone()),
+                CurrentUser(user.clone()),
+                Json(request),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error.0, Error::Invalid(_)));
+            assert_eq!(repo(&ctx).get(&ws.id).await.unwrap().name, "Original");
+        }
+        let request =
+            serde_json::from_value(serde_json::json!({"settings_patch":{"notes":"root can save"}}))
+                .unwrap();
+        let Json(saved) = update(Path(ws.id), State(ctx), CurrentUser(user), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(saved.settings["notes"], "root can save");
+    }
 
     #[test]
     fn reject_system_workspace_is_409_for_scratch_and_ok_otherwise() {

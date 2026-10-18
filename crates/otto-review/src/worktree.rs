@@ -37,7 +37,7 @@ pub async fn materialize_pr_worktree(
     source: Option<&str>,
     head_sha: Option<&str>,
     suffix: &str,
-    git_token: Option<String>,
+    git_token: Option<otto_git::transport::TransportCredential>,
 ) -> Option<PrWorktree> {
     let git = otto_git::LocalGit::new(&repo.path);
     if let Err(e) = git.fetch(git_token.clone()).await {

@@ -28,6 +28,80 @@ fn nm(body: &str) -> NewMemory {
 }
 
 #[tokio::test]
+async fn failed_export_is_reported_and_identical_retry_repairs_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("mirror");
+    std::fs::write(&root, "not a directory").unwrap();
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool).with_vault(&root);
+    let result = svc.save(&ws, &user, vec![nm("retry export body")]).await;
+    assert!(result.is_err(), "mirror failure must be visible");
+    std::fs::remove_file(&root).unwrap();
+    let saved = svc
+        .save(&ws, &user, vec![nm("retry export body")])
+        .await
+        .unwrap();
+    let files: Vec<_> = std::fs::read_dir(root.join(&ws))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert!(std::fs::read_to_string(&files[0])
+        .unwrap()
+        .contains("retry export body"));
+    // A retry must not overwrite a user's later edit to the shared file.
+    std::fs::write(&files[0], "user edit").unwrap();
+    let again = svc
+        .save(&ws, &user, vec![nm("retry export body")])
+        .await
+        .unwrap();
+    assert_eq!(again[0].id, saved[0].id);
+    assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), "user edit");
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_exports_publish_one_complete_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool).with_vault(dir.path());
+    let body = "concurrent export body ".repeat(10_000);
+    let (a, b) = tokio::join!(
+        svc.save(&ws, &user, vec![nm(&body)]),
+        svc.save(&ws, &user, vec![nm(&body)])
+    );
+    let a = a.unwrap();
+    assert_eq!(a[0].id, b.unwrap()[0].id);
+    let files: Vec<_> = std::fs::read_dir(dir.path().join(&ws))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "no orphan temp or duplicate note");
+    assert_eq!(
+        std::fs::read_to_string(&files[0]).unwrap(),
+        to_markdown(&a[0], &[])
+    );
+}
+
+#[tokio::test]
+async fn export_retry_refuses_non_file_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool).with_vault(dir.path());
+    let saved = svc
+        .save(&ws, &user, vec![nm("export collision")])
+        .await
+        .unwrap();
+    let path = otto_memory::vault::VaultWriter::new(dir.path()).note_path(&ws, &saved[0]);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(svc
+        .save(&ws, &user, vec![nm("export collision")])
+        .await
+        .is_err());
+    assert!(path.is_dir());
+}
+
+#[tokio::test]
 async fn save_writes_an_obsidian_note() {
     let dir = tempfile::tempdir().unwrap();
     let (pool, ws, user) = otto_memory::test_support::mem_pool().await;

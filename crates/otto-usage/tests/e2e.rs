@@ -966,3 +966,100 @@ async fn budget_clickhouse_idle_threads() {
     );
     engine.shutdown().await;
 }
+
+/// E18: the real sink accepts retries with original IDs exactly once, leaves
+/// legacy rows intact, and an enforcing background read includes pending spend.
+#[tokio::test]
+async fn durable_replay_and_parked_budget_include_pending_spend() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no clickhouse binary; durable replay was NOT verified");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    let ch = engine.clickhouse().unwrap();
+    engine
+        .insert_events(&[event("codex", "s", "gpt", "completion", 900, 0, 9.0)])
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.session_totals_background(30, true).await.unwrap()[0].cost_usd,
+        9.0
+    );
+    assert!(ch.maybe_park(Duration::ZERO).await);
+    assert!(ch.is_parked());
+    engine
+        .commit_ingestion(
+            &serde_json::json!({"version":1,"offset":123}),
+            &[event("codex", "s", "gpt", "completion", 100, 0, 2.0)],
+        )
+        .await
+        .unwrap();
+    assert!(ch.is_parked(), "enqueue must not wake the sink");
+    // Same path consumed by server budget gates: no foreground dashboard read.
+    let totals = engine.session_totals_for_budget(30, true).await.unwrap();
+    assert_eq!(totals[0].cost_usd, 11.0);
+    assert!(
+        totals[0].cost_usd >= 10.0,
+        "the configured $10 cap is exceeded"
+    );
+    assert_eq!(totals[0].total_tokens, 1000);
+    assert_eq!(
+        engine.session_totals_background(30, true).await.unwrap()[0].cost_usd,
+        11.0
+    );
+
+    // Emulate INSERT success followed by a crash/failure before durable ack.
+    let journal = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(tmp.path().join("usage-ingestion.sqlite3")),
+        )
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER fail_ack BEFORE DELETE ON outbox BEGIN SELECT RAISE(ABORT, 'crash before ack'); END")
+        .execute(&journal).await.unwrap();
+    engine
+        .commit_ingestion(
+            &serde_json::json!({"version":1,"offset":456}),
+            &[event("codex", "s", "gpt", "completion", 200, 0, 3.0)],
+        )
+        .await
+        .unwrap();
+    let original: String = sqlx::query_scalar("SELECT event_id FROM outbox")
+        .fetch_one(&journal)
+        .await
+        .unwrap();
+    assert!(engine.flush_ingestion().await.is_err());
+    assert!(engine.session_totals_for_budget(30, true).await.is_err());
+    assert_eq!(
+        original,
+        sqlx::query_scalar::<_, String>("SELECT event_id FROM outbox")
+            .fetch_one(&journal)
+            .await
+            .unwrap()
+    );
+    sqlx::query("DROP TRIGGER fail_ack")
+        .execute(&journal)
+        .await
+        .unwrap();
+    let totals = engine.session_totals_for_budget(30, true).await.unwrap();
+    assert_eq!(totals[0].total_tokens, 1200);
+    assert_eq!(totals[0].cost_usd, 14.0);
+    let legacy = ch
+        .query_rows("SELECT sum(input_tokens) AS n FROM usage_events")
+        .await
+        .unwrap();
+    assert_eq!(legacy[0]["n"].as_u64(), Some(900), "legacy data untouched");
+    // Repeated additive schema initialization cannot lose or duplicate data.
+    engine.reinit(test_config()).await;
+    assert_eq!(
+        engine.session_totals_background(30, true).await.unwrap()[0].total_tokens,
+        1200
+    );
+    journal.close().await;
+    engine.shutdown().await;
+}

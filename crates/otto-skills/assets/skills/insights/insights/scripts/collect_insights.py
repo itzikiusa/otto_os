@@ -127,14 +127,24 @@ EXTRACT_MAX_ERRORS = 5         # sample tool-error snippets kept
 
 # ----------------------------------------------------------------------------- time
 def parse_date(iso_str):
-    """Parse an ISO timestamp to a naive (tz-stripped) datetime, like the original."""
+    """Normalize provider instants to the daemon-local report calendar.
+
+    Naive legacy timestamps already denote local wall time. astimezone() uses
+    the offset at the event instant, including historical DST transitions.
+    """
     if isinstance(iso_str, (int, float)):
-        # epoch millis (gemini history.jsonl) or seconds
         ts = iso_str / 1000.0 if iso_str > 1e11 else float(iso_str)
-        return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
-    return datetime.fromisoformat(str(iso_str).replace("Z", "+00:00")).replace(
-        tzinfo=None
-    )
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    else:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+    return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def timestamp_in_window(value, start, end):
+    try:
+        return value is not None and in_window(parse_date(value), start, end)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return False
 
 
 def resolve_window(args):
@@ -425,6 +435,8 @@ def aggregate(sessions, provider, depth, note, start, end):
         round(overlap_messages / total_messages * 100) if total_messages > 0 else 0
     )
 
+    out["unavailable_window_metrics"] = sorted({field for session in sessions
+        for field in session["meta"].get("_unavailable_window_metrics", [])})
     out["stats"] = {
         "total_sessions": total_sessions,
         "analyzed_sessions": analyzed_sessions,
@@ -593,6 +605,24 @@ def collect_claude(start, end, extra_facets_dir=None):
                     tp = _claude_transcript_for(sid)
                     if tp:
                         meta["transcript_path"] = tp
+                # Metadata counters cover the whole session. Timestamped
+                # transcripts supply additive window metrics even when rich
+                # metadata/facets exist. Never invent a fractional allocation.
+                tp = meta.get("transcript_path")
+                window_meta = _parse_claude_jsonl(tp, meta.get("project_path", "unknown"), start, end) if tp else None
+                lifetime = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                            "duration_minutes", "git_commits", "git_pushes", "lines_added", "lines_removed",
+                            "files_modified", "tool_counts", "user_response_times", "tool_error_categories")
+                for field in lifetime:
+                    meta.pop(field, None)
+                meta["_unavailable_window_metrics"] = ["git_commits", "git_pushes", "lines_added", "lines_removed", "files_modified"]
+                if window_meta:
+                    meta.update(window_meta)
+                    effective_date = parse_date(meta["start_time"])
+                else:
+                    meta["user_message_timestamps"] = in_window_ts
+                    meta["user_message_count"] = len(in_window_ts)
+                    meta["_unavailable_window_metrics"].extend(lifetime)
                 sessions.append(
                     {
                         "meta": meta,
@@ -705,6 +735,8 @@ def _parse_claude_jsonl(path, project_dir, start, end):
                     msg = obj.get("message", {})
                     if isinstance(msg, dict):
                         _accumulate_claude_usage(obj, start, end, responses)
+                        if not timestamp_in_window(obj.get("timestamp"), start, end):
+                            continue
                         for block in msg.get("content", []) or []:
                             if isinstance(block, dict) and block.get("type") == "tool_use":
                                 name = block.get("name", "unknown")
@@ -822,6 +854,8 @@ def _parse_codex_jsonl(path, start, end):
                     sid = payload.get("id")
                     continue
 
+                if not timestamp_in_window(ts, start, end):
+                    continue
                 ptype = payload.get("type")
                 if outer == "event_msg" and ptype == "user_message":
                     if ts:
@@ -949,7 +983,7 @@ def _parse_generic_basic_jsonl(path, start, end, provider):
                 )
                 if looks_user and ts:
                     user_ts.append(ts)
-                if "tool" in str(ptype or "").lower():
+                if timestamp_in_window(ts, start, end) and "tool" in str(ptype or "").lower():
                     name = payload.get("name")
                     if name:
                         tool_counts[name] += 1

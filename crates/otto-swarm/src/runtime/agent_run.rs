@@ -216,6 +216,26 @@ pub async fn run_swarm_agent(
     // a required goal was recorded `error` and the task blocked for good.
     // Those turns wait (bounded, cancellable) for the agent / a slot instead.
     let waits = matches!(kind, "verify" | "fix");
+    // Verify and fix pass `allow_paused = false`. Every other kind passes
+    // true, which still must not admit an aborted swarm or a nonempty
+    // `pause_reason`. `reserve_run_on` enforces that in the write; this
+    // read refuses before the wait loop so a budget pause is not retried
+    // for the verify window. An ordinary pause (empty reason) stays on the
+    // SQL rule.
+    if let Ok(swarm) = ctx.swarm_repo().get_swarm(&swarm_id.to_string()).await {
+        let held = swarm
+            .pause_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty());
+        if held || swarm.status == "aborted" {
+            tracing::warn!(
+                swarm = %swarm_id,
+                status = %swarm.status,
+                "swarm_agent_run: not reserved; swarm is aborted or paused with a reason"
+            );
+            return (None, String::new());
+        }
+    }
     let mut waited = Duration::ZERO;
     let (run, operation) = loop {
         let operation = crate::runtime::engine::operation_guard(swarm_id).await;

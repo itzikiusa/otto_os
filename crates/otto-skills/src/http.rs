@@ -115,7 +115,8 @@ pub struct InstallAllResult {
     pub installed: Vec<String>,
     pub backed_up: Vec<String>,
     /// Already at the bundled version (or ahead of it without `force`) — left
-    /// untouched, no backup made.
+    /// untouched in the Library, no backup made. Current Library copies still
+    /// reconcile their provider mirrors so failed copies can be retried.
     pub skipped: Vec<String>,
     /// Skills whose install failed; the rest of the batch still ran.
     pub failed: Vec<InstallFailure>,
@@ -295,6 +296,22 @@ fn install_many(
     backup: bool,
     force: bool,
 ) -> InstallAllResult {
+    install_many_into_dirs(
+        library,
+        category,
+        backup,
+        force,
+        &user_skills::provider_skill_dirs(),
+    )
+}
+
+fn install_many_into_dirs(
+    library: &Library,
+    category: Option<&str>,
+    backup: bool,
+    force: bool,
+    provider_dirs: &[std::path::PathBuf],
+) -> InstallAllResult {
     let mut out = InstallAllResult {
         installed: Vec::new(),
         backed_up: Vec::new(),
@@ -308,7 +325,24 @@ fn install_many(
         }
         match install_state(library, &b.name) {
             Some(InstallState::UpToDate) => {
-                out.skipped.push(b.name);
+                match user_skills::install_into_dirs(
+                    provider_dirs,
+                    &b.name,
+                    &library.root.join("skills").join(&b.name),
+                ) {
+                    Ok(user_owned) => {
+                        out.user_owned.extend(
+                            user_owned
+                                .into_iter()
+                                .map(|dir| dir.join(&b.name).to_string_lossy().into_owned()),
+                        );
+                        out.skipped.push(b.name);
+                    }
+                    Err(error) => out.failed.push(InstallFailure {
+                        name: b.name,
+                        error: format!("materialize user-level skill: {error}"),
+                    }),
+                }
                 continue;
             }
             Some(InstallState::Ahead { .. }) if !force => {
@@ -317,7 +351,7 @@ fn install_many(
             }
             _ => {}
         }
-        match install_one(library, &b.name, backup) {
+        match install_one_into_dirs(library, &b.name, backup, provider_dirs) {
             Ok(r) => {
                 out.user_owned.extend(r.user_owned.iter().cloned());
                 if r.installed {
@@ -344,6 +378,15 @@ fn install_many(
 /// install the bundled tree. Returns the per-skill outcome. `installed` is
 /// `false` only when `name` is not a bundled skill.
 fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallResult, ApiErr> {
+    install_one_into_dirs(library, name, backup, &user_skills::provider_skill_dirs())
+}
+
+fn install_one_into_dirs(
+    library: &Library,
+    name: &str,
+    backup: bool,
+    provider_dirs: &[std::path::PathBuf],
+) -> Result<InstallResult, ApiErr> {
     // `name` comes off the URL; a separator/`..` would aim the backup copy (and
     // the install) outside the Library — same not-a-bundled-skill outcome as an
     // unknown name, which the handler surfaces as 404.
@@ -383,7 +426,7 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
     // A provider dir already holding a user-owned `<name>` is left alone.
     let mut user_owned = Vec::new();
     if installed {
-        user_owned = user_skills::install(name, &installed_dir)
+        user_owned = user_skills::install_into_dirs(provider_dirs, name, &installed_dir)
             .map_err(|e| Error::Internal(format!("materialize user-level skill '{name}': {e}")))?
             .into_iter()
             .map(|d| d.join(name).to_string_lossy().into_owned())
@@ -514,18 +557,105 @@ mod tests {
     }
 
     #[test]
+    fn bulk_retry_repairs_provider_mirrors_after_library_was_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path().join("library"));
+        let skill = list_bundled().into_iter().next().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        let providers = vec![dir.path().join("provider-a"), blocked.join("skills")];
+        let first = install_many_into_dirs(&lib, Some(&skill.category), true, false, &providers);
+        assert!(first
+            .failed
+            .iter()
+            .any(|failure| failure.name == skill.name));
+        assert_eq!(
+            install_state(&lib, &skill.name),
+            Some(InstallState::UpToDate)
+        );
+        std::fs::remove_file(&blocked).unwrap();
+        let retry = install_many_into_dirs(&lib, Some(&skill.category), true, false, &providers);
+        assert!(retry.failed.is_empty(), "{:?}", retry.failed);
+        for provider in &providers {
+            assert_eq!(
+                std::fs::read(provider.join(&skill.name).join("SKILL.md")).unwrap(),
+                std::fs::read(lib.root.join("skills").join(&skill.name).join("SKILL.md")).unwrap()
+            );
+            assert!(std::fs::read_to_string(provider.join(".otto-managed.json"))
+                .unwrap()
+                .contains(&skill.name));
+        }
+        assert!(
+            !lib.root.join("skills-backup").exists(),
+            "retry must not rewrite current Library copies"
+        );
+    }
+
+    #[test]
+    fn bulk_reconciliation_preserves_ahead_and_user_owned_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::new(dir.path().join("library"));
+        let skill = list_bundled().into_iter().next().unwrap();
+        let installed = lib.root.join("skills").join(&skill.name);
+        std::fs::create_dir_all(&installed).unwrap();
+        let ahead = format!("---\nversion: {}\n---\nlocal edits", skill.version + 1);
+        std::fs::write(installed.join("SKILL.md"), &ahead).unwrap();
+        let provider = dir.path().join("provider");
+        let result = install_many_into_dirs(
+            &lib,
+            Some(&skill.category),
+            true,
+            false,
+            std::slice::from_ref(&provider),
+        );
+        assert!(result.skipped.contains(&skill.name));
+        assert_eq!(
+            std::fs::read_to_string(installed.join("SKILL.md")).unwrap(),
+            ahead
+        );
+        assert!(
+            !provider.join(&skill.name).exists(),
+            "ahead copies must remain opt-in"
+        );
+
+        assert!(install_into(&lib, &skill.name).unwrap());
+        std::fs::create_dir_all(provider.join(&skill.name)).unwrap();
+        std::fs::write(provider.join(&skill.name).join("SKILL.md"), "user copy").unwrap();
+        let result = install_many_into_dirs(
+            &lib,
+            Some(&skill.category),
+            true,
+            false,
+            std::slice::from_ref(&provider),
+        );
+        assert!(result.failed.is_empty());
+        assert!(result
+            .user_owned
+            .contains(&provider.join(&skill.name).to_string_lossy().into_owned()));
+        assert_eq!(
+            std::fs::read_to_string(provider.join(&skill.name).join("SKILL.md")).unwrap(),
+            "user copy"
+        );
+    }
+
+    #[test]
     fn install_many_skips_up_to_date_skills() {
         let dir = tempfile::tempdir().unwrap();
         let lib = Library::new(dir.path());
         let first = list_bundled().into_iter().next().expect("a bundled skill");
         let cat = first.category.clone();
         // Seed every skill of the category into the Library only, so the bulk
-        // install has nothing to do — it must never reach the provider-dir
-        // mirror (~/.claude/skills …) from a test.
+        // install skips Library writes but reconciles an isolated provider mirror.
         for b in list_bundled().into_iter().filter(|b| b.category == cat) {
             assert!(install_into(&lib, &b.name).unwrap());
         }
-        let r = install_many(&lib, Some(&cat), true, false);
+        let r = install_many_into_dirs(
+            &lib,
+            Some(&cat),
+            true,
+            false,
+            &[dir.path().join("provider")],
+        );
         assert!(r.skipped.contains(&first.name), "{r:?}");
         assert!(r.installed.is_empty() && r.backed_up.is_empty() && r.failed.is_empty());
     }

@@ -410,6 +410,10 @@ async fn run(cfg: Config) -> Result<(), String> {
     boot::spawn_post_listen_work(&ctx, post_listen_housekeeping);
     let mut background = boot::spawn_background(&ctx, root_user_id).await;
     background.keep(start_usage_tailer(&cfg, &ctx));
+    // Stop supervisor admission as soon as shutdown begins, including while
+    // HTTP drains. Dropping cancellation guards stops their next tick; already
+    // running jobs are handled separately by engine/session teardown.
+    let background_stop = background.stop_on(otto_server::shutdown::cancelled());
 
     // Kept past `build_router` (which takes the ctx) for the listeners and
     // the teardown.
@@ -428,12 +432,27 @@ async fn run(cfg: Config) -> Result<(), String> {
 
     // (Bound at the very top of `run` — the single-instance lock.)
     tracing::info!("listening on http://127.0.0.1:{}", cfg.port);
-    let network_task = serve_network_listener(&cfg, &pool, &router, &shutdown_rx).await?;
-    let alt_task = alt_loopback.map(|l| serve_alt_loopback(l, cfg.port, &router, &shutdown_rx));
-
-    boot.finish();
-
-    serve_loopback(loopback, router, &shutdown_rx).await?;
+    // A settings-read failure here happens after supervisors and sessions have
+    // started. Preserve that error, but take the same cancellation/teardown path
+    // as a primary listener failure instead of returning through `?`.
+    let (serve_result, network_task, alt_task) =
+        match serve_network_listener(&cfg, &pool, &router, &shutdown_rx).await {
+            Ok(network_task) => {
+                let alt_task =
+                    alt_loopback.map(|l| serve_alt_loopback(l, cfg.port, &router, &shutdown_rx));
+                boot.finish();
+                (
+                    serve_loopback(loopback, router, &shutdown_rx).await,
+                    network_task,
+                    alt_task,
+                )
+            }
+            Err(error) => (Err(error), None, None),
+        };
+    // Also stop supervisors if serving ended without a signal. Await the
+    // aborted task so its captured guards are dropped before teardown starts.
+    background_stop.abort();
+    let _ = background_stop.await;
 
     // The other listeners got the same signal; they get no extra time.
     for task in [network_task, alt_task].into_iter().flatten() {
@@ -456,8 +475,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     .await;
     housekeeping::clear_running(&cfg.data_dir);
     tracing::info!("ottod stopped");
-    drop(background);
-    Ok(())
+    serve_result
 }
 
 /// Second LOOPBACK host for the same port (TRANSPORT_PLAN §3d). Browsers

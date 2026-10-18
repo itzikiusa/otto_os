@@ -173,3 +173,32 @@ async fn replacement_session_is_persisted_for_the_next_turn() {
         Some("replacement-session")
     );
 }
+
+#[tokio::test]
+async fn stopping_assist_restores_current_manual_content_and_format() {
+    let (_pool, repo, scene) = scene_fixture().await;
+    repo.update(
+        &scene.id,
+        otto_state::SceneUpdate {
+            doc_json: Some(
+                serde_json::json!({"format":"mermaid", "source":"flowchart TD\n manual"})
+                    .to_string(),
+            ),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let dir = std::env::temp_dir().join(format!("otto-stop-{}", otto_core::new_id()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let (doc, result) = stopped_document(&repo, &scene.id, &dir).await.unwrap();
+    assert_eq!(doc["format"], "mermaid");
+    assert_eq!(result.mermaid.as_deref(), Some("flowchart TD\n manual"));
+    assert_eq!(
+        tokio::fs::read_to_string(dir.join("canvas.mermaid"))
+            .await
+            .unwrap(),
+        "flowchart TD\n manual"
+    );
+    tokio::fs::remove_dir_all(dir).await.unwrap();
+}

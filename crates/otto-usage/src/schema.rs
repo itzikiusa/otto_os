@@ -150,6 +150,8 @@ pub fn alter_ttl_sql(retention_days: u32) -> String {
         "ALTER TABLE usage_events MODIFY TTL event_date + INTERVAL {ttl} DAY \
 SETTINGS materialize_ttl_after_modify = 0;
 ALTER TABLE system_metrics MODIFY TTL metric_date + INTERVAL {ttl} DAY \
+SETTINGS materialize_ttl_after_modify = 0;
+ALTER TABLE usage_events_durable MODIFY TTL event_date + INTERVAL {ttl} DAY \
 SETTINGS materialize_ttl_after_modify = 0;"
     )
 }
@@ -157,7 +159,7 @@ SETTINGS materialize_ttl_after_modify = 0;"
 /// `SELECT name, engine_full FROM system.tables` for the two usage tables —
 /// read before an alter to learn the TTL each table already has.
 pub const TABLE_TTLS_SQL: &str = "SELECT name, engine_full FROM system.tables \
-WHERE database = currentDatabase() AND name IN ('usage_events', 'system_metrics')";
+WHERE database = currentDatabase() AND name IN ('usage_events', 'system_metrics', 'usage_events_durable')";
 
 /// The day count of a table's `TTL <col> + toIntervalDay(N)` clause, from its
 /// `system.tables.engine_full`. `None` when there is no (day-interval) TTL.
@@ -178,6 +180,25 @@ pub fn parts_lifetime_sql() -> &'static str {
 ALTER TABLE system_metrics MODIFY SETTING old_parts_lifetime = 60, ttl_only_drop_parts = 1;"
 }
 
+/// Additive durable ingestion storage. Legacy rows are never rewritten. FINAL
+/// deduplicates only journal-delivered rows, partitioned by the event's month;
+/// reporting predicates on event_date prune partitions before the merge.
+pub fn ingestion_schema_sql(retention_days: u32) -> String {
+    let legacy = schema_sql(retention_days);
+    let table = legacy.split(";\n").next().expect("usage DDL");
+    let durable = table
+        .replace(
+            "CREATE TABLE IF NOT EXISTS usage_events (",
+            "CREATE TABLE IF NOT EXISTS usage_events_durable (\n    event_id String,",
+        )
+        .replace("ENGINE = MergeTree", "ENGINE = ReplacingMergeTree")
+        .replace(
+            "ORDER BY (event_date, provider, session_id, ts)",
+            "ORDER BY (event_date, session_id, event_id)",
+        );
+    format!("{durable};\nCREATE VIEW IF NOT EXISTS usage_accounted AS SELECT * FROM usage_events UNION ALL SELECT * EXCEPT(event_id) FROM usage_events_durable FINAL")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,7 +206,7 @@ mod tests {
     #[test]
     fn alter_ttl_skips_the_materialize_rewrite() {
         let sql = alter_ttl_sql(90);
-        assert_eq!(sql.matches("materialize_ttl_after_modify = 0").count(), 2);
+        assert_eq!(sql.matches("materialize_ttl_after_modify = 0").count(), 3);
         assert!(sql.contains("event_date + INTERVAL 90 DAY"));
         assert!(sql.contains("metric_date + INTERVAL 90 DAY"));
         assert!(alter_ttl_sql(0).contains("INTERVAL 1 DAY"), "floored at 1");

@@ -1009,6 +1009,7 @@ impl JiraClient {
         };
         let mut all: Vec<serde_json::Value> = Vec::new();
         let mut start_at: u64 = 0;
+        let mut complete = false;
         for _ in 0..MAX_PAGES {
             let start_s = start_at.to_string();
             let max_s = PAGE.to_string();
@@ -1057,9 +1058,18 @@ impl JiraClient {
                     false
                 }
             };
-            if reached_cursor || got == 0 || start_at >= total {
+            if reached_cursor || start_at >= total {
+                complete = true;
                 break;
             }
+            if got == 0 {
+                break;
+            }
+        }
+        if !complete {
+            return Err(Error::Upstream(format!(
+                "jira comments for {key} are incomplete after {start_at} rows; backlog exceeds the page limit or the upstream page was empty; cursor has not advanced"
+            )));
         }
         if since.is_some() {
             // Newest-first on the wire (or ascending on a server that ignored
@@ -3548,6 +3558,31 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0]["id"], "2");
         assert!(!reached);
+    }
+
+    #[tokio::test]
+    async fn comment_backlog_over_cap_is_an_error_not_a_partial_success() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        let origin = fixture(axum::Router::new().route(
+            "/rest/api/3/issue/P-1/comment",
+            axum::routing::get(|Query(q): Query<HashMap<String, String>>| async move {
+                let offset: usize = q["startAt"].parse().unwrap();
+                let comments: Vec<_> = (offset..(offset + 100).min(2001))
+                    .map(|i| {
+                        serde_json::json!({
+                            "id": i.to_string(), "created": "2026-10-18T10:00:00Z", "body": null
+                        })
+                    })
+                    .collect();
+                axum::Json(serde_json::json!({ "comments": comments, "total": 2001 }))
+            }),
+        ))
+        .await;
+        let result = JiraClient::new(&origin, "e", "t")
+            .list_comments_since("P-1", "2026-10-17T10:00:00Z")
+            .await;
+        assert!(matches!(result, Err(Error::Upstream(message)) if message.contains("incomplete")));
     }
 
     /// Serve `router` on an ephemeral loopback port; returns its origin.

@@ -418,13 +418,85 @@ async fn clickhouse_export_is_uncapped_over_1000_rows() {
     );
 }
 
-/// Isolated parity server; independently runnable without the legacy seed.
+/// Isolated parity server by default; CI points at its seeded compose server.
 fn parity_cfg(native: bool) -> ResolvedConfig {
     let mut c = cfg();
-    c.port = if native { 29000 } else { 28123 };
+    let (port_var, default_port) = if native {
+        ("OTTO_CLICKHOUSE_PARITY_NATIVE_PORT", 29000)
+    } else {
+        ("OTTO_CLICKHOUSE_PARITY_HTTP_PORT", 28123)
+    };
+    c.port = std::env::var(port_var)
+        .map(|port| {
+            port.parse::<u16>()
+                .expect("ClickHouse parity port must be a u16")
+        })
+        .unwrap_or(default_port);
     c.database = Some("default".into());
     c.params = json!({"transport": if native { "native" } else { "http" }});
     c
+}
+
+/// A server-owned readonly=1 profile must remain usable without weakening it
+/// to Otto's readonly=2 execution mode or requiring permission to change settings.
+#[tokio::test]
+#[ignore]
+async fn clickhouse_parity_native_strict_readonly_profile() {
+    if std::env::var("OTTO_DBV_PARITY").is_err() {
+        return;
+    }
+    let user = format!(
+        "otto_readonly_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let admin = ClickhouseDriver::default();
+    let admin_cfg = parity_cfg(false);
+    admin
+        .run(
+            &admin_cfg,
+            &query(&format!(
+        "CREATE USER {user} IDENTIFIED WITH no_password SETTINGS readonly=1, session_timezone='UTC'"
+    )),
+        )
+        .await
+        .unwrap();
+    admin
+        .run(
+            &admin_cfg,
+            &query(&format!("GRANT SELECT ON *.* TO {user}")),
+        )
+        .await
+        .unwrap();
+    let outcome = async {
+        let driver = ClickhouseDriver::default();
+        for enforced in [false, true] {
+            let mut cfg = parity_cfg(true);
+            cfg.user = Some(user.clone());
+            cfg.password = None;
+            cfg.params["__read_only_execution"] = json!(enforced);
+            let result = driver
+                .run(
+                    &cfg,
+                    &query("SELECT toUInt8(getSetting('readonly')) AS mode, timezone() AS tz"),
+                )
+                .await?;
+            assert_eq!(result.rows[0], vec![json!(1), json!("UTC")]);
+            assert!(driver.run(&cfg, &query("SET readonly=0")).await.is_err());
+            cfg.params["timezone"] = json!("Europe/Paris");
+            let error = driver.run(&cfg, &query("SELECT 1")).await.unwrap_err();
+            assert!(error.to_string().contains("timezone"), "{error}");
+        }
+        Ok::<(), otto_core::Error>(())
+    }
+    .await;
+    admin
+        .run(&admin_cfg, &query(&format!("DROP USER {user}")))
+        .await
+        .unwrap();
+    outcome.unwrap();
 }
 
 #[tokio::test]

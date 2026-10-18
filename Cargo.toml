@@ -200,3 +200,6 @@ strip = "debuginfo"
 vt100 = { path = "vendor/vt100" }
 # Preserve MySQL result metadata and authorize explicit LOCAL INFILE transfers.
 sqlx-mysql = { path = "vendor/sqlx-mysql" }
+
+# Permit native ClickHouse startup under server-enforced readonly=1 profiles.
+klickhouse = { path = "vendor/klickhouse" }

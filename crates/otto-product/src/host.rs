@@ -128,6 +128,7 @@ pub trait ProductStudioHost: ProductRunHost {
         meta: serde_json::Value,
         prompt: &str,
         stuck_after: Duration,
+        cancel: otto_core::cancel_signal::CancelSignal,
     ) -> impl Future<Output = Result<(String, Id)>> + Send;
 
     /// The point-of-action usage-budget gate (`provider` empty = any) a swarm

@@ -17,7 +17,7 @@ use otto_core::event::Event;
 use otto_core::Id;
 use otto_improve::ImprovementEngine;
 use otto_orchestrator::Orchestrator;
-use otto_state::{NewEvent, NewQuestion, ProductQuestion, ProductRepo, QuestionPatch};
+use otto_state::{NewEvent, NewQuestion, ProductQuestion, ProductRepo};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -252,50 +252,37 @@ async fn poll_story(
     }
 
     // Step 2: fetch comments since the current cursor.
-    let comments = product
+    let comments = match product
         .list_new_comments(&story_id, story.watch_cursor.as_deref())
-        .await?;
+        .await
+    {
+        Ok(comments) => comments,
+        Err(error) => {
+            let _ = events.send(Event::Notice {
+                level: "warn".into(),
+                title: format!(
+                    "Story {}: comments could not be synchronized",
+                    story.source_key
+                ),
+                body: error.to_string(),
+            });
+            return Err(error);
+        }
+    };
 
     if comments.is_empty() {
         return Ok(());
     }
 
-    // Step 3: record each new comment as a "watch/comment" event.
-    for c in &comments {
-        let snippet = c.body_md.chars().take(120).collect::<String>();
-        let summary = format!("{}: {}", c.author, snippet);
-        if let Err(e) = product_repo
-            .add_event(NewEvent {
-                story_id: story_id.clone(),
-                section: "watch".into(),
-                kind: "comment".into(),
-                summary,
-                actor_id: None,
-                meta_json: None,
-            })
-            .await
-        {
-            warn!("story watcher: add_event comment {story_id}: {e}");
-        }
-    }
-
-    // Step 4: advance the cursor — newest created timestamp PLUS the ids seen
-    // at that exact timestamp, so a later comment sharing the same millisecond
-    // is picked up next poll instead of being dropped forever.
-    if let Some(cursor) = crate::build_watch_cursor(&comments) {
-        if let Err(e) = product_repo.set_watch_cursor(&story_id, &cursor).await {
-            warn!("story watcher: set_watch_cursor {story_id}: {e}");
-        }
-    }
+    // Keep the prior cursor until parsing and all question/event writes succeed.
+    let next_cursor =
+        crate::service::advance_watch_cursor(story.watch_cursor.as_deref(), &comments)
+            .expect("nonempty comment batch has a cursor");
 
     // Step 5: reconcile — build prompt from open questions + new comments.
     let open_questions: Vec<ProductQuestion> = product_repo
         .list_questions(&story_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("story watcher: list_questions({story_id}) failed: {e}");
-            Vec::new()
-        })
+        .await?
         .into_iter()
         .filter(|q| q.status == "open" || q.status == "posted")
         .collect();
@@ -345,116 +332,74 @@ async fn poll_story(
         }
     };
 
-    let recommended_next_step = match reconcile_result {
+    let output = match reconcile_result {
+        Ok(output) => output,
         Err(e) => {
-            warn!("story watcher: reconcile agent error for {story_id}: {e}");
-            // Cursor is already advanced; comments are recorded. Continue.
-            let source_key = story.source_key.clone();
-            let n = comments.len();
             let _ = events.send(Event::Notice {
-                level: "info".into(),
-                title: format!("Story {source_key}: {n} new comment(s)"),
-                body: "(reconcile failed — check logs)".into(),
+                level: "warn".into(),
+                title: format!("Story {}: reconciliation delayed", story.source_key),
+                body: "New comments will be retried on the next poll.".into(),
             });
-            return Ok(());
-        }
-        Ok(output) => {
-            // Parse the reconcile JSON.
-            let json_val = extract_json_block(&output);
-            match json_val {
-                None => {
-                    warn!(
-                        "story watcher: reconcile parse failed for {story_id} (len={})",
-                        output.len()
-                    );
-                    String::new()
-                }
-                Some(v) => {
-                    // Step 6a: mark answered questions.
-                    if let Some(answered) = v["answered"].as_array() {
-                        for ans in answered {
-                            let qid = ans["question_id"].as_str().unwrap_or("").to_string();
-                            let answer = ans["answer"].as_str().unwrap_or("").to_string();
-                            if qid.is_empty() {
-                                continue;
-                            }
-                            // Only update if this question belongs to this story.
-                            let belongs = open_questions.iter().any(|q| q.id == qid);
-                            if !belongs {
-                                continue;
-                            }
-                            if let Err(e) = product_repo
-                                .update_question(
-                                    &qid,
-                                    QuestionPatch {
-                                        text: None,
-                                        rationale: None,
-                                        category: None,
-                                        status: Some("answered".into()),
-                                        answer: Some(Some(answer)),
-                                        posted_ref: None,
-                                    },
-                                )
-                                .await
-                            {
-                                warn!("story watcher: update_question {qid}: {e}");
-                            }
-                        }
-                    }
-
-                    // Step 6b: insert new questions.
-                    if let Some(new_qs) = v["new_questions"].as_array() {
-                        for nq in new_qs {
-                            let text = nq["text"].as_str().unwrap_or("").to_string();
-                            if text.trim().is_empty() {
-                                continue;
-                            }
-                            if let Err(e) = product_repo
-                                .create_question(NewQuestion {
-                                    story_id: story_id.clone(),
-                                    analysis_id: None,
-                                    text,
-                                    rationale: nq["rationale"].as_str().unwrap_or("").to_string(),
-                                    category: nq["category"]
-                                        .as_str()
-                                        .unwrap_or("general")
-                                        .to_string(),
-                                    created_by: story.created_by.clone(),
-                                })
-                                .await
-                            {
-                                warn!("story watcher: create_question for {story_id}: {e}");
-                            }
-                        }
-                    }
-
-                    v["recommended_next_step"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string()
-                }
-            }
+            return Err(e);
         }
     };
-
-    // Step 6c: add a "watch/reconciled" event.
-    if let Err(e) = product_repo
-        .add_event(NewEvent {
+    let reconciled = parse_reconcile(&output)?;
+    let answers: Vec<_> = reconciled
+        .answered
+        .into_iter()
+        .filter(|a| open_questions.iter().any(|q| q.id == a.question_id))
+        .map(|a| (a.question_id, a.answer))
+        .collect();
+    let questions: Vec<_> = reconciled
+        .new_questions
+        .into_iter()
+        .map(|q| NewQuestion {
+            story_id: story_id.clone(),
+            analysis_id: None,
+            text: q.text,
+            rationale: q.rationale,
+            category: q.category,
+            created_by: story.created_by.clone(),
+        })
+        .collect();
+    let recommended_next_step = reconciled.recommended_next_step;
+    let mut recorded: Vec<_> = comments
+        .iter()
+        .map(|c| NewEvent {
             story_id: story_id.clone(),
             section: "watch".into(),
-            kind: "reconciled".into(),
-            summary: if recommended_next_step.is_empty() {
-                format!("{} new comment(s) reconciled", comments.len())
-            } else {
-                recommended_next_step.clone()
-            },
+            kind: "comment".into(),
+            summary: format!(
+                "{}: {}",
+                c.author,
+                c.body_md.chars().take(120).collect::<String>()
+            ),
             actor_id: None,
             meta_json: None,
         })
-        .await
-    {
-        warn!("story watcher: add_event reconciled {story_id}: {e}");
-    }
+        .collect();
+    recorded.push(NewEvent {
+        story_id: story_id.clone(),
+        section: "watch".into(),
+        kind: "reconciled".into(),
+        summary: if recommended_next_step.is_empty() {
+            format!("{} new comment(s) reconciled", comments.len())
+        } else {
+            recommended_next_step.clone()
+        },
+        actor_id: None,
+        meta_json: None,
+    });
+    product_repo
+        .commit_watch_reconcile(
+            &story_id,
+            story.watch_cursor.as_deref(),
+            &next_cursor,
+            &answers,
+            &questions,
+            &recorded,
+        )
+        .await?;
 
     // Step 7: run self-improvement narrative.
     let all_questions = product_repo
@@ -504,6 +449,63 @@ async fn poll_story(
     });
 
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ReconcileResult {
+    answered: Vec<ReconcileAnswer>,
+    new_questions: Vec<ReconcileQuestion>,
+    recommended_next_step: String,
+}
+#[derive(serde::Deserialize)]
+struct ReconcileAnswer {
+    question_id: Id,
+    answer: String,
+}
+#[derive(serde::Deserialize)]
+struct ReconcileQuestion {
+    text: String,
+    rationale: String,
+    category: String,
+}
+
+fn parse_reconcile(raw: &str) -> otto_core::Result<ReconcileResult> {
+    let bad = || {
+        otto_core::Error::Upstream("invalid reconciliation result; comments remain pending".into())
+    };
+    let value = extract_json_block(raw).ok_or_else(bad)?;
+    let result: ReconcileResult = serde_json::from_value(value).map_err(|_| bad())?;
+    if result
+        .answered
+        .iter()
+        .any(|a| a.question_id.trim().is_empty() || a.answer.trim().is_empty())
+        || result
+            .new_questions
+            .iter()
+            .any(|q| q.text.trim().is_empty())
+    {
+        return Err(bad());
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod reconcile_result_tests {
+    #[test]
+    fn malformed_or_partial_output_is_not_an_acknowledgement() {
+        for raw in [
+            "provider error",
+            "{}",
+            r#"{"answered":[],"new_questions":[]}"#,
+            r#"{"answered":[{"question_id":"q","answer":""}],"new_questions":[],"recommended_next_step":""}"#,
+        ] {
+            assert!(super::parse_reconcile(raw).is_err(), "{raw}");
+        }
+        assert!(super::parse_reconcile(
+            r#"{"answered":[],"new_questions":[],"recommended_next_step":"No change"}"#
+        )
+        .is_ok());
+    }
 }
 
 // ---------------------------------------------------------------------------

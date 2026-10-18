@@ -8,6 +8,7 @@ license.workspace = true
 otto-core.workspace = true
 otto-state.workspace = true
 otto-sessions.workspace = true
+otto-transcript.workspace = true
 otto-orchestrator.workspace = true
 axum.workspace = true
 serde.workspace = true

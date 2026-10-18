@@ -118,6 +118,27 @@ async fn update_swarm_is_a_partial_patch_and_null_clears_a_budget() {
 }
 
 #[tokio::test]
+async fn status_active_does_not_clear_a_budget_pause_reason() {
+    let svc = service().await;
+    let s = svc
+        .create_swarm(&ws(), &user(), req(json!({"name": "Held"})), "claude")
+        .await
+        .unwrap();
+    svc.repo
+        .pause_swarm_with_reason(&s.id, "cost budget reached")
+        .await
+        .unwrap();
+    let err = svc
+        .update_swarm(&s.id, req::<UpdateSwarmReq>(json!({"status": "active"})))
+        .await
+        .expect_err("active patch must not clear a pause reason");
+    let held = svc.repo.get_swarm(&s.id).await.unwrap();
+    assert_eq!(held.status, "paused");
+    assert_eq!(held.pause_reason.as_deref(), Some("cost budget reached"));
+    assert!(err.to_string().contains("paused with a reason"), "{err}");
+}
+
+#[tokio::test]
 async fn org_tree_reports_to_round_trips_and_detail_counts_match() {
     let svc = service().await;
     let s = svc

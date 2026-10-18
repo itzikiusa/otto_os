@@ -133,7 +133,13 @@ pub fn output_schema_for(kind: &str) -> Option<Value> {
     match kind {
         "agent_prompt" => obj(&[("reply", "string"), ("working_directory", "string")]),
         "prepare_context" => obj(&[("jira", "object")]),
-        "http_request" | "api_run" => obj(&[("status", "number"), ("body", "any")]),
+        "http_request" => obj(&[("status", "number"), ("body", "any")]),
+        "api_run" => obj(&[
+            ("status", "number"),
+            ("body", "any"),
+            ("truncated", "boolean"),
+            ("too_large", "boolean"),
+        ]),
         "db_query" => obj(&[
             ("columns", "array"),
             ("rows", "array"),

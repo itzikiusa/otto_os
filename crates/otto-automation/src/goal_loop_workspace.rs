@@ -102,6 +102,53 @@ pub async fn provision_worktree(
 const CAPTURE_CAP: usize = 8 * 1024 * 1024;
 /// Per-git budget: a capture never hangs the loop (a FIFO, a stuck NFS path).
 const CAPTURE_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Git's well-known empty tree. `--attr-source` reads attributes from it, so a
+/// worktree `.gitattributes` is not consulted.
+const EMPTY_ATTR_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Args that keep `git diff` from running a clean filter. The empty attribute
+/// tree drops worktree `.gitattributes`. Blanking each configured
+/// `filter.<name>.{clean,smudge,process}` drops a driver named from
+/// `info/attributes` or the global file. Driver names that are not a config
+/// token are skipped rather than interpolated into `-c`.
+async fn diff_safety_args(cwd: &str) -> Vec<String> {
+    let mut cmd = otto_git::hardened_command();
+    cmd.args(["config", "--get-regexp", "^filter\\."])
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let listed = cmd.output().await.ok().map(|out| out.stdout);
+    let mut names = Vec::new();
+    if let Some(stdout) = listed {
+        for line in String::from_utf8_lossy(&stdout).lines() {
+            let key = line.split_whitespace().next().unwrap_or("");
+            let Some(rest) = key.strip_prefix("filter.") else {
+                continue;
+            };
+            let name = match rest.rsplit_once('.') {
+                Some((name, "clean" | "smudge" | "process" | "required")) => name,
+                _ => rest,
+            };
+            let token = name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && !name.is_empty();
+            if token {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    let mut args = vec![format!("--attr-source={EMPTY_ATTR_TREE}")];
+    for name in names {
+        for kind in ["clean", "smudge", "process"] {
+            args.push("-c".into());
+            args.push(format!("filter.{name}.{kind}="));
+        }
+    }
+    args
+}
 
 /// Capture the actual working contents, including untracked files. No staging,
 /// temporary commits or mutation of the user's index is needed for evidence.
@@ -114,10 +161,16 @@ const CAPTURE_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// skipped.
 pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
     /// `(succeeded-or-cut, stdout ≤ cap)`.
-    async fn git(cwd: &str, args: &[&str], cap: usize) -> Result<(bool, Vec<u8>)> {
+    async fn git(
+        cwd: &str,
+        prefix: &[String],
+        args: &[&str],
+        cap: usize,
+    ) -> Result<(bool, Vec<u8>)> {
         use tokio::io::AsyncReadExt;
         let mut cmd = otto_git::hardened_command();
-        cmd.args(args)
+        cmd.args(prefix)
+            .args(args)
             .current_dir(cwd)
             .env("GIT_OPTIONAL_LOCKS", "0")
             .stdout(std::process::Stdio::piped())
@@ -147,9 +200,15 @@ pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
     if base.starts_with('-') {
         return Err(Error::Invalid("invalid goal base".into()));
     }
+    // Worktree `.gitattributes` is not a source of programs. `--attr-source`
+    // reads attributes from the empty tree, and every configured clean/smudge
+    // filter command is blanked so `$GIT_DIR/info/attributes` cannot name one
+    // that still runs. `filter.use` is not a git key.
+    let safe = diff_safety_args(cwd).await;
     let left = |text: &str| CAPTURE_CAP.saturating_sub(text.len());
     let (ok, tracked) = git(
         cwd,
+        &safe,
         &[
             "diff",
             "--no-ext-diff",
@@ -167,6 +226,7 @@ pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
         // Unborn repositories in research/fixtures have no HEAD.
         let (_, staged) = git(
             cwd,
+            &safe,
             &[
                 "diff",
                 "--no-ext-diff",
@@ -181,6 +241,7 @@ pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
         let mut t = String::from_utf8_lossy(&staged).into_owned();
         let (_, unstaged) = git(
             cwd,
+            &safe,
             &["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--"],
             left(&t),
         )
@@ -190,6 +251,7 @@ pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
     };
     let (_, untracked) = git(
         cwd,
+        &safe,
         &["ls-files", "--others", "--exclude-standard", "-z"],
         CAPTURE_CAP,
     )
@@ -207,6 +269,7 @@ pub async fn capture_work(cwd: &str, base: Option<&str>) -> Result<String> {
         // -- prevents option-like filenames being interpreted as git flags.
         let (_, patch) = git(
             cwd,
+            &safe,
             &[
                 "diff",
                 "--no-ext-diff",
@@ -251,6 +314,55 @@ mod evidence_tests {
         assert!(diff.contains("staged"));
         assert!(diff.contains("new evidence"));
         assert!(dir.path().join("untracked.txt").exists());
+    }
+
+    /// A clean filter named from worktree attributes or info/attributes must
+    /// not run while the capture reads the working tree. The diff still shows
+    /// the bytes on disk.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_does_not_run_a_clean_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("filter-ran");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        assert!(git(&["config", "user.email", "t@example.invalid"])
+            .status
+            .success());
+        assert!(git(&["config", "user.name", "t"]).status.success());
+        std::fs::write(dir.path().join("f.txt"), "hi\n").unwrap();
+        assert!(git(&["add", "f.txt"]).status.success());
+        assert!(git(&["commit", "-qm", "init"]).status.success());
+        let script = dir.path().join("filt.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut mode = std::fs::metadata(&script).unwrap().permissions();
+        mode.set_mode(0o755);
+        std::fs::set_permissions(&script, mode).unwrap();
+        assert!(
+            git(&["config", "filter.secret.clean", script.to_str().unwrap()])
+                .status
+                .success()
+        );
+        std::fs::write(dir.path().join(".gitattributes"), "* filter=secret\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        std::fs::write(dir.path().join(".git/info/attributes"), "* filter=secret\n").unwrap();
+        std::fs::write(dir.path().join("f.txt"), "secret\n").unwrap();
+        let diff = super::capture_work(dir.path().to_str().unwrap(), None)
+            .await
+            .unwrap();
+        assert!(!marker.exists(), "clean filter ran during capture");
+        assert!(diff.contains("secret"));
     }
 
     /// S2-11: an untracked FIFO used to block `diff --no-index` forever, and

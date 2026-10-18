@@ -445,13 +445,17 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
     // The run column is a list snapshot. Publication checks current evidence
     // and policy, including a pack that has failed or disappeared since approval.
     let live_pack = match run.proof_pack_id.as_deref() {
-        Some(id) => match crate::proof::recompute_and_emit(ctx, id).await {
+        Some(id) => match ctx.proof_repo.get_pack(id).await {
             Ok(pack)
                 if pack.workspace_id == run.workspace_id
                     && pack.work_item_id == run.id
                     && pack.work_item_kind == otto_core::proof::WorkItemKind::Task =>
             {
-                Some(pack)
+                // Repair historical Task packs before evaluating configured policy.
+                ctx.proof_repo
+                    .set_repo_link(id, run.repo_id.as_deref(), None)
+                    .await?;
+                Some(crate::proof::recompute_and_emit(ctx, id).await?)
             }
             Ok(_) | Err(Error::NotFound(_)) => None,
             Err(error) => return Err(error),
@@ -499,7 +503,10 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
                 Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
                     .await
                     .ok()
-                    .flatten(),
+                    .flatten()
+                    .and_then(|token| {
+                        otto_git::transport::TransportCredential::for_repo(token, &acc, &repo).ok()
+                    }),
                 Err(_) => None,
             },
             None => None,

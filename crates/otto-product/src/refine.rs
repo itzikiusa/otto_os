@@ -71,6 +71,9 @@ pub struct ThreadDetail {
 #[derive(Debug, Deserialize)]
 pub struct SendMessageReq {
     pub body: String,
+    /// Unique per-request identity used by Stop; omit for legacy callers.
+    #[serde(default)]
+    pub turn_id: Option<String>,
     /// Agent provider to run this turn on (built-in or custom, e.g. grok).
     /// Empty/absent = default agent (resolved request → workspace → global →
     /// claude). Each turn replays the whole thread history in the prompt, so a
@@ -264,9 +267,29 @@ pub async fn send_message<C: ProductStudioHost>(
     CurrentUser(user): CurrentUser,
     Json(req): Json<SendMessageReq>,
 ) -> ApiResult<Json<TurnResp>> {
+    // Dropping the HTTP response must not release the turn while its managed
+    // session still owns cleanup. Stop continues to address the same task.
+    crate::studio_turn::complete(async move {
+        send_message_inner(Path(tid), State(ctx), CurrentUser(user), Json(req)).await
+    })
+    .await
+}
+
+async fn send_message_inner<C: ProductStudioHost>(
+    Path(tid): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<SendMessageReq>,
+) -> ApiResult<Json<TurnResp>> {
     // 1. Resolve thread + Editor role-check.
     let thread = thread_with_role(&ctx, &user, &tid, WorkspaceRole::Editor).await?;
-    let _turn = crate::studio_turn::claim("refinement", &thread.workspace_id, &tid)?;
+    let _story_turn = crate::story_lifecycle::claim(&thread.story_id).await?;
+    let turn = crate::studio_turn::claim_with_id(
+        "refinement",
+        &thread.workspace_id,
+        &tid,
+        req.turn_id.as_deref(),
+    )?;
     let thread = thread_with_role(&ctx, &user, &tid, WorkspaceRole::Editor).await?;
 
     let story = ctx
@@ -287,28 +310,14 @@ pub async fn send_message<C: ProductStudioHost>(
         .await
         .map_err(ApiError)?;
 
-    // 3a. Current story body: latest `suggested` → `source` → the title.
-    let story_body = match ctx
-        .product_repo()
-        .latest_version_of_kind(&thread.story_id, "suggested")
-        .await
-        .ok()
-        .flatten()
+    // Match discovery/publication: suggested → draft → source → title.
+    let story_body = ctx
+        .product()
+        .best_content_version(&thread.story_id)
+        .await?
         .map(|v| v.body_md)
-    {
-        Some(b) if !b.trim().is_empty() => b,
-        _ => match ctx
-            .product_repo()
-            .latest_version_of_kind(&thread.story_id, "source")
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v.body_md)
-        {
-            Some(b) if !b.trim().is_empty() => b,
-            _ => story.title.clone(),
-        },
-    };
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| story.title.clone());
 
     // 3b. Attachments by absolute path (never copied — the agent opens them).
     let attachment_lines: Vec<String> = ctx
@@ -402,6 +411,7 @@ pub async fn send_message<C: ProductStudioHost>(
     {
         meta["model"] = json!(m);
     }
+    turn.check_running()?;
     let (raw, _sid) = ctx
         .run_session_turn(
             &ws,
@@ -413,9 +423,11 @@ pub async fn send_message<C: ProductStudioHost>(
             meta,
             &prompt,
             REFINE_NO_PROGRESS,
+            turn.cancel(),
         )
         .await?;
 
+    turn.check_running()?;
     // 7. Parse — tolerant; malformed/missing → reply=raw, no update.
     let (reply, updated_story_md, summary) = parse_turn(&raw);
 
@@ -584,6 +596,19 @@ fn parse_turn(raw: &str) -> (String, Option<String>, Option<String>) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Stop exactly the caller's turn and wait for managed-session cleanup.
+pub async fn stop_turn<C: ProductStudioHost>(
+    Path(id): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<crate::chat::StopTurnReq>,
+) -> ApiResult<Json<crate::chat::StopTurnResp>> {
+    let conversation = thread_with_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let stopped =
+        crate::studio_turn::stop("refinement", &conversation.workspace_id, &id, &req.turn_id).await;
+    Ok(Json(crate::chat::StopTurnResp { stopped }))
+}
 
 #[cfg(test)]
 mod tests {

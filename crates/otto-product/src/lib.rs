@@ -28,6 +28,7 @@ pub mod refine;
 pub mod run;
 pub mod service;
 pub use otto_skills::product as skills;
+pub mod story_lifecycle;
 mod studio_turn;
 pub mod swarm;
 pub mod types;

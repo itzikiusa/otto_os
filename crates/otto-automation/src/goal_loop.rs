@@ -146,6 +146,33 @@ const EXECUTOR_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 const HARD_CAP: Duration = Duration::from_secs(4 * 60 * 60);
 const CLEANUP_GRACE: Duration = Duration::from_secs(10);
 
+/// A zero budget must not start work. The check is the same one
+/// [`within_budget`] uses once a future exists.
+fn may_start_work(remaining: Duration) -> bool {
+    !remaining.is_zero()
+}
+
+/// A start that resumed after worktree setup may proceed only while the loop
+/// is still startable and still has runtime. Terminal status means stop won.
+fn admit_start(status: GoalLoopStatus, remaining: Duration) -> bool {
+    !status.is_terminal() && may_start_work(remaining)
+}
+
+/// Re-read after a durable Running write. False means do not start side effects.
+async fn launch_admitted(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<bool> {
+    let fresh = ctx.goal_loops_repo().get(loop_id).await?;
+    Ok(admit_start(fresh.status, remaining_runtime(&fresh)))
+}
+
+/// Stop the controller that this handle belongs to, including an executor
+/// that only watches `interrupted`. Setting `cancel` alone leaves that
+/// process running until its own timeout.
+fn supersede(old: &LoopHandle) {
+    old.cancel.store(true, Ordering::Relaxed);
+    old.interrupted.store(true, Ordering::Relaxed);
+    ring_flags();
+}
+
 fn remaining_runtime(loop_: &GoalLoop) -> Duration {
     Duration::from_secs(
         loop_
@@ -164,20 +191,40 @@ fn remaining_runtime(loop_: &GoalLoop) -> Duration {
 pub async fn start_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
     ctx.goal_loops().require_idle(loop_id)?;
     let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
+    // Zero remaining runtime must not provision a worktree or flip the loop
+    // to Running. The controller's within_budget guard runs only after that.
+    if !may_start_work(remaining_runtime(&loop_)) {
+        return Err(Error::Conflict("this loop has no runtime left".into()));
+    }
     let (branch, wt, base) = crate::goal_loop_workspace::provision_worktree(ctx, &loop_).await?;
+    // Stop can finalize the row while the worktree is being created. That
+    // await is the same window the schedulers close with launch_after_await:
+    // do not mark Running or spawn over a terminal loop.
+    let fresh = ctx.goal_loops_repo().get(loop_id).await?;
+    if !admit_start(fresh.status, remaining_runtime(&fresh)) {
+        return Ok(());
+    }
     ctx.goal_loops_repo()
         .set_branch(loop_id, &branch, &wt, &base)
         .await?;
-    ctx.goal_loops_repo()
+    if !ctx
+        .goal_loops_repo()
         .mark_running(loop_id, Utc::now())
-        .await?;
+        .await?
+    {
+        return Ok(());
+    }
+    // `mark_running` committed. Stop can land during that write. Leave the
+    // row for startup recovery and do not emit or spawn the controller.
+    if !launch_admitted(ctx, loop_id).await? {
+        return Ok(());
+    }
 
     let handle = LoopHandle::new();
     {
         let mut reg = ctx.goal_loops().lock().unwrap();
         if let Some(old) = reg.insert(loop_id.to_string(), handle.clone()) {
-            old.cancel.store(true, Ordering::Relaxed);
-            ring_flags();
+            supersede(&old);
         }
     }
     let loop_id = loop_id.clone();
@@ -280,6 +327,11 @@ pub async fn retry_executor(
             "can only retry an executor while the loop is blocked".into(),
         ));
     }
+    // Before any ledger, evaluation, or result-file change. A loop that is
+    // already out of time must keep the approvals and the result it has.
+    if !may_start_work(remaining_runtime(&loop_)) {
+        return Err(Error::Conflict("this loop has no runtime left".into()));
+    }
     let iter = ctx
         .goal_loops_repo()
         .get_iteration(loop_id, iter_idx)
@@ -322,14 +374,25 @@ pub async fn retry_executor(
             return Err(Error::Internal(error.to_string()));
         }
     }
-    ctx.goal_loops_repo()
+    if !ctx
+        .goal_loops_repo()
         .mark_running(loop_id, Utc::now())
-        .await?;
+        .await?
+    {
+        return Ok(());
+    }
+    // Same post-admit window as `start_loop`: a stop during `mark_running`
+    // keeps the row and does not spawn the executor.
+    if !launch_admitted(ctx, loop_id).await? {
+        return Ok(());
+    }
     let handle = LoopHandle::new();
-    ctx.goal_loops()
-        .lock()
-        .unwrap()
-        .insert(loop_id.clone(), handle.clone());
+    {
+        let mut reg = ctx.goal_loops().lock().unwrap();
+        if let Some(old) = reg.insert(loop_id.clone(), handle.clone()) {
+            supersede(&old);
+        }
+    }
     set_phase(
         ctx,
         &loop_.workspace_id,
@@ -661,7 +724,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 &context_in,
                 &out_path.to_string_lossy(),
             );
-            let _ = std::fs::write(prompt_path(&loop_id, idx, i), &prompt);
+            let _ = write_owned_file(&prompt_path(&loop_id, idx, i), prompt.as_bytes());
             let summary = run_executor(
                 &ctx,
                 &loop_,
@@ -830,8 +893,7 @@ async fn controller_inner(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHand
                 let result = review
                     .as_ref()
                     .ok()
-                    .and_then(|text| crate::goal_loop_parse::find_json_object(text))
-                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+                    .and_then(|text| crate::goal_loop_parse::parse_review(text));
                 ledger.review_passed = result.as_ref().is_some_and(|v| {
                     v["approved"] == true && v["findings"].as_array().is_some_and(Vec::is_empty)
                 });
@@ -1325,21 +1387,28 @@ async fn evaluate(
             break;
         }
         if crit.verify_kind == "command" {
-            if let Some(cmd) = &crit.verify_cmd {
-                let run =
-                    crate::goal_loop_commands::run(wt, cmd, per_phase_secs, &handle.interrupted)
-                        .await;
-                set_criterion(
-                    &mut eval,
-                    &crit.id,
-                    run.success,
-                    if run.success {
-                        "verify command exited 0"
-                    } else {
-                        "verify command failed"
-                    },
-                );
-                captures.push((crit.id.clone(), cmd.clone(), run));
+            match verify_command(crit.verify_cmd.as_deref()) {
+                Some(cmd) => {
+                    let run = crate::goal_loop_commands::run(
+                        wt,
+                        cmd,
+                        per_phase_secs,
+                        &handle.interrupted,
+                    )
+                    .await;
+                    set_criterion(
+                        &mut eval,
+                        &crit.id,
+                        run.success,
+                        if run.success {
+                            "verify command exited 0"
+                        } else {
+                            "verify command failed"
+                        },
+                    );
+                    captures.push((crit.id.clone(), cmd.to_string(), run));
+                }
+                None => set_criterion(&mut eval, &crit.id, false, "verify command is missing"),
             }
         }
     }
@@ -1560,6 +1629,47 @@ fn executor_out_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
         "otto-goalloop-{}-{idx}-{exec}.json",
         safe_loop_id(loop_id)
     ))
+}
+
+/// A non-empty verify command. Blank and whitespace run as `sh -c ""`,
+/// which exits 0, so they are not a check.
+fn verify_command(cmd: Option<&str>) -> Option<&str> {
+    cmd.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Write `bytes` at `path` without following a symlink. A planted link is
+/// removed (the link only) and replaced by a regular file. `O_NOFOLLOW`
+/// closes the window between that check and the create.
+fn write_owned_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            std::fs::remove_file(path)?;
+        } else if !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "path is not a regular file",
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        let file = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::TRUNC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )?;
+        let mut file = std::fs::File::from(file);
+        file.write_all(bytes)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
 }
 
 fn prompt_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
@@ -1974,6 +2084,59 @@ fn executor_error_note(reason: Option<FailReason>) -> String {
 #[cfg(test)]
 mod goal_loop_tests {
     use super::*;
+
+    #[test]
+    fn a_spent_budget_does_not_start_work_and_supersede_interrupts() {
+        assert!(!may_start_work(Duration::ZERO));
+        assert!(may_start_work(Duration::from_secs(1)));
+        assert!(admit_start(GoalLoopStatus::Draft, Duration::from_secs(1)));
+        assert!(admit_start(GoalLoopStatus::Paused, Duration::from_secs(1)));
+        assert!(!admit_start(
+            GoalLoopStatus::Stopped,
+            Duration::from_secs(1)
+        ));
+        assert!(!admit_start(GoalLoopStatus::Draft, Duration::ZERO));
+        let old = LoopHandle::new();
+        supersede(&old);
+        assert!(old.cancel.load(Ordering::Relaxed));
+        assert!(
+            old.interrupted.load(Ordering::Relaxed),
+            "an executor watching interrupted must see the supersede"
+        );
+    }
+
+    #[test]
+    fn a_blank_verify_command_is_not_a_passing_check() {
+        assert!(verify_command(None).is_none());
+        assert!(verify_command(Some("")).is_none());
+        assert!(verify_command(Some(" \n")).is_none());
+        assert_eq!(verify_command(Some(" cargo test ")), Some("cargo test"));
+    }
+
+    #[test]
+    fn prompt_write_replaces_a_symlink_without_truncating_its_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "otto-prompt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("owned.txt");
+        std::fs::write(&target, b"keep").unwrap();
+        let link = dir.join("planted.prompt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_owned_file(&link, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(!meta.file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), b"new");
+        // Sync test cleanup of a two-file temp dir; not on an async worker.
+        #[allow(clippy::disallowed_methods)]
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn tmp_files_stay_directly_in_the_temp_dir() {

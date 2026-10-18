@@ -5,6 +5,7 @@
 //! git config instead of a silent `--no-rebase`), which remotes exist, and
 //! whether a commit is signed.
 
+use crate::transport::TransportCredential;
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
@@ -176,7 +177,7 @@ impl LocalGit {
     /// `MERGE_HEAD`) instead of `is_merging()`.
     pub async fn pull_outcome_mode(
         &self,
-        token: Option<String>,
+        token: Option<TransportCredential>,
         mode: PullMode,
     ) -> Result<PullOutcome> {
         let (ok, stdout, stderr, code) = self.run_remote_raw(&["pull", mode.flag()], token).await?;
@@ -217,7 +218,7 @@ impl LocalGit {
     /// pops them straight back so the tree is exactly as it was.
     pub async fn pull_autostash_mode(
         &self,
-        token: Option<String>,
+        token: Option<TransportCredential>,
         mode: PullMode,
     ) -> Result<(PullOutcome, Option<String>)> {
         let dirty = !self

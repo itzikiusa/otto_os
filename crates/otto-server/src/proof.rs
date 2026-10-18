@@ -233,6 +233,71 @@ pub async fn add_content_artifact(
 // Auto-assembly
 // ---------------------------------------------------------------------------
 
+/// Identity of the tested filesystem, not merely HEAD. Hash changed file bytes
+/// (including binary/untracked files) off the runtime; clean files are covered
+/// by HEAD. Inconclusive status/read/submodule captures never certify a command.
+async fn proof_identity(cwd: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let git = LocalGit::new(cwd);
+    let head = git.rev_parse("HEAD").await.ok()?;
+    let mut status = git.status().await.ok()?;
+    if status.untracked_truncated || status.op_in_progress.is_some() {
+        return None;
+    }
+    status.changes.sort_by(|a, b| a.path.cmp(&b.path));
+    let root = std::path::PathBuf::from(cwd);
+    let expected_head = head.clone();
+    let identity = crate::offload::blocking(move || {
+        use std::io::Read;
+        let mut hash = Sha256::new();
+        hash.update(head.as_bytes());
+        hash.update(serde_json::to_vec(&status.changes).ok()?);
+        for change in status.changes {
+            let mut content = Sha256::new();
+            let path = root.join(&change.path);
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    hash.update(b"missing");
+                    continue;
+                }
+                Err(_) => return None,
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                content.update(meta.permissions().mode().to_le_bytes());
+            }
+            if meta.file_type().is_symlink() {
+                content.update(b"symlink");
+                content.update(
+                    std::fs::read_link(path)
+                        .ok()?
+                        .as_os_str()
+                        .as_encoded_bytes(),
+                );
+            } else if meta.is_file() {
+                content.update(b"file");
+                let mut file = std::fs::File::open(path).ok()?;
+                let mut buf = [0u8; 65536];
+                loop {
+                    let n = file.read(&mut buf).ok()?;
+                    if n == 0 {
+                        break;
+                    }
+                    content.update(&buf[..n]);
+                }
+            } else {
+                return None; // dirty submodule or unsupported file type
+            }
+            hash.update(content.finalize());
+        }
+        Some(hex::encode(hash.finalize()))
+    })
+    .await?;
+    (git.rev_parse("HEAD").await.ok()? == expected_head).then_some(identity)
+}
+
 /// Assemble a `diff` artifact from `cwd` (vs `base`, or the working tree vs HEAD
 /// when `base` is None). Best-effort: returns Ok(()) without an artifact if the
 /// path isn't a git repo or the diff fails. Idempotent (upsert by title).
@@ -246,6 +311,7 @@ pub async fn assemble_diff(
     let Ok(head_commit) = git.rev_parse("HEAD").await else {
         return Ok(());
     };
+    let identity = proof_identity(cwd).await;
     // Counts come from ONE `--raw --numstat` summary (never the patch): this
     // runs automatically at every session/run completion, often on a huge
     // worktree, and the old full parsed diff only fed four numbers. The
@@ -277,6 +343,7 @@ pub async fn assemble_diff(
             "repository HEAD changed while assembling proof; retry".into(),
         ));
     }
+    let after_identity = proof_identity(cwd).await;
     let additions: u32 = resp.files.iter().filter_map(|f| f.added).sum();
     let deletions: u32 = resp.files.iter().filter_map(|f| f.deleted).sum();
     let risky_files: Vec<String> = resp
@@ -287,6 +354,7 @@ pub async fn assemble_diff(
         .collect();
     let meta = json!({
         "head_commit": head_commit,
+        "proof_identity": identity.filter(|id| Some(id) == after_identity.as_ref()),
         "files_changed": resp.files.len(),
         "additions": additions,
         "deletions": deletions,
@@ -315,7 +383,9 @@ pub async fn run_command_artifact(
     cmd: &str,
     kind_hint: Option<&str>,
 ) -> Result<ProofArtifactStatus> {
+    let before = proof_identity(cwd).await;
     let run = run_command(cwd, cmd, CMD_TIMEOUT_SECS).await;
+    let after = proof_identity(cwd).await;
     let test_kind = kind_hint.unwrap_or_else(|| classify_test_kind(cmd));
     let status = if run.success {
         ProofArtifactStatus::Passed
@@ -323,6 +393,7 @@ pub async fn run_command_artifact(
         ProofArtifactStatus::Failed
     };
     let meta = json!({
+        "proof_identity": before.filter(|id| Some(id) == after.as_ref()),
         "test_kind": test_kind,
         "exit_code": run.exit_code,
         "duration_ms": run.duration_ms,
@@ -707,7 +778,7 @@ pub async fn run_pr_check(
     let arts = ctx.proof_repo.list_artifacts_meta(&pack.id).await?;
     let has_passing_tests = arts
         .iter()
-        .any(|a| otto_core::proof::is_test_artifact(a) && a.status == ProofArtifactStatus::Passed);
+        .any(|a| otto_core::proof::is_current_passing_test(a, &arts));
     let has_failing_tests = arts
         .iter()
         .any(|a| otto_core::proof::is_test_artifact(a) && a.status == ProofArtifactStatus::Failed);
@@ -1177,106 +1248,5 @@ pub fn ignore_err<T>(r: Result<T>) -> Option<T> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proof_locks_prune_unheld_entries() {
-        let locks = new_locks();
-        let held = lock_in(&locks, "p1");
-        drop(lock_in(&locks, "p2"));
-        // p2 is unheld → pruned by the next insert; p1 (held) survives and is
-        // handed out again as the SAME mutex.
-        let again = lock_in(&locks, "p1");
-        assert!(Arc::ptr_eq(&held, &again));
-        assert_eq!(locks.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn risky_file_segments_not_substrings() {
-        assert!(is_risky_file("crates/otto-state/migrations/0077.sql"));
-        assert!(is_risky_file("crates/otto-server/src/policy.rs"));
-        assert!(is_risky_file("crates/otto-rbac/src/auth.rs"));
-        assert!(is_risky_file(".github/workflows/ci.yml"));
-        assert!(is_risky_file("ui/package-lock.json"));
-        assert!(is_risky_file("Cargo.lock"));
-        // false positives the naive substring approach would hit:
-        assert!(!is_risky_file("crates/otto-core/src/author.rs"));
-        assert!(!is_risky_file("ui/src/lib/tokenizer.ts"));
-        assert!(!is_risky_file("crates/otto-server/src/modules.rs"));
-    }
-
-    #[test]
-    fn classify_kinds() {
-        assert_eq!(classify_test_kind("cargo clippy --workspace"), "lint");
-        assert_eq!(classify_test_kind("go vet ./..."), "lint");
-        assert_eq!(classify_test_kind("npm run build"), "build");
-        assert_eq!(classify_test_kind("cargo test --workspace"), "test");
-    }
-
-    #[tokio::test]
-    async fn run_command_captures_success_and_failure() {
-        let here = ".";
-        let ok = run_command(here, "true", 30).await;
-        assert!(ok.success && ok.exit_code == 0);
-        let bad = run_command(here, "exit 3", 30).await;
-        assert!(!bad.success && bad.exit_code == 3);
-        let echo = run_command(here, "echo hello", 30).await;
-        assert!(echo.output.contains("hello"));
-    }
-
-    #[tokio::test]
-    async fn run_command_timeout_kills_descendants() {
-        let dir = tempfile::tempdir().unwrap();
-        let result = run_command(
-            dir.path().to_str().unwrap(),
-            "(sleep 2; touch survived-timeout) & wait",
-            1,
-        )
-        .await;
-        assert!(!result.success);
-        assert!(result.output.contains("timed out"));
-        tokio::time::sleep(Duration::from_millis(1300)).await;
-        assert!(!dir.path().join("survived-timeout").exists());
-    }
-
-    #[test]
-    fn prepare_content_caps_and_reports() {
-        let (small, meta) = prepare_content("hello");
-        assert_eq!(small, "hello");
-        assert_eq!(meta["truncated"], json!(false));
-        let big = "x".repeat(STORE_CAP + 1000);
-        let (capped, meta) = prepare_content(&big);
-        assert!(capped.len() <= STORE_CAP + 32);
-        assert_eq!(meta["truncated"], json!(true));
-    }
-
-    #[test]
-    fn pr_gate_decision() {
-        // Unproven pack with no override → block.
-        assert!(pr_should_block(ProofStatus::Failed, false));
-        assert!(pr_should_block(ProofStatus::Missing, false));
-        assert!(pr_should_block(ProofStatus::Partial, false));
-        // Proven (or waived) → never block.
-        assert!(!pr_should_block(ProofStatus::Passed, false));
-        assert!(!pr_should_block(ProofStatus::Waived, false));
-        // Override lets an unproven pack through.
-        assert!(!pr_should_block(ProofStatus::Failed, true));
-    }
-
-    #[test]
-    fn prepare_content_redacts_secrets() {
-        // A trust layer must not itself leak secrets (D6). A Bearer token in
-        // captured output must be redacted before storage.
-        let raw = "running with Authorization: Bearer abcdef0123456789ABCDEF0123456789 in the log";
-        let (stored, meta) = prepare_content(raw);
-        assert!(
-            !stored.contains("abcdef0123456789ABCDEF0123456789"),
-            "secret must be redacted from stored content"
-        );
-        assert!(
-            meta["redactions"].as_u64().unwrap_or(0) >= 1,
-            "redaction count should be reported"
-        );
-    }
-}
+#[path = "../tests/unit/proof_assembly.rs"]
+mod tests;

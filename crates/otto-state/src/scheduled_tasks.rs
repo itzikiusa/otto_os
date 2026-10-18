@@ -752,10 +752,10 @@ impl ScheduledTasksRepo {
         Ok(())
     }
 
-    /// An unchanged report suppresses delivery only when the latest successful
-    /// run delivered (or already inherited a delivered baseline) to the same
-    /// destination without error. Inspect the latest row first: filtering out a
-    /// failed delivery would incorrectly fall back to an older matching report.
+    /// An unchanged report suppresses delivery when the latest successful run
+    /// already sent the body, or skipped an identical one, to the same
+    /// destination. An attachment error on that delivered row does not post
+    /// the body again. A row that was not delivered is not a baseline.
     pub async fn last_ok_report_hash(
         &self,
         task_id: &str,
@@ -775,9 +775,7 @@ impl ScheduledTasksRepo {
         let Some(row) = row else {
             return Ok(None);
         };
-        if row.get::<Option<String>, _>("delivery_error").is_some()
-            || !(row.get::<bool, _>("delivered") || row.get::<bool, _>("skipped_delivery"))
-        {
+        if !(row.get::<bool, _>("delivered") || row.get::<bool, _>("skipped_delivery")) {
             return Ok(None);
         }
         let snapshot = row
@@ -1244,7 +1242,12 @@ mod tests {
         for (delivered, skipped, error, expected) in [
             (true, false, None, Some("same-report")),
             (false, false, Some("fixture send failure"), None),
-            (true, false, Some("fixture attachment failure"), None),
+            (
+                true,
+                false,
+                Some("fixture attachment failure"),
+                Some("same-report"),
+            ),
             (true, false, None, Some("same-report")),
             (false, true, None, Some("same-report")),
             (false, false, None, None),

@@ -506,7 +506,7 @@ pub async fn patch_attachment<C: ProductStudioHost>(
 /// upload guards (allow-list, sniff, raw cap, confined path); the row's `mime`
 /// and `filename` never change here, so extension and served content-type stay
 /// consistent. A `scene3d` payload is additionally schema-validated (400 on a
-/// bad document). Persists via `set_assist_result` (size + `updated_at`, meta
+/// bad document). Persists via an immutable-file CAS (size + `updated_at`, meta
 /// untouched) and broadcasts `MockupUpdated` — `content` is the source for text
 /// formats and `null` for binaries / oversized payloads.
 pub async fn put_attachment_content<C: ProductStudioHost>(
@@ -522,32 +522,20 @@ pub async fn put_attachment_content<C: ProductStudioHost>(
     check_base_updated_at(req.base_updated_at.as_deref(), &att.updated_at).map_err(ApiError)?;
     let bytes = decode_content(&att.mime, &req.data_b64).map_err(ApiError)?;
 
-    let root = ctx.data_dir().join(ATTACH_ROOT);
-    let full =
-        otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path).ok_or_else(|| {
-            ApiError(Error::Forbidden(
-                "attachment path escapes the data dir".into(),
-            ))
-        })?;
-    if !path_within(&root, &full) {
-        return Err(ApiError(Error::Forbidden(
-            "attachment path escapes the attachments root".into(),
-        )));
-    }
-    if let Some(parent) = full.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| ApiError(Error::Internal(format!("create attachment dir: {e}"))))?;
-    }
-    tokio::fs::write(&full, &bytes)
-        .await
-        .map_err(|e| ApiError(Error::Internal(format!("write attachment: {e}"))))?;
-
-    let updated = ctx
-        .attachments()
-        .set_assist_result(&aid, bytes.len() as i64, None, att.meta_json.clone())
-        .await
-        .map_err(ApiError)?;
+    let conditional = req
+        .base_updated_at
+        .as_deref()
+        .is_some_and(|b| !b.trim().is_empty());
+    let updated = publish_content(
+        ctx.attachments(),
+        ctx.data_dir(),
+        &att,
+        &bytes,
+        conditional,
+        att.meta_json.clone(),
+    )
+    .await
+    .map_err(ApiError)?;
 
     let _ = ctx.events().send(Event::MockupUpdated {
         workspace_id: att.workspace_id.clone(),
@@ -559,6 +547,58 @@ pub async fn put_attachment_content<C: ProductStudioHost>(
         content: event_content(&att.mime, &bytes),
     });
     Ok(Json(updated))
+}
+
+/// Stage an immutable revision, then publish its path and metadata in one SQL
+/// CAS. Readers that already loaded the old path keep reading complete bytes.
+/// The prior revision remains under the story directory until story cleanup.
+pub async fn publish_content(
+    repo: &otto_state::ProductAttachmentRepo,
+    data_dir: &Path,
+    previous: &ProductAttachment,
+    bytes: &[u8],
+    conditional: bool,
+    meta_json: Option<String>,
+) -> otto_core::Result<ProductAttachment> {
+    let relative = format!(
+        "{ATTACH_ROOT}/{}/{}-{}{}",
+        previous.story_id,
+        previous.id,
+        otto_core::new_id(),
+        ext_for_mime(&previous.mime)
+    );
+    let full = otto_core::paths::confine_join(data_dir, &relative)
+        .ok_or_else(|| Error::Forbidden("attachment path escapes the data dir".into()))?;
+    if !path_within(&data_dir.join(ATTACH_ROOT), &full) {
+        return Err(Error::Forbidden(
+            "attachment path escapes the attachments root".into(),
+        ));
+    }
+    let parent = full
+        .parent()
+        .ok_or_else(|| Error::Invalid("attachment has no parent".into()))?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| Error::Internal(format!("create attachment dir: {e}")))?;
+    // No database reader can reference this fresh path until write completes.
+    if let Err(e) = tokio::fs::write(&full, bytes).await {
+        let _ = tokio::fs::remove_file(&full).await;
+        return Err(Error::Internal(format!("stage attachment: {e}")));
+    }
+    let result = repo
+        .publish_content(
+            previous,
+            &relative,
+            bytes.len() as i64,
+            &otto_core::proof::bytes_sha256(bytes),
+            conditional,
+            meta_json,
+        )
+        .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&full).await;
+    }
+    result
 }
 
 /// Optimistic-concurrency check for the content PUT: an unparseable

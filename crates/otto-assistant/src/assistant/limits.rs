@@ -54,12 +54,15 @@ pub fn detect_limit(text: &str) -> Option<LimitHit> {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = &lines[lines.len().saturating_sub(20)..];
     for line in tail.iter().rev() {
-        let lower = line.to_lowercase();
-        if NEEDLES.iter().any(|n| lower.contains(n)) {
-            let clean = line
-                .trim()
-                .trim_matches(|c: char| "│|>⎿ ".contains(c))
-                .trim();
+        // The provider banner starts with the needle. A tool line that quotes
+        // the same words later in the row is not the CLI's limit notice.
+        let clean = line
+            .trim()
+            // Claude draws `⎿`; Codex prefixes the same notice with `■`.
+            .trim_matches(|c: char| "│|>⎿■ ".contains(c))
+            .trim();
+        let lower = clean.to_lowercase();
+        if NEEDLES.iter().any(|n| lower.starts_with(n)) {
             let message: String = clean.chars().take(240).collect();
             return Some(LimitHit {
                 until: epoch_after_pipe(clean),
@@ -169,6 +172,7 @@ mod tests {
     #[test]
     fn ordinary_text_and_old_mentions_do_not_trip_it() {
         assert!(detect_limit("The API returned a rate limit error, retrying.").is_none());
+        assert!(detect_limit("tool output: you've hit your usage limit").is_none());
         assert!(detect_limit("").is_none());
         // A mention far above the last 20 lines is ignored.
         let mut text = String::from("you've hit your usage limit (quoted earlier)\n");

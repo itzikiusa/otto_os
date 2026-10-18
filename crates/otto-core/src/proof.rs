@@ -369,6 +369,32 @@ pub fn is_test_artifact(a: &ProofArtifact) -> bool {
     a.kind == ProofArtifactKind::Command && looks_like_test_command(&a.title)
 }
 
+/// Passing automatic command evidence must describe the current assembled tree.
+/// Explicitly supplied manual evidence and historical packs without tree identity
+/// keep their existing semantics. A null identity means capture was inconclusive.
+pub fn is_current_passing_test(a: &ProofArtifact, arts: &[ProofArtifact]) -> bool {
+    if !is_test_artifact(a) || a.status != ProofArtifactStatus::Passed {
+        return false;
+    }
+    if a.created_by != "otto" && a.metadata.get("proof_identity").is_none() {
+        return true;
+    }
+    let identities: Vec<_> = arts
+        .iter()
+        .filter(|d| d.kind == ProofArtifactKind::Diff)
+        .filter_map(|d| d.metadata.get("proof_identity"))
+        .collect();
+    if identities.is_empty() && a.metadata.get("proof_identity").is_none() {
+        return true; // legacy pack, not yet refreshed
+    }
+    a.metadata
+        .get("proof_identity")
+        .and_then(Value::as_str)
+        .is_some_and(|id| {
+            !identities.is_empty() && identities.iter().all(|v| v.as_str() == Some(id))
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Required-kind policy (D4)
 // ---------------------------------------------------------------------------
@@ -415,9 +441,7 @@ fn required_met(pack: &ProofPack, arts: &[ProofArtifact]) -> bool {
     match required_kinds(pack.work_item_kind) {
         RequiredSpec::CodeChange => {
             has_kind(arts, ProofArtifactKind::Diff)
-                && arts
-                    .iter()
-                    .any(|a| is_test_artifact(a) && a.status == ProofArtifactStatus::Passed)
+                && arts.iter().any(|a| is_current_passing_test(a, arts))
         }
         RequiredSpec::Review => has_kind(arts, ProofArtifactKind::Review),
         RequiredSpec::WorkflowRun => {
@@ -523,10 +547,7 @@ pub fn compute_badges(pack: &ProofPack, arts: &[ProofArtifact]) -> Vec<ProofBadg
             .any(|a| a.status == ProofArtifactStatus::Failed)
         {
             out.push(ProofBadge::TestsFailed);
-        } else if test_arts
-            .iter()
-            .all(|a| a.status == ProofArtifactStatus::Passed)
-        {
+        } else if test_arts.iter().all(|a| is_current_passing_test(a, arts)) {
             out.push(ProofBadge::TestsPassed);
         }
     }
@@ -778,11 +799,7 @@ impl DoneContractPolicy {
 
     /// Whether any opted-in extra requirement lacks a *passing* artifact.
     fn extra_unmet(&self, arts: &[ProofArtifact]) -> bool {
-        if self.require_test
-            && !arts
-                .iter()
-                .any(|a| is_test_artifact(a) && a.status == ProofArtifactStatus::Passed)
-        {
+        if self.require_test && !arts.iter().any(|a| is_current_passing_test(a, arts)) {
             return true;
         }
         if self.require_ci
@@ -859,9 +876,7 @@ pub fn compute_done_contract(
     let nonempty = !arts.is_empty();
     let no_failures = nonempty && !any_failed(arts);
 
-    let has_passing_test = arts
-        .iter()
-        .any(|a| is_test_artifact(a) && a.status == ProofArtifactStatus::Passed);
+    let has_passing_test = arts.iter().any(|a| is_current_passing_test(a, arts));
     let has_diff = has_kind(arts, ProofArtifactKind::Diff);
     let ci_passed = arts
         .iter()
@@ -1616,6 +1631,36 @@ mod tests {
             ),
         ];
         assert_eq!(derive_status(&p, &arts), ProofStatus::Failed);
+    }
+
+    #[test]
+    fn refreshed_diff_does_not_reuse_stale_command_proof() {
+        let p = pack(WorkItemKind::Task);
+        let mut arts = vec![
+            art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({"proof_identity":"B"}),
+            ),
+            art(
+                ProofArtifactKind::Command,
+                "cargo test",
+                ProofArtifactStatus::Passed,
+                json!({"proof_identity":"A"}),
+            ),
+        ];
+        assert_eq!(derive_status(&p, &arts), ProofStatus::Partial);
+        assert!(!compute_badges(&p, &arts).contains(&ProofBadge::TestsPassed));
+        assert!(compute_done_contract(&p, &arts, &DoneContractPolicy::default()).score < 100);
+        arts[1].metadata = json!({"proof_identity":"B"});
+        assert_eq!(derive_status(&p, &arts), ProofStatus::Passed);
+        arts[1].metadata = json!({"proof_identity":null});
+        assert_eq!(derive_status(&p, &arts), ProofStatus::Partial);
+        arts[1].metadata = json!({}); // historical auto-command has no proven revision
+        assert_eq!(derive_status(&p, &arts), ProofStatus::Partial);
+        arts[1].created_by = "root".into(); // explicit manual evidence remains supported
+        assert_eq!(derive_status(&p, &arts), ProofStatus::Passed);
     }
 
     #[test]

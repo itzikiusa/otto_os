@@ -34,6 +34,12 @@ pub struct PinnedRef {
     pub policy: String,
     /// Unresolvable (missing artifact / version, no access, wrong format).
     pub missing: bool,
+    /// Immutable poster for this publish. `poster_pinned` also records absence;
+    /// older manifests did not capture posters and deserialize as false.
+    #[serde(default)]
+    pub poster_pinned: bool,
+    #[serde(default)]
+    pub poster_blob: Option<String>,
 }
 
 /// The entry for `role` (`site` / `brand`), if any.
@@ -84,32 +90,57 @@ fn ctx_for<'a>(r: &'a Resolved, pages: HashMap<String, String>, home: String) ->
 
 /// The static site: `index.html` + `<slug>.html` per page, `site.css`, the
 /// assets and `otto-publish.json`.
-pub fn static_files(doc: &SiteDoc, r: &Resolved) -> Vec<(String, Vec<u8>)> {
+pub fn static_files(
+    doc: &SiteDoc,
+    mut r: Resolved,
+    cap: usize,
+) -> otto_core::Result<Vec<(String, Vec<u8>)>> {
     let pages: HashMap<String, String> = doc
         .pages
         .iter()
         .enumerate()
         .map(|(i, p)| (p.id.clone(), page_file_name(doc, i)))
         .collect();
-    let ctx = ctx_for(r, pages, "index.html".into());
+    let ctx = ctx_for(&r, pages, "index.html".into());
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     for i in 0..doc.pages.len() {
         let name = page_file_name(doc, i);
         if out.iter().any(|(n, _)| *n == name) {
-            continue;
+            return Err(otto_core::Error::Invalid(format!(
+                "duplicate site output {name}"
+            )));
         }
         let html = render_document(doc, i, &ctx, Css::Link("site.css"));
         out.push((name, html.into_bytes()));
+        check_archive_budget(&out, cap)?;
     }
     out.push(("site.css".into(), site_css(&r.theme).into_bytes()));
-    for (name, bytes) in &r.files {
-        if !out.iter().any(|(n, _)| n == name) {
-            out.push((name.clone(), bytes.clone()));
+    drop(ctx);
+    for (name, bytes) in std::mem::take(&mut r.files) {
+        if !out.iter().any(|(n, _)| n == &name) {
+            out.push((name, bytes));
+            check_archive_budget(&out, cap)?;
         }
     }
     let manifest = serde_json::to_vec_pretty(&r.pinned).unwrap_or_default();
     out.push(("otto-publish.json".into(), manifest));
-    out
+    check_archive_budget(&out, cap)?;
+    Ok(out)
+}
+
+/// Stored ZIP: payload + local/central headers + two copies of each name + EOCD.
+fn check_archive_budget(files: &[(String, Vec<u8>)], cap: usize) -> otto_core::Result<()> {
+    let total = files.iter().try_fold(22usize, |n, (name, bytes)| {
+        n.checked_add(bytes.len())?
+            .checked_add(76)?
+            .checked_add(2 * name.len())
+    });
+    if total.is_none_or(|n| n > cap) {
+        return Err(otto_core::Error::PayloadTooLarge(
+            "site archive exceeds the export byte budget".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The URL segment of a page in the loopback preview (slug, else id).
@@ -204,6 +235,8 @@ mod tests {
                     title: "Rewards+".into(),
                     policy: "pinned".into(),
                     missing: false,
+                    poster_pinned: false,
+                    poster_blob: None,
                 },
                 PinnedRef {
                     role: "embed".into(),
@@ -214,6 +247,8 @@ mod tests {
                     title: "Rewards Card 3D".into(),
                     policy: "follow_approved".into(),
                     missing: false,
+                    poster_pinned: false,
+                    poster_blob: None,
                 },
             ],
             warnings: vec![],
@@ -239,7 +274,7 @@ mod tests {
 
     #[test]
     fn the_static_site_has_pages_one_stylesheet_with_tokens_assets_and_the_manifest() {
-        let files = static_files(&doc(), &resolved());
+        let files = static_files(&doc(), resolved(), 150 * 1024 * 1024).unwrap();
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
@@ -313,5 +348,19 @@ mod tests {
             zip_name("Rewards+ landing page", 14),
             "rewards-landing-page-v14.zip"
         );
+    }
+    #[test]
+    fn archive_rejects_legacy_collisions_and_counts_zip_overhead() {
+        let mut d = doc();
+        d.pages[1].slug.clear();
+        d.pages[1].id = "index".into();
+        assert!(matches!(
+            static_files(&d, resolved(), usize::MAX),
+            Err(otto_core::Error::Invalid(_))
+        ));
+        let entries = vec![("a".to_string(), vec![1, 2, 3])];
+        assert!(check_archive_budget(&entries, 3).is_err());
+        assert!(check_archive_budget(&entries, 22 + 76 + 2 + 3).is_ok());
+        assert!(static_files(&doc(), resolved(), 64).is_err());
     }
 }

@@ -1463,3 +1463,143 @@ async fn execute_with_env_secret_never_reads_full_request_rows() {
         "/execute must not read every saved request in full"
     );
 }
+
+#[tokio::test]
+async fn form_variables_are_decoded_substituted_then_encoded() {
+    let request: ExecuteApiReq = serde_json::from_value(json!({
+        "method":"POST", "url":"http://127.0.0.1/", "body_mode":"form",
+        "body":"token=%7B%7Btoken%7D%7D&repeat=a&repeat=b&literal=%2520"
+    }))
+    .unwrap();
+    let vars = json!({"token":"abc+&=%"}).as_object().unwrap().clone();
+    let (builder, _, _) = prepare_request(&"form-test".into(), &request, &vars, None, true, true)
+        .await
+        .unwrap();
+    let request = builder.build().unwrap();
+    assert_eq!(
+        request.body().unwrap().as_bytes().unwrap(),
+        b"token=abc%2B%26%3D%25&repeat=a&repeat=b&literal=%2520"
+    );
+}
+
+#[tokio::test]
+async fn multipart_substitutes_fields_without_corrupting_container_or_files() {
+    use axum::{body::Bytes, routing::post, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/", post(|body: Bytes| async { body })),
+        )
+        .await
+        .unwrap();
+    });
+    let request: ExecuteApiReq = serde_json::from_value(json!({
+        "method":"POST", "url":format!("http://{addr}/"), "body_mode":"multipart",
+        "body":json!([
+            {"key":"note","type":"text","value":"{{note}}"},
+            {"key":"file","type":"file","filename":"hello.txt","value":"aGVsbG8="}
+        ]).to_string()
+    }))
+    .unwrap();
+    let vars = json!({"note":"a\"b\n\\&"}).as_object().unwrap().clone();
+    let result = build_and_send(&"multipart-test".into(), &request, &vars, None, true).await;
+    server.abort();
+    let (response, _) = result.unwrap();
+    assert!(
+        response.body.contains("name=\"note\"\r\n\r\na\"b\n\\&\r\n"),
+        "{}",
+        response.body
+    );
+    assert!(response.body.contains("filename=\"hello.txt\""));
+    assert!(response.body.contains("\r\n\r\nhello\r\n"));
+}
+
+#[tokio::test]
+async fn malformed_or_missing_multipart_content_is_not_sent() {
+    for body in [
+        "[{broken".to_string(),
+        json!([{ "key":"f","type":"file","filename":"f.txt","value":"","missing_content":true }])
+            .to_string(),
+    ] {
+        let request: ExecuteApiReq = serde_json::from_value(
+            json!({"method":"POST","url":"http://127.0.0.1/","body_mode":"multipart","body":body}),
+        )
+        .unwrap();
+        assert!(prepare_request(
+            &"multipart-invalid".into(),
+            &request,
+            &serde_json::Map::new(),
+            None,
+            true,
+            true
+        )
+        .await
+        .is_err());
+    }
+}
+
+#[test]
+fn history_marks_stripped_file_content_even_for_small_requests() {
+    let mut request = json!({"body_mode":"multipart","body":json!([
+        {"key":"f","type":"file","filename":"f.txt","value":"aGVsbG8="}
+    ]).to_string()})
+    .as_object()
+    .unwrap()
+    .clone();
+    cap_history_request(&mut request);
+    assert_eq!(request["request_truncated"], true);
+    let fields: Value = serde_json::from_str(request["body"].as_str().unwrap()).unwrap();
+    assert_eq!(fields[0]["missing_content"], true);
+    assert_eq!(fields[0]["value"], "");
+    assert_eq!(fields[0]["size"], 5);
+}
+
+#[test]
+fn encoded_form_variables_keep_secret_binding_and_missing_variable_checks() {
+    let request: ExecuteApiReq = serde_json::from_value(json!({"method":"POST","url":"https://new.test","body_mode":"form","body":"token=%7B%7Btoken%7D%7D"})).unwrap();
+    let vars = json!({"token":"secret"}).as_object().unwrap().clone();
+    assert!(uses_env_secret(
+        &request,
+        &vars,
+        &BTreeMap::from([("token".into(), "secret".into())]),
+        &["token".into()]
+    ));
+    assert_eq!(
+        unresolved_placeholders(&request, &serde_json::Map::new()),
+        vec!["token"]
+    );
+}
+
+#[tokio::test]
+async fn http_non_success_status_remains_a_response_not_an_execution_error() {
+    use axum::{routing::post, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/",
+                post(|| async { (StatusCode::UNPROCESSABLE_ENTITY, "invalid input") }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let request: ExecuteApiReq =
+        serde_json::from_value(json!({"method":"POST","url":format!("http://{addr}/")})).unwrap();
+    let result = build_and_send(
+        &"http-status-test".into(),
+        &request,
+        &serde_json::Map::new(),
+        None,
+        true,
+    )
+    .await;
+    server.abort();
+    let (response, _) = result.expect("HTTP failure status is still a successful transport");
+    assert_eq!(response.status, 422);
+    assert_eq!(response.body, "invalid input");
+}

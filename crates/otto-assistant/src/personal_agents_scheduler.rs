@@ -12,6 +12,22 @@
 //! folder and memory. On startup we **reap** `running` rows left by a previous
 //! daemon life before this supervisor starts admitting work (the boot caller
 //! awaits `PersonalAgentsRepo::reap_running`).
+//!
+//! Shutdown: [`CancelSignal::cancel`] stops this scan from launching anything
+//! further. The check is after each await and again immediately before a
+//! spawn, so a tick already waiting on the database does not fire when stop
+//! wins that race. Work that already passed the check is detached. This token
+//! does not stop it, and a cancelled token is not a claim that those runs
+//! have finished. A scheduled row admitted inside that race stays `running`
+//! for `PersonalAgentsRepo::reap_running` on next boot and does not start a
+//! session. Its `last_run_at` is written only on completion
+//! (`settle_captured_schedule`, which also disables `once`). Reap does not
+//! settle, so a `once` schedule stays unfired and a recurring schedule stays
+//! due for the same occurrence. A proactive goal is different: admission
+//! stamps `goal.last_run_at` before a session exists. A stop before spawn
+//! restores that stamp only while the run is still `running` with no
+//! `session_id`. A run that already has a session keeps the stamp and is not
+//! replayed. Other in-flight agents are left alone.
 
 use std::time::Duration;
 
@@ -20,7 +36,7 @@ use tracing::{info, warn};
 
 use otto_state::PersonalAgentsRepo;
 
-use crate::personal_agents_engine::{in_flight, run_agent, spawn_proactive_run};
+use crate::personal_agents_engine::{in_flight, launch_proactive, run_agent_after_supervisor};
 use crate::AssistantCtx;
 use otto_core::cancel_signal::CancelSignal;
 use otto_state::AgentAutonomy;
@@ -41,7 +57,7 @@ async fn supervise<C: AssistantCtx>(ctx: C, cancel: CancelSignal) {
         if cancel.is_cancelled() {
             return;
         }
-        if let Err(e) = tick(&ctx, &repo).await {
+        if let Err(e) = tick(&ctx, &repo, &cancel).await {
             warn!("personal agents scheduler tick: {e}");
         }
         // One timer per scan; cancel() wakes it (no 500 ms polling slices).
@@ -51,9 +67,26 @@ async fn supervise<C: AssistantCtx>(ctx: C, cancel: CancelSignal) {
     }
 }
 
-async fn tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo) -> otto_core::Result<()> {
+/// Post-await / pre-spawn gate. False once the supervisor is cancelled.
+fn launch_after_await(cancel: &CancelSignal) -> bool {
+    otto_core::cancel_signal::supervisor_may_launch(cancel)
+}
+
+async fn tick<C: AssistantCtx>(
+    ctx: &C,
+    repo: &PersonalAgentsRepo,
+    cancel: &CancelSignal,
+) -> otto_core::Result<()> {
     let now = Utc::now();
-    for (schedule, agent) in repo.list_enabled_schedules().await? {
+    let due = repo.list_enabled_schedules().await?;
+    // Stop can land while the schedule list is in flight. Do not claim or spawn.
+    if !launch_after_await(cancel) {
+        return Ok(());
+    }
+    for (schedule, agent) in due {
+        if !launch_after_await(cancel) {
+            break;
+        }
         // Not due → skip. Busy (any run of this AGENT in flight — scheduled,
         // manual or delegated) → skip WITHOUT advancing the cursor, so the
         // occurrence is retried next tick rather than lost (the engine
@@ -73,16 +106,23 @@ async fn tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo) -> otto_core:
         let Some(guard) = in_flight().claim(&agent.id) else {
             continue;
         };
+        // Re-check after the claim. A stop that arrived since the list await
+        // drops the guard and does not spawn.
+        if !launch_after_await(cancel) {
+            drop(guard);
+            break;
+        }
 
         info!(agent = %agent.id, schedule = %schedule.id, "personal agents: firing due schedule");
         let ctx2 = ctx.clone();
+        let supervisor = cancel.clone();
         tokio::spawn(async move {
             // The guard clears the in-flight entry on drop — including on panic.
             let _guard = guard;
-            let _ = run_agent(&ctx2, &agent, Some(&schedule), "schedule").await;
+            let _ = run_agent_after_supervisor(&ctx2, &agent, &schedule, &supervisor).await;
         });
     }
-    proactive_tick(ctx, repo, now).await;
+    proactive_tick(ctx, repo, now, cancel).await;
     Ok(())
 }
 
@@ -90,7 +130,15 @@ async fn tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo) -> otto_core:
 /// goals round-robin, at most `runs_per_day` runs in any rolling 24 h, spaced
 /// evenly (24 h / runs_per_day apart). A busy agent is skipped (its scheduled
 /// and directed work comes first); the next tick tries again.
-async fn proactive_tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo, now: DateTime<Utc>) {
+async fn proactive_tick<C: AssistantCtx>(
+    ctx: &C,
+    repo: &PersonalAgentsRepo,
+    now: DateTime<Utc>,
+    cancel: &CancelSignal,
+) {
+    if !launch_after_await(cancel) {
+        return;
+    }
     let agents = match repo.list_proactive().await {
         Ok(a) => a,
         Err(e) => {
@@ -98,6 +146,9 @@ async fn proactive_tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo, now
             return;
         }
     };
+    if !launch_after_await(cancel) {
+        return;
+    }
     if agents.is_empty() {
         return;
     }
@@ -112,13 +163,19 @@ async fn proactive_tick<C: AssistantCtx>(ctx: &C, repo: &PersonalAgentsRepo, now
             return;
         }
     };
+    if !launch_after_await(cancel) {
+        return;
+    }
     for (agent, cfg) in agents {
+        if !launch_after_await(cancel) {
+            return;
+        }
         let used = used_by.get(&agent.id).copied().unwrap_or(0);
         let Some(goal) = next_proactive_goal(&cfg, used, now) else {
             continue;
         };
         // A busy agent answers Conflict — skipped quietly, retried next tick.
-        match spawn_proactive_run(ctx, &agent, &goal).await {
+        match launch_proactive(ctx, &agent, &goal, Some(cancel)).await {
             Ok(_) => info!(agent = %agent.id, goal = %goal, "personal agents: proactive run"),
             Err(otto_core::Error::Conflict(_)) => {}
             Err(e) => warn!(agent = %agent.id, "personal agents: proactive run: {e}"),
@@ -215,5 +272,29 @@ mod tests {
     fn parse_ts_roundtrips() {
         assert!(parse_ts("2026-09-01T10:00:00+00:00").is_some());
         assert!(parse_ts("not-a-time").is_none());
+    }
+
+    /// The scan is parked on its await. Stop is signaled before that await
+    /// completes. The post-await check must not admit a launch. A worker that
+    /// already started is still running afterwards.
+    #[tokio::test]
+    async fn awaiting_tick_does_not_launch_after_stop() {
+        let cancel = CancelSignal::new();
+        let (release_scan, scan_done) = tokio::sync::oneshot::channel::<()>();
+        let (release_work, work_done) = tokio::sync::oneshot::channel::<()>();
+        let scan = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let _ = scan_done.await;
+                launch_after_await(&cancel)
+            })
+        };
+        let detached = tokio::spawn(async move { work_done.await.ok() });
+        cancel.cancel();
+        release_scan.send(()).unwrap();
+        assert!(!scan.await.unwrap());
+        assert!(!detached.is_finished());
+        release_work.send(()).unwrap();
+        detached.await.unwrap();
     }
 }

@@ -310,12 +310,15 @@ pub fn approval_card(args: &Value) -> Result<ApprovalCard, String> {
     })
 }
 
-/// The `agent_grants` resource an always-allow is keyed on: tool + destination.
-/// `None` when either is missing (nothing specific enough to remember).
+/// The `agent_grants` resource an always-allow is keyed on: tool, destination,
+/// category, and the action text. A grant to send one message does not cover
+/// a later action that reuses the tool and destination under another category
+/// or another `what`. `None` when tool or destination is missing.
 pub fn always_allow_resource(card: &ApprovalCard) -> Option<String> {
     let tool = card.tool.as_deref()?;
     let dest = card.destination.as_deref()?;
-    Some(format!("{tool}|{dest}"))
+    let what: String = card.what.trim().to_lowercase().chars().take(200).collect();
+    Some(format!("{tool}|{dest}|{}|{what}", card.category))
 }
 
 #[cfg(test)]
@@ -346,7 +349,7 @@ mod tests {
         assert_eq!(v["always_allow_allowed"], true);
         assert_eq!(
             always_allow_resource(&c).as_deref(),
-            Some("telegram_send|me")
+            Some("telegram_send|me|send|flight options summary")
         );
     }
 

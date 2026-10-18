@@ -4227,7 +4227,6 @@ async fn execute_node(
                 .ok_or_else(|| otto_core::Error::Invalid("db_query: missing statement".into()))?
                 .to_string();
             let max_rows = p.get("max_rows").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let dummy_user: Id = "workflow-engine".to_string();
             let req = QueryRequest {
                 statement: stmt.clone(),
                 max_rows: Some(max_rows),
@@ -4239,7 +4238,7 @@ async fn execute_node(
             };
             let result = ctx
                 .db_explorer
-                .run(&conn_id, &dummy_user, &req)
+                .run(&conn_id, &user.id, &req)
                 .await
                 .map_err(|e| otto_core::Error::Upstream(format!("db_query: {e}")))?;
             let rows_returned = result.rows.len();
@@ -4759,67 +4758,9 @@ async fn execute_node(
             ))
         }
 
-        // --- API Run (wired) ------------------------------------------------
-        // Executes an ad-hoc HTTP request through the API-client engine (same
-        // code-path as `POST /workspaces/{wid}/api-client/execute` but inline).
-        // Params mirror ExecuteApiReq: method, url, headers, body, auth.
-        "api_run" => {
-            let method = p
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or("GET")
-                .to_string();
-            let url = p
-                .get("url")
-                .and_then(Value::as_str)
-                .ok_or_else(|| otto_core::Error::Invalid("api_run: missing url".into()))?
-                .to_string();
-            let headers = p.get("headers").cloned().unwrap_or(json!({}));
-            let body = p.get("body").cloned();
-            // body_mode is parsed for documentation/UI purposes; the raw HTTP
-            // path always sends JSON for non-null bodies.
-            let _body_mode = p.get("body_mode").and_then(Value::as_str).unwrap_or("json");
-
-            // Build a minimal ExecuteApiReq and invoke the engine's execute path.
-            // Using the public `build_and_send` path isn't accessible here
-            // (it's a private fn in routes::api_client), so we call the HTTP
-            // endpoint directly via reqwest to keep coupling clean.
-            // This is the same approach as the http_request node but uses the
-            // api_run semantic (so the UI shows it distinctly).
-            // Same SSRF guard + guarded redirects as http_request.
-            otto_netguard::check_url(&url)
-                .await
-                .map_err(otto_core::Error::Upstream)?;
-            // Guarded resolver pins the vetted address (no DNS rebinding).
-            let client = otto_netguard::guarded_client_builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
-            let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
-            if let Some(obj) = headers.as_object() {
-                for (k, v) in obj {
-                    if let Some(s) = v.as_str() {
-                        rb = rb.header(k.as_str(), s);
-                    }
-                }
-            }
-            if let Some(b) = &body {
-                if !b.is_null() {
-                    rb = rb.json(b);
-                }
-            }
-            let resp = rb
-                .send()
-                .await
-                .map_err(|e| otto_core::Error::Upstream(format!("api_run: {e}")))?;
-            let status = resp.status().as_u16();
-            let text = resp.text().await.unwrap_or_default();
-            let resp_body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-            Ok((
-                json!({ "status": status, "body": resp_body }),
-                vec![format!("api_run: HTTP {status} from {url}")],
-            ))
-        }
+        // --- API Run --------------------------------------------------------
+        // Share the API client's environment, auth, transport and history path.
+        "api_run" => api_request::execute(ctx, ws, user, p).await,
 
         // --- Condition (branching primitive) --------------------------------
         "condition" => {
@@ -4999,19 +4940,29 @@ async fn execute_node(
                     )
                     .await
                     {
-                        Ok((out, mut slogs)) => {
-                            // Iteration handoff files — the loop recursion never
-                            // passes the main run loop, so this is the second
-                            // persistence hook site.
-                            let flogs = env.files.persist_step(
-                                &sub_file_base,
-                                &skind,
-                                &sname,
-                                &out,
-                                &slogs,
-                                None,
-                                Some(sub_attempt_started),
-                            );
+                        Ok(outcome) => {
+                            let out = outcome.output;
+                            let mut slogs = outcome.logs;
+                            // A completed checkpoint owns the earlier handoff.
+                            // Restart time is not a new winning attempt timestamp.
+                            let flogs = if outcome.adopted
+                                && env.files.has_file(&format!("{sub_file_base}.md"))
+                            {
+                                if outcome_error(&out).is_none() {
+                                    env.files.adopt_step(&sub_file_base, &skind);
+                                }
+                                vec![]
+                            } else {
+                                env.files.persist_step(
+                                    &sub_file_base,
+                                    &skind,
+                                    &sname,
+                                    &out,
+                                    &slogs,
+                                    outcome_error(&out),
+                                    Some(sub_attempt_started),
+                                )
+                            };
                             for l in slogs.drain(..).chain(flogs) {
                                 let line = format!("  [{i}/{sname}] {l}");
                                 let _ = log_tx.send(line.clone());
@@ -6409,7 +6360,13 @@ async fn execute_node(
                         Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
                             .await
                             .ok()
-                            .flatten(),
+                            .flatten()
+                            .and_then(|token| {
+                                otto_git::transport::TransportCredential::for_repo(
+                                    token, &acc, &repo,
+                                )
+                                .ok()
+                            }),
                         Err(_) => None,
                     },
                     None => None,
@@ -8615,15 +8572,18 @@ mod canvas_rel_tests;
 mod tests;
 
 #[cfg(test)]
-#[path = "workflow_product_publish_tests.rs"]
+#[path = "../tests/unit/workflow_product_publish_tests.rs"]
 mod product_publish_tests;
 
 #[path = "workflow_product_publish.rs"]
 mod product_publication;
 
 #[cfg(test)]
-#[path = "workflow_recovery_tests.rs"]
+#[path = "../tests/unit/workflow_recovery_tests.rs"]
 mod recovery_tests;
 
 #[path = "workflow_budget.rs"]
 mod budget;
+
+#[path = "workflow_api_request.rs"]
+mod api_request;

@@ -5,6 +5,7 @@ use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 pub const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
@@ -21,6 +22,82 @@ fn io_error(e: impl std::fmt::Display) -> Error {
     Error::Internal(format!("agent memory: {e}"))
 }
 
+fn link_escape(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(62) || err.to_string().contains("hard link")
+}
+
+/// Open a regular file without following a final symlink. A hard link shares
+/// the target inode (`nlink > 1`) and is refused after the open.
+pub(crate) fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    let fd = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    let file = std::fs::File::from(fd);
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not a regular file",
+        ));
+    }
+    if meta.nlink() > 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hard link",
+        ));
+    }
+    Ok(file)
+}
+
+/// Replace `dest` from `staged` without following a symlink parent. The
+/// directory fd is opened `O_NOFOLLOW`, so a parent swapped for a symlink
+/// after the last path check is not the directory we write into.
+pub(crate) fn persist_nofollow(
+    staged: &tempfile::NamedTempFile,
+    dest: &Path,
+) -> std::io::Result<()> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent"))?;
+    match std::fs::symlink_metadata(parent) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "parent is not a directory",
+            ))
+        }
+        Err(e) => return Err(e),
+    }
+    let name = dest
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+    let dir = rustix::fs::open(
+        parent,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    let staged_path = staged.path();
+    let staged_parent = staged_path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "staged parent"))?;
+    let staged_name = staged_path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "staged name"))?;
+    let staged_dir = rustix::fs::open(
+        staged_parent,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    rustix::fs::renameat(&staged_dir, staged_name, &dir, name)?;
+    Ok(())
+}
+
 /// The caller supplies a resolved agent directory, never a request path. Reject
 /// symlinks in the fixed descendants so memory cannot escape that selected root.
 fn memory_path(root: &Path) -> Result<PathBuf> {
@@ -29,6 +106,11 @@ fn memory_path(root: &Path) -> Result<PathBuf> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(Error::Forbidden(
                     "agent memory cannot follow a symlink".into(),
+                ))
+            }
+            Ok(meta) if path.ends_with("notes.md") && meta.nlink() > 1 => {
+                return Err(Error::Forbidden(
+                    "agent memory cannot be a hard link".into(),
                 ))
             }
             Ok(meta) if path.ends_with("notes.md") && !meta.is_file() => {
@@ -54,7 +136,7 @@ fn memory_version(path: &Path, content: Option<&[u8]>) -> String {
 
 fn read_sync(root: &Path) -> Result<AgentDocument> {
     let path = memory_path(root)?;
-    let file = match std::fs::File::open(&path) {
+    let file = match open_regular_nofollow(&path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(AgentDocument {
@@ -64,11 +146,11 @@ fn read_sync(root: &Path) -> Result<AgentDocument> {
                 path: Some(path.to_string_lossy().into_owned()),
             })
         }
+        Err(e) if link_escape(&e) => {
+            return Err(Error::Forbidden("agent memory cannot follow a link".into()))
+        }
         Err(e) => return Err(io_error(e)),
     };
-    if !file.metadata().map_err(io_error)?.is_file() {
-        return Err(Error::Invalid("agent memory must be a regular file".into()));
-    }
     let mut bytes = Vec::new();
     file.take(MAX_DOCUMENT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -148,7 +230,13 @@ pub async fn save_memory(root: &Path, version: &str, content: &str) -> Result<Ag
                 "Memory changed while saving. Reload and reconcile your edits.".into(),
             ));
         }
-        staged.persist(&path).map_err(io_error)?;
+        persist_nofollow(&staged, &path).map_err(|e| {
+            if link_escape(&e) {
+                Error::Forbidden("agent memory cannot follow a symlink".into())
+            } else {
+                io_error(e)
+            }
+        })?;
         read_sync(&root)
     })
     .await
@@ -233,11 +321,32 @@ mod tests {
             std::fs::read_to_string(outside.path().join("notes.md")).unwrap(),
             "outside"
         );
+        let linked = tempfile::tempdir().unwrap();
+        std::fs::create_dir(linked.path().join("memory")).unwrap();
+        let target = outside.path().join("hard.md");
+        std::fs::write(&target, "secret").unwrap();
+        std::fs::hard_link(&target, linked.path().join("memory/notes.md")).unwrap();
+        assert!(read_memory(linked.path()).await.is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "secret");
         let clean = tempfile::tempdir().unwrap();
         assert!(
             save_memory(clean.path(), "missing", &"x".repeat(MAX_DOCUMENT_BYTES + 1))
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn persist_nofollow_does_not_write_through_a_symlinked_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.path().join("memory");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let staged_dir = tempfile::tempdir().unwrap();
+        let mut staged = tempfile::NamedTempFile::new_in(staged_dir.path()).unwrap();
+        use std::io::Write;
+        staged.write_all(b"pwned").unwrap();
+        assert!(persist_nofollow(&staged, &link.join("notes.md")).is_err());
+        assert!(!outside.path().join("notes.md").exists());
     }
 }

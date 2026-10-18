@@ -443,6 +443,151 @@ async fn seed_account(
         .unwrap()
 }
 
+/// A split Git/API mapping is a deliberate existing binding. Refreshing its
+/// origin must retain that mapping only while the forge identity is unchanged.
+#[tokio::test]
+async fn credential_binding_preserves_split_hosts_but_rejects_changed_forge() {
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    let (_pool, ctx, user, ws) = fixture().await;
+    let old_api = MockServer::start().await;
+    let account = ctx
+        .store
+        .create_account(NewGitAccount {
+            user_id: user.clone(),
+            provider: GitProviderKind::Gitlab,
+            label: "split".into(),
+            username: "who".into(),
+            token_ref: "split-token".into(),
+            api_base_url: Some(old_api.uri()),
+            namespace: None,
+            token_expires_at: None,
+        })
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "ssh://git@gitlab.ssh.example/team/app.git",
+    ]);
+    let repo = ctx
+        .store
+        .create_repo(NewRepo {
+            workspace_id: ws,
+            name: "split".into(),
+            path: dir.path().to_string_lossy().into_owned(),
+            remote_url: Some("ssh://git@gitlab.ssh.example/team/app.git".into()),
+            provider: Some(GitProviderKind::Gitlab),
+            git_account_id: Some(account.id.clone()),
+        })
+        .await
+        .unwrap();
+    Mock::given(method("PUT"))
+        .and(path("/api/v4/projects/team%2Fapp/merge_requests/7"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&old_api)
+        .await;
+    let (provider, remote) = provider_ctx(&ctx, &auth(&user, false), &repo)
+        .await
+        .unwrap();
+    provider
+        .update_pr(
+            &remote,
+            7,
+            &UpdatePrReq {
+                title: Some("valid owner edit".into()),
+                description: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Root must retain the same valid mapping and credential authority.
+    assert!(provider_ctx(&ctx, &auth(&user, true), &repo).await.is_ok());
+    // Trusted run-engine callers retain an explicit split-host association.
+    assert!(bound_provider_ctx(&ctx, &repo).await.is_ok());
+    assert_eq!(
+        ctx.store.get_repo(&repo.id).await.unwrap().git_account_id,
+        Some(account.id)
+    );
+    let requests_before = old_api.received_requests().await.unwrap().len();
+
+    git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://gitlab.new.example/team/app.git",
+    ]);
+    // The autonomous path must refresh the binding too, without any request
+    // route first noticing the changed origin on its behalf.
+    assert!(bound_provider_ctx(&ctx, &repo).await.is_err());
+    assert!(provider_ctx(&ctx, &auth(&user, false), &repo)
+        .await
+        .is_err());
+    // Repeat with the refreshed record: lazy account adoption must not restore
+    // the old mapping merely because both servers are GitLab.
+    let refreshed = ctx.store.get_repo(&repo.id).await.unwrap();
+    assert!(refreshed.git_account_id.is_none());
+    assert!(provider_ctx(&ctx, &auth(&user, true), &refreshed)
+        .await
+        .is_err());
+    assert_eq!(
+        old_api.received_requests().await.unwrap().len(),
+        requests_before,
+        "changed forge must make zero calls to the old API"
+    );
+}
+
+#[tokio::test]
+async fn credential_binding_refresh_cannot_restore_a_concurrently_changed_account() {
+    let (_pool, ctx, user, ws) = fixture().await;
+    let account = seed_account(&ctx, &user, GitProviderKind::Github, "old").await;
+    let repo = seed_repo(&ctx, &ws, "race", Some("https://github.com/o/r")).await;
+    let old = ctx
+        .store
+        .set_repo_account(&repo.id, Some(&account.id))
+        .await
+        .unwrap();
+    ctx.store.set_repo_account(&repo.id, None).await.unwrap();
+    assert!(matches!(
+        ctx.store
+            .refresh_repo_binding(
+                &old,
+                Some("https://github.com/o/new"),
+                Some(GitProviderKind::Github),
+                true
+            )
+            .await,
+        Err(Error::Conflict(_))
+    ));
+    assert!(ctx
+        .store
+        .get_repo(&repo.id)
+        .await
+        .unwrap()
+        .git_account_id
+        .is_none());
+}
+
 async fn seed_repo(ctx: &TestCtx, ws: &Id, name: &str, remote: Option<&str>) -> Repo {
     ctx.store
         .create_repo(NewRepo {
@@ -794,6 +939,13 @@ async fn provider_ctx_tracks_changed_and_removed_origin() {
     )
     .await
     .unwrap();
+    // The previous call changed the persisted origin. A caller retaining that
+    // old snapshot must retry; it cannot overwrite a newer account binding.
+    assert!(matches!(
+        provider_ctx(&ctx, &auth(&user, false), &repo).await,
+        Err(Error::Conflict(_))
+    ));
+    let repo = ctx.store.get_repo(&repo.id).await.unwrap();
     assert!(
         matches!(
             provider_ctx(&ctx, &auth(&user, false), &repo).await,
@@ -804,6 +956,7 @@ async fn provider_ctx_tracks_changed_and_removed_origin() {
     git.remote_op(crate::ops::RemoteOp::Remove, "origin", None)
         .await
         .unwrap();
+    let repo = ctx.store.get_repo(&repo.id).await.unwrap();
     assert!(matches!(
         provider_ctx(&ctx, &auth(&user, false), &repo).await,
         Err(Error::Invalid(_))
@@ -997,9 +1150,10 @@ async fn checkout_handler_honours_auto_stash() {
         "develop\n",
         "the switch actually happened"
     );
-    assert!(
-        LocalGit::new(&dir).stash_list().await.unwrap().is_empty(),
-        "a clean pop leaves no stash entry"
+    assert_eq!(
+        LocalGit::new(&dir).stash_list().await.unwrap().len(),
+        1,
+        "a successful restore retains its recovery backup"
     );
     let _ = tokio::fs::remove_dir_all(&dir).await;
 }

@@ -74,7 +74,7 @@ async fn cached_public_resource_burst_does_not_fail_before_workers_are_polled() 
     );
 }
 
-fn process_fixture(conn: Arc<CdpConn>, cache: VerdictCache) -> Arc<ChromeProcess> {
+pub(crate) fn process_fixture(conn: Arc<CdpConn>, cache: VerdictCache) -> Arc<ChromeProcess> {
     Arc::new(ChromeProcess {
         key: ProcessKey::Ephemeral,
         build: ChromeBuild::Chrome,

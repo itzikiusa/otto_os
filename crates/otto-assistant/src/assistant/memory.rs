@@ -10,6 +10,7 @@
 //! 3. Per-agent `memory/notes.md` of each Personal Agent — unchanged.
 
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use otto_core::domain::SCRATCH_WORKSPACE_ID;
@@ -429,6 +430,9 @@ fn profile_path(dir: &Path) -> Result<PathBuf> {
         Ok(meta) if meta.file_type().is_symlink() => {
             Err(Error::Forbidden("profile.md cannot be a symlink".into()))
         }
+        Ok(meta) if meta.nlink() > 1 => {
+            Err(Error::Forbidden("profile.md cannot be a hard link".into()))
+        }
         Ok(meta) if !meta.is_file() => Err(Error::Invalid("profile.md must be a file".into())),
         _ => Ok(path),
     }
@@ -445,7 +449,7 @@ fn version_of(content: Option<&[u8]>) -> String {
 
 fn read_profile_sync(dir: &Path) -> Result<ProfileDoc> {
     let path = profile_path(dir)?;
-    let file = match std::fs::File::open(&path) {
+    let file = match crate::personal_agent_documents::open_regular_nofollow(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ProfileDoc {
@@ -514,8 +518,7 @@ fn save_profile_sync(dir: &Path, version: &str, content: &str) -> Result<Profile
     staged
         .write_all(content.as_bytes())
         .map_err(|e| Error::Internal(format!("profile: {e}")))?;
-    staged
-        .persist(&path)
+    crate::personal_agent_documents::persist_nofollow(&staged, &path)
         .map_err(|e| Error::Internal(format!("profile: {e}")))?;
     read_profile_sync(dir)
 }

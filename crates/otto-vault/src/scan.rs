@@ -20,8 +20,57 @@ pub struct WalkEntry {
 
 pub struct WalkResult {
     pub complete: bool,
+    pub directories: Vec<String>,
     pub notes: Vec<WalkEntry>,
     pub files: Vec<WalkEntry>,
+}
+
+/// Shallow directory listing, including empty folders. Like the recursive
+/// walk, it excludes hidden/protected paths and never follows directory links.
+/// Blocking: callers run this on the blocking pool.
+pub(crate) fn child_directories(root: &Path, rel: &str) -> std::io::Result<Vec<String>> {
+    use otto_core::secret_paths as sp;
+    let protected = sp::protected_set();
+    let filter = !protected.in_protected_dir(root);
+    let mut dir = root.to_path_buf();
+    for part in rel.split('/').filter(|p| !p.is_empty()) {
+        if is_skipped_dir(part) {
+            return Ok(Vec::new());
+        }
+        dir.push(part);
+        let meta = match std::fs::symlink_metadata(&dir) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        if !meta.is_dir() || (filter && protected.is_protected_dir(&dir, sp::metadata_id(&meta))) {
+            return Ok(Vec::new());
+        }
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_skipped_dir(&name) {
+            continue;
+        }
+        // Directory-entry types avoid a stat per ordinary file in a large
+        // flat vault; only directories need identity/protection checks here.
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        if meta.is_dir()
+            && !(filter && protected.is_protected_dir(&entry.path(), sp::metadata_id(&meta)))
+        {
+            out.push(if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Recursively list the vault. Blocking — call from `spawn_blocking`.
@@ -38,6 +87,7 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
     let mut complete = true;
     let mut notes = Vec::new();
     let mut files = Vec::new();
+    let mut directories = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
@@ -65,6 +115,9 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
                 if !is_skipped_dir(&name)
                     && !(filter && protected.is_protected_dir(&path, sp::metadata_id(&meta)))
                 {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        directories.push(rel.to_string_lossy().into_owned());
+                    }
                     stack.push(path);
                 }
                 continue;
@@ -106,6 +159,7 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(WalkResult {
         complete,
+        directories,
         notes,
         files,
     })

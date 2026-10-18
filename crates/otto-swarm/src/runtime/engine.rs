@@ -418,6 +418,21 @@ async fn tick_inner(
     if swarm.status != "active" {
         return Ok(());
     }
+    // A budget pause keeps `pause_reason` even if a generic status write flipped
+    // the row back to active. Idle the live coordinator until resume clears it.
+    if swarm
+        .pause_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.is_empty())
+    {
+        set_paused(ctx, swarm_id, true);
+        return Ok(());
+    }
+    if let Some(reason) = ctx.budget_blocked(&swarm.workspace_id).await {
+        let text = reason.unwrap_or_else(|| "workspace budget reached".to_string());
+        pause_for_budget(ctx, &swarm, &text).await;
+        return Ok(());
+    }
 
     // Budget guardrails (D3/D8): before doing anything, check whether any
     // per-swarm budget is exhausted. If so, pause the swarm with a clear reason
@@ -609,7 +624,7 @@ async fn tick_inner(
 /// limits are nullable = unlimited. Spend/run-count counts every run ever
 /// enqueued for the swarm; the runtime budget is measured from `run_started_at`
 /// (the last time the swarm went active).
-async fn budget_exceeded(ctx: &SwarmRt, swarm: &Swarm) -> Option<String> {
+pub(crate) async fn budget_exceeded(ctx: &SwarmRt, swarm: &Swarm) -> Option<String> {
     if !has_budget(swarm) {
         return None;
     }
@@ -664,11 +679,17 @@ fn run_count_reason(swarm: &Swarm, spend: &otto_state::swarm::SwarmSpend) -> Opt
 /// Pause a swarm because a budget was hit: persist status+reason, flip the
 /// coordinator's paused flag (so it idles without ticking), suspend idle swarm
 /// sessions, post to the board, and notify.
-async fn pause_for_budget(ctx: &SwarmRt, swarm: &Swarm, reason: &str) {
-    let _ = ctx
+pub(crate) async fn pause_for_budget(ctx: &SwarmRt, swarm: &Swarm, reason: &str) {
+    // The in-memory paused flag used to flip even when the status write failed,
+    // so the scheduler kept admitting work the coordinator thought was paused.
+    if let Err(e) = ctx
         .swarm_repo()
         .pause_swarm_with_reason(&swarm.id, reason)
-        .await;
+        .await
+    {
+        tracing::warn!(swarm = %swarm.id, "swarm budget pause was not stored: {e}");
+        return;
+    }
     set_paused(ctx, &swarm.id, true);
     crate::runtime::verify::stop_swarm(ctx, &swarm.id).await;
     stop_runs_for_pause(ctx, &swarm.id).await;
@@ -1757,7 +1778,11 @@ pub(crate) async fn emit_task_pub(ctx: &SwarmRt, task_id: &str) {
 /// consults this between goals/fixes so it doesn't run past the budget gate.
 pub(crate) async fn is_over_budget(ctx: &SwarmRt, swarm_id: &str) -> bool {
     match ctx.swarm_repo().get_swarm(&swarm_id.to_string()).await {
-        Ok(s) => s.status == "paused" || budget_exceeded(ctx, &s).await.is_some(),
+        Ok(s) => {
+            s.status == "paused"
+                || budget_exceeded(ctx, &s).await.is_some()
+                || ctx.budget_blocked(&s.workspace_id).await.is_some()
+        }
         Err(_) => true,
     }
 }
@@ -2661,9 +2686,19 @@ async fn run_task(
             "swarm is aborted — tasks can't run".into(),
         )));
     }
+    // Same predicate as `reserve_run_on`: a nonempty pause reason refuses the
+    // manual slot even though this path passes `allow_paused`. Whitespace is
+    // not empty. The SQL write still refuses the row if the reason lands
+    // after this read.
     if let Some(reason) = swarm.pause_reason.as_deref().filter(|r| !r.is_empty()) {
         return Err(ApiError(Error::Conflict(format!(
             "swarm is paused: {reason} — raise the budget and resume first"
+        ))));
+    }
+    if let Some(reason) = ctx.budget_blocked(&swarm.workspace_id).await {
+        return Err(ApiError(Error::Invalid(format!(
+            "Budget exceeded — swarm blocked: {}",
+            reason.unwrap_or_else(|| "cap reached".to_string())
         ))));
     }
     if let Some(reason) = budget_exceeded(&ctx, &swarm).await {

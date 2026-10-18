@@ -395,6 +395,27 @@ pub fn issues(v: &Value) -> Vec<String> {
     if pages.len() > MAX_PAGES {
         acc.add("pages", &format!("at most {MAX_PAGES} pages"));
     }
+    // IDs and slugs share the preview route namespace. Also reserve the home
+    // output filename: a slug-less page with id "index" would overwrite it.
+    let mut routes = std::collections::HashMap::<&str, usize>::new();
+    routes.insert("index", 0);
+    for (pi, page) in pages.iter().enumerate() {
+        for route in [page.get("id"), page.get("slug")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(previous) = routes.insert(route, pi) {
+                if previous != pi {
+                    acc.add(
+                        &format!("pages[{pi}]"),
+                        &format!("page route \"{route}\" conflicts with pages[{previous}]"),
+                    );
+                }
+            }
+        }
+    }
     let mut page_ids: HashSet<String> = HashSet::new();
     let mut slugs: HashSet<String> = HashSet::new();
     let mut node_ids: HashSet<String> = HashSet::new();
@@ -657,5 +678,19 @@ mod tests {
         assert_eq!(scheme("//cdn").as_deref(), Some("//"));
         assert!(is_data_image("data:image/webp;base64,UklGRg=="));
         assert!(!is_data_image("data:image/svg+xml;base64,PHN2Zz4="));
+    }
+    #[test]
+    fn rejects_colliding_page_routes_and_output_names() {
+        for pages in [
+            json!([{ "id":"home" }, { "id":"faq" }, { "id":"contact", "slug":"faq" }]),
+            json!([{ "id":"home" }, { "id":"index" }]),
+            json!([{ "id":"home", "slug":"welcome" }, { "id":"welcome" }]),
+        ] {
+            let d = json!({"type":"otto-site", "version":1, "pages":pages});
+            assert!(validate(&d).is_err(), "ambiguous pages accepted: {d}");
+        }
+        assert!(validate(&json!({"type":"otto-site", "version":1,
+            "pages":[{"id":"home"},{"id":"faq", "slug":"faq"}]}))
+        .is_ok());
     }
 }

@@ -313,25 +313,25 @@ fn field_placeholder(field: &prost_reflect::FieldDescriptor, depth: u8) -> Value
 
 // ── invoke ──────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct KV {
     #[serde(default)]
-    key: String,
+    pub key: String,
     #[serde(default)]
-    value: String,
+    pub value: String,
 }
 
 #[derive(Deserialize)]
 pub struct GrpcInvokeReq {
-    url: String,
+    pub url: String,
     #[serde(default)]
-    proto: String,
+    pub proto: String,
     /// `/package.Service/Method`.
-    method: String,
+    pub method: String,
     #[serde(default)]
-    body: String,
+    pub body: String,
     #[serde(default)]
-    headers: Vec<KV>,
+    pub headers: Vec<KV>,
 }
 
 /// Budget for one gRPC call (unary answer, or the whole server stream).
@@ -966,9 +966,9 @@ async fn reflect_pool_inner(
 
 #[derive(Deserialize)]
 pub struct GrpcReflectReq {
-    url: String,
+    pub url: String,
     #[serde(default)]
-    headers: Vec<KV>,
+    pub headers: Vec<KV>,
 }
 
 /// `POST /workspaces/{wid}/api-client/grpc/reflect` — list services/methods via

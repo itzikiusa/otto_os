@@ -1517,17 +1517,49 @@ async fn configure_native(client: &klickhouse::Client, cfg: &ResolvedConfig) -> 
         .param_str("timezone")
         .filter(|tz| !tz.is_empty())
         .unwrap_or_else(|| "UTC".into());
-    client
+    if let Err(error) = client
         .execute(format!("SET session_timezone = '{}'", esc(&timezone)))
         .await
-        .map_err(native_err)?;
+    {
+        if !matches!(
+            &error,
+            klickhouse::KlickhouseError::ServerException { code: 164, .. }
+        ) {
+            return Err(native_err(error));
+        }
+        // readonly=1 may reject the timezone SET. Verify its policy and
+        // effective timezone on this connection before accepting its
+        // stronger policy; never downgrade it to readonly=2 or ignore a mismatch.
+        let mut row = client
+            .query_one::<klickhouse::RawRow>(
+                "SELECT toUInt8(getSetting('readonly')) AS mode, timezone() AS timezone",
+            )
+            .await
+            .map_err(native_err)?;
+        let mode: u8 = row.try_get("mode").map_err(native_err)?;
+        let current_timezone: String = row.try_get("timezone").map_err(native_err)?;
+        if mode == 1 && current_timezone == timezone {
+            return Ok(());
+        }
+        return Err(native_err(error));
+    }
     if cfg
         .params
         .get("__read_only_execution")
         .and_then(Value::as_bool)
         == Some(true)
     {
-        client.execute("SET readonly=2").await.map_err(native_err)?;
+        // Some servers allow SET to its existing value under readonly=1, so
+        // the timezone SET above may succeed. Still preserve that stronger
+        // policy rather than trying to replace it with Otto's readonly=2.
+        let mut row = client
+            .query_one::<klickhouse::RawRow>("SELECT toUInt8(getSetting('readonly')) AS mode")
+            .await
+            .map_err(native_err)?;
+        let mode: u8 = row.try_get("mode").map_err(native_err)?;
+        if mode != 1 {
+            client.execute("SET readonly=2").await.map_err(native_err)?;
+        }
     }
     Ok(())
 }

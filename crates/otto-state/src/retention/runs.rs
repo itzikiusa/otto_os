@@ -150,6 +150,7 @@ impl RetentionRepo {
             }
             let m = marks(ids.len());
             let terminal = "status IN ('done','error','stopped')";
+            let counts = crate::swarm::not_unstarted_scheduled_stop("r");
             let mut tx = self
                 .pool
                 .begin()
@@ -158,10 +159,10 @@ impl RetentionRepo {
             let q = format!(
                 "UPDATE swarms SET \
                    pruned_runs = pruned_runs + (SELECT COUNT(*) FROM swarm_runs r \
-                       WHERE r.swarm_id = swarms.id AND r.id IN ({m}) AND r.{terminal}), \
+                       WHERE r.swarm_id = swarms.id AND r.id IN ({m}) AND r.{terminal} AND {counts}), \
                    pruned_cost_usd = pruned_cost_usd + (SELECT COALESCE(SUM(r.cost_usd), 0.0) \
                        FROM swarm_runs r \
-                       WHERE r.swarm_id = swarms.id AND r.id IN ({m}) AND r.{terminal}) \
+                       WHERE r.swarm_id = swarms.id AND r.id IN ({m}) AND r.{terminal} AND {counts}) \
                  WHERE id IN (SELECT swarm_id FROM swarm_runs WHERE id IN ({m}))"
             );
             let mut up = sqlx::query(sqlx::AssertSqlSafe(q.as_str()));
