@@ -1976,6 +1976,79 @@ async fn refs_flag_branches_merged_into_base() {
     assert!(!by("main"), "the base branch is never flagged");
 }
 
+/// Git-flow: `origin/HEAD` (the cleanup base) is `main`, but work lands in
+/// `develop` first. `merged_into` names EVERY integration branch holding the
+/// tip, so a release merged into develop still shows where it landed even
+/// though `merged_into_base` (main) is false. The integration branches never
+/// flag each other (main ⊂ develop is noise, not a cleanup hint).
+#[tokio::test]
+async fn refs_list_every_integration_branch_holding_a_tip() {
+    let (_tmp, dir) = fixture();
+    sh_git(&dir, &["branch", "old"]); // at main's tip → in main AND develop
+    sh_git(&dir, &["checkout", "-b", "develop"]);
+    write(&dir, "dev.txt", "dev\n");
+    sh_git(&dir, &["add", "dev.txt"]);
+    sh_git(&dir, &["commit", "-m", "develop commit"]);
+    sh_git(&dir, &["checkout", "-b", "release/1.0"]);
+    write(&dir, "rel.txt", "release\n");
+    sh_git(&dir, &["add", "rel.txt"]);
+    sh_git(&dir, &["commit", "-m", "release commit"]);
+    sh_git(&dir, &["checkout", "develop"]);
+    sh_git(&dir, &["merge", "--no-ff", "--no-edit", "release/1.0"]);
+    sh_git(&dir, &["checkout", "-b", "feature/x"]);
+    write(&dir, "x.txt", "x\n");
+    sh_git(&dir, &["add", "x.txt"]);
+    sh_git(&dir, &["commit", "-m", "feature commit"]);
+    sh_git(&dir, &["checkout", "develop"]);
+    // A remote twin of the release, so remote rows get the same answer.
+    sh_git(
+        &dir,
+        &[
+            "update-ref",
+            "refs/remotes/origin/release/1.0",
+            "release/1.0",
+        ],
+    );
+    sh_git(
+        &dir,
+        &["update-ref", "refs/remotes/origin/develop", "develop"],
+    );
+
+    let git = LocalGit::new(&dir);
+    let refs = git.refs_with_base(Some("main")).await.unwrap();
+    let landed = |list: &[RefBranch], name: &str| {
+        let mut v = list
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("branch {name} present"))
+            .merged_into
+            .clone();
+        v.sort();
+        v
+    };
+    assert_eq!(landed(&refs.local, "release/1.0"), ["develop"]);
+    assert_eq!(landed(&refs.local, "old"), ["develop", "main"]);
+    assert!(
+        landed(&refs.local, "feature/x").is_empty(),
+        "ahead of every base"
+    );
+    assert!(
+        landed(&refs.local, "develop").is_empty(),
+        "integration branch"
+    );
+    assert!(landed(&refs.local, "main").is_empty(), "integration branch");
+    assert_eq!(landed(&refs.remote, "origin/release/1.0"), ["develop"]);
+    assert!(
+        landed(&refs.remote, "origin/develop").is_empty(),
+        "integration twin"
+    );
+    let release = refs.local.iter().find(|b| b.name == "release/1.0").unwrap();
+    assert!(
+        !release.merged_into_base,
+        "base (main) does not hold the release"
+    );
+}
+
 /// Untracked files with non-ASCII names must appear in the Working diff —
 /// quotePath escaping made `--no-index` miss them silently.
 #[tokio::test]

@@ -1409,6 +1409,13 @@ pub struct RefBranch {
     /// clients / responses that predate the field.
     #[serde(default)]
     pub merged_into_base: bool,
+    /// Every integration branch (the cleanup base plus `develop` / `main` /
+    /// `master` when present, local else `origin/`) whose history already holds
+    /// this tip — so a git-flow repo shows a release "in develop" even while
+    /// the base (`main`) doesn't hold it yet. Integration branches and their
+    /// remote twins are never listed. Empty for older responses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_into: Vec<String>,
     /// Full sha this branch points at. Lets a client locate the branch in the
     /// graph WITHOUT the tip having to be in the loaded page of history — the
     /// tip of a long-dormant branch is exactly the one that isn't. Empty for
