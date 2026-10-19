@@ -2,7 +2,8 @@
 //! user's enabled MCP servers, and its own first-party `otto` tool server into
 //! the config each agent CLI actually reads:
 //!
-//!   - claude/agy: `<workspace>/.mcp.json`
+//!   - claude:     `<workspace>/.mcp.json`
+//!   - agy:        `<workspace>/.agents/mcp_config.json` (never `.mcp.json`)
 //!   - grok:       `<workspace>/.grok/config.toml` (never `.mcp.json`)
 //!   - codex:      per-spawn `-c mcp_servers.*` overrides (never `.mcp.json`)
 //!
@@ -102,6 +103,16 @@ fn mcp_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root).join(".mcp.json")
 }
 
+/// agy (Antigravity CLI)'s workspace MCP config. agy ignores `.mcp.json`; it
+/// discovers `.agents/` walking up from its cwd to the repo root and loads that
+/// `mcp_config.json` — same `mcpServers` shape, unknown top-level keys (our
+/// marker) tolerated, and the agy process env is inherited by stdio children.
+fn agy_mcp_path(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root)
+        .join(".agents")
+        .join("mcp_config.json")
+}
+
 /// Per-cwd write lock: several sessions can share one cwd (PR-review sessions
 /// all spawn in the repo root), and each spawn does a read→reconcile→write of
 /// the same files. A process-global registry keyed by workspace root serializes
@@ -168,7 +179,27 @@ pub fn reconcile_managed_servers(
     workspace_root: &str,
     cfg: &ManagedMcpConfig,
 ) -> Result<Vec<String>, String> {
-    let path = mcp_path(workspace_root);
+    reconcile_json_launcher(workspace_root, &mcp_path(workspace_root), cfg)
+}
+
+/// The agy counterpart of [`reconcile_managed_servers`]: the same managed set
+/// and marker semantics, written to `<workspace>/.agents/mcp_config.json`
+/// (agy never reads `.mcp.json`, so without this an agy session gets no
+/// `otto`, browser or user servers at all).
+pub fn reconcile_managed_servers_agy(
+    workspace_root: &str,
+    cfg: &ManagedMcpConfig,
+) -> Result<Vec<String>, String> {
+    reconcile_json_launcher(workspace_root, &agy_mcp_path(workspace_root), cfg)
+}
+
+/// One `mcpServers`-shaped JSON launcher file (`.mcp.json` or agy's
+/// `.agents/mcp_config.json`) reconciled against `cfg` under the cwd lock.
+fn reconcile_json_launcher(
+    workspace_root: &str,
+    path: &Path,
+    cfg: &ManagedMcpConfig,
+) -> Result<Vec<String>, String> {
     let lock = cwd_lock(workspace_root);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -218,7 +249,7 @@ pub fn reconcile_managed_servers(
         return Ok(Vec::new());
     }
 
-    let mut doc = read_doc(&path)?;
+    let mut doc = read_doc(path)?;
 
     // The previously managed set. Files written before the marker existed
     // (the old accumulate-only merge) get an adoption pass: Otto's reserved
@@ -270,7 +301,7 @@ pub fn reconcile_managed_servers(
             Value::Array(desired_names.iter().cloned().map(Value::String).collect()),
         );
     }
-    write_doc(&path, &doc)?;
+    write_doc(path, &doc)?;
     Ok(desired_names)
 }
 
@@ -788,6 +819,49 @@ mod tests {
         );
     }
 
+    /// agy ignores `.mcp.json`: its reconcile lands the same managed set (and
+    /// marker) in `.agents/mcp_config.json`, leaves `.mcp.json` alone, keeps
+    /// hand-added agy entries, and propagates a disable as a removal.
+    #[test]
+    fn agy_config_reconciles_into_agents_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let path = agy_mcp_path(root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"mcpServers":{"mine":{"command":"x"}}}"#).unwrap();
+
+        let names = reconcile_managed_servers_agy(
+            root,
+            &ManagedMcpConfig {
+                browser: false,
+                user_servers: vec![user("jira")],
+                otto_tools: Some(otto_tools()),
+            },
+        )
+        .unwrap();
+        assert_eq!(names, vec!["otto", "jira"]);
+        assert!(!mcp_path(root).exists(), "agy reconcile wrote .mcp.json");
+        let doc = read_doc(&path).unwrap();
+        let servers = doc["mcpServers"].as_object().unwrap();
+        assert_eq!(servers["otto"]["args"], json!(["mcp-tools"]));
+        assert!(servers["otto"].get("env").is_none(), "session env leaked");
+        assert!(servers.contains_key("jira") && servers.contains_key("mine"));
+        assert_eq!(doc[MANAGED_KEY], json!(["otto", "jira"]));
+
+        reconcile_managed_servers_agy(
+            root,
+            &ManagedMcpConfig {
+                otto_tools: Some(otto_tools()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let doc = read_doc(&path).unwrap();
+        let servers = doc["mcpServers"].as_object().unwrap();
+        assert!(!servers.contains_key("jira"), "disabled server survived");
+        assert!(servers.contains_key("otto") && servers.contains_key("mine"));
+    }
+
     /// grok project config: upsert is format-preserving and idempotent — a
     /// user's own `[mcp_servers.other]` table and top-level keys survive, and
     /// re-enabling replaces (not duplicates) the managed `otto` table.
@@ -922,8 +996,10 @@ mod tests {
 pub fn retire_user_server(workspace_root: &str, name: &str, apply: bool) -> Result<(), String> {
     let lock = cwd_lock(workspace_root);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let path = mcp_path(workspace_root);
-    if path.exists() {
+    for path in [mcp_path(workspace_root), agy_mcp_path(workspace_root)] {
+        if !path.exists() {
+            continue;
+        }
         let mut doc = read_doc(&path)?;
         if doc
             .get("mcpServers")

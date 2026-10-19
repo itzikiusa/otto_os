@@ -299,8 +299,9 @@ Notes:
   the read-only DB connection tools: `otto_list_connections`, `otto_db_schema`/`_children`/
   `_object`, `otto_db_query`) attached to every agent session. **Default ON** (opt-out): an
   absent value or unlisted workspace resolves to enabled. A bare scalar `true`/`false` is the
-  global toggle; a `{ "<ws>": bool }` object overrides per workspace. Claude/agy receive it via
-  the workspace `.mcp.json`; Codex via per-spawn `-c mcp_servers.otto.*` overrides. (Settings via
+  global toggle; a `{ "<ws>": bool }` object overrides per workspace. Claude receives it via
+  the workspace `.mcp.json`, agy via `<workspace>/.agents/mcp_config.json` (agy ignores
+  `.mcp.json`); Codex via per-spawn `-c mcp_servers.otto.*` overrides. (Settings via
   `PUT /settings`.)
 - `session_persistence` (bool, **default `true`**) — sessions you start yourself (Agents-page
   agents and shells: foreground, `work.origin` absent or `manual`) are spawned inside a detached
@@ -898,7 +899,9 @@ disable/delete propagates), upserts the current set, and never touches entries o
 marker (hand-added servers survive). Codex sessions receive the same enabled servers as
 per-spawn `-c mcp_servers.<name>.*` overrides (Codex doesn't read `.mcp.json`); grok sessions
 get `[mcp_servers.<name>]` tables in `<workspace>/.grok/config.toml`, tracked by an
-`otto_managed_servers` marker. The resolved managed name list is snapshotted into the
+`otto_managed_servers` marker; agy sessions get the full managed set (browser, `otto`, user
+servers) reconciled into `<workspace>/.agents/mcp_config.json` with the same
+`ottoManagedServers` marker (agy doesn't read `.mcp.json`). The resolved managed name list is snapshotted into the
 session's meta as `mcp_servers` at each spawn. Nothing is auto-enabled: `enabled` defaults
 `false` on create, and a server is only written once the user flips it on and a session then
 spawns in the workspace. Reads = `ws viewer`, mutations = `ws editor`. Item routes resolve
