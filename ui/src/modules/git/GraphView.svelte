@@ -1269,7 +1269,7 @@
         action: () => void clip(c.subject, c.subject),
       },
     );
-    ctxMenu.show(e, items, { filter: items.length > 12, maxVisible: 12 });
+    ctxMenu.show(e, items, { filter: items.length > 12 });
   }
 
   async function cherryPick(c: CommitInfo): Promise<void> {
@@ -1521,7 +1521,7 @@
         action: () => void setCleanupBase(baseName),
       });
     }
-    ctxMenu.show(e, items, { filter: items.length > 12, maxVisible: 12 });
+    ctxMenu.show(e, items, { filter: items.length > 12 });
   }
 
   async function createBranchFrom(ref: string): Promise<void> {
