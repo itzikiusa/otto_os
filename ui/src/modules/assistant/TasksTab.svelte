@@ -5,7 +5,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import { assistant } from '../../lib/stores/assistant.svelte';
+  import { assistant, describeError } from '../../lib/stores/assistant.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import NeedsYouCard from './cards/NeedsYouCard.svelte';
   import Badge from '../../lib/components/Badge.svelte';
@@ -31,6 +33,19 @@
   const groups = $derived(groupTasks(tasks.data.filter((t) => !needIds.has(t.id) && t.state !== 'needs_you')));
   const total = $derived(tasks.data.length + needs.length);
   const threadTitle = (id: string | null): string | null => (id ? (assistant.thread(id)?.title ?? null) : null);
+  let stopping = $state<string | null>(null);
+  async function stopTask(t: AssistantTask): Promise<void> {
+    const ok = await confirmer.ask(`Stop “${t.title}”? Otto drops what it has not finished.`, { title: 'Stop task', confirmLabel: 'Stop', danger: true });
+    if (!ok) return;
+    stopping = t.id;
+    try {
+      await assistant.act(t.id, 'cancel');
+    } catch (e) {
+      toasts.error('Couldn’t stop the task', describeError(e));
+    } finally {
+      stopping = null;
+    }
+  }
   const COLUMNS = $derived([
     { key: 'running', label: 'Running', list: groups.running },
     { key: 'queued', label: 'Queued', list: groups.queued },
@@ -54,6 +69,13 @@
         <button class="link" onclick={() => onopenthread(t.thread_id!)}>{threadTitle(t.thread_id)}</button>
       {/if}
     </div>
+    {#if t.state === 'running' || t.state === 'queued'}
+      <div class="acts">
+        <button class="btn small ghost" onclick={() => void stopTask(t)} disabled={stopping === t.id} aria-label="Stop {t.title}">
+          <Icon name="stop" size={12} /> {stopping === t.id ? 'Stopping…' : 'Stop'}
+        </button>
+      </div>
+    {/if}
   </li>
 {/snippet}
 
@@ -172,6 +194,11 @@
     gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  .acts {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 4px;
   }
   .link {
     border: 0;

@@ -3,6 +3,7 @@
   // stage timeline, proof + findings, the approval gate, and the PR draft. Reads
   // the open run + its events straight from the store.
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
   import RunStageRail from './RunStageRail.svelte';
@@ -60,7 +61,7 @@
         note: decision === 'reject' && note?.trim() ? note.trim() : undefined,
       });
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Decision failed';
+      error = loadErrorText(e);
     } finally {
       busy = false;
       deciding = null;
@@ -75,7 +76,7 @@
     try {
       await runWithOtto.cancel(runId);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Cancel failed';
+      error = loadErrorText(e);
     } finally {
       busy = false;
     }
@@ -105,7 +106,7 @@
     try {
       await runWithOtto.openPr(runId);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Open PR failed';
+      error = loadErrorText(e);
     } finally {
       busy = false;
     }
@@ -382,5 +383,9 @@
     background: var(--danger-soft);
     color: var(--danger); padding: 6px 10px; overflow-wrap: anywhere;
     border-radius: var(--radius-s); font-size: var(--fs-s);
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .chip-btn { min-block-size: var(--hit-min); align-items: center; }
+    .d-head { flex-wrap: wrap; }
   }
 </style>

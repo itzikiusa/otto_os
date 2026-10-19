@@ -4,6 +4,7 @@
   import ActionCard from './ActionCard.svelte';
   import Badge from '../../../lib/components/Badge.svelte';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
+  import { confirmer } from '../../../lib/confirm.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { taskStateLabel, taskTone } from '../model';
   import { deliverLabel, whenLabel } from '../format';
@@ -16,6 +17,13 @@
 
   let busy = $state(false);
   async function cancel(): Promise<void> {
+    const ok = await confirmer.ask(`Cancel “${task.title}”? It will not fire.`, {
+      title: 'Cancel reminder',
+      confirmLabel: 'Cancel reminder',
+      cancelLabel: 'Keep reminder',
+      danger: true,
+    });
+    if (!ok) return;
     busy = true;
     try {
       await assistant.act(task.id, 'cancel');

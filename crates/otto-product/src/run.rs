@@ -1078,6 +1078,11 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
     retry_analysis_agent_owned(ctx, ws, user_id, analysis_id, agent_id, owner).await;
 }
 
+fn retry_model(model: &str) -> Option<&str> {
+    let model = model.trim();
+    (!model.is_empty()).then_some(model)
+}
+
 pub(crate) async fn retry_analysis_agent_owned<C: ProductRunHost>(
     ctx: C,
     ws: otto_core::domain::Workspace,
@@ -1263,7 +1268,7 @@ pub(crate) async fn retry_analysis_agent_owned<C: ProductRunHost>(
             &ws,
             &user_id,
             &agent.provider,
-            None, // retry path: no model override; agent row already has its provider
+            retry_model(&agent.model),
             retry_work,
             &cwd,
             &prompt,
@@ -3560,5 +3565,17 @@ mod tests {
             narrative.contains("Remember to handle 3DS authentication flow"),
             "narrative must contain the note body; got:\n{narrative}"
         );
+    }
+}
+
+#[cfg(test)]
+mod retry_model_tests {
+    #[test]
+    fn preserves_selected_model_and_legacy_empty_default() {
+        assert_eq!(
+            super::retry_model(" selected-model "),
+            Some("selected-model")
+        );
+        assert_eq!(super::retry_model("  "), None);
     }
 }

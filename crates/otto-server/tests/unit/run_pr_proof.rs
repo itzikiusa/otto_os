@@ -241,3 +241,148 @@ async fn open_pr_rejects_changed_worktree_and_changed_commit_without_mutating_ei
     );
     assert!(ctx.runs.get(&run.id).await.unwrap().pr_url.is_none());
 }
+
+#[tokio::test]
+async fn provisioning_replay_preserves_base_before_worktree_side_effects() {
+    let (dir, ctx, run, _pack) = fixture().await;
+    let path = dir.path().join("repo");
+    std::fs::create_dir(&path).unwrap();
+    git(&path, &["init", "-q"]);
+    git(&path, &["config", "user.name", "Fixture"]);
+    git(&path, &["config", "user.email", "fixture@example.invalid"]);
+    std::fs::write(path.join("app"), "A").unwrap();
+    git(&path, &["add", "."]);
+    git(&path, &["commit", "-qm", "A"]);
+    let a = git(&path, &["rev-parse", "HEAD"]);
+    let repo = ctx
+        .git_store
+        .create_repo(otto_state::NewRepo {
+            workspace_id: run.workspace_id.clone(),
+            name: "replay".into(),
+            path: path.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    // Fail the first git side effect: the base must already be durable.
+    let blocked = ctx.data_dir.join("otto-runs").join(&run.id).join("work");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::write(blocked.join("obstruction"), "fixture").unwrap();
+    assert!(crate::run_workspace::provision_worktree(&ctx, &run, &repo)
+        .await
+        .is_err());
+    assert_eq!(
+        ctx.runs.get(&run.id).await.unwrap().base_commit.as_deref(),
+        Some(a.as_str())
+    );
+    std::fs::remove_file(blocked.join("obstruction")).unwrap();
+    let (_, worktree, base) = crate::run_workspace::provision_worktree(&ctx, &run, &repo)
+        .await
+        .unwrap();
+    assert_eq!(base, a);
+    assert_eq!(
+        ctx.runs.get(&run.id).await.unwrap().base_commit.as_deref(),
+        Some(a.as_str())
+    );
+    std::fs::write(path.join("app"), "B").unwrap();
+    git(&path, &["commit", "-qam", "B"]);
+    // Deliberately pass the old snapshot, like an interrupted stage caller.
+    let (_, same_worktree, replay_base) =
+        crate::run_workspace::provision_worktree(&ctx, &run, &repo)
+            .await
+            .unwrap();
+    assert_eq!(worktree, same_worktree);
+    assert_eq!(replay_base, a);
+    assert_eq!(
+        git(std::path::Path::new(&worktree), &["rev-parse", "HEAD"]),
+        a
+    );
+    // Simulate a restart after the durable base write but before worktree creation.
+    git(&path, &["worktree", "remove", &worktree]);
+    let (_, recreated, replay_base) = crate::run_workspace::provision_worktree(&ctx, &run, &repo)
+        .await
+        .unwrap();
+    assert_eq!(replay_base, a);
+    assert_eq!(
+        git(std::path::Path::new(&recreated), &["rev-parse", "HEAD"]),
+        a
+    );
+}
+
+#[tokio::test]
+async fn opening_old_run_pack_applies_its_repositories_configured_policy() {
+    let (dir, ctx, run, pack) = fixture().await;
+    let repo = ctx
+        .git_store
+        .create_repo(otto_state::NewRepo {
+            workspace_id: run.workspace_id.clone(),
+            name: "policy".into(),
+            path: dir.path().to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    ctx.git_store
+        .set_proof_config(
+            &repo.id,
+            &otto_core::proof::RepoProofConfig {
+                require_ci: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    ctx.runs
+        .set_fields(
+            &run.id,
+            &RunPatch {
+                repo_id: Some(repo.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for (kind, title, status) in [
+        (
+            otto_core::proof::ProofArtifactKind::Diff,
+            "diff",
+            otto_core::proof::ProofArtifactStatus::Info,
+        ),
+        (
+            otto_core::proof::ProofArtifactKind::Command,
+            "cargo test",
+            otto_core::proof::ProofArtifactStatus::Passed,
+        ),
+    ] {
+        crate::proof::upsert_content_artifact(
+            &ctx,
+            &pack,
+            kind,
+            title,
+            "evidence",
+            status,
+            serde_json::json!({}),
+            "root",
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        crate::proof::recompute_and_emit(&ctx, &pack.id)
+            .await
+            .unwrap()
+            .status,
+        ProofStatus::Passed
+    );
+    assert!(matches!(
+        open_pr(&ctx, &run.id).await.unwrap_err(),
+        Error::Conflict(_)
+    ));
+    let fresh = ctx.proof_repo.get_pack(&pack.id).await.unwrap();
+    assert_eq!(fresh.repo_id.as_deref(), Some(repo.id.as_str()));
+    assert_eq!(fresh.status, ProofStatus::Partial);
+}

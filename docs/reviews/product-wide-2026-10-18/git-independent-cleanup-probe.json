@@ -1,0 +1,38 @@
+{
+  "root": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-stash-fixtures-7pai7cw5",
+  "results": {
+    "normal": {
+      "decision": "commit",
+      "stack": [],
+      "stash_ref_exists": false,
+      "recovery_object": "commit",
+      "unrelated_branch_exists": null
+    },
+    "packed": {
+      "decision": "commit",
+      "stack": [],
+      "stash_ref_exists": false,
+      "recovery_object": "commit",
+      "unrelated_branch_exists": true
+    },
+    "same-oid-arrival": {
+      "decision": "abort",
+      "stack": [
+        "6b8c45722380134797b4650b7066384db717f447\tnew same object",
+        "a1b6a8fc857d24443754b2264872707a7938b191\tintervening object"
+      ],
+      "stash_ref_exists": true,
+      "recovery_object": "commit",
+      "unrelated_branch_exists": null
+    },
+    "different-oid-arrival": {
+      "decision": "prepare-refused",
+      "stack": [
+        "0bf65074c7bc96ba7f478c34955df1a8ffa1d127\tOn master: new different object"
+      ],
+      "stash_ref_exists": true,
+      "recovery_object": "commit",
+      "unrelated_branch_exists": null
+    }
+  }
+}

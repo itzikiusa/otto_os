@@ -493,9 +493,17 @@ impl otto_product::ProductStudioHost for ServerCtx {
         meta: serde_json::Value,
         prompt: &str,
         stuck_after: Duration,
+        cancel: otto_core::cancel_signal::CancelSignal,
     ) -> otto_core::Result<(String, Id)> {
         crate::agent_session::require_owned_resume(&self.pool, &ws.id, &user.id, existing).await?;
-        crate::agent_session::run_session_turn(
+        let story_id = meta
+            .get("story_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                otto_core::Error::Invalid("product studio turn has no story id".into())
+            })?;
+        let deleting = otto_product::story_lifecycle::cancellation(story_id);
+        let turn = crate::agent_session::run_session_turn_cancellable(
             self,
             ws,
             user,
@@ -506,10 +514,20 @@ impl otto_product::ProductStudioHost for ServerCtx {
             meta,
             prompt,
             stuck_after,
+            Some(cancel.share_flag()),
             |_| {},
-        )
-        .await
-        .map_err(|e| e.0)
+        );
+        tokio::pin!(turn);
+        // Keep polling the same managed future so cancellation drains startup
+        // and SessionGuard cleanup; dropping it would detach cleanup work.
+        tokio::select! {
+            biased;
+            _ = deleting.cancelled() => {
+                cancel.cancel();
+                turn.await.map_err(|error| error.0)
+            }
+            result = &mut turn => result.map_err(|error| error.0),
+        }
     }
     async fn usage_budget(&self, workspace_id: &str, provider: &str) -> otto_product::BudgetGate {
         let v = crate::routes::usage::check_budget(self, workspace_id, provider).await;
@@ -554,3 +572,7 @@ mod cancel_registry_tests {
         assert!(reg.lock().unwrap().get("a1").is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/product_studio_stop.rs"]
+mod studio_stop_tests;

@@ -511,8 +511,9 @@ for line in sys.stdin:
                 block = source.read(4096)
                 if not block: break
                 dest.write(block); dest.flush(); time.sleep(0.12)
+    elif cmd == 'cd': os.chdir(args[-1])
     elif cmd == 'ls':
-        target=pathlib.Path(args[-1])
+        target=pathlib.Path(args[-1]) if len(args) > 2 else pathlib.Path('.')
         with pathlib.Path(__file__).with_name('ls-probes').open('a') as log: log.write(str(target)+'\n')
         entries=list(target.iterdir()) if target.is_dir() else [target]
         for entry in entries:

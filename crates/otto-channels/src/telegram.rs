@@ -86,6 +86,13 @@ struct TgResponse<T> {
     ok: bool,
     result: Option<T>,
     description: Option<String>,
+    #[serde(default)]
+    parameters: Option<TgParameters>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgParameters {
+    retry_after: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +247,14 @@ impl TelegramAdapter {
                     } else {
                         format!("HTTP 429 Too Many Requests: {d}")
                     });
+                }
+                if !tg.ok {
+                    if let Some(seconds) = tg.parameters.as_ref().and_then(|p| p.retry_after) {
+                        tg.description = Some(format!(
+                            "Too Many Requests: retry after {seconds}; {}",
+                            tg.description.unwrap_or_default()
+                        ));
+                    }
                 }
                 Ok(tg)
             }
@@ -647,7 +662,7 @@ pub async fn run(
         health.connected();
 
         let next = dispatch_prefix(&updates, offset, |update| {
-            handle_update(update, &integ, &adapter, &bridge, &health)
+            handle_update(update, &integ, &adapter, &bridge, &health, &cancel)
         })
         .await;
         let deferred = next == offset && !updates.is_empty();
@@ -683,13 +698,43 @@ where
     offset
 }
 
+/// Permanent rejection is settled; retryable notices retain the contiguous prefix.
+fn notice_disposition(result: anyhow::Result<String>) -> (bool, Option<Duration>) {
+    match result {
+        Ok(_) => (true, None),
+        Err(error) => match crate::mirror::classify_send_error(&error) {
+            crate::mirror::FeedSend::Permanent => {
+                tracing::warn!("telegram notice permanently rejected: {error}");
+                (true, None)
+            }
+            crate::mirror::FeedSend::RateLimited => (
+                false,
+                Some(crate::mirror::retry_after_hint(&error).unwrap_or(Duration::from_secs(5))),
+            ),
+            _ => (false, None),
+        },
+    }
+}
+
+async fn settle_notice(result: anyhow::Result<String>, cancel: &AtomicBool) -> bool {
+    let (settled, wait) = notice_disposition(result);
+    if let Some(wait) = wait {
+        sleep_unless_cancelled(wait.as_millis().try_into().unwrap_or(u64::MAX), cancel).await;
+    }
+    settled
+}
+
 async fn handle_update(
     update: &TgUpdate,
     integ: &Integration,
     adapter: &Arc<TelegramAdapter>,
     bridge: &Arc<Bridge>,
     health: &crate::health::Health,
+    cancel: &AtomicBool,
 ) -> bool {
+    if cancel.load(Ordering::Relaxed) {
+        return false;
+    }
     if let Some(msg) = &update.message {
         if inbound_text(msg).is_none() && msg.has_attachment() {
             // A bare file: tell an admitted sender instead of
@@ -703,10 +748,13 @@ async fn handle_update(
                 let adapter = Arc::clone(adapter);
                 let chat = msg.chat.id.to_string();
                 let reply_to = msg.message_id.to_string();
-                if adapter
-                    .send(&chat, Some(&reply_to), ATTACHMENT_ONLY_REPLY)
-                    .await
-                    .is_err()
+                if !settle_notice(
+                    adapter
+                        .send(&chat, Some(&reply_to), ATTACHMENT_ONLY_REPLY)
+                        .await,
+                    cancel,
+                )
+                .await
                 {
                     return false;
                 }
@@ -754,10 +802,24 @@ async fn handle_update(
             );
             match permit {
                 Admission::Work(permit) => {
+                    let order = bridge
+                        .reserve_ingress(
+                            Channel::Telegram,
+                            &integ.workspace_id,
+                            &inbound.chat,
+                            inbound.thread.as_deref(),
+                            &inbound.text,
+                            inbound.edited,
+                        )
+                        .await;
                     let bridge = Arc::clone(bridge);
                     let integ = integ.clone();
                     let adapter = Arc::clone(adapter) as Arc<dyn Adapter>;
                     tokio::spawn(async move {
+                        let _ordered = match order {
+                            Some(q) => Some(q.acquire().await),
+                            None => None,
+                        };
                         bridge.handle(&integ, adapter, inbound, permit).await;
                     });
                 }
@@ -766,10 +828,13 @@ async fn handle_update(
                     // A failed notice keeps this update and its suffix
                     // pending at Telegram instead of silently losing it.
                     if crate::bridge::integration_admits(integ, &inbound.user)
-                        && adapter
-                            .send_notice(&inbound.chat, inbound.thread.as_deref(), BUSY_REPLY)
-                            .await
-                            .is_err()
+                        && !settle_notice(
+                            adapter
+                                .send_notice(&inbound.chat, inbound.thread.as_deref(), BUSY_REPLY)
+                                .await,
+                            cancel,
+                        )
+                        .await
                     {
                         return false;
                     }
@@ -784,6 +849,35 @@ async fn handle_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn permanent_notice_failure_does_not_block_the_next_chat() {
+        let updates: Vec<TgUpdate> = serde_json::from_value(serde_json::json!([
+            {"update_id":10}, {"update_id":11}
+        ]))
+        .unwrap();
+        let mut handled = Vec::new();
+        let offset = dispatch_prefix(&updates, 10, |u| {
+            let accepted = if u.update_id == 10 {
+                notice_disposition(Err(anyhow::anyhow!(
+                    "Forbidden: bot was blocked by the user"
+                )))
+                .0
+            } else {
+                handled.push(u.update_id);
+                true
+            };
+            std::future::ready(accepted)
+        })
+        .await;
+        assert_eq!(offset, 12);
+        assert_eq!(handled, vec![11]);
+        let (accepted, wait) =
+            notice_disposition(Err(anyhow::anyhow!("Too Many Requests: retry after 120")));
+        assert!(!accepted);
+        assert_eq!(wait, Some(Duration::from_secs(120)));
+        assert!(!notice_disposition(Err(anyhow::anyhow!("connection reset"))).0);
+    }
 
     #[tokio::test]
     async fn failed_admission_retains_suffix_and_retry_does_not_duplicate_prefix() {
@@ -885,6 +979,83 @@ mod tests {
         let id = a.send_formatted("1", None, "a *b").await.unwrap();
         assert_eq!(id, "7");
         assert_eq!(calls.load(Ordering::SeqCst), 2, "formatted then plain");
+    }
+
+    #[tokio::test]
+    async fn structured_retry_after_is_authoritative() {
+        use axum::{http::StatusCode, Json};
+        let base = fixture(axum::Router::new().route(
+            "/botTOKEN/sendMessage",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(
+                        serde_json::json!({"ok": false, "description": "retry after 5",
+                    "parameters": {"retry_after": 120}}),
+                    ),
+                )
+            }),
+        ))
+        .await;
+        let error = TelegramAdapter::with_base("TOKEN", base)
+            .send("1", None, "x")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::mirror::retry_after_hint(&error),
+            Some(Duration::from_secs(120))
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_bare_file_notice_settles_actual_update_handler() {
+        use axum::{http::StatusCode, Json};
+        let base = fixture(axum::Router::new().route("/botTOKEN/sendMessage",
+            axum::routing::post(|| async { (StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"ok":false,"description":"Forbidden: bot was blocked by the user"}))) }))).await;
+        let directory =
+            std::env::temp_dir().join(format!("otto-tg-notice-{}", otto_core::new_id()));
+        let pool = otto_state::db::open(&directory.join("state.sqlite"))
+            .await
+            .unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let manager = Arc::new(otto_sessions::SessionManager::new(
+            otto_state::SessionsRepo::new(pool.clone()),
+            events,
+            otto_sessions::providers::ProviderRegistry::new(None),
+        ));
+        let bridge = Bridge::new(
+            manager.clone(),
+            otto_state::WorkspacesRepo::new(pool.clone()),
+            otto_state::SettingsRepo::new(pool.clone()),
+            crate::mirror::Mirror::new(manager.clone()),
+            "root".into(),
+        );
+        let integ: Integration = serde_json::from_value(serde_json::json!({
+            "workspace_id":"test", "channel":"telegram", "enabled":true,
+            "allowed_users":"7", "open_to_all":false, "agent_reply":false,
+            "reply_instructions":"", "channel_id":"1", "preferred_cli":"claude",
+            "has_bot_token":true, "has_app_token":false, "updated_at":"2026-10-18T00:00:00Z"
+        }))
+        .unwrap();
+        let update: TgUpdate = serde_json::from_value(serde_json::json!({"update_id":10,
+            "message":{"message_id":5,"from":{"id":7},"chat":{"id":1},"document":{"file_id":"f"}}}))
+        .unwrap();
+        let adapter = Arc::new(TelegramAdapter::with_base("TOKEN", base));
+        let health = crate::health::Health::begin("tg-test-permanent", Channel::Telegram);
+        assert!(
+            handle_update(
+                &update,
+                &integ,
+                &adapter,
+                &bridge,
+                &health,
+                &AtomicBool::new(false)
+            )
+            .await
+        );
+        drop((bridge, manager, pool));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

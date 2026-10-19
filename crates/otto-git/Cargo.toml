@@ -23,6 +23,7 @@ sha2.workspace = true
 hex.workspace = true
 libc = "0.2.190"
 ignore.workspace = true
+git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
 notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]

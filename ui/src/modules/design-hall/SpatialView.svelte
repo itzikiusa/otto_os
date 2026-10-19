@@ -98,7 +98,7 @@
               {#each b.flat as a (a.id)}
                 <button class="frame" onclick={() => open(a)} title={`Open ${a.title}`}>
                   <span class="canvas"><ArtifactThumb artifact={a} live /></span>
-                  <span class="sr">{a.title}</span>
+                  <span class="work-caption">{a.title}</span>
                 </button>
               {/each}
             </div>
@@ -106,7 +106,7 @@
               <button class="plinth" onclick={() => open(b.plinth!)} title={`Open ${b.plinth.title}`}>
                 <span class="obj"><ArtifactThumb artifact={b.plinth} /></span>
                 <span class="base" aria-hidden="true"></span>
-                <span class="sr">{b.plinth.title}</span>
+                <span class="work-caption">{b.plinth.title}</span>
               </button>
             {/if}
             <div class="plaque">
@@ -289,13 +289,15 @@
     border: 1px solid var(--border);
     box-shadow: var(--glass-shadow);
   }
-  .sr {
-    position: absolute;
-    width: 1px;
-    height: 1px;
+  .work-caption {
+    display: block;
+    max-inline-size: 164px;
     overflow: hidden;
-    clip: rect(0 0 0 0);
+    text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: var(--fs-xs);
+    color: var(--text);
+    padding-block-start: 4px;
   }
   @media (prefers-reduced-motion: reduce) {
     .frame {

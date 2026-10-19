@@ -815,4 +815,4 @@ mod tests {
 }
 #[cfg(test)]
 #[path = "process_burst_tests.rs"]
-mod burst_tests;
+pub(crate) mod burst_tests;

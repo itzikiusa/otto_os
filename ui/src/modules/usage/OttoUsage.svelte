@@ -8,6 +8,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import MetricChart from '../../lib/components/MetricChart.svelte';
   import { formatCount as fmt, formatBytes, formatSeconds, type MetricChartPoint } from '../../lib/metric-format';
+  import { loadErrorText } from '../../lib/loadError';
   let { dirty = $bindable(false) }: { dirty?: boolean } = $props();
   let savedConfig = $state('');
   $effect(() => { dirty = !!config && JSON.stringify(config) !== savedConfig; });
@@ -77,7 +78,7 @@
         overview = data; suggestions = items;
       }
     } catch (e) {
-      if (!disposed && seq === loadSeq) loadError = e instanceof Error ? e.message : 'Could not load application telemetry';
+      if (!disposed && seq === loadSeq) loadError = loadErrorText(e);
     } finally {
       if (!disposed && seq === loadSeq) {
         loading = false;
@@ -98,34 +99,34 @@
       telemetrySettingsChanged();
       message = config.enabled ? 'Settings saved. The local collector starts automatically.' : 'Collection stopped. Retained history expires on its schedule.';
       await load();
-    } catch (e) { error = e instanceof Error ? e.message : 'Could not save telemetry settings'; }
+    } catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
   async function analyze(): Promise<void> {
     if (busy) return;
     busy = true; error = '';
     try { suggestions = await api.post<TelemetrySuggestion[]>('/telemetry/analyze'); await load(); }
-    catch (e) { error = e instanceof Error ? e.message : 'Could not analyze performance'; }
+    catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
   async function dismiss(id: string): Promise<void> {
     if (busy) return;
     busy = true;
     try { await api.post(`/telemetry/suggestions/${encodeURIComponent(id)}/dismiss`); suggestions = suggestions.map((s) => s.id === id ? { ...s, dismissed: true } : s); }
-    catch (e) { error = e instanceof Error ? e.message : 'Could not dismiss suggestion'; }
+    catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
   async function openTrace(id: string): Promise<void> {
     const seq = ++detailSeq;
     traceId = id; trace = []; traceBusy = true; traceError = '';
     try { const spans = await api.get<TelemetrySpan[]>(`/telemetry/traces/${encodeURIComponent(id)}`, controller.signal); if (!disposed && seq === detailSeq) trace = spans; }
-    catch (e) { if (!disposed && seq === detailSeq) traceError = e instanceof Error ? e.message : 'Could not load trace'; }
+    catch (e) { if (!disposed && seq === detailSeq) traceError = loadErrorText(e); }
     finally { if (!disposed && seq === detailSeq) traceBusy = false; }
   }
   async function capture(): Promise<void> {
     busy = true; error = '';
     try { profile = await api.post<TelemetryProfile>('/telemetry/profile'); }
-    catch (e) { error = e instanceof Error ? e.message : 'Could not capture profile'; }
+    catch (e) { error = loadErrorText(e); }
     finally { busy = false; }
   }
 </script>
@@ -140,17 +141,17 @@
         <details>
           <summary>Retention, analysis and profiling</summary>
           <div class="fields">
-            <label>Trace retention (days)<input type="number" min="1" max="30" step="1" required bind:value={config.traces_days} disabled={busy} /></label>
-            <label>Log retention (days)<input type="number" min="1" max="30" step="1" required bind:value={config.logs_days} disabled={busy} /></label>
-            <label>Metric retention (days)<input type="number" min="1" max="90" step="1" required bind:value={config.metrics_days} disabled={busy} /></label>
-            <label>Analyze every (hours)<input type="number" min="1" max="168" step="1" required bind:value={config.analysis_interval_hours} disabled={busy} /></label>
-            <label>Analysis window (hours)<input type="number" min="1" max={config.traces_days * 24} step="1" required bind:value={config.analysis_window_hours} disabled={busy} /></label>
-            <label>Slow threshold (ms per call)<input type="number" min="1" max="60000" required bind:value={config.slow_threshold_ms} disabled={busy} /></label>
-            <label>Minimum calls<input type="number" min="1" max="10000" step="1" required bind:value={config.min_samples} disabled={busy} /></label>
-            <label>Maximum suggestions<input type="number" min="1" max="100" step="1" required bind:value={config.suggestion_limit} disabled={busy} /></label>
-            <label>Sample every (seconds)<input type="number" min="2" max="60" step="1" required bind:value={config.sample_interval_secs} disabled={busy} /></label>
-            <label>Sustained CPU threshold (%)<input type="number" min="1" max="10000" required bind:value={config.cpu_spike_percent} disabled={busy} /></label>
-            <label>Memory increase between samples (MB)<input type="number" min="16" max="65536" required bind:value={config.rss_spike_mb} disabled={busy} /></label>
+            <label>Trace retention (days)<input class="input" type="number" min="1" max="30" step="1" required bind:value={config.traces_days} disabled={busy} /></label>
+            <label>Log retention (days)<input class="input" type="number" min="1" max="30" step="1" required bind:value={config.logs_days} disabled={busy} /></label>
+            <label>Metric retention (days)<input class="input" type="number" min="1" max="90" step="1" required bind:value={config.metrics_days} disabled={busy} /></label>
+            <label>Analyze every (hours)<input class="input" type="number" min="1" max="168" step="1" required bind:value={config.analysis_interval_hours} disabled={busy} /></label>
+            <label>Analysis window (hours)<input class="input" type="number" min="1" max={config.traces_days * 24} step="1" required bind:value={config.analysis_window_hours} disabled={busy} /></label>
+            <label>Slow threshold (ms per call)<input class="input" type="number" min="1" max="60000" required bind:value={config.slow_threshold_ms} disabled={busy} /></label>
+            <label>Minimum calls<input class="input" type="number" min="1" max="10000" step="1" required bind:value={config.min_samples} disabled={busy} /></label>
+            <label>Maximum suggestions<input class="input" type="number" min="1" max="100" step="1" required bind:value={config.suggestion_limit} disabled={busy} /></label>
+            <label>Sample every (seconds)<input class="input" type="number" min="2" max="60" step="1" required bind:value={config.sample_interval_secs} disabled={busy} /></label>
+            <label>Sustained CPU threshold (%)<input class="input" type="number" max="10000" min="1" required bind:value={config.cpu_spike_percent} disabled={busy} /></label>
+            <label>Memory increase between samples (MB)<input class="input" type="number" min="16" max="65536" required bind:value={config.rss_spike_mb} disabled={busy} /></label>
           </div>
           <label class="toggle"><input type="checkbox" bind:checked={config.native_profiling} disabled={busy || !status?.native_profiling_supported} /> Allow short native stack profiles of Otto</label>
           <p class="hint">Profiles sample the daemon only, on supported macOS systems. They can briefly add CPU load. Browser timings and process metrics do not require native profiling.</p>
@@ -167,10 +168,10 @@
       <span>{fmt(status.exported)} collector accepted · {fmt(status.queued)} queued · {fmt(status.dropped)} discarded or unacknowledged</span>
       <button class="btn small" onclick={() => void load()} disabled={loading || busy}>Refresh</button>
     </div>
-    {#if status.last_error}<p class="notice" role="alert">{status.last_error}. Check that ClickHouse is installed in Usage → Overview, then retry.</p>{/if}
+    {#if status.last_error}<p class="notice" role="alert">The local collector reported an error. Check that ClickHouse is installed in Usage → Overview, then retry. <span class="dim">{status.last_error}</span></p>{/if}
   {/if}
   {#if overview}
-    <div class="section-heading"><h2>Application health</h2><label>Window <select bind:value={hours} onchange={() => void load()}><option value={1}>Last hour</option><option value={6}>Last 6 hours</option><option value={24}>Last day</option><option value={168}>Last week</option></select></label></div>
+    <div class="section-heading"><h2>Application health</h2><label class="toggle">Window <select class="input" bind:value={hours} onchange={() => void load()}><option value={1}>Last hour</option><option value={6}>Last 6 hours</option><option value={24}>Last day</option><option value={168}>Last week</option></select></label></div>
     {#if resources.length}
       <div class="resource-grid">
         {#each resources as resource (resource.name)}
@@ -205,19 +206,19 @@
       {#if operationPages > 1}<nav class="actions" aria-label="Operation pages"><button class="btn small" disabled={operationPage === 0} onclick={() => operationPage--}>Previous</button><span>Page {Math.min(operationPage + 1, operationPages)} of {operationPages}</span><button class="btn small" disabled={operationPage >= operationPages - 1} onclick={() => operationPage++}>Next</button></nav>{/if}
     {:else}<p class="hint">No operations in this window. Open a page or run an operation after enabling collection.</p>{/if}
   {/if}
-  <div class="section-heading"><h2>Native profiling</h2><button class="btn small" onclick={async () => { try { profile = await api.get<TelemetryProfile | null>('/telemetry/profile'); message = profile ? '' : 'No retained native profile yet.'; } catch (e) { error = e instanceof Error ? e.message : 'Could not load profile'; } }}>View latest profile</button><button class="btn small" onclick={capture} disabled={busy || !status?.enabled || !config?.native_profiling || !status?.native_profiling_supported}>{busy ? 'Working…' : 'Capture short profile'}</button></div>
+  <div class="section-heading"><h2>Native profiling</h2><button class="btn small" onclick={async () => { try { profile = await api.get<TelemetryProfile | null>('/telemetry/profile'); message = profile ? '' : 'No retained native profile yet.'; } catch (e) { error = loadErrorText(e); } }}>View latest profile</button><button class="btn small" onclick={capture} disabled={busy || !status?.enabled || !config?.native_profiling || !status?.native_profiling_supported}>{busy ? 'Working…' : 'Capture short profile'}</button></div>
   <p class="hint">Sampled daemon stacks help investigate CPU hotspots. Long browser tasks are recorded where the webview supports them. JavaScript heap size is not available in every webview.</p>
 </section>
 
 {#if trace !== null}
-  <Modal title="Trace detail" width={900} onclose={() => { detailSeq++; traceId = null; trace = null; }}>
+  <Modal title="Trace detail" width={680} onclose={() => { detailSeq++; traceId = null; trace = null; }}>
     <LoadState what="trace" loading={traceBusy} empty={!trace.length} error={traceError} onretry={() => { if (traceId) void openTrace(traceId); }}>
       {#snippet emptyView()}<p>This trace has expired or has not reached local storage yet.</p>{/snippet}
       <ol class="trace-list">{#each trace as span (span.span_id)}<li><code>{span.name}</code><span>{span.component} · {formatSeconds(span.duration_ms / 1000)} · {span.status}</span><small>Span {span.span_id}{span.parent_span_id ? ` · parent ${span.parent_span_id}` : ' · root'}</small></li>{/each}</ol>
     </LoadState>
   </Modal>
 {/if}
-{#if profile}<Modal title="Native stack profile" width={900} onclose={() => profile = null}><p>{date(profile.captured_at)} · {profile.duration_seconds} seconds · {profile.format}</p><pre class="profile">{profile.frames.join('\n')}</pre></Modal>{/if}
+{#if profile}<Modal title="Native stack profile" width={680} onclose={() => profile = null}><p>{date(profile.captured_at)} · {profile.duration_seconds} seconds · {profile.format}</p><pre class="profile">{profile.frames.join('\n')}</pre></Modal>{/if}
 
 <style>
   .otto-usage { display: flex; flex-direction: column; gap: 16px; min-inline-size: 0; }
@@ -244,5 +245,5 @@
   .trace-list { display: flex; flex-direction: column; gap: 12px; padding-inline-start: 24px; }
   .trace-list li > * { display: block; overflow-wrap: anywhere; }
   .trace-list small { font-size: var(--fs-xs); color: var(--text-dim); }
-  .profile { white-space: pre-wrap; overflow-wrap: anywhere; max-block-size: 60vh; overflow: auto; font-size: var(--fs-s); }
+  .profile { white-space: pre-wrap; overflow-wrap: anywhere; max-block-size: 420px; overflow: auto; font-size: var(--fs-s); }
 </style>

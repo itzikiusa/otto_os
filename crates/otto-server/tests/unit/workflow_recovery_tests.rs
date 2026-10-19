@@ -453,3 +453,258 @@ async fn inner_retry_waits_for_owned_session_and_review_cleanup() {
     assert!(matches!(observed.try_recv().unwrap(),AgentAssociation::Session(id) if id==session.id));
     assert!(matches!(observed.try_recv().unwrap(),AgentAssociation::Review(id) if id==review.id));
 }
+
+/// Both integration nodes must execute with the real run identity and the
+/// shared engines. The only network target is an isolated HTTP test server.
+#[tokio::test]
+async fn workflow_integration_nodes_use_actor_environment_and_auth() {
+    use otto_core::access::{AccessActor, AccessMode, AccessPolicy, ResourceKind};
+    use otto_core::domain::{ConnectionKind, Environment};
+    use wiremock::{
+        matchers::{body_string_contains, header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let pool = mem_pool().await;
+    seed_workspace(&pool, "integration-ws").await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
+        .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE workspaces SET settings_json = ? WHERE id = 'integration-ws'")
+        .bind(json!({"api_client":{"allow_local":true}}).to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx = test_ctx(&pool, dir.path().to_path_buf()).await;
+    let user = root_user();
+    let ws = ctx.workspaces.get(&"integration-ws".into()).await.unwrap();
+    let remote = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("system.settings"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("0\n"))
+        .mount(&remote)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("SELECT 42"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"meta":[{"name":"answer","type":"UInt8"}],"data":[[42]]})),
+        )
+        .expect(1)
+        .mount(&remote)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/answer"))
+        .and(header("Authorization", "Bearer test-token"))
+        .and(header("X-Workflow", "configured"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"answer":42})))
+        .expect(1)
+        .mount(&remote)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/failure"))
+        .respond_with(ResponseTemplate::new(418).set_body_string("teapot"))
+        .expect(1)
+        .mount(&remote)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/oversized"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(600 * 1024)))
+        .expect(1)
+        .mount(&remote)
+        .await;
+    let conn = otto_state::ConnectionsRepo::new(pool.clone()).create(otto_state::NewConnection {
+        workspace_id: Some(ws.id.clone()), name: "workflow CH".into(), kind: ConnectionKind::Clickhouse,
+        params: json!({"host":"127.0.0.1","port":remote.address().port(),"user":"default","database":"default","protocol":"http"}),
+        secret_ref: None, first_command: None, section_id: None, environment: Environment::Dev,
+        read_only: true, created_by: user.id.clone(),
+    }).await.unwrap();
+    let policy_repo = otto_state::resource_access::ResourceAccessRepo::new(pool.clone());
+    let policy = policy_repo
+        .get_policy(ResourceKind::Connection, &conn.id)
+        .await
+        .unwrap();
+    policy_repo
+        .put_policy(
+            &AccessPolicy {
+                kind: ResourceKind::Connection,
+                resource_id: conn.id.clone(),
+                mode: AccessMode::Enforced,
+                revision: policy.revision,
+                rules: vec![],
+            },
+            policy.revision,
+            &AccessActor {
+                real_user_id: user.id.clone(),
+                effective_user_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let environment = otto_state::ApiClientRepo::new(pool.clone())
+        .create_environment(otto_state::NewApiEnvironment {
+            workspace_id: ws.id.clone(),
+            name: "Workflow".into(),
+            variables: json!({"endpoint":remote.uri(),"token":"test-token"}),
+            secret_keys: vec![],
+        })
+        .await
+        .unwrap();
+    let graph: WorkflowGraph = serde_json::from_value(json!({"nodes":[
+        {"id":"db","kind":"db_query","params":{"connection_id":conn.id,"statement":"SELECT 42 AS answer"}},
+        {"id":"api","kind":"api_run","params":{"url":"{{endpoint}}/answer","environment_id":environment.id,
+         "headers":{"X-Workflow":"configured"},"auth":{"type":"bearer","token":"{{token}}"}}},
+        {"id":"api-error-status","kind":"api_run","params":{"url":format!("{}/failure",remote.uri())}},
+        {"id":"api-bounded","kind":"api_run","params":{"url":format!("{}/oversized",remote.uri())}}
+    ],"edges":[]})).unwrap();
+    let repo = WorkflowsRepo::new(pool.clone());
+    let wf = repo
+        .create(&ws.id, "Integrations", "", "", &graph, &user.id)
+        .await
+        .unwrap();
+    let run = repo
+        .create_run(&wf.id, &ws.id, &json!({}), Some(&user.id))
+        .await
+        .unwrap();
+    let env = RunEnv {
+        budget: budget::ActiveBudget::new(RUN_WALL_CLOCK_TIMEOUT),
+        run_id: run.id.clone(),
+        wf_name: wf.name,
+        run_cwd: dir.path().to_string_lossy().into(),
+        run_base: None,
+        files: std::sync::Arc::new(crate::workflow_context::RunContextFiles::disabled(&run.id)),
+        default_provider: "claude".into(),
+        run_input: json!({}),
+    };
+    let (sessions, _sr) = tokio::sync::mpsc::unbounded_channel();
+    let (logs, _lr) = tokio::sync::mpsc::unbounded_channel();
+    let (activity, _ar) = tokio::sync::mpsc::unbounded_channel();
+    for node in &graph.nodes {
+        let (output, logs) = execute_node(
+            &ctx,
+            &ws,
+            &user,
+            node,
+            json!({}),
+            &env,
+            &StepScope {
+                step_no: 1,
+                iter: None,
+                inner_idx: None,
+            },
+            &sessions,
+            &logs,
+            &activity,
+            &ProgressSink::disabled(),
+        )
+        .await
+        .unwrap();
+        if node.id == "db" {
+            assert_eq!(output["rows"], json!([[42]]));
+            assert_eq!(output["rows_returned"], 1);
+        } else if node.id == "api-bounded" {
+            assert_eq!(output["truncated"], true);
+            assert_eq!(output["too_large"], false);
+            assert!(output["body"].as_str().unwrap().len() < 600 * 1024);
+            assert!(logs.iter().any(|line| line.contains("inline size limit")));
+        } else if node.id == "api-error-status" {
+            assert_eq!(output["status"], 418);
+            assert_eq!(output["body"], "teapot");
+        } else {
+            assert_eq!(output["status"], 200);
+            assert_eq!(output["body"], json!({"answer":42}));
+        }
+    }
+}
+
+#[tokio::test]
+async fn resumed_loop_keeps_checkpoint_handoff_without_replaying_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = mem_pool().await;
+    seed_workspace(&pool, "handoff-ws").await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
+        .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+    let ctx = test_ctx(&pool, dir.path().to_path_buf()).await;
+    let user = root_user();
+    let ws = ctx.workspaces.get(&"handoff-ws".into()).await.unwrap();
+    // An empty prompt fails if executed; the successful checkpoint is the only
+    // way this step can produce its original answer during recovery.
+    let node: WorkflowNode = serde_json::from_value(json!({"id":"loop","kind":"loop","params":{
+        "max_iterations":1,"steps":[{"kind":"agent_prompt","name":"Answer","params":{"prompt":""}}]
+    }}))
+    .unwrap();
+    let graph = WorkflowGraph {
+        nodes: vec![node.clone()],
+        edges: vec![],
+    };
+    let repo = WorkflowsRepo::new(pool);
+    let wf = repo
+        .create(&ws.id, "Handoff", "", "", &graph, &user.id)
+        .await
+        .unwrap();
+    let run = repo
+        .create_run(&wf.id, &ws.id, &json!({}), None)
+        .await
+        .unwrap();
+    let sub: WorkflowNode =
+        serde_json::from_value(json!({"id":"loop#1.0","kind":"agent_prompt","name":"Answer"}))
+            .unwrap();
+    let mut checkpoint = loop_checkpoint(&sub, &node.id, 1, 0, json!({}));
+    checkpoint.status = NodeStatus::Success;
+    checkpoint.attempts = 1;
+    checkpoint.output = Some(json!({"reply":"short machine reply"}));
+    repo.save_checkpoint(&run.id, &checkpoint).await.unwrap();
+    let files = std::sync::Arc::new(crate::workflow_context::RunContextFiles::create(
+        dir.path(),
+        &run.id,
+    ));
+    let handoff = "# Original agent handoff\nDetailed evidence absent from machine reply.\n";
+    assert!(files.write_named("step1-answer-iter1.md", handoff));
+    let env = RunEnv {
+        budget: budget::ActiveBudget::new(RUN_WALL_CLOCK_TIMEOUT),
+        run_id: run.id.clone(),
+        wf_name: wf.name,
+        run_cwd: dir.path().to_string_lossy().into(),
+        run_base: None,
+        files: files.clone(),
+        default_provider: "claude".into(),
+        run_input: json!({}),
+    };
+    let (sessions, _sr) = tokio::sync::mpsc::unbounded_channel();
+    let (logs, _lr) = tokio::sync::mpsc::unbounded_channel();
+    let (activity, _ar) = tokio::sync::mpsc::unbounded_channel();
+    let (out, _) = execute_node(
+        &ctx,
+        &ws,
+        &user,
+        &node,
+        json!({}),
+        &env,
+        &StepScope {
+            step_no: 1,
+            iter: None,
+            inner_idx: None,
+        },
+        &sessions,
+        &logs,
+        &activity,
+        &ProgressSink::disabled(),
+    )
+    .await
+    .unwrap();
+    assert!(out.get("_workflow_error").is_none(), "{out}");
+    assert_eq!(out["last"]["reply"], "short machine reply");
+    assert_eq!(
+        files.read_named("step1-answer-iter1.md").as_deref(),
+        Some(handoff)
+    );
+    assert_eq!(files.write_final_output().unwrap(), handoff.as_bytes());
+    assert_eq!(
+        repo.checkpoint(&run.id, &sub.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .attempts,
+        1
+    );
+}

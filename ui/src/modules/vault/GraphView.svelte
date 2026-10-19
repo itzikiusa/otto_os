@@ -22,13 +22,15 @@
   import Badge from '../../lib/components/Badge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
   import { startMouseDrag } from '../../lib/dragCursor';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
   import { carrySeed } from './graphSeed';
 
-  let { local = false }: { local?: boolean } = $props();
+  let { local = false, onNewNote }: { local?: boolean; onNewNote?: () => void } = $props();
 
   // ── Budgets / constants ─────────────────────────────────────────────────
   const EDGE_DRAW_BUDGET = 150_000; // past this: stride-sample edges + fade
@@ -94,7 +96,7 @@
   let hoverTip = $state({ x: 0, y: 0, title: '', meta: '' });
   let draggingNode = $state(false); // suppresses the tooltip while dragging
   let dataRev = $state(0); // bumped per adopted payload (re-runs dependent effects)
-  let panelOpen = $state(true);
+  let panelOpen = $state(!viewport.isPhone);
 
   // Panel width is drag-resizable and persisted: service/tag names are long and
   // a fixed 210px truncated most of them. The handle is on the panel's LEFT edge
@@ -444,12 +446,13 @@
         projOf[i] = gi;
         continue;
       }
+      const groupKey = colorBy === 'type' ? typeLabels[rawTypes[i]] : serviceLabels[rawServices[i]];
       projOf[i] = pPaths.length;
       pPaths.push(rawPaths[i]);
       pTitles.push(rawTitles[i]);
-      pMetas.push('');
+      pMetas.push(groupKey || '');
       pFlags.push(rawFlags[i]);
-      pKeys.push(colorBy === 'type' ? typeLabels[rawTypes[i]] : serviceLabels[rawServices[i]]);
+      pKeys.push(groupKey);
       pWeight.push(1);
     }
 
@@ -647,6 +650,7 @@
   /** Set right before `ingest` of a refetch of the SAME vault + query. */
   let carryNext = false;
   let lastQueryKey = '';
+  let lastVaultKey = '';
   /** Bumped by the error state's Retry — the load effect below re-runs. */
   let retryTick = $state(0);
   $effect(() => {
@@ -671,23 +675,30 @@
     if (!v || !wsId || (local && !path)) {
       reqSeq++;
       lastPayloadSig = '';
+      lastVaultKey = '';
       ingest(EMPTY_PAYLOAD);
       return;
     }
     const seq = ++reqSeq;
+    const vaultKey = `${wsId}:${v.id}`;
     const queryKey = JSON.stringify([wsId, v.id, q]);
+    if (lastVaultKey && lastVaultKey !== vaultKey) {
+      lastPayloadSig = '';
+      ingest(EMPTY_PAYLOAD);
+    }
     loading = true;
     errorMsg = '';
     vaultGraph(wsId, v.id, q)
       .then((p) => {
         if (seq !== reqSeq) return;
         const sig = payloadSig(p);
-        if (sig === lastPayloadSig) return; // same graph: keep layout, pins, camera
+        if (sig === lastPayloadSig && lastVaultKey === vaultKey) return; // same graph: keep layout, pins, camera
         // Same vault + query, different graph = a real change: carry the
         // layout (a vault / mode / toggle switch lays out fresh).
         carryNext = lastPayloadSig !== '' && queryKey === lastQueryKey;
         lastPayloadSig = sig;
         lastQueryKey = queryKey;
+        lastVaultKey = vaultKey;
         ingest(p);
       })
       .catch((e: unknown) => {
@@ -1100,7 +1111,7 @@
     ctx.globalAlpha = 1;
     if (k >= labelZoom && alphaLive < 0.3) {
       const fade = Math.min(1, (k - labelZoom) / (labelZoom * 0.5 + 0.01));
-      ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillStyle = theme.text;
@@ -1195,7 +1206,8 @@
     setHover(pick(w.x, w.y));
     if (hoverIdx >= 0) {
       hoverTip = {
-        x: p.x + 14, y: p.y + 10,
+        x: Math.max(8, Math.min(cssW - 268, p.x + 14)),
+        y: Math.max(8, Math.min(cssH - 36, p.y + 10)),
         title: titles[hoverIdx] ?? '', meta: metas[hoverIdx] ?? '',
       };
     }
@@ -1205,12 +1217,20 @@
     if (dragMode === 'none') return; // capture-less up (e.g. re-entry) — ignore
     if (dragMode === 'node' && !movedFar) {
       // A stationary press on a node is a click: a rolled-up node drills open
-      // (that group alone expands into its notes); real notes open; ghost/tag
-      // nodes have nothing to open.
+      // (that group alone expands into its notes); real notes open; ghost
+      // nodes prompt to create the missing note.
       const f = flagsArr[dragI];
       if (f & F_GROUP) {
         toggleGroup(titles[dragI]);
-      } else if (!(f & F_GHOST) && !(f & F_TAG)) {
+      } else if (f & F_GHOST) {
+        const raw = (titles[dragI] || paths[dragI] || '').trim();
+        if (raw) {
+          const p = raw.endsWith('.md') ? raw : `${raw}.md`;
+          void confirmer.ask(`Create “${p}”?`, { title: 'Create note', confirmLabel: 'Create', danger: false }).then((ok) => {
+            if (ok) void vault.createNote(p, `# ${raw}\n\n`);
+          });
+        }
+      } else if (!(f & F_TAG)) {
         void vault.open(paths[dragI]);
       }
     }
@@ -1310,6 +1330,12 @@
 >
   <canvas bind:this={canvasEl} class:grabbable={hoverIdx < 0} aria-hidden="true"></canvas>
 
+  {#if !loading && errorMsg && nodeCount > 0}
+    <div class="graph-error-bar">
+      <LoadState what="the graph" variant="compact" error={errorMsg} onretry={() => retryTick++} />
+    </div>
+  {/if}
+
   {#if !vault.current}
     <div class="empty">No vault selected</div>
   {:else if !loading && nodeCount === 0 && errorMsg}
@@ -1324,7 +1350,14 @@
           Nothing matches this focus — {rawNodeCount.toLocaleString()} nodes filtered out.
           <button class="mini" onclick={resetFocus}>Reset focus</button>
         </span>
-      {:else}Nothing to graph — the vault has no notes yet{/if}
+      {:else}
+        <span>
+          Nothing to graph — this vault is empty.
+          {#if onNewNote}
+            <button class="mini" onclick={onNewNote}>New note</button>
+          {/if}
+        </span>
+      {/if}
     </div>
   {/if}
 
@@ -1661,20 +1694,32 @@
     border-color: var(--accent);
   }
 
+  .graph-error-bar {
+    position: absolute;
+    top: 8px;
+    inset-inline-start: 10px;
+    max-width: calc(100% - 20px);
+    z-index: 3;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: var(--shadow-card);
+  }
   .panel {
     position: absolute;
     top: 8px;
     inset-inline-end: 8px;
     /* Width comes from the store (drag-resizable); this is the fallback. */
     width: 210px;
+    max-width: calc(100% - 16px);
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     box-shadow: var(--shadow-card);
     font-size: var(--fs-xs);
     color: var(--text);
-    /* Never taller than the view — the body scrolls (floating-UI rule). */
-    max-height: calc(100% - 16px);
+    /* Never taller than the view above the status strip (floating-UI rule). */
+    max-height: calc(100% - 52px);
     display: flex;
     flex-direction: column;
   }

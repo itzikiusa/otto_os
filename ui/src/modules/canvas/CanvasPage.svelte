@@ -37,7 +37,10 @@
   const isD2 = $derived(canvas.format === 'd2');
 
   // Phone collapses the scene list once a board is open (more room).
-  const readonly = $derived(viewport.isPhone);
+  const isPhone = $derived(viewport.isPhone);
+  const openTitle = $derived(
+    canvas.scenes.find((scene) => scene.id === canvas.currentId)?.title,
+  );
 
   // The board exposes generate()/isGenerating() for agent drawing.
   let editor = $state<
@@ -171,12 +174,12 @@
 <div class="canvas-shell">
 <!-- Canvas is Design Hall's Whiteboard studio: the crumb leads back to the Hall. -->
 <PageHeader
-  title="Canvas"
+  title={openTitle || 'Canvas'}
   subtitle="Diagrams an agent draws and refines as you chat"
-  crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]}
+  crumbs={isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]}
 >
   {#snippet leading()}
-    {#if readonly && canvas.currentId}
+    {#if isPhone && canvas.currentId}
       <button class="icon-btn" onclick={() => void backToList()} aria-label="Back to scenes" title="Back to scenes">
         <Icon name="chevronLeft" size={16} />
       </button>
@@ -229,21 +232,21 @@
 {:else}
   <!-- Phone: push navigation — the scene list IS the first screen (full
        width); opening a scene replaces it and the header gets a Back button. -->
-  <div class="canvas-page" class:phone={readonly} class:tablet={viewport.isTablet}>
+  <div class="canvas-page" class:phone={isPhone} class:tablet={viewport.isTablet}>
     <aside
       id="canvas-scene-list"
       class="scenes"
-      class:hidden={(readonly && canvas.currentId) || (viewport.isTablet && canvas.currentId && !showTabletScenes) || noScenes || listFailed}
-      class:full={readonly && !canvas.currentId}
+      class:hidden={(isPhone && canvas.currentId) || (viewport.isTablet && canvas.currentId && !showTabletScenes) || noScenes || listFailed}
+      class:full={isPhone && !canvas.currentId}
       style="--list-pane-w:{listW}px"
     >
       <SceneList />
     </aside>
-    {#if !readonly && !viewport.isTablet && !noScenes && !listFailed}
+    {#if !isPhone && !viewport.isTablet && !noScenes && !listFailed}
       <PaneDivider bind:width={listW} storageKey="canvas.listW" label="Resize the scenes list" />
     {/if}
 
-    <section class="main" class:hidden={readonly && !canvas.currentId && !noScenes && !listFailed && !canvas.loadError}>
+    <section class="main" class:hidden={isPhone && !canvas.currentId && !noScenes && !listFailed && !canvas.loadError}>
       {#if canvas.loadError && canvas.scene && canvas.currentId}
         <!-- Opening another scene failed: keep the open board, say so above it. -->
         <LoadState what="that scene" variant="compact" error={canvas.loadError} empty onretry={retryOpen} />
@@ -265,11 +268,11 @@
           <div class="editor-split" class:with-convo={showConvo}>
             <div class="editor-host">
               {#if isExcalidraw}
-                <ExcalidrawCanvas bind:this={editor} {readonly} />
+                <ExcalidrawCanvas bind:this={editor} />
               {:else if isD2}
-                <D2Canvas bind:this={editor} {readonly} />
+                <D2Canvas bind:this={editor} />
               {:else}
-                <MermaidCanvas bind:this={editor} {readonly} />
+                <MermaidCanvas bind:this={editor} />
               {/if}
               {#if !showConvo}
                 <!-- Open the Assistant (Ask-AI lives in the conversation panel). -->
@@ -281,7 +284,7 @@
               {/if}
             </div>
             {#if showConvo}
-              <aside class="convo-panel" class:overlay={readonly}>
+              <aside class="convo-panel" class:overlay={isPhone}>
                 <ConversationPanel {editor} onclose={() => (showConvo = false)} />
               </aside>
             {/if}

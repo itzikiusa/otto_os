@@ -131,21 +131,14 @@ fn strip_task_prefix(title: &str) -> String {
 /// Build the project goal from the story's most refined content: prefer the
 /// latest `suggested` (rewrite) body, then the `source` body, then the title.
 async fn build_goal_md<C: ProductStudioHost>(ctx: &C, story: &ProductStory) -> String {
-    if let Ok(Some(v)) = ctx
-        .product_repo()
-        .latest_version_of_kind(&story.id, "suggested")
+    ctx.product()
+        .best_content_version(&story.id)
         .await
-    {
-        if !v.body_md.trim().is_empty() {
-            return v.body_md.trim().to_string();
-        }
-    }
-    if let Ok(Some(v)) = ctx.product_repo().latest_source_version(&story.id).await {
-        if !v.body_md.trim().is_empty() {
-            return v.body_md.trim().to_string();
-        }
-    }
-    story.title.clone()
+        .ok()
+        .flatten()
+        .map(|v| v.body_md)
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| story.title.clone())
 }
 
 /// Resolve the target swarm: explicit request id (verified same-workspace),

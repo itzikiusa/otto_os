@@ -15,11 +15,16 @@
 //! in-flight guard *before* calling [`run_task`]; this engine advances the task
 //! cursor only **on completion** and only for `trigger == "schedule"` — so an
 //! overlapping or crash-interrupted occurrence is re-tried (at-least-once), never
-//! silently dropped. A process-wide semaphore bounds concurrent runs.
+//! silently dropped. The cursor written is the occurrence the run served, not
+//! the completion clock, so a slot that comes due while the run is in flight
+//! stays due. A workflow overlap (`skipped`) does not settle: that slot was
+//! not run. A process-wide semaphore bounds concurrent runs.
 //!
 //! [`Orchestrator::run_agent`]: otto_orchestrator::Orchestrator::run_agent
 //! [`ScheduledTask`]: otto_core::domain::ScheduledTask
 
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -50,7 +55,10 @@ use crate::AutomationCtx;
 /// (`otto_orchestrator::e2e_stub`) returns a representative report instead of "OK".
 pub const SENTINEL: &str = "OTTO_TASK: scheduled_task";
 
-/// No-progress (stuck) budget for a single scheduled agent run.
+/// Idle grace for a single scheduled agent run: the watcher stops the run
+/// only when there is no report file and the session has been idle this long.
+/// Output, or an accepted report file, keeps the run alive. This is not a
+/// wall-clock cap on the whole attempt.
 const RUN_NO_PROGRESS: Duration = Duration::from_secs(600);
 /// Idle windows for the session watcher (waiting < stuck < grace timeout).
 const WAITING_IDLE: Duration = Duration::from_secs(60);
@@ -162,8 +170,25 @@ fn headless_fallback_ok(provider: &str) -> bool {
 // Run
 // ---------------------------------------------------------------------------
 
+/// Held across cwd resolution, including `git worktree add`. The permit is
+/// the bound on unattended work; taking it after the worktree left every due
+/// task free to provision a tree at once.
+struct RunPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+async fn acquire_run_permit() -> Result<RunPermit> {
+    let permit = run_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
+    Ok(RunPermit { _permit: permit })
+}
+
 /// Process-wide cap on concurrent scheduled-task agent runs (security review:
 /// bounds unattended-agent CPU/LLM cost). Override with `OTTO_SCHEDULED_MAX_CONCURRENT`.
+/// Workflow handoffs do not take this permit: they are a separate run.
 fn run_semaphore() -> &'static Arc<Semaphore> {
     static SEM: OnceLock<Arc<Semaphore>> = OnceLock::new();
     SEM.get_or_init(|| {
@@ -194,6 +219,61 @@ pub fn cancel_run(run_id: &str) -> bool {
     run_cancels().cancel(run_id)
 }
 
+/// Session ids created for a run, recorded in memory BEFORE the database
+/// `set_run_session` await. Stop reads this even when that update has not
+/// landed, or a retry has opened a new session the row does not name yet.
+fn live_sessions() -> &'static Mutex<HashMap<String, String>> {
+    static LIVE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_live_session(run_id: &str, session_id: &str) {
+    live_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run_id.to_string(), session_id.to_string());
+}
+
+fn take_live_session(run_id: &str) -> Option<String> {
+    live_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(run_id)
+}
+
+/// A scheduled completion writes the cursor. A skipped overlap did not run
+/// the slot, and a manual run never moves it.
+fn settles_schedule(trigger: &str, skipped: bool) -> bool {
+    trigger == "schedule" && !skipped
+}
+
+/// Drop the in-memory session on a normal return. A Stop that drops the
+/// future instead leaves the entry for [`stop_run`].
+fn release_live_session(run_id: &str) {
+    let _ = take_live_session(run_id);
+}
+
+/// Scheduled-task reports are the file the prompt names. `None` so a narration
+/// turn cannot finish the run before that file exists.
+fn scheduled_report_transcript_ok() -> Option<fn(&str) -> bool> {
+    None
+}
+
+/// Database session plus the in-memory one, without duplicates. The memory
+/// entry is the session Stop must kill when the row is stale.
+fn sessions_to_stop(db_sid: Option<String>, live_sid: Option<String>) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(sid) = db_sid.filter(|s| !s.is_empty()) {
+        ids.push(sid);
+    }
+    if let Some(sid) = live_sid.filter(|s| !s.is_empty()) {
+        if !ids.iter().any(|s| s == &sid) {
+            ids.push(sid);
+        }
+    }
+    ids
+}
+
 /// The process-wide [`InFlightSet`] for scheduled tasks.
 pub fn in_flight() -> &'static InFlightSet {
     static SET: OnceLock<InFlightSet> = OnceLock::new();
@@ -220,6 +300,55 @@ pub async fn run_task(
     let run = open_run(ctx, task, trigger).await?;
     let cancel = run_cancels().register(&run.id);
     complete_run(ctx, task, &run.id, trigger, cancel).await
+}
+
+/// Scheduler entry. [`otto_state::ScheduledTasksRepo::admit_run`] may commit
+/// while the supervisor cancels. The `running` row stays for
+/// [`crate::scheduled_tasks_scheduler::reap_interrupted`] on next boot. The
+/// cursor advances only when a run completes, so this stop is not slot loss:
+/// `once` stays unfired because `last_run_at` was never written, and a
+/// recurring cadence stays due for the same occurrence. Reap does not settle.
+/// This path does not start the agent, shell, or workflow hand-off, and it
+/// does not replay one.
+pub async fn run_task_after_supervisor(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    supervisor: &otto_core::cancel_signal::CancelSignal,
+) -> Result<String> {
+    let run = ctx.scheduled_tasks().admit_run(task, "schedule").await?;
+    if !otto_core::cancel_signal::supervisor_may_launch(supervisor) {
+        warn!(
+            task = %task.id,
+            run = %run.id,
+            "scheduled tasks: stop won after admit; execution not started"
+        );
+        return Ok(run.id);
+    }
+    emit(ctx, task, &run.id, "running");
+    let cancel = run_cancels().register(&run.id);
+    complete_run(ctx, task, &run.id, "schedule", cancel).await
+}
+
+fn parse_task_ts(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
+/// Occurrence this run is serving, captured from the cursor as the run starts.
+fn served_for(task: &ScheduledTask, now: DateTime<Utc>) -> DateTime<Utc> {
+    let cursor = cadence::effective_cursor(
+        &task.schedule,
+        task.last_run_at.as_deref().and_then(parse_task_ts),
+        task.armed_at.as_deref().and_then(parse_task_ts),
+    );
+    cadence::served_occurrence(
+        &task.schedule,
+        cursor,
+        parse_task_ts(&task.created_at),
+        now,
+        cadence::task_tz(&task.timezone),
+    )
 }
 
 /// Start a run in the BACKGROUND and return its freshly-opened (`running`)
@@ -298,13 +427,14 @@ async fn complete_run(
     // route then answers "finishing" instead of a false "not running".
     cancel: RunCancelGuard,
 ) -> Result<String> {
+    let signal = cancel.signal.clone();
     complete_run_with(
         ctx,
         task,
         run_id,
         trigger,
         cancel,
-        execute(ctx, task, run_id),
+        execute(ctx, task, run_id, signal),
     )
     .await
 }
@@ -322,6 +452,10 @@ async fn complete_run_with(
 ) -> Result<String> {
     let repo = ctx.scheduled_tasks();
     let run_id = run_id.to_string();
+    // The slot this run is serving, taken before the work. Settlement writes
+    // this instant so a later fire that arrives while we are busy is not
+    // swallowed by the completion clock.
+    let served = served_for(task, Utc::now());
     // A user's Stop drops the execution future (its permit, its shell's
     // process group, its wait) and stops what it started — see `stop_run`.
     let result = tokio::select! {
@@ -388,8 +522,8 @@ async fn complete_run_with(
                 },
             )
             .await;
-            if trigger == "schedule" {
-                let _ = settle_schedule(repo, task, "ok", now).await;
+            if settles_schedule(trigger, false) {
+                let _ = settle_schedule(repo, task, "ok", served).await;
             } else {
                 // A manual run's outcome is the task's latest status too — a
                 // failed "Run now" used to leave the row saying "Succeeded".
@@ -397,7 +531,10 @@ async fn complete_run_with(
             }
             prune(ctx, &task.id).await;
             emit(ctx, task, &run_id, "ok");
-            task_notice(ctx, task, &run_id, None, derr_for_notice.as_deref()).await;
+            // The body already went out. An attachment error stays on the row
+            // and must not read as "the report was not delivered".
+            let notice_delivery = derr_for_notice.as_deref().filter(|_| !delivered);
+            task_notice(ctx, task, &run_id, None, notice_delivery).await;
             Ok(run_id)
         }
         Err(fail) => {
@@ -432,14 +569,17 @@ async fn complete_run_with(
                 }
                 None => (None, None, String::new()),
             };
+            let skipped = fail.skipped;
             record_finish(
                 repo,
                 &run_id,
                 failure_finish(fail, msg, summary, report_path, report_rel_opt),
             )
             .await;
-            if trigger == "schedule" {
-                let _ = settle_schedule(repo, task, status, Utc::now()).await;
+            // A skipped overlap did not run this occurrence. Settling would
+            // spend `once` and hide the slot. Status only; the cursor stays due.
+            if settles_schedule(trigger, skipped) {
+                let _ = settle_schedule(repo, task, status, served).await;
             } else {
                 let _ = repo.set_last_status(&task.id, status).await;
             }
@@ -552,13 +692,17 @@ async fn stop_run(ctx: &impl AutomationCtx, run_id: &str) -> ExecFailure {
             ctx.scheduled_tasks().get_run(run_id).await.ok()
         }
     };
-    let session_id = row.as_ref().and_then(|r| r.session_id.clone());
+    let db_session = row.as_ref().and_then(|r| r.session_id.clone());
     let workflow_run_id = row.as_ref().and_then(|r| r.workflow_run_id.clone());
-    if let Some(sid) = &session_id {
+    // The in-memory id covers a session whose row update has not committed,
+    // and a retry whose row still names the previous attempt.
+    let session_ids = sessions_to_stop(db_session.clone(), take_live_session(run_id));
+    for sid in &session_ids {
         if let Err(e) = ctx.manager().kill_session(sid).await {
             warn!(run = %run_id, "scheduled task stop: kill session {sid}: {e}");
         }
     }
+    let session_id = session_ids.last().cloned().or(db_session);
     if let Some(wr) = &workflow_run_id {
         let _ = otto_state::WorkflowsRepo::new(ctx.pool().clone())
             .request_cancel(wr)
@@ -610,14 +754,19 @@ fn failure_finish(
 
 /// Dispatch a task by kind/provider: a handed-off workflow, a shell command, or
 /// (the default) an agent run.
-async fn execute(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
+async fn execute(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    run_id: &str,
+    cancel: otto_core::cancel_signal::CancelSignal,
+) -> ExecResult {
     if task.kind == "workflow" {
         return execute_workflow(ctx, task, run_id).await;
     }
     if task.provider.trim() == "shell" {
         return execute_shell(ctx, task).await;
     }
-    execute_agent(ctx, task, run_id).await
+    execute_agent(ctx, task, run_id, cancel).await
 }
 
 /// Build the wrapped + skill-composed prompt for an agent run.
@@ -641,15 +790,16 @@ fn task_data_dir(ctx: &impl AutomationCtx, task_id: &str) -> std::path::PathBuf 
 /// stub (no real CLI). Otherwise every run is a **real, openable session** of the
 /// task's provider (claude/codex/agy/custom), retried up to `1 + max_retries`
 /// times, capturing the Markdown report the agent writes to a file.
-async fn execute_agent(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
-    let cwd = resolve_cwd(ctx, task).await?;
+async fn execute_agent(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    run_id: &str,
+    cancel: otto_core::cancel_signal::CancelSignal,
+) -> ExecResult {
+    let _permit = acquire_run_permit().await?;
+    let cwd = resolve_cwd(ctx, task, &_permit).await?;
     let prompt = build_prompt(ctx, task);
     let model = (!task.model.trim().is_empty()).then_some(task.model.as_str());
-
-    let _permit = run_semaphore()
-        .acquire()
-        .await
-        .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
 
     // Deterministic offline path for tests: the orchestrator's E2E stub returns a
     // representative report; no PTY / session is spawned (the E2E daemon makes the
@@ -719,23 +869,31 @@ async fn execute_agent(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &
     let captured_sid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let attempts = Arc::new(std::sync::atomic::AtomicI64::new(0));
 
+    // The recovery loop kills the attempt and records Stopped only when this
+    // flag is set. It is the run's own CancelSignal, not a fresh one.
+    let recovery_cancel = cancel.share_flag();
     let outcome = ctx
-        .run_with_recovery(max_attempts, &RETRY_BACKOFF, None, |_attempt| {
-            let captured = captured_sid.clone();
-            let attempts = attempts.clone();
-            let ws = ws.clone();
-            let owner = owner.clone();
-            let cwd = cwd.clone();
-            let augmented = augmented.clone();
-            let out_path = out_path.clone();
-            async move {
-                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                run_one_agent_session(
-                    ctx, &ws, &owner, task, run_id, &cwd, &augmented, &out_path, &captured,
-                )
-                .await
-            }
-        })
+        .run_with_recovery(
+            max_attempts,
+            &RETRY_BACKOFF,
+            Some(&recovery_cancel),
+            |_attempt| {
+                let captured = captured_sid.clone();
+                let attempts = attempts.clone();
+                let ws = ws.clone();
+                let owner = owner.clone();
+                let cwd = cwd.clone();
+                let augmented = augmented.clone();
+                let out_path = out_path.clone();
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    run_one_agent_session(
+                        ctx, &ws, &owner, task, run_id, &cwd, &augmented, &out_path, &captured,
+                    )
+                    .await
+                }
+            },
+        )
         .await;
     // The watcher already read the report into `outcome`; the scratch file
     // would otherwise pile up one per run (for a personal agent, inside the
@@ -746,7 +904,20 @@ async fn execute_agent(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let attempts = attempts.load(std::sync::atomic::Ordering::Relaxed).max(1);
+    let attempts = attempts.load(Ordering::Relaxed).max(1);
+    // Normal return (not a dropped Stop). The select path reads the map itself.
+    release_live_session(run_id);
+    if outcome.reason == Some(FailReason::Stopped) {
+        return Err(ExecFailure {
+            error: Error::Internal("stopped from Otto before it finished".into()),
+            report: None,
+            session_id: session_id.clone(),
+            workflow_run_id: None,
+            attempts,
+            canceled: true,
+            skipped: false,
+        });
+    }
     // Keep the session on a failure: it is where the user sees what went wrong.
     let fail = |error: Error| ExecFailure {
         error,
@@ -823,6 +994,8 @@ async fn run_one_agent_session(
     };
     let sid = session.id.clone();
     *captured_sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
+    // Before the database await. Stop during that await still sees this id.
+    remember_live_session(run_id, &sid);
     // Persist the session id immediately so the UI can Open the run live.
     let _ = ctx.scheduled_tasks().set_run_session(run_id, &sid).await;
 
@@ -848,7 +1021,7 @@ async fn run_one_agent_session(
         RUN_NO_PROGRESS,
         WAITING_IDLE,
         STUCK_IDLE,
-        Some(|t| !t.trim().is_empty()),
+        scheduled_report_transcript_ok(),
         None,
         |_st| async {},
     )
@@ -858,17 +1031,14 @@ async fn run_one_agent_session(
 /// Run a `provider == "shell"` task: execute the prompt as a shell command in the
 /// resolved cwd, capturing stdout/stderr + exit code as the Markdown report.
 async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecResult {
-    let cwd = resolve_cwd(ctx, task).await?;
+    let _permit = acquire_run_permit().await?;
+    let cwd = resolve_cwd(ctx, task, &_permit).await?;
     // The `process_sandbox` setting covers `shell` by default: a scheduled
     // shell task is confined exactly like a shell session would be.
     let sandbox = ctx
         .manager()
         .process_sandbox_policy("shell", std::path::Path::new(&cwd))
         .await;
-    let _permit = run_semaphore()
-        .acquire()
-        .await
-        .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
     let cmd = task.prompt.clone();
     // Confined like a `shell` agent session when the process sandbox applies
     // to `shell` (S3-04) — any Editor can author a shell task.
@@ -1263,7 +1433,11 @@ async fn wait_workflow_outcome(
 /// the task's `cwd` if it exists, else a per-task scratch dir. NOTE: `cwd` is NOT
 /// a security boundary — a coding agent can read/write anywhere the daemon user
 /// can; the worktree isolates the *git working tree*, not the filesystem.
-async fn resolve_cwd(ctx: &impl AutomationCtx, task: &ScheduledTask) -> Result<String> {
+async fn resolve_cwd(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    _permit: &RunPermit,
+) -> Result<String> {
     let trimmed = task.cwd.trim();
     let base_dir = (!trimmed.is_empty() && std::path::Path::new(trimmed).is_dir())
         .then(|| trimmed.to_string());
@@ -1944,6 +2118,52 @@ mod tests {
     fn short_truncates_to_8() {
         assert_eq!(short("0123456789abcdef"), "01234567");
         assert_eq!(short("abc"), "abc");
+    }
+
+    #[test]
+    fn a_narration_turn_is_not_the_scheduled_report() {
+        assert!(scheduled_report_transcript_ok().is_none());
+        let narration = "I'll write the report to the file next.";
+        let would_have_accepted: fn(&str) -> bool = |t| !t.trim().is_empty();
+        assert!(
+            would_have_accepted(narration),
+            "the old predicate would have finished the run on this turn"
+        );
+    }
+
+    #[test]
+    fn skipped_overlap_does_not_settle_and_a_real_run_does() {
+        assert!(settles_schedule("schedule", false));
+        assert!(!settles_schedule("schedule", true));
+        assert!(!settles_schedule("manual", false));
+        assert!(!settles_schedule("manual", true));
+    }
+
+    #[test]
+    fn stop_arms_the_run_flag_and_kills_a_session_the_row_does_not_name() {
+        let signal = otto_core::cancel_signal::CancelSignal::new();
+        let flag = signal.share_flag();
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "a fresh run is not already stopped"
+        );
+        // Stop during the retry backoff: the recovery loop polls this flag
+        // before the next attempt and returns Stopped instead of spawning.
+        signal.cancel();
+        assert!(flag.load(Ordering::SeqCst));
+        let run = "sched-stop-stale-row";
+        remember_live_session(run, "sid-retry");
+        let ids = sessions_to_stop(Some("sid-previous".into()), take_live_session(run));
+        assert_eq!(
+            ids,
+            vec!["sid-previous".to_string(), "sid-retry".to_string()]
+        );
+        assert!(take_live_session(run).is_none());
+        // The same id is not killed twice.
+        assert_eq!(
+            sessions_to_stop(Some("sid-same".into()), Some("sid-same".into())),
+            vec!["sid-same".to_string()]
+        );
     }
 
     #[test]

@@ -4,6 +4,8 @@
   // zoom (wheel), click a node with a session → open it. Live via events.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { sentenceCase } from '../../lib/status';
   import RunInspector from './RunInspector.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -103,12 +105,29 @@
     return { w, h };
   });
 
-  function statusIcon(s: string): { icon: IconName; cls: string } {
-    if (s === 'done') return { icon: 'check', cls: 'done' };
-    if (s === 'in_progress' || s === 'running' || s === 'waiting') return { icon: 'play', cls: 'run' };
-    if (s === 'error' || s === 'blocked') return { icon: 'x', cls: 'err' };
-    if (s === 'in_review') return { icon: 'eye', cls: 'run' };
-    return { icon: 'dot', cls: 'idle' };
+  function statusIcon(s: string): { icon: IconName; cls: string; label: string } {
+    switch (s) {
+      case 'done':
+        return { icon: 'check', cls: 'done', label: 'Done' };
+      case 'in_progress':
+        return { icon: 'play', cls: 'run', label: 'In progress' };
+      case 'running':
+        return { icon: 'zap', cls: 'run', label: 'Running' };
+      case 'waiting':
+        return { icon: 'clock', cls: 'wait', label: 'Waiting' };
+      case 'error':
+        return { icon: 'x', cls: 'err', label: 'Error' };
+      case 'blocked':
+        return { icon: 'warning', cls: 'blocked', label: 'Blocked' };
+      case 'in_review':
+        return { icon: 'eye', cls: 'review', label: 'In review' };
+      default:
+        return { icon: 'dot', cls: 'idle', label: sentenceCase(s) };
+    }
+  }
+
+  function reloadGraph(): void {
+    if (swarm.detail) void swarm.loadGraph(swarm.detail.id);
   }
 
   function onWheel(e: WheelEvent) {
@@ -199,12 +218,34 @@
     <button class="icon-btn" onclick={() => { userTouchedZoom = true; scale = Math.min(2, scale * 1.1); }} aria-label="Zoom in" title="Zoom in"><Icon name="plus" size={14} /></button>
     <button class="icon-btn" onclick={() => { userTouchedZoom = true; scale = Math.max(0.4, scale * 0.9); }} aria-label="Zoom out" title="Zoom out"><Icon name="minimize" size={14} /></button>
     <button class="icon-btn" onclick={fit} aria-label="Fit graph to view" title="Fit graph to view"><Icon name="maximize" size={14} /></button>
-    <button class="icon-btn" onclick={() => swarm.detail && swarm.loadGraph(swarm.detail.id)} aria-label="Refresh graph" title="Refresh graph"><Icon name="refresh" size={14} /></button>
+    <button class="icon-btn" onclick={reloadGraph} aria-label="Refresh graph" title="Refresh graph"><Icon name="refresh" size={14} /></button>
   </div>
 
-  {#if placed.length === 0}
+  {#if !swarm.graph}
+    <LoadState
+      what="the work graph"
+      loading={swarm.graphLoading}
+      error={swarm.graphError}
+      empty
+      onretry={reloadGraph}
+    >
+      {#snippet emptyView()}
+        <EmptyState icon="split" title="No work yet" body="Tasks and their dependencies show up here as a live graph." />
+      {/snippet}
+    </LoadState>
+  {:else if placed.length === 0}
+    {#if swarm.graphError}
+      <div class="graph-stale">
+        <LoadState what="the work graph" error={swarm.graphError} onretry={reloadGraph} />
+      </div>
+    {/if}
     <EmptyState icon="split" title="No work yet" body="Tasks and their dependencies show up here as a live graph." />
   {:else}
+    {#if swarm.graphError}
+      <div class="graph-stale">
+        <LoadState what="the work graph" error={swarm.graphError} onretry={reloadGraph} />
+      </div>
+    {/if}
     <div
       class="canvas"
       onpointerdown={startPan}
@@ -230,12 +271,13 @@
             class="node {si.cls}"
             class:clickable={!!n.session_id || !!run}
             style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{NODE_H}px"
+            aria-label="{n.label}, {si.label}{agent ? `, ${agent.name}` : ''}"
             onclick={() => click(n)}
           >
             <span class="node-badge {si.cls}"><Icon name={si.icon} size={12} /></span>
             <span class="node-main">
               <span class="node-label">{n.label}</span>
-              <span class="node-sub dim">{agent ? agent.name : n.status}{run ? ' · inspect' : n.session_id ? ' · open' : ''}</span>
+              <span class="node-sub dim">{si.label}{agent ? ` · ${agent.name}` : ''}{run ? ' · inspect' : n.session_id ? ' · open' : ''}</span>
             </span>
           </button>
         {/each}
@@ -253,6 +295,13 @@
     position: relative;
     height: 100%;
     overflow: hidden;
+  }
+  .graph-stale {
+    position: absolute;
+    z-index: 2;
+    inset-inline: 10px;
+    top: 10px;
+    max-width: 480px;
   }
   .controls {
     position: absolute;
@@ -338,8 +387,20 @@
     color: var(--success);
   }
   .node-badge.err {
-    background: color-mix(in srgb, var(--status-exited) 24%, transparent);
+    background: var(--danger-soft);
     color: var(--danger);
+  }
+  .node-badge.wait {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  .node-badge.blocked {
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+  .node-badge.review {
+    background: var(--info-soft);
+    color: var(--info);
   }
   .node-main {
     display: flex;
@@ -356,5 +417,8 @@
   }
   .node-sub {
     font-size: var(--fs-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

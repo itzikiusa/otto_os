@@ -476,7 +476,12 @@ async fn stage_prove(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         &run.created_by,
     )
     .await?;
-    let _ = crate::proof::assemble_diff(ctx, &pack, &wt, Some(&base)).await;
+    // Policy belongs to the run's repository, including on a replay of an old
+    // unlinked Task pack. Persist before recomputing any readiness signal.
+    ctx.proof_repo
+        .set_repo_link(&pack.id, run.repo_id.as_deref(), None)
+        .await?;
+    crate::proof::assemble_diff(ctx, &pack, &wt, Some(&base)).await?;
     if let Some(summary) = run.result_summary.as_deref().filter(|s| !s.is_empty()) {
         let _ = crate::proof::upsert_content_artifact(
             ctx,
@@ -837,7 +842,10 @@ async fn best_effort_push(ctx: &ServerCtx, run: &OttoRun) {
         Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
             .await
             .ok()
-            .flatten(),
+            .flatten()
+            .and_then(|token| {
+                otto_git::transport::TransportCredential::for_repo(token, &acc, &repo).ok()
+            }),
         Err(_) => None,
     };
     let _ = otto_git::LocalGit::new(wt).push(token).await;

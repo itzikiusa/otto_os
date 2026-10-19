@@ -36,6 +36,44 @@ impl Background {
     pub fn keep<H: Send + 'static>(&mut self, handle: H) {
         self.handles.push(Box::new(handle));
     }
+
+    /// Own the supervisors until stop is requested. Aborting and awaiting the
+    /// returned task also drops every guard, for a server exit without a signal.
+    pub fn stop_on(
+        self,
+        signal: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            signal.await;
+            drop(self);
+        })
+    }
+}
+
+/// Cancellation signals do not cancel on drop by themselves. Keep an owning
+/// guard so dropping Background stops admission before engine teardown.
+struct CancelOnDrop(crate::cancel_signal::CancelSignal);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+struct StopFlagOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for StopFlagOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Start every background task, in boot order. `root_user_id` gates the
@@ -92,7 +130,7 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     bg.keep(start_scheduled_tasks(ctx).await);
     bg.keep(start_personal_agents(ctx));
     bg.keep(start_assistant(ctx));
-    start_run_scheduler(ctx);
+    bg.keep(start_run_scheduler(ctx));
     start_model_catalog(ctx);
     start_usage_tracking(ctx);
     spawn_mcp_health_sweep(ctx);
@@ -597,7 +635,7 @@ fn start_conversation_view(ctx: &ServerCtx) -> impl Send + 'static {
     let nudge = crate::agent_tasks_nudge::spawn(ctx.clone());
     crate::history_index::spawn_scan(ctx.clone(), None);
     tracing::info!("conversation view: nudge sweep + history index scan started");
-    nudge
+    AbortOnDrop(nudge)
 }
 
 /// Design Hall: FTS index + idempotent legacy import (background). Mirrors
@@ -655,7 +693,7 @@ async fn start_swarm(ctx: &ServerCtx) -> impl Send + 'static {
         }
         Err(e) => tracing::warn!("swarm restore: {e}"),
     }
-    scheduler
+    CancelOnDrop(scheduler)
 }
 
 /// Workflow event-trigger listener (B8). Subscribes to the daemon event bus;
@@ -669,7 +707,7 @@ fn start_workflow_event_triggers(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::workflow_trigger_scheduler::spawn_workflow_event_trigger_listener(ctx.clone());
     crate::run_notices::spawn_listener(ctx.clone());
     tracing::info!("workflow event-trigger listener started");
-    h
+    StopFlagOnDrop(h)
 }
 
 /// Workflow schedule-trigger scheduler: 60 s tick that fires
@@ -679,7 +717,7 @@ fn start_workflow_event_triggers(ctx: &ServerCtx) -> impl Send + 'static {
 fn start_workflow_schedule_triggers(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::workflow_trigger_scheduler::start(ctx.clone());
     tracing::info!("workflow schedule-trigger scheduler started");
-    h
+    CancelOnDrop(h)
 }
 
 /// Kubernetes monitor supervisor: one collector loop per cluster with
@@ -688,7 +726,7 @@ fn start_workflow_schedule_triggers(ctx: &ServerCtx) -> impl Send + 'static {
 fn start_k8s_monitor(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::k8s_monitor_scheduler::start(ctx.clone());
     tracing::info!("k8s monitor scheduler started");
-    h
+    CancelOnDrop(h)
 }
 
 /// Mission Control / work-graph projector: subscribes to the daemon event
@@ -698,7 +736,7 @@ fn start_k8s_monitor(ctx: &ServerCtx) -> impl Send + 'static {
 fn start_workgraph_projector(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::workgraph_projector::spawn(ctx.clone());
     tracing::info!("workgraph projector started");
-    h
+    AbortOnDrop(h)
 }
 
 /// Scheduled Tasks. Reap runs a previous daemon life left `running` BEFORE
@@ -709,7 +747,7 @@ fn start_workgraph_projector(ctx: &ServerCtx) -> impl Send + 'static {
 async fn start_scheduled_tasks(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::scheduled_tasks_scheduler::start(ctx.clone());
     tracing::info!("scheduled tasks scheduler started");
-    h
+    CancelOnDrop(h)
 }
 
 /// Personal Agents: fires every enabled schedule of every enabled personal
@@ -718,7 +756,7 @@ async fn start_scheduled_tasks(ctx: &ServerCtx) -> impl Send + 'static {
 fn start_personal_agents(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::personal_agents_scheduler::start(ctx.clone());
     tracing::info!("personal agents scheduler started");
-    h
+    CancelOnDrop(h)
 }
 
 /// Otto Assistant: 30 s tick that fires due reminders (`once`), reports
@@ -727,14 +765,15 @@ fn start_personal_agents(ctx: &ServerCtx) -> impl Send + 'static {
 fn start_assistant(ctx: &ServerCtx) -> impl Send + 'static {
     let h = crate::assistant::start(ctx.clone());
     tracing::info!("assistant supervisor started");
-    h
+    CancelOnDrop(h)
 }
 
 /// Run with Otto: a 30 s tick re-drives resumable runs. Interrupted live
 /// work was already settled by `recover_before_serve`, before admission.
-fn start_run_scheduler(ctx: &ServerCtx) {
-    crate::run_scheduler::spawn(ctx.clone());
+fn start_run_scheduler(ctx: &ServerCtx) -> impl Send + 'static {
+    let stop = crate::run_scheduler::spawn(ctx.clone());
     tracing::info!("run-with-otto scheduler started");
+    CancelOnDrop(stop)
 }
 
 /// Dynamic model catalog: hourly per-provider model discovery (CLI probe /
@@ -802,3 +841,60 @@ fn spawn_mcp_health_sweep(ctx: &ServerCtx) {
 #[cfg(test)]
 #[path = "../../tests/unit/run_scheduler_boot.rs"]
 mod run_scheduler_boot_tests;
+
+#[cfg(test)]
+mod background_shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_background_cancels_supervisors_and_aborts_owned_tasks() {
+        let signal = crate::cancel_signal::CancelSignal::new();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _finished_tx = finished_tx;
+            std::future::pending::<()>().await;
+        });
+        let mut background = Background::default();
+        background.keep(CancelOnDrop(signal.clone()));
+        background.keep(StopFlagOnDrop(flag.clone()));
+        background.keep(AbortOnDrop(task));
+        assert!(!signal.is_cancelled());
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+        drop(background);
+        assert!(signal.is_cancelled());
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .expect("owned task was aborted")
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_watcher_drops_handles_before_teardown_even_without_signal() {
+        let signal = crate::cancel_signal::CancelSignal::new();
+        let mut background = Background::default();
+        background.keep(CancelOnDrop(signal.clone()));
+        // Mirrors the daemon's ownership: an early server exit must stop
+        // admission even if the shutdown watcher never received a signal.
+        let watcher = background.stop_on(std::future::pending());
+        watcher.abort();
+        let _ = watcher.await;
+        assert!(signal.is_cancelled(), "teardown sees cancelled admission");
+    }
+
+    #[tokio::test]
+    async fn stop_watcher_cancels_on_signal_before_it_returns() {
+        let signal = crate::cancel_signal::CancelSignal::new();
+        let mut background = Background::default();
+        background.keep(CancelOnDrop(signal.clone()));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let watcher = background.stop_on(async move {
+            let _ = stopped.await;
+        });
+        assert!(!signal.is_cancelled());
+        stop.send(()).unwrap();
+        watcher.await.unwrap();
+        assert!(signal.is_cancelled());
+    }
+}

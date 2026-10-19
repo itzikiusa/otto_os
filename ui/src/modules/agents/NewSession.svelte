@@ -8,6 +8,7 @@
   import NetworkProfilePicker from '../connections/NetworkProfilePicker.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import ContextPreview from './ContextPreview.svelte';
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
@@ -249,23 +250,25 @@
   }
 
   function onProviderKeydown(e: KeyboardEvent): void {
+    const avail = providers.filter((p) => providerReadiness(p).available);
     const idx = providers.indexOf(provider);
-    if (idx < 0 || providers.length === 0) return;
-    let next = idx;
+    if (idx < 0 || avail.length === 0) return;
+    const availIdx = Math.max(0, avail.indexOf(provider));
+    let nextProvider = avail[availIdx];
     switch (e.key) {
       case 'ArrowRight':
       case 'ArrowDown':
-        next = (idx + 1) % providers.length;
+        nextProvider = avail[(availIdx + 1) % avail.length];
         break;
       case 'ArrowLeft':
       case 'ArrowUp':
-        next = (idx - 1 + providers.length) % providers.length;
+        nextProvider = avail[(availIdx - 1 + avail.length) % avail.length];
         break;
       case 'Home':
-        next = 0;
+        nextProvider = avail[0];
         break;
       case 'End':
-        next = providers.length - 1;
+        nextProvider = avail[avail.length - 1];
         break;
       case '+':
       case '=':
@@ -281,7 +284,7 @@
         return; // let other keys (Tab, Enter, Space) behave normally
     }
     e.preventDefault();
-    selectProvider(providers[next], true);
+    selectProvider(nextProvider, true);
   }
 
   // Browser tools wire an MCP server into the workspace .mcp.json; only
@@ -422,7 +425,7 @@
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" onclose={requestClose} dismissable={!busy}>
+<Modal title="New session" height={800} onclose={requestClose} dismissable={!busy}>
   <!-- Workspace: the current one, or none (a workspace-less session in the
        daemon's hidden scratch workspace). With no workspace at all only "No
        workspace" exists, pre-selected. -->
@@ -486,6 +489,7 @@
             onclick={() => selectProvider(p)}
           >
             <span class="provider-name">
+              <ProviderIcon provider={p} size={14} />
               {p}
               {#if p === defaultProvider}<span class="default-badge">default</span>{/if}
             </span>
@@ -674,7 +678,7 @@
   {/if}
 
   {#snippet footer()}
-    <button class="btn" onclick={onclose}>Cancel</button>
+    <button class="btn" onclick={requestClose}>Cancel</button>
     <button class="btn primary" disabled={busy || (pendingSpawns.length === 0 && total === 0)} onclick={create}>
       {busy ? 'Starting…' : pendingSpawns.length ? `Retry ${pendingSpawns.length} failed` : total > 1 ? `Start ${total} sessions` : 'Start session'}
     </button>
@@ -825,12 +829,12 @@
     opacity: var(--disabled-opacity);
     cursor: default;
   }
-  /* Touch: the ± targets have to be tappable on a phone, where the card is the
-     same size but fingers are not cursors. */
-  @media (pointer: coarse) {
+  /* Touch / mobile: the ± targets have to be tappable on a phone (≥36×36px
+     per layout.md), whether via coarse pointer or narrow mobile viewport. */
+  @media (pointer: coarse), (max-width: 640px) {
     .cbtn {
-      width: 30px;
-      height: 30px;
+      width: var(--hit-min);
+      height: var(--hit-min);
       font-size: var(--fs-l);
     }
   }

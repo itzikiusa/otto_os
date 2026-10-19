@@ -15,6 +15,7 @@
   import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -30,14 +31,16 @@
 
   interface Props {
     wsId: string;
+    listCollapsed?: boolean;
     /** Optional skill to pre-select in the New Review form (from the Skills tab). */
     initialTarget?: { name: string; source: string } | null;
     onconsumed?: () => void;
     /** Open this existing review (a skill's Usage → Reviews card). */
     initialReview?: string | null;
     onreviewconsumed?: () => void;
+    onphonedetail?: (open: boolean) => void;
   }
-  let { wsId, initialTarget = null, onconsumed, initialReview = null, onreviewconsumed }: Props = $props();
+  let { wsId, listCollapsed = false, initialTarget = null, onconsumed, initialReview = null, onreviewconsumed, onphonedetail }: Props = $props();
 
   // `source` is "library" | "bundled" | a provider name (claude/codex/agy) — all
   // valid `skill_source` values the review engine resolves.
@@ -65,7 +68,16 @@
   }
   let fInstructions = $state('');
   let starting = $state(false);
-  let listHidden = $state(false);
+  let phoneListOpen = $state(false);
+  const showPhoneList = $derived(
+    viewport.isPhone && (phoneListOpen || ((listLoading || !!listError) && reviews.length === 0)),
+  );
+  $effect(() => {
+    onphonedetail?.(viewport.isPhone && !showPhoneList && reviews.length > 0);
+  });
+  export function back(): void {
+    phoneListOpen = true;
+  }
 
   // Apply-fixes form.
   let fixProvider = $state(defaultAgentProvider());
@@ -156,7 +168,10 @@
     if (quiet && (selected?.id !== id || selectionPending === detailGeneration || refreshPending === detailGeneration)) return;
     const generation = quiet ? detailGeneration : ++detailGeneration;
     if (quiet) refreshPending = generation;
-    else selectionPending = generation;
+    else {
+      selectionPending = generation;
+      phoneListOpen = false;
+    }
     const workspace = wsId;
     try {
       const review = await skillReviewApi.get(id);
@@ -191,6 +206,7 @@
       });
       if (disposed || workspace !== wsId || generation !== detailGeneration) return;
       selected = rev;
+      phoneListOpen = false;
       await loadList();
     } catch (e) {
       toastError('Couldn’t start the review', e);
@@ -267,6 +283,7 @@
     detailGeneration++;
     selected = null;
     fSkill = '';
+    phoneListOpen = false;
   }
 
   // --- live refresh -----------------------------------------------------------
@@ -318,6 +335,7 @@
       detailGeneration++;
       consumedTarget = `${initialTarget.source}:${initialTarget.name}`;
       selected = null;
+      phoneListOpen = false;
       // Ensure the option exists even before the skill list loads.
       const key = `${initialTarget.source}:${initialTarget.name}`;
       if (!skillOpts.some((o) => `${o.source}:${o.name}` === key)) {
@@ -357,9 +375,8 @@
 </script>
 
 <div class="review-wrap">
-  <div class="review-toolbar"><button class="btn small ghost" aria-label={listHidden ? 'Show reviews list' : 'Hide reviews list'} title={listHidden ? 'Show reviews list' : 'Hide reviews list'} aria-expanded={!listHidden} aria-controls="reviews-list" onclick={() => (listHidden = !listHidden)}><Icon name="sidebar" size={14} /></button></div>
-<div class="lab-review" class:list-hidden={listHidden} data-testid="skill-review">
-  <aside class="lr-side" id="reviews-list">
+<div class="lab-review" class:list-hidden={listCollapsed && !viewport.isPhone} data-testid="skill-review">
+  <aside class="lr-side" class:hide-phone={viewport.isPhone && !showPhoneList} id="reviews-list">
     <!-- Same list head as the Evaluator’s runs. Not .primary: the form’s
          "Start review" is the view’s primary. -->
     <div class="lr-side-head">
@@ -391,7 +408,7 @@
     {/if}
   </aside>
 
-  <main class="lr-main">
+  <main class="lr-main" class:hide-phone={viewport.isPhone && showPhoneList}>
     {#if !selected}
       <!-- New review form -->
       <div class="lr-form card">
@@ -608,7 +625,6 @@
 
 <style>
   .review-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .review-toolbar { display: flex; align-items: center; min-height: 32px; padding-inline: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .lab-review.list-hidden { grid-template-columns: minmax(0, 1fr); }
   .list-hidden .lr-side { display: none; }
   /* Same shell as Skills: a surface list pane with a hairline, content beside it. */
@@ -692,11 +708,12 @@
   .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
   .mono { font-family: var(--font-mono); }
 
-  /* Phone: the list stacks above the report, like the Evaluator's runs. */
+  /* Phone: push navigation between the reviews list and the open review / form. */
   @media (max-width: 640px) {
     .lab-review { display: flex; flex-direction: column; }
-    .lr-side { flex: none; max-height: 40%; border-inline-end: none; border-bottom: 1px solid var(--border); }
-    .lr-main { flex: 1; }
-    .lr-main { padding: 12px 14px; }
+    .hide-phone { display: none; }
+    .lr-side { width: 100%; flex: 1; border-inline-end: none; }
+    .lr-main { flex: 1; padding: 12px 14px; }
+    .lr-item { min-height: var(--hit-min); }
   }
 </style>

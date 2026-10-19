@@ -40,6 +40,7 @@
   // send; the agent reply bumps it again on completion).
   $effect(() => {
     void messages.length;
+    void sending;
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
   });
   let loadError = $state<string | null>(null);
@@ -47,6 +48,10 @@
 
   let inputText = $state('');
   let sending = $state(false);
+  let stopping = $state(false);
+  let activeTurnId = $state<string | null>(null);
+  let stopNotice = $state<string | null>(null);
+  let backgroundTurn = $state(false);
 
   let composerEl = $state<HTMLTextAreaElement | null>(null);
 
@@ -63,34 +68,51 @@
   let loadSeq = 0;
   let activeId = '';
   let alive = true;
+  let inFlightTurnId: string | null = null;
   const drafts = new Map<string, string>();
+  const stopRequestedTurns = new Set<string>();
   onDestroy(() => { alive = false; ++loadSeq; });
+
+  function newTurnId(): string {
+    return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 
   // ── Load / reload when cid changes ────────────────────────────────────────
   $effect(() => {
     // Reactive on cid — re-runs whenever the active chat switches.
     const currentCid = cid;
+    backgroundTurn = false;
+    stopNotice = null;
     void loadChat(currentCid);
   });
 
-  async function loadChat(chatId: string): Promise<void> {
+  async function loadChat(chatId: string, opts?: { preserveMessages?: DiscoveryChatMessage[] }): Promise<void> {
     const my = ++loadSeq;
     const current = () => alive && my === loadSeq && cid === chatId;
     if (activeId !== chatId) {
-      // An empty draft is an intentional decision too. While sending, the
-      // cleared composer belongs to that in-flight request, not a new draft.
-      if (activeId && !sending) drafts.set(activeId, inputText);
+      // An empty draft is an intentional decision too. While sending or stopping,
+      // the cleared composer belongs to that in-flight request, not a new draft.
+      if (activeId && !sending && !stopping) drafts.set(activeId, inputText);
       activeId = chatId;
       inputText = drafts.get(chatId) ?? '';
       messages = [];
       sending = false;
+      stopping = false;
+      activeTurnId = null;
+      inFlightTurnId = null;
+      stopNotice = null;
+      backgroundTurn = false;
     }
     loading = true;
     loadError = null;
     try {
       const detail = await product.getDiscoveryChat(chatId);
       if (!current()) return;
-      messages = detail.messages;
+      messages = detail.messages.length === 0 && opts?.preserveMessages?.length
+        ? opts.preserveMessages
+        : detail.messages;
       chatModel = detail.chat.model;
     } catch (e) {
       if (current()) loadError = loadErrorText(e);
@@ -99,14 +121,75 @@
     }
   }
 
-  // ── Send ──────────────────────────────────────────────────────────────────
+  // ── Send & Stop ───────────────────────────────────────────────────────────
+
+  async function stopTurn(): Promise<void> {
+    if ((!sending && !stopping) || stopping || !activeTurnId) return;
+    const target = cid;
+    const turnId = activeTurnId;
+    const generation = loadSeq;
+    const ownsTurn = () => alive && cid === target && loadSeq === generation && activeTurnId === turnId;
+    stopRequestedTurns.add(turnId);
+    stopping = true;
+    stopNotice = null;
+    try {
+      const res = await product.stopDiscoveryTurn(target, turnId);
+      if (!ownsTurn()) return;
+      if (res.stopped) {
+        const snapshot = messages;
+        sending = false;
+        stopping = false;
+        activeTurnId = null;
+        inFlightTurnId = null;
+        backgroundTurn = false;
+        stopNotice = 'Turn stopped.';
+        await loadChat(target, { preserveMessages: snapshot });
+      } else {
+        // stopped: false means the turn was not active on the server (not yet admitted or already finished),
+        // NOT proof of cancellation. Keep the accepted user bubble and report truthfully.
+        stopping = false;
+        stopNotice = 'Couldn’t confirm stop — the turn was not active on the server yet (or already finished).';
+        if (inFlightTurnId !== turnId) {
+          sending = false;
+          activeTurnId = null;
+        }
+      }
+    } catch (e) {
+      if (!ownsTurn()) return;
+      stopping = false;
+      if (inFlightTurnId !== turnId) {
+        sending = false;
+        activeTurnId = null;
+      }
+      toastError('Couldn’t stop the turn', e);
+    }
+  }
+
+  function stopWaiting(): void {
+    if (!sending && !stopping) return;
+    if (activeTurnId) stopRequestedTurns.add(activeTurnId);
+    ++loadSeq;
+    sending = false;
+    stopping = false;
+    activeTurnId = null;
+    inFlightTurnId = null;
+    stopNotice = null;
+    backgroundTurn = true;
+  }
+
+  function reloadAfterStop(): void {
+    backgroundTurn = false;
+    stopNotice = null;
+    void loadChat(cid);
+  }
 
   async function send(): Promise<void> {
     const body = inputText.trim();
-    if (!body || sending) return;
+    if (!body || sending || stopping || loading || Boolean(loadError)) return;
     const target = cid;
+    const turnId = newTurnId();
     const generation = loadSeq;
-    const current = () => alive && cid === target && loadSeq === generation;
+    const current = () => alive && cid === target && loadSeq === generation && activeTurnId === turnId;
     drafts.delete(target);
 
     // Optimistic user bubble (temporary — reconciled with the server message).
@@ -121,7 +204,12 @@
     };
     messages = [...messages, optimisticMsg];
     inputText = '';
+    activeTurnId = turnId;
+    inFlightTurnId = turnId;
     sending = true;
+    stopping = false;
+    stopNotice = null;
+    backgroundTurn = false;
 
     try {
       // Provider only matters on the FIRST message (session create); pass it
@@ -130,7 +218,10 @@
         cid,
         body,
         messages.length <= 1 ? provider : undefined,
+        undefined,
+        turnId,
       );
+      if (inFlightTurnId === turnId) inFlightTurnId = null;
       if (!current()) return;
       // Reconcile: drop the optimistic bubble, append the real user + agent msgs.
       messages = [
@@ -138,7 +229,21 @@
         resp.user_message,
         resp.agent_message,
       ];
+      stopNotice = null;
+      sending = false;
+      stopping = false;
+      activeTurnId = null;
     } catch (e) {
+      if (inFlightTurnId === turnId) inFlightTurnId = null;
+      if (stopRequestedTurns.has(turnId)) {
+        // User requested Stop or Stop waiting on this turn: the user message was
+        // already accepted, so never restore it to the composer or drafts map.
+        if (current() && !stopping) {
+          sending = false;
+          activeTurnId = null;
+        }
+        return;
+      }
       // Keep a failed send with its original conversation; never overwrite
       // the draft the person is composing in the newly selected one.
       // A newer draft (including an explicit clear) wins over an old failure.
@@ -147,9 +252,16 @@
       // Roll back the optimistic bubble, restore the typed text, show an error.
       messages = messages.filter((m) => m.id !== optimisticMsg.id);
       inputText = body;
+      sending = false;
+      stopping = false;
+      activeTurnId = null;
       toastError('Couldn’t send the message', e);
     } finally {
-      if (current()) sending = false;
+      if (inFlightTurnId === turnId) inFlightTurnId = null;
+      if (current() && !stopping) {
+        sending = false;
+        activeTurnId = null;
+      }
     }
   }
 
@@ -211,6 +323,9 @@
         <p class="see-hint">I can see your draft, mockups, and discovery notes.</p>
       </div>
     {:else}
+      {#if loadError}
+        <LoadState what="this chat" {loading} error={loadError} onretry={() => void loadChat(cid)} />
+      {/if}
       {#each messages as m (m.id)}
         {@const actions = m.role === 'agent' ? parseActions(m.actions_json) : []}
         <div class="bubble-row" class:row-user={m.role === 'user'} class:row-agent={m.role === 'agent'}>
@@ -241,11 +356,50 @@
       {/each}
 
       <!-- Thinking indicator while a turn is in flight -->
-      {#if sending}
+      {#if sending || stopping}
         <div class="bubble-row row-agent">
           <div class="bubble bubble-agent thinking" role="status">
             <div class="bubble-header"><AgentByline {provider} model={chatModel} /></div>
-            <span class="thinking-dots"><LiveWorkingDot label="Thinking…" /></span>
+            <div class="thinking-row">
+              <span class="thinking-dots"><LiveWorkingDot label={stopping ? 'Stopping…' : 'Thinking…'} /></span>
+              <div class="thinking-actions">
+                <button
+                  class="btn small"
+                  type="button"
+                  onclick={() => void stopTurn()}
+                  disabled={stopping || !activeTurnId}
+                  title="Cancel this in-flight agent turn on the server"
+                >
+                  {stopping ? 'Stopping…' : 'Stop'}
+                </button>
+                <button
+                  class="btn small"
+                  type="button"
+                  onclick={stopWaiting}
+                  title="Stop waiting in the UI (the agent turn may still finish in the background)"
+                >
+                  Stop waiting
+                </button>
+              </div>
+            </div>
+            {#if stopNotice}
+              <p class="stop-notice" role="status">{stopNotice}</p>
+            {/if}
+          </div>
+        </div>
+      {:else if backgroundTurn || stopNotice}
+        <div class="bubble-row row-agent">
+          <div class="bubble bubble-agent thinking" role="status">
+            <div class="thinking-row">
+              <span class="thinking-dots">
+                {backgroundTurn
+                  ? 'Stopped waiting — the agent turn may still finish in the background.'
+                  : stopNotice}
+              </span>
+              <button class="btn small" type="button" onclick={reloadAfterStop}>
+                Reload chat
+              </button>
+            </div>
           </div>
         </div>
       {/if}
@@ -259,7 +413,7 @@
            pickable before the first message. -->
       <label class="dc-provider">
         <span class="dim">Agent</span>
-        <select bind:value={provider} aria-label="Chat provider" disabled={sending}>
+        <select bind:value={provider} aria-label="Chat provider" disabled={sending || stopping || loading || Boolean(loadError)}>
           {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
         </select>
       </label>
@@ -270,15 +424,15 @@
       placeholder="Describe the idea or problem… (Enter to send, Shift+Enter for newline)"
       bind:value={inputText}
       onkeydown={handleKeydown}
-      disabled={sending}
+      disabled={sending || stopping || loading || Boolean(loadError)}
       rows={3}
     ></textarea>
     <button
       class="send-btn"
       onclick={() => void send()}
-      disabled={sending || !inputText.trim()}
+      disabled={sending || stopping || loading || Boolean(loadError) || !inputText.trim()}
     >
-      {sending ? 'Sending…' : 'Send'}
+      {stopping ? 'Stopping…' : sending ? 'Sending…' : 'Send'}
     </button>
   </div>
 </div>
@@ -375,12 +529,13 @@
   .bubble-user {
     background: var(--accent-soft-strong);
     border: 1px solid var(--accent-line);
-    border-bottom-right-radius: 3px;
+    border-end-end-radius: 3px;
   }
   .bubble-agent {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-bottom-left-radius: 3px;
+    border-inline-start: 2px solid var(--accent-line-strong);
+    border-end-start-radius: 3px;
   }
 
   .bubble-header {
@@ -439,8 +594,25 @@
   .thinking {
     color: var(--text-dim);
   }
+  .thinking-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
   .thinking-dots {
     font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .thinking-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .stop-notice {
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 

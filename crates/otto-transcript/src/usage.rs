@@ -35,7 +35,7 @@ use serde_json::Value;
 
 /// Token counts parsed from a single transcript line, normalized across
 /// providers and ready to be turned into an `otto_usage::UsageEvent`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ParsedUsage {
     pub model: String,
     pub input: u64,
@@ -47,7 +47,7 @@ pub struct ParsedUsage {
 /// Fields lifted from a Codex `session_meta` line (the first line of a rollout
 /// file). Both fields are best-effort: the rollout JSONL does not always carry a
 /// model, and the cwd shape can vary, so callers must tolerate `None`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CodexMeta {
     pub session_id: Option<String>,
     pub cwd: Option<String>,
@@ -62,7 +62,7 @@ fn u64_field(obj: &Value, key: &str) -> u64 {
 
 /// A parsed Claude Code assistant line: normalized usage plus the identity
 /// needed to count each API response exactly once.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ClaudeLine {
     pub usage: ParsedUsage,
     /// `message.id` (+ `requestId` when present). One API response is written
@@ -247,7 +247,7 @@ fn lenient_str<'de: 'a, 'a, D: serde::Deserializer<'de>>(
 
 /// A Claude response held back until its usage is final (see
 /// [`ResponseFolder`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeldResponse {
     pub key: String,
     /// Field-wise max of every line of the response seen so far.
@@ -277,7 +277,7 @@ pub struct HeldResponse {
 ///
 /// Corrections are delta rows with the same key timestamp, so summing rows
 /// still yields the response's final usage.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ResponseFolder {
     cap: usize,
     recent: HashMap<String, (ParsedUsage, Option<String>)>,
@@ -545,6 +545,24 @@ pub struct CursorStore {
 }
 
 impl CursorStore {
+    /// Journal checkpoint, independent of the frozen legacy file format.
+    pub fn checkpoint(&self) -> Value {
+        serde_json::json!(self.offsets)
+    }
+
+    pub fn restore_checkpoint(&mut self, value: Value) -> Result<(), serde_json::Error> {
+        self.offsets = serde_json::from_value(value)?;
+        self.dirty.clear();
+        self.needs_compact = false;
+        Ok(())
+    }
+
+    /// The transaction has durably captured all offsets, including held state.
+    pub fn checkpoint_committed(&mut self) {
+        self.dirty.clear();
+        self.needs_compact = false;
+    }
+
     /// Load the cursor map from `path`. A missing or unparseable file yields an
     /// empty store bound to that path (so the next [`Self::save`] creates it).
     pub fn load(path: impl Into<PathBuf>) -> Self {
@@ -786,6 +804,16 @@ pub struct CodexCounterStore {
 }
 
 impl CodexCounterStore {
+    pub fn checkpoint(&self) -> Value {
+        serde_json::json!(self.state)
+    }
+
+    pub fn restore_checkpoint(&mut self, value: Value) -> Result<(), serde_json::Error> {
+        self.state = serde_json::from_value(value)?;
+        self.evict();
+        Ok(())
+    }
+
     pub fn load(path: impl Into<PathBuf>, cap: usize) -> Self {
         let path = path.into();
         let state = std::fs::read_to_string(&path)
@@ -917,6 +945,7 @@ impl CodexCounterStore {
 #[derive(Debug)]
 pub struct SeenKeys {
     path: PathBuf,
+    checkpoint_offset: u64,
     cap: usize,
     /// 128-bit hashes of the keys, oldest first — ONE 16-byte copy per key.
     /// The old `HashSet<String>` + `VecDeque<String>` pair held every ~57-char
@@ -951,6 +980,41 @@ fn encode_seen_entry(h: u128) -> String {
 }
 
 impl SeenKeys {
+    /// Stable 256-key chunks avoid rewriting the entire seen set on each scan.
+    /// Absolute positions survive FIFO eviction, so only the boundary chunks
+    /// change. The legacy JSON/log representation remains untouched.
+    pub fn checkpoint(&self) -> Value {
+        let mut chunks: std::collections::BTreeMap<u64, Vec<String>> = Default::default();
+        for (i, hash) in self.set.iter().enumerate() {
+            chunks
+                .entry((self.checkpoint_offset + i as u64) / 256)
+                .or_default()
+                .push(format!("{hash:032x}"));
+        }
+        serde_json::json!({"offset": self.checkpoint_offset, "chunks": chunks})
+    }
+
+    pub fn restore_checkpoint(&mut self, value: Value) -> Result<(), serde_json::Error> {
+        #[derive(Deserialize)]
+        struct State {
+            offset: u64,
+            chunks: std::collections::BTreeMap<u64, Vec<String>>,
+        }
+        let state: State = serde_json::from_value(value)?;
+        self.checkpoint_offset = state.offset;
+        self.set.clear();
+        for key in state.chunks.into_values().flatten() {
+            self.set.insert(decode_seen_entry(&key));
+        }
+        self.evict();
+        self.pending.clear();
+        Ok(())
+    }
+
+    pub fn checkpoint_committed(&mut self) {
+        self.pending.clear();
+    }
+
     /// Load from `path`, keeping at most `cap` keys (oldest evicted first). A
     /// missing or unparseable file yields an empty store bound to that path.
     /// Accepts both the legacy raw-key array and the hashed form.
@@ -969,6 +1033,7 @@ impl SeenKeys {
         drop(entries);
         let mut s = Self {
             path,
+            checkpoint_offset: 0,
             cap: cap.max(1),
             set,
             pending: Vec::new(),
@@ -1060,6 +1125,7 @@ impl SeenKeys {
         if self.set.len() > self.cap + self.slack() {
             let over = self.set.len() - self.cap;
             self.set.drain(..over);
+            self.checkpoint_offset += over as u64;
         }
     }
 

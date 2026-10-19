@@ -123,23 +123,32 @@ pub fn is_due_since(
             None => true,
             Some(l) => (now - l).num_minutes() >= every_min(spec),
         },
+        // One slot per check: the earliest wall-clock time strictly after the
+        // cursor that is already <= now. A daily 23:00 that last ran Sunday
+        // and wakes Tuesday still owes Monday; it does not also run Tuesday's
+        // slot in the same completion. Never-run (no cursor) stays "today's
+        // slot has passed" — there is no earlier day to catch up from.
         "daily" => {
             let (h, m) = parse_at(spec);
-            match scheduled_today(now, tz, h, m) {
-                Some(t) => now >= t && last_run.is_none_or(|l| l < t),
-                None => false,
-            }
+            let slot = match last_run {
+                Some(cursor) => next_daily_after(cursor, tz, h, m),
+                None => scheduled_today(now, tz, h, m),
+            };
+            slot.is_some_and(|t| now >= t)
         }
         "weekly" => {
             let wd = spec.get("weekday").and_then(Value::as_i64).unwrap_or(0) as u32;
-            if now.with_timezone(&tz).weekday().num_days_from_monday() != wd.min(6) {
-                return false;
-            }
             let (h, m) = parse_at(spec);
-            match scheduled_today(now, tz, h, m) {
-                Some(t) => now >= t && last_run.is_none_or(|l| l < t),
-                None => false,
-            }
+            let slot = match last_run {
+                Some(cursor) => next_weekly_after(cursor, tz, h, m, wd),
+                None => {
+                    if now.with_timezone(&tz).weekday().num_days_from_monday() != wd.min(6) {
+                        return false;
+                    }
+                    scheduled_today(now, tz, h, m)
+                }
+            };
+            slot.is_some_and(|t| now >= t)
         }
         "cron" => match cron::Schedule::parse(cron_expr(spec)) {
             Ok(sched) => {
@@ -168,18 +177,106 @@ pub fn is_due_since(
 /// a minute, and a new `daily 09:00` created at 15:00 ran at once while its
 /// row said "next: tomorrow 09:00". A `once` schedule ignores it: its cursor
 /// is the "already fired" flag, so arming must never count as having fired.
+///
+/// A cron that has never actually run returns `None` even when `armed` is
+/// set. Create always writes `armed_at`, and treating that as `last_run`
+/// disabled the 7-day first-fire lookback in [`is_due_since`]. A cron that
+/// HAS a last run still takes `max(last_run, armed)`, so a resume does not
+/// replay fires from while it was paused.
 pub fn effective_cursor(
     spec: &Value,
     last_run: Option<DateTime<Utc>>,
     armed: Option<DateTime<Utc>>,
 ) -> Option<DateTime<Utc>> {
-    if cadence(spec) == "once" {
+    if cadence(spec) == "once" || (cadence(spec) == "cron" && last_run.is_none()) {
         return last_run;
     }
     match (last_run, armed) {
         (Some(l), Some(a)) => Some(l.max(a)),
         (l, a) => l.or(a),
     }
+}
+
+/// The occurrence a run that started at `now` is serving. Settlement writes
+/// this instant, not the completion clock: a `*/5` fire that starts at 09:05
+/// and finishes at 09:12 must leave the cursor at 09:05 so 09:10 stays due.
+/// One slot — the earliest fire strictly after the cursor that is already
+/// `<= now` — matching [`is_due_since`].
+pub fn served_occurrence(
+    spec: &Value,
+    cursor: Option<DateTime<Utc>>,
+    created: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    tz: Tz,
+) -> DateTime<Utc> {
+    let due = match cadence(spec) {
+        "interval" => cursor
+            .map(|l| l + Duration::minutes(every_min(spec)))
+            .filter(|t| *t <= now),
+        "daily" => {
+            let (h, m) = parse_at(spec);
+            match cursor {
+                Some(c) => next_daily_after(c, tz, h, m).filter(|t| *t <= now),
+                None => scheduled_today(now, tz, h, m).filter(|t| now >= *t),
+            }
+        }
+        "weekly" => {
+            let wd = spec.get("weekday").and_then(Value::as_i64).unwrap_or(0) as u32;
+            let (h, m) = parse_at(spec);
+            match cursor {
+                Some(c) => next_weekly_after(c, tz, h, m, wd).filter(|t| *t <= now),
+                None => scheduled_today(now, tz, h, m).filter(|t| now >= *t),
+            }
+        }
+        "cron" => {
+            let anchor = cursor.unwrap_or_else(|| match created {
+                Some(c) => c.max(now - Duration::days(FIRST_FIRE_LOOKBACK_DAYS)),
+                None => now - Duration::minutes(1),
+            });
+            cron::Schedule::parse(cron_expr(spec))
+                .ok()
+                .and_then(|sched| sched.next_after(anchor, tz))
+                .filter(|next| *next <= now)
+        }
+        "once" => once_at(spec, tz).filter(|t| now >= *t),
+        _ => None,
+    };
+    due.unwrap_or(now)
+}
+
+/// Earliest daily `at` strictly after `cursor` (the slot on the cursor's
+/// local date when that instant is still ahead, otherwise the next local day).
+fn next_daily_after(cursor: DateTime<Utc>, tz: Tz, h: u32, m: u32) -> Option<DateTime<Utc>> {
+    let day = cursor.with_timezone(&tz).date_naive();
+    let on_day = scheduled_on(day, tz, h, m)?;
+    if cursor < on_day {
+        Some(on_day)
+    } else {
+        scheduled_on(day.succ_opt()?, tz, h, m)
+    }
+}
+
+/// Earliest weekly `at` on `weekday` strictly after `cursor`.
+fn next_weekly_after(
+    cursor: DateTime<Utc>,
+    tz: Tz,
+    h: u32,
+    m: u32,
+    weekday: u32,
+) -> Option<DateTime<Utc>> {
+    let wd = weekday.min(6);
+    let mut day = cursor.with_timezone(&tz).date_naive();
+    for _ in 0..8 {
+        if day.weekday().num_days_from_monday() == wd {
+            if let Some(slot) = scheduled_on(day, tz, h, m) {
+                if cursor < slot {
+                    return Some(slot);
+                }
+            }
+        }
+        day = day.succ_opt()?;
+    }
+    None
 }
 
 /// Whether an edit re-arms the schedule (see [`effective_cursor`]): resumed
@@ -1023,6 +1120,9 @@ mod tests {
         // Once: arming is not firing.
         let once = json!({"cadence":"once","run_at":"2026-06-01T16:00:00Z"});
         assert_eq!(effective_cursor(&once, None, Some(created)), None);
+        // Never-run cron keeps a None cursor so the 7-day lookback applies.
+        // Create always sets armed_at; that must not become last_run.
+        assert_eq!(effective_cursor(&cron, None, Some(created)), None);
         assert!(is_due(&once, None, utc(2026, 6, 1, 16, 0), Tz::UTC));
         // No arm instant (pre-existing rows) → the old cursor, unchanged.
         assert_eq!(effective_cursor(&daily, last, None), last);
@@ -1067,6 +1167,80 @@ mod tests {
         assert!(!rearms_once(&o1, Some(&o1)));
         assert!(!rearms_once(&o1, None));
         assert!(!rearms_once(&o1, Some(&a)));
+    }
+
+    #[test]
+    fn never_run_cron_lookback_survives_the_arm_instant() {
+        // Created Sunday; asleep through Monday 09:00; wakes at 10:00.
+        // The supervisor passes effective_cursor (armed) into is_due_since.
+        let s = json!({"cadence":"cron","expr":"0 9 * * 1"});
+        let created = utc(2026, 6, 28, 12, 0);
+        let now = utc(2026, 6, 29, 10, 0);
+        let cursor = effective_cursor(&s, None, Some(created));
+        assert!(cursor.is_none());
+        assert!(is_due_since(&s, cursor, Some(created), now, Tz::UTC));
+        assert!(!is_due_since(
+            &s,
+            cursor,
+            Some(created),
+            utc(2026, 6, 29, 8, 0),
+            Tz::UTC
+        ));
+        // Months-old never-run monthly cron still does not fire on a random day.
+        let monthly = json!({"cadence":"cron","expr":"0 9 1 * *"});
+        let born = utc(2026, 5, 1, 0, 0);
+        let cursor = effective_cursor(&monthly, None, Some(born));
+        assert!(!is_due_since(
+            &monthly,
+            cursor,
+            Some(born),
+            utc(2026, 6, 20, 12, 0),
+            Tz::UTC
+        ));
+    }
+
+    #[test]
+    fn cron_in_flight_settles_the_served_slot_not_the_completion_clock() {
+        let s = json!({"cadence":"cron","expr":"*/5 * * * *"});
+        let cursor = Some(utc(2026, 6, 26, 9, 0));
+        let started = utc(2026, 6, 26, 9, 5);
+        let finished = utc(2026, 6, 26, 9, 12);
+        let served = served_occurrence(&s, cursor, None, started, Tz::UTC);
+        assert_eq!(served, utc(2026, 6, 26, 9, 5));
+        // Completion time would hide 09:10. The served slot leaves it due.
+        assert!(is_due(&s, Some(served), finished, Tz::UTC));
+        assert!(!is_due(&s, Some(finished), finished, Tz::UTC));
+        // One slot per completion: the next serve is 09:10, not 09:15.
+        assert_eq!(
+            served_occurrence(&s, Some(served), None, finished, Tz::UTC),
+            utc(2026, 6, 26, 9, 10)
+        );
+    }
+
+    #[test]
+    fn daily_and_weekly_catch_up_one_missed_slot_after_the_cursor() {
+        // Daily 23:00 last ran Sunday 23:05. Asleep across Monday. Wakes
+        // Tuesday 01:00: Monday's digest is due, Tuesday's 23:00 is not.
+        let daily = json!({"cadence":"daily","at":"23:00"});
+        let sunday = Some(utc(2026, 6, 7, 23, 5));
+        let tuesday = utc(2026, 6, 9, 1, 0);
+        assert!(is_due(&daily, sunday, tuesday, Tz::UTC));
+        let served = served_occurrence(&daily, sunday, None, tuesday, Tz::UTC);
+        assert_eq!(served, utc(2026, 6, 8, 23, 0));
+        assert!(!is_due(&daily, Some(served), tuesday, Tz::UTC));
+        // Weekly Monday 23:00 missed June 8, seen Wednesday June 10 01:00.
+        // One slot (June 8), not also a fire before June 15.
+        let weekly = json!({"cadence":"weekly","at":"23:00","weekday":0});
+        let last_monday = Some(utc(2026, 6, 1, 23, 5));
+        let wednesday = utc(2026, 6, 10, 1, 0);
+        assert!(is_due(&weekly, last_monday, wednesday, Tz::UTC));
+        let served = served_occurrence(&weekly, last_monday, None, wednesday, Tz::UTC);
+        assert_eq!(served, utc(2026, 6, 8, 23, 0));
+        assert!(!is_due(&weekly, Some(served), wednesday, Tz::UTC));
+        // Resume still hides the missed week: the cursor is the arm instant.
+        let resumed = effective_cursor(&daily, sunday, Some(utc(2026, 6, 9, 1, 0)));
+        assert!(!is_due(&daily, resumed, tuesday, Tz::UTC));
+        assert!(is_due(&daily, resumed, utc(2026, 6, 9, 23, 0), Tz::UTC));
     }
 
     #[test]

@@ -311,7 +311,7 @@
   }
 
   async function removeRepo(r: Repo): Promise<void> {
-    if (!(await confirmer.ask(`Remove “${r.name}” from Otto? Its tab closes and its saved review findings are deleted. The folder and its git history on disk are not touched, so you can add it again later.`, { title: 'Remove repository', confirmLabel: 'Remove' }))) return;
+    if (!(await confirmer.ask(`Remove “${r.name}” from Otto? Its tab closes and its saved review findings are deleted. The folder and its git history on disk are not touched, so you can add it again later.`, { title: 'Remove repository', confirmLabel: 'Remove', danger: true }))) return;
     try {
       await api.del(`/repos/${r.id}`);
       git.closeRepoTab(r.id);

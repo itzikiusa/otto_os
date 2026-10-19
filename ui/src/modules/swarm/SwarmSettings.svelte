@@ -125,9 +125,28 @@
     void loadTriggers(sid);
   });
 
+  function channelName(channel: string): string {
+    switch (channel) {
+      case 'slack':
+        return 'Slack';
+      case 'telegram':
+        return 'Telegram';
+      case 'webhook':
+        return 'Webhook';
+      default:
+        return channel;
+    }
+  }
+
+  function triggerWhere(t: { channel: string; keyword?: string | null; match_chat?: string | null }): string {
+    const keyword = t.keyword?.trim() || 'any message';
+    const chat = t.match_chat?.trim() || 'any chat';
+    return `${channelName(t.channel)} trigger “${keyword}” in ${chat}`;
+  }
+
   function newTrigger() {
     triggerEditId = null;
-    triggerForm = { channel: 'slack', match_chat: '', keyword: '', repo_path: '', auto_start: true, reply: true, enabled: true };
+    triggerForm = { channel: 'slack', match_chat: '', keyword: '', repo_path: '', auto_start: true, reply: false, enabled: true };
   }
   function editTrigger(t: SwarmChannelTrigger) {
     triggerEditId = t.id;
@@ -142,7 +161,23 @@
     };
   }
   async function saveTrigger() {
-    if (!detail || !triggerForm) return;
+    if (!detail || !triggerForm || savingTrigger) return;
+    const chat = triggerForm.match_chat?.trim() ?? '';
+    if (triggerForm.reply && !chat) {
+      toasts.warn(
+        'Name a chat to reply in',
+        'Reply stays off until you pick one chat. Otherwise the swarm would post in every conversation.',
+      );
+      return;
+    }
+    if (triggerForm.reply) {
+      const channel = channelName(triggerForm.channel);
+      const ok = await confirmer.ask(
+        `Reply in the ${channel} chat “${chat}”? Anyone who can read that chat will see the swarm’s reply.`,
+        { title: 'Reply on the channel', confirmLabel: 'Reply there' },
+      );
+      if (!ok) return;
+    }
     savingTrigger = true;
     try {
       const body: CreateTriggerReq = {
@@ -182,7 +217,7 @@
   }
   async function delTrigger(t: SwarmChannelTrigger) {
     if (
-      await confirmer.ask(`Delete this ${t.channel} trigger? Matching messages stop launching swarm work.`, {
+      await confirmer.ask(`Delete this ${triggerWhere(t)}? Matching messages stop launching swarm work.`, {
         title: 'Delete trigger',
         confirmLabel: 'Delete',
         danger: true,
@@ -233,8 +268,8 @@
               {#if g.blocking}<span class="blocking" title="Blocks task completion until it passes">Blocking</span>{/if}
               {#if g.metric}<span class="dim">· {g.metric}{g.comparator ? ` ${g.comparator}` : ''}{g.target_value != null ? ` ${g.target_value}` : ''}</span>{/if}
             </div>
-            <button class="icon-btn small" onclick={() => editGoal(i)} aria-label="Edit standing goal" title="Edit standing goal"><Icon name="edit" size={13} /></button>
-            <button class="icon-btn small" onclick={() => removeGoal(i)} aria-label="Remove standing goal" title="Remove (takes effect on Save)"><Icon name="trash" size={13} /></button>
+            <button class="icon-btn small" onclick={() => editGoal(i)} aria-label="Edit standing goal “{g.title}”" title="Edit standing goal “{g.title}”"><Icon name="edit" size={13} /></button>
+            <button class="icon-btn small" onclick={() => removeGoal(i)} aria-label="Remove standing goal “{g.title}”" title="Remove “{g.title}” (takes effect on Save)"><Icon name="trash" size={13} /></button>
           </div>
         {/each}
       </div>
@@ -295,7 +330,7 @@
           {#each swarm.triggers as t (t.id)}
             <div class="row-item">
               <div class="ri-main">
-                <span class="chip">{t.channel === 'webhook' ? 'Webhook' : t.channel === 'slack' ? 'Slack' : t.channel === 'telegram' ? 'Telegram' : t.channel}</span>
+                <span class="chip">{channelName(t.channel)}</span>
                 <span class="ri-title">{t.keyword || 'Any message'}</span>
                 <span class="dim">{t.match_chat ? `in ${t.match_chat}` : 'any chat'}</span>
                 {#if t.auto_start}<span class="dim">· auto-start</span>{/if}
@@ -307,8 +342,8 @@
                 label={`Enable trigger “${t.keyword || 'Any message'}”`}
                 title={t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
               />
-              <button class="icon-btn small" onclick={() => editTrigger(t)} aria-label="Edit trigger" title="Edit trigger"><Icon name="edit" size={13} /></button>
-              <button class="icon-btn small" onclick={() => delTrigger(t)} aria-label="Delete trigger" title="Delete trigger"><Icon name="trash" size={13} /></button>
+              <button class="icon-btn small" onclick={() => editTrigger(t)} aria-label="Edit {triggerWhere(t)}" title="Edit {triggerWhere(t)}"><Icon name="edit" size={13} /></button>
+              <button class="icon-btn small" onclick={() => delTrigger(t)} aria-label="Delete {triggerWhere(t)}" title="Delete {triggerWhere(t)}"><Icon name="trash" size={13} /></button>
             </div>
           {/each}
         </div>

@@ -22,10 +22,37 @@ pub(crate) async fn provision_worktree(
     repo: &Repo,
 ) -> Result<(String, String, String)> {
     let git = LocalGit::new(&repo.path);
-    let base_commit = git.rev_parse("HEAD").await?;
     let branch = format!("otto-run/{}", run.id);
     let path = ctx.data_dir.join("otto-runs").join(&run.id).join("work");
     let path_str = path.to_string_lossy().to_string();
+    let durable = ctx.runs.get(&run.id).await?;
+    let base_commit = match durable.base_commit.filter(|b| !b.is_empty()) {
+        Some(base) => base,
+        None => {
+            // A legacy interrupted provision has no trustworthy origin. Do not
+            // substitute today's checkout HEAD for an existing branch's base.
+            if git.branch_exists(&branch).await || git.worktree_exists(&path_str).await {
+                return Err(otto_core::Error::Conflict(
+                    "existing run worktree has no recorded base — relaunch the run".into(),
+                ));
+            }
+            let base = git
+                .rev_parse(run.base_branch.as_deref().unwrap_or("HEAD"))
+                .await?;
+            ctx.runs
+                .set_fields(
+                    &run.id,
+                    &otto_state::runs::RunPatch {
+                        base_commit: Some(base.clone()),
+                        branch: Some(branch.clone()),
+                        worktree_path: Some(path_str.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            base
+        }
+    };
     git.worktree_add_if_absent(&path_str, &branch, &base_commit)
         .await?;
     Ok((branch, path_str, base_commit))

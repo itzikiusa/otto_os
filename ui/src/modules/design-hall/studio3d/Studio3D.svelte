@@ -101,6 +101,7 @@
   let play = $state(false);
   /** Show the scene JSON beside a plain viewport (hand edits, agent diffs). */
   let showSource = $state(false);
+  let showSceneTools = $state(false);
   let turntable = $state(false);
   type RightTab = 'inspector' | 'otto' | 'links' | 'references';
   const rightTabs = $derived<TabItem<RightTab>[]>([
@@ -539,8 +540,8 @@
     </div>
   </div>
 {:else}
-  <div class="studio3d" class:wide-right={rightTab === 'otto'} data-testid="studio3d">
-    <aside class="left" aria-label="Scene" data-testid="s3d-left">
+  <div class="studio3d" class:wide-right={rightTab === 'otto'} class:scene-open={showSceneTools} data-testid="studio3d">
+    <aside class="left" id="s3d-scene-tools" aria-label="Scene" data-testid="s3d-left">
       <div class="hier">
         <Hierarchy {doc} bind:selectedId onchange={edit} {readonly} onimportGlb={() => void importModel()} />
       </div>
@@ -603,6 +604,7 @@
 
     <section class="center" aria-label="3D viewport">
       <div class="toolbar">
+        <button class="btn small scene-toggle" aria-expanded={showSceneTools} aria-controls="s3d-scene-tools" onclick={() => (showSceneTools = !showSceneTools)}>Scene</button>
         <button class="btn small" onclick={generateMenu} disabled={readonly} aria-haspopup="menu" data-testid="s3d-generate">
           <Icon name="sparkle" size={12} /> Generate <Icon name="chevronDown" size={12} />
         </button>
@@ -1086,7 +1088,11 @@
     color: var(--danger);
     font-size: var(--fs-s);
   }
+  .scene-toggle { display: none; }
   @container (max-width: 980px) {
+    .scene-toggle { display: inline-flex; }
+    .studio3d.scene-open .left { display: flex; grid-column: 1 / -1; max-block-size: 320px; border-block-end: 1px solid var(--border); }
+    .studio3d.scene-open { grid-template-rows: auto minmax(360px, 1fr); }
     .studio3d,
     .studio3d.wide-right {
       grid-template-columns: minmax(0, 1fr) 300px;
@@ -1105,7 +1111,7 @@
     .right {
       border-inline-start: 0;
       border-block-start: 1px solid var(--border);
-      max-height: 60vh;
+      max-height: 480px;
     }
   }
 </style>

@@ -30,6 +30,9 @@
     placeholder="Search… (tag:x path:y type:z)"
     aria-label="Search this vault"
     title="Full-text search. Narrow with tag:, path: or type:. Press Enter to search."
+    oninput={() => {
+      if (!vault.searchQuery.trim()) void vault.runSearch();
+    }}
     onkeydown={(e) => e.key === 'Enter' && void vault.runSearch()}
   />
   {#if vault.searching}
@@ -42,18 +45,23 @@
   {:else if vault.searchQuery.trim() && vault.searchHits.length === 0}
     <div class="dim">No notes match “{vault.searchQuery.trim()}”.</div>
   {/if}
-  <div class="hits">
-    {#each vault.searchHits as h (h.path)}
-      <button class="hit" class:reserved={h.reserved} onclick={() => void vault.open(h.path)}>
-        <div class="t">{h.title}</div>
-        <div class="p" title={h.path}>{h.path}</div>
-        {#if h.snippet}
-          <!-- Escaped above; only <mark> tags are injected. -->
-          <div class="s">{@html renderSnippet(h.snippet)}</div>
-        {/if}
-      </button>
-    {/each}
-  </div>
+  {#if !vault.searching && !vault.searchError && vault.searchedQuery && vault.searchQuery.trim() === vault.searchedQuery}
+    <div class="hits">
+      {#each vault.searchHits as h (h.path)}
+        <button class="hit" class:reserved={h.reserved} onclick={() => void vault.open(h.path)}>
+          <div class="t">{h.title}</div>
+          <div class="p" title={h.path}>{h.path}</div>
+          {#if h.snippet}
+            <!-- Escaped above; only <mark> tags are injected. -->
+            <div class="s">{@html renderSnippet(h.snippet)}</div>
+          {/if}
+        </button>
+      {/each}
+      {#if vault.searchHits.length >= 50}
+        <div class="dim cap-note">Showing the first 50 matches. Narrow with tag:, path:, or type:.</div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -79,6 +87,10 @@
     font-size: var(--fs-s);
     padding: 4px 2px;
   }
+  .cap-note {
+    font-size: var(--fs-xs);
+    padding: 6px 8px;
+  }
   .hits {
     overflow-y: auto;
     min-height: 0;
@@ -92,6 +104,7 @@
     border: none;
     border-radius: var(--radius-s);
     padding: 6px 8px;
+    min-height: var(--hit-min);
     cursor: pointer;
     color: var(--text);
   }

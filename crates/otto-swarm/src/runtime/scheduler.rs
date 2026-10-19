@@ -3,6 +3,26 @@
 //! daily trend researcher, a periodic PM status report). Modeled on
 //! `otto-improve::Scheduler`: 60s tick (one timer, woken by `CancelSignal`), DB-cursor
 //! idempotency (the agent's `schedule_json.last_run`).
+//!
+//! Shutdown: [`CancelSignal::cancel`] stops this scan from launching anything
+//! further. The check is after each await and again immediately before
+//! `tokio::spawn`, so a tick already waiting on the database does not start a
+//! turn when stop wins that race.
+//!
+//! A scheduled occurrence reserved before that spawn is provably unstarted:
+//! the row is still `queued` and has no session. [`run::emit_run`] only
+//! broadcasts the row; it does not open a session. The scheduler stops that
+//! row and rewinds only `schedule_json.last_run` when it still equals the
+//! timestamp this reserve wrote. `once` uses that cursor as the already-fired
+//! flag, so restoring its absence makes the one shot due again, and leaving
+//! the timestamp consumes it. A recurring cadence (interval, daily, weekly,
+//! cron) uses the cursor as the last served slot, so restoring the previous
+//! value keeps this slot due, and leaving the new timestamp skips it until
+//! the next one. A turn that reached `tokio::spawn` may have started: its
+//! cursor stays, and this path does not replay the turn. Utilization reserves
+//! have no cadence cursor; those queued rows stay for startup `fail_running`,
+//! which stops them and does not rewind a schedule. Work already spawned
+//! keeps running on its own handle.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -30,7 +50,7 @@ async fn supervise(ctx: SwarmRt, cancel: CancelSignal) {
         if cancel.is_cancelled() {
             return;
         }
-        if let Err(e) = tick(&ctx).await {
+        if let Err(e) = tick(&ctx, &cancel).await {
             tracing::warn!("swarm scheduler tick: {e}");
         }
         // One timer per scan; cancel() wakes it (no 500 ms polling slices).
@@ -40,11 +60,57 @@ async fn supervise(ctx: SwarmRt, cancel: CancelSignal) {
     }
 }
 
-async fn tick(ctx: &SwarmRt) -> otto_core::Result<()> {
+/// Post-await / pre-spawn gate. False once the supervisor is cancelled.
+fn launch_after_await(cancel: &CancelSignal) -> bool {
+    otto_core::cancel_signal::supervisor_may_launch(cancel)
+}
+
+/// Stop a scheduled row that is still queued with no session, and rewind only
+/// the cursor this reserve wrote. A false result means the turn may have
+/// started or the cursor already moved; either way the turn is not spawned.
+async fn release_unstarted_scheduled(
+    ctx: &SwarmRt,
+    run_id: &str,
+    agent_id: &str,
+    fired_at: &str,
+    previous_last_run: Option<&str>,
+) {
+    match ctx
+        .swarm_repo()
+        .release_unstarted_scheduled_occurrence(run_id, agent_id, fired_at, previous_last_run)
+        .await
+    {
+        Ok(true) => tracing::warn!(
+            run = %run_id,
+            "swarm scheduler: stop won before the turn started; unstarted occurrence released"
+        ),
+        Ok(false) => tracing::warn!(
+            run = %run_id,
+            "swarm scheduler: stop won after reserve; occurrence left because the turn may have started"
+        ),
+        Err(e) => tracing::warn!(
+            run = %run_id,
+            "swarm scheduler: release unstarted occurrence: {e}"
+        ),
+    }
+}
+
+async fn tick(ctx: &SwarmRt, cancel: &CancelSignal) -> otto_core::Result<()> {
     // Board-utilization watchdog rides the same 60s scan (its own 5-min gate).
-    utilization_pass(ctx).await;
+    utilization_pass(ctx, cancel).await;
+    if !launch_after_await(cancel) {
+        return Ok(());
+    }
     let now = Utc::now();
-    for agent in ctx.swarm_repo().list_scheduled_agents().await? {
+    let agents = ctx.swarm_repo().list_scheduled_agents().await?;
+    // Stop can land while the agent list is in flight. Do not reserve or spawn.
+    if !launch_after_await(cancel) {
+        return Ok(());
+    }
+    for agent in agents {
+        if !launch_after_await(cancel) {
+            break;
+        }
         let Some(sched) = agent.schedule.clone() else {
             continue;
         };
@@ -59,33 +125,73 @@ async fn tick(ctx: &SwarmRt) -> otto_core::Result<()> {
             continue;
         }
         let _operation = crate::runtime::engine::operation_guard(&agent.swarm_id).await;
-        // Swarm must be active and under its parallel cap; one turn per agent.
+        if !launch_after_await(cancel) {
+            break;
+        }
+        let fired_at = now.to_rfc3339();
+        let previous_last_run = sched
+            .get("last_run")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // Swarm must be active, not held by a pause reason, and under its
+        // parallel cap; one turn per agent. A verify/fix lock is not an
+        // active run, so the busy check alone used to launch over it.
         let swarm = match ctx.swarm_repo().get_swarm(&agent.swarm_id).await {
-            Ok(s) if s.status == "active" => s,
-            _ => continue,
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(agent = %agent.id, "swarm scheduler: load swarm: {e}");
+                continue;
+            }
         };
+        if !scheduled_turn_open(&swarm.status, swarm.pause_reason.as_deref(), false) {
+            continue;
+        }
+        if let Some(reason) = ctx.budget_blocked(&swarm.workspace_id).await {
+            let text = reason.unwrap_or_else(|| "workspace budget reached".to_string());
+            crate::runtime::engine::pause_for_budget(ctx, &swarm, &text).await;
+            continue;
+        }
+        if let Some(reason) = crate::runtime::engine::budget_exceeded(ctx, &swarm).await {
+            crate::runtime::engine::pause_for_budget(ctx, &swarm, &reason).await;
+            continue;
+        }
+        if !scheduled_turn_open(
+            &swarm.status,
+            swarm.pause_reason.as_deref(),
+            crate::runtime::verify::agent_under_verification(&agent.id),
+        ) {
+            continue;
+        }
         let cap = swarm
             .config
             .get("max_parallel_sessions")
             .and_then(|v| v.as_i64())
             .unwrap_or(4)
             .max(1);
-        if ctx
-            .swarm_repo()
-            .active_run_count(&swarm.id)
-            .await
-            .unwrap_or(0)
-            >= cap
-        {
+        // A failed count used to read as zero and a failed busy-check as
+        // idle, so a tick could open another run while the board was full.
+        let active = match ctx.swarm_repo().active_run_count(&swarm.id).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(swarm = %swarm.id, "swarm scheduler: active run count: {e}");
+                continue;
+            }
+        };
+        if active >= cap {
             continue;
         }
-        if ctx
-            .swarm_repo()
-            .agent_has_active_run(&agent.id)
-            .await
-            .unwrap_or(false)
-        {
+        let busy = match ctx.swarm_repo().agent_has_active_run(&agent.id).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(agent = %agent.id, "swarm scheduler: active run check: {e}");
+                continue;
+            }
+        };
+        if !schedule_slot_open(Some(active), Some(busy), cap) {
             continue;
+        }
+        if !launch_after_await(cancel) {
+            break;
         }
 
         // Reservation + cursor advance commit together, guarded on the stored
@@ -103,13 +209,38 @@ async fn tick(ctx: &SwarmRt) -> otto_core::Result<()> {
                     trigger: "scheduled".into(),
                 },
                 &sched,
-                &now.to_rfc3339(),
+                &fired_at,
             )
             .await
         {
             Ok(None) => {}
             Ok(Some(run)) => {
+                if !launch_after_await(cancel) {
+                    // Reserved, not started. Give the occurrence back. Do not
+                    // emit, and do not start the turn.
+                    release_unstarted_scheduled(
+                        ctx,
+                        &run.id,
+                        &agent.id,
+                        &fired_at,
+                        previous_last_run.as_deref(),
+                    )
+                    .await;
+                    break;
+                }
                 run::emit_run(ctx, &run.id).await;
+                if !launch_after_await(cancel) {
+                    // The broadcast is not a session. The row is still queued.
+                    release_unstarted_scheduled(
+                        ctx,
+                        &run.id,
+                        &agent.id,
+                        &fired_at,
+                        previous_last_run.as_deref(),
+                    )
+                    .await;
+                    break;
+                }
                 let ctx2 = ctx.clone();
                 tokio::spawn(async move {
                     let _ = run::run_turn(ctx2, run).await;
@@ -149,7 +280,7 @@ fn util_cursor() -> &'static Mutex<UtilCursors> {
     CUR.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-async fn utilization_pass(ctx: &SwarmRt) {
+async fn utilization_pass(ctx: &SwarmRt, cancel: &CancelSignal) {
     // Active swarms = the ones with a live coordinator (start/resume register it).
     let swarm_ids: Vec<String> = ctx.swarm_coords().lock().unwrap().keys().cloned().collect();
     let now = Instant::now();
@@ -162,17 +293,36 @@ async fn utilization_pass(ctx: &SwarmRt) {
             }
             e.0 = Some(now);
         }
-        if let Err(e) = check_utilization(ctx, &sid).await {
+        if !launch_after_await(cancel) {
+            return;
+        }
+        if let Err(e) = check_utilization(ctx, &sid, cancel).await {
             tracing::warn!(swarm = %sid, "swarm utilization check: {e}");
         }
     }
 }
 
-async fn check_utilization(ctx: &SwarmRt, sid: &str) -> otto_core::Result<()> {
+async fn check_utilization(
+    ctx: &SwarmRt,
+    sid: &str,
+    cancel: &CancelSignal,
+) -> otto_core::Result<()> {
     let _operation = crate::runtime::engine::operation_guard(sid).await;
+    if !launch_after_await(cancel) {
+        return Ok(());
+    }
     let repo = &ctx.swarm_repo();
     let swarm = repo.get_swarm(&sid.to_string()).await?;
-    if swarm.status != "active" {
+    if !scheduled_turn_open(&swarm.status, swarm.pause_reason.as_deref(), false) {
+        return Ok(());
+    }
+    if let Some(reason) = ctx.budget_blocked(&swarm.workspace_id).await {
+        let text = reason.unwrap_or_else(|| "workspace budget reached".to_string());
+        crate::runtime::engine::pause_for_budget(ctx, &swarm, &text).await;
+        return Ok(());
+    }
+    if let Some(reason) = crate::runtime::engine::budget_exceeded(ctx, &swarm).await {
+        crate::runtime::engine::pause_for_budget(ctx, &swarm, &reason).await;
         return Ok(());
     }
     let cap = swarm
@@ -298,6 +448,9 @@ async fn check_utilization(ctx: &SwarmRt, sid: &str) -> otto_core::Result<()> {
     else {
         return Ok(());
     };
+    if !launch_after_await(cancel) {
+        return Ok(());
+    }
     let mut run = repo
         .reserve_run(
             NewRun {
@@ -312,6 +465,16 @@ async fn check_utilization(ctx: &SwarmRt, sid: &str) -> otto_core::Result<()> {
             false,
         )
         .await?;
+    if !launch_after_await(cancel) {
+        // Reserved. Utilization has no cadence cursor, so the row stays for
+        // startup `fail_running`. Do not write a directive, emit, post, or
+        // start the turn while shutdown is in progress.
+        tracing::warn!(
+            run = %run.id,
+            "swarm scheduler: stop won after utilization reserve; turn not started"
+        );
+        return Ok(());
+    }
     let directive = format!(
         "UTILIZATION CHECK — the board is under-utilized: {active}/{cap} sessions busy, 0 ready \
          tasks, {open} open task(s) stuck (blocked / in review / waiting). You are the manager: \
@@ -346,6 +509,16 @@ async fn check_utilization(ctx: &SwarmRt, sid: &str) -> otto_core::Result<()> {
         json!({ "event": "utilization_escalation", "agent_id": leader.id }),
     )
     .await;
+    if !launch_after_await(cancel) {
+        // Reserved and announced. Do not start the turn. The supervisor
+        // token does not mark this row stopped; shutdown settles running
+        // rows on its own path.
+        tracing::warn!(
+            run = %run.id,
+            "swarm scheduler: stop won after utilization reserve; turn not started"
+        );
+        return Ok(());
+    }
     let ctx2 = ctx.clone();
     tokio::spawn(async move {
         let _ = run::run_turn(ctx2, run).await;
@@ -357,6 +530,35 @@ fn parse_ts(v: Option<&Value>) -> Option<DateTime<Utc>> {
     v.and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc))
+}
+
+/// A scheduled or utilization turn needs an active swarm, no pause reason, and
+/// an agent that is not held by verification. The busy-run check is separate.
+/// `reserve_run_on` applies the same pause-reason rule in the admission
+/// write: an active row with a nonempty `pause_reason` is refused, and
+/// `allow_paused` admits only `paused` with an empty reason. Whitespace is
+/// not empty, and the reason is not trimmed.
+pub(crate) fn scheduled_turn_open(
+    status: &str,
+    pause_reason: Option<&str>,
+    under_verification: bool,
+) -> bool {
+    status == "active"
+        && pause_reason.filter(|reason| !reason.is_empty()).is_none()
+        && !under_verification
+}
+
+/// Whether a due agent may be given a new scheduled run. `None` is a failed
+/// read of the active-run count or the agent's busy flag, and stays closed.
+pub(crate) fn schedule_slot_open(
+    active_runs: Option<i64>,
+    agent_busy: Option<bool>,
+    cap: i64,
+) -> bool {
+    matches!(
+        (active_runs, agent_busy),
+        (Some(n), Some(false)) if n < cap
+    )
 }
 
 /// Is a scheduled agent due to fire? Delegates to the shared
@@ -391,6 +593,90 @@ pub fn is_due(sched: &Value, created: Option<DateTime<Utc>>, now: DateTime<Utc>)
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// The scan is parked on its await. Stop is signaled before that await
+    /// completes. The post-await check must not admit a launch. A worker that
+    /// already started is still running afterwards.
+    #[tokio::test]
+    async fn awaiting_tick_does_not_launch_after_stop() {
+        let cancel = CancelSignal::new();
+        let (release_scan, scan_done) = tokio::sync::oneshot::channel::<()>();
+        let (release_work, work_done) = tokio::sync::oneshot::channel::<()>();
+        let scan = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let _ = scan_done.await;
+                launch_after_await(&cancel)
+            })
+        };
+        let detached = tokio::spawn(async move { work_done.await.ok() });
+        cancel.cancel();
+        release_scan.send(()).unwrap();
+        assert!(!scan.await.unwrap());
+        assert!(!detached.is_finished());
+        release_work.send(()).unwrap();
+        detached.await.unwrap();
+    }
+
+    #[test]
+    fn pause_reason_or_verification_closes_a_scheduled_turn() {
+        assert!(scheduled_turn_open("active", None, false));
+        assert!(scheduled_turn_open("active", Some(""), false));
+        assert!(!scheduled_turn_open(
+            "active",
+            Some("cost budget reached"),
+            false
+        ));
+        assert!(!scheduled_turn_open("paused", None, false));
+        assert!(!scheduled_turn_open("active", None, true));
+    }
+
+    #[test]
+    fn failed_cap_or_busy_read_does_not_open_a_scheduled_slot() {
+        assert!(schedule_slot_open(Some(0), Some(false), 4));
+        assert!(!schedule_slot_open(Some(4), Some(false), 4));
+        assert!(!schedule_slot_open(Some(0), Some(true), 4));
+        assert!(!schedule_slot_open(None, Some(false), 4));
+        assert!(!schedule_slot_open(Some(0), None, 4));
+    }
+
+    /// `once` stores the fired flag in `last_run`: restoring its absence makes
+    /// the shot due again, and leaving the timestamp consumes it. A recurring
+    /// cadence stores the served slot: restoring the previous cursor keeps
+    /// that slot due, and leaving the fired timestamp skips it.
+    #[test]
+    fn once_cursor_is_the_fired_flag_and_recurring_cursor_is_the_served_slot() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 5, 10, 0, 0).unwrap();
+        let once = json!({
+            "cadence": "once",
+            "run_at": "2026-10-05T09:00:00+00:00",
+            "enabled": true
+        });
+        assert!(is_due(&once, None, now));
+        let consumed = json!({
+            "cadence": "once",
+            "run_at": "2026-10-05T09:00:00+00:00",
+            "enabled": true,
+            "last_run": "2026-10-05T09:00:01+00:00"
+        });
+        assert!(!is_due(&consumed, None, now));
+
+        let previous = "2026-10-05T08:00:00+00:00";
+        let interval = json!({
+            "cadence": "interval",
+            "every_min": 60,
+            "enabled": true,
+            "last_run": previous
+        });
+        assert!(is_due(&interval, None, now));
+        let fired = json!({
+            "cadence": "interval",
+            "every_min": 60,
+            "enabled": true,
+            "last_run": "2026-10-05T10:00:00+00:00"
+        });
+        assert!(!is_due(&fired, None, now));
+    }
 
     #[test]
     fn interval_due_when_never_run() {

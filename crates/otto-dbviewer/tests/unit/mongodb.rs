@@ -337,7 +337,7 @@ fn shorthand_aggregate() {
 fn shorthand_count() {
     let p = parse_command(r#"db.users.countDocuments({"active":true})"#).unwrap();
     assert_eq!(p.collection, "users");
-    assert_eq!(p.op, MongoOp::Count);
+    assert_eq!(p.op, MongoOp::CountDocuments);
 }
 
 #[test]
@@ -502,9 +502,11 @@ fn bson_to_json_typed_preserves_oid_and_date() {
 // ---- server-side cancel helpers -----------------------------------------
 
 #[test]
-fn mongo_comment_tag_is_namespaced_by_query_id() {
-    assert_eq!(mongo_comment_tag("q-42"), "otto:q-42");
-    assert_eq!(mongo_comment_tag(""), "otto:");
+fn mongo_comment_tag_is_server_owned_and_unique() {
+    let first = mongo_comment_tag();
+    let second = mongo_comment_tag();
+    assert!(first.starts_with("otto:"));
+    assert_ne!(first, second);
 }
 
 #[test]
@@ -676,14 +678,14 @@ fn bson_to_json_typed_binary_uuid_vs_generic() {
     let uuid = BsonUuid::new();
     let v = bson_to_json_typed(&Bson::Binary(BsonBinary::from(uuid)));
     assert_eq!(v, json!({ "$uuid": uuid.to_string() }));
-    // Legacy UUID subtype (3) renders the same way.
+    // Legacy UUID subtype (3) must keep its subtype; $uuid always means 4.
     let legacy = BsonBinary {
         subtype: BinarySubtype::UuidOld,
         bytes: uuid.bytes().to_vec(),
     };
     assert_eq!(
-        bson_to_json_typed(&Bson::Binary(legacy)),
-        json!({ "$uuid": uuid.to_string() })
+        bson_to_json_typed(&Bson::Binary(legacy))["$binary"]["subType"],
+        json!("03")
     );
     // Generic bytes → canonical `$binary` with a 2-hex lowercase subtype.
     let raw = BsonBinary {
@@ -890,4 +892,394 @@ fn graph_columns_put_id_first() {
     ];
     let names: Vec<String> = graph_columns(&rows).into_iter().map(|c| c.name).collect();
     assert_eq!(names, ["_id", "a"]);
+}
+
+#[test]
+fn distinct_is_a_supported_read() {
+    for statement in [
+        r#"db.users.distinct("country")"#,
+        "db.users.distinct('profile.country', {active: true})",
+        r#"{collection: 'users', op: 'distinct', field: 'country', filter: {active: true}}"#,
+    ] {
+        assert!(parse_command(statement).is_ok(), "{statement}");
+        assert!(statement_is_read_only(statement));
+    }
+}
+
+#[test]
+fn distinct_preserves_field_and_nested_filter() {
+    let parsed =
+        parse_command("db.users.distinct('profile.country', {active: true, age: {$gt: 20}})")
+            .unwrap();
+    assert_eq!(parsed.op, MongoOp::Distinct);
+    assert_eq!(parsed.distinct_field.as_deref(), Some("profile.country"));
+    assert_eq!(
+        parsed.filter,
+        Some(doc! {"active": true, "age": {"$gt": 20_i64}})
+    );
+}
+
+#[test]
+fn distinct_rejects_invalid_or_ignored_arguments() {
+    for statement in [
+        "db.users.distinct()",
+        "db.users.distinct(123)",
+        "db.users.distinct('')",
+        "db.users.distinct('a', [])",
+        "db.users.distinct('a', {}, {collation: {locale: 'en'}})",
+        "db.users.distinct('a').limit(1)",
+        "db.users.distinct('a').sort({a: 1})",
+        "db.users.distinct('a').find({})",
+        "db.users.find({}).distinct('a')",
+        "{collection:'users', op:'distinct'}",
+        "{collection:'users', op:'distinct', field:123}",
+        "{collection:'users', op:'distinct', field:'a', limit:1}",
+    ] {
+        assert!(parse_command(statement).is_err(), "{statement}");
+    }
+}
+
+#[test]
+fn distinct_read_gate_checks_all_statements() {
+    use crate::types::{statement_is_write, Engine};
+    assert!(!statement_is_write(
+        Engine::Mongodb,
+        "db.c.distinct('x'); db.c.distinct('y', {active:true});"
+    ));
+    assert!(statement_is_write(
+        Engine::Mongodb,
+        "db.c.distinct('x'); db.c.deleteMany({});"
+    ));
+    assert!(!statement_is_write(
+        Engine::Mongodb,
+        "db.c.distinct('x', {text:'deleteMany({})'})"
+    ));
+}
+
+#[test]
+fn distinct_values_keep_types_and_cap_without_pagination() {
+    let result = distinct_to_result(
+        vec![
+            Bson::String("a".into()),
+            Bson::Int32(2),
+            Bson::Null,
+            Bson::Boolean(true),
+        ],
+        3,
+        Instant::now(),
+    );
+    assert_eq!(result.columns[0].name, "value");
+    assert_eq!(
+        result.rows,
+        vec![vec![json!("a")], vec![json!(2)], vec![Value::Null]]
+    );
+    assert_eq!(result.stats.row_count, 3);
+    assert!(result.truncated);
+    assert!(result.auto_limited.is_none());
+    assert!(result.next_cursor.is_none());
+    let empty = distinct_to_result(vec![], 10, Instant::now());
+    assert_eq!(empty.columns[0].name, "value");
+    assert!(empty.rows.is_empty());
+    assert!(!empty.truncated);
+}
+
+#[test]
+fn native_parser_never_silently_discards_shell_semantics() {
+    for statement in [
+        "db.c.find({}, {}, {collation: {locale: 'en'}})",
+        "db.c.updateOne({}, {$set: {a: 1}}, {upsert: true})",
+        "db.c.replaceOne({}, {a: 1}, {upsert: true})",
+        "db.c.find({}).limit('bad')",
+        "db.c.find({}).limit(-2)",
+        "db.c.find({}).countDocuments({})",
+        "db.c.count({}).sort({a: 1})",
+        "db.c.find({}).aggregate([])",
+        "db.c.find({}).explain('executionStats')",
+        "db.c.createIndex({a:1}, {}, {extra:true})",
+    ] {
+        assert!(
+            parse_command(statement).is_err(),
+            "silently accepted: {statement}"
+        );
+    }
+}
+
+#[test]
+fn native_zero_limit_means_no_explicit_limit() {
+    assert_eq!(parse_command("db.c.find({}).limit(0)").unwrap().limit, None);
+}
+
+#[test]
+fn native_dotted_collection_preserves_collection_name() {
+    let parsed = parse_command("db.system.profile.find({})").unwrap();
+    assert_eq!(parsed.collection, "system.profile");
+}
+
+#[test]
+fn native_literals_do_not_change_special_values_or_constructor_arguments() {
+    for statement in [
+        "db.c.find({a: NaN})",
+        "db.c.find({a: Infinity})",
+        "db.c.find({a: undefined})",
+        "db.c.find({a: Date()})",
+        "db.c.find({a: new Date(2020, 1, 1)})",
+        r#"db.c.find({a: '\uD83D\uDE00'})"#,
+    ] {
+        assert!(
+            parse_command(statement).is_err(),
+            "lossy literal: {statement}"
+        );
+    }
+}
+
+#[test]
+fn sql_translation_rejects_clauses_it_cannot_preserve() {
+    for statement in [
+        "SELECT DISTINCT country FROM users",
+        "SELECT * FROM users LIMIT 5 OFFSET 2",
+        "SELECT * FROM users LIMIT 0",
+    ] {
+        assert!(
+            mongo_sql::translate(statement).is_err(),
+            "silently ignored clause: {statement}"
+        );
+    }
+}
+
+#[test]
+fn json_commands_reject_unimplemented_fields_and_bad_limits() {
+    for statement in [
+        r#"{collection:'c',op:'find',skip:2}"#,
+        r#"{collection:'c',op:'find',limit:-2}"#,
+        r#"{collection:'c',op:'find',limit:'invalid'}"#,
+        r#"{collection:'c',op:'updateOne',filter:{},update:{$set:{a:1}},upsert:true}"#,
+        r#"{collection:'c',op:'count',sort:{a:1}}"#,
+    ] {
+        assert!(
+            parse_command(statement).is_err(),
+            "ignored command option: {statement}"
+        );
+    }
+    assert_eq!(
+        parse_command("{collection:'c',limit:0}").unwrap().limit,
+        None
+    );
+}
+
+#[test]
+fn canonical_ejson_double_and_bounds_are_real_bson_values() {
+    let value = json_to_bson(&json!({"$numberDouble":"NaN"})).unwrap();
+    assert!(matches!(value, Bson::Double(v) if v.is_nan()));
+    assert_eq!(json_to_bson(&json!({"$minKey":1})).unwrap(), Bson::MinKey);
+    assert_eq!(json_to_bson(&json!({"$maxKey":1})).unwrap(), Bson::MaxKey);
+    assert!(json_to_bson(&json!({"$numberDouble":"not-a-double"})).is_err());
+}
+
+#[test]
+fn rare_bson_values_round_trip_without_turning_into_strings_or_null() {
+    for value in [
+        Bson::MinKey,
+        Bson::MaxKey,
+        Bson::Undefined,
+        Bson::RegularExpression(mongodb::bson::Regex {
+            pattern: "^a".into(),
+            options: "i".into(),
+        }),
+        Bson::JavaScriptCode("return 1".into()),
+        Bson::Symbol("legacy".into()),
+        Bson::Binary(BsonBinary {
+            subtype: BinarySubtype::UuidOld,
+            bytes: vec![1; 16],
+        }),
+    ] {
+        let wire = bson_to_json_typed(&value);
+        assert_eq!(
+            json_to_bson(&wire).unwrap(),
+            value,
+            "lost BSON type: {wire}"
+        );
+    }
+    assert_eq!(
+        bson_to_json_typed(&Bson::Double(f64::INFINITY)),
+        json!({"$numberDouble":"Infinity"})
+    );
+}
+
+#[test]
+fn sql_aggregate_arguments_are_not_silently_ignored() {
+    for statement in [
+        "SELECT COUNT(DISTINCT country) FROM users",
+        "SELECT SUM(1) FROM users",
+        "SELECT SUM(age) OVER () FROM users",
+        "SELECT COUNT(*) OVER () FROM users",
+    ] {
+        assert!(
+            mongo_sql::translate(statement).is_err(),
+            "ignored aggregate semantics: {statement}"
+        );
+    }
+    let translated = mongo_sql::translate("SELECT country AS region FROM users").unwrap();
+    let parsed = parse_command(&translated).unwrap();
+    assert_eq!(
+        parsed.projection.unwrap().get_str("region").unwrap(),
+        "$country"
+    );
+    let translated = mongo_sql::translate("SELECT COUNT(age) FROM users").unwrap();
+    assert!(
+        translated.contains("$cond"),
+        "COUNT(field) must exclude null and missing values"
+    );
+}
+
+#[test]
+fn mongosh_uri_encodes_discrete_options_and_ipv6() {
+    let mut cfg = script_cfg(json!({"auth_source":"auth&other=x", "replica_set":"rs&other=y"}));
+    cfg.host = "::1".into();
+    let uri = mongosh_invocation(&cfg, Some("shop")).unwrap();
+    assert!(uri.contains("@[::1]:27017/shop?"), "{uri}");
+    assert!(uri.contains("authSource=auth%26other%3Dx"));
+    assert!(uri.contains("replicaSet=rs%26other%3Dy"));
+}
+
+#[test]
+fn native_missing_delete_filter_and_malformed_json_cannot_expand_scope() {
+    for statement in [
+        "db.c.deleteMany()",
+        "db.c.deleteMany({} /*)",
+        "db.c.deleteOne()",
+        "{collection:'c',pipeline:'not-an-array'}",
+        "{collection:'c',op:42}",
+        "{collection:'c',op:'deleteMany'}",
+        "{collection:'c',op:'deleteMany',filter:null}",
+        "{collection:'c',op:'deleteMany',filter:{},explain:'true'}",
+    ] {
+        assert!(
+            parse_command(statement).is_err(),
+            "invalid input silently widened: {statement}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explain_never_executes_an_arbitrary_script() {
+    let error = MongoDriver::default()
+        .run(
+            &script_cfg(json!({})),
+            &QueryRequest {
+                statement: "print('must not run')".into(),
+                explain: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("explain"), "{error}");
+}
+
+#[tokio::test]
+async fn repeated_client_query_ids_do_not_share_cancel_tags() {
+    let first = CancelToken::new();
+    let second = CancelToken::new();
+    let request = QueryRequest {
+        statement: "unsupported".into(),
+        query_id: Some("same".into()),
+        explain: true,
+        ..Default::default()
+    };
+    let driver = MongoDriver::default();
+    for token in [&first, &second] {
+        assert!(driver
+            .run_tracked(&script_cfg(json!({})), &request, token)
+            .await
+            .is_err());
+    }
+    let Some(QueryHandle::MongoComment(first)) = first.handle() else {
+        panic!("missing first handle")
+    };
+    let Some(QueryHandle::MongoComment(second)) = second.handle() else {
+        panic!("missing second handle")
+    };
+    assert_ne!(first, second);
+}
+
+#[test]
+fn shell_expression_detection_preserves_formatted_chains_and_actual_scripts() {
+    assert!(single_db_expression("/* comment */\ndb.getSiblingDB('x')\n.c.find({})").is_some());
+    assert!(single_db_expression("db.getSiblingDB('x');\nprint('done')").is_none());
+    assert!(single_db_expression("db.getSiblingDB('x')\ndb.c.find({})").is_none());
+    assert!(single_db_expression("const x = db.getSiblingDB('x'); print(x)").is_none());
+}
+
+#[test]
+fn extreme_bson_dates_round_trip_through_grid_and_export() {
+    for millis in [i64::MIN, i64::MAX] {
+        let value = Bson::DateTime(BsonDateTime::from_millis(millis));
+        assert_eq!(json_to_bson(&bson_to_json_typed(&value)).unwrap(), value);
+    }
+}
+
+#[test]
+fn legacy_count_is_not_count_documents() {
+    for text in [
+        "db.c.count()",
+        "db.c.find({}).limit(2).count()",
+        r#"{"collection":"c","op":"count"}"#,
+    ] {
+        assert_eq!(parse_command(text).unwrap().op, MongoOp::Count, "{text}");
+    }
+    assert_eq!(
+        parse_command(r#"{"collection":"c","op":"countDocuments"}"#)
+            .unwrap()
+            .op,
+        MongoOp::CountDocuments
+    );
+    let command = legacy_count_command("c", None, Some(1200), Some("execution"));
+    assert!(!command.contains_key("query"));
+    assert_eq!(command.get_i64("maxTimeMS").unwrap(), 1200);
+    assert_eq!(command.get_str("comment").unwrap(), "execution");
+    for n in [Bson::Int32(3), Bson::Int64(3), Bson::Double(3.0)] {
+        assert_eq!(mongo_count_value(&doc! {"n": n}).unwrap(), 3);
+    }
+    for n in [
+        Bson::Int32(-1),
+        Bson::Double(1.5),
+        Bson::Double(f64::NAN),
+        Bson::String("3".into()),
+    ] {
+        assert!(mongo_count_value(&doc! {"n": n}).is_err());
+    }
+}
+
+#[tokio::test]
+async fn native_cancel_timeout_returns_error_for_service_abort_fallback() {
+    let error =
+        mongo_cancel_with_timeout(std::time::Duration::from_millis(1), std::future::pending())
+            .await
+            .unwrap_err();
+    assert!(error.to_string().contains("native cancellation timed out"));
+    mongo_cancel_with_timeout(std::time::Duration::from_secs(1), async { Ok(()) })
+        .await
+        .unwrap();
+    let error = mongo_cancel_with_timeout(std::time::Duration::from_secs(1), async {
+        Err(types::upstream("control connection failed"))
+    })
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("control connection failed"));
+}
+
+#[test]
+fn native_chains_accept_comment_trivia_but_not_unclosed_comments() {
+    for query in [
+        "db.c.find({}) // process.env db.getSiblingDB(",
+        "db.c.find({}) /* comment */",
+        "db.c.find({}) /* comment */ .limit(2)",
+        "db.c.find({}) // comment\n.sort({x:1})",
+    ] {
+        assert_eq!(parse_command(query).unwrap().op, MongoOp::Find, "{query}");
+        assert!(statement_is_read_only(query));
+    }
+    assert!(parse_command("db.c.find({}) /* unfinished").is_err());
+    assert!(parse_command("db.c.find({}) /* closed */ garbage").is_err());
+    assert!(parse_command("db.c.find({}) // comment\ndb.c.deleteMany({})").is_err());
 }

@@ -9,7 +9,7 @@
 //!     Blender outputs (`meta.derived_from`) also get a `derived_from` link to
 //!     the artifact mirrored from their source attachment.
 //!   - `canvas_scenes` → one `otto-canvas` whiteboard artifact each (the scene
-//!     document kept verbatim), linked to its story when it has one.
+//!     document made self-contained with its image bytes), linked to its story.
 //!
 //! Idempotency: `design_artifacts(source_kind, source_id)` is unique, and the
 //! import remembers each source's `updated_at` + content sha in
@@ -133,6 +133,9 @@ async fn stamp_source(
     }
     next.meta["imported_from"]["source_updated_at"] = json!(updated_at);
     next.meta["imported_from"]["source_sha256"] = json!(sha);
+    if a.source_kind.as_deref() == Some(SOURCE_SCENE) {
+        next.meta["imported_from"]["portable_images"] = json!(true);
+    }
     svc.store().write_artifact_meta(&next).await?;
     Ok(())
 }
@@ -375,25 +378,24 @@ async fn import_scenes(
         let updated_at: String = h.get("updated_at");
         let existing = index.get(&(SOURCE_SCENE.to_string(), id.clone()));
         if let Some(a) = existing {
-            if a.meta["imported_from"]["source_updated_at"].as_str() == Some(updated_at.as_str()) {
+            if a.meta["imported_from"]["source_updated_at"].as_str() == Some(updated_at.as_str())
+                && a.meta["imported_from"]["portable_images"] == true
+            {
                 report.unchanged += 1;
                 continue;
             }
         }
-        let Some(r) = sqlx::query(
-            "SELECT id, workspace_id, story_id, title, doc_json, section, created_by,
-                    created_at, updated_at
-             FROM canvas_scenes WHERE id = ?",
-        )
-        .bind(&id)
-        .fetch_optional(svc.store().pool())
-        .await
-        .map_err(|e| Error::Internal(format!("design import: read canvas scene: {e}")))?
-        else {
-            continue; // deleted meanwhile
+        let repo = otto_state::CanvasRepo::new(svc.store().pool().clone());
+        let scene = match repo.portable_scene(&id).await {
+            Ok(Some(scene)) => scene,
+            Ok(None) => continue,
+            Err(e) => {
+                push_err(report, format!("canvas scene {id}: {e}"));
+                continue;
+            }
         };
-        let r = &r;
-        let doc: String = r.get("doc_json");
+        let updated_at = scene.updated_at.to_rfc3339();
+        let doc = scene.doc_json;
         let bytes = doc.clone().into_bytes();
         if bytes.len() > format::MAX_CONTENT_BYTES {
             push_err(
@@ -438,10 +440,10 @@ async fn import_scenes(
                     .or_else(|| v.get("type").and_then(Value::as_str).map(str::to_string))
             })
             .unwrap_or_else(|| "mermaid".to_string());
-        let section: Option<String> = r.get("section");
-        let story_id: Option<String> = r.get("story_id");
-        let title: String = r.get("title");
-        let created_at: String = r.get("created_at");
+        let section = scene.section;
+        let story_id = scene.story_id;
+        let title = scene.title;
+        let created_at = scene.created_at;
         let meta = json!({
             "imported_from": {
                 "kind": SOURCE_SCENE,
@@ -449,12 +451,13 @@ async fn import_scenes(
                 "story_id": story_id,
                 "section": section,
                 "canvas_format": canvas_format,
+                "portable_images": true,
                 "source_sha256": sha,
                 "source_updated_at": updated_at,
             }
         });
         let input = CreateInput {
-            workspace_id: r.get("workspace_id"),
+            workspace_id: scene.workspace_id,
             project_id: None,
             studio: Some("whiteboard".into()),
             format: "otto-canvas".into(),
@@ -468,11 +471,11 @@ async fn import_scenes(
             content: Some(bytes),
             story_id,
             derived_from: None,
-            created_by: r.get("created_by"),
+            created_by: scene.created_by,
             author: Author::system("import"),
             message: Some("Imported from Canvas".into()),
             source: Some((SOURCE_SCENE.to_string(), id.clone())),
-            created_at: parse_ts(&created_at),
+            created_at: Some(created_at),
             version_kind: Some("import".into()),
             validate: false,
         };
@@ -807,5 +810,62 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(still, changed);
+    }
+    #[tokio::test]
+    async fn imported_canvas_images_survive_source_deletion_and_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        let repo = otto_state::CanvasRepo::new(pool);
+        let image = "data:image/png;base64,aGVsbG8=";
+        let inner = json!({"type":"excalidraw", "elements":[], "files": {
+            "img": {"id":"img", "mimeType":"image/png", "dataURL":image}
+        }});
+        let scene = repo.create(otto_state::NewScene {
+            workspace_id: "w1".into(), story_id: None, title: "Board".into(),
+            doc_json: json!({"type":"otto-canvas", "version":1, "format":"excalidraw", "source":inner.to_string()}).to_string(),
+            provider: "claude".into(), section: None, created_by: "u1".into(),
+        }).await.unwrap();
+        assert!(scene.doc_json.contains("otto-canvas-file:"));
+        run(&svc).await.unwrap();
+        let imported = svc
+            .store()
+            .find_by_source(SOURCE_SCENE, &scene.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let fork = svc
+            .create_artifact(CreateInput {
+                workspace_id: "w1".into(),
+                project_id: None,
+                studio: None,
+                format: "otto-canvas".into(),
+                title: "Copy".into(),
+                tags: vec![],
+                meta: json!({}),
+                content: None,
+                story_id: None,
+                derived_from: Some(crate::types::ForkFrom {
+                    artifact_id: imported.id.clone(),
+                    version_id: None,
+                }),
+                created_by: "u1".into(),
+                author: Author::user("u1"),
+                message: None,
+                source: None,
+                created_at: None,
+                version_kind: None,
+                validate: true,
+            })
+            .await
+            .unwrap();
+        repo.delete(&scene.id).await.unwrap();
+        assert_eq!(repo.file_store_stats().await.unwrap().0, 0);
+        for artifact in [&imported, &fork.artifact] {
+            let body = svc.head_content(artifact).await.unwrap().1;
+            let doc: Value = serde_json::from_slice(&body).unwrap();
+            let inner: Value = serde_json::from_str(doc["source"].as_str().unwrap()).unwrap();
+            assert_eq!(inner["files"]["img"]["dataURL"], image);
+        }
     }
 }

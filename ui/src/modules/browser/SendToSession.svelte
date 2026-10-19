@@ -6,6 +6,7 @@
   // workspace considers "live" (running/working/idle) are valid targets — a
   // dead/suspended/connection session can't receive a prompt.
 
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import { browser } from '../../lib/stores/browser.svelte';
@@ -25,10 +26,18 @@
   }
 
   async function sendTo(sessionId: string): Promise<void> {
+    if (sending) return;
+    const id = annotationId;
+    const workspace = ws.currentId;
+    const session = eligible().find(s => s.id === sessionId);
+    const mark = browser.annotations.find(a => a.id === id);
+    if (!session || !mark) return;
+    if (!await confirmer.ask(`Send this mark to ${session.title} (${session.provider}) and start its next turn?\n\n${mark.text.slice(0, 600)}`, { title: 'Send mark', confirmLabel: 'Send mark', danger: false })) return;
+    if (annotationId !== id || ws.currentId !== workspace) return;
     sending = true;
     try {
-      await browser.sendAnnotation(annotationId, sessionId);
-      toasts.success('Sent to session');
+      await browser.sendAnnotation(id, sessionId);
+      toasts.success(`Sent to ${session.title}`);
     } catch (e) {
       toastError('Couldn’t send to the session', e);
     } finally {

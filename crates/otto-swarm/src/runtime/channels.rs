@@ -166,12 +166,15 @@ async fn channel_start_refused(
     swarm_id: &str,
     workspace_id: &str,
 ) -> Option<String> {
-    let swarm = ctx
-        .swarm_repo()
-        .get_swarm(&swarm_id.to_string())
-        .await
-        .ok()?;
-    if let Some(why) = start_refusal(&swarm.status, swarm.pause_reason.as_deref()) {
+    // A failed or missing status read used to return None, and the caller
+    // treats None as "start allowed", then sets the swarm active. Refuse.
+    let swarm = match ctx.swarm_repo().get_swarm(&swarm_id.to_string()).await {
+        Ok(swarm) => swarm,
+        Err(e) => return status_load_refusal(Err(e.to_string())),
+    };
+    if let Some(why) =
+        status_load_refusal(Ok((swarm.status.as_str(), swarm.pause_reason.as_deref())))
+    {
         return Some(why);
     }
     ctx.budget_blocked(workspace_id).await.map(|reason| {
@@ -180,6 +183,19 @@ async fn channel_start_refused(
             reason.unwrap_or_else(|| "cap reached".into())
         )
     })
+}
+
+/// Status refusal after a load. `Err` is a failed read: the launch must not
+/// start the swarm. `Ok` is the stored status and pause reason.
+fn status_load_refusal(
+    loaded: std::result::Result<(&str, Option<&str>), String>,
+) -> Option<String> {
+    match loaded {
+        Err(err) => Some(format!(
+            "its status could not be read ({err}) — not started"
+        )),
+        Ok((status, pause)) => start_refusal(status, pause),
+    }
 }
 
 /// [`channel_start_refused`]'s pure status part.
@@ -340,13 +356,17 @@ fn strip_keyword<'a>(text: &'a str, kw: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{start_refusal, strip_keyword};
+    use super::{start_refusal, status_load_refusal, strip_keyword};
 
     #[test]
     fn a_channel_never_restarts_an_aborted_or_auto_paused_swarm() {
         assert!(start_refusal("aborted", None).is_some());
         assert!(start_refusal("paused", Some("max_total_runs reached")).is_some());
         assert!(start_refusal("active", None).is_none());
+        assert!(status_load_refusal(Err("db down".into()))
+            .is_some_and(|w| w.contains("could not be read")));
+        assert!(status_load_refusal(Ok(("aborted", None))).is_some());
+        assert!(status_load_refusal(Ok(("active", None))).is_none());
         // An ordinary (manual) pause carries no reason: a launch may start it.
         assert!(start_refusal("paused", None).is_none());
         assert!(start_refusal("idle", Some("  ")).is_none());

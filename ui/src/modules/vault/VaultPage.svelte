@@ -21,6 +21,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { rightPanel } from '../../lib/stores/rightPanel.svelte';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -209,8 +210,23 @@
     }
     return null;
   });
+  let phoneShowSidebar = $state(false);
+  const phoneInSidebar = $derived(
+    viewport.isPhone && (phoneShowSidebar || vault.centerMode === 'empty'),
+  );
+  $effect(() => {
+    void vault.note;
+    void vault.filePath;
+    void vault.activeTab;
+    const mode = vault.centerMode;
+    untrack(() => {
+      if (mode !== 'empty') phoneShowSidebar = false;
+    });
+  });
+
   let autoIndexFor: number | null = null;
   $effect(() => {
+    if (viewport.isPhone) return;
     const id = vault.current?.id;
     const path = indexNote;
     if (id == null || !path || autoIndexFor === id) return;
@@ -271,6 +287,19 @@
   <!-- Unified header: vault switcher as the title, status chips as badges,
        tools right-aligned (they collapse into ⋯ when the pane is narrow). -->
   <PageHeader title={vault.current?.name ?? 'Vault'} class="vault-header">
+    {#snippet leading()}
+      {#if viewport.isPhone && !phoneInSidebar && vault.current}
+        <button
+          type="button"
+          class="btn ghost small phone-back-btn"
+          onclick={() => (phoneShowSidebar = true)}
+          aria-label="Back to vault sidebar"
+        >
+          <Icon name="chevronLeft" size={14} />
+          <span>{vault.leftMode === 'search' ? 'Search' : vault.leftMode === 'tags' ? 'Tags' : 'Files'}</span>
+        </button>
+      {/if}
+    {/snippet}
     {#snippet titleContent()}
       <button
         class="vault-pick"
@@ -390,7 +419,7 @@
   {:else if vault.current}
     <PageBody fill padded={false}>
     <div class="panes">
-      {#if leftOpen}
+      {#if phoneInSidebar || (!viewport.isPhone && leftOpen)}
       <aside class="left" style="width:{leftW}px">
         <div class="left-modes" role="group" aria-label="Sidebar view">
           <button
@@ -438,9 +467,12 @@
           <TagsPanel />
         {/if}
       </aside>
-      <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" />
+      {#if !viewport.isPhone}
+        <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" />
+      {/if}
       {/if}
 
+      {#if !phoneInSidebar}
       <main class="center">
         {#if vault.noteOpenError}
           <div class="note-open-error" role="alert" data-testid="note-open-error">
@@ -496,7 +528,7 @@
             </select></label>
             {#if vault.graphLocal}<span class="gs-path" title={vault.notePath ?? ''}>{vault.notePath}</span>{/if}
           </div>
-          <GraphView local={vault.graphLocal} />
+          <GraphView local={vault.graphLocal} onNewNote={() => openNewNote('')} />
         {:else if vault.centerMode === 'trash' || vault.centerMode === 'history'}
           {#key vault.centerMode}<RecoveryView mode={vault.centerMode} />{/key}
         {:else if vault.centerMode === 'docs-agents'}
@@ -506,24 +538,28 @@
         {:else if vault.centerMode === 'note' && vault.note}
           <NoteView />
         {:else}
+          {@const emptyVault = (vault.status?.notes ?? vault.current.notes) === 0}
           <div class="center-empty">
             <EmptyState
               icon="note"
-              title="No note open"
-              body="Open a note from the file tree or search, press ⌘O to jump to one, or start a new note."
+              title={emptyVault ? 'This vault is empty' : 'No note open'}
+              body={emptyVault
+                ? 'Start a new markdown note or run the Docs agent to populate this vault.'
+                : 'Open a note from the file tree or search, press ⌘O to jump to one, or start a new note.'}
               actionLabel="New note"
               actionIcon="plus"
               onaction={() => openNewNote('')}
             >
               {#if indexNote}
                 <button class="btn ghost" onclick={() => void vault.open(indexNote!)}>Open {indexNote}</button>
-              {:else}
+              {:else if !emptyVault}
                 <button class="btn ghost" onclick={() => (vault.switcherOpen = true)}>Quick switcher (⌘O)</button>
               {/if}
             </EmptyState>
           </div>
         {/if}
       </main>
+      {/if}
 
     </div>
 
@@ -865,8 +901,18 @@
     word-break: break-word;
   }
 
-  /* Phone: stack — left pane becomes a top strip, and the
-   * status bar drops the on-disk path (it would take a whole row). */
+  @media (pointer: coarse), (max-width: 640px) {
+    .vtab-main {
+      min-height: var(--hit-min);
+    }
+    .vtab-close {
+      width: var(--hit-min);
+      height: var(--hit-min);
+    }
+  }
+
+  /* Phone: push navigation — sidebar or center takes the full body height,
+   * and the status bar drops the on-disk path (it would take a whole row). */
   @media (max-width: 640px) {
     .vs-path {
       display: none;
@@ -875,10 +921,11 @@
       flex-direction: column;
     }
     .left {
+      flex: 1;
       width: 100% !important;
-      max-height: min(25%, 180px);
+      max-height: none;
       border-inline-end: none;
-      border-bottom: 1px solid var(--border);
+      border-bottom: none;
     }
   }
 </style>

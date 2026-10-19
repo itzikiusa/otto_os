@@ -8,6 +8,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { onDestroy, tick, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { openFile as openFileSignal } from '../../lib/stores/openfile.svelte';
@@ -205,7 +206,7 @@
       await tick();
       if (generation === rootGeneration && crumbsEl) crumbsEl.scrollLeft = crumbsEl.scrollWidth;
     } catch (e) {
-      if (generation === rootGeneration) rootError = e instanceof Error ? e.message : String(e);
+      if (generation === rootGeneration) rootError = loadErrorText(e);
     } finally {
       if (generation === rootGeneration) rootLoading = false;
     }
@@ -245,6 +246,24 @@
     if (generation === rootGeneration) rootNodes = [...rootNodes];
   }
 
+  function onTreeRowKey(e: KeyboardEvent, node: TreeNode): void {
+    const btn = e.currentTarget as HTMLElement;
+    const list = btn.closest('.tree-list');
+    if (e.key === 'ArrowRight' && node.entry.is_dir && !node.open) {
+      e.preventDefault();
+      void toggleDir(node);
+    } else if (e.key === 'ArrowLeft' && node.entry.is_dir && node.open) {
+      e.preventDefault();
+      void toggleDir(node);
+    } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && list) {
+      e.preventDefault();
+      const rows = Array.from(list.querySelectorAll<HTMLButtonElement>('button.tree-row'));
+      const i = rows.indexOf(btn as HTMLButtonElement);
+      const next = rows[i + (e.key === 'ArrowDown' ? 1 : -1)];
+      next?.focus();
+    }
+  }
+
   async function openFile(entry: FsEntry): Promise<void> {
     await readFile(entry.path, undefined, undefined, true, false);
   }
@@ -277,7 +296,7 @@
       if (revealParent) overriddenRoot = folderOf(data.path);
     } catch (e) {
       if (generation !== fileGeneration) return;
-      viewerError = `Cannot open ${path}: ${e instanceof Error ? e.message : String(e)}. If the terminal shortened the filename, use its full path.`;
+      viewerError = `Cannot open ${path}: ${loadErrorText(e)}. If the terminal shortened the filename, use its full path.`;
     } finally {
       if (generation === fileGeneration) viewerLoading = false;
     }
@@ -458,7 +477,7 @@
             onblur={() => (editingPath = false)}
           />
         {:else}
-          <nav class="ft-crumbs mono" dir="ltr" aria-label="Folder path" bind:this={crumbsEl} ondblclick={() => void startPathEdit()}>
+          <nav class="ft-crumbs mono" dir="ltr" aria-label="Folder path" bind:this={crumbsEl}>
             {#each folderCrumbs(listedPath || effectiveRoot) as part, i (part.path)}
               {#if i > 1}<span class="ft-crumb-sep" aria-hidden="true">/</span>{/if}
               <button
@@ -466,6 +485,7 @@
                 title={part.path}
                 aria-current={part.path === (listedPath || effectiveRoot) ? 'location' : undefined}
                 onclick={() => navigate(part.path)}
+                ondblclick={() => void startPathEdit()}
               >{part.label}</button>
             {/each}
           </nav>
@@ -476,7 +496,7 @@
         <button
           class="icon-btn ft-nav-btn"
           class:on={showHidden}
-          title={showHidden ? 'Hide dotfiles' : 'Show hidden files (dotfiles)'}
+          title={showHidden ? 'Hide hidden files' : 'Show hidden files'}
           aria-label="Show hidden files"
           aria-pressed={showHidden}
           onclick={toggleHidden}
@@ -519,8 +539,10 @@
               class:is-open={node.open}
               class:is-file={!node.entry.is_dir}
               style="padding-inline-start: {8 + node.depth * 14}px"
+              aria-expanded={node.entry.is_dir ? node.open : undefined}
               onclick={() => node.entry.is_dir ? toggleDir(node) : openFile(node.entry)}
               ondblclick={() => navigation && node.entry.is_dir && navigate(node.entry.path)}
+              onkeydown={(e) => onTreeRowKey(e, node)}
               title={node.entry.path}
             >
               {#if node.entry.is_dir}
@@ -542,7 +564,7 @@
               {/if}
             </button>
             {#if navigation && node.entry.is_dir}
-              <button class="icon-btn enter-btn" title="Open {node.entry.name} as the folder" aria-label="Open folder {node.entry.name}" onclick={() => navigate(node.entry.path)}>
+              <button class="icon-btn enter-btn" title="Open folder {node.entry.name}" aria-label="Open folder {node.entry.name}" onclick={() => navigate(node.entry.path)}>
                 <Icon name="arrow" size={12} />
               </button>
             {/if}

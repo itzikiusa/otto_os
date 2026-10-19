@@ -42,7 +42,7 @@
   }
   async function remove(): Promise<void> {
     if (!dashboard) return;
-    if (await confirmer.ask(`Delete dashboard “${dashboard.name}” and its widgets?`, { title: 'Delete dashboard' })) {
+    if (await confirmer.ask(`Delete dashboard “${dashboard.name}” and its widgets?`, { title: 'Delete dashboard', confirmLabel: 'Delete', danger: true })) {
       await database.deleteDashboard(dashboard.id);
     }
   }

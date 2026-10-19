@@ -33,6 +33,14 @@ pub struct WorkPermit {
 }
 pub struct NoticePermit(Arc<Mutex<Counts>>);
 
+pub(crate) fn is_control(text: &str, edited: bool) -> bool {
+    !edited
+        && matches!(
+            text.split_whitespace().next().unwrap_or(""),
+            "/help" | "/sessions" | "/stop" | "/new" | "/restart" | "/who"
+        )
+}
+
 impl InboundAdmission {
     /// Existing quick commands have their own small reserve: a full turn
     /// queue must not prevent its owner from stopping or detaching that turn.
@@ -44,13 +52,7 @@ impl InboundAdmission {
         text: &str,
         edited: bool,
     ) -> Admission {
-        let command = text.split_whitespace().next().unwrap_or("");
-        if !edited
-            && matches!(
-                command,
-                "/help" | "/sessions" | "/stop" | "/new" | "/restart" | "/who"
-            )
-        {
+        if is_control(text, edited) {
             let mut counts = self.0.lock().unwrap_or_else(|error| error.into_inner());
             if counts.controls < CONTROLS {
                 counts.controls += 1;

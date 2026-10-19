@@ -934,7 +934,7 @@ impl ProductService {
     ///
     /// Assembles six sections (each skipped when empty):
     /// 1. Story — title + the most-recent CONTENT version's body_md
-    ///    (latest `suggested` if any, else latest `source`).
+    ///    (latest `suggested`, else `draft`, else `source`).
     /// 2. Analysis Summary — most-recent analysis's summary.
     /// 3. Answered Questions — questions with status=="answered".
     /// 4. Approved Test Cases — latest testcase run's approved cases.
@@ -946,18 +946,9 @@ impl ProductService {
         let mut sections: Vec<InjectSection> = Vec::new();
 
         // --- Section 1: Story ---
-        // Find the best version: highest version_no with kind=="suggested",
-        // else highest version_no with kind=="source".
+        // Match publication: newest suggested, draft, then source.
         let all_versions = self.repo.list_versions(story_id).await?;
-        let best_version_id = {
-            let suggested = all_versions.iter().find(|v| v.kind == "suggested");
-            let source = all_versions.iter().find(|v| v.kind == "source");
-            // list_versions returns DESC by version_no so .find() gives the highest.
-            suggested.or(source).map(|v| v.id.clone())
-        };
-
-        if let Some(vid) = best_version_id {
-            let version = self.repo.get_version(&vid).await?;
+        if let Some(version) = self.best_content_version(story_id).await? {
             if !version.body_md.trim().is_empty() {
                 let body = format!("# {}\n\n{}", story.title, version.body_md.trim());
                 sections.push(InjectSection {
@@ -1083,7 +1074,7 @@ impl ProductService {
     ///
     /// Contents:
     /// - Story heading, source reference, url, stage.
-    /// - `## Story` — latest CONTENT version body (prefer newest `suggested`, else newest `source`).
+    /// - `## Story` — latest CONTENT version body (prefer newest `suggested`, then `draft`, then `source`).
     /// - `## Full Jira context` (only when `source_kind == "jira"`) — fetched via
     ///   `JiraClient::get_issue_full`; includes status, assignee, reporter, priority,
     ///   labels, custom fields table, linked issues, comments (last 20), change history
@@ -1093,19 +1084,11 @@ impl ProductService {
     pub async fn build_agent_context(&self, story_id: &Id, focus: Option<&str>) -> Result<String> {
         let story = self.repo.get_story(story_id).await?;
 
-        // Best content version: newest suggested, else newest source.
-        let all_versions = self.repo.list_versions(story_id).await?;
-        let body_md = {
-            let suggested = all_versions.iter().find(|v| v.kind == "suggested");
-            let source = all_versions.iter().find(|v| v.kind == "source");
-            match suggested.or(source) {
-                Some(v) => {
-                    let ver = self.repo.get_version(&v.id).await?;
-                    ver.body_md
-                }
-                None => String::new(),
-            }
-        };
+        let body_md = self
+            .best_content_version(story_id)
+            .await?
+            .map(|v| v.body_md)
+            .unwrap_or_default();
 
         let mut doc = String::new();
 
@@ -1321,7 +1304,7 @@ impl ProductService {
 
     /// Pick the best content version for publishing or agent context.
     /// Priority: newest `suggested` > newest `draft` > newest `source`.
-    async fn best_content_version(
+    pub async fn best_content_version(
         &self,
         story_id: &Id,
     ) -> Result<Option<otto_state::ProductStoryVersion>> {
@@ -1857,6 +1840,25 @@ pub(crate) fn parse_watch_cursor(cursor: &str) -> (&str, std::collections::HashS
         Some((ts, ids)) => (ts, ids.split(',').filter(|s| !s.is_empty()).collect()),
         None => (cursor, std::collections::HashSet::new()),
     }
+}
+
+/// Advance a successful batch without forgetting previously consumed timestamp ties.
+pub fn advance_watch_cursor(previous: Option<&str>, comments: &[CommentInfo]) -> Option<String> {
+    let batch = build_watch_cursor(comments)?;
+    let (timestamp, batch_ids) = parse_watch_cursor(&batch);
+    let mut ids: std::collections::BTreeSet<&str> = batch_ids.into_iter().collect();
+    if let Some(previous) = previous {
+        let (old_timestamp, old_ids) = parse_watch_cursor(previous);
+        match otto_issues::cmp_created(timestamp, old_timestamp) {
+            std::cmp::Ordering::Less => return Some(previous.to_string()),
+            std::cmp::Ordering::Equal => ids.extend(old_ids),
+            std::cmp::Ordering::Greater => {}
+        }
+    }
+    Some(format!(
+        "{timestamp}|{}",
+        ids.into_iter().collect::<Vec<_>>().join(",")
+    ))
 }
 
 /// Build the watch cursor for a processed batch: newest `created` + the ids of
@@ -2956,6 +2958,230 @@ mod tests {
     // -----------------------------------------------------------------------
     // Test D1: create_draft — creates draft story + version + event
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn attachment_publication_conflicts_without_losing_winning_bytes() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool).await;
+        let svc = ProductService::new(
+            ProductRepo::new(pool.clone()),
+            IssuesRepo::new(pool.clone()),
+            Arc::new(FixedSecret("unused".into())),
+        );
+        let story = svc
+            .create_draft(&ws, &user, Some("Design"))
+            .await
+            .unwrap()
+            .story;
+        let repo = otto_state::ProductAttachmentRepo::new(pool);
+        let dir = tempfile::tempdir().unwrap();
+        let att = repo
+            .create(otto_state::NewAttachment {
+                story_id: story.id,
+                workspace_id: ws,
+                filename: "design.html".into(),
+                mime: "text/html".into(),
+                size_bytes: 3,
+                sha256: None,
+                storage_path: "product/attachments/original.html".into(),
+                kind: "mockup".into(),
+                source: "user".into(),
+                meta_json: None,
+                created_by: user,
+            })
+            .await
+            .unwrap();
+        let a = crate::media::publish_content(
+            &repo,
+            dir.path(),
+            &att,
+            b"first complete content",
+            true,
+            None,
+        );
+        let b = crate::media::publish_content(
+            &repo,
+            dir.path(),
+            &att,
+            b"second complete content is longer",
+            true,
+            None,
+        );
+        let (a, b) = tokio::join!(a, b);
+        assert_ne!(a.is_ok(), b.is_ok());
+        let winner = a.or(b).unwrap();
+        let bytes = tokio::fs::read(dir.path().join(&winner.storage_path))
+            .await
+            .unwrap();
+        assert!(
+            bytes == b"first complete content" || bytes == b"second complete content is longer"
+        );
+        assert_eq!(winner.size_bytes, bytes.len() as i64);
+        assert_eq!(
+            winner.sha256.as_deref(),
+            Some(otto_core::proof::bytes_sha256(&bytes).as_str())
+        );
+        // A late agent holding the original row must also conflict.
+        assert!(crate::media::publish_content(
+            &repo,
+            dir.path(),
+            &att,
+            b"stale assist",
+            true,
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            tokio::fs::read(dir.path().join(&winner.storage_path))
+                .await
+                .unwrap(),
+            bytes
+        );
+        repo.delete(&att.id).await.unwrap();
+        assert!(
+            crate::media::publish_content(&repo, dir.path(), &winner, b"deleted", true, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_acknowledgement_rolls_back_with_effects_and_rejects_replay() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool).await;
+        let repo = ProductRepo::new(pool.clone());
+        let svc = ProductService::new(
+            repo.clone(),
+            IssuesRepo::new(pool),
+            Arc::new(FixedSecret("unused".into())),
+        );
+        let story = svc
+            .create_draft(&ws, &user, Some("Watch"))
+            .await
+            .unwrap()
+            .story;
+        let question = |creator: &str| otto_state::NewQuestion {
+            story_id: story.id.clone(),
+            analysis_id: None,
+            text: "Question".into(),
+            rationale: "Why".into(),
+            category: "scope".into(),
+            created_by: creator.into(),
+        };
+        let q = repo.create_question(question(&user)).await.unwrap();
+        let answers = vec![(q.id.clone(), "Answer".into())];
+        // Reject a mismatched question after the cursor and answer writes, so
+        // the transaction must roll back both already-applied effects.
+        let mut invalid_question = question(&user);
+        invalid_question.story_id = "another-story".into();
+        assert!(repo
+            .commit_watch_reconcile(&story.id, None, "T|A", &answers, &[invalid_question], &[])
+            .await
+            .is_err());
+        assert_eq!(repo.get_story(&story.id).await.unwrap().watch_cursor, None);
+        assert_eq!(repo.get_question(&q.id).await.unwrap().status, "open");
+        repo.commit_watch_reconcile(&story.id, None, "T|A", &answers, &[question(&user)], &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_question(&q.id).await.unwrap().answer.as_deref(),
+            Some("Answer")
+        );
+        assert!(repo
+            .commit_watch_reconcile(&story.id, None, "T|A", &answers, &[question(&user)], &[])
+            .await
+            .is_err());
+        assert_eq!(repo.list_questions(&story.id).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn saved_draft_requirements_reach_agent_context_and_injection() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool).await;
+        let repo = ProductRepo::new(pool.clone());
+        let svc = ProductService::new(
+            repo.clone(),
+            IssuesRepo::new(pool),
+            Arc::new(FixedSecret("unused".into())),
+        );
+        let detail = svc.create_draft(&ws, &user, Some("Refunds")).await.unwrap();
+        let id = &detail.story.id;
+        let requirement = "Refunds above 100 require manager approval.";
+        svc.update_draft_body(id, "Refunds", requirement, &user)
+            .await
+            .unwrap();
+        assert!(svc
+            .build_agent_context(id, None)
+            .await
+            .unwrap()
+            .contains(requirement));
+        assert!(svc
+            .build_inject_bundle(id)
+            .await
+            .unwrap()
+            .markdown
+            .contains(requirement));
+        assert_eq!(
+            svc.best_content_version(id).await.unwrap().unwrap().body_md,
+            requirement
+        );
+        repo.add_version(otto_state::NewVersion {
+            story_id: id.clone(),
+            kind: "suggested".into(),
+            title: "Refunds".into(),
+            body_md: "Reviewed suggestion".into(),
+            raw_json: None,
+            change_notes: None,
+            created_by: user,
+        })
+        .await
+        .unwrap();
+        assert!(svc
+            .build_agent_context(id, None)
+            .await
+            .unwrap()
+            .contains("Reviewed suggestion"));
+        assert!(svc
+            .build_inject_bundle(id)
+            .await
+            .unwrap()
+            .markdown
+            .contains("Reviewed suggestion"));
+    }
+
+    #[test]
+    fn successive_watch_batches_keep_all_seen_ties() {
+        let make = |id: &str| CommentInfo {
+            id: id.into(),
+            author: "PO".into(),
+            body_md: "answer".into(),
+            created: "2026-10-18T10:00:00Z".into(),
+        };
+        let a = make("A");
+        let b = make("B");
+        let first = advance_watch_cursor(None, std::slice::from_ref(&a)).unwrap();
+        let next = advance_watch_cursor(Some(&first), std::slice::from_ref(&b)).unwrap();
+        let (ts, seen) = parse_watch_cursor(&next);
+        assert_eq!(ts, a.created);
+        assert!(seen.contains("A") && seen.contains("B"));
+        let remaining: Vec<_> = [a, b]
+            .into_iter()
+            .filter(|c| !seen.contains(c.id.as_str()))
+            .collect();
+        assert!(remaining.is_empty());
+        let newer = CommentInfo {
+            created: "2026-10-18T10:00:01Z".into(),
+            ..make("C")
+        };
+        assert_eq!(
+            advance_watch_cursor(Some(&next), &[newer]).unwrap(),
+            "2026-10-18T10:00:01Z|C"
+        );
+    }
 
     #[tokio::test]
     async fn create_draft_makes_draft_story_and_version() {

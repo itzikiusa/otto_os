@@ -1,8 +1,7 @@
 <script lang="ts">
   // Agent-centric swarm graph: TEAM MEMBERS are the nodes (not tasks), laid out
-  // radially around the coordinator by `reports_to`. Click a node → open that
-  // agent's session; hover → its live sessions. A side rail shows a per-member
-  // brief (completed / live) and the currently active tasks.
+  // radially around the coordinator by `reports_to`. Click a node for Edit,
+  // Open session, and Add report. A side rail shows a per-member brief.
   import { sentenceCase, sessionState, type SessionStateInfo } from '../../lib/status';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
@@ -14,8 +13,13 @@
   import { onMount } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { now } from '../../lib/stores/now.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import type { SwarmAgent, SwarmRun } from './types';
+
+  interface Props {
+    onedit?: (agent: SwarmAgent) => void;
+    onadd?: (parent: SwarmAgent) => void;
+  }
+  let { onedit, onadd }: Props = $props();
 
   const agents = $derived(swarm.detail?.agents ?? []);
   const allTasks = $derived.by(() => {
@@ -197,10 +201,23 @@
       })),
     );
   }
-  function openAgent(a: SwarmAgent) {
+  function agentMenu(e: MouseEvent, a: SwarmAgent): void {
     const sess = agentSessions(a.id);
-    if (sess.length > 0) swarm.selectedSessionId = sess[0].id;
-    else toasts.info(`${a.name} has no open session`, 'Start a task from the Board.');
+    ctxMenu.show(e, [
+      { label: 'Edit agent', icon: 'edit', action: () => onedit?.(a) },
+      {
+        label: 'Open session',
+        icon: 'terminal',
+        disabled: sess.length === 0,
+        title: sess.length === 0
+          ? `${a.name} has no open session. Start a task from the Board.`
+          : `Open ${a.name}’s session`,
+        action: () => {
+          if (sess[0]) swarm.selectedSessionId = sess[0].id;
+        },
+      },
+      { label: 'Add report', icon: 'plus', action: () => onadd?.(a) },
+    ]);
   }
 
   // ── Pan + zoom (drag background, wheel to zoom) ──────────────────────────────
@@ -339,7 +356,7 @@
                 class="node act-{act}"
                 style="left:{pos.x - NODE_W / 2}px; top:{pos.y - NODE_H / 2}px; width:{NODE_W}px; min-height:{NODE_H}px"
               >
-                <button class="node-hit" onclick={() => openAgent(a)} title="Open session">
+                <button class="node-hit" onclick={(e) => agentMenu(e, a)} aria-haspopup="menu" aria-label="Actions for {a.name}" title="Actions for {a.name}">
                   <span class="avatar">{a.avatar || a.name.slice(0, 1)}</span>
                   <span class="node-body">
                     <span class="node-top">
@@ -378,7 +395,7 @@
       <div class="brief-list">
         {#each agents as a (a.id)}
           {@const addr = toAddress(a.id)}
-          <button class="brief-row" onclick={() => openAgent(a)} title="Open session">
+          <button class="brief-row" onclick={(e) => agentMenu(e, a)} aria-haspopup="menu" aria-label="Actions for {a.name}" title="Actions for {a.name}">
             <span class="avatar sm">{a.avatar || a.name.slice(0, 1)}</span>
             <span class="grow ellipsis">{a.name}</span>
             <span class="stat done" title="Completed runs"><Icon name="check" size={12} /> {completedCount(a.id)}</span>

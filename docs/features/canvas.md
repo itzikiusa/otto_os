@@ -289,7 +289,8 @@ its native export menu). Behavior:
   carefully guarded against a scene switch landing mid-PUT, so an Excalidraw doc is
   never written into a Mermaid scene.
 - **Live agent edits** arrive over `canvas_updated` and reload in place.
-- On a phone the board is read-only (`viewModeEnabled`); tablets/desktops edit.
+- Phones, tablets and desktops can edit the board. Phone layout collapses the
+  scene list and offers Back without changing editing permissions.
 
 > Excalidraw's hand-drawn fonts are served by Otto itself
 > (`EXCALIDRAW_ASSET_PATH = <base>assets/excalidraw/`): the UI build copies them
@@ -458,8 +459,8 @@ that lists the Canvas scenes linked to a story.
 - **Provider** is per-scene and persisted; only real agents are offered (no
   `shell`). Resume requires a provider that supports `--resume` (claude); other
   providers run fresh each turn.
-- **Mobile**: the Excalidraw board is read-only on a phone; the scene list
-  collapses once a board is open. Tablets keep editing.
+- **Mobile**: the scene list collapses once a board is open. Excalidraw stays
+  editable; Mermaid and D2 expose Code, touch-sized controls and two-finger zoom.
 - **Session references (§7a) are workspace-scoped, not cross-workspace.** A
   session can only reference scenes in its OWN workspace — attaching one from
   a different workspace is rejected (404). The Canvas panel's inline preview

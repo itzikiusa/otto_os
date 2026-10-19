@@ -61,12 +61,12 @@ test.afterEach(async () => {
 async function openFixture(page: Page): Promise<void> {
   await page.getByPlaceholder('e.g. https://example.com').fill(FIXTURE_URL);
   await page.getByRole('button', { name: 'Go', exact: true }).click();
-  await expect(page.locator('.reader h1')).toHaveText('Agent Fixture', { timeout: 15_000 });
+  await expect(page.locator('.reader .page-title')).toHaveText('Agent Fixture', { timeout: 15_000 });
 }
 
 async function markHeading(page: Page, note: string): Promise<void> {
   await page.getByRole('button', { name: 'Mark passage' }).click();
-  await page.locator('.reader h1').click();
+  await page.locator('.reader .page-title').click();
   await page.getByLabel('Note for this mark').fill(note);
   await page.getByRole('button', { name: 'Save mark' }).click();
   await expect(page.locator('.notes-rail')).toContainText(note);

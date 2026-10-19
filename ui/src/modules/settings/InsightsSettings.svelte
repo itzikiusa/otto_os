@@ -194,7 +194,7 @@
 
     <h2 class="section-title">Report agent {#if savedIn === 'agent'}<span class="saved" role="status">Saved</span>{/if}</h2>
     {#if agentSaveError}
-      <p role="alert">{agentSaveError} <button class="btn small" disabled={saving || !!modelSaveTimer} onclick={retryAgent}>Retry saving report agent</button></p>
+      <p role="alert">{agentSaveError} <button class="btn small" disabled={saving || !!modelSaveTimer} onclick={retryAgent}>Retry saving report agent</button><!-- ui-guards: allow — retries a failed save action, not a load --></p>
     {/if}
     <div class="card agent-row">
       <div class="field agent-field">

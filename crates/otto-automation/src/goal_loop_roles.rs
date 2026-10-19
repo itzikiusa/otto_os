@@ -29,6 +29,10 @@ pub async fn run(
     cwd: &str,
     budget: u64,
 ) -> Result<String> {
+    // Bind the controller that started this role, before any await. A later
+    // start replaces the registry entry; this role must keep watching the
+    // handle it began with, and stop when that handle is no longer current.
+    let bound = ctx.goal_loops().lock().unwrap().get(&loop_.id).cloned();
     let workspace = ctx.workspaces().get(&loop_.workspace_id).await?;
     let user = otto_state::UsersRepo::new(ctx.pool().clone())
         .get(&loop_.created_by)
@@ -58,14 +62,22 @@ pub async fn run(
     let prompt = format!("{prompt}\n\nExecution policy: this role is read-only except for its result file. Do not edit source, stage, commit, push, publish or send messages.\n\nFinally encode your full response as a JSON object with one string field named result. Write the complete JSON to {}, then atomically rename it to {}. A chat reply alone does not finish the turn.", temporary.display(), output.display());
     let meta = serde_json::json!({"source":"goal_loop", "loop_id":loop_.id,
         "role":name, "model":role.model});
-    let handle = ctx.goal_loops().lock().unwrap().get(&loop_.id).cloned();
     // Parks on the loop flag bell (perf W8) instead of a 100 ms poll.
-    let cancelled = crate::goal_loop::until_flag(|| {
-        handle.as_ref().is_some_and(|h| {
-            h.interrupted.load(Ordering::Relaxed)
-                || h.cancel.load(Ordering::Relaxed)
-                || h.paused.load(Ordering::Relaxed)
-        })
+    let bound_wait = bound;
+    let loop_id = loop_.id.clone();
+    let cancelled = crate::goal_loop::until_flag(move || {
+        let current = ctx.goal_loops().lock().unwrap().get(&loop_id).cloned();
+        let replaced = match (&bound_wait, &current) {
+            (Some(old), Some(now)) => !std::sync::Arc::ptr_eq(&old.cancel, &now.cancel),
+            (Some(_), None) => true,
+            _ => false,
+        };
+        replaced
+            || bound_wait.as_ref().is_some_and(|h| {
+                h.interrupted.load(Ordering::Relaxed)
+                    || h.cancel.load(Ordering::Relaxed)
+                    || h.paused.load(Ordering::Relaxed)
+            })
     });
     let turn = RoleTurn {
         workspace: &workspace,

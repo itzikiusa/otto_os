@@ -361,10 +361,11 @@ async fn bearer_token_param_is_no_longer_accepted_on_any_socket() {
 }
 
 /// S11-305 / S1-303: broadcast and relay are the fan-out twins of
-/// `/sessions/{id}/message`. An agent session's own token reaches only itself
-/// and the workers it opened through them — a live sibling (here a plain
-/// `/bin/cat` agent the same root user owns) receives nothing — while the
-/// person's own token still reaches it.
+/// `/sessions/{id}/message`. This sibling is `provider=shell` (`/bin/cat`).
+/// An agent token must not reach that shell: broadcast, relay, and a direct
+/// message all leave it alone (403 on the direct post). A non-shell agent
+/// sibling is a different rule and is reachable. The person's own token still
+/// reaches this shell session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_token_broadcast_and_relay_never_reach_a_sibling() {
     let d = boot(&[]).await;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   // Create/edit sheet for one personal agent: name, avatar, persona (soul),
   // provider + ModelPicker, browser toggle, delivery — mirrors the
@@ -8,6 +9,7 @@
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -96,6 +98,57 @@
     }
   }
 
+  type DestType = 'none' | 'slack' | 'telegram' | 'email' | 'webhook';
+
+  function deliveryTarget(type: DestType, chat: string, email: string, url: string): string {
+    switch (type) {
+      case 'slack':
+      case 'telegram':
+        return chat.trim();
+      case 'email':
+        return email.trim();
+      case 'webhook':
+        return url.trim();
+      default:
+        return '';
+    }
+  }
+
+  // Mounted fresh per open — untrack keeps the saved destination, not a live binding.
+  const initialDestType = untrack(() => fDestType);
+  const initialDestTarget = untrack(() => deliveryTarget(fDestType, fChatId, fEmailTo, fUrl));
+
+  /** True when save would start or retarget an outward report channel. */
+  function deliversReports(): boolean {
+    if (fDestType === 'none') return false;
+    const target = deliveryTarget(fDestType, fChatId, fEmailTo, fUrl);
+    return fDestType !== initialDestType || target !== initialDestTarget;
+  }
+
+  function deliveryConfirm(): string {
+    const target = deliveryTarget(fDestType, fChatId, fEmailTo, fUrl);
+    switch (fDestType) {
+      case 'slack':
+      case 'telegram': {
+        const where = fDestType === 'slack' ? 'Slack' : 'Telegram';
+        const dest = target ? `${where} (${target})` : `${where} (the integration’s default channel)`;
+        return `Every run’s report will be posted to ${dest}. Everyone in that channel can see it. Unchanged reports aren’t re-sent.`;
+      }
+      case 'email':
+        return `Every run’s report will be emailed to ${target || 'the address you entered'}. That recipient is who sees it. Unchanged reports aren’t re-sent.`;
+      case 'webhook':
+        return `Every run’s report will be POSTed to ${target || 'the webhook URL'}. Whoever controls that URL can read it. Unchanged reports aren’t re-sent.`;
+      default:
+        return '';
+    }
+  }
+
+  function saveLabel(): string {
+    if (busy) return 'Saving…';
+    if (deliversReports()) return 'Save and deliver reports';
+    return 'Save';
+  }
+
   function buildDelivery(): Record<string, unknown> {
     switch (fDestType) {
       case 'slack':
@@ -120,6 +173,13 @@
     if (!agent && !createdAgent && !ws.currentId) {
       error = 'Add or select a workspace before saving. Your changes are kept in this form.';
       return;
+    }
+    if (deliversReports()) {
+      const ok = await confirmer.ask(deliveryConfirm(), {
+        title: 'Deliver run reports?',
+        confirmLabel: 'Save and deliver',
+      });
+      if (!ok) return;
     }
     const body = {
       name: fName.trim(),
@@ -283,7 +343,7 @@
 
   {#snippet footer()}
     <button class="btn" disabled={busy} onclick={onclose}>Cancel</button>
-    <button class="btn primary" disabled={busy} onclick={save}>{busy ? 'Saving…' : 'Save'}</button>
+    <button class="btn primary" disabled={busy} onclick={save}>{saveLabel()}</button>
   {/snippet}
 </Modal>
 

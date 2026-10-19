@@ -919,15 +919,49 @@ async fn run_controller(
         .await
         .unwrap_or_else(|| dev.clone());
 
-    // The dev's worktree + branch (already created during the dev's turn).
+    // The dev's worktree + branch. Prefer the cwd the completing turn recorded.
+    // A later ensure can fall back to scratch or create a new branch that does
+    // not contain that turn, and the old "no branch means done" path then
+    // either drops the commits or merges the empty tree.
+    let (expected_wt, expected_branch) =
+        crate::runtime::workspace::agent_worktree(ctx, &swarm, &dev, &project);
+    let expected_integration = crate::runtime::workspace::integration_branch_name(&swarm, &project);
+    let stored_cwd = match classify_cwd_lookup(recorded_task_cwd(ctx, task, dev_agent_id).await) {
+        CwdLookup::Unreadable => {
+            tracing::warn!(
+                task = %task.id,
+                "swarm: turn directory lookup failed; verification held"
+            );
+            return hold_verification(
+                ctx,
+                task,
+                &cancel,
+                "Verification held: the turn directory lookup failed, so this task stays blocked until it can be read.",
+            )
+            .await;
+        }
+        CwdLookup::Recorded(cwd) => cwd,
+    };
     let cwd_info =
         crate::runtime::workspace::ensure_cwd_info(ctx, &swarm, &dev, Some(&project)).await?;
-    let (agent_branch, integration_branch) = match (
-        cwd_info.branch.clone(),
-        cwd_info.integration_branch.clone(),
-    ) {
-        (Some(b), Some(i)) => (b, i),
-        _ => {
+    // One decision supplies the verify/fix directory and the merged branch.
+    // `cwd_info.path` is only an input to that decision; it is not the
+    // directory the turns run in when the recorded worktree differs.
+    let ControllerTree {
+        cwd: verify_cwd,
+        agent_branch,
+        integration_branch,
+    } = match controller_gate(verify_tree(
+        stored_cwd.as_deref(),
+        &expected_wt.to_string_lossy(),
+        &expected_branch,
+        &expected_integration,
+        &cwd_info.path,
+        cwd_info.branch.as_deref(),
+        cwd_info.integration_branch.as_deref(),
+    )) {
+        ControllerGate::Run(tree) => tree,
+        ControllerGate::CompleteWithoutMerge => {
             // No worktree (scratch/repo mode) — nothing to verify-and-merge; just complete.
             let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
             if cancel.cancelled()
@@ -943,6 +977,15 @@ async fn run_controller(
                 crate::runtime::engine::complete_parent_if_done(ctx, task).await;
             }
             return Ok(());
+        }
+        ControllerGate::Hold => {
+            return hold_verification(
+                ctx,
+                task,
+                &cancel,
+                "Verification held: the turn's directory does not match the worktree that would be merged.",
+            )
+            .await;
         }
     };
 
@@ -964,7 +1007,7 @@ async fn run_controller(
         task: task.clone(),
         leader,
         dev,
-        cwd: cwd_info.path.clone(),
+        cwd: verify_cwd,
         agent_branch,
         integration_branch,
         cancel,
@@ -1178,9 +1221,343 @@ fn fix_prompt(goal: &SwarmGoal, v: &Verdict) -> String {
 
 pub(crate) use otto_core::text::clip_chars as clip;
 
+/// Which tree verification may merge. `Hold` means the recorded turn and the
+/// freshly resolved tree disagree, so neither auto-complete nor merge.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum VerifyTree {
+    /// `cwd` is the tree the selected branch belongs to. Verify and fix turns
+    /// run there. A recorded worktree stays that path even when a later
+    /// resolve fell back to scratch.
+    Merge {
+        cwd: String,
+        branch: String,
+        integration: String,
+    },
+    CompleteWithoutMerge,
+    Hold,
+}
+
+/// A failed run-list read is not missing provenance. Only `Ok(None)` may take
+/// the legacy no-record auto-complete path.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CwdLookup {
+    Recorded(Option<String>),
+    Unreadable,
+}
+
+pub(crate) fn classify_cwd_lookup<E>(loaded: Result<Option<String>, E>) -> CwdLookup {
+    match loaded {
+        Ok(cwd) => CwdLookup::Recorded(cwd),
+        Err(_) => CwdLookup::Unreadable,
+    }
+}
+
+async fn hold_verification(
+    ctx: &SwarmRt,
+    task: &SwarmTask,
+    cancel: &CancelState,
+    detail: &str,
+) -> otto_core::Result<()> {
+    let repo = &ctx.swarm_repo();
+    let _operation = crate::runtime::engine::operation_guard(&task.swarm_id).await;
+    if !cancel.cancelled()
+        && repo
+            .set_task_status_if(&task.id, &["verifying"], "blocked")
+            .await?
+    {
+        crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
+        crate::runtime::engine::system_post_meta(
+            ctx,
+            &task.swarm_id,
+            Some(&task.project_id),
+            Some(&task.id),
+            "status",
+            detail,
+            json!({ "event": "verify_tree_mismatch" }),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_tree(
+    stored_cwd: Option<&str>,
+    expected_worktree: &str,
+    expected_branch: &str,
+    expected_integration: &str,
+    resolved_path: &str,
+    resolved_branch: Option<&str>,
+    resolved_integration: Option<&str>,
+) -> VerifyTree {
+    let stored = stored_cwd.map(str::trim).filter(|cwd| !cwd.is_empty());
+    if stored == Some(expected_worktree) {
+        return VerifyTree::Merge {
+            cwd: expected_worktree.to_string(),
+            branch: expected_branch.to_string(),
+            integration: expected_integration.to_string(),
+        };
+    }
+    if stored.is_some_and(|cwd| cwd != resolved_path) {
+        return VerifyTree::Hold;
+    }
+    match (resolved_branch, resolved_integration) {
+        (Some(branch), Some(integration)) => VerifyTree::Merge {
+            cwd: resolved_path.to_string(),
+            branch: branch.to_string(),
+            integration: integration.to_string(),
+        },
+        _ => VerifyTree::CompleteWithoutMerge,
+    }
+}
+
+/// Directory and branches `run_controller` copies onto [`SwarmVerifyOps`].
+/// Verify and fix use `cwd`. Merge uses `agent_branch`. They are one choice.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ControllerTree {
+    pub cwd: String,
+    pub agent_branch: String,
+    pub integration_branch: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ControllerGate {
+    Run(ControllerTree),
+    CompleteWithoutMerge,
+    Hold,
+}
+
+pub(crate) fn controller_gate(decision: VerifyTree) -> ControllerGate {
+    match decision {
+        VerifyTree::Merge {
+            cwd,
+            branch,
+            integration,
+        } => ControllerGate::Run(ControllerTree {
+            cwd,
+            agent_branch: branch,
+            integration_branch: integration,
+        }),
+        VerifyTree::CompleteWithoutMerge => ControllerGate::CompleteWithoutMerge,
+        VerifyTree::Hold => ControllerGate::Hold,
+    }
+}
+
+/// `Err` is a failed run-list read. Callers must not turn that into `None`:
+/// `None` is the legacy no-record path and would auto-complete the task.
+async fn recorded_task_cwd(
+    ctx: &SwarmRt,
+    task: &SwarmTask,
+    agent_id: &str,
+) -> otto_core::Result<Option<String>> {
+    let runs = ctx
+        .swarm_repo()
+        .list_runs(&otto_state::RunFilter {
+            swarm_id: Some(task.swarm_id.clone()),
+            agent_id: Some(agent_id.to_string()),
+            status: Some("done".into()),
+            ..Default::default()
+        })
+        .await?;
+    Ok(runs
+        .into_iter()
+        .filter(|run| run.task_id.as_deref() == Some(task.id.as_str()))
+        .filter(|run| matches!(run.kind.as_str(), "task" | "planning"))
+        .max_by_key(|run| run.enqueued_at)
+        .and_then(|run| {
+            run.result
+                .as_ref()
+                .and_then(|result| result.get("cwd"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_worktree_is_merged_and_a_mismatch_is_held() {
+        assert_eq!(
+            verify_tree(
+                Some("/data/swarm/s/a/wt-p"),
+                "/data/swarm/s/a/wt-p",
+                "swarm/s/a-p",
+                "swarm/s/p/int",
+                "/data/swarm/s/a/work",
+                None,
+                None,
+            ),
+            VerifyTree::Merge {
+                cwd: "/data/swarm/s/a/wt-p".into(),
+                branch: "swarm/s/a-p".into(),
+                integration: "swarm/s/p/int".into(),
+            }
+        );
+        // A later resolve invented a new branch on scratch. The recorded
+        // worktree still merges the branch that contains the turn.
+        assert_eq!(
+            verify_tree(
+                Some("/data/swarm/s/a/wt-p"),
+                "/data/swarm/s/a/wt-p",
+                "swarm/s/a-p",
+                "swarm/s/p/int",
+                "/data/swarm/s/a/work",
+                Some("swarm/s/a-p-new"),
+                Some("swarm/s/p/int-new"),
+            ),
+            VerifyTree::Merge {
+                cwd: "/data/swarm/s/a/wt-p".into(),
+                branch: "swarm/s/a-p".into(),
+                integration: "swarm/s/p/int".into(),
+            }
+        );
+        assert_eq!(
+            verify_tree(
+                Some("/data/swarm/s/a/work"),
+                "/data/swarm/s/a/wt-p",
+                "swarm/s/a-p",
+                "swarm/s/p/int",
+                "/data/swarm/s/a/wt-p",
+                Some("swarm/s/a-p"),
+                Some("swarm/s/p/int"),
+            ),
+            VerifyTree::Hold
+        );
+        assert_eq!(
+            verify_tree(
+                None,
+                "/data/swarm/s/a/wt-p",
+                "swarm/s/a-p",
+                "swarm/s/p/int",
+                "/data/swarm/s/a/work",
+                None,
+                None,
+            ),
+            VerifyTree::CompleteWithoutMerge
+        );
+    }
+
+    #[test]
+    fn a_repository_error_is_not_missing_provenance() {
+        assert_eq!(
+            classify_cwd_lookup(Ok::<_, ()>(Some("/data/swarm/s/a/wt-p".into()))),
+            CwdLookup::Recorded(Some("/data/swarm/s/a/wt-p".into()))
+        );
+        assert_eq!(
+            classify_cwd_lookup(Ok::<_, ()>(None)),
+            CwdLookup::Recorded(None)
+        );
+        assert_eq!(classify_cwd_lookup(Err(())), CwdLookup::Unreadable);
+    }
+
+    /// The controller runs verify/fix in the same tree whose branch it merges.
+    /// A scratch resolve must not become `SwarmVerifyOps.cwd` while merge uses
+    /// the recorded branch.
+    #[test]
+    fn controller_selects_recorded_cwd_with_recorded_branch() {
+        let scratch = "/data/swarm/s/a/work";
+        let recorded = "/data/swarm/s/a/wt-p";
+        let gate = controller_gate(verify_tree(
+            Some(recorded),
+            recorded,
+            "swarm/s/a-p",
+            "swarm/s/p/int",
+            scratch,
+            Some("swarm/s/a-p-new"),
+            Some("swarm/s/p/int-new"),
+        ));
+        assert_eq!(
+            gate,
+            ControllerGate::Run(ControllerTree {
+                cwd: recorded.into(),
+                agent_branch: "swarm/s/a-p".into(),
+                integration_branch: "swarm/s/p/int".into(),
+            })
+        );
+        let ControllerGate::Run(tree) = gate else {
+            panic!("recorded worktree must run verification");
+        };
+        assert_ne!(tree.cwd, scratch);
+        assert_ne!(tree.agent_branch, "swarm/s/a-p-new");
+
+        assert_eq!(
+            controller_gate(verify_tree(
+                Some(scratch),
+                recorded,
+                "swarm/s/a-p",
+                "swarm/s/p/int",
+                recorded,
+                Some("swarm/s/a-p"),
+                Some("swarm/s/p/int"),
+            )),
+            ControllerGate::Hold
+        );
+    }
+
+    /// No recorded directory is the legacy scratch path. A branchless resolve
+    /// still completes without a merge; only a failed lookup is held.
+    #[test]
+    fn missing_cwd_still_completes_a_branchless_scratch() {
+        let scratch = "/data/swarm/s/a/work";
+        let expected = "/data/swarm/s/a/wt-p";
+        for stored in [None, Some("   ")] {
+            assert_eq!(
+                controller_gate(verify_tree(
+                    stored,
+                    expected,
+                    "swarm/s/a-p",
+                    "swarm/s/p/int",
+                    scratch,
+                    None,
+                    None,
+                )),
+                ControllerGate::CompleteWithoutMerge,
+                "stored {stored:?} must stay a scratch completion"
+            );
+        }
+    }
+
+    /// The pure gate tests do not compile `run_controller`. This locks the
+    /// wiring those tests cannot see: lookup `Err` is classified, not turned
+    /// into a missing cwd, and `SwarmVerifyOps.cwd` is the chosen tree rather
+    /// than the scratch path `ensure` just returned.
+    #[test]
+    fn run_controller_keeps_lookup_errors_and_pairs_cwd_with_branch() {
+        let src = include_str!("verify.rs");
+        let start = src
+            .find("async fn run_controller(")
+            .expect("run_controller");
+        let body = &src[start..];
+        let end = body
+            .find("\n/// On coordinator")
+            .expect("run_controller ends at recover");
+        let body = &body[..end];
+        assert!(
+            body.contains("classify_cwd_lookup(recorded_task_cwd("),
+            "a failed run list must be classified before any complete path"
+        );
+        assert!(
+            !body.contains(".await.ok()"),
+            "recorded_task_cwd errors must not collapse to None"
+        );
+        assert!(
+            body.contains("cwd: verify_cwd,"),
+            "verify/fix cwd must be the controller-selected tree"
+        );
+        assert!(
+            !body.contains("cwd: cwd_info.path"),
+            "scratch ensure path must not be the verify cwd"
+        );
+        let lookup = src
+            .find("async fn recorded_task_cwd(")
+            .expect("recorded_task_cwd");
+        let lookup = &src[lookup..];
+        let lookup_end = lookup.find("\n#[cfg(test)]").expect("tests follow lookup");
+        assert!(lookup[..lookup_end].contains(".await?"));
+        assert!(!lookup[..lookup_end].contains(".ok()"));
+    }
+
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;

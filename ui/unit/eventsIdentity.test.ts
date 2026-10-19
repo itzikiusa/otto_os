@@ -43,7 +43,7 @@ function setup() {
       return { notifications: { resetForIdentity: () => log.push('notifications-reset'), load: async () => { log.push('notifications-load'); } } };
     }
     if (p === './stores/activity.svelte') {
-      return { activity: { reset: () => log.push('activity-reset'), loadSummary: async () => {}, load: async () => {} } };
+      return { activity: { reset: () => log.push('activity-reset'), resync: async () => { log.push('activity-resync'); }, loadSummary: async () => {}, load: async () => {} } };
     }
     if (p === './lazyModule') return { lazyModule: () => ({ peek: () => null }) };
     if (p === './stores/proof.svelte') return { proof: { identityChanged: () => log.push('proof-reset') } };
@@ -93,7 +93,7 @@ test('a token change reconnects /ws/events as a first connect for the new identi
   // caches and refetches (the bell, needs-you, activity, proof).
   assert.deepEqual(
     h.log.filter((x) => x !== 'resync'),
-    ['notifications-reset', 'activity-reset', 'proof-reset', 'notifications-load', 'assistant-resync'],
+    ['notifications-reset', 'activity-reset', 'proof-reset', 'activity-resync', 'notifications-load', 'assistant-resync'],
   );
   assert.ok(h.log.includes('resync'), 'live views refetch too');
 });

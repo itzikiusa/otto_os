@@ -197,6 +197,9 @@
       body="Run discovery to have a swarm analyze this story and report its findings here."
     />
   {:else}
+    {#if loadError}
+      <LoadState what="discovery runs" variant="compact" loading={loading} error={loadError} onretry={() => void loadRuns()} />
+    {/if}
     <div class="run-list">
       {#each runs as summary (summary.run.id)}
         {@const isOpen = expandedId === summary.run.id}
@@ -248,7 +251,8 @@
                         {@const taskSummary = taskSummaryEntry ? taskSummaryEntry[1] : null}
                         <div class="task-item">
                           <div class="task-row">
-                            <span class="task-status-dot {statusColor(task.status)}"></span>
+                            <span class="task-status-dot {statusColor(task.status)}" aria-hidden="true"></span>
+                            <StatusBadge status={runStatus(task.status)} variant="text" />
                             <span class="task-title">{task.title}</span>
                           </div>
                           {#if taskSummary}

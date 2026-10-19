@@ -185,6 +185,11 @@
 
   // ── revoke a single share ────────────────────────────────────────────────────
   async function revoke(shareId: string): Promise<void> {
+    const ok = await confirmer.ask(
+      'Revoke this share link? Guests attached through it are disconnected, and the link can’t be used again.',
+      { title: 'Revoke share link', confirmLabel: 'Revoke link', danger: true },
+    );
+    if (!ok) return;
     revoking = { ...revoking, [shareId]: true };
     try {
       await api.del(`/auth/shares/${encodeURIComponent(shareId)}`);
@@ -444,7 +449,7 @@
                 <span class="sm-share-label">{share.label}</span>
               {/if}
               <span class="sm-share-role" class:editor={share.role === 'editor'}>
-                {share.role}
+                {share.role === 'editor' ? 'Can type' : 'View only'}
               </span>
             </div>
             <div class="sm-share-meta">

@@ -2460,6 +2460,9 @@ export interface UpdateWorkspaceReq {
   name?: string | null;
   root_path?: string | null;
   settings?: Record<string, unknown> | null;
+  /** Atomic RFC 7396 patch: null members remove keys. Cannot include context
+   *  or be combined with settings (legacy full replacement). */
+  settings_patch?: Record<string, unknown>;
   archived?: boolean | null;
 }
 
@@ -4873,9 +4876,13 @@ export interface InstallBundledResp {
 export interface InstallAllBundledResp {
   installed: string[];
   backed_up: string[];
-  /** Already at the bundled version, or ahead of it (local edits) without `force` — untouched. */
+  /**
+   * Library copies already at the bundled version, or ahead of it (local edits)
+   * without `force`. Those Library files stay untouched. Provider mirrors for a
+   * skipped skill are still reconciled.
+   */
   skipped: string[];
-  /** Skills that failed to install; the rest of the batch still ran. */
+  /** A Library install or a provider-mirror reconcile failed; the rest of the batch still ran. */
   failed: { name: string; error: string }[];
   /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */
   user_owned: string[];
@@ -5291,6 +5298,20 @@ export interface UpsertApiEnvironmentReq {
   /** Update only: `{old_name: new_name}` — a renamed secret keeps its stored
    *  Keychain value (a value in secret_values for the new name still wins). */
   secret_renames?: Record<string, string>;
+}
+
+/** gRPC workspace resolution options; omitted environment selects the active one. */
+export interface GrpcReflectReq {
+  url: string;
+  headers?: ApiKeyVal[];
+  environment_id?: Id | null;
+  vars?: Record<string, string> | null;
+  confirm_new_host?: boolean;
+}
+export interface GrpcInvokeReq extends GrpcReflectReq {
+  proto?: string;
+  method: string;
+  body?: string;
 }
 
 export interface ExecuteApiReq {
@@ -11097,6 +11118,18 @@ export interface DesignPinnedRef {
   policy: string;
   /** Unresolvable (missing artifact/version, no access) — rendered as a stand-in. */
   missing: boolean;
+  /** Poster blob captured for an `embed` pin. Both poster fields are optional:
+   *  an older `otto-publish.json` row that omits them still parses
+   *  (`poster_pinned` absent means the same as false). `null` together with
+   *  `poster_pinned: true` is a new publish that pinned the absence of a
+   *  poster. A historical publish (field omitted or `poster_pinned: false`)
+   *  did not capture a poster and renders a stand-in, not the artifact's
+   *  later thumbnail. */
+  poster_blob?: string | null;
+  /** `true` when this publish stored a poster decision, including a decision
+   *  that there was no poster. Omitted or `false` on manifests from before
+   *  posters were captured. */
+  poster_pinned?: boolean;
 }
 
 /** `POST /design/artifacts/{id}/export`. */
@@ -12125,3 +12158,9 @@ export interface TelemetryProfile {
 
 // Ephemeral two-player game relay contracts.
 export type * from "./game-room-types";
+
+/** Product discovery/refinement exact-turn Stop. See contracts/api.md. */
+export interface ProductStopTurnReq { turn_id: string }
+export interface ProductStopTurnResp { stopped: boolean }
+/** Optional on Product conversational message requests; fresh for every send. */
+export interface ProductTurnIdentity { turn_id?: string }

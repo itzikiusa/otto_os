@@ -10,6 +10,9 @@ use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
+#[path = "product_watch.rs"]
+mod watch;
+
 // ---------------------------------------------------------------------------
 // Domain structs
 // ---------------------------------------------------------------------------
@@ -859,12 +862,19 @@ impl ProductRepo {
     pub async fn add_version(&self, v: NewVersion) -> Result<ProductStoryVersion> {
         let id = new_id();
         let now = fmt(Utc::now());
+        // Allocate and insert under the same write lock. Independent agent,
+        // refresh and workflow callers must never commit the same version_no.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("add version begin"))?;
         // Compute next version_no
         let next_no: i64 = sqlx::query(
             "SELECT COALESCE(MAX(version_no), 0) + 1 FROM product_story_versions WHERE story_id = ?",
         )
         .bind(&v.story_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(dberr("compute version_no"))?
         .get::<i64, _>(0);
@@ -885,10 +895,17 @@ impl ProductRepo {
         .bind(&v.change_notes)
         .bind(&v.created_by)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("add version"))?;
-        self.get_version(&id).await
+        let row = sqlx::query("SELECT * FROM product_story_versions WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("added version"))?;
+        let version = row_to_version(&row)?;
+        tx.commit().await.map_err(dberr("add version commit"))?;
+        Ok(version)
     }
 
     /// List versions for a story; `body_md` is omitted (empty string) for

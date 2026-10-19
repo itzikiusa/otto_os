@@ -144,8 +144,9 @@ pub async fn deliver_destination(
         "email" => deliver_email(ctx, owner, destination, &msg, &report_bytes).await,
         "webhook" => {
             let url = destination.get("url").and_then(Value::as_str).unwrap_or("");
-            match deliver_webhook(url, &msg, "report.md", &report_bytes).await {
-                Ok(()) => (true, None),
+            match deliver_webhook_observed(url, &msg, "report.md", &report_bytes).await {
+                Ok(WebhookSend::Complete) => (true, None),
+                Ok(WebhookSend::BodyOnly { attachment }) => (true, Some(attachment)),
                 Err(e) => (false, Some(e.to_string())),
             }
         }
@@ -263,9 +264,31 @@ async fn deliver_email(
     }
 }
 
+/// How far a webhook send got. The body and the attachment are separate
+/// requests; a failed attachment must not look like the body never left.
+enum WebhookSend {
+    Complete,
+    BodyOnly { attachment: String },
+}
+
 /// POST the report to a user-supplied URL via `WebhookAdapter`, which runs the
 /// `otto_netguard` SSRF check + redirect policy before every request.
+/// Callers that need the partial result use [`deliver_webhook_observed`].
 pub async fn deliver_webhook(url: &str, text: &str, filename: &str, bytes: &[u8]) -> Result<()> {
+    match deliver_webhook_observed(url, text, filename, bytes).await? {
+        WebhookSend::Complete => Ok(()),
+        WebhookSend::BodyOnly { attachment } => {
+            Err(Error::Upstream(format!("webhook attachment: {attachment}")))
+        }
+    }
+}
+
+async fn deliver_webhook_observed(
+    url: &str,
+    text: &str,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<WebhookSend> {
     if url.trim().is_empty() {
         return Err(Error::Invalid(
             "webhook destination is missing 'url'".into(),
@@ -276,11 +299,15 @@ pub async fn deliver_webhook(url: &str, text: &str, filename: &str, bytes: &[u8]
         .send_formatted("scheduled-task", None, text)
         .await
         .map_err(|e| Error::Upstream(format!("webhook delivery: {e}")))?;
-    adapter
+    match adapter
         .upload("scheduled-task", None, filename, bytes)
         .await
-        .map_err(|e| Error::Upstream(format!("webhook attachment: {e}")))?;
-    Ok(())
+    {
+        Ok(()) => Ok(WebhookSend::Complete),
+        Err(e) => Ok(WebhookSend::BodyOnly {
+            attachment: format!("message sent but attachment upload failed: {e}"),
+        }),
+    }
 }
 
 #[cfg(test)]

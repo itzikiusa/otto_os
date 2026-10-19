@@ -470,7 +470,7 @@
     if (
       !(await confirmer.ask(
         `Delete section “${sec.name}”? Sub-sections are removed too and their connections become ungrouped.`,
-        { title: 'Delete section' },
+        { title: 'Delete section', confirmLabel: 'Delete', danger: true },
       ))
     )
       return;
@@ -662,7 +662,7 @@
       // "Remove" button, which lands here.
       !(await confirmer.ask(
         `Remove cluster “${cl.name}”? Its saved settings and Keychain secrets are removed from Otto; topics on the broker are not touched.`,
-        { title: 'Remove cluster', confirmLabel: 'Remove' },
+        { title: 'Remove cluster', confirmLabel: 'Remove', danger: true },
       ))
     )
       return;
@@ -721,6 +721,8 @@
     if (
       !(await confirmer.ask(`Delete connection “${c.name}”? Its Keychain secret is removed too.`, {
         title: 'Delete connection',
+        confirmLabel: 'Delete',
+        danger: true,
       }))
     )
       return;
@@ -1634,6 +1636,7 @@
                 const ok = await confirmer.ask(`Delete saved query “${q.name}”? Open tabs keep their text but are no longer linked to it.`, {
                   title: 'Delete saved query',
                   confirmLabel: 'Delete query',
+                  danger: true,
                 });
                 if (ok) void database.deleteSavedQuery(q.id);
               }}

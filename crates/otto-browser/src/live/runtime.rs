@@ -106,6 +106,23 @@ pub struct LiveRuntime {
     janitor: StdMutex<Option<JoinHandle<()>>>,
 }
 
+/// A background snapshot may outlive a replacement under the same key.
+/// Compare identity and remove under one map lock, before asynchronous cleanup.
+fn remove_if_same<T>(
+    entries: &mut HashMap<String, Arc<T>>,
+    key: &str,
+    expected: &Arc<T>,
+) -> Option<Arc<T>> {
+    if entries
+        .get(key)
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
+    {
+        entries.remove(key)
+    } else {
+        None
+    }
+}
+
 impl LiveRuntime {
     pub fn new(data_dir: PathBuf, hooks: Arc<dyn LiveHooks>, settings: LiveSettings) -> Arc<Self> {
         Self::with_io(
@@ -365,6 +382,24 @@ impl LiveRuntime {
         true
     }
 
+    async fn close_snapshot(
+        &self,
+        tab_id: &str,
+        expected: &Arc<LiveSession>,
+        reason: &'static str,
+    ) {
+        let removed = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|mut sessions| remove_if_same(&mut sessions, tab_id, expected));
+        if let Some(session) = removed {
+            session.close(reason).await;
+            self.audit("browser.live.close", &session, json!({"reason":reason}))
+                .await;
+        }
+    }
+
     async fn audit(&self, action: &'static str, s: &LiveSession, mut detail: serde_json::Value) {
         detail["workspace_id"] = json!(s.workspace_id);
         detail["profile"] = json!(s.profile);
@@ -480,18 +515,11 @@ impl LiveRuntime {
             .lock()
             .map(|s| s.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
-        for (tab, s) in snapshot {
-            if !s.is_live() {
-                if s.viewer_count() == 0 {
-                    self.close(&tab, "closed").await;
-                }
-                continue;
-            }
-            if s.idle_for(now).is_some_and(|d| d >= idle_limit) {
-                tracing::info!("browser live: closing idle session for tab {tab}");
-                self.close(&tab, "idle").await;
-            }
-        }
+        self.sweep_sessions(snapshot, now, idle_limit).await;
+        // An open owns a process before its target has registered. Do not reap
+        // that apparently empty process, or relaunch the same profile before
+        // shutdown finishes. Keep the same open_lock -> procs order as open().
+        let _opening = self.open_lock.lock().await;
         let stale: Vec<Arc<ChromeProcess>> = {
             let mut procs = self.procs.lock().await;
             let keys: Vec<ProcessKey> = procs
@@ -508,6 +536,26 @@ impl LiveRuntime {
         };
         for p in stale {
             p.shutdown().await;
+        }
+    }
+
+    async fn sweep_sessions(
+        &self,
+        snapshot: Vec<(String, Arc<LiveSession>)>,
+        now: Instant,
+        idle_limit: Duration,
+    ) {
+        for (tab, s) in snapshot {
+            if !s.is_live() {
+                if s.viewer_count() == 0 {
+                    self.close_snapshot(&tab, &s, "closed").await;
+                }
+                continue;
+            }
+            if s.idle_for(now).is_some_and(|d| d >= idle_limit) {
+                tracing::info!("browser live: closing idle session for tab {tab}");
+                self.close_snapshot(&tab, &s, "idle").await;
+            }
         }
     }
 
@@ -538,6 +586,148 @@ impl LiveRuntime {
 mod tests {
     use super::*;
     use crate::live::hooks::NoopHooks;
+
+    #[test]
+    fn stale_cleanup_cannot_remove_a_reopened_session() {
+        // The janitor holds the old Arc while open replaces the same tab key.
+        let old = Arc::new("crashed session");
+        let replacement = Arc::new("new live session");
+        let mut sessions = HashMap::from([("tab".to_string(), old.clone())]);
+        let snapshot = sessions["tab"].clone();
+        sessions.insert("tab".into(), replacement.clone());
+        assert!(remove_if_same(&mut sessions, "tab", &snapshot).is_none());
+        assert!(Arc::ptr_eq(&sessions["tab"], &replacement));
+        // A current candidate is removed once; an already removed one is a no-op.
+        assert!(Arc::ptr_eq(
+            &remove_if_same(&mut sessions, "tab", &replacement).unwrap(),
+            &replacement
+        ));
+        assert!(remove_if_same(&mut sessions, "tab", &replacement).is_none());
+    }
+
+    #[tokio::test]
+    async fn process_reaping_waits_for_open_to_finish() {
+        use super::super::conn::CdpConn;
+        use super::super::guard::VerdictCache;
+        let data = tempfile::tempdir().unwrap();
+        let rt = rt(data.path());
+        let (ours, _browser) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(ours);
+        let (conn, _events) = CdpConn::start(read, write);
+        let proc =
+            super::super::process::burst_tests::process_fixture(conn, VerdictCache::default());
+        proc.conn.shutdown();
+        rt.procs.lock().await.insert(ProcessKey::Ephemeral, proc);
+        let opening = rt.open_lock.lock().await;
+        let sweep = rt.sweep();
+        tokio::pin!(sweep);
+        // Poll cleanup once while an open owns lifecycle admission. No sleeps.
+        tokio::select! {
+            biased;
+            _ = &mut sweep => panic!("reaping ran during an in-flight open"),
+            _ = std::future::ready(()) => {}
+        }
+        assert_eq!(rt.procs.lock().await.len(), 1);
+        drop(opening);
+        sweep.await;
+        assert!(rt.procs.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_janitor_snapshot_preserves_replacement_target() {
+        use super::super::conn::CdpConn;
+        use super::super::guard::VerdictCache;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for crashed in [false, true] {
+            let (ours, mut browser) = tokio::io::duplex(65536);
+            let (read, write) = tokio::io::split(ours);
+            let (conn, _events) = CdpConn::start(read, write);
+            let proc =
+                super::super::process::burst_tests::process_fixture(conn, VerdictCache::default());
+            let closed = Arc::new(StdMutex::new(Vec::new()));
+            let log = closed.clone();
+            let responder = tokio::spawn(async move {
+                let mut target = 0;
+                loop {
+                    let mut bytes = Vec::new();
+                    loop {
+                        let Ok(byte) = browser.read_u8().await else {
+                            return;
+                        };
+                        if byte == 0 {
+                            break;
+                        }
+                        bytes.push(byte);
+                    }
+                    let command: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let result = match command["method"].as_str().unwrap() {
+                        "Target.createBrowserContext" => {
+                            json!({"browserContextId":format!("ctx-{target}")})
+                        }
+                        "Target.createTarget" => {
+                            target += 1;
+                            json!({"targetId":format!("target-{target}")})
+                        }
+                        "Target.attachToTarget" => json!({"sessionId":format!("session-{target}")}),
+                        "Target.closeTarget" => {
+                            log.lock()
+                                .unwrap()
+                                .push(command["params"]["targetId"].clone());
+                            json!({"success":true})
+                        }
+                        _ => json!({}),
+                    };
+                    let mut response =
+                        serde_json::to_vec(&json!({"id":command["id"],"result":result})).unwrap();
+                    response.push(0);
+                    if browser.write_all(&response).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            let data = tempfile::tempdir().unwrap();
+            let rt = rt(data.path());
+            let old = LiveSession::create(
+                proc.clone(),
+                params("ephemeral"),
+                data.path().into(),
+                Arc::new(NoopHooks),
+            )
+            .await
+            .unwrap();
+            if crashed {
+                old.on_target_gone(true);
+            }
+            let snapshot = vec![("tab1".to_string(), old.clone())];
+            // Complete the same replacement publication as open(), after snapshot.
+            let new = LiveSession::create(
+                proc.clone(),
+                params("ephemeral"),
+                data.path().into(),
+                Arc::new(NoopHooks),
+            )
+            .await
+            .unwrap();
+            rt.sessions
+                .lock()
+                .unwrap()
+                .insert("tab1".into(), new.clone());
+            rt.sweep_sessions(snapshot, Instant::now(), Duration::ZERO)
+                .await;
+            assert!(new.is_live());
+            assert!(Arc::ptr_eq(&rt.session("tab1").unwrap(), &new));
+            assert!(
+                closed.lock().unwrap().is_empty(),
+                "replacement target was closed"
+            );
+            rt.close("tab1", "closed").await;
+            assert!(!new.is_live());
+            assert_eq!(*closed.lock().unwrap(), vec![json!("target-2")]);
+            old.close("closed").await;
+            proc.conn.shutdown();
+            responder.abort();
+        }
+    }
 
     fn rt(dir: &std::path::Path) -> Arc<LiveRuntime> {
         LiveRuntime::new(

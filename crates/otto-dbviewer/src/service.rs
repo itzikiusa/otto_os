@@ -670,6 +670,9 @@ pub struct ImportCounts {
 struct Resolved {
     driver: Arc<dyn Driver>,
     config: ResolvedConfig,
+    /// Credential profile selected for this call. Equal to the logical
+    /// connection id when the rule uses that connection's own account.
+    profile_id: Id,
     _tunnel: Option<Arc<SshTunnel>>,
 }
 
@@ -917,6 +920,15 @@ impl DbViewerService {
         if user.is_root {
             return Ok(());
         }
+        // The owner executing as this connection's own account is ordinary
+        // privileged execution. A different credential profile keeps the
+        // native ceiling, including when the caller is the owner. A non-owner
+        // whose allow rule leaves `credential_connection_id` empty still uses
+        // the shared account and must fail closed on engines that cannot
+        // prove a restricted ceiling. `__read_only_execution` is untouched.
+        if user.id == conn.created_by && r.profile_id == conn.id {
+            return Ok(());
+        }
         let grants = r.with_lifecycle(r.driver.native_grants(&r.config)).await?;
         for grant in grants {
             let decision = otto_rbac::resource_access::ResourceAccess::new(self.connections.pool())
@@ -951,6 +963,52 @@ impl DbViewerService {
                  use the browser export or file upload instead"
                     .into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Carry the caller's host-file permission into MySQL's incremental script
+    /// executor. SQL mode can change before a later LOCAL INFILE statement, so
+    /// preflight parsing cannot determine all transfers. The driver grants only
+    /// the actual statement's exact filename; saved params cannot supply this flag.
+    async fn prepare_local_infile(
+        &self,
+        conn_id: &Id,
+        user_id: &Id,
+        statement: &str,
+        config: &mut ResolvedConfig,
+    ) -> Result<()> {
+        if let Some(params) = config.params.as_object_mut() {
+            params.remove("__mysql_local_infile_authorized");
+        }
+        // LOCAL is a literal SQL keyword regardless of the session's quote
+        // mode. A conservative byte scan cannot miss it after SET/EXECUTE,
+        // unlike preflight statement parsing. False positives only negotiate
+        // capability; the driver still requires the actual LOAD filename.
+        if config.engine != Engine::Mysql
+            || !statement
+                .as_bytes()
+                .windows(5)
+                .any(|w| w.eq_ignore_ascii_case(b"LOCAL"))
+        {
+            return Ok(());
+        }
+        crate::access::count_read();
+        let user = otto_state::UsersRepo::new(self.connections.pool())
+            .get(user_id)
+            .await?;
+        if user.is_root && !user.disabled {
+            if !config.params.is_object() {
+                config.params = serde_json::json!({});
+            }
+            config
+                .params
+                .as_object_mut()
+                .unwrap()
+                .insert("__mysql_local_infile_authorized".into(), Value::Bool(true));
+        } else if crate::drivers::mysql::requires_local_infile(statement) {
+            // Early actionable error; the driver also checks each statement.
+            self.require_local_path_access(conn_id, user_id).await?;
         }
         Ok(())
     }
@@ -1323,6 +1381,7 @@ impl DbViewerService {
         Ok(Resolved {
             driver,
             config,
+            profile_id,
             _tunnel: tunnel,
         })
     }
@@ -2347,7 +2406,7 @@ impl DbViewerService {
     #[allow(clippy::too_many_arguments)]
     async fn execute_recorded(
         &self,
-        r: Resolved,
+        mut r: Resolved,
         conn_id: &Id,
         user_id: &Id,
         req: &QueryRequest,
@@ -2366,6 +2425,8 @@ impl DbViewerService {
                 .await?
             }
         }
+        self.prepare_local_infile(conn_id, user_id, &req.statement, &mut r.config)
+            .await?;
         let execution = otto_telemetry::context::measure_result(
             "db.driver.execute",
             r.with_lifecycle(r.driver.run_tracked(&r.config, req, token)),
@@ -2608,10 +2669,10 @@ impl DbViewerService {
         };
         // Second barrier: execute in the engine's native read-only mode —
         // MySQL `START TRANSACTION READ ONLY` / PostgreSQL `BEGIN READ ONLY`
-        // (rolled back afterwards), ClickHouse `readonly` over HTTP. MongoDB
+        // (rolled back afterwards), ClickHouse `readonly` on either transport. MongoDB
         // and Redis have no such mode; their gate is a positive allow-list of
-        // read operations (Mongo: find/count/getIndexes and aggregations
-        // without `$out`/`$merge`; Redis: known read commands only).
+        // read operations (Mongo: find/count/countDocuments/distinct/getIndexes
+        // and aggregations without `$out`/`$merge`; Redis: known read commands only).
         self.run_inner(conn_id, user_id, &safe, true).await
     }
 
@@ -4035,6 +4096,8 @@ mod tests {
 
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod native_owner_tests;
 #[cfg(test)]
 mod perf_budget_tests;
 #[cfg(test)]

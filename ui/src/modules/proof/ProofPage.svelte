@@ -163,7 +163,7 @@
   const showRail = $derived(proof.packs.length > 0 || filter !== 'all');
   const filterCounts = $derived.by(() => {
     // Counts only mean something on the unfiltered list.
-    if (filter !== 'all') return null;
+    if (filter !== 'all' || proof.nextCursor) return null;
     const c: Record<string, number> = { all: proof.packs.length };
     for (const p of proof.packs) c[p.status] = (c[p.status] ?? 0) + 1;
     return c;
@@ -816,7 +816,9 @@
       {/if}
       <!-- Everything occasional (waive, CI refresh, housekeeping, delete) lives
            in one ⋯ so the header stays at Add + Assemble + ⋯. -->
+      {#if ws.currentId}
       <button class="icon-btn" data-overflow="-1" data-icon="more" data-label="More actions…" aria-haspopup="menu" aria-label="More actions" title="More actions" onclick={openMoreMenu}><Icon name="more" size={14} /></button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -847,7 +849,7 @@
         <button class="pack-item" class:active={detail?.pack.id === p.id} aria-current={detail?.pack.id === p.id ? 'true' : undefined} aria-busy={openingId === p.id} onclick={() => open(p.id)}>
           <div class="pack-top">
             <span class="grow ellipsis pack-title" title={p.title || p.work_item_id}>{p.title || p.work_item_id}</span>
-            <span class="done-pill" title={`Done score ${p.done_score}/100`}>{p.done_score}</span>
+            <span class="done-pill" title={`Done score ${p.done_score}/100`}>{p.done_score} done</span>
             <ProofStatusChip status={p.status} risk={p.risk_score} />
           </div>
           <div class="pack-meta">
@@ -880,7 +882,7 @@
   {/if}
 
   <!-- Right: detail. -->
-  <section class="main">
+  <section class="main" class:phone-list-only={viewport.isPhone && showRail && !detail && !openingId && !proof.detailError}>
     {#if !detail}
       {#if !ws.currentId}
         <EmptyState
@@ -985,7 +987,7 @@
                         {expanded[a.id] ? 'Hide' : 'Show'}
                       </button>
                     {/if}
-                    <button class="icon-btn small" onclick={() => removeArtifact(a.id)} aria-label="Delete artifact {a.title}" title="Delete artifact"><Icon name="trash" size={12} /></button>
+                    <button class="icon-btn small artifact-delete" onclick={() => removeArtifact(a.id)} aria-label="Delete artifact {a.title}" title="Delete artifact"><Icon name="trash" size={12} /></button>
                   </div>
                   {#if MEDIA_KINDS.has(a.kind)}
                     {#if mediaUrls[a.id]}
@@ -1588,7 +1590,7 @@
   .child-link:hover {
     background: var(--hover);
   }
-  .icon-btn.small {
+  .artifact-delete {
     width: 22px;
     height: 22px;
   }
@@ -1696,5 +1698,12 @@
     display: block;
     margin-block: 8px;
     margin-inline: auto;
+  }
+  .main.phone-list-only { display: none; }
+  @media (pointer: coarse), (max-width: 640px) {
+    .chip-btn, .link-btn { min-block-size: var(--hit-min); }
+    .artifact-delete { min-inline-size: var(--hit-min); min-block-size: var(--hit-min); }
+    .art-top { flex-wrap: wrap; }
+    .art-title { flex-basis: 100%; }
   }
 </style>

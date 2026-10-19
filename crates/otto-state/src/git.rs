@@ -320,6 +320,41 @@ impl GitStore {
         self.get_repo(id).await
     }
 
+    /// Refresh the observed origin and its account association together. A
+    /// stale reader must not overwrite an explicit rebind or restore a binding
+    /// another request already invalidated.
+    pub async fn refresh_repo_binding(
+        &self,
+        expected: &Repo,
+        remote_url: Option<&str>,
+        provider: Option<GitProviderKind>,
+        keep_account: bool,
+    ) -> Result<Repo> {
+        let updated = sqlx::query(
+            "UPDATE repos SET remote_url = ?, provider = ?, git_account_id = ?
+             WHERE id = ? AND remote_url IS ? AND git_account_id IS ?",
+        )
+        .bind(remote_url)
+        .bind(provider.map(|p| p.as_str()))
+        .bind(if keep_account {
+            expected.git_account_id.as_deref()
+        } else {
+            None
+        })
+        .bind(&expected.id)
+        .bind(expected.remote_url.as_deref())
+        .bind(expected.git_account_id.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("refresh repo binding"))?;
+        if updated.rows_affected() == 0 {
+            return Err(otto_core::Error::Conflict(
+                "repository account or remote changed; refresh and retry".into(),
+            ));
+        }
+        self.get_repo(&expected.id).await
+    }
+
     pub async fn delete_repo(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM repos WHERE id = ?")
             .bind(id)

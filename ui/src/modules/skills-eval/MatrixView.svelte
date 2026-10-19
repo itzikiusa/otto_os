@@ -16,10 +16,19 @@
   import { runStatus, sentenceCase } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
   import { pollWhileVisible } from '../../lib/poll';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import type { EvalMatrix, MatrixCell, MatrixPrompt, StartMatrixReq } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
-  let { onopenrun } = $props<{ onopenrun?: (evalId: string) => void }>();
+  let {
+    listCollapsed = false,
+    onopenrun,
+    onphonedetail,
+  } = $props<{
+    listCollapsed?: boolean;
+    onopenrun?: (evalId: string) => void;
+    onphonedetail?: (open: boolean) => void;
+  }>();
 
   let matrices: EvalMatrix[] = $state([]);
   let loading = $state(true);
@@ -29,10 +38,21 @@
   let selectedId: string | null = $state(null);
   let showForm = $state(false);
   let creating = $state(false);
+  let phoneListOpen = $state(false);
   // The selected matrix's own load: shown inline in the detail pane (a toast
   // left the pane on the generic "Eval matrix" intro, as if nothing existed).
   let detailError: string | null = $state(null);
   let detailLoading = $state(false);
+
+  const showPhoneList = $derived(
+    viewport.isPhone && (phoneListOpen || ((loading || !!loadError) && matrices.length === 0)),
+  );
+  $effect(() => {
+    onphonedetail?.(viewport.isPhone && !showPhoneList && matrices.length > 0);
+  });
+  export function back(): void {
+    phoneListOpen = true;
+  }
 
   // --- New-matrix form fields --------------------------------------------
   let fName = $state('');
@@ -45,7 +65,6 @@
   }
   let fSkills = $state(''); // comma-separated skill names
   let fTestCmd = $state('');
-  let fIterations = $state(1);
   let fPrompts: MatrixPrompt[] = $state([{ label: '', task: '' }]);
 
   // Load the workspace's matrices whenever the active workspace changes.
@@ -54,6 +73,7 @@
     // A workspace switch drops the previous workspace's open matrix.
     selected = null;
     selectedId = null;
+    phoneListOpen = false;
     if (wsId) {
       void loadList(wsId);
     } else {
@@ -83,6 +103,7 @@
   async function selectMatrix(id: string): Promise<void> {
     selectedId = id;
     showForm = false;
+    phoneListOpen = false;
     detailError = null;
     if (selected?.id !== id) selected = null;
     detailLoading = true;
@@ -166,6 +187,7 @@
     showForm = true;
     selectedId = null;
     selected = null;
+    phoneListOpen = false;
   }
 
   function parseList(s: string): string[] {
@@ -214,7 +236,7 @@
       prompts,
       target: { kind: 'working' },
       test_cmd: fTestCmd.trim() || null,
-      iterations: Math.max(1, Math.floor(fIterations)),
+      iterations: 1,
     };
 
     creating = true;
@@ -289,8 +311,8 @@
 
 </script>
 
-<div class="mx" data-testid="matrix-view">
-  <aside class="mx-side">
+<div class="mx" class:list-hidden={listCollapsed && !viewport.isPhone} data-testid="matrix-view">
+  <aside class="mx-side" class:hide-phone={viewport.isPhone && !showPhoneList} id="matrices-list">
     <div class="mx-side-head">
       <span class="mx-side-title">Matrices</span>
       <!-- Not .primary: the form’s "Create matrix" / the empty state’s CTA is the view’s primary. -->
@@ -328,7 +350,7 @@
     </div>
   </aside>
 
-  <main class="mx-main">
+  <main class="mx-main" class:hide-phone={viewport.isPhone && showPhoneList}>
     {#if !ws.currentId}
       <EmptyState icon="grid" title="No workspace selected" body="Pick a workspace to build a matrix." />
     {:else if showForm}
@@ -359,15 +381,9 @@
             <label class="field-label" for="mx-skills">Skills <span class="hint-inline">library skill names, comma-separated</span></label>
             <input dir="auto" id="mx-skills" class="input" data-testid="matrix-skills" placeholder="golang-testing, golang-code-review" bind:value={fSkills} />
           </div>
-          <div class="grid2">
-            <div class="field">
-              <label class="field-label" for="mx-test">Test command <span class="hint-inline">optional</span></label>
-              <input dir="ltr" id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
-            </div>
-            <div class="field">
-              <label class="field-label" for="mx-iter">Iterations</label>
-              <input id="mx-iter" class="input" type="number" min="1" max="10" bind:value={fIterations} />
-            </div>
+          <div class="field">
+            <label class="field-label" for="mx-test">Test command <span class="hint-inline">optional</span></label>
+            <input dir="ltr" id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
           </div>
         </section>
 
@@ -512,6 +528,9 @@
     height: 100%;
     min-height: 0;
   }
+  .mx.list-hidden .mx-side {
+    display: none;
+  }
   .mx-side {
     width: 280px;
     flex-shrink: 0;
@@ -618,18 +637,20 @@
     .mx {
       flex-direction: column;
     }
+    .hide-phone {
+      display: none;
+    }
     .mx-side {
       width: 100%;
-      max-height: 40%;
+      flex: 1;
       border-inline-end: none;
-      border-bottom: 1px solid var(--border);
     }
     .mx-main {
       flex: 1;
       min-height: 0;
     }
-    .grid2 {
-      grid-template-columns: minmax(0, 1fr);
+    .mx-item {
+      min-height: var(--hit-min);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -679,12 +700,6 @@
   .field {
     margin-bottom: 0;
     min-width: 0;
-  }
-  .grid2 {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    align-items: end;
   }
   /* Same field-label style as every other Otto form (app.css .field > label). */
   .field-label {

@@ -659,13 +659,17 @@ impl otto_product::ProductCtx for ServerCtx {
                 }
             }
             if let Ok(story) = self.product_repo.get_story(story_id).await {
-                let live = self
-                    .manager
-                    .list_live_by_meta(&story.workspace_id, None, "work.story_id", story_id)
-                    .await
-                    .unwrap_or_default();
-                for s in live {
-                    let _ = self.manager.kill_session(&s.id).await;
+                // Legacy studio metadata used top-level story_id; analysis and
+                // plan sessions use work.story_id. Both belong to this story.
+                for key in ["work.story_id", "story_id"] {
+                    let live = self
+                        .manager
+                        .list_live_by_meta(&story.workspace_id, None, key, story_id)
+                        .await
+                        .unwrap_or_default();
+                    for session in live {
+                        let _ = self.manager.kill_session(&session.id).await;
+                    }
                 }
             }
         })
@@ -1059,6 +1063,10 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             post(otto_product::refine::send_message::<ServerCtx>),
         )
         .route(
+            "/product/refinement-threads/{tid}/stop",
+            post(otto_product::refine::stop_turn::<ServerCtx>),
+        )
+        .route(
             "/product/refinement-threads/{tid}/archive",
             post(otto_product::refine::archive_thread::<ServerCtx>),
         )
@@ -1078,6 +1086,10 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         .route(
             "/product/discovery-chats/{cid}/messages",
             post(otto_product::chat::send_message::<ServerCtx>),
+        )
+        .route(
+            "/product/discovery-chats/{cid}/stop",
+            post(otto_product::chat::stop_turn::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}/archive",
@@ -3016,45 +3028,66 @@ async fn materialize_pr_worktree(
     // Re-read the git token (resolve_provider_remote consumed it) so the fetch
     // can reach a private origin. Fetch is metadata-only (updates refs) and
     // never touches a working tree.
-    let git_token: Option<String> = match repo.git_account_id.as_ref() {
-        Some(aid) => match ctx.git_store.get_account(aid).await {
-            Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
-                .await
-                .ok()
-                .flatten(),
-            Err(_) => None,
-        },
-        None => None,
-    };
+    let git_token: Option<otto_git::transport::TransportCredential> =
+        match repo.git_account_id.as_ref() {
+            Some(aid) => match ctx.git_store.get_account(aid).await {
+                Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|token| {
+                        otto_git::transport::TransportCredential::for_repo(token, &acc, repo).ok()
+                    }),
+                Err(_) => None,
+            },
+            None => None,
+        };
     otto_review::worktree::materialize_pr_worktree(
         repo, review_id, pr_number, source, head_sha, suffix, git_token,
     )
     .await
 }
 
-/// Re-materialize a PR review's head for a RETRY (the original run's worktree
-/// was torn down when it finished). Best-effort: `None` when the provider or
-/// the head is unreachable — the caller then falls back to repo.path.
+/// Re-materialize the ORIGINAL PR review revision for a retry. The stored
+/// diff and findings are from that revision, even if the forge head has moved.
+/// Missing evidence fails explicitly instead of substituting another checkout.
 async fn pr_retry_worktree(
     ctx: &ServerCtx,
-    user: &otto_core::domain::User,
+    _user: &otto_core::domain::User,
     repo: &otto_core::domain::Repo,
     review_id: &Id,
     pr_number: u64,
     suffix: &str,
-) -> Option<PrWorktree> {
-    let (provider, remote) = resolve_provider_remote(ctx, user, repo).await.ok()?;
-    let pr = provider.get_pr(&remote, pr_number).await.ok();
+) -> Result<PrWorktree> {
+    let recorded = ctx
+        .reviews_store
+        .get_run_context(review_id)
+        .await?
+        .ok_or_else(|| {
+            Error::Conflict("review revision is unavailable — start a new review".into())
+        })?;
+    let head = recorded
+        .head_sha
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| {
+            Error::Conflict("review revision is unavailable — start a new review".into())
+        })?;
     materialize_pr_worktree(
         ctx,
         repo,
         review_id,
         pr_number,
-        pr.as_ref().map(|p| p.summary.source_branch.as_str()),
-        pr.as_ref().and_then(|p| p.summary.head_sha.as_deref()),
+        recorded.source_branch.as_deref(),
+        Some(head),
         suffix,
     )
     .await
+    .ok_or_else(|| {
+        Error::Conflict(
+            "the original reviewed revision cannot be checked out — start a new review".into(),
+        )
+    })
 }
 
 /// The checkout a BRANCH review's (pr #0) retry runs in: the run's recorded
@@ -4498,11 +4531,20 @@ async fn retry_review_agent(
         let suffix = format!("-a{index}-{}", chrono::Utc::now().timestamp_millis());
         let (cwd, pr_wt) = if pr_number != 0 {
             let wt =
-                pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, &suffix).await;
-            let cwd = wt
-                .as_ref()
-                .map_or_else(|| repo.path.clone(), |w| w.path.clone());
-            (cwd, wt)
+                match pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, &suffix)
+                    .await
+                {
+                    Ok(wt) => wt,
+                    Err(error) => {
+                        let mut row = states.lock().await[index].clone();
+                        row.status = "error".into();
+                        row.note = error.to_string();
+                        let _ = reviews.set_agent_at(&review_id_bg, index, &row).await;
+                        unregister_review_agent_cancel(&agent_cancels_reg, &review_id_bg, index);
+                        return;
+                    }
+                };
+            (wt.path.clone(), Some(wt))
         } else {
             // A branch review re-enters the checkout it ran in (S2-06), not
             // the user's main checkout on whatever branch it is on now.
@@ -4620,6 +4662,19 @@ async fn retry_summarizer(
             "review is still running — wait for it to finish first".into(),
         )));
     }
+    // The claim excludes live reviewer retries. Reload AFTER claiming: a reviewer
+    // may have completed between the handler's initial read and atomic admission.
+    let settled = ctx
+        .reviews_store
+        .get_review(&review_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> = settled
+        .agents
+        .iter()
+        .take(settled.agents.len().saturating_sub(1))
+        .map(|a| a.findings.clone())
+        .collect();
     // Each retry has its own cancellation flag; a cancelled earlier attempt
     // must not poison the new session, and Cancel must cover this task too
     // (registered only once this attempt owns the review).
@@ -4646,11 +4701,34 @@ async fn retry_summarizer(
         // for anchoring so the retry re-keys onto the original findings.
         let (repo_path, pr_wt) = if pr_number != 0 {
             let wt =
-                pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, "-sum").await;
-            let path = wt
-                .as_ref()
-                .map_or_else(|| repo.path.clone(), |w| w.path.clone());
-            (path, wt)
+                match pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, "-sum")
+                    .await
+                {
+                    Ok(wt) => wt,
+                    Err(error) => {
+                        if attempt_cancel.load(std::sync::atomic::Ordering::SeqCst)
+                            || review_is_cancelled(&ctx_bg, &review_id_bg).await
+                        {
+                            return;
+                        }
+                        let _ = ctx_bg
+                            .reviews_store
+                            .set_status(
+                                &review_id_bg,
+                                ReviewStatus::Error,
+                                Some(&error.to_string()),
+                            )
+                            .await;
+                        let _ = ctx_bg.events.send(Event::ReviewChanged {
+                            workspace_id: workspace.id.clone(),
+                            session_id: None,
+                            review_id: review_id_bg.clone(),
+                            status: "error".into(),
+                        });
+                        return;
+                    }
+                };
+            (wt.path.clone(), Some(wt))
         } else {
             // Anchor on the branch review's own checkout/head (S2-06): the
             // user's checkout holds other line text and would re-key nothing.
@@ -6019,8 +6097,10 @@ async fn open_agent_session(
         meta["work"] = serde_json::json!({ "origin": "delegation" });
     }
     // The delegating lead, stamped by the server from the credential (never
-    // the body): `/sessions/{id}/message` lets an agent's own token reach
-    // only itself and the workers it opened here (S11-02).
+    // the body). `/sessions/{id}/message` lets an agent's own token reach any
+    // non-shell agent session that this user could message, including a
+    // sibling it did not open. A shell or SSH sibling stays refused unless
+    // `delegated_by` names this agent (S11-02).
     match crate::feature_guard::agent_session_of(&auth) {
         Some(lead) => meta[DELEGATED_BY_META] = serde_json::json!(lead),
         None => {

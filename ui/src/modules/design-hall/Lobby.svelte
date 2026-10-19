@@ -278,7 +278,7 @@
     <button class="btn small" data-overflow="-1" data-icon="download" onclick={onimport}>
       <Icon name="download" size={12} /> Import
     </button>
-    <button class="btn small primary" onclick={onnew} aria-haspopup="menu" data-testid="design-new" data-keep>
+    <button class="btn small" class:primary={searchActive || view === 'spatial'} onclick={onnew} aria-haspopup="menu" data-testid="design-new" data-keep>
       <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={12} />
     </button>
   {/snippet}
@@ -303,7 +303,7 @@
           {#if searchError}
             <div class="inline-err" role="alert">
               <Icon name="warning" size={14} />
-              <span>Search failed. {searchError}</span>
+              <span title={searchError}>Search failed. Check the connection and try again.</span>
               <button class="btn small" onclick={() => void runSearch(q.trim())}>Retry</button>
             </div>
           {:else if !searching && results.length === 0}
@@ -921,5 +921,8 @@
   }
   .quick a :global(svg) {
     color: var(--text-dim);
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .search, .sel select { min-block-size: var(--hit-min); }
   }
 </style>

@@ -11,8 +11,11 @@
   import RoomParticipants from './RoomParticipants.svelte';
   import RoomChat from './RoomChat.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { router } from '../../lib/router.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { applyRoomEvent } from './room-state';
   import { RoomClient, joinRoom, type RoomConnection } from './room-client';
   import { recallRoom, rememberRoom, forgetRoom, roomInvite } from './room-access';
@@ -25,13 +28,22 @@
   let waitingForRecap = $state(false);
   let finishing = $state(false), needsName = $state(false), inviteOpen = $state(false), inviteRole = $state<'viewer' | 'editor'>('viewer');
   let invitation = $state<RoomInvite | null>(null), inviting = $state(false), copied = $state(false);
+  let inviteError = $state('');
   let tab = $state<'session' | 'conversation'>('session');
+  let peopleOpen = $state(true);
   const host = $derived(room?.member_id === room?.host_member_id && !!room?.host_member_id);
   const self = $derived(room?.members?.find(m => m.id === room?.member_id));
   const driver = $derived(room?.members?.find(m => m.id === room?.driver_member_id));
   const connected = $derived(connection === 'connected');
   const canType = $derived(!finishing && connected && room?.admission === 'admitted' && room?.driver_member_id === room?.member_id);
   const origin = $derived(recallRoom(roomId)?.origin ?? location.origin);
+  const narrowRoom = $derived(viewport.isPhone || viewport.isTablet);
+  $effect(() => { peopleOpen = !narrowRoom; });
+  function endLabel(): string {
+    if (!finishing) return host ? 'End room…' : 'Leave room…';
+    if (waitingForRecap) return 'Finishing recap…';
+    return 'Ending…';
+  }
   onMount(() => {
     if (recallRoom(roomId)) attach();
     else if (guest && roomInvite(roomId)) { needsName = true; connection = 'disconnected'; }
@@ -96,21 +108,25 @@
     client?.dispose(); room = null; connection = 'ended'; ended = host ? 'The room has ended. The session is still running.' : 'You left the room.'; forgetRoom(roomId);
   }
   async function makeInvite() {
-    inviting = true; error = ''; copied = false;
+    inviting = true; inviteError = ''; copied = false;
     try { const { api } = await import('../../lib/api/client'); invitation = await api.post<RoomInvite>(`/rooms/${encodeURIComponent(roomId)}/invites`, {role: inviteRole}); }
-    catch (e) { error = e instanceof Error ? e.message : 'Could not create an invitation. Try again.'; }
+    catch (e) { inviteError = e instanceof Error ? e.message : 'Could not create an invitation. Try again.'; }
     finally { inviting = false; }
   }
   async function copyInvite() {
     if (!invitation) return;
-    try { await copyTextOrThrow(invitation.url); copied = true; } catch { error = 'Could not copy. Select and copy the invitation link below.'; }
+    try { await copyTextOrThrow(invitation.url); copied = true; } catch { inviteError = 'Could not copy. Select and copy the invitation link below.'; }
   }
 </script>
 <div class="room-page">
   <PageHeader title={room?.session_title ?? 'Session room'} subtitle={room ? `${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
     {#snippet actions()}{#if room?.admission === 'admitted'}
-      <button class="btn small danger" data-overflow="-2" disabled={finishing} onclick={leave}>{finishing ? waitingForRecap ? 'Finishing recap…' : 'Ending…' : host ? 'End room…' : 'Leave room…'}</button>
-      {#if host}<button class="btn small primary" disabled={!connected} onclick={() => { invitation = null; inviteOpen = true; }}>Invite someone…</button>{/if}
+      {#if host}
+        <button class="icon-btn" data-keep aria-haspopup="menu" disabled={finishing} title={endLabel()} aria-label={finishing ? endLabel() : 'More room actions'} onclick={(e) => ctxMenu.showAt(e.currentTarget, [{ label: endLabel(), icon: 'stop', danger: true, disabled: finishing, action: () => void leave() }], { align: 'end' })}><Icon name="more" size={14} /></button>
+        <button class="btn small primary" disabled={!connected} onclick={() => { invitation = null; inviteError = ''; inviteOpen = true; }}>Invite someone…</button>
+      {:else}
+        <button class="btn small danger" disabled={finishing} onclick={leave}>{endLabel()}</button>
+      {/if}
     {/if}{/snippet}
   </PageHeader>
   <PageBody fill padded={false}>
@@ -123,7 +139,7 @@
     {:else if room.admission === 'pending'}<EmptyState variant="page" icon="people" title="Waiting for the host" body="Your request has been sent. Terminal content, people and messages remain private until you are admitted." actionLabel="Cancel request" onaction={leave} />
     {:else}
       {#if !connected}<div class="error" role="status">Connection interrupted. Terminal access is paused.<button class="btn small" onclick={() => client?.connect()}>Retry</button></div>{/if}
-      <div class="room-status" role="status"><span>{self?.role === 'host' ? 'Host' : self?.role === 'editor' ? 'Can control' : 'View only'} · {driver?.name ?? 'Host'} controls the terminal</span>
+      <div class="room-status" role="status"><span>{self?.role === 'host' ? 'Host' : self?.role === 'editor' ? 'May be granted control' : 'View only'} · {driver?.name ?? 'Host'} controls the terminal</span>
         {#if host && !canType}<button class="btn small" onclick={() => send({type: 'grant_control', member_id: room!.member_id})}>Take back control</button>
         {:else if !host && canType}<button class="btn small" onclick={() => send({type: 'release_control'})}>Release control</button>
         {:else if self?.role === 'editor'}<button class="btn small" disabled={self.control_requested} onclick={() => send({type: 'request_control'})}>{self.control_requested ? 'Control requested' : 'Request control'}</button>{/if}
@@ -132,16 +148,22 @@
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />
       <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} onclick={() => tab = 'conversation'}>People & chat</button></nav>
       <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} /><div class="terminal-pane">{#if room.session_id && client && connected}<Terminal sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} scrollback={PRIMARY_SCROLLBACK} preferDom />{/if}</div></main>
-        <aside class:mobile-hidden={tab !== 'conversation'}><RoomParticipants {room} {send} disabled={!connected} /><RoomChat messages={room.messages ?? []} {send} {connected} /></aside>
+        <aside class:mobile-hidden={tab !== 'conversation'}>
+          <details class="people" bind:open={peopleOpen}>
+            <summary>People</summary>
+            <RoomParticipants {room} {send} disabled={!connected} />
+          </details>
+          <RoomChat messages={room.messages ?? []} {send} {connected} />
+        </aside>
       </div>
     {/if}
   </PageBody>
 </div>
 {#if inviteOpen}<Modal title="Invite someone" onclose={() => inviteOpen = false}>
   <p>A single-use invitation expires after ten minutes. You still approve admission and terminal control.</p>
-  <label>Maximum access <select bind:value={inviteRole}><option value="viewer">View only</option><option value="editor">Can control when granted</option></select></label>
+  <label>Maximum access <select bind:value={inviteRole}><option value="viewer">View only</option><option value="editor">May be granted control</option></select></label>
   {#if invitation}<label>Invitation link <input dir="ltr" readonly value={invitation.url} aria-label="Invitation link" /></label><p>Expires {new Date(invitation.expires_at).toLocaleTimeString()}.</p>{/if}
-  {#if error}<p role="alert">{error}</p>{/if}
+  {#if inviteError}<p role="alert">{inviteError}<button class="btn small" type="button" onclick={() => inviteError = ''}>Dismiss</button></p>{/if}
   {#snippet footer()}<button class="btn" onclick={() => inviteOpen = false}>Done</button>{#if invitation}<button class="btn primary" onclick={copyInvite}>{copied ? 'Copied' : 'Copy invitation'}</button>{:else}<button class="btn primary" disabled={inviting} onclick={makeInvite}>{inviting ? 'Creating…' : 'Create invitation'}</button>{/if}{/snippet}
 </Modal>{/if}
 <style>
@@ -152,7 +174,19 @@
   .room-status { background: var(--surface); } .error, [role='alert'] { color: var(--danger); }
   .room-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); }
   main { min-width: 0; min-height: 0; display: flex; flex-direction: column; } .terminal-pane { flex: 1; min-height: 160px; }
-  aside { min-width: 0; overflow-y: auto; border-inline-start: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }
+  aside { min-width: 0; min-height: 0; overflow: hidden; border-inline-start: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }
+  .people { flex: 0 1 auto; min-height: 0; overflow: auto; max-height: 45%; border-bottom: 1px solid var(--border); }
+  .people > summary { display: none; }
   .mobile-tabs { display: none; }
-  @media (max-width: 1024px) { .room-workspace { grid-template-columns: minmax(0, 1fr); } .mobile-tabs { display: flex; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); } .mobile-hidden { display: none; } aside { border-inline-start: 0; } .join-form { padding: 16px; } }
+  @media (max-width: 1024px) {
+    .room-workspace { grid-template-columns: minmax(0, 1fr); }
+    .mobile-tabs { display: flex; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    .mobile-hidden { display: none; }
+    aside { border-inline-start: 0; }
+    .people { max-height: none; overflow: visible; flex: 0 0 auto; }
+    .people > summary { display: block; cursor: pointer; padding: 10px 16px; font-size: var(--fs-m); color: var(--text); }
+    .people :global(h2) { display: none; }
+    .people:not([open]) :global(section) { display: none; }
+    .join-form { padding: 16px; }
+  }
 </style>

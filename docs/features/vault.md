@@ -109,14 +109,17 @@ vault (keeps files)** removes only the registration + index — files on disk ar
 never touched. **Rescan** (toolbar / context menu) forces a full incremental
 pass.
 
-### Freshness model (no filesystem watcher)
+### Freshness model
 
-- **Writes are eagerly indexed** — every write/rename/delete/folder op through
-  the API or MCP re-scans before returning, so API/MCP writers always read
-  their own writes.
+- **Note and artifact writes are eagerly indexed**. Rename/delete/restore
+  rescan after the filesystem mutation; a failed post-mutation scan is retried
+  in the background. Folder listings read physical directories, including empty
+  ones, so a newly created folder is visible immediately.
 - **Reads self-heal**: `GET /status` and every read (search, backlinks, graph,
   dir, note — including the MCP tools) kick a **background incremental scan**
-  when the index is **>5 s stale**, so agents with no UI open stay fresh too.
+  when the index is **>30 s stale**, or **>10 minutes** with a healthy filesystem
+  watcher. External changes trigger debounced scans; changes observed during a
+  scan request another pass rather than being dropped.
 - The UI polls `/status` every 5 s while the page is visible; a content-generation
   token refreshes clean open notes, tree, tags, search and graph even if counts
   are unchanged. Dirty drafts show a conflict instead of being replaced; **edits made
@@ -147,7 +150,10 @@ current view — click it to jump to the runs.
 ### 4.1 File explorer
 
 A **virtualized, lazily-loaded tree** (directory levels fetch on expand — big
-vaults stay cheap). Row click opens a note; context menu:
+vaults stay cheap).
+Empty folders appear too, including externally created folders and folders
+whose last note was removed. They remain available after a rescan or restart.
+Row click opens a note; context menu:
 
 - **New note here / New folder here** (folders only)
 - **Rename** (inline) and **Move to…** (path prompt) — both are the same
@@ -356,6 +362,10 @@ exposes:
   malformed note is indexed with a parse-error flag rather than aborting a scan.
 - **Generate indexes** — regenerates per-directory `index.md` files from the
   notes' frontmatter descriptions (root index preserves its existing `okf_version`; new indexes use `0.2`).
+  Replacements retain the previous content in revision history and use atomic
+  writes. If a file changes after generation reads it, that replacement returns
+  a conflict instead of overwriting the newer edit. Earlier files in a multi-file
+  generation may already have been saved; each has its own recovery revision.
 
 `index.md`/`log.md` are flagged `reserved` everywhere: excluded from the
 switcher and (by default) the graph, never validated as concepts, searchable
@@ -633,6 +643,12 @@ computed anywhere. Memories have **no Vault UI anymore** (the vault page is
 docs-only); the Product page and MCP/API are the memory consumers. The optional
 `OTTO_MEMORY_VAULT_DIR` markdown mirror and the `OTTO_MEMORY_REMOTE_URL`
 keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
+
+With the Markdown mirror enabled, a failed export is reported explicitly even
+when the database save succeeded. Repair the destination and retry the same
+save: it reuses the existing memory and publishes the missing note. An existing
+mirror file is preserved because it may contain external edits. Export uses
+atomic publication; private memories are not exported.
 
 ---
 

@@ -58,6 +58,9 @@ pub struct ChatDetail {
 #[derive(Debug, Deserialize)]
 pub struct SendMessageReq {
     pub body: String,
+    /// Unique per-request identity used by Stop; omit for legacy callers.
+    #[serde(default)]
+    pub turn_id: Option<String>,
     /// Agent provider to run the chat on (built-in or custom, e.g. grok). Only
     /// used when the chat's persistent session is FIRST created; later messages
     /// resume the existing session regardless. Empty/absent = default agent.
@@ -214,8 +217,28 @@ pub async fn send_message<C: ProductStudioHost>(
     CurrentUser(user): CurrentUser,
     Json(req): Json<SendMessageReq>,
 ) -> ApiResult<Json<ChatTurn>> {
+    // Dropping the HTTP response must not release the turn while its managed
+    // session still owns cleanup. Stop continues to address the same task.
+    crate::studio_turn::complete(async move {
+        send_message_inner(Path(cid), State(ctx), CurrentUser(user), Json(req)).await
+    })
+    .await
+}
+
+async fn send_message_inner<C: ProductStudioHost>(
+    Path(cid): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<SendMessageReq>,
+) -> ApiResult<Json<ChatTurn>> {
     let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
-    let _turn = crate::studio_turn::claim("discovery", &chat.workspace_id, &cid)?;
+    let _story_turn = crate::story_lifecycle::claim(&chat.story_id).await?;
+    let turn = crate::studio_turn::claim_with_id(
+        "discovery",
+        &chat.workspace_id,
+        &cid,
+        req.turn_id.as_deref(),
+    )?;
     // The earlier authorization read may predate a just-completed first turn.
     // Reload under ownership so its newly persisted session is reused.
     let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
@@ -260,6 +283,7 @@ pub async fn send_message<C: ProductStudioHost>(
     {
         meta["model"] = json!(m);
     }
+    turn.check_running()?;
     let (raw, sid) = ctx
         .run_session_turn(
             &ws,
@@ -271,8 +295,10 @@ pub async fn send_message<C: ProductStudioHost>(
             meta,
             &prompt,
             ctx.session_stuck_idle(),
+            turn.cancel(),
         )
         .await?;
+    turn.check_running()?;
     // The host may replace a deleted session; the next turn must resume its actual ID.
     if session_link_changed(chat.session_id.as_ref(), &sid) {
         ctx.discovery_chat_repo().set_session(&cid, &sid).await?;
@@ -743,6 +769,28 @@ fn truncate(text: &str, max: usize) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Stop exactly the caller's turn and wait for managed-session cleanup.
+pub async fn stop_turn<C: ProductStudioHost>(
+    Path(id): Path<Id>,
+    State(ctx): State<C>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<crate::chat::StopTurnReq>,
+) -> ApiResult<Json<crate::chat::StopTurnResp>> {
+    let conversation = chat_with_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let stopped =
+        crate::studio_turn::stop("discovery", &conversation.workspace_id, &id, &req.turn_id).await;
+    Ok(Json(crate::chat::StopTurnResp { stopped }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StopTurnReq {
+    pub turn_id: String,
+}
+#[derive(Debug, Serialize)]
+pub struct StopTurnResp {
+    pub stopped: bool,
+}
 
 #[cfg(test)]
 mod tests {

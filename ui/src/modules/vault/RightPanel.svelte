@@ -2,6 +2,7 @@
   // Right panel: Backlinks (linked mentions) · Outgoing links · Outline ·
   // Properties (frontmatter) · OKF validation card (OKF vaults only).
   import { scrollBehavior } from '../../lib/motion';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { vault } from './vault.svelte';
   import PropertiesEditor from './PropertiesEditor.svelte';
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
@@ -10,6 +11,19 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { plural } from '../../lib/plural';
   import Badge from '../../lib/components/Badge.svelte';
+
+  function openOrCreateOutgoing(dstPath: string | null, rawTarget: string): void {
+    if (dstPath) {
+      if (/\.md$/i.test(dstPath)) void vault.open(dstPath);
+      return;
+    }
+    const raw = rawTarget.split('#')[0]?.trim() ?? '';
+    if (!raw) return;
+    const p = raw.endsWith('.md') ? raw : `${raw}.md`;
+    void confirmer.ask(`Create “${p}”?`, { title: 'Create note', confirmLabel: 'Create', danger: false }).then((ok) => {
+      if (ok) void vault.createNote(p, `# ${raw}\n\n`);
+    });
+  }
 
   let open = $state({ backlinks: true, outgoing: true, outline: false, props: false, okf: false });
 
@@ -87,9 +101,9 @@
         <button
           class="item"
           class:unresolved={!l.dst_path}
-          title={l.dst_path ?? `${l.raw_target} (unresolved)`}
-          disabled={!l.dst_path || !/\.md$/i.test(l.dst_path)}
-          onclick={() => l.dst_path && void vault.open(l.dst_path)}
+          title={l.dst_path ?? `${l.raw_target} (missing note — click to create)`}
+          disabled={Boolean(l.dst_path && !/\.md$/i.test(l.dst_path))}
+          onclick={() => openOrCreateOutgoing(l.dst_path, l.raw_target)}
         >
           <div class="t">
             {#if l.kind === 'embed'}<span class="embed-ic" title="Embedded"><Icon name="image" size={12} /></span>{/if}{l.alias ?? l.raw_target}

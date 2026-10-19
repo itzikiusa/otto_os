@@ -1,0 +1,67 @@
+[
+  {
+    "reviewer": "E08-api",
+    "session_id": "01M57ZKKJ6K5VEET03YF0DYZ80",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E09-connections",
+    "session_id": "01M57ZKM55HMTDGJRBA365JE8A",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E10-vault",
+    "session_id": "01M57ZKMFGW8CCNV0YFZYW8NFH",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E11-design",
+    "session_id": "01M57ZKMSNCW5P83YC4N5EXMRJ",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E12-product",
+    "session_id": "01M57ZKNCARZC178CJ1PRCX5BW",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E13-review",
+    "session_id": "01M57ZKNXHPSMEM8TWRCF6SSDV",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E14-state",
+    "session_id": "01M57ZKQAVAB1M1R5R470C7AZX",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E15-runtime",
+    "session_id": "01M57ZKS1AXDSFR7E6T6CETEXE",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E16-auth",
+    "session_id": "01M57ZKTRZRWAFXT2GFJ0JMYNC",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E17-channels",
+    "session_id": "01M57ZKWJ4P6823ME5QERW5BKZ",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E18-accounting",
+    "session_id": "01M57ZKXYS9ZEM3EYV0PCHVVHE",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E19-extensibility",
+    "session_id": "01M57ZKZ2RRH36F0C8VH1W056W",
+    "status": "session started; prompt queued"
+  },
+  {
+    "reviewer": "E20-ui-contracts",
+    "session_id": "01M57ZM02HS93CD3C0Y403PNDG",
+    "status": "session started; prompt queued"
+  }
+]

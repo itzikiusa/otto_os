@@ -527,6 +527,46 @@ pub fn parse_cursor(s: &str) -> Result<(String, Id)> {
 // Store
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default)]
+pub struct PrunedVersions {
+    pub ids: Vec<String>,
+    pub blobs: Vec<String>,
+    pub reclaimable_bytes: i64,
+}
+
+async fn require_version_on(
+    conn: &mut sqlx::SqliteConnection,
+    artifact: &str,
+    version: &str,
+) -> Result<()> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM design_versions WHERE id = ? AND artifact_id = ?)",
+    )
+    .bind(version)
+    .bind(artifact)
+    .fetch_one(conn)
+    .await
+    .map_err(dberr("design.reference.version"))?;
+    if !exists {
+        return Err(Error::Conflict(format!(
+            "version {version} of {artifact} no longer exists; reload"
+        )));
+    }
+    Ok(())
+}
+
+async fn check_link_versions(conn: &mut sqlx::SqliteConnection, link: &NewLink) -> Result<()> {
+    if let Some(id) = &link.src_version_id {
+        require_version_on(conn, &link.src_artifact_id, id).await?;
+    }
+    if !link.broken && link.dst_kind == "artifact" {
+        if let Some(id) = &link.pinned_version_id {
+            require_version_on(conn, &link.dst_id, id).await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: DbPool,
@@ -875,21 +915,25 @@ impl Store {
     }
 
     /// Move `approved_version_id` (+ status). The version must belong to the
-    /// artifact (checked by the caller).
+    /// artifact at the same atomic UPDATE that publishes the approval.
     pub async fn set_approved(&self, id: &str, version_id: &str, status: &str) -> Result<()> {
         let res = sqlx::query(
             "UPDATE design_artifacts SET approved_version_id = ?, status = ?, updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND EXISTS (SELECT 1 FROM design_versions WHERE id = ? AND artifact_id = ?)",
         )
         .bind(version_id)
         .bind(status)
         .bind(now())
         .bind(id)
+        .bind(version_id)
+        .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("design.artifact.approve"))?;
         if res.rows_affected() == 0 {
-            return Err(Error::NotFound(format!("design artifact {id}")));
+            return Err(Error::Conflict(format!(
+                "artifact {id} or version {version_id} no longer exists; reload"
+            )));
         }
         Ok(())
     }
@@ -1338,30 +1382,47 @@ impl Store {
         Ok((row.get("n"), row.get("bytes")))
     }
 
-    /// Delete version rows (opt-in prune only). Returns their blob hashes.
-    pub async fn delete_versions(&self, ids: &[String]) -> Result<Vec<String>> {
+    /// Recheck every protection at the DELETE linearization point. A stale
+    /// plan is only a candidate list; successful approvals/pins always win.
+    pub async fn delete_versions(&self, ids: &[String]) -> Result<PrunedVersions> {
         if ids.is_empty() {
-            return Ok(vec![]);
+            return Ok(PrunedVersions::default());
         }
-        let ph = placeholders(ids.len());
-        let sql = format!("SELECT DISTINCT blob_sha256 FROM design_versions WHERE id IN ({ph})");
-        let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql.as_str()));
-        for id in ids {
-            q = q.bind(id.as_str());
-        }
-        let blobs = q
-            .fetch_all(&self.pool)
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(dberr("design.version.prune.blobs"))?;
-        let sql = format!("DELETE FROM design_versions WHERE id IN ({ph})");
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
-        for id in ids {
-            q = q.bind(id.as_str());
+            .map_err(dberr("design.prune.begin"))?;
+        let deleted: Vec<(String, String, i64)> = sqlx::query_as(
+            "DELETE FROM design_versions
+             WHERE id IN (SELECT value FROM json_each(?1)) AND kind = 'autosave'
+             AND NOT EXISTS (SELECT 1 FROM design_artifacts a WHERE a.head_version_id = design_versions.id OR a.approved_version_id = design_versions.id)
+             AND NOT EXISTS (SELECT 1 FROM design_links l WHERE l.pinned_version_id = design_versions.id OR l.src_version_id = design_versions.id)
+             AND NOT EXISTS (SELECT 1 FROM design_signals s WHERE s.version_id = design_versions.id)
+             AND NOT EXISTS (SELECT 1 FROM design_publishes p WHERE p.version_id = design_versions.id)
+             AND NOT EXISTS (SELECT 1 FROM design_publishes p, json_each(p.pinned_set_json) pin
+                             WHERE json_extract(pin.value, '$.version_id') = design_versions.id)
+             RETURNING id, blob_sha256, size_bytes"
+        ).bind(serde_json::to_string(ids)?).fetch_all(&mut *tx).await.map_err(dberr("design.version.prune"))?;
+        let mut out = PrunedVersions::default();
+        let mut blobs = HashMap::<String, i64>::new();
+        for (id, sha, size) in deleted {
+            out.ids.push(id);
+            blobs.entry(sha).or_insert(size);
         }
-        q.execute(&self.pool)
-            .await
-            .map_err(dberr("design.version.prune"))?;
-        Ok(blobs)
+        for (sha, size) in blobs {
+            let used: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM design_versions WHERE blob_sha256 = ?1)
+                     OR EXISTS(SELECT 1 FROM design_artifacts WHERE thumb_blob = ?1)
+                     OR EXISTS(SELECT 1 FROM design_publishes p, json_each(p.pinned_set_json) pin WHERE json_extract(pin.value, '$.poster_blob') = ?1)"
+            ).bind(&sha).fetch_one(&mut *tx).await.map_err(dberr("design.prune.blob"))?;
+            if !used {
+                out.reclaimable_bytes += size.max(0);
+            }
+            out.blobs.push(sha);
+        }
+        tx.commit().await.map_err(dberr("design.prune.commit"))?;
+        Ok(out)
     }
 
     /// Bytes (and blob count) deleting `doomed` versions would free: blobs
@@ -1382,7 +1443,8 @@ impl Store {
               WHERE NOT EXISTS (SELECT 1 FROM design_versions v
                                  WHERE v.blob_sha256 = b.sha
                                    AND v.id NOT IN (SELECT id FROM d))
-                AND NOT EXISTS (SELECT 1 FROM design_artifacts a WHERE a.thumb_blob = b.sha)",
+                AND NOT EXISTS (SELECT 1 FROM design_artifacts a WHERE a.thumb_blob = b.sha)
+                AND NOT EXISTS (SELECT 1 FROM design_publishes p, json_each(p.pinned_set_json) pin WHERE json_extract(pin.value, '$.poster_blob') = b.sha)",
         )
         .bind(ids)
         .fetch_one(&self.pool)
@@ -1410,7 +1472,9 @@ impl Store {
     pub async fn referenced_blobs(&self) -> Result<std::collections::HashSet<String>> {
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT blob_sha256 FROM design_versions
-             UNION SELECT thumb_blob FROM design_artifacts WHERE thumb_blob IS NOT NULL",
+             UNION SELECT thumb_blob FROM design_artifacts WHERE thumb_blob IS NOT NULL
+             UNION SELECT json_extract(pin.value, '$.poster_blob') FROM design_publishes p, json_each(p.pinned_set_json) pin
+             WHERE json_extract(pin.value, '$.poster_blob') IS NOT NULL",
         )
         .fetch_all(&self.pool)
         .await
@@ -1422,7 +1486,8 @@ impl Store {
     pub async fn blob_in_use(&self, sha: &str) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT (SELECT COUNT(*) FROM design_versions WHERE blob_sha256 = ?1)
-                  + (SELECT COUNT(*) FROM design_artifacts WHERE thumb_blob = ?1)",
+                  + (SELECT COUNT(*) FROM design_artifacts WHERE thumb_blob = ?1)
+                  + (SELECT COUNT(*) FROM design_publishes p, json_each(p.pinned_set_json) pin WHERE json_extract(pin.value, '$.poster_blob') = ?1)",
         )
         .bind(sha)
         .fetch_one(&self.pool)
@@ -1454,6 +1519,7 @@ impl Store {
         .await
         .map_err(dberr("design.links.replace.delete"))?;
         for l in links {
+            check_link_versions(&mut tx, l).await?;
             sqlx::query(
                 "INSERT OR IGNORE INTO design_links
                  (id, src_artifact_id, src_version_id, src_node, dst_kind, dst_id, dst_node,
@@ -1499,6 +1565,12 @@ impl Store {
 
     /// Insert an explicit link. A duplicate is a `Conflict`.
     pub async fn insert_link(&self, l: &NewLink) -> Result<DesignLink> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("design.link.begin"))?;
+        check_link_versions(&mut tx, l).await?;
         let id = new_id();
         sqlx::query(
             "INSERT INTO design_links
@@ -1521,7 +1593,7 @@ impl Store {
         .bind(l.meta.to_string())
         .bind(&l.created_by)
         .bind(now())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             if is_unique(&e) {
@@ -1530,6 +1602,7 @@ impl Store {
                 Error::Internal(format!("design.link.insert: {e}"))
             }
         })?;
+        tx.commit().await.map_err(dberr("design.link.commit"))?;
         self.get_link(&id)
             .await?
             .ok_or_else(|| Error::NotFound(format!("design link {id}")))
@@ -1772,6 +1845,14 @@ impl Store {
     // -- signals / publishes --------------------------------------------------
 
     pub async fn insert_signal(&self, s: NewSignal) -> Result<DesignSignal> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("design.signal.begin"))?;
+        if let Some(v) = &s.version_id {
+            require_version_on(&mut tx, &s.artifact_id, v).await?;
+        }
         let id = new_id();
         sqlx::query(
             "INSERT INTO design_signals
@@ -1789,9 +1870,10 @@ impl Store {
         .bind(&s.session_id)
         .bind(s.payload.to_string())
         .bind(now())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("design.signal.insert"))?;
+        tx.commit().await.map_err(dberr("design.signal.commit"))?;
         let row = sqlx::query("SELECT * FROM design_signals WHERE id = ?")
             .bind(&id)
             .fetch_one(&self.pool)
@@ -1850,6 +1932,22 @@ impl Store {
     }
 
     pub async fn insert_publish(&self, p: NewPublish) -> Result<DesignPublish> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("design.publish.begin"))?;
+        require_version_on(&mut tx, &p.artifact_id, &p.version_id).await?;
+        if let Some(pins) = p.pinned_set.as_array() {
+            for pin in pins {
+                if let (Some(a), Some(v)) = (
+                    pin.get("artifact_id").and_then(Value::as_str),
+                    pin.get("version_id").and_then(Value::as_str),
+                ) {
+                    require_version_on(&mut tx, a, v).await?;
+                }
+            }
+        }
         let id = new_id();
         sqlx::query(
             "INSERT INTO design_publishes
@@ -1864,9 +1962,10 @@ impl Store {
         .bind(p.pinned_set.to_string())
         .bind(&p.created_by)
         .bind(now())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("design.publish.insert"))?;
+        tx.commit().await.map_err(dberr("design.publish.commit"))?;
         let row = sqlx::query("SELECT * FROM design_publishes WHERE id = ?")
             .bind(&id)
             .fetch_one(&self.pool)
@@ -2929,5 +3028,101 @@ mod tests {
         assert_eq!(title("A").as_deref(), Some("Design the hero"));
         assert_eq!(title("B"), None, "a deleted session degrades to null");
         assert_eq!(title("C"), None);
+    }
+    #[tokio::test]
+    async fn prune_rechecks_protection_added_after_planning() {
+        let s = store().await;
+        s.insert_artifact(&art("A", "w")).await.unwrap();
+        s.insert_artifact(&art("B", "w")).await.unwrap();
+        let mut versions = Vec::new();
+        for i in 0..7 {
+            versions.push(
+                s.commit_version(ver("A", &format!("sha{i}")), None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        // This is the stale plan a paused prune owns, before any protection.
+        let planned: Vec<String> = versions.iter().map(|v| v.id.clone()).collect();
+        let (resume, paused) = tokio::sync::oneshot::channel();
+        let pruner = s.clone();
+        let pending = tokio::spawn(async move {
+            paused.await.unwrap();
+            pruner.delete_versions(&planned).await.unwrap()
+        });
+        s.set_approved("A", &versions[0].id, "approved")
+            .await
+            .unwrap();
+        let mut l = link("B", "A", "references", "explicit");
+        l.policy = "pinned".into();
+        l.pinned_version_id = Some(versions[1].id.clone());
+        s.insert_link(&l).await.unwrap();
+        s.insert_publish(NewPublish {
+            artifact_id: "A".into(),
+            version_id: versions[2].id.clone(),
+            target: "local".into(),
+            url: None,
+            created_by: "u1".into(),
+            pinned_set: serde_json::json!([{"artifact_id":"A", "version_id":versions[3].id}]),
+        })
+        .await
+        .unwrap();
+        s.insert_signal(NewSignal {
+            workspace_id: "w".into(),
+            artifact_id: "A".into(),
+            version_id: Some(versions[4].id.clone()),
+            kind: "status_change".into(),
+            actor_kind: "user".into(),
+            actor_id: "u1".into(),
+            session_id: None,
+            payload: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        resume.send(()).unwrap();
+        let deleted = pending.await.unwrap();
+        assert_eq!(deleted.ids, vec![versions[5].id.clone()]);
+        for i in [0, 1, 2, 3, 4, 6] {
+            assert!(s.get_version(&versions[i].id).await.unwrap().is_some());
+        }
+        assert!(s
+            .set_approved("A", &versions[5].id, "approved")
+            .await
+            .is_err());
+        l.pinned_version_id = Some(versions[5].id.clone());
+        l.src_node = "new".into();
+        assert!(s.insert_link(&l).await.is_err());
+        assert!(s
+            .insert_publish(NewPublish {
+                artifact_id: "A".into(),
+                version_id: versions[6].id.clone(),
+                target: "local".into(),
+                url: None,
+                created_by: "u1".into(),
+                pinned_set: serde_json::json!([{"artifact_id":"A", "version_id":versions[5].id}]),
+            })
+            .await
+            .is_err());
+    }
+    #[tokio::test]
+    async fn racing_approval_and_prune_never_acknowledge_a_dangling_version() {
+        let s = store().await;
+        s.insert_artifact(&art("A", "w")).await.unwrap();
+        for _ in 0..10 {
+            let old = s.commit_version(ver("A", "old"), None).await.unwrap();
+            s.commit_version(ver("A", "head"), None).await.unwrap();
+            let candidates = vec![old.id.clone()];
+            let (approval, removed) = tokio::join!(
+                s.set_approved("A", &old.id, "approved"),
+                s.delete_versions(&candidates)
+            );
+            let removed = removed.unwrap();
+            if approval.is_ok() {
+                assert!(removed.ids.is_empty());
+                assert!(s.get_version(&old.id).await.unwrap().is_some());
+            } else {
+                assert_eq!(removed.ids, candidates);
+            }
+        }
     }
 }

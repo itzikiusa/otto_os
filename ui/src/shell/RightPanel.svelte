@@ -83,6 +83,7 @@
   import { git } from '../lib/stores/git.svelte';
   import { getToken } from '../lib/api/client';
   import { ctxMenu, type MenuItem } from '../lib/contextmenu.svelte';
+  import { loadErrorText } from '../lib/loadError';
   import { onDestroy, untrack } from 'svelte';
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
@@ -94,8 +95,8 @@
   }
   let { forceOpen = false }: Props = $props();
 
-  // Drag-to-resize: the panel is anchored right, so dragging the left edge
-  // leftwards (smaller clientX) widens it.
+  // Drag-to-resize: the panel is anchored on the inline-end edge, so dragging
+  // its inline-start edge towards the center widens it.
   let resizing = $state(false);
   // Overlay cursor + one width write per frame + one localStorage write on
   // release (lib/dragCursor.ts) — no body.style restyle of the whole app.
@@ -103,8 +104,9 @@
     resizing = true;
     const startX = e.clientX;
     const startW = ui.rightWidth;
+    const rtl = typeof document !== 'undefined' && getComputedStyle(document.documentElement).direction === 'rtl';
     startMouseDrag(e, {
-      onMove: (ev) => ui.setRightWidth(startW + (startX - ev.clientX), false),
+      onMove: (ev) => ui.setRightWidth(startW + (rtl ? ev.clientX - startX : startX - ev.clientX), false),
       onEnd: () => {
         resizing = false;
         ui.setRightWidth(ui.rightWidth);
@@ -206,7 +208,7 @@
         items.push({ label: w.name, icon: 'folder', hint: 'workspace', title: w.root_path, checked: folder === w.root_path, action: () => rightPanel.pickFolder(w.root_path) });
       }
     }
-    ctxMenu.show(e, items, { filter: repos.length + others.length > 8, filterPlaceholder: 'Find a repository or workspace' });
+    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { filter: repos.length + others.length > 8, filterPlaceholder: 'Find a repository or workspace' });
   }
 
   // ── notes ────────────────────────────────────────────────────────────────
@@ -262,7 +264,7 @@
       }
       if (revision !== notesRevision) return;
       pendingNotes = p;
-      notesError = e instanceof Error ? e.message : String(e);
+      notesError = loadErrorText(e);
       saveState = 'error';
     }
   }
@@ -356,7 +358,7 @@
           <button
             class="icon-btn"
             onclick={() => ui.toggleRightWide()}
-            title={ui.rightWide ? 'Restore panel width' : 'Expand panel — wider view'}
+            title={ui.rightWide ? 'Restore panel width' : 'Expand panel'}
             aria-label={ui.rightWide ? 'Restore panel width' : 'Expand panel'}
             aria-pressed={ui.rightWide}
           >
@@ -365,7 +367,7 @@
           <button
             class="icon-btn"
             onclick={collapse}
-            title="Collapse panel (⌘J)"
+            title="Collapse panel"
             aria-keyshortcuts="Meta+J"
             aria-label="Collapse panel"
           >

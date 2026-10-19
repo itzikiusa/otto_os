@@ -207,6 +207,9 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                     return;
                 }
             };
+            if cancel2.load(Ordering::SeqCst) {
+                return;
+            }
 
             let Some(kind_str) = event_to_kind(&event) else {
                 continue;
@@ -238,6 +241,9 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
 
             let workflows_repo = WorkflowsRepo::new(ctx.pool().clone());
             for trigger in matching {
+                if cancel2.load(Ordering::SeqCst) {
+                    return;
+                }
                 // Resolve the workflow; skip silently when it was deleted.
                 let wf = match workflows_repo.get(&trigger.workflow_id).await {
                     Ok(w) => w,
@@ -290,6 +296,9 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                 // Re-checked atomically with the insert: the early check above
                 // only spares the input build; a scheduled task or schedule
                 // trigger may admit a run in between.
+                if cancel2.load(Ordering::SeqCst) {
+                    return;
+                }
                 let run = match workflows_repo
                     .admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)
                     .await
@@ -309,6 +318,13 @@ pub fn spawn_event_trigger_listener<C: WorkflowCtx>(ctx: C) -> Arc<AtomicBool> {
                         continue;
                     }
                 };
+
+                // A commit racing shutdown stays pending for startup recovery.
+                // Do not launch side effects after the admission await when
+                // the owning daemon has begun tearing dependencies down.
+                if cancel2.load(Ordering::SeqCst) {
+                    return;
+                }
 
                 info!(
                     workflow_id = %wf.id,

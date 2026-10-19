@@ -597,10 +597,6 @@ class EventsClient {
   private resyncForIdentity(): void {
     notifications.resetForIdentity();
     activity.reset();
-    if (ws.currentId) {
-      void activity.loadSummary(ws.currentId);
-      if (ws.activeSessionId) void activity.load(ws.currentId, ws.activeSessionId, true);
-    }
     proof.identityChanged();
     this.resyncAfterReconnect();
   }
@@ -609,6 +605,8 @@ class EventsClient {
     // Every liveQuery refetches (coalesced, staggered) — registered views
     // resync for free.
     liveEvents.resync();
+    void activity.resync();
+    if (ws.currentId) void activity.loadSummary(ws.currentId);
     // Nothing to resync in a document that never opened the Swarm page.
     void swarmStore.peek()?.resync();
     transcript.resyncVisible();

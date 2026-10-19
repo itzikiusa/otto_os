@@ -108,9 +108,10 @@
               {/if}
               <span class="mono dim prefix" title="Token prefix">{s.token_prefix}…</span>
             </td>
-            <td>{s.role === 'editor' ? 'Can type' : 'View only'}</td>
-            <td class="dim">{s.label ?? '—'}</td>
+            <td data-label="Access">{s.role === 'editor' ? 'Can type' : 'View only'}</td>
+            <td class="dim" data-label="Label">{s.label ?? '—'}</td>
             <td
+              data-label="Expires"
               title={s.dormant
                 ? 'Window lapsed — the link holder can still request a new code until it is revoked'
                 : new Date(s.expires_at).toLocaleString()}
@@ -167,5 +168,16 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+  @media (max-width: 640px) {
+    .links, .links tbody { display: block; }
+    .links thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .links tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 10px; gap: 8px; border-block-end: 1px solid var(--border); }
+    .links td { padding: 0; border: 0; overflow-wrap: anywhere; }
+    .links .sess, .links td[data-label] { grid-column: 1 / -1; }
+    .links td[data-label] { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; }
+    .links td[data-label]::before { content: attr(data-label); color: var(--text-dim); }
+    .links .act { grid-column: 2; }
+    .link-btn { min-height: var(--hit-min); }
   }
 </style>

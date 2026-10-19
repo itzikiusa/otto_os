@@ -142,7 +142,7 @@
         <span class="sep" aria-hidden="true"></span>
         <span class="dim">Try a {tokenLabel(primaryName).toLowerCase()}</span>
         {#each PRESETS as [h, n] (h)}
-          <button class="pchip" style:background={h} onclick={() => preset(h)} aria-label="Set {primaryName} to {n} {h}" title="{n} {h}"></button>
+          <button class="pchip" style:background={h} onclick={() => preset(h)} aria-label="Set {primaryName} to {n}" title="Set {primaryName} to {n}"></button>
         {/each}
       {/if}
     </div>
@@ -348,5 +348,8 @@
     .swc-c {
       transition: none;
     }
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .pchip { min-inline-size: var(--hit-min); min-block-size: var(--hit-min); }
   }
 </style>

@@ -17,27 +17,31 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmOutward } from '../../lib/confirmOutward';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { scheduledTasks } from '../../lib/stores/scheduledTasks.svelte';
   import { scheduledTasksPort } from '../../lib/uiCommands/scheduled';
   import { authedText } from '../../lib/api/client';
   import { scheduledTasksApi, type ScheduledTaskInput } from '../../lib/api/scheduledTasks';
   import { router } from '../../lib/router.svelte';
-  import { registry } from '../../lib/commands.svelte';
+  import { registry, type Command } from '../../lib/commands.svelte';
   import { rememberSelection } from '../../lib/lastSelection';
   import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { events } from '../../lib/events.svelte';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
-  import ModelPicker from '../../lib/components/ModelPicker.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
   import type { EmailSenderResp, Integration, Workflow } from '../../lib/api/types';
-  import { renderMarkdownGfm } from '../../lib/md';
   import { copyText } from '../../lib/clipboard';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
+  // Model catalog chunk: only the create/edit form asks for a model.
+  const ModelPickerLazy = lazyComponent(() => import('../../lib/components/ModelPicker.svelte'));
   let expandedId = $state<string | null>(null);
   // Agent UI control (lib/uiCommands/scheduled.ts) expands a task's runs.
   $effect(() => scheduledTasksPort.bind({ expand: (id) => (expandedId = id) }));
@@ -71,15 +75,13 @@
     });
   });
 
-  // ⌘K: the page's verbs.
-  $effect(() =>
-    registry.register('scheduled-tasks', [
-      { id: 'scheduled-tasks.new', title: 'New scheduled task…', group: 'Scheduled Tasks', keywords: 'create cron cadence report', run: () => { if (!creating && !editId) startCreate(); } },
-    ]),
-  );
   let busy = $state(false);
-  /** Inline form error (validation / failed save). Row actions report via toasts. */
+  /** Daemon save failure. Field problems use `fieldError` / `intervalError`, not this banner. */
   let error = $state('');
+  /** The control a submit rejected, with the message rendered under it. */
+  let fieldError = $state<{ id: string; message: string } | null>(null);
+  /** Set on blur or submit when the interval is under 5 minutes. Blocks save. */
+  let intervalError = $state('');
   /** Task ids with a "Run now" in flight — per row, so one run never freezes the list. */
   let runningIds = $state<Record<string, boolean>>({});
 
@@ -94,7 +96,29 @@
    *  stdout / stderr wrapper for a shell task) — rendered by default, with a
    *  Plain text toggle for the raw file. */
   let reportRaw = $state(false);
-  const reportHtml = $derived(reportRaw || !reportText ? '' : renderMarkdownGfm(reportText));
+  /** Markdown stays out of the page chunk until a formatted report is open. */
+  let reportHtml = $state('');
+  let reportRenderError = $state<string | null>(null);
+  let reportRenderRetry = $state(0);
+  $effect(() => {
+    const text = reportText;
+    const raw = reportRaw;
+    void reportRenderRetry;
+    reportHtml = '';
+    reportRenderError = null;
+    if (raw || !text.trim()) {
+      return;
+    }
+    let canceled = false;
+    void import('../../lib/md').then(({ renderMarkdownGfm }) => {
+      if (!canceled) reportHtml = renderMarkdownGfm(text);
+    }).catch((error: unknown) => {
+      if (!canceled) reportRenderError = loadErrorText(error);
+    });
+    return () => {
+      canceled = true;
+    };
+  });
 
   /** Form snapshot taken when the form opens — Back/Cancel only asks before
    *  discarding when something actually changed. */
@@ -225,6 +249,35 @@
   const list = $derived(scheduledTasks.list);
   const presets = $derived(scheduledTasks.presets);
 
+  // ⌘K: create, plus Run / Pause / Edit for the expanded task (or the only one)
+  // while the form is closed. One register() owns the set, so closing the
+  // form or losing the task drops the row verbs.
+  $effect(() => {
+    const commands: Command[] = [];
+    if (ws.currentId) {
+      commands.push({
+        id: 'scheduled-tasks.new',
+        title: 'New scheduled task…',
+        group: 'Scheduled Tasks',
+        keywords: 'create cron cadence report',
+        run: () => { if (!creating && !editId) startCreate(); },
+      });
+    }
+    if (!(creating || editId)) {
+      const task = expandedId
+        ? (list.find((t) => t.id === expandedId) ?? null)
+        : (list.length === 1 ? list[0] : null);
+      if (task) {
+        commands.push(
+          { id: 'scheduled-tasks.run', title: `Run ${task.name} once`, group: 'Scheduled Tasks', keywords: 'run now', run: () => void runNow(task) },
+          { id: 'scheduled-tasks.toggle', title: task.enabled ? `Pause ${task.name}` : `Resume ${task.name}`, group: 'Scheduled Tasks', run: () => void toggle(task) },
+          { id: 'scheduled-tasks.edit', title: `Edit ${task.name}…`, group: 'Scheduled Tasks', run: () => startEdit(task) },
+        );
+      }
+    }
+    return registry.register('scheduled-tasks', commands);
+  });
+
   function resetForm(): void {
     formGeneration++;
     busy = false;
@@ -253,6 +306,8 @@
     fEnabled = true;
     fCwd = '';
     error = '';
+    fieldError = null;
+    intervalError = '';
     // Fresh workflow list each time the form opens (one may have been added since).
     wfLoaded = false;
     wfError = '';
@@ -286,6 +341,8 @@
     editId = null;
     busy = false;
     error = '';
+    fieldError = null;
+    intervalError = '';
     return true;
   }
 
@@ -394,11 +451,29 @@
   }
 
   function buildSchedule(): Record<string, unknown> {
-    if (fCadence === 'interval') return { cadence: 'interval', every_min: Math.max(5, fEveryMin) };
+    // Under 5 is rejected in the form (`intervalError`); never stored as 5.
+    if (fCadence === 'interval') return { cadence: 'interval', every_min: Number(fEveryMin) };
     if (fCadence === 'daily') return { cadence: 'daily', at: fAt };
     if (fCadence === 'cron') return { cadence: 'cron', expr: fCronExpr.trim() };
     if (fCadence === 'once') return { cadence: 'once', run_at: fRunAt };
     return { cadence: 'weekly', at: fAt, weekday: fWeekday };
+  }
+
+  function intervalTooShort(): boolean {
+    return !(Number(fEveryMin) >= 5);
+  }
+
+  function onIntervalBlur(): void {
+    if (fCadence !== 'interval') {
+      intervalError = '';
+      return;
+    }
+    intervalError = intervalTooShort() ? 'The shortest interval is 5 minutes' : '';
+  }
+
+  /** A corrected value drops the error immediately, so submit is not stuck on a stale flag. */
+  function onIntervalInput(): void {
+    if (intervalError && !intervalTooShort()) intervalError = '';
   }
 
   // ── "Next fires" preview (S20-17) ─────────────────────────────────────────
@@ -408,7 +483,10 @@
   // trigger preview, but live (debounced) instead of behind a button.
   let firePreview = $state<{ key: string; times: string[]; tz: string; error: string } | null>(null);
   const previewKey = $derived.by(() => {
-    if (!(creating || editId) || fCadence === 'interval' || !tzOk) return '';
+    if (!(creating || editId)) return '';
+    if (fCadence === 'interval') {
+      if (intervalTooShort()) return '';
+    } else if (!tzOk) return '';
     if (fCadence === 'cron' && cronFieldCount !== 5) return '';
     if (fCadence === 'once' && !fRunAt) return '';
     return JSON.stringify([buildSchedule(), fTimezone.trim() || 'UTC']);
@@ -428,7 +506,7 @@
         })
         .catch((e: unknown) => {
           if (alive && previewKey === key) {
-            firePreview = { key, times: [], tz: timezone, error: e instanceof Error ? e.message : 'The daemon couldn’t check this schedule.' };
+            firePreview = { key, times: [], tz: timezone, error: loadErrorText(e) };
           }
         });
     }, 350);
@@ -484,35 +562,56 @@
     }
   }
 
+  async function focusField(id: string): Promise<void> {
+    await tick();
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.focus();
+    el.scrollIntoView({ block: 'nearest' });
+  }
+
+  function failField(id: string, message: string): void {
+    fieldError = { id, message };
+    void focusField(id);
+  }
+
   async function save(): Promise<void> {
     if (busy) return;
     error = '';
+    fieldError = null;
+    if (!ws.currentId) return;
     if (!fName.trim()) {
-      error = 'Give the task a name.';
+      failField('sched-name', 'Give the task a name.');
       return;
     }
     if (fKind === 'workflow' && !fWorkflowId.trim()) {
-      error = 'Pick the workflow this task launches.';
+      failField('sched-workflow', 'Pick the workflow this task launches.');
       return;
     }
     if (fDestType === 'email' && !fEmailTo.trim()) {
-      error = 'Add the email address reports go to.';
+      failField('sched-email', 'Add the email address reports go to.');
       return;
     }
     if (fDestType === 'webhook' && !/^https?:\/\//i.test(fUrl.trim())) {
-      error = 'Add the webhook URL (starting with https://).';
+      failField('sched-webhook', 'Add the webhook URL (starting with http:// or https://).');
       return;
     }
+    if (fCadence === 'interval' && (intervalTooShort() || intervalError)) {
+      intervalError = 'The shortest interval is 5 minutes';
+      void focusField('sched-every');
+      return;
+    }
+    intervalError = '';
     if (fCadence !== 'interval' && !tzOk) {
-      error = 'Fix the timezone — use an IANA name like Europe/London.';
+      void focusField('sched-tz');
       return;
     }
     if (fCadence === 'cron' && cronFieldCount !== 5) {
-      error = 'The cron expression needs 5 fields.';
+      void focusField('sched-cron');
       return;
     }
     if (fCadence === 'once' && !fRunAt) {
-      error = 'Pick the date and time it runs.';
+      failField('sched-run-at', 'Pick the date and time it runs.');
       return;
     }
     const body: ScheduledTaskInput = {
@@ -534,10 +633,7 @@
       ...(fKind === 'workflow' ? { workflow_id: fWorkflowId.trim() || null } : {}),
     };
     const wsId = ws.currentId;
-    if (!wsId) {
-      error = 'Pick a workspace first — scheduled tasks belong to a workspace.';
-      return;
-    }
+    if (!wsId) return;
     const generation = formGeneration;
     const submittedId = editId;
     const submitted = formState();
@@ -566,21 +662,20 @@
       creating = false;
       editId = formState() === submitted ? null : savedId;
     } catch (e) {
-      if (ownsForm()) error = `Couldn’t save the task. ${errText(e)}`;
+      if (ownsForm()) {
+        error = `Couldn’t save the task. ${loadErrorText(e)}`;
+        toastError('Couldn’t save the task', e);
+      }
     } finally {
       if (ownsForm()) busy = false;
     }
-  }
-
-  function errText(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
   }
 
   async function toggle(t: ScheduledTask): Promise<void> {
     try {
       await scheduledTasks.setEnabled(t.id, !t.enabled);
     } catch (e) {
-      toasts.error(t.enabled ? `Couldn’t pause “${t.name}”` : `Couldn’t resume “${t.name}”`, errText(e));
+      toastError(t.enabled ? `Couldn’t pause “${t.name}”` : `Couldn’t resume “${t.name}”`, e);
     }
   }
 
@@ -637,7 +732,7 @@
       await scheduledTasks.runNow(t.id);
       expandedId = t.id;
     } catch (e) {
-      toasts.error(`Couldn’t start “${t.name}”`, errText(e));
+      toastError(`Couldn’t start “${t.name}”`, e);
     } finally {
       const { [t.id]: _done, ...rest } = runningIds;
       runningIds = rest;
@@ -674,7 +769,7 @@
         disableTask ? `Created a workflow from “${t.name}” and paused the task.` : `Created a workflow from “${t.name}”.`,
       );
     } catch (e) {
-      toasts.error(`Couldn’t convert “${t.name}” to a workflow`, errText(e));
+      toastError(`Couldn’t convert “${t.name}” to a workflow`, e);
     } finally {
       busy = false;
     }
@@ -690,7 +785,7 @@
       if (expandedId === t.id) expandedId = null;
       toasts.success('Scheduled task deleted', t.name);
     } catch (e) {
-      toasts.error(`Couldn’t delete “${t.name}”`, errText(e));
+      toastError(`Couldn’t delete “${t.name}”`, e);
     }
   }
 
@@ -698,11 +793,14 @@
   function rowMenu(e: MouseEvent, t: ScheduledTask): void {
     const items: MenuItem[] = [
       { label: 'Edit…', icon: 'edit', action: () => startEdit(t) },
-      { label: t.enabled ? 'Pause' : 'Resume', icon: t.enabled ? 'pause' : 'play', action: () => void toggle(t) },
+    ];
+    // Resume is the leading button while paused, so it is not repeated here.
+    if (t.enabled) items.push({ label: 'Pause', icon: 'pause', action: () => void toggle(t) });
+    items.push(
       { label: 'Convert to workflow', icon: 'split', disabled: busy, action: () => void convertToWorkflow(t) },
       { separator: true },
       { label: 'Delete…', icon: 'trash', danger: true, action: () => void remove(t) },
-    ];
+    );
     ctxMenu.show(e, items);
   }
 
@@ -727,7 +825,7 @@
       await scheduledTasksApi.cancelRun(r.id);
       toasts.info('Stopping the run…', t.name);
     } catch (e) {
-      toasts.error('Couldn’t stop the run', errText(e));
+      toastError('Couldn’t stop the run', e);
     }
     void scheduledTasks.loadRuns(t.id);
   }
@@ -747,14 +845,17 @@
     } catch {
       /* fall back to the task's workflow */
     }
-    if (!workflowId) return;
+    if (!workflowId) {
+      toasts.error('Couldn’t open the workflow run', 'This run did not name a workflow.');
+      return;
+    }
     if (!(await router.goChecked(`workflows/${encodeURIComponent(workflowId)}`))) return;
     try {
       const { workflowsPagePort } = await import('../../lib/uiCommands/workflows');
       const page = await workflowsPagePort.get(new AbortController().signal);
       if (await page.open(workflowId)) await page.openRun(workflowId, runId);
     } catch (e) {
-      toasts.error('Couldn’t open the workflow run', errText(e));
+      toastError('Couldn’t open the workflow run', e);
     }
   }
 
@@ -831,6 +932,37 @@
     return destLabel(t);
   }
 
+  function loadedRuns(taskId: string): ScheduledTaskRun[] {
+    return scheduledTasks.runsByTask[taskId] ?? [];
+  }
+
+  function runIsLive(status: string): boolean {
+    return status === 'running' || status === 'pending';
+  }
+
+  /** In-flight Run now, or a loaded run that has not finished. */
+  function taskRunLive(t: ScheduledTask): boolean {
+    if (runningIds[t.id]) return true;
+    return loadedRuns(t.id).some((r) => runIsLive(r.status));
+  }
+
+  /** Newest by `started_at` (the runs API is newest-first; don't trust that here). */
+  function newestLoadedRun(t: ScheduledTask): ScheduledTaskRun | null {
+    let newest: ScheduledTaskRun | null = null;
+    for (const r of loadedRuns(t.id)) {
+      if (!newest || (r.started_at ?? '') > (newest.started_at ?? '')) newest = r;
+    }
+    return newest;
+  }
+
+  async function refreshTasks(): Promise<void> {
+    const id = ws.currentId;
+    if (!id) return;
+    await scheduledTasks.loadList(id);
+    const open = expandedId;
+    if (open) await scheduledTasks.loadRuns(open);
+  }
+
 </script>
 
 <div class="sched-page">
@@ -847,14 +979,33 @@
   {/snippet}
   {#snippet actions()}
     <AutomateGuideButton current="scheduled-tasks" />
-    {#if !(creating || editId) && list.length > 0}
+    {#if !(creating || editId) && ws.currentId}
+      <button type="button" class="btn small" data-overflow="-1" data-icon="refresh" data-label="Refresh" title="Refresh" aria-label="Refresh" onclick={() => void refreshTasks()}>
+        <Icon name="refresh" size={12} /> Refresh
+      </button>
+    {/if}
+    {#if !(creating || editId) && ws.currentId && list.length > 0}
       <button class="btn small primary" onclick={startCreate}><Icon name="plus" size={12} /> New task</button>
     {/if}
   {/snippet}
 </PageHeader>
 <PageBody width="readable">
 <div class="sched">
+  {#snippet addWorkspace(page: boolean)}
+    <EmptyState
+      variant={page ? 'page' : 'panel'}
+      icon="calendar"
+      title="Add a workspace"
+      body="Scheduled tasks belong to a workspace. Add your project folder, then create a task."
+      actionLabel="Add workspace"
+      actionIcon="plus"
+      onaction={() => (ui.newWorkspaceOpen = true)}
+    />
+  {/snippet}
   {#if creating || editId}
+    {#if !ws.currentId}
+      {@render addWorkspace(false)}
+    {/if}
     <form class="form" onsubmit={(e) => { e.preventDefault(); void save(); }}>
       {#if error}<div class="err" role="alert"><Icon name="warning" size={12} /> {error}</div>{/if}
 
@@ -870,7 +1021,10 @@
 
       <label class="field">
         <span>Name</span>
-        <input dir="auto" class="input" bind:value={fName} placeholder="Nightly ticket review" required />
+        <input id="sched-name" dir="auto" class="input" bind:value={fName} placeholder="Nightly ticket review"
+          aria-invalid={fieldError?.id === 'sched-name'}
+          aria-describedby={fieldError?.id === 'sched-name' ? 'sched-name-err' : undefined} />
+        {#if fieldError?.id === 'sched-name'}<small id="sched-name-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
       </label>
 
       <div class="frow">
@@ -896,13 +1050,16 @@
         {:else}
           <label class="field">
             <span>Workflow</span>
-            <select class="input" bind:value={fWorkflowId} disabled={wfLoading}>
+            <select id="sched-workflow" class="input" bind:value={fWorkflowId} disabled={wfLoading}
+              aria-invalid={fieldError?.id === 'sched-workflow'}
+              aria-describedby={fieldError?.id === 'sched-workflow' ? 'sched-workflow-err' : undefined}>
               <option value="">{wfLoading ? 'Loading workflows…' : wfOptions.length ? 'Choose a workflow…' : 'No workflows in this workspace'}</option>
               {#each wfOptions as w (w.id)}<option value={w.id}>{w.name || 'Untitled workflow'}</option>{/each}
               {#if fWorkflowId && !wfLoading && !wfOptions.some((w) => w.id === fWorkflowId)}
                 <option value={fWorkflowId}>Unknown workflow ({fWorkflowId.slice(0, 8)}…)</option>
               {/if}
             </select>
+            {#if fieldError?.id === 'sched-workflow'}<small id="sched-workflow-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
             {#if wfError}
               <small class="field-hint bad">Couldn’t load workflows. {wfError}
                 <button type="button" class="btn small ghost" onclick={loadWorkflowOptions}>Retry</button></small>
@@ -914,13 +1071,19 @@
       {#if fKind === 'agent_prompt' && !PROVIDERS.includes(fProvider)}
         <label class="field">
           <span>Custom provider slug</span>
-          <input dir="auto" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
+          <input dir="ltr" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
         </label>
       {/if}
 
       {#if fKind === 'agent_prompt'}
         <!-- Hides itself when the provider has no model-flag template (e.g. shell). -->
-        <ModelPicker provider={fProvider} value={fModel} onchange={(m) => (fModel = m)} />
+        {#if ModelPickerLazy.error}
+          <LoadState what="models" error={ModelPickerLazy.error} onretry={() => ModelPickerLazy.retry()} />
+        {:else if ModelPickerLazy.component}
+          <ModelPickerLazy.component provider={fProvider} value={fModel} onchange={(m) => (fModel = m)} />
+        {:else}
+          <LoadState what="models" loading />
+        {/if}
       {/if}
 
       {#if fKind === 'workflow'}
@@ -928,7 +1091,7 @@
       {:else if fProvider === 'shell'}
         <label class="field">
           <span>Shell command</span>
-          <textarea dir="auto" class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
+          <textarea dir="ltr" class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
         </label>
       {:else}
         <label class="field">
@@ -951,18 +1114,25 @@
         {#if fCadence === 'interval'}
           <label class="field">
             <span>Every (minutes, min 5)</span>
-            <input class="input" type="number" min="5" bind:value={fEveryMin} />
+            <input id="sched-every" class="input" type="number" bind:value={fEveryMin} onblur={onIntervalBlur} oninput={onIntervalInput}
+              aria-invalid={!!intervalError}
+              aria-describedby={intervalError ? 'sched-every-err' : undefined} />
+            {#if intervalError}<small id="sched-every-err" class="field-hint bad" role="alert">{intervalError}</small>{/if}
           </label>
         {:else if fCadence === 'once'}
           <label class="field">
             <span>Runs once at (in the timezone)</span>
-            <input class="input" type="datetime-local" bind:value={fRunAt} aria-invalid={!fRunAt} />
+            <input id="sched-run-at" class="input" type="datetime-local" bind:value={fRunAt}
+              aria-invalid={!fRunAt}
+              aria-describedby={fieldError?.id === 'sched-run-at' ? 'sched-run-at-err' : undefined} />
+            {#if fieldError?.id === 'sched-run-at'}<small id="sched-run-at-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
           </label>
         {:else if fCadence === 'cron'}
           <label class="field">
             <span>Cron expression (5 fields)</span>
-            <input dir="ltr" class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
-            <small class="field-hint" class:bad={cronFieldCount !== 5}>
+            <input id="sched-cron" dir="ltr" class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1"
+              aria-invalid={cronFieldCount !== 5} aria-describedby="sched-cron-hint" />
+            <small id="sched-cron-hint" class="field-hint" class:bad={cronFieldCount !== 5}>
               {cronFieldCount === 5
                 ? 'minute · hour · day of month · month · day of week (0 or 7 = Sun)'
                 : `Needs 5 fields (minute hour day month weekday) — has ${cronFieldCount}`}
@@ -987,8 +1157,9 @@
         {#if fCadence !== 'interval'}
           <label class="field">
             <span>Timezone</span>
-            <input dir="auto" class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
-            {#if !tzOk}<small class="field-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
+            <input id="sched-tz" dir="ltr" class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list"
+              aria-invalid={!tzOk} aria-describedby={tzOk ? undefined : 'sched-tz-err'} />
+            {#if !tzOk}<small id="sched-tz-err" class="field-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
             {#if tzNames.length}
               <datalist id="sched-tz-list">{#each tzNames as z (z)}<option value={z}></option>{/each}</datalist>
             {/if}
@@ -1038,17 +1209,23 @@
         {#if fDestType === 'slack' || fDestType === 'telegram'}
           <label class="field">
             <span>Chat / channel id (optional)</span>
-            <input dir="auto" class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
+            <input dir="ltr" class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
           </label>
         {:else if fDestType === 'email'}
           <label class="field">
             <span>Send to (email)</span>
-            <input dir="ltr" class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com" />
+            <input id="sched-email" dir="ltr" class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com"
+              aria-invalid={fieldError?.id === 'sched-email'}
+              aria-describedby={fieldError?.id === 'sched-email' ? 'sched-email-err' : undefined} />
+            {#if fieldError?.id === 'sched-email'}<small id="sched-email-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
           </label>
         {:else if fDestType === 'webhook'}
           <label class="field">
             <span>Webhook URL</span>
-            <input dir="ltr" class="input" type="url" bind:value={fUrl} placeholder="https://…" />
+            <input id="sched-webhook" dir="ltr" class="input" type="url" bind:value={fUrl} placeholder="https://…"
+              aria-invalid={fieldError?.id === 'sched-webhook'}
+              aria-describedby={fieldError?.id === 'sched-webhook' ? 'sched-webhook-err' : undefined} />
+            {#if fieldError?.id === 'sched-webhook'}<small id="sched-webhook-err" class="field-hint bad" role="alert">{fieldError.message}</small>{/if}
           </label>
         {/if}
       </div>
@@ -1106,11 +1283,13 @@
 
       <div class="actions">
         <button type="button" class="btn" disabled={busy} onclick={closeForm}>Cancel</button>
-        <button type="submit" class="btn primary" disabled={busy}>
+        <button type="submit" class="btn primary" disabled={busy || !ws.currentId}>
           {busy ? 'Saving…' : editId ? 'Save changes' : 'Create task'}
         </button>
       </div>
     </form>
+  {:else if !ws.currentId}
+    {@render addWorkspace(true)}
   {:else}
     {#if convertedWfId}
       <div class="notice" role="status">
@@ -1144,6 +1323,8 @@
       {/snippet}
       <ul class="tasks">
         {#each list as t (t.id)}
+          {@const live = taskRunLive(t)}
+          {@const newest = newestLoadedRun(t)}
           <li class="task" data-task-id={t.id}>
             <div class="task-main">
               <div class="task-info">
@@ -1151,9 +1332,18 @@
                   <strong class="name" title={t.name}>{t.name}</strong>
                   {#if !t.enabled}
                     <StatusBadge tone="neutral" label="Paused" />
-                  {:else if t.last_status}
-                    <!-- Shared run vocabulary (lib/status.ts): ok → Succeeded, error → Failed. -->
-                    <StatusBadge status={runStatus(t.last_status)} />
+                  {/if}
+                  {#if live}
+                    <StatusBadge status={runStatus('running')} />
+                  {:else}
+                    {#if t.last_status}
+                      <!-- Shared run vocabulary (lib/status.ts): ok → Succeeded, error → Failed.
+                           A paused task still shows its last run. -->
+                      <StatusBadge status={runStatus(t.last_status)} />
+                    {/if}
+                    {#if newest?.delivery_error}
+                      <StatusBadge tone="warning" label="Not delivered" title={newest.delivery_error} />
+                    {/if}
                   {/if}
                 </div>
                 <div class="meta">
@@ -1166,9 +1356,14 @@
                 </div>
               </div>
               <div class="task-actions">
+                {#if !t.enabled}
+                  <button class="btn small" onclick={() => void toggle(t)} title="Resume this schedule">
+                    <Icon name="play" size={12} /> Resume
+                  </button>
+                {/if}
                 <button class="btn small" onclick={() => runNow(t)} disabled={!!runningIds[t.id]}
                   title={destLabel(t) === 'Report kept in Otto' ? 'Run once now' : `Run once now — ${destLabel(t).toLowerCase()}`}>
-                  <Icon name="play" size={12} /> {runningIds[t.id] ? 'Starting…' : 'Run now'}
+                  <Icon name="play" size={12} /> {runningIds[t.id] ? 'Starting…' : t.enabled ? 'Run now' : 'Run once'}
                 </button>
                 <button class="btn small ghost" onclick={() => toggleRuns(t)} aria-expanded={expandedId === t.id} aria-controls="runs-{t.id}">
                   <Icon name={expandedId === t.id ? 'chevronUp' : 'chevronDown'} size={12} /> Runs
@@ -1178,6 +1373,9 @@
                 </button>
               </div>
             </div>
+            {#if live && events.state !== 'connected'}
+              <p class="reconnect" role="status">Reconnecting — this run’s status may be stale.</p>
+            {/if}
             {#if expandedId === t.id}
               <div class="runs" id="runs-{t.id}">
                 <LoadState
@@ -1207,10 +1405,12 @@
                     {#if r.delivered}<Badge tone="ok" label="Delivered" />{/if}
                     {#if r.skipped_delivery}<Badge label="No change" title="Not delivered: the report is unchanged since the last run" />{/if}
                     {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
-                    {#if r.proof_pack_id}<Badge tone="ok" label="Proof" title="A proof pack is attached to this run" />{/if}
-                    {#if r.workflow_run_id && t.workflow_id}
+                    {#if r.proof_pack_id}
+                      <button class="btn small" title="Open the proof pack for this run" onclick={() => router.go(`proof/${encodeURIComponent(r.proof_pack_id ?? '')}`)}>Proof</button>
+                    {/if}
+                    {#if r.workflow_run_id}
                       <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => void openWorkflowRun(r.workflow_run_id!, t.workflow_id)}>Workflow run</button>
-                    {:else if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
+                    {/if}
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
                     {#if r.status === 'error' && r.error}
@@ -1248,6 +1448,10 @@
         <div class="muted">This run wrote an empty report.</div>
       {:else if reportRaw}
         <pre class="report">{reportText}</pre>
+      {:else if reportRenderError}
+        <LoadState what="formatted report" error={reportRenderError} empty onretry={() => reportRenderRetry++} />
+      {:else if !reportHtml}
+        <LoadState what="formatted report" loading empty />
       {:else}
         <!-- renderMarkdownGfm output goes through the allowlist sanitizer. -->
         <div class="md-body report-md">{@html reportHtml}</div>
@@ -1331,7 +1535,8 @@
     background: none; border: none; padding: 2px 0; font: inherit; font-size: var(--fs-m); font-weight: 600;
     color: var(--text); cursor: pointer; text-align: start;
   }
-  .adv-hint { font-weight: 400; font-size: var(--fs-s); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .adv-hint { flex: 1; min-width: 0; font-weight: 400; font-size: var(--fs-s); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reconnect { margin: 8px 0 0; font-size: var(--fs-s); color: var(--warning); }
   .adv-body { display: flex; flex-direction: column; gap: 12px; margin-block-start: 12px; }
   .hint { font-size: var(--fs-s); color: var(--text-dim); margin: 0 0 4px; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-block-start: 8px; padding-block-start: 12px; border-block-start: 1px solid var(--border); }

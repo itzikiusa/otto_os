@@ -736,10 +736,10 @@
     {#snippet badge()}
       {#if artifact}
         <span class="badges">
-          <StudioBadge studio={artifact.studio} />
+          {#if !viewport.isPhone}<StudioBadge studio={artifact.studio} />{/if}
           <StatusPill status={artifact.status === 'approved' && head?.id !== artifact.approved_version_id ? 'draft' : artifact.status} onclick={statusMenu} />
-          {#if head}<span class="ver" title={`Current version: v${head.seq}`}>v{head.seq}</span>{/if}
-          {#if dirty}<span class="chip edited" data-testid="design-dirty">Edited</span>{/if}
+          {#if head && !viewport.isPhone}<span class="ver" title={`Current version: v${head.seq}`}>v{head.seq}</span>{/if}
+          {#if dirty && !viewport.isPhone}<span class="chip edited" data-testid="design-dirty">Edited</span>{/if}
         </span>
       {/if}
     {/snippet}

@@ -1,0 +1,52 @@
+{
+  "root": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-stash-fixtures-1_i8msb1",
+  "results": {
+    "locks drop": {
+      "code": 1,
+      "mentions_lock": true,
+      "stack_unchanged": true,
+      "working_file": "base"
+    },
+    "locks push": {
+      "code": 1,
+      "mentions_lock": false,
+      "stack_unchanged": true,
+      "working_file": "external work"
+    },
+    "linked drop": {
+      "code": 1,
+      "mentions_lock": true,
+      "stack_unchanged": true,
+      "working_file": "base"
+    },
+    "linked push": {
+      "code": 1,
+      "mentions_lock": false,
+      "stack_unchanged": true,
+      "working_file": "external work"
+    },
+    "reflog_written_target_old": {
+      "stack": [
+        "3bc6ac6458011040070a87a62fa7dd0f82bee99b\tOn master: middle",
+        "1a7a8915447a4437ba6551320ea3f222254700b6\tOn master: oldest"
+      ],
+      "expected_remaining": [
+        "3bc6ac6458011040070a87a62fa7dd0f82bee99b\tOn master: middle",
+        "1a7a8915447a4437ba6551320ea3f222254700b6\tOn master: oldest"
+      ],
+      "ref_still_old": true,
+      "default_apply_oid": "e35f1dc2714b1a472da361e463e440712523359b",
+      "selector0_oid": "e35f1dc2714b1a472da361e463e440712523359b"
+    },
+    "sha256": {
+      "oid_length": 64,
+      "stash_count": 3,
+      "ref_format": "files"
+    },
+    "reftable": {
+      "oid_length": 40,
+      "stash_count": 3,
+      "ref_format": "reftable"
+    }
+  }
+}

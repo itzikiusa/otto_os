@@ -233,15 +233,22 @@
   // the top of the pane (or the window), so it never runs off the top edge.
   let wrapEl = $state<HTMLDivElement | null>(null);
   let popMax = $state(320);
-  $effect(() => {
-    void suggestions.length;
-    void paneH;
+  function measurePopMax(): void {
     if (!cmdOpen || !wrapEl) return;
     const paneTop = Math.max(0, composerEl?.parentElement?.getBoundingClientRect().top ?? 0);
     const room = wrapEl.getBoundingClientRect().top - paneTop - 12;
     // Honour the real room even when it is tiny (a short split + attachments):
     // a taller floor would push the list past the pane's clip. It scrolls.
     popMax = Math.floor(Math.max(0, Math.min(320, window.innerHeight * 0.5, room)));
+  }
+  $effect(() => {
+    void suggestions.length;
+    void attachments.length;
+    void paneH;
+    if (!cmdOpen || !wrapEl) return;
+    measurePopMax();
+    window.addEventListener('resize', measurePopMax);
+    return () => window.removeEventListener('resize', measurePopMax);
   });
   function acceptCmd(c: SlashCommand): void {
     transcript.setDraft(ownerId, `/${c.name} `);
@@ -652,7 +659,7 @@
   }
   .thumb-x {
     position: absolute;
-    top: 3px;
+    inset-block-start: 3px;
     inset-inline-end: 3px;
     width: 18px;
     height: 18px;
@@ -714,6 +721,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  @media (max-width: 640px), (pointer: coarse) {
+    .send,
+    .thumb-x {
+      width: var(--hit-min);
+      height: var(--hit-min);
+    }
   }
   .exited {
     display: flex;

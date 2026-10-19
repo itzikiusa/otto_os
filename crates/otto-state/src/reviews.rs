@@ -123,7 +123,10 @@ impl ReviewsRepo {
     /// read-then-write check and each persist a full set of drafts).
     pub async fn try_begin_rerun(&self, id: &Id) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE pr_reviews SET status = 'running', error = NULL WHERE id = ? AND status != 'running'",
+            "UPDATE pr_reviews SET status = 'running', error = NULL WHERE id = ? AND status != 'running' \
+             AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(agents_json) THEN agents_json ELSE '[]' END) \
+               WHERE CAST(key AS INTEGER) < json_array_length(agents_json) - 1 \
+                 AND json_extract(value, '$.status') IN ('pending', 'running', 'waiting'))",
         )
         .bind(id)
         .execute(&self.pool)
@@ -777,6 +780,36 @@ mod tests {
         let after = repo.get_review(&review.id).await.unwrap();
         assert_eq!(after.status, ReviewStatus::Running);
         assert!(after.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_and_summarizer_retry_claims_exclude_each_other() {
+        let repo = ReviewsRepo::new(mem_pool().await);
+        let review = repo.create_review(&"r".into(), 7).await.unwrap();
+        repo.set_agents(&review.id, &[agent("a", "done"), agent("summary", "done")])
+            .await
+            .unwrap();
+        repo.set_status(&review.id, ReviewStatus::Done, None)
+            .await
+            .unwrap();
+        assert!(repo
+            .claim_agent_retry(&review.id, 0, &agent("a", "pending"))
+            .await
+            .unwrap());
+        assert!(!repo.try_begin_rerun(&review.id).await.unwrap());
+        repo.set_agent_at(&review.id, 0, &agent("a", "done"))
+            .await
+            .unwrap();
+        // An interrupted summarizer row itself must remain retryable. Only
+        // active REVIEWERS exclude the new summary attempt.
+        repo.set_agent_at(&review.id, 1, &agent("summary", "running"))
+            .await
+            .unwrap();
+        assert!(repo.try_begin_rerun(&review.id).await.unwrap());
+        assert!(!repo
+            .claim_agent_retry(&review.id, 0, &agent("a", "pending"))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

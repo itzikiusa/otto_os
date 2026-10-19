@@ -15,8 +15,7 @@
 /// SQL flavour, selecting the lexical quirks the scanner honours.
 ///
 /// - `Mysql`: backtick identifiers, `#` line comments, backslash string escapes.
-/// - `Clickhouse`: standard `'`/`"` quoting, `--` / `/* */` comments (no `#`,
-///   no backtick, no backslash escape — matches the plan's contract).
+/// - `Clickhouse`: quoted identifiers, backslash escapes and `--` / `/* */` comments.
 /// - `Postgres`: `$tag$…$tag$` dollar quoting (no backtick, no `#`, no backslash
 ///   escape — standard-conforming strings).
 /// - `Generic`: the conservative common denominator used by the write-guard —
@@ -57,176 +56,252 @@ enum State {
 /// comments, # line comments (Mysql only), $tag$…$tag$ dollar quoting (Postgres only).
 /// Trailing statement without `;` is included; blank/comment-only segments are dropped.
 pub fn split_statements(sql: &str, dialect: SqlDialect) -> Vec<StatementSpan> {
-    // Char-indexed view so every offset we record lands on a UTF-8 boundary,
-    // while single-byte ASCII lookahead still drives the state machine (none of
-    // our delimiters are multi-byte).
-    let chars: Vec<(usize, char)> = sql.char_indices().collect();
-    let n = chars.len();
-    let total = sql.len();
-    // Backslash is only a string escape in these dialects (plan §2.2 contract).
-    let backslash_escapes = matches!(dialect, SqlDialect::Mysql | SqlDialect::Generic);
+    let mut scanner = StatementScanner::new(sql, dialect);
+    std::iter::from_fn(|| scanner.next(false)).collect()
+}
 
-    // Exclusive byte offset just past the char at position `idx`.
-    let byte_end = |idx: usize| -> usize {
-        if idx + 1 < n {
-            chars[idx + 1].0
-        } else {
-            total
-        }
-    };
+/// Incremental scanner: keeps delimiter/offset and one character index while
+/// the caller obtains the current MySQL escape mode from each server response.
+pub struct StatementScanner<'a> {
+    sql: &'a str,
+    chars: Vec<(usize, char)>,
+    dialect: SqlDialect,
+    delimiter: String,
+    offset: usize,
+}
 
-    let mut spans: Vec<StatementSpan> = Vec::new();
-    let mut state = State::Normal;
-    let mut dollar_tag = String::new();
-    // Byte offsets of the trimmed statement content accumulated so far. `start`
-    // is set at the first meaningful (non-whitespace, non-comment) char; `end`
-    // is extended to just past the last meaningful char. Slicing between them
-    // yields the statement with leading/trailing noise trimmed but any interior
-    // comment preserved (the slice is contiguous).
-    let mut start: Option<usize> = None;
-    let mut end: usize = 0;
-    let push = |spans: &mut Vec<StatementSpan>, start: &mut Option<usize>, end: usize| {
-        if let Some(s) = start.take() {
-            spans.push(StatementSpan {
-                text: sql[s..end].to_string(),
-                start: s,
-                end,
-            });
-        }
-    };
-
-    let mut i = 0;
-    while i < n {
-        let (bi, ch) = chars[i];
-        let ce = byte_end(i);
-        match state {
-            State::Normal => {
-                if ch == '-' && next_is(&chars, i, '-') {
-                    state = State::LineComment;
-                    i += 2;
-                    continue;
-                }
-                if ch == '#' && dialect == SqlDialect::Mysql {
-                    state = State::LineComment;
-                    i += 1;
-                    continue;
-                }
-                if ch == '/' && next_is(&chars, i, '*') {
-                    state = State::BlockComment;
-                    i += 2;
-                    continue;
-                }
-                if ch == '\'' {
-                    mark(&mut start, &mut end, bi, ce);
-                    state = State::Single;
-                    i += 1;
-                    continue;
-                }
-                if ch == '"' {
-                    mark(&mut start, &mut end, bi, ce);
-                    state = State::Double;
-                    i += 1;
-                    continue;
-                }
-                if ch == '`' && dialect == SqlDialect::Mysql {
-                    mark(&mut start, &mut end, bi, ce);
-                    state = State::Backtick;
-                    i += 1;
-                    continue;
-                }
-                if ch == '$' && dialect == SqlDialect::Postgres {
-                    if let Some((tag, after)) = try_open_dollar(&chars, i) {
-                        mark(&mut start, &mut end, bi, byte_end(after - 1));
-                        dollar_tag = tag;
-                        state = State::Dollar;
-                        i = after;
-                        continue;
-                    }
-                    // Not a dollar-quote opener (e.g. `$1`): fall through.
-                }
-                if ch == ';' {
-                    push(&mut spans, &mut start, end);
-                    i += 1;
-                    continue;
-                }
-                if !ch.is_whitespace() {
-                    mark(&mut start, &mut end, bi, ce);
-                }
-                i += 1;
-            }
-            State::Single => {
-                if backslash_escapes && ch == '\\' {
-                    // Consume the backslash and the escaped char as literal.
-                    mark(&mut start, &mut end, bi, ce);
-                    i += 1;
-                    if i < n {
-                        mark(&mut start, &mut end, chars[i].0, byte_end(i));
-                        i += 1;
-                    }
-                    continue;
-                }
-                mark(&mut start, &mut end, bi, ce);
-                if ch == '\'' {
-                    // A doubled '' re-opens on the next char in Normal, so the
-                    // toggle correctly keeps an embedded `;` inside the literal.
-                    state = State::Normal;
-                }
-                i += 1;
-            }
-            State::Double => {
-                if backslash_escapes && ch == '\\' {
-                    mark(&mut start, &mut end, bi, ce);
-                    i += 1;
-                    if i < n {
-                        mark(&mut start, &mut end, chars[i].0, byte_end(i));
-                        i += 1;
-                    }
-                    continue;
-                }
-                mark(&mut start, &mut end, bi, ce);
-                if ch == '"' {
-                    state = State::Normal;
-                }
-                i += 1;
-            }
-            State::Backtick => {
-                mark(&mut start, &mut end, bi, ce);
-                if ch == '`' {
-                    state = State::Normal;
-                }
-                i += 1;
-            }
-            State::LineComment => {
-                if ch == '\n' {
-                    state = State::Normal;
-                }
-                i += 1;
-            }
-            State::BlockComment => {
-                if ch == '*' && next_is(&chars, i, '/') {
-                    state = State::Normal;
-                    i += 2;
-                    continue;
-                }
-                i += 1;
-            }
-            State::Dollar => {
-                if ch == '$' {
-                    if let Some(after) = try_close_dollar(&chars, i, &dollar_tag) {
-                        mark(&mut start, &mut end, bi, byte_end(after - 1));
-                        state = State::Normal;
-                        i = after;
-                        continue;
-                    }
-                }
-                mark(&mut start, &mut end, bi, ce);
-                i += 1;
-            }
+impl<'a> StatementScanner<'a> {
+    pub fn new(sql: &'a str, dialect: SqlDialect) -> Self {
+        Self {
+            sql,
+            chars: sql.char_indices().collect(),
+            dialect,
+            delimiter: ";".into(),
+            offset: 0,
         }
     }
-    // Trailing statement without a terminating `;`.
-    push(&mut spans, &mut start, end);
-    spans
+
+    /// Probe once for single-statement paging without consuming scanner state.
+    pub fn has_more(&mut self, no_backslash_escapes: bool) -> bool {
+        let offset = self.offset;
+        let delimiter = self.delimiter.clone();
+        let more = self.next(no_backslash_escapes).is_some();
+        self.offset = offset;
+        self.delimiter = delimiter;
+        more
+    }
+
+    /// Return the next statement using the session's current escape mode.
+    pub fn next(&mut self, no_backslash_escapes: bool) -> Option<StatementSpan> {
+        let sql = self.sql;
+        let chars = &self.chars;
+        let dialect = self.dialect;
+        let delimiter = &mut self.delimiter;
+        let n = chars.len();
+        let total = sql.len();
+        let backslash_escapes = matches!(dialect, SqlDialect::Clickhouse | SqlDialect::Generic)
+            || (dialect == SqlDialect::Mysql && !no_backslash_escapes);
+        // Exclusive byte offset just past the char at position `idx`.
+        let byte_end = |idx: usize| -> usize {
+            if idx + 1 < n {
+                chars[idx + 1].0
+            } else {
+                total
+            }
+        };
+
+        let mut state = State::Normal;
+        let mut dollar_tag = String::new();
+        let mut start: Option<usize> = None;
+        let mut end: usize = 0;
+        let span = |start: usize, end: usize| StatementSpan {
+            text: sql[start..end].to_string(),
+            start,
+            end,
+        };
+
+        let mut i = self.offset;
+        while i < n {
+            let (bi, ch) = chars[i];
+            let ce = byte_end(i);
+            match state {
+                State::Normal => {
+                    // DELIMITER is a MySQL client directive, never SQL sent to the
+                    // server. Recognize it only on its own line between statements.
+                    if dialect == SqlDialect::Mysql
+                        && start.is_none()
+                        && ch.eq_ignore_ascii_case(&'d')
+                    {
+                        let line_start = sql[..bi].rfind('\n').map_or(0, |p| p + 1);
+                        if sql[line_start..bi].trim().is_empty() {
+                            let line_end = sql[bi..].find('\n').map_or(total, |p| bi + p);
+                            let line = &sql[bi..line_end];
+                            if let Some((verb, value)) = line.split_once(char::is_whitespace) {
+                                let value = value.trim();
+                                // mysql accepts a quoted delimiter token too.
+                                let quoted = value.len() >= 2
+                                    && matches!(value.as_bytes()[0], b'\'' | b'"' | b'`')
+                                    && value.as_bytes().first() == value.as_bytes().last();
+                                let value = if quoted {
+                                    &value[1..value.len() - 1]
+                                } else {
+                                    value
+                                };
+                                if verb.eq_ignore_ascii_case("delimiter")
+                                    && !value.is_empty()
+                                    && (quoted || !value.chars().any(char::is_whitespace))
+                                {
+                                    *delimiter = value.to_string();
+                                    while i < n && chars[i].0 < line_end {
+                                        i += 1;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if sql[bi..].starts_with(delimiter.as_str()) {
+                        let after = bi + delimiter.len();
+                        while i < n && chars[i].0 < after {
+                            i += 1;
+                        }
+                        if let Some(start) = start.take() {
+                            self.offset = i;
+                            return Some(span(start, end));
+                        }
+                        continue;
+                    }
+                    if ch == '-' && next_is(chars, i, '-') {
+                        state = State::LineComment;
+                        i += 2;
+                        continue;
+                    }
+                    if ch == '#' && dialect == SqlDialect::Mysql {
+                        state = State::LineComment;
+                        i += 1;
+                        continue;
+                    }
+                    if ch == '/' && next_is(chars, i, '*') {
+                        state = State::BlockComment;
+                        i += 2;
+                        continue;
+                    }
+                    if ch == '\'' {
+                        mark(&mut start, &mut end, bi, ce);
+                        state = State::Single;
+                        i += 1;
+                        continue;
+                    }
+                    if ch == '"' {
+                        mark(&mut start, &mut end, bi, ce);
+                        state = State::Double;
+                        i += 1;
+                        continue;
+                    }
+                    if ch == '`' && matches!(dialect, SqlDialect::Mysql | SqlDialect::Clickhouse) {
+                        mark(&mut start, &mut end, bi, ce);
+                        state = State::Backtick;
+                        i += 1;
+                        continue;
+                    }
+                    if ch == '$' && dialect == SqlDialect::Postgres {
+                        if let Some((tag, after)) = try_open_dollar(chars, i) {
+                            mark(&mut start, &mut end, bi, byte_end(after - 1));
+                            dollar_tag = tag;
+                            state = State::Dollar;
+                            i = after;
+                            continue;
+                        }
+                        // Not a dollar-quote opener (e.g. `$1`): fall through.
+                    }
+                    if !ch.is_whitespace() {
+                        mark(&mut start, &mut end, bi, ce);
+                    }
+                    i += 1;
+                }
+                State::Single => {
+                    if backslash_escapes && ch == '\\' {
+                        // Consume the backslash and the escaped char as literal.
+                        mark(&mut start, &mut end, bi, ce);
+                        i += 1;
+                        if i < n {
+                            mark(&mut start, &mut end, chars[i].0, byte_end(i));
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    mark(&mut start, &mut end, bi, ce);
+                    if ch == '\'' {
+                        // A doubled '' re-opens on the next char in Normal, so the
+                        // toggle correctly keeps an embedded `;` inside the literal.
+                        state = State::Normal;
+                    }
+                    i += 1;
+                }
+                State::Double => {
+                    if backslash_escapes && ch == '\\' {
+                        mark(&mut start, &mut end, bi, ce);
+                        i += 1;
+                        if i < n {
+                            mark(&mut start, &mut end, chars[i].0, byte_end(i));
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    mark(&mut start, &mut end, bi, ce);
+                    if ch == '"' {
+                        state = State::Normal;
+                    }
+                    i += 1;
+                }
+                State::Backtick => {
+                    if dialect == SqlDialect::Clickhouse && ch == '\\' {
+                        mark(&mut start, &mut end, bi, ce);
+                        i += 1;
+                        if i < n {
+                            mark(&mut start, &mut end, chars[i].0, byte_end(i));
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    mark(&mut start, &mut end, bi, ce);
+                    if ch == '`' {
+                        state = State::Normal;
+                    }
+                    i += 1;
+                }
+                State::LineComment => {
+                    if ch == '\n' {
+                        state = State::Normal;
+                    }
+                    i += 1;
+                }
+                State::BlockComment => {
+                    if ch == '*' && next_is(chars, i, '/') {
+                        state = State::Normal;
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+                State::Dollar => {
+                    if ch == '$' {
+                        if let Some(after) = try_close_dollar(chars, i, &dollar_tag) {
+                            mark(&mut start, &mut end, bi, byte_end(after - 1));
+                            state = State::Normal;
+                            i = after;
+                            continue;
+                        }
+                    }
+                    mark(&mut start, &mut end, bi, ce);
+                    i += 1;
+                }
+            }
+        }
+        // Trailing statement without a terminating `;`.
+        self.offset = n;
+        start.map(|start| span(start, end))
+    }
 }
 
 /// Records `[cs, ce)` as covered content, opening the span on first mark.
@@ -282,7 +357,86 @@ fn try_close_dollar(chars: &[(usize, char)], i: usize, tag: &str) -> Option<usiz
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn incremental_mysql_mode_and_delimiter_changes() {
+        let sql = r"SET sql_mode='NO_BACKSLASH_ESCAPES'; SELECT 'ends\'; SELECT 2;";
+        let mut scanner = super::StatementScanner::new(sql, super::SqlDialect::Mysql);
+        assert_eq!(
+            scanner.next(false).unwrap().text,
+            "SET sql_mode='NO_BACKSLASH_ESCAPES'"
+        );
+        assert!(scanner.has_more(true));
+        let span = scanner.next(true).unwrap();
+        assert_eq!(span.text, r"SELECT 'ends\'");
+        assert_eq!(&sql[span.start..span.end], span.text);
+        assert_eq!(scanner.next(true).unwrap().text, "SELECT 2");
+        assert!(scanner.next(true).is_none());
+        let mut scanner = super::StatementScanner::new(
+            "DELIMITER $$\nSELECT 1$$\nDELIMITER ;\nSELECT 2;",
+            super::SqlDialect::Mysql,
+        );
+        assert_eq!(scanner.next(false).unwrap().text, "SELECT 1");
+        assert!(scanner.has_more(true));
+        assert_eq!(scanner.next(true).unwrap().text, "SELECT 2");
+    }
     use super::*;
+
+    #[test]
+    fn mysql_delimiter_with_quoted_whitespace() {
+        let spans = split_statements(
+            "DELIMITER 'x y'\nSELECT 1x y\nDELIMITER ;\nSELECT 2;",
+            SqlDialect::Mysql,
+        );
+        assert_eq!(
+            spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            ["SELECT 1", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn mysql_quoted_delimiters() {
+        for delimiter in ["'$$'", "\"$$\"", "`$$`"] {
+            let sql = format!("DELIMITER {delimiter}\nSELECT 1$$\nDELIMITER ;\nSELECT 2;");
+            let spans = split_statements(&sql, SqlDialect::Mysql);
+            assert_eq!(
+                spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+                ["SELECT 1", "SELECT 2"]
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_escapes_and_quoted_identifiers_keep_semicolons() {
+        let sql = r"SELECT 'it\'s;valid', `a; b`, `a\`;b`; SELECT 2";
+        assert_eq!(texts(sql, SqlDialect::Clickhouse).len(), 2);
+        assert_eq!(texts(sql, SqlDialect::Clickhouse)[1], "SELECT 2");
+    }
+
+    #[test]
+    fn mysql_delimiter_preserves_stored_programs() {
+        let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 'x;$$'; SELECT 2; END$$\nDELIMITER ;\nCALL p(); SELECT 3;";
+        assert_eq!(
+            texts(sql, SqlDialect::Mysql),
+            vec![
+                "CREATE PROCEDURE p() BEGIN SELECT 'x;$$'; SELECT 2; END",
+                "CALL p()",
+                "SELECT 3",
+            ]
+        );
+        for span in split_statements(sql, SqlDialect::Mysql) {
+            assert_eq!(&sql[span.start..span.end], span.text);
+        }
+    }
+
+    #[test]
+    fn delimiter_inside_comments_or_strings_is_not_a_directive() {
+        let sql = "SELECT 'DELIMITER $$'; /*\nDELIMITER //\n*/ SELECT 2;";
+        assert_eq!(
+            texts(sql, SqlDialect::Mysql),
+            vec!["SELECT 'DELIMITER $$'", "SELECT 2"]
+        );
+    }
 
     /// Just the trimmed statement texts — the common assertion shape.
     fn texts(sql: &str, dialect: SqlDialect) -> Vec<String> {

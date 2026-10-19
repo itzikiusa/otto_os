@@ -1,7 +1,9 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
   // Create a swarm — from a preset (5 templates) or blank.
+  import { onMount } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { toastError } from '../../lib/toastError';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -15,8 +17,8 @@
   let selected = $state<string>(''); // preset slug or '' for blank
   let busy = $state(false);
 
-  $effect(() => {
-    swarm.loadPresets();
+  onMount(() => {
+    void swarm.loadPresets();
   });
 
   async function create() {
@@ -46,6 +48,16 @@
       <div class="p-name">Blank</div>
       <div class="p-desc dim">Start empty and recruit your own agents.</div>
     </button>
+    {#if swarm.presetsLoading || swarm.presetsError}
+      <LoadState
+        what="presets"
+        variant="compact"
+        loading={swarm.presetsLoading}
+        error={swarm.presetsError}
+        empty={swarm.presets.length === 0}
+        onretry={() => void swarm.loadPresets()}
+      />
+    {/if}
     {#each swarm.presets as p (p.slug)}
       <button class="preset" class:sel={selected === p.slug} aria-pressed={selected === p.slug} onclick={() => (selected = p.slug)}>
         <div class="p-name">{p.name} <span class="dim">· {plural(p.agents.length, 'agent')}</span></div>

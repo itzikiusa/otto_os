@@ -16,7 +16,7 @@
   import type { DesignArtifact, DesignPublish, DesignSiteLocalResp } from '../../../lib/api/types';
   import type { AuditFinding } from './engine/audit';
   import type { SiteDoc } from './engine/types';
-  import { exportZip, listPublishes, previewHtml, publishLocal } from './siteApi';
+  import { exportZip, listPublishes, pinnedEmbedPoster, previewHtml, publishLocal } from './siteApi';
   import { baseUrl } from '../../../lib/api/client';
   import { auth } from '../../../lib/stores/auth.svelte';
 
@@ -178,10 +178,12 @@
           {#each history as h (h.id)}
             {@const set = Array.isArray(h.pinned_set) ? h.pinned_set : []}
             {@const pinnedRefs = set.filter((r) => r.role !== 'site').length}
+            {@const standIns = set.filter((r) => pinnedEmbedPoster(r).standIn).length}
             <li>
               <span class="chip">{h.target === 'zip' ? '.zip' : 'local'}</span>
               v{set.find((r) => r.role === 'site')?.seq ?? '?'} · {rel(h.created_at)}
               {#if pinnedRefs}<span class="dim"> · {pinnedRefs} pinned</span>{/if}
+              {#if standIns}<span class="dim"> · {plural(standIns, 'poster stand-in')}</span>{/if}
             </li>
           {/each}
         </ul>

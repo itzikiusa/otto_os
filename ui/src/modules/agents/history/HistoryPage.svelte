@@ -562,7 +562,7 @@
             {#if !collapsed[g.key]}
               {#each g.entries as e (entryKey(e))}
                 <div
-                  class="row"
+                  class="hist-row"
                   class:on={selKey === entryKey(e)}
                   data-testid="history-row"
                   data-status={e.status}
@@ -589,8 +589,8 @@
                   </button>
                   <button
                     class="icon-btn row-more"
-                    onclick={(k) => ctxMenu.show(k, menuFor(e))}
-                    title="More actions"
+                    onclick={(k) => ctxMenu.showAt(k.currentTarget as HTMLElement, menuFor(e))}
+                    title="More actions for {entryTitle(e)}"
                     aria-label="More actions for {entryTitle(e)}"
                   ><Icon name="more" size={14} /></button>
                 </div>
@@ -911,17 +911,17 @@
     border-radius: 999px;
     padding: 0 6px;
   }
-  .row {
+  .hist-row {
     display: flex;
     align-items: center;
     gap: 2px;
     border-radius: var(--radius-s);
     padding-inline-end: 4px;
   }
-  .row:hover {
+  .hist-row:hover {
     background: var(--hover);
   }
-  .row.on {
+  .hist-row.on {
     background: var(--accent-soft);
   }
   .row-main {
@@ -1018,9 +1018,9 @@
   .row-more {
     opacity: 0;
   }
-  .row:hover .row-more,
-  .row.on .row-more,
-  .row:focus-within .row-more {
+  .hist-row:hover .row-more,
+  .hist-row.on .row-more,
+  .hist-row:focus-within .row-more {
     opacity: 1;
   }
   @media (hover: none) {

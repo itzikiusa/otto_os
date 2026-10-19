@@ -647,7 +647,7 @@ fn make_row(
 #[derive(Debug, Clone, Default)]
 pub struct BudgetVerdict {
     /// True when enforcement is on AND `block_on_exceed` AND a relevant cap is
-    /// exceeded. Callers that want to gate work check this.
+    /// exceeded or its spend cannot be read. Callers that gate work check this.
     pub blocked: bool,
     /// True when enforcement is on and a relevant cap is exceeded (whether or not
     /// blocking is enabled). Callers can use this to warn prominently.
@@ -658,21 +658,48 @@ pub struct BudgetVerdict {
 
 /// Daemon-consultable budget check for a `(workspace, provider)`. Returns a
 /// no-op verdict when enforcement is off (the default), so callers can wire this
-/// in safely without changing behaviour until a root user opts in. Best-effort:
-/// any engine error reads as "not exceeded".
+/// in safely without changing behaviour until a root user opts in. An unreadable
+/// relevant cap blocks only when blocking enforcement is explicitly enabled;
+/// unknown spend is never reported as a measured exceedance.
 pub async fn check_budget(ctx: &ServerCtx, workspace_id: &str, provider: &str) -> BudgetVerdict {
     let cfg = load_budgets(ctx).await;
     if !cfg.enforce {
         return BudgetVerdict::default();
     }
-    // A background read (S9-303): a gate consulted per swarm turn / workflow
-    // step must not keep ClickHouse awake. Only when there is no spend to
-    // judge at all (parked before any scan) does it fall back to a foreground
-    // read — failing open on a cap could let a blocked run through.
-    let status = match budget_status_background(ctx, cfg.clone()).await {
-        Some(status) => status,
-        None => budget_status(ctx, cfg.clone()).await,
+    let relevant_cap = cfg
+        .workspaces
+        .iter()
+        .any(|cap| cap.workspace_id == workspace_id && cap.monthly_usd > 0.0)
+        || cfg
+            .providers
+            .iter()
+            .any(|cap| cap.provider == provider && cap.monthly_usd > 0.0);
+    if !relevant_cap {
+        return BudgetVerdict::default();
+    }
+    let mut cfg = cfg;
+    cfg.window_days = budget_window(&cfg);
+    // Admission must include accepted pending spend and retain read/flush errors.
+    // The strict accessor preserves background idle semantics without treating a
+    // failed flush or an unavailable engine as a successful zero-spend reading.
+    let totals = match ctx
+        .usage
+        .session_totals_for_budget(cfg.window_days, true)
+        .await
+    {
+        Ok(totals) => totals,
+        Err(error) => {
+            tracing::warn!(%error, workspace_id, provider, "budget spend unavailable");
+            return BudgetVerdict {
+                blocked: cfg.block_on_exceed,
+                exceeded: false,
+                reason: Some(
+                    "Budget spend unavailable; retry after usage accounting recovers".into(),
+                ),
+            };
+        }
     };
+    let status = fold_budget_status(ctx, cfg.clone(), &totals).await;
     for row in &status.rows {
         let relevant = (row.scope == "workspace" && row.key == workspace_id)
             || (row.scope == "provider" && row.key == provider);
@@ -1130,5 +1157,80 @@ mod scope_tests {
             Some(vec!["s1".to_string(), "s3".to_string()])
         );
         assert_eq!(own_ids(false, "carol", rows.iter().copied()), Some(vec![]));
+    }
+}
+
+#[cfg(test)]
+mod budget_admission_tests {
+    use super::*;
+    use otto_core::api::{ProviderBudget, WorkspaceBudget};
+
+    /// An unavailable engine must not become a successful zero-spend reading.
+    /// Exercise the real settings lookup and admission function, without a
+    /// ClickHouse installation or any access to the user's accounting data.
+    #[tokio::test]
+    async fn unavailable_spend_respects_only_explicit_relevant_blocking_caps() {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "budget-ws").await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let settings = SettingsRepo::new(pool);
+        let mut cfg = UsageBudgetConfig {
+            enforce: true,
+            block_on_exceed: true,
+            workspaces: vec![WorkspaceBudget {
+                workspace_id: "budget-ws".into(),
+                monthly_usd: 10.0,
+            }],
+            ..Default::default()
+        };
+        settings
+            .put(BUDGETS_KEY, &serde_json::to_value(&cfg).unwrap())
+            .await
+            .unwrap();
+        let verdict = check_budget(&ctx, "budget-ws", "codex").await;
+        assert!(
+            verdict.blocked,
+            "unreadable spend cannot satisfy an explicit blocking cap"
+        );
+        assert!(
+            !verdict.exceeded,
+            "unknown spend is not proof that the cap was exceeded"
+        );
+        assert!(verdict.reason.as_deref().unwrap().contains("unavailable"));
+        assert!(!check_budget(&ctx, "other-ws", "codex").await.blocked);
+
+        cfg.block_on_exceed = false;
+        settings
+            .put(BUDGETS_KEY, &serde_json::to_value(&cfg).unwrap())
+            .await
+            .unwrap();
+        assert!(!check_budget(&ctx, "budget-ws", "codex").await.blocked);
+        cfg.block_on_exceed = true;
+        cfg.enforce = false;
+        settings
+            .put(BUDGETS_KEY, &serde_json::to_value(&cfg).unwrap())
+            .await
+            .unwrap();
+        assert!(!check_budget(&ctx, "budget-ws", "codex").await.blocked);
+
+        cfg.enforce = true;
+        cfg.workspaces[0].monthly_usd = 0.0;
+        settings
+            .put(BUDGETS_KEY, &serde_json::to_value(&cfg).unwrap())
+            .await
+            .unwrap();
+        assert!(!check_budget(&ctx, "budget-ws", "codex").await.blocked);
+        cfg.providers.push(ProviderBudget {
+            provider: "codex".into(),
+            monthly_usd: 10.0,
+        });
+        settings
+            .put(BUDGETS_KEY, &serde_json::to_value(&cfg).unwrap())
+            .await
+            .unwrap();
+        assert!(check_budget(&ctx, "other-ws", "codex").await.blocked);
+        assert!(!check_budget(&ctx, "other-ws", "grok").await.blocked);
     }
 }

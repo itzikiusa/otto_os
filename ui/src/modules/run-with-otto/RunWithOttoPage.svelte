@@ -9,6 +9,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
   import ProofStatusChip from '../../lib/components/ProofStatusChip.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -121,19 +122,27 @@
 <PageHeader
   title="Run with Otto"
   subtitle="From a story, issue, finding or failing test to a PR draft"
-/>
+>
+  {#snippet leading()}
+    {#if viewport.isPhone && openRun}
+      <button class="btn ghost" onclick={() => runWithOtto.closeDetail()} aria-label="Back to runs" title="Back to runs"><Icon name="chevronLeft" size={16} /> Back</button>
+    {/if}
+  {/snippet}
+</PageHeader>
 <PageBody>
 <div class="rwo">
 
   {#if ws.currentId}
     <!-- Keyed per workspace: no draft/repo pick leaks across a switch. -->
+    <div class:phone-hidden={viewport.isPhone && !!openRun}>
     {#key ws.currentId}
       <RunLauncher wsId={ws.currentId} {onLaunched} />
     {/key}
+    </div>
 
   <div class="body-wrap">
   <div class="body" class:has-detail={openRun}>
-    <section class="list-col" aria-label="Runs">
+    <section class="list-col" class:phone-hidden={viewport.isPhone && !!openRun} aria-label="Runs">
       <LoadState
         what="runs"
         loading={runWithOtto.loadingList}
@@ -218,6 +227,7 @@
     .body.has-detail { grid-template-columns: 1fr; }
   }
   .detail-col { min-width: 0; }
+  .phone-hidden { display: none; }
   .list-h {
     margin: 0 0 8px;
     font-size: var(--fs-xs);

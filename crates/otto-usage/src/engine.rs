@@ -164,6 +164,7 @@ pub struct UsageEngine {
     /// skipped (see [`Self::usage_generation`]) and the totals memo never
     /// serves a rollup computed before a flush.
     usage_gen: Arc<AtomicU64>,
+    pending_legacy: Arc<AtomicU64>,
     /// Asks the usage writer to flush its buffer now (S9-01) and acks when it
     /// did (S9-303): every read flushes-and-waits ([`Self::ch_read`]), and a
     /// lazy restart pokes it, so the 90 s flush interval never shows a reader
@@ -173,6 +174,8 @@ pub struct UsageEngine {
     /// [`Self::session_totals_background`] while the server is parked, so a
     /// budget gate neither wakes it nor fails open on a cap it already saw.
     last_totals: std::sync::Mutex<TotalsMemo>,
+    ingestion: tokio::sync::OnceCell<Arc<crate::ingestion::IngestionJournal>>,
+    ingestion_delivery: tokio::sync::Mutex<()>,
 }
 
 /// `(days, otto_only)` → the last rollup that key produced (see `last_totals`).
@@ -180,6 +183,7 @@ type TotalsMemo = HashMap<(u32, bool), LastTotals>;
 struct LastTotals {
     saved: std::time::Instant,
     day: (chrono::NaiveDate, chrono::NaiveDate),
+    gen: u64,
     rows: Arc<Vec<SessionTotals>>,
 }
 const LAST_TOTAL_WINDOWS: usize = 16;
@@ -327,8 +331,11 @@ impl UsageEngine {
             idle_stop_changed: Arc::new(tokio::sync::Notify::new()),
             ch_woke: Arc::new(tokio::sync::Notify::new()),
             usage_gen: Arc::new(AtomicU64::new(0)),
+            pending_legacy: Arc::new(AtomicU64::new(0)),
             flush_sync: Arc::new(FlushSync::default()),
             last_totals: std::sync::Mutex::new(HashMap::new()),
+            ingestion: tokio::sync::OnceCell::new(),
+            ingestion_delivery: tokio::sync::Mutex::new(()),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -371,6 +378,16 @@ impl UsageEngine {
                 }
             }
         });
+        let weak = Arc::downgrade(&engine);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(FLUSH_INTERVAL).await;
+                let Some(engine) = weak.upgrade() else { break };
+                if let Err(e) = engine.flush_ingestion().await {
+                    tracing::warn!("usage: durable delivery deferred: {e}");
+                }
+            }
+        });
         engine
     }
 
@@ -410,6 +427,14 @@ impl UsageEngine {
                                         "usage: add workref columns failed (non-fatal): {e}"
                                     );
                                 }
+                                if let Err(e) = ch
+                                    .exec(&schema::ingestion_schema_sql(config.retention_days))
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "usage: durable ingestion schema unavailable: {e}"
+                                    );
+                                }
                                 // Only alter when the window changed: each MODIFY
                                 // TTL used to queue a part-rewriting mutation on
                                 // every boot and self-heal.
@@ -435,6 +460,7 @@ impl UsageEngine {
                                     Arc::clone(&self.heal),
                                     Arc::clone(&self.usage_gen),
                                     Arc::clone(&self.flush_sync),
+                                    Arc::clone(&self.pending_legacy),
                                 );
                                 spawn_idle_stopper(
                                     Arc::downgrade(&ch),
@@ -502,6 +528,10 @@ impl UsageEngine {
     /// daemon's graceful-shutdown path so the dir lock is released and the next
     /// daemon start doesn't have to reclaim an orphan.
     pub async fn shutdown(&self) {
+        // Bounded shutdown never deletes pending rows; restart will replay them.
+        if let Ok(Err(e)) = tokio::time::timeout(WRITER_DRAIN, self.flush_ingestion()).await {
+            tracing::warn!("usage: shutdown journal retained: {e}");
+        }
         // Buffered metric samples go in before the server stops — even when
         // it is idle-stopped (the one place a metrics write may wake it).
         if let Err(e) = self.flush_metrics_with(true).await {
@@ -562,6 +592,9 @@ impl UsageEngine {
     /// poke, and raced the flush it asked for). The read wakes a parked server
     /// anyway, so its flush may wake it too.
     async fn ch_read(&self) -> Option<Arc<ClickHouse>> {
+        if let Err(e) = self.flush_ingestion().await {
+            tracing::warn!("usage: pending journal rows: {e}");
+        }
         let ch = self.ch()?;
         self.flush_sync.flush_and_wait(true, READ_FLUSH_WAIT).await;
         Some(ch)
@@ -585,8 +618,112 @@ impl UsageEngine {
         self.last_record.store(unix_now(), Ordering::Relaxed);
         let tx = self.inner.read().expect("usage inner lock").tx.clone();
         if let Some(tx) = tx {
-            let _ = tx.send(ev);
+            self.pending_legacy.fetch_add(1, Ordering::SeqCst);
+            if tx.send(ev).is_err() {
+                self.pending_legacy.fetch_sub(1, Ordering::SeqCst);
+            }
+            self.usage_gen.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    async fn ingestion(&self) -> Result<&Arc<crate::ingestion::IngestionJournal>> {
+        self.ingestion
+            .get_or_try_init(|| async {
+                tokio::fs::create_dir_all(&self.data_dir)
+                    .await
+                    .map_err(|e| {
+                        otto_core::Error::Internal(format!("usage journal directory: {e}"))
+                    })?;
+                crate::ingestion::IngestionJournal::open(
+                    &self.data_dir.join("usage-ingestion.sqlite3"),
+                )
+                .await
+                .map(Arc::new)
+                .map_err(journal_error)
+            })
+            .await
+    }
+
+    /// Authoritative source state. A corrupt journal is an error, never a
+    /// fallback to stale legacy cursors (which would replay charged events).
+    pub async fn ingestion_checkpoint(&self) -> Result<Option<serde_json::Value>> {
+        self.ingestion()
+            .await?
+            .checkpoint()
+            .await
+            .map_err(journal_error)
+    }
+
+    /// Atomically accept source progress and its owed events. IDs are generated
+    /// in the journal transaction; neither source nor ClickHouse advances first.
+    pub async fn commit_ingestion(
+        &self,
+        checkpoint: &serde_json::Value,
+        events: &[UsageEvent],
+    ) -> Result<()> {
+        let mut accepted = if self.config().enabled {
+            events.to_vec()
+        } else {
+            Vec::new()
+        };
+        for event in &mut accepted {
+            stamp_ts(event);
+        }
+        self.ingestion()
+            .await?
+            .commit(checkpoint, &accepted)
+            .await
+            .map_err(journal_error)?;
+        if !events.is_empty() {
+            self.last_record.store(unix_now(), Ordering::Relaxed);
+            self.usage_gen.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Deliver bounded batches, retaining their original IDs until confirmed.
+    /// INSERT success followed by an ack failure is safe: FINAL counts a replay
+    /// once. No synchronous SQLite work runs on a Tokio runtime worker.
+    pub async fn flush_ingestion(&self) -> Result<()> {
+        if !self.config().enabled {
+            return Ok(());
+        }
+        let _delivery = self.ingestion_delivery.lock().await;
+        let journal = self.ingestion().await?;
+        let mut remaining = journal.pending_count().await.map_err(journal_error)?;
+        if remaining == 0 {
+            return Ok(());
+        }
+        let ch = self.ch().ok_or_else(|| {
+            otto_core::Error::Upstream("usage engine unavailable; journal retained".into())
+        })?;
+        let _lease = ch.wake_background().await?;
+        loop {
+            if remaining == 0 {
+                break;
+            }
+            let rows = journal
+                .pending(remaining.min(FLUSH_BATCH as u64) as u32)
+                .await
+                .map_err(journal_error)?;
+            if rows.is_empty() {
+                break;
+            }
+            let payload = rows
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| otto_core::Error::Internal(format!("usage outbox encode: {e}")))?
+                .join("\n");
+            ch.insert_ndjson_background("usage_events_durable", &payload)
+                .await?
+                .then_some(())
+                .ok_or_else(|| otto_core::Error::Upstream("usage parked during delivery".into()))?;
+            journal.ack(&rows).await.map_err(journal_error)?;
+            remaining = remaining.saturating_sub(rows.len() as u64);
+            self.usage_gen.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// Insert events synchronously (used by the writer and by tests). No-op
@@ -919,7 +1056,7 @@ impl UsageEngine {
                     sum(cache_write_tokens) AS cache_write_tokens,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd
-             FROM usage_events
+             FROM usage_accounted
              WHERE event_date >= today() - {since} {ws}
              GROUP BY provider
              ORDER BY total_tokens DESC, events DESC",
@@ -940,7 +1077,7 @@ impl UsageEngine {
                     sum(cache_write_tokens) AS cache_write_tokens,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd
-             FROM usage_events
+             FROM usage_accounted
              WHERE event_date >= today() - {since} {ws}
              GROUP BY event_date
              ORDER BY event_date",
@@ -970,7 +1107,7 @@ impl UsageEngine {
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd,
                     toString(max(ts)) AS last_active
-             FROM usage_events
+             FROM usage_accounted
              WHERE event_date >= today() - {since} {ws}
              GROUP BY session_id
              ORDER BY total_tokens DESC, events DESC
@@ -1026,6 +1163,7 @@ impl UsageEngine {
             LastTotals {
                 saved: std::time::Instant::now(),
                 day: totals_window_day(),
+                gen,
                 rows: Arc::clone(rows),
             },
         );
@@ -1040,20 +1178,118 @@ impl UsageEngine {
         }
     }
 
+    /// Strict error-preserving per-session totals for budget admission checks.
+    ///
+    /// Retains background idle semantics (never resets ClickHouse's foreground
+    /// idle clock), flushes accepted pending spend from both the durable
+    /// ingestion journal and the legacy writer before reading, and fails closed
+    /// with `Err` whenever the engine is unavailable, pending spend cannot be
+    /// flushed, or the underlying scan fails — never returning an empty `Ok` or
+    /// a stale cached rollup after a failed flush.
+    pub async fn session_totals_for_budget(
+        &self,
+        days: u32,
+        otto_only: bool,
+    ) -> Result<Arc<Vec<SessionTotals>>> {
+        self.flush_ingestion().await?;
+        if let Some(journal) = self.ingestion.get() {
+            if journal.pending_count().await.map_err(journal_error)? > 0 {
+                return Err(otto_core::Error::Upstream(
+                    "usage journal has undelivered rows".into(),
+                ));
+            }
+        }
+        let ch = self
+            .ch()
+            .ok_or_else(|| otto_core::Error::Upstream("usage engine unavailable".into()))?;
+        if self.pending_legacy.load(Ordering::SeqCst) > 0 {
+            let acked = self
+                .flush_sync
+                .flush_and_wait(true, Duration::from_secs(125))
+                .await;
+            if !acked || self.pending_legacy.load(Ordering::SeqCst) > 0 {
+                return Err(otto_core::Error::Upstream(
+                    "usage writer failed to flush pending events".into(),
+                ));
+            }
+        }
+        let key = (days, otto_only);
+        let parked_last = |gen: u64| {
+            self.last_totals
+                .lock()
+                .expect("last totals lock")
+                .get(&key)
+                .filter(|value| value.day == totals_window_day() && value.gen == gen)
+                .map(|value| Arc::clone(&value.rows))
+        };
+        if ch.is_parked() {
+            if let Some(rows) = parked_last(self.usage_generation()) {
+                return Ok(rows);
+            }
+        }
+        let mut memo = self.totals_cache.lock().await;
+        let gen = self.usage_generation();
+        if let Some((k, at_gen, at, rows)) = &*memo {
+            if *k == key && *at_gen == gen && at.elapsed() < SESSION_TOTALS_TTL {
+                return Ok(Arc::clone(rows));
+            }
+        }
+        if ch.is_parked() {
+            if let Some(rows) = parked_last(gen) {
+                return Ok(rows);
+            }
+        }
+        let raw = match ch
+            .query_rows_background(&session_totals_sql(days, otto_only), true)
+            .await
+        {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                return Err(otto_core::Error::Upstream(
+                    "usage engine parked during budget scan".into(),
+                ));
+            }
+            Err(e) => {
+                if !ch.server_alive() {
+                    self.heal.store(true, Ordering::SeqCst);
+                }
+                return Err(e);
+            }
+        };
+        let rows = Arc::new(decode_rows::<SessionTotals>(raw)?);
+        self.remember_totals(&mut memo, key, gen, &rows);
+        Ok(rows)
+    }
+
     /// [`Self::session_totals_shared`] for BACKGROUND callers — the budget
     /// sampler and budget gates (S9-303). Never resets ClickHouse's idle
     /// clock, so an always-on agent no longer keeps the server up through the
-    /// budget path. While the server is parked it does not wake it: it serves
-    /// the last rollup this key produced (spend cannot have been written
-    /// since — the writer holds events while parked), or `None` when there is
-    /// none yet (the caller decides: skip, or fall back to a foreground read).
+    /// budget path. Accepted pending spend wakes the sink for delivery before
+    /// reading. With no pending spend, a parked server serves its last rollup,
+    /// or `None` when there is none (the caller decides whether to fall back).
     /// `None` also on a failed scan.
     pub async fn session_totals_background(
         &self,
         days: u32,
         otto_only: bool,
     ) -> Option<Arc<Vec<SessionTotals>>> {
+        // Admission checks must include accepted journal spend even while the
+        // server was parked. Delivery wakes without resetting its idle clock.
+        if let Err(e) = self.flush_ingestion().await {
+            tracing::warn!("usage: budget delivery failed (pending rows retained): {e}");
+            return None;
+        }
         let ch = self.ch()?;
+        if self.pending_legacy.load(Ordering::SeqCst) > 0 {
+            // User-enabled admission cannot use a parked stale cache while
+            // already accepted hook events are waiting in the legacy writer.
+            self.flush_sync
+                .flush_and_wait(true, Duration::from_secs(125))
+                .await;
+            if self.pending_legacy.load(Ordering::SeqCst) > 0 {
+                return None;
+            }
+        }
         let key = (days, otto_only);
         let last = || {
             self.last_totals
@@ -1067,6 +1303,9 @@ impl UsageEngine {
             return last();
         }
         self.flush_sync.flush_and_wait(false, READ_FLUSH_WAIT).await;
+        if self.pending_legacy.load(Ordering::SeqCst) > 0 {
+            return None;
+        }
         let mut memo = self.totals_cache.lock().await;
         let gen = self.usage_generation();
         if let Some((k, at_gen, at, rows)) = &*memo {
@@ -1115,7 +1354,7 @@ fn session_totals_sql(days: u32, otto_only: bool) -> String {
                     round(sum(cost_usd), 6) AS cost_usd,
                     topK(1)(model)[1] AS model,
                     toString(max(ts)) AS last_active
-             FROM usage_events
+             FROM usage_accounted
              WHERE event_date >= today() - {since} {ws}
              GROUP BY session_id",
             since = since(days),
@@ -1196,7 +1435,7 @@ impl UsageEngine {
                     round(sum(cost_usd), 6) AS cost,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS tokens,
                     uniqExact(session_id) AS sessions
-             FROM usage_events
+             FROM usage_accounted
              WHERE event_date >= today() - {since}
                AND {col} != ''
              GROUP BY {col}
@@ -1213,7 +1452,7 @@ impl UsageEngine {
         let rows = ch
             .query_rows(&format!(
                 "SELECT model, count() AS n
-                 FROM usage_events
+                 FROM usage_accounted
                  WHERE event_date >= today() - 29
                    AND provider = '{provider}'
                    AND model != ''
@@ -1283,7 +1522,7 @@ impl UsageEngine {
             "SELECT session_id,
                     round(sum(cost_usd), 6) AS sess_cost,
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS sess_tokens
-             FROM usage_events
+             FROM usage_accounted
              WHERE event_date >= today() - 29
                AND origin = '{feature}'
                AND provider = '{provider}'
@@ -1377,7 +1616,12 @@ impl UsageEngine {
         // `ts` is a DateTime64(3); a `'YYYY-MM-DD HH:MM:SS.mmm'` literal compares
         // correctly against it. The timestamp is our own (no escaping needed).
         let since_clause = since
-            .map(|t| format!(" AND ts >= '{}'", t.format("%Y-%m-%d %H:%M:%S%.3f")))
+            .map(|t| {
+                format!(
+                    " AND ts >= toDateTime64('{}', 3, 'UTC')",
+                    t.format("%Y-%m-%d %H:%M:%S%.3f")
+                )
+            })
             .unwrap_or_default();
         let sql = format!(
                 "SELECT '{sid}' AS session_id,
@@ -1390,7 +1634,7 @@ impl UsageEngine {
                         sum(cache_write_tokens) AS cache_write_tokens,
                         sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                         round(sum(cost_usd), 6) AS cost_usd
-                 FROM usage_events
+                 FROM usage_accounted
                  WHERE session_id = '{sid}'{since_clause}"
             );
         let rows: Vec<SessionTotals> = if background {
@@ -1430,7 +1674,7 @@ impl UsageEngine {
                 sum(cache_write_tokens) AS cache_write_tokens,
                 sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                 round(sum(cost_usd), 6) AS cost_usd
-             FROM usage_events WHERE session_id IN ({ids}) GROUP BY session_id"
+             FROM usage_accounted WHERE session_id IN ({ids}) GROUP BY session_id"
         )).await.ok()
     }
 
@@ -1479,7 +1723,7 @@ impl UsageEngine {
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd,
                     toString(max(ts)) AS last_active
-             FROM usage_events
+             FROM usage_accounted
              WHERE event_date >= today() - {since} {ws}
              GROUP BY session_id
              ORDER BY total_tokens DESC, events DESC
@@ -1620,7 +1864,7 @@ impl UsageEngine {
                     sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                     round(sum(cost_usd), 6) AS cost_usd,
                     toString(max(ts)) AS last_active
-             FROM usage_events WHERE {cond}
+             FROM usage_accounted WHERE {cond}
              GROUP BY session_id
              ORDER BY total_tokens DESC, events DESC
              LIMIT {limit}"
@@ -1770,7 +2014,7 @@ impl UsageEngine {
             // One round-trip for both counts (was two).
             let counts = ch
                 .query_rows(
-                    "SELECT (SELECT count() FROM usage_events) AS u, \
+                    "SELECT (SELECT count() FROM usage_accounted) AS u, \
                             (SELECT count() FROM system_metrics) AS m",
                 )
                 .await
@@ -1973,6 +2217,7 @@ fn spawn_writer(
     heal: Arc<HealSignal>,
     usage_gen: Arc<AtomicU64>,
     sync: Arc<FlushSync>,
+    pending: Arc<AtomicU64>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut w = WriterBuf::default();
@@ -2001,12 +2246,12 @@ fn spawn_writer(
                             });
                             continue;
                         }
-                        flush(&ch, &mut w, &heal, &usage_gen, false).await
+                        flush_tracked(&ch, &mut w, &heal, &usage_gen, false, &pending).await
                     }
                     None => {
                         // Final flush (reinit / shutdown): may wake a parked
                         // server so nothing buffered is lost.
-                        flush(&ch, &mut w, &heal, &usage_gen, true).await;
+                        flush_tracked(&ch, &mut w, &heal, &usage_gen, true, &pending).await;
                         break;
                     }
                 },
@@ -2018,11 +2263,11 @@ fn spawn_writer(
                     while let Ok(ev) = rx.try_recv() {
                         w.push(ev);
                     }
-                    let outcome = flush(&ch, &mut w, &heal, &usage_gen, wake).await;
+                    let outcome = flush_tracked(&ch, &mut w, &heal, &usage_gen, wake, &pending).await;
                     sync.ack(target);
                     outcome
                 }
-                _ = tick => flush(&ch, &mut w, &heal, &usage_gen, false).await,
+                _ = tick => flush_tracked(&ch, &mut w, &heal, &usage_gen, false, &pending).await,
             };
             size_trigger = match outcome {
                 FlushOutcome::Written => FLUSH_BATCH,
@@ -2037,6 +2282,23 @@ fn spawn_writer(
             };
         }
     })
+}
+
+async fn flush_tracked(
+    ch: &Arc<ClickHouse>,
+    w: &mut WriterBuf,
+    heal: &HealSignal,
+    generation: &AtomicU64,
+    wake: bool,
+    pending: &AtomicU64,
+) -> FlushOutcome {
+    let before = w.buf.len();
+    let outcome = flush(ch, w, heal, generation, wake).await;
+    let removed = before.saturating_sub(w.buf.len()) as u64;
+    let _ = pending.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+        Some(n.saturating_sub(removed))
+    });
+    outcome
 }
 
 /// Whether one writer flush emptied the buffer.
@@ -2211,7 +2473,7 @@ fn grouped_sql(cond: &str) -> String {
                 sum(cache_write_tokens) AS cache_write_tokens,
                 sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                 sum(cost_usd) AS cost_usd
-         FROM usage_events
+         FROM usage_accounted
          WHERE {cond}
          GROUP BY event_date, provider, model
          ORDER BY event_date, total_tokens DESC"
@@ -2406,7 +2668,7 @@ fn daily_models_sql(cond: &str) -> String {
                 sum(cache_write_tokens) AS cache_write_tokens,
                 sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS total_tokens,
                 round(sum(cost_usd), 6) AS cost_usd
-         FROM usage_events
+         FROM usage_accounted
          WHERE {cond}
          GROUP BY event_date, provider, model
          ORDER BY event_date, total_tokens DESC"
@@ -2421,7 +2683,7 @@ async fn ensure_ttl(ch: &ClickHouse, retention_days: u32) -> Result<()> {
         .query_rows(schema::TABLE_TTLS_SQL)
         .await
         .unwrap_or_default();
-    let all_match = current.len() == 2
+    let all_match = current.len() == 3
         && current.iter().all(|row| {
             row.get("engine_full")
                 .and_then(serde_json::Value::as_str)
@@ -2527,9 +2789,9 @@ async fn maybe_compact(ch: Arc<ClickHouse>, ch_dir: PathBuf, retention_days: u32
     }
 }
 
-/// `SELECT count() FROM usage_events`, 0 on any error.
+/// `SELECT count() FROM usage_accounted`, 0 on any error.
 async fn scalar_count(ch: &ClickHouse) -> u64 {
-    ch.query_rows("SELECT count() AS n FROM usage_events")
+    ch.query_rows("SELECT count() AS n FROM usage_accounted")
         .await
         .ok()
         .and_then(|r| r.into_iter().next())
@@ -2740,6 +3002,67 @@ mod scope_tests {
             .daily_model_range("2026-01-01", "2026-01-02")
             .await
             .is_err());
+        assert!(engine.session_totals_for_budget(30, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn session_totals_for_budget_fails_closed_when_unavailable_or_flush_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = UsageEngine::start(
+            UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            dir.path().to_path_buf(),
+        )
+        .await;
+        assert!(
+            engine.session_totals_for_budget(30, true).await.is_err(),
+            "unavailable engine must Err, never manufacture zero spend"
+        );
+
+        let ch = Arc::new(ClickHouse::for_tests("http://127.0.0.1:9", true));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let writer = spawn_writer(
+            Arc::clone(&ch),
+            rx,
+            Arc::clone(&engine.heal),
+            Arc::clone(&engine.usage_gen),
+            Arc::clone(&engine.flush_sync),
+            Arc::clone(&engine.pending_legacy),
+        );
+        {
+            let mut inner = engine.inner.write().unwrap();
+            inner.ch = Some(Arc::clone(&ch));
+            inner.tx = Some(tx);
+            inner.writer = Some(writer);
+        }
+        let cached = Arc::new(vec![SessionTotals {
+            session_id: "cached".into(),
+            cost_usd: 1.25,
+            ..Default::default()
+        }]);
+        {
+            let mut memo = engine.totals_cache.lock().await;
+            engine.remember_totals(&mut memo, (30, true), engine.usage_generation(), &cached);
+        }
+        assert_eq!(
+            engine.session_totals_for_budget(30, true).await.unwrap()[0].cost_usd,
+            1.25,
+            "parked engine with matching generation and no pending spend serves last rollup without waking"
+        );
+        assert!(ch.is_parked());
+
+        engine.record(UsageEvent {
+            session_id: "pending".into(),
+            cost_usd: 9.0,
+            ..Default::default()
+        });
+        assert!(
+            engine.session_totals_for_budget(30, true).await.is_err(),
+            "failed legacy flush must Err, never return cached rollup"
+        );
+        engine.shutdown().await;
     }
 
     /// perf2/03 N5: the heal watcher has no poll — a raise is acted on at
@@ -2862,6 +3185,7 @@ mod writer_policy_tests {
             heal,
             Arc::new(AtomicU64::new(0)),
             Arc::clone(&sync),
+            Arc::new(AtomicU64::new(0)),
         );
         for _ in 0..n {
             tx.send(UsageEvent::default()).unwrap();
@@ -2907,6 +3231,7 @@ mod writer_policy_tests {
             Arc::new(HealSignal::default()),
             Arc::new(AtomicU64::new(0)),
             Arc::clone(&sync),
+            Arc::new(AtomicU64::new(0)),
         );
         for _ in 0..(FLUSH_BATCH + FLUSH_BATCH / 2) {
             tx.send(UsageEvent::default()).unwrap();
@@ -2959,4 +3284,8 @@ mod writer_policy_tests {
         assert!(FLUSH_BATCH >= 1_000);
         assert!(MAX_DEFER.as_secs() <= 30 * 60);
     };
+}
+
+fn journal_error(e: sqlx::Error) -> otto_core::Error {
+    otto_core::Error::Internal(format!("usage ingestion journal: {e}"))
 }

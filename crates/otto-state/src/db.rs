@@ -11,6 +11,8 @@ use otto_core::{Error, Result};
 
 use crate::DbPool;
 
+mod pre13;
+
 /// Writer connections. Two, not one: a deferred read-only transaction or a
 /// long statement on one never stalls every other write in-process, while at
 /// most one connection at a time sits in SQLite's busy handler (see
@@ -81,10 +83,16 @@ pub async fn open(path: &Path) -> Result<DbPool> {
     repair_renumbered_migrations(&pool, RENUMBERED).await?;
 
     warn_unknown_applied_versions(&pool, &migrator).await;
+    pre13::prepare(&pool).await.inspect_err(|error| {
+        tracing::error!(%error, "pre13 preservation failed; migrations not started to protect improvement edit history");
+    })?;
     migrator
         .run(&pool)
         .await
         .map_err(|e| Error::Internal(format!("migrate: {e}")))?;
+    pre13::restore(&pool).await.inspect_err(|error| {
+        tracing::error!(%error, "pre13 restoration failed; startup stopped and rescue table retained for retry");
+    })?;
 
     // Lazily connected: the file (and its WAL) exist by now.
     let read = SqlitePoolOptions::new()

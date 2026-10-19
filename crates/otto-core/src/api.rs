@@ -477,6 +477,9 @@ pub struct UpdateWorkspaceReq {
     pub name: Option<String>,
     pub root_path: Option<String>,
     pub settings: Option<Value>,
+    /// Atomic RFC 7396 merge patch. Null members remove keys; `context` is
+    /// owned by the versioned context API. Mutually exclusive with `settings`.
+    pub settings_patch: Option<Value>,
     pub archived: Option<bool>,
 }
 

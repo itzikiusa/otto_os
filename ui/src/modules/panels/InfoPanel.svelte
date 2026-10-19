@@ -128,7 +128,7 @@
     {#if workspace}
       <section class="section">
         <div class="section-title">Workspace</div>
-        <div class="row">
+        <div class="info-row">
           <span class="key">Default agent</span>
           <span class="val">
             <select aria-label="Default agent" class="ws-select" value={wsDefaultAgent} onchange={onDefaultAgentChange}>
@@ -146,25 +146,25 @@
     {#if session}
     <section class="section">
       <div class="section-title">Session</div>
-      <div class="row">
+      <div class="info-row">
         <span class="key">Title</span>
         <span class="val">{session.title}</span>
       </div>
-      <div class="row">
+      <div class="info-row">
         <span class="key">Provider</span>
         <span class="val val-provider"><ProviderIcon provider={session.provider} size={13} />{session.provider}</span>
       </div>
-      <div class="row">
+      <div class="info-row">
         <span class="key">Status</span>
         <span class="val">{#if liveState}<StatusBadge status={liveState} variant="text" />{/if}</span>
       </div>
       {#if session.cwd}
-        <div class="row">
+        <div class="info-row">
           <span class="key">Folder</span>
           <span class="val mono cwd" title={session.cwd}>{session.cwd}</span>
         </div>
       {/if}
-      <div class="row">
+      <div class="info-row">
         <span class="key">Created</span>
         <span class="val">{fmt(session.created_at)}</span>
       </div>
@@ -271,7 +271,7 @@
     border-bottom: 1px solid var(--border);
     margin-bottom: 4px;
   }
-  .row {
+  .info-row {
     display: flex;
     align-items: baseline;
     gap: 6px;
@@ -298,7 +298,7 @@
   }
   .ws-select {
     width: 100%;
-    border: 1px solid var(--border);
+    border: 1px solid var(--control-border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);

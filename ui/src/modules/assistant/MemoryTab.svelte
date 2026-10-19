@@ -230,8 +230,8 @@
                 </div>
               </div>
               <div class="acts">
-                <button class="btn small" onclick={() => void reject(m)} disabled={deciding === m.id}>{deciding === m.id && decidingAs === 'reject' ? 'Rejecting…' : 'Reject'}</button>
-                <button class="btn small primary" onclick={() => void accept(m)} disabled={deciding === m.id}>{deciding === m.id && decidingAs === 'keep' ? 'Keeping…' : 'Keep'}</button>
+                <button class="btn small" onclick={() => void reject(m)} disabled={deciding === m.id} aria-label="Reject “{m.text}”">{deciding === m.id && decidingAs === 'reject' ? 'Rejecting…' : 'Reject'}</button>
+                <button class="btn small primary" onclick={() => void accept(m)} disabled={deciding === m.id} aria-label="Keep “{m.text}”">{deciding === m.id && decidingAs === 'keep' ? 'Keeping…' : 'Keep'}</button>
               </div>
             </li>
           {/each}

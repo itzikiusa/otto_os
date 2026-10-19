@@ -145,7 +145,7 @@ function makeMarked(ctx: RenderCtx): Marked {
           if (dst) {
             return `<div class="note-embed" data-embed-path="${esc(dst)}"><span class="embed-title">${esc(target.trim())}</span></div>`;
           }
-          return `<span class="wikilink unresolved" data-raw="${esc(target.trim())}">${esc(inner)}</span>`;
+          return `<a class="internal-link unresolved" href="#" data-raw="${esc(target.trim())}" data-unresolved="1" title="Missing note">${esc(inner)}</a>`;
         },
       },
       {
@@ -171,9 +171,9 @@ function makeMarked(ctx: RenderCtx): Marked {
           }
           if (dst) {
             const anchorAttr = anchor ? ` data-anchor="${esc(anchor)}"` : '';
-            return `<a class="internal-link" data-path="${esc(dst)}"${anchorAttr}>${esc(label)}</a>`;
+            return `<a class="internal-link" href="#" data-path="${esc(dst)}"${anchorAttr}>${esc(label)}</a>`;
           }
-          return `<a class="internal-link unresolved" data-raw="${esc(target.trim())}" data-unresolved="1">${esc(label)}</a>`;
+          return `<a class="internal-link unresolved" href="#" data-raw="${esc(target.trim())}" data-unresolved="1" title="Missing note">${esc(label)}</a>`;
         },
       },
       {
@@ -252,9 +252,9 @@ function makeMarked(ctx: RenderCtx): Marked {
         const dst = ctx.resolve(raw);
         if (dst) {
           const anchorAttr = anchor ? ` data-anchor="${esc(anchor)}"` : '';
-          return `<a class="internal-link" data-path="${esc(dst)}"${anchorAttr}${t}>${text}</a>`;
+          return `<a class="internal-link" href="#" data-path="${esc(dst)}"${anchorAttr}${t}>${text}</a>`;
         }
-        return `<a class="internal-link unresolved" data-raw="${esc(raw)}" data-unresolved="1"${t}>${text}</a>`;
+        return `<a class="internal-link unresolved" href="#" data-raw="${esc(raw)}" data-unresolved="1"${t || ' title="Missing note"'}>${text}</a>`;
       },
       image({ href, text }) {
         const raw = decodeURIComponentSafe(href);
@@ -325,9 +325,18 @@ function decodeURIComponentSafe(s: string): string {
   }
 }
 
+/** Post-sanitize hook: give inline `#tag` chips keyboard button semantics on
+ *  the already-parsed DOM tree (one DOMParser pass). */
+export function postProcessVaultHtml(body: HTMLElement): void {
+  for (const el of Array.from(body.querySelectorAll('span.tag[data-tag]'))) {
+    el.setAttribute('role', 'button');
+    el.setAttribute('tabindex', '0');
+  }
+}
+
 /** Render a note body (raw markdown WITHOUT frontmatter) to sanitized HTML. */
 export function renderNote(md: string, ctx: RenderCtx): string {
-  return sanitizeHtml(renderNoteUnsanitized(md, ctx));
+  return sanitizeHtml(renderNoteUnsanitized(md, ctx), postProcessVaultHtml);
 }
 
 /** The DOM-free half of {@link renderNote} — markdown parse + highlight, NOT

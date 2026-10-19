@@ -68,6 +68,7 @@
   let issues = $state<SiteIssue[]>([]);
   let undoStack: SiteDoc[] = [];
   let redoStack: SiteDoc[] = [];
+  let narrowPane = $state<'page' | 'blocks' | 'design'>('page');
   let canUndo = $state(false);
   let canRedo = $state(false);
   let lastKey: string | null = null;
@@ -195,6 +196,7 @@
   onDestroy(() => siteSelection.clear(artifact.id));
 
   function select(s: string | null, b: string | null): void {
+    if (s) narrowPane = 'design';
     sectionId = s;
     blockId = s ? b : null;
     if (s && doc) {
@@ -601,16 +603,16 @@
         <Icon name={playMotion ? 'square' : 'play'} size={12} /> Motion
       </button>
       <span class="sep"></span>
-      <button class="icon-btn" onclick={undo} disabled={!canUndo || readonly} aria-label="Undo" title="Undo (⌘Z)"><Icon name="chevronLeft" size={14} /></button>
-      <button class="icon-btn" onclick={redo} disabled={!canRedo || readonly} aria-label="Redo" title="Redo (⇧⌘Z)"><Icon name="chevronRight" size={14} /></button>
+      <button class="icon-btn" onclick={undo} disabled={!canUndo || readonly} aria-label="Undo" title="Undo" aria-keyshortcuts="Meta+z"><Icon name="chevronLeft" size={14} /></button>
+      <button class="icon-btn" onclick={redo} disabled={!canRedo || readonly} aria-label="Redo" title="Redo" aria-keyshortcuts="Meta+Shift+z"><Icon name="chevronRight" size={14} /></button>
       {#if findings.some((f) => f.level === 'error')}
-        <button class="chip bad" onclick={() => select(null, null)} title="Open the checks in the Design panel">
+        <button class="chip bad" onclick={() => { select(null, null); narrowPane = 'design'; }} title="Open the checks in the Design panel">
           <Icon name="warning" size={12} /> {findings.filter((f) => f.level === 'error').length} to fix
         </button>
       {/if}
       <span class="grow"></span>
       <button class="btn small" onclick={() => (previewOpen = true)} disabled={!doc || !doc.pages.length} data-testid="site-preview"><Icon name="play" size={12} /> Preview</button>
-      <button class="btn small primary" onclick={publishMenu} disabled={!doc || !doc.pages.length} aria-haspopup="menu" data-testid="site-publish">
+      <button class="btn small" onclick={publishMenu} disabled={!doc || !doc.pages.length} aria-haspopup="menu" data-testid="site-publish">
         <Icon name="share" size={12} /> Publish <Icon name="chevronDown" size={12} />
       </button>
     </div>
@@ -629,7 +631,12 @@
     {:else if doc.pages.length === 0}
       <TemplatePicker {theme} title={doc.title || artifact.title} {readonly} onpick={pickTemplate} />
     {:else if page}
-      <div class="work" class:tab-blocks={leftTab === 'blocks'}>
+      <div class="pane-switch segmented" role="group" aria-label="Site panels">
+        <button aria-pressed={narrowPane === 'page'} class:active={narrowPane === 'page'} onclick={() => (narrowPane = 'page')}>Page</button>
+        <button aria-pressed={narrowPane === 'blocks'} class:active={narrowPane === 'blocks'} onclick={() => { narrowPane = 'blocks'; leftTab = 'blocks'; }}>Blocks</button>
+        <button aria-pressed={narrowPane === 'design'} class:active={narrowPane === 'design'} onclick={() => (narrowPane = 'design')}>Design</button>
+      </div>
+      <div class="work" class:tab-blocks={leftTab === 'blocks'} class:pane-page={narrowPane === 'page'} class:pane-blocks={narrowPane === 'blocks'} class:pane-design={narrowPane === 'design'}>
         <aside class="left" aria-label="Pages, layers and blocks">
           <LeftPanel
             {doc}
@@ -867,14 +874,19 @@
       border-block-start: 1px solid var(--border);
     }
   }
-  /* Narrow: everything stacks; the page scrolls. */
+  .pane-switch { display: none; }
+  /* Narrow: show the selected editing panel without stacking it below the board. */
   @container site-studio (max-width: 699px) {
-    .work {
+    .pane-switch { display: flex; margin: 8px 12px; }
+    .work, .work.tab-blocks {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: 460px auto auto;
-      grid-template-areas: 'canvas' 'insp' 'left';
+      grid-template-rows: minmax(360px, 1fr);
+      grid-template-areas: 'panel';
       overflow-y: auto;
     }
+    .work > .left, .work > .insp, .work > .canvas { grid-area: panel; display: none; }
+    .work.pane-page > .canvas { display: block; }
+    .work.pane-blocks > .left, .work.pane-design > .insp { display: flex; flex-direction: column; }
     .left,
     .insp {
       border: 0;

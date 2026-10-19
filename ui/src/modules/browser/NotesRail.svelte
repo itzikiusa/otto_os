@@ -9,6 +9,7 @@
   import type { BrowserAnnotation } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
   import { browser } from '../../lib/stores/browser.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import SendToSession from './SendToSession.svelte';
 
@@ -36,6 +37,9 @@
   }
 
   async function remove(id: string): Promise<void> {
+    const mark = annotations.find(a => a.id === id);
+    if (!mark || !await confirmer.ask(`Delete this mark and its note? “${mark.text.slice(0, 180)}”`, { title: 'Delete mark', confirmLabel: 'Delete mark', danger: true })) return;
+    if (!annotations.some(a => a.id === id)) return;
     try {
       await browser.deleteAnnotation(id);
     } catch (e) {
@@ -219,5 +223,8 @@
       border-inline-start: none;
       border-top: 1px solid var(--border);
     }
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .actions :global(.icon-btn) { min-width: 36px; min-height: 36px; }
   }
 </style>

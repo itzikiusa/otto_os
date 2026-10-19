@@ -186,9 +186,28 @@ impl MemoryService {
         let mut out = Vec::with_capacity(items.len());
         for nm in items {
             let (m, outcome) = self.repo.save_one(ws, by, nm, fts).await?;
-            if outcome.is_new() && m.visibility == "shared" {
+            if m.visibility == "shared" {
                 if let Some(v) = &self.vault {
-                    let _ = v.write(ws, &m, &[]);
+                    // The row is already committed. Report export failure so
+                    // callers can retry, including a deduplicated save. Missing
+                    // exports are repaired without overwriting external edits.
+                    let (writer, workspace, memory) = (v.clone(), ws.to_string(), m.clone());
+                    tokio::task::spawn_blocking(move || {
+                        writer.write_missing(&workspace, &memory, &[])
+                    })
+                    .await
+                    .map_err(|e| {
+                        otto_core::Error::Internal(format!(
+                            "memory {} saved; vault export task failed: {e}; retry the same save",
+                            m.id
+                        ))
+                    })?
+                    .map_err(|e| {
+                        otto_core::Error::Internal(format!(
+                            "memory {} saved; vault export failed: {e}; retry the same save",
+                            m.id
+                        ))
+                    })?;
                 }
             }
             out.push((m, outcome));

@@ -178,6 +178,7 @@
     const ok = await confirmer.ask(`Delete the saved view${name ? ` “${name}”` : ''}? Only the view is removed — no sessions are affected.`, {
       title: 'Delete saved view?',
       confirmLabel: 'Delete view',
+      danger: true,
     });
     if (!ok || deletingViews[id]) return;
     deletingViews = { ...deletingViews, [id]: true };

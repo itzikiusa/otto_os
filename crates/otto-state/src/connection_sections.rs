@@ -3,7 +3,7 @@
 use crate::DbPool;
 use chrono::Utc;
 use otto_core::domain::ConnectionSection;
-use otto_core::{new_id, Id, Result};
+use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
@@ -72,16 +72,50 @@ impl ConnectionSectionsRepo {
         self.get(&id).await
     }
 
-    /// Reparent a section (None = make it top-level). Callers must prevent
-    /// cycles (moving a section under one of its own descendants).
+    /// Reparent a section (None = make it top-level). Validate ancestors under
+    /// the write lock so opposing concurrent moves cannot create a cycle.
     pub async fn reparent(&self, id: &Id, parent_id: Option<&str>) -> Result<ConnectionSection> {
+        let mut tx = self.pool.begin().await.map_err(dberr("reparent begin"))?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM connection_sections WHERE id = ?)")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(dberr("reparent section"))?;
+        if !exists {
+            return Err(Error::NotFound(format!("connection section {id}")));
+        }
+        let mut cursor = parent_id.map(str::to_owned);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(ancestor) = cursor {
+            if ancestor == *id || !visited.insert(ancestor.clone()) {
+                return Err(Error::Invalid(
+                    "cannot move a section into a cyclic parent chain".into(),
+                ));
+            }
+            cursor = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT parent_id FROM connection_sections WHERE id = ?",
+            )
+            .bind(&ancestor)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(dberr("reparent ancestor"))?
+            .ok_or_else(|| Error::NotFound(format!("connection section {ancestor}")))?;
+        }
         sqlx::query("UPDATE connection_sections SET parent_id = ? WHERE id = ?")
             .bind(parent_id)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("reparent section"))?;
-        self.get(id).await
+        let row = sqlx::query("SELECT * FROM connection_sections WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("reparent section"))?;
+        let section = row_to_section(&row)?;
+        tx.commit().await.map_err(dberr("reparent commit"))?;
+        Ok(section)
     }
 
     pub async fn get(&self, id: &Id) -> Result<ConnectionSection> {

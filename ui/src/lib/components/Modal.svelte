@@ -11,13 +11,15 @@
   interface Props {
     title: string;
     width?: number;
+    /** Preferred fixed height for forms whose fields change; capped to the backdrop. */
+    height?: number;
     onclose: () => void;
     children: Snippet;
     footer?: Snippet;
     /** false blocks Esc / backdrop / ✕ close while the form is busy. */
     dismissable?: boolean;
   }
-  let { title, width = 460, onclose, children, footer, dismissable = true }: Props = $props();
+  let { title, width = 460, height, onclose, children, footer, dismissable = true }: Props = $props();
   const titleId = $props.id();
 
   // A drag that starts inside the sheet (selecting text) and ends on the
@@ -180,6 +182,7 @@
     aria-labelledby={titleId}
     aria-label={title}
     style="width: min({width}px, calc(100vw - 24px))"
+    style:height={height === undefined ? undefined : `${height}px`}
   >
     <header>
       <h2 id={titleId}>{title}</h2>

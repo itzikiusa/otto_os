@@ -274,7 +274,9 @@ impl SftpSession {
     /// the directory held more (a 100k-entry spool/maildir/`/tmp` would
     /// otherwise ship a multi-MB JSON array the UI can't lay out).
     pub async fn list_capped(&self, path: &str, max: usize) -> Result<(Vec<SftpEntry>, bool)> {
-        let batch = format!("ls -la {}", quote_checked(path)?);
+        // Listing an explicit directory makes OpenSSH prefix every filename
+        // with that path. Enter it first so returned identities are basenames.
+        let batch = format!("cd {}\nls -la", quote_checked(path)?);
         let out = self.run(&batch).await?;
         Ok(parse_longname_listing_capped(&out, max))
     }
@@ -632,9 +634,10 @@ fn parse_pwd(out: &str) -> Option<String> {
 /// Robust by design: only lines whose first token looks like a mode string
 /// (`^[-dlbcps][rwxsStT-]{9}`) are considered — this filters command echoes,
 /// the `sftp>` prompt, blank lines, and "total N" headers. From a kept line:
-/// perms = token 0, size = token 4 (numeric), name = join(tokens ≥ 8). A
-/// trailing `/`, `*`, or `@` indicator on the name is stripped; a " -> " splits
-/// a symlink's name from its target. The entry type comes from `perms[0]`.
+/// perms = field 0, size = field 4 (numeric), name = the exact suffix after
+/// the eight metadata fields. OpenSSH does not add classification indicators
+/// or link targets to this command; literal suffixes remain part of the name.
+/// The entry type comes from `perms[0]`.
 /// The "." entry is excluded.
 /// Directory listings are cut at this many entries (`truncated: true`).
 pub const MAX_LIST_ENTRIES: usize = 20_000;
@@ -648,38 +651,42 @@ fn parse_longname_listing(out: &str) -> Vec<SftpEntry> {
 fn parse_longname_listing_capped(out: &str, max: usize) -> (Vec<SftpEntry>, bool) {
     let mut entries = Vec::new();
     for raw in out.lines() {
-        let line = raw.trim_end();
-        let trimmed = line.trim_start();
+        let trimmed = raw.trim_start();
         if !looks_like_mode(trimmed) {
             continue;
         }
-        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        // Need at least: perms, links, owner, group, size, mon, day, time, name
-        if tokens.len() < 9 {
+        // Consume just the eight metadata fields. The separator after the
+        // timestamp is ONE space; everything after it belongs to the filename,
+        // including leading, repeated and trailing spaces. OpenSSH formats its
+        // own long listing and does not add -F indicators or symlink targets.
+        let mut rest = trimmed;
+        let mut fields = Vec::with_capacity(8);
+        for column in 0..8 {
+            let Some(end) = rest.find(char::is_whitespace) else {
+                break;
+            };
+            fields.push(&rest[..end]);
+            rest = if column == 7 {
+                &rest[end + 1..]
+            } else {
+                rest[end..].trim_start()
+            };
+        }
+        if fields.len() != 8 || rest.is_empty() {
             continue;
         }
-        let perms = tokens[0].to_string();
-        let size: u64 = tokens[4].parse().unwrap_or(0);
-        // The date/time is tokens 5..8 ("Mon DD HH:MM" or "Mon DD  YYYY").
-        let mtime = Some(tokens[5..8].join(" "));
-
-        // Name = everything from token 8 onward (handles names with spaces).
-        let name_field = tokens[8..].join(" ");
-
-        let kind = match perms.chars().next() {
-            Some('d') => "dir",
-            Some('l') => "symlink",
-            Some('-') => "file",
+        let perms = fields[0].to_string();
+        let size = fields[4].parse().unwrap_or(0);
+        let mtime = Some(fields[5..8].join(" "));
+        let kind = match perms.as_bytes()[0] {
+            b'd' => "dir",
+            b'l' => "symlink",
+            b'-' => "file",
             _ => "other",
         }
         .to_string();
-
-        // Symlinks: "name -> target".
-        let (mut name, symlink_target) = match name_field.split_once(" -> ") {
-            Some((n, t)) => (n.to_string(), Some(strip_indicator(t).to_string())),
-            None => (name_field.clone(), None),
-        };
-        name = strip_indicator(&name).to_string();
+        let name = rest.to_string();
+        let symlink_target = None;
 
         if name == "." {
             continue;
@@ -697,14 +704,6 @@ fn parse_longname_listing_capped(out: &str, max: usize) -> (Vec<SftpEntry>, bool
         });
     }
     (entries, false)
-}
-
-/// Strip a trailing `ls -F`-style type indicator (`/`, `*`, `@`) from a name.
-fn strip_indicator(name: &str) -> &str {
-    name.strip_suffix('/')
-        .or_else(|| name.strip_suffix('*'))
-        .or_else(|| name.strip_suffix('@'))
-        .unwrap_or(name)
 }
 
 /// True when `s` begins with a 10-char unix mode string:
@@ -792,12 +791,12 @@ drwxr-xr-x    3 me   staff    96 Jun 20 12:00 src
 
     #[test]
     fn parses_symlink_with_target() {
-        let out = "lrwxr-xr-x  1 me staff 11 Jun 20 12:00 current -> releases/42\n";
+        let out = "lrwxr-xr-x  1 me staff 11 Jun 20 12:00 current\n";
         let e = parse_longname_listing(out);
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].name, "current");
         assert_eq!(e[0].kind, "symlink");
-        assert_eq!(e[0].symlink_target.as_deref(), Some("releases/42"));
+        assert!(e[0].symlink_target.is_none());
     }
 
     #[test]
@@ -832,15 +831,20 @@ not-a-mode-string here we go
     }
 
     #[test]
-    fn strips_ls_f_indicators() {
-        let out = "\
-drwxr-xr-x  2 me staff 64 Jun 20 12:00 mydir/
--rwxr-xr-x  1 me staff 64 Jun 20 12:00 run.sh*
-";
-        let e = parse_longname_listing(out);
-        assert_eq!(e.iter().find(|x| x.kind == "dir").unwrap().name, "mydir");
-        let exe = e.iter().find(|x| x.name == "run.sh").unwrap();
-        assert_eq!(exe.kind, "file");
+    fn preserves_literal_suffixes_and_spaces() {
+        for name in [
+            "mydir@",
+            "run.sh*",
+            " leading",
+            "trailing ",
+            "a  b",
+            "backup -> old",
+        ] {
+            let out = format!("-rw-r--r--  1 me staff 64 Jun 20 12:00 {name}\n");
+            let entries = parse_longname_listing(&out);
+            assert_eq!(entries[0].name, name);
+            assert!(entries[0].symlink_target.is_none());
+        }
     }
 
     #[test]
@@ -983,6 +987,56 @@ mod file_size_tests {
             Some(42)
         );
     }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn directory_listing_preserves_real_openssh_names() {
+        let session =
+            fixture("os.execv('/usr/bin/sftp',['sftp','-b','-','-D','/usr/libexec/sftp-server'])");
+        let names = [
+            "a  b",
+            " leading",
+            "trailing ",
+            "report@",
+            "report*",
+            "backup -> old",
+            "{x,y}",
+        ];
+        let directory = session.ctl_dir.join("files");
+        std::fs::create_dir(&directory).unwrap();
+        for name in names {
+            std::fs::write(directory.join(name), name.as_bytes()).unwrap();
+        }
+        std::os::unix::fs::symlink("a  b", directory.join("link -> literal")).unwrap();
+        let entries = session.list(directory.to_str().unwrap()).await.unwrap();
+        for name in names {
+            assert!(
+                entries.iter().any(|e| e.name == name && e.kind == "file"),
+                "missing exact {name:?}: {entries:?}"
+            );
+        }
+        assert!(!entries
+            .iter()
+            .any(|e| e.name == "." || e.name.starts_with('/')));
+        assert!(entries
+            .iter()
+            .any(|e| e.name == "link -> literal" && e.kind == "symlink"));
+        // The selected double-space name must be the identity used by mutation.
+        session
+            .rename(
+                directory.join("a  b").to_str().unwrap(),
+                directory.join("renamed").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(directory.join("renamed")).unwrap(), b"a  b");
+        session
+            .remove(directory.join("report@").to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(!directory.join("report@").exists());
+        assert!(directory.join("report*").exists());
+    }
+
     /// Exercise the actual OpenSSH batch/glob parser over local stdio only:
     /// no ssh process, listener, host credentials or network connection.
     #[cfg(target_os = "macos")]

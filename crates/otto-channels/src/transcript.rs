@@ -87,7 +87,17 @@ pub async fn tail(
     on_event: impl FnMut(TranscriptEvent),
     cancel: Arc<AtomicBool>,
 ) {
-    tail_inner(path, since, on_event, cancel, None, None, PROD_CADENCE).await
+    tail_inner(
+        path,
+        since,
+        on_event,
+        cancel,
+        None,
+        None,
+        PROD_CADENCE,
+        "claude",
+    )
+    .await
 }
 
 /// [`tail`] with an activity signal: while `active` reads `true` (a turn is in
@@ -100,6 +110,7 @@ pub async fn tail_adaptive(
     on_event: impl FnMut(TranscriptEvent),
     cancel: Arc<AtomicBool>,
     active: tokio::sync::watch::Receiver<bool>,
+    provider: &str,
 ) {
     tail_inner(
         path,
@@ -109,6 +120,7 @@ pub async fn tail_adaptive(
         Some(active),
         None,
         PROD_CADENCE,
+        provider,
     )
     .await
 }
@@ -118,6 +130,7 @@ pub async fn tail_adaptive(
 /// read only when the file grew. The handle is reopened only when the file
 /// shrank (truncated/replaced) or could not be stat'ed. `polls`, when set,
 /// counts poll iterations (the idle-wakeup test's probe).
+#[allow(clippy::too_many_arguments)]
 async fn tail_inner(
     path: PathBuf,
     since: Option<DateTime<Utc>>,
@@ -126,7 +139,9 @@ async fn tail_inner(
     mut active: Option<tokio::sync::watch::Receiver<bool>>,
     polls: Option<Arc<std::sync::atomic::AtomicU64>>,
     cadence: Cadence,
+    provider: &str,
 ) {
+    let mut parser = RelayParser::new(provider);
     // Everything before this byte offset predates the tailer.
     let history_end: u64 = match since {
         Some(_) => tokio::fs::metadata(&path)
@@ -181,7 +196,7 @@ async fn tail_inner(
                             if line_start < history_end && !line_at_or_after(line, since) {
                                 continue;
                             }
-                            if let Some(evt) = parse_line(line) {
+                            for evt in parser.parse(line) {
                                 on_event(evt);
                             }
                         }
@@ -191,6 +206,7 @@ async fn tail_inner(
                     // Truncated or replaced: start over on a fresh handle.
                     offset = 0;
                     file = None;
+                    parser = RelayParser::new(provider);
                 }
                 Ok(_) => {}
                 Err(_) => file = None,
@@ -333,6 +349,97 @@ fn line_at_or_after(line: &str, since: Option<DateTime<Utc>>) -> bool {
                 .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         })
         .is_some_and(|ts| ts.with_timezone(&Utc) >= since)
+}
+
+/// Codex content is normalized by the shared transcript parser. Relay only
+/// emits its final at task_complete, never at an intermediate AgentMessage.
+struct RelayParser {
+    codex: bool,
+    turn: Option<String>,
+    last_text: String,
+}
+
+impl RelayParser {
+    fn new(provider: &str) -> Self {
+        Self {
+            codex: provider == "codex",
+            turn: None,
+            last_text: String::new(),
+        }
+    }
+
+    fn parse(&mut self, line: &str) -> Vec<TranscriptEvent> {
+        if !self.codex {
+            return parse_line(line).into_iter().collect();
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            return vec![];
+        };
+        let payload = &record["payload"];
+        let event = if record["type"] == "event_msg" {
+            payload["type"].as_str()
+        } else {
+            None
+        };
+        let tid = payload["turn_id"].as_str();
+        if event == Some("task_started") {
+            self.turn = tid.map(str::to_owned);
+            self.last_text.clear();
+            return vec![];
+        }
+        if matches!(event, Some("task_complete" | "turn_aborted")) {
+            if tid.is_none() || tid != self.turn.as_deref() {
+                return vec![];
+            }
+            self.turn = None;
+            let text = payload["last_agent_message"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&self.last_text)
+                .trim()
+                .to_owned();
+            self.last_text.clear();
+            return if event == Some("task_complete") && !text.is_empty() {
+                vec![TranscriptEvent::Final { text }]
+            } else {
+                vec![]
+            };
+        }
+        // Only active-turn content can become a reply. This also excludes
+        // initial history and late records for a completed/aborted turn.
+        if self.turn.is_none() || tid.is_some_and(|t| Some(t) != self.turn.as_deref()) {
+            return vec![];
+        }
+        let folded = otto_transcript::fold(
+            otto_transcript::Provider::Codex,
+            &[record],
+            otto_transcript::FoldOpts::default(),
+        );
+        let mut out = Vec::new();
+        let mut texts = Vec::new();
+        for turn in folded.turns {
+            if turn.turn.role != otto_transcript::Role::Assistant {
+                continue;
+            }
+            for block in turn.turn.blocks {
+                match block {
+                    otto_transcript::Block::Text { md } => texts.push(md),
+                    otto_transcript::Block::ToolCall { name, title, .. } => {
+                        out.push(TranscriptEvent::Tool {
+                            name,
+                            display: redact_secrets(&title, false),
+                            code: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !texts.is_empty() {
+            self.last_text = texts.join("\n");
+        }
+        out
+    }
 }
 
 /// Parse one JSONL line into a `TranscriptEvent`, if it matches. Reads the
@@ -573,6 +680,104 @@ fn summarize_input(name: &str, input: &serde_json::Value, home: &str) -> String 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_final_waits_for_completion_and_uses_shared_message_parser() {
+        let mut parser = RelayParser::new("codex");
+        assert!(parser
+            .parse(r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}"#)
+            .is_empty());
+        assert!(parser.parse(r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"a1","content":[{"type":"Text","text":"Answer"}]}}}"#).is_empty());
+        assert_eq!(
+            parser
+                .parse(r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}"#),
+            vec![TranscriptEvent::Final {
+                text: "Answer".into()
+            }]
+        );
+        assert!(parser
+            .parse(r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}"#)
+            .is_empty());
+        parser.parse(r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}"#);
+        assert!(parser.parse(r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"stale"}}"#).is_empty());
+        assert_eq!(parser.parse(r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t2","last_agent_message":"Next"}}"#), vec![TranscriptEvent::Final { text: "Next".into() }]);
+    }
+
+    #[tokio::test]
+    async fn codex_tail_delivers_a_completed_rollout_and_ignores_partial_lines() {
+        use tokio::io::AsyncWriteExt;
+        let path = std::env::temp_dir().join(format!(
+            "otto-channel-rollout-{}.jsonl",
+            otto_core::new_id()
+        ));
+        tokio::fs::write(&path, concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"t\",\"last_agent_message\":\"done\"}}"
+        )).await.unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(tail_inner(
+            path.clone(),
+            None,
+            move |e| {
+                let _ = tx.send(e);
+            },
+            cancel.clone(),
+            None,
+            None,
+            Cadence {
+                active: Duration::from_millis(10),
+                idle_max: Duration::from_millis(20),
+            },
+            "codex",
+        ));
+        assert!(tokio::time::timeout(Duration::from_millis(80), rx.recv())
+            .await
+            .is_err());
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        file.write_all(b"\n").await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap(),
+            Some(TranscriptEvent::Final {
+                text: "done".into()
+            })
+        );
+        cancel.store(true, Ordering::Relaxed);
+        task.await.unwrap();
+        drop(file);
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[test]
+    fn codex_old_messages_and_aborted_turns_do_not_leak_a_reply() {
+        let mut parser = RelayParser::new("codex");
+        parser.parse(r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"old"}}"#);
+        assert!(parser.parse(r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Old format answer"}}"#).is_empty());
+        assert_eq!(
+            parser.parse(
+                r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"old"}}"#
+            ),
+            vec![TranscriptEvent::Final {
+                text: "Old format answer".into()
+            }]
+        );
+        parser.parse(r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"abort"}}"#);
+        parser.parse(
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Do not deliver"}}"#,
+        );
+        assert!(parser
+            .parse(r#"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"abort"}}"#)
+            .is_empty());
+        assert!(parser
+            .parse(r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"abort"}}"#)
+            .is_empty());
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -876,6 +1081,7 @@ mod tests {
             Some(active_rx),
             Some(Arc::clone(&polls)),
             cadence,
+            "claude",
         ));
         // Let the back-off ramp up, then measure a 1 s idle window: at the
         // 100 ms ceiling that is ~10 polls (the fast cadence would be ~100).

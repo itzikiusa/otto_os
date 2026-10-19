@@ -221,20 +221,20 @@ pub async fn assist_mockup(
 
     // Write the committed bytes to the attachment's storage + record size + the
     // resumable session id and format in meta_json.
-    let full = storage_full(&ctx, &att).map_err(ApiError)?;
-    if let Some(parent) = full.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    write_source(&full, &bytes).await.map_err(ApiError)?;
     let meta_json = serde_json::json!({
         "assist_session_id": sid, "format": format, "group": format.default_group(),
     })
     .to_string();
-    let updated = ctx
-        .attachment_repo
-        .set_assist_result(&attachment_id, bytes.len() as i64, None, Some(meta_json))
-        .await
-        .map_err(ApiError)?;
+    let updated = otto_product::media::publish_content(
+        &ctx.attachment_repo,
+        &ctx.data_dir,
+        &att,
+        &bytes,
+        true,
+        Some(meta_json),
+    )
+    .await
+    .map_err(ApiError)?;
 
     let _ = ctx.events.send(Event::MockupUpdated {
         workspace_id: story.workspace_id.clone(),

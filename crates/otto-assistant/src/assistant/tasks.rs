@@ -6,8 +6,8 @@
 //! popover, the phone and Slack all read one list. Outward actions open an
 //! `approval` item in the guideline shape AND a row in the existing MCP
 //! approvals queue (`kind: "assistant_outward"`), and either surface can
-//! decide it. "Always allow" is recorded per tool + destination only, never
-//! for purchases or prod.
+//! decide it. "Always allow" is one grant per tool, destination, category, and
+//! the action text, never for purchases or prod.
 //!
 //! The 30 s tick ([`start`]) fires due reminders (`once` cadence, delivered to
 //! the thread + a user notification), reports finished delegations back into
@@ -304,6 +304,13 @@ pub(super) async fn apply_agent_update(
             "the task belongs to another thread".into(),
         ));
     }
+    // An approval is decided on the card (and the MCP approval row). The
+    // owning thread must not mark it done with `result.decision = approved`.
+    if task.kind == "approval" || needs_kind(&task).as_deref() == Some("approval") {
+        return Err(Error::Forbidden(
+            "an approval is decided from its card".into(),
+        ));
+    }
     if needs_kind(&task).as_deref() == Some("takeover") {
         return Err(Error::Conflict("the user has control of this task".into()));
     }
@@ -558,11 +565,7 @@ pub async fn request_approval<C: AssistantCtx>(
         waited += 1;
         current = repo(ctx).get_task_any(&current.id).await?;
     }
-    let decision = match (current.state.as_str(), &current.result) {
-        ("needs_you", _) => "pending",
-        (_, Some(r)) if r.get("decision").and_then(Value::as_str) == Some("approved") => "approved",
-        _ => "denied",
-    };
+    let decision = approval_decision(current.state.as_str(), current.result.as_ref());
     let reason = current
         .result
         .as_ref()
@@ -570,6 +573,21 @@ pub async fn request_approval<C: AssistantCtx>(
         .cloned()
         .unwrap_or(Value::Null);
     Ok(json!({"task": current, "decision": decision, "reason": reason}))
+}
+
+/// `approved` only when the MCP approval row settled it. A task result the
+/// agent wrote itself (`{"decision":"approved"}` with no `via`) is a deny.
+fn approval_decision(state: &str, result: Option<&Value>) -> &'static str {
+    match (state, result) {
+        ("needs_you", _) => "pending",
+        (_, Some(result))
+            if result.get("via").and_then(Value::as_str) == Some("mcp_approvals")
+                && result.get("decision").and_then(Value::as_str) == Some("approved") =>
+        {
+            "approved"
+        }
+        _ => "denied",
+    }
 }
 
 fn approval_title(card: &ApprovalCard) -> String {
@@ -755,23 +773,12 @@ pub async fn act<C: AssistantCtx>(
         _ => {}
     }
 
-    // A failed continuation keeps the question/takeover open and recoverable.
-    if let (Some(text), Some(tid)) = (followup, task.thread_id.as_deref()) {
-        threads::send(
-            ctx,
-            owner,
-            tid,
-            SendReq {
-                text,
-                origin: Some("app".into()),
-                ..Default::default()
-            },
-            None,
-        )
-        .await?;
-        if let Some(id) = threads::execution_id(tid) {
-            repo(ctx).bind_task_execution(&task.id, &id).await?;
-        }
+    // The answer is stored before the paste. A 409 while the asking turn still
+    // holds the thread used to return here and drop the text.
+    let followup_text = followup.clone();
+    if followup_text.is_some() {
+        result["followup"] = json!(followup_text);
+        result["followup_pending"] = json!(true);
     }
 
     let needs_payload = match to {
@@ -781,12 +788,109 @@ pub async fn act<C: AssistantCtx>(
         })),
         _ => Some(Value::Null),
     };
+    if followup_text.is_some() {
+        repo(ctx)
+            .set_task_state(&task.id, to, needs_payload.clone(), Some(result.clone()))
+            .await?;
+    }
+    if let Some(text) = followup_text {
+        if task.kind == "delegation"
+            && deliver_delegation_answer(ctx, task.agent_run_id.as_deref(), &text).await
+        {
+            result["delegation_answer_sent"] = json!(true);
+        }
+        let mut sent = task.thread_id.is_none();
+        if let Some(tid) = task.thread_id.as_deref() {
+            if !threads::is_in_flight(tid) {
+                match threads::send(
+                    ctx,
+                    owner,
+                    tid,
+                    SendReq {
+                        text,
+                        origin: Some("app".into()),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        if let Some(id) = threads::execution_id(tid) {
+                            repo(ctx).bind_task_execution(&task.id, &id).await?;
+                        }
+                        sent = true;
+                    }
+                    Err(e) if thread_is_busy(&e) => {}
+                    Err(e) => warn!(task = %task.id, "assistant follow-up will retry: {e}"),
+                }
+            }
+        }
+        if sent {
+            result["followup_pending"] = json!(false);
+        }
+    }
     let updated = repo(ctx)
         .set_task_state(&task.id, to, needs_payload, Some(result))
         .await?;
     emit_task_change(ctx, &updated, &task.state).await;
 
     Ok(updated)
+}
+
+/// The assistant thread is still on the turn that asked. `send` answers 409
+/// for that, and the answer must stay on the task until the thread is idle.
+fn thread_is_busy(err: &Error) -> bool {
+    matches!(err, Error::Conflict(msg) if msg.contains("still answering"))
+}
+
+/// Text owed to a thread because the asking turn was still in flight.
+pub(crate) fn owed_followup(result: Option<&Value>) -> Option<&str> {
+    let result = result?;
+    if result.get("followup_pending").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    result
+        .get("followup")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn paste_bytes(text: &str) -> Vec<u8> {
+    let text = otto_orchestrator::claude_pty::sanitize_paste(text);
+    let mut bytes = Vec::with_capacity(text.len() + 16);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+/// Paste the answer into the delegated personal-agent session when that run
+/// is still live. The assistant thread is a separate conversation.
+async fn deliver_delegation_answer<C: AssistantCtx>(
+    ctx: &C,
+    run_id: Option<&str>,
+    text: &str,
+) -> bool {
+    let Some(run_id) = run_id else {
+        return false;
+    };
+    let Ok(run) = PersonalAgentsRepo::new(ctx.pool().clone())
+        .get_run(run_id)
+        .await
+    else {
+        return false;
+    };
+    if run.status != "running" {
+        return false;
+    }
+    let Some(sid) = run.session_id.as_ref() else {
+        return false;
+    };
+    if ctx.manager().input(sid, &paste_bytes(text)).await.is_err() {
+        return false;
+    }
+    ctx.manager().input(sid, b"\r").await.is_ok()
 }
 
 /// Only the first canonical decision wins. A card that has not received the
@@ -1102,9 +1206,90 @@ pub fn start<C: AssistantCtx>(ctx: C) -> CancelSignal {
 
 async fn tick<C: AssistantCtx>(ctx: &C) {
     fire_due_reminders(ctx).await;
+    retry_owed_followups(ctx).await;
     settle_delegations(ctx).await;
     sync_mcp_approvals(ctx).await;
     expire_incognito(ctx).await;
+}
+
+async fn retry_owed_followups<C: AssistantCtx>(ctx: &C) {
+    let Ok(rows) = repo(ctx).tasks_with_pending_followup().await else {
+        return;
+    };
+    for t in rows {
+        let lock = task_lock(&t.id);
+        let _guard = lock.lock().await;
+        let Ok(t) = repo(ctx).get_task_any(&t.id).await else {
+            continue;
+        };
+        if t.state != "running" {
+            continue;
+        }
+        let Some(text) = owed_followup(t.result.as_ref()) else {
+            continue;
+        };
+        let text = text.to_string();
+        let mut result = t.result.clone().unwrap_or_else(|| json!({}));
+        if t.kind == "delegation"
+            && result
+                .get("delegation_answer_sent")
+                .and_then(Value::as_bool)
+                != Some(true)
+            && deliver_delegation_answer(ctx, t.agent_run_id.as_deref(), &text).await
+        {
+            result["delegation_answer_sent"] = json!(true);
+        }
+        let Some(tid) = t.thread_id.clone() else {
+            result["followup_pending"] = json!(false);
+            if let Ok(updated) = repo(ctx)
+                .set_task_state(&t.id, "running", None, Some(result))
+                .await
+            {
+                emit_task(ctx, &updated);
+            }
+            continue;
+        };
+        if threads::is_in_flight(&tid) {
+            if result
+                .get("delegation_answer_sent")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                let _ = repo(ctx)
+                    .set_task_state(&t.id, "running", None, Some(result))
+                    .await;
+            }
+            continue;
+        }
+        match threads::send(
+            ctx,
+            &t.owner_user_id,
+            &tid,
+            SendReq {
+                text,
+                origin: Some("app".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => {
+                if let Some(id) = threads::execution_id(&tid) {
+                    let _ = repo(ctx).bind_task_execution(&t.id, &id).await;
+                }
+                result["followup_pending"] = json!(false);
+                if let Ok(updated) = repo(ctx)
+                    .set_task_state(&t.id, "running", None, Some(result))
+                    .await
+                {
+                    emit_task(ctx, &updated);
+                }
+            }
+            Err(e) if thread_is_busy(&e) => {}
+            Err(e) => warn!(task = %t.id, "assistant follow-up will retry: {e}"),
+        }
+    }
 }
 
 async fn fire_due_reminders<C: AssistantCtx>(ctx: &C) {
@@ -1280,6 +1465,56 @@ async fn expire_incognito<C: AssistantCtx>(ctx: &C) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_stays_owed_until_the_thread_can_take_it() {
+        assert!(owed_followup(None).is_none());
+        assert!(owed_followup(Some(&json!({"answer": "yes"}))).is_none());
+        assert_eq!(
+            owed_followup(Some(&json!({
+                "followup_pending": true,
+                "followup": "Answer to your question: aisle"
+            }))),
+            Some("Answer to your question: aisle")
+        );
+        assert!(thread_is_busy(&Error::Conflict(
+            "the assistant is still answering the previous message in this thread".into()
+        )));
+        assert!(!thread_is_busy(&Error::Invalid(
+            "an answer is required".into()
+        )));
+    }
+
+    #[test]
+    fn an_agent_written_approval_is_not_the_users_decision() {
+        assert_eq!(approval_decision("needs_you", None), "pending");
+        assert_eq!(
+            approval_decision("done", Some(&json!({"decision": "approved"}))),
+            "denied"
+        );
+        assert_eq!(
+            approval_decision(
+                "done",
+                Some(&json!({"decision": "approved", "via": "mcp_approvals"}))
+            ),
+            "approved"
+        );
+    }
+
+    #[test]
+    fn a_send_grant_does_not_cover_another_action() {
+        let send = approval_card(&json!({
+            "where":"Telegram DM to me","what":"Flight options summary","who_sees":"only you",
+            "reason":"you asked","tool":"telegram_send","destination":"me","category":"send"
+        }))
+        .unwrap();
+        let other = approval_card(&json!({
+            "where":"Telegram DM to me","what":"Buy the ticket","who_sees":"only you",
+            "reason":"you asked","tool":"telegram_send","destination":"me","category":"send"
+        }))
+        .unwrap();
+        assert_ne!(always_allow_resource(&send), always_allow_resource(&other));
+    }
 
     #[tokio::test]
     async fn a_canonical_denial_never_becomes_approved_or_creates_a_grant() {

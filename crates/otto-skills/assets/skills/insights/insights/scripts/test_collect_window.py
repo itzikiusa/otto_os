@@ -71,5 +71,69 @@ class ClaudeTokenTest(unittest.TestCase):
         self.assertEqual(meta["cache_read_tokens"], 200)
 
 
+
+class AccountingWindowTest(unittest.TestCase):
+    def setUp(self):
+        self.start = datetime(2026, 10, 18)
+        self.end = datetime(2026, 10, 18, 23, 59, 59, 999999)
+
+    def test_equivalent_instants_use_host_calendar(self):
+        import time
+        self.addCleanup(time.tzset)
+        with patch.dict(os.environ, {"TZ": "Etc/GMT-3"}):
+            time.tzset()
+            try:
+                expected = datetime(2026, 10, 18, 1, 30)
+                for value in ("2026-10-17T22:30:00Z", "2026-10-18T01:30:00+03:00",
+                              1792276200):
+                    self.assertEqual(collector.parse_date(value), expected)
+            finally:
+                pass
+        time.tzset()
+
+    def test_codex_tools_and_latency_are_windowed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "rollout.jsonl")
+            rows = [{"type": "session_meta", "payload": {"id": "s", "cwd": "/p"}}]
+            for day, duration in ((17, 1000), (18, 100000)):
+                stamp = f"2026-10-{day}T12:00:00Z"
+                rows += [
+                    {"timestamp": stamp, "type": "event_msg", "payload": {"type": "user_message"}},
+                    {"timestamp": stamp, "type": "response_item", "payload": {"type": "function_call", "name": "read"}},
+                    {"timestamp": stamp, "type": "event_msg", "payload": {"type": "task_complete", "duration_ms": duration}},
+                ]
+            with open(path, "w") as f:
+                f.write("\n".join(map(json.dumps, rows)))
+            got = collector._parse_codex_jsonl(path, self.start, self.end)
+            self.assertEqual(got["tool_counts"], {"read": 1})
+            self.assertEqual(got["user_response_times"], [100])
+
+    def test_metadata_does_not_override_window_tokens(self):
+        with tempfile.TemporaryDirectory() as d:
+            meta_dir, projects = os.path.join(d, "meta"), os.path.join(d, "projects")
+            os.makedirs(meta_dir)
+            os.makedirs(os.path.join(projects, "p"))
+            path = os.path.join(projects, "p", "s.jsonl")
+            rows = []
+            for day, tokens in ((17, 900), (18, 100)):
+                stamp = f"2026-10-{day}T12:00:00Z"
+                rows += [
+                    {"timestamp": stamp, "type": "user", "message": {"content": "hello"}},
+                    {"timestamp": stamp, "type": "assistant", "message": {"id": str(day), "usage": {"input_tokens": tokens}, "content": [{"type": "tool_use", "name": "read"}]}},
+                ]
+            with open(path, "w") as f:
+                f.write("\n".join(map(json.dumps, rows)))
+            with open(os.path.join(meta_dir, "s.json"), "w") as f:
+                json.dump({"session_id": "s", "start_time": "2026-10-17T12:00:00Z",
+                           "user_message_timestamps": ["2026-10-17T12:00:00Z", "2026-10-18T12:00:00Z"],
+                           "input_tokens": 1000, "git_commits": 10, "transcript_path": path}, f)
+            with patch.multiple(collector, CLAUDE_META_DIR=meta_dir, CLAUDE_PROJECTS_DIR=projects,
+                                CLAUDE_FACETS_DIR=os.path.join(d, "facets")):
+                got = collector.collect_claude(self.start, self.end)[0]["meta"]
+            self.assertEqual(got["input_tokens"], 100)
+            self.assertEqual(got["tool_counts"], {"read": 1})
+            self.assertNotIn("git_commits", got)
+
+
 if __name__ == "__main__":
     unittest.main()

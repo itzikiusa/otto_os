@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { loadErrorText } from '../src/lib/loadError.ts';
 import { deferred, loadSource } from './sourceHarness.ts';
 
 function methods(file: string, names: string[]) {
@@ -87,7 +88,9 @@ test('extended budget survives Resume failure and retry skips repeat PATCH', asy
     ${methods('modules/loops/LoopDetail.svelte', ['extendAndResume'])}
     return {extendAndResume, read(){return {extError,extendOpen,acting}}};`, {
     loops: { updateLimits: async () => { updates++; }, resume: async () => { if (++resumes === 1) throw Error('offline'); } },
-    elapsedSecs: () => 1, formatSeconds: String, errText: String, toasts: toast,
+    elapsedSecs: () => 1, formatSeconds: String, errText: String,
+    loadErrorText,
+    toasts: toast,
   });
   await state.extendAndResume(); assert.match(state.read().extError, /Budget saved/); assert.equal(state.read().extendOpen, true);
   await state.extendAndResume(); assert.equal(updates, 1); assert.equal(resumes, 2); assert.equal(state.read().extendOpen, false);

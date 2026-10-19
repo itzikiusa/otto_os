@@ -135,7 +135,7 @@ affordances appear) plus the introspection each driver actually performs.
 | Diagram tab (ERD) | yes (FK edges) | yes (FK edges) | — (no Diagram) | yes (cards, no edges) | yes (FK edges) |
 | Visual JOIN / FK relationships | yes | yes | no | no | yes |
 | Inline editing (approval-gated) | yes (single-table SELECT w/ PK) | yes (single-table SELECT w/ PK) | yes (`GET`/`HGETALL`/`HGET`/`LRANGE`/`SMEMBERS`/`ZRANGE` results) | yes (single-collection find by `_id`; nested fields via dotted `$set`/`$unset`/`$rename`) | yes (`ALTER … UPDATE`) |
-| Streaming export to file | yes (sqlx cursor) | yes (sqlx cursor) | no (buffered, 100k cap) | yes (cursor) | yes (HTTP `FORMAT` splice) |
+| Streaming export to file | yes (sqlx cursor) | yes (sqlx cursor) | no (buffered, 100k cap) | yes (cursor) | yes (HTTP and native streams) |
 | File import | yes (batched `INSERT`) | yes (batched `INSERT`) | no | yes (`insertMany`) | yes (batched `INSERT`) |
 | Query-plan source | `EXPLAIN FORMAT=JSON` | `EXPLAIN (FORMAT JSON)` | — (no plan) | `explain` (queryPlanner) | `EXPLAIN json=1` (+plain fallback) |
 | Triggers browse | yes (`SHOW CREATE TRIGGER`) | — | — | — | — |
@@ -689,6 +689,59 @@ it a run keeps its status and counts only). The sheet shows the first 200
 rows of a result. Agents can use the same endpoints (`docs/contracts/api.md` →
 "DB Explorer — multi-target runs"); `read_only: true` refuses any write.
 
+### MongoDB: distinct values
+
+Run `db.users.distinct("country")` or add an optional filter:
+`db.users.distinct("profile.country", {active: true})`. The JSON command form is
+`{collection: "users", op: "distinct", field: "country", filter: {active: true}}`.
+These are read-only commands and require no mongosh installation. Each distinct
+value appears in a `value` column, preserving its BSON type in the grid.
+
+The row selector caps the displayed values. MongoDB returns distinct values in
+one response (subject to its BSON response limit), so this operation has no cursor
+pagination. Use an aggregation for larger sets. The native path does not accept chained methods or a third options argument;
+shell expressions with options use the mongosh fallback described below. Query plan and streaming **Export all
+rows** support find/aggregate only; downloading the displayed grid still works.
+Request timeouts and tracked-query cancellation also apply to distinct.
+
+### Native commands and shell fallback
+
+MongoDB `count()` uses the native legacy count command, while `countDocuments()`
+uses the driver's document-count operation. They retain their server semantics
+and are not rewritten into each other; prefer `countDocuments()` for new queries.
+
+MySQL uses the text protocol for console statements, including `USE`, `CALL`,
+prepared-statement commands and administrative statements. A batch shares one
+connection, so `BEGIN; …; COMMIT` and temporary tables work within that batch.
+MySQL client `DELIMITER` directives on their own lines preserve stored-program
+bodies; the editor sends such a script together. Separate Run actions do not
+retain session variables, transactions or temporary tables. `LOAD DATA LOCAL
+INFILE` and `LOAD XML LOCAL INFILE` transfer the explicitly named file from the
+Otto host for a root caller (the same host-file permission as Import). Files must
+be regular files within the 100 MiB import bound; the server must permit LOCAL
+INFILE. Native FIELDS/LINES/SET semantics are preserved. The transfer uses a
+separate connection and rejects a server request for any other filename. MySQL
+scripts containing the `LOCAL` keyword use an operation-owned connection
+for an authorized root caller, so a later LOCAL INFILE statement still works
+after SQL-mode changes. These scripts add connection setup overhead; ordinary
+queries retain the shared pool.
+
+Mongo shorthand runs natively when its arguments have a faithful native mapping.
+Other shell expressions, such as `findOne`, cursor `skip`, or method options,
+fall back to installed **mongosh** against the same connection and selected
+database. Cursor expression results are capped for display, and scalar/document
+results retain Extended JSON types. Fallback occurs only after a native parse
+failure, never after a database error, so a failed write is not retried.
+Unknown shell expressions count as writes for connection policy because their
+JavaScript cannot be proven read-only. Explicit read-only execution refuses them.
+The ordinary authorized console can run them. Missing mongosh returns an install
+hint. Native JSON commands and SQL translation errors do not fall back to JavaScript.
+
+SQL-to-Mongo remains a convenience subset, not a SQL engine. Unsupported SQL
+constructs produce errors rather than silently discarding their semantics.
+Mongo query plans and streaming exports still require native find/aggregate;
+downloading displayed results works for shell results too.
+
 ### MongoDB: running full mongosh scripts
 
 Pasting a real **mongosh script** — variables, functions, control flow,
@@ -754,9 +807,10 @@ to `POST …/db/cancel`, and the service issues:
 
 - **MySQL** → `KILL QUERY <connection-id>` (captured from `CONNECTION_ID()`).
 - **PostgreSQL** → `pg_cancel_backend(<pid>)`.
-- **ClickHouse** → `KILL QUERY WHERE query_id = '<id>'` (HTTP transport only).
-- **MongoDB** → every `find` / `aggregate` / `count` issued with a `query_id`
-  is tagged with a **comment** (`otto:<query_id>`); **Stop** runs
+- **ClickHouse** → a separate `KILL QUERY` targets the HTTP query ID or the
+  native operation's unique marker.
+- **MongoDB** → every native `find` / `aggregate` / `count` / `distinct`
+  is tagged with a unique server-owned **comment** (`otto:<execution_id>`); **Stop** runs
   `$currentOp` on a second connection, matches `command.comment` against that
   tag and issues `killOp` for each matching op id. Best-effort: it needs the
   `inprog` and `killop` privileges — without them the cancel logs a warning and
@@ -1272,9 +1326,9 @@ Two export paths, both gated at the same role as running a query (workspace
 
 **A. Browser download (`POST …/db/export`).** Re-runs the statement **uncapped**
 and returns the whole result as a file attachment the browser downloads —
-`csv` or `json`. The whole result is buffered in RAM (fine for the UI's "Full
-Export" of a modestly-clipped result). This backs the grid's **CSV / JSON**
-buttons (which export the in-memory view) and **Full Export** (uncapped re-run).
+`csv` or `json`. The daemon streams the driver output into the response. This
+backs **Full Export** (uncapped re-run); the grid's **CSV / JSON** buttons instead
+download the already displayed rows without re-running the statement.
 
 **B. Streaming to a local file (`POST …/db/export-to-path`).** For results too
 big to pull into the browser. The **Download…** dialog picks a **format**, a
@@ -1289,9 +1343,9 @@ bounded** regardless of result size:
 - **ClickHouse (HTTP)** — appends an explicit `FORMAT` and splices the server's
   own bytes through. **For a tunnelled ClickHouse this writes *your* local path —
   not a server-side `INTO OUTFILE` on the tunnel host.**
-- **Redis** (and any engine without a native row stream, incl. ClickHouse's JSON
-  *array* shape and the native transport) — falls back to buffering the full
-  result (logged with a warning).
+- **ClickHouse (native)** — streams decoded blocks through the selected export
+  encoder. HTTP JSON arrays also stream, using the server's JSON array setting.
+- **Redis** — uses the bounded buffered result path rather than a row cursor.
 
 **Formats** (`ExportFormat`, `format` field, snake_case on the wire) and the
 labels shown in the dialog:
@@ -1309,7 +1363,9 @@ labels shown in the dialog:
 user's home); an existing directory becomes `<dir>/export.<ext>`, otherwise it's
 the full file path (parent created). ClickHouse maps these to native `FORMAT`
 names (`CSV`, `CSVWithNames`, `TabSeparated`, `TabSeparatedWithNames`,
-`JSONEachRow`); the JSON *array* has no single-pass `FORMAT`, so it buffers.
+`JSONEachRow`); JSON arrays use `JSONEachRow` with
+`output_format_json_array_of_rows=1`. A requested row cap is enforced even when
+the query already contains its own `LIMIT`.
 Only **row-returning reads** are exportable — a write/DDL is rejected, and a
 write on a guarded connection is blocked outright (export has no confirmation
 path). The response reports `{local_path, rows, bytes, duration_ms}`.
@@ -1397,9 +1453,9 @@ root): `…/db/saved-queries`, `…/db/dashboards`, `…/db/widgets`,
 `GET|PATCH|DELETE /db/dashboards/{id}`, `PATCH|DELETE /db/widgets/{id}`, and
 `POST /db/widgets/{id}/run`.
 
-`RunQueryReq` notes: `query_id` (client-generated, enables cancel — on MongoDB
-it also becomes the `otto:<query_id>` comment tag `killOp` matches on);
-`timeout_ms` (MySQL `MAX_EXECUTION_TIME` hint; others = context deadline);
+`RunQueryReq` notes: `query_id` (client-generated cancellation lookup key;
+MongoDB uses a separate server-owned execution tag for `killOp` matching);
+`timeout_ms` (execution deadline; native cancellation where supported);
 `mask` (server-side redaction); `confirm_write` (typed-confirmation
 acknowledgement for a guarded connection); `offset` (server-side paging for
 auto-limited statements); `cursor?` (EJSON of the last `_id` of the previous
@@ -1465,7 +1521,7 @@ parses (and which read fine as plain text in history rows and MCP results):
   edits to other keys of that same column are overwritten — Mongo's dotted
   paths don't have this limitation.
 - **Cancellation** is engine-native for MySQL, PostgreSQL (`pg_cancel_backend`),
-  ClickHouse (HTTP transport) and MongoDB (`$currentOp` comment tag + `killOp`,
+  ClickHouse (HTTP and native transports) and MongoDB (`$currentOp` comment tag + `killOp`,
   which needs the `inprog` + `killop` privileges — without them the cancel
   degrades to a client-side drop with a daemon-side warning, and full mongosh
   scripts / writes are never tagged). Redis cancel is a client-side drop (the
@@ -1482,12 +1538,22 @@ parses (and which read fine as plain text in history rows and MCP results):
 - **Transactions**: the `transactions` capability is `false` for every engine —
   queries run on pooled connections, so there is no pinned session to hold a
   `BEGIN…COMMIT` open across runs.
-- **Streaming export** is native for MySQL/PostgreSQL/Mongo/ClickHouse-HTTP;
-  Redis, ClickHouse-native, and the ClickHouse JSON-*array* format buffer in RAM
-  with a **100,000-row hard cap** (a clear error beyond, never an OOM).
-- **ClickHouse native transport** caveats: per-query database scoping and per-query
-  cancellation are **not** wired on the native (9000/9440) transport — use the HTTP
-  transport (8123/8443) for those.
+- **Streaming export** is native for MySQL/PostgreSQL/Mongo/ClickHouse (both
+  transports, including HTTP JSON arrays).
+  Redis exports use the bounded result path. Mongo JSON/NDJSON
+  exports preserve sparse fields; CSV uses the first document's columns.
+- **ClickHouse** batches share an operation-specific session; `SET` and `USE`
+  affect subsequent statements in that batch without changing another tab.
+  Both transports support selected databases, timeout and native cancellation.
+  Grid/export requests choose a structured wire format while preserving query
+  settings; arbitrary console output formats are not displayed as raw bytes.
+  Map values use key/value pairs so duplicate keys are not discarded. Native
+  transport does not decode JSON/Dynamic/Variant types in the bundled native client;
+  use HTTP or explicitly select `toJSONString(value)` for unsupported types.
+  Native connections accept server-enforced `readonly=1` profiles without
+  downgrading them to `readonly=2`. Their active timezone must match the profile
+  timezone requested in Otto (UTC by default); a forbidden timezone change still
+  fails explicitly. No user query is replayed to negotiate these settings.
 - **MongoDB** supports a mongosh-style shorthand, raw JSON command documents,
   **full mongosh scripts** (below), **and**
   a SQL→Mongo translation for a single-base-collection `SELECT` (WHERE / ORDER BY /
@@ -1668,4 +1734,3 @@ Close cleanup owns the retired pools and tunnel leases independently of the HTTP
 - **Cache sweeps.** The five-minute reaper also drops expired schema diagrams
   and completion snapshots. Postgres completion reads `pg_catalog` directly,
   so it stays fast on catalogs with thousands of tables.
-

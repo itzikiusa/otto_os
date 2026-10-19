@@ -159,7 +159,7 @@
       if (!repos.some((r) => r.id === repo.id)) repos = [...repos, repo];
       repoId = repo.id;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Could not register that folder as a repo';
+      error = loadErrorText(e);
     } finally {
       registering = false;
     }
@@ -200,7 +200,7 @@
       if (query.trim() === q) { query = ''; detected = null; }
       onLaunched(run);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Launch failed';
+      error = loadErrorText(e);
     } finally {
       busy = false;
     }
@@ -506,5 +506,8 @@
     .detect { flex-basis: 100%; }
     .kbd-hint { display: none; }
     .run { margin-inline-start: auto; }
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .src-chip, .options .segmented > button { min-block-size: var(--hit-min); }
   }
 </style>

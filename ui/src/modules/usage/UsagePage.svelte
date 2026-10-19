@@ -1,5 +1,6 @@
 <script lang="ts">
   import { scrollBehavior } from '../../lib/motion';
+  import { loadErrorText } from '../../lib/loadError';
   import PathField from '../../lib/components/PathField.svelte';
   // Usage dashboard: tokens first (provider/day/model/session rollups; cost is
   // the secondary figure), the ccusage-style Report tab, and — for root only —
@@ -32,7 +33,7 @@
   import AttributionDrilldown from './AttributionDrilldown.svelte';
   import CostForecastChip from './CostForecastChip.svelte';
   import ModelBreakdown from './ModelBreakdown.svelte';
-  import UsageReportView from './UsageReportView.svelte';
+  let reportLoad = $state(0);
 
   /** Root sees everything and owns the engine/budget controls; anyone else
    *  with Usage:View gets a read-only view of their own sessions. */
@@ -44,7 +45,7 @@
   let telemetryDirty = $state(false);
   async function selectView(next: typeof view): Promise<void> {
     if (next === view) return;
-    if (telemetryDirty && !await confirmer.ask('You have unsaved telemetry settings. Leaving now discards them.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' })) return;
+    if (telemetryDirty && !await confirmer.ask('You have unsaved telemetry settings. Leaving now discards them.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing', danger: true })) return;
     telemetryDirty = false;
     view = next;
   }
@@ -67,6 +68,20 @@
   let interval = $state(60);
   let chPath = $state('');
   let configOpen = $state(false);
+  const storageDirty = $derived(
+    configOpen &&
+      !!usage.status &&
+      (retention !== usage.status.retention_days ||
+        interval !== usage.status.metrics_interval_secs ||
+        chPath.trim() !== (usage.status.binary ?? '')),
+  );
+  const storageError = $derived(
+    !Number.isInteger(retention) || retention < 1 || retention > 3650
+      ? 'Keep history must be a whole number of days from 1 to 3650.'
+      : !Number.isInteger(interval) || interval < 5 || interval > 3600
+        ? 'Sample interval must be a whole number of seconds from 5 to 3600.'
+        : '',
+  );
 
   // Editable budget config — a local copy of usage.budgets.config, seeded when
   // budgets load and saved back on demand. Enforcement is opt-in (default off).
@@ -80,7 +95,7 @@
   let budgetsOpen = $state(false);
   let budgetsDirty = $state(false);
   let budgetValidated = $state(false);
-  $effect(() => guardUnsaved(() => budgetsDirty || telemetryDirty, { what: 'your usage settings' }));
+  $effect(() => guardUnsaved(() => budgetsDirty || telemetryDirty || storageDirty, { what: 'your usage settings' }));
   const budgetWindowInvalid = $derived(!Number.isInteger(budgetCfg.window_days) || budgetCfg.window_days < 1 || budgetCfg.window_days > 3650);
   const budgetValidation = $derived.by(() => {
     if (budgetWindowInvalid)
@@ -199,10 +214,11 @@
     usage.admin = admin;
   });
 
-  // Mirror server status into the editable fields whenever it refreshes.
+  // Mirror server status into the editable fields whenever it refreshes,
+  // unless the user is actively editing Storage & retention.
   $effect(() => {
     const s = usage.status;
-    if (s) {
+    if (s && !storageDirty) {
       retention = s.retention_days;
       interval = s.metrics_interval_secs;
       chPath = s.binary ?? '';
@@ -299,7 +315,9 @@
   // via <title>. Works at 7d/30d/90d windows.
 
   // Chart viewport (inner drawing area, inside the axis labels).
-  const SVG_W = 500;
+  let dailyChartWidth = $state(500);
+  const SVG_W = $derived(dailyChartWidth || 500);
+  let selectedDailyKey = $state('');
   const SVG_H = 110;
   const AXIS_L = 52;  // left margin for y-axis labels
   const AXIS_B = 22;  // bottom margin for x-axis labels
@@ -307,6 +325,8 @@
   const dailyTokens = $derived((usage.summary?.daily ?? []).map((d) => d.total_tokens));
   const dailyMaxTokens = $derived(Math.max(...dailyTokens, 0));
   const dailyDays = $derived(usage.summary?.daily ?? []);
+  const selectedDaily = $derived(dailyDays.find(d => d.day === selectedDailyKey) ?? dailyDays.at(-1));
+  const hasUsage = $derived(Boolean(usage.summary && (usage.summary.total_tokens > 0 || usage.summary.total_events > 0 || usage.summary.sessions.length > 0)));
 
   // Y-axis: 4 ticks from 0 to ceiling. Round the top tick to a "nice" value
   // (never below one token, so a near-empty window can't repeat a label).
@@ -332,11 +352,10 @@
     return AXIS_L + ((i + 0.5) / Math.max(1, total)) * plotW;
   }
 
-  // X-axis: thin labels so they don't overlap (max ~8 visible).
+  // The viewBox uses measured CSS pixels; keep date labels at least 52px apart.
   function showXLabel(i: number, total: number): boolean {
-    if (total <= 8) return true;
-    const step = Math.ceil(total / 8);
-    return i % step === 0 || i === total - 1;
+    const step = Math.max(1, Math.ceil(52 * total / Math.max(1, SVG_W - AXIS_L)));
+    return i % step === 0;
   }
 
   // ── Metric sparkline path builder ─────────────────────────────────────────
@@ -471,7 +490,7 @@
 
   <PageBody>
     {#if view === 'otto' && admin}
-      {#await ottoUsage()}<LoadState what="Otto usage" loading empty />{:then module}<module.default bind:dirty={telemetryDirty} />{:catch}<p role="alert">Could not load Otto usage. <button class="btn" onclick={() => view = 'overview'}>Return to Overview</button></p>{/await}
+      {#await ottoUsage()}<LoadState what="Otto usage" loading empty />{:then module}<module.default bind:dirty={telemetryDirty} />{:catch e}<LoadState what="Otto usage" error={e instanceof Error ? e.message : 'Could not load Otto usage'} empty onretry={() => (view = 'overview')} />{/await}
     {:else}
     <!-- What the numbers cover: who, how far back, how fresh. In the page body,
          not the header, so the header keeps to tabs + Refresh / Export / settings. -->
@@ -626,13 +645,15 @@
               <label for="cfg-path">ClickHouse binary</label>
               <PathField bind:value={chPath} files><input dir="ltr" id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" /></PathField>
             </div>
+            {#if storageError}<p class="budget-error" role="alert">{storageError}</p>{/if}
             <div class="cfg-actions">
               <button class="btn" disabled={usage.installing} onclick={() => usage.install()}>
                 {usage.installing ? 'Updating…' : 'Update ClickHouse'}
               </button>
               <button
                 class="btn primary"
-                disabled={usage.saving}
+                disabled={usage.saving || !!storageError}
+                title={storageError || undefined}
                 onclick={() =>
                   usage.saveConfig({
                     enabled: true,
@@ -662,7 +683,15 @@
         {/if}
 
         {#if view === 'report'}
-          <UsageReportView {admin} />
+          {#key reportLoad}
+            {#await import('./UsageReportView.svelte')}
+              <LoadState what="Usage report" loading empty />
+            {:then module}
+              <module.default {admin} />
+            {:catch error}
+              <LoadState what="Usage report" error={loadErrorText(error)} empty onretry={() => reportLoad++} />
+            {/await}
+          {/key}
         {:else}
         {#if usage.summaryError}
           <!-- Summary failed: inline error (no data yet) or a stale-data bar.
@@ -678,8 +707,11 @@
           <LoadState what="usage summary" loading empty rows={4} />
         {/if}
 
+        {#if usage.summary && !hasUsage}
+          <EmptyState icon="chart" title="No usage in this window" body="Choose a longer window or All sessions to include activity outside Otto. New agent activity will appear here." />
+        {/if}
         <!-- Stat cards: one sans figure per tile (tabular-nums), label above. -->
-        {#if usage.summary}
+        {#if usage.summary && hasUsage}
           <div class="cards">
             <div class="stat card">
               <span class="stat-label">Total tokens</span>
@@ -752,7 +784,7 @@
           </section>
         {/if}
 
-        {#if usage.summary}
+        {#if usage.summary && hasUsage}
           <div class="grid">
             <!-- Provider breakdown -->
             <section class="panel card" aria-labelledby="usage-prov-title">
@@ -804,11 +836,12 @@
               {:else if usage.summary.daily.length > 0}
                 {@const days = dailyDays}
                 {@const n = days.length}
+                <div class="usage-chart" bind:clientWidth={dailyChartWidth}>
                 <svg
                   class="daily-svg"
                   viewBox="0 0 {SVG_W} {SVG_H}"
                   aria-label="Daily tokens over the last {usage.summary.days} days, peak {fmtNum(dailyMaxTokens)}"
-                  role="img"
+                  role="group"
                 >
                   <!-- Gridlines + y-axis labels -->
                   {#each yTicks as tick (tick)}
@@ -826,7 +859,7 @@
                     {@const barH = (d.total_tokens / (yTicks[yTicks.length - 1] || 1)) * (SVG_H - AXIS_B)}
                     {@const barY = SVG_H - AXIS_B - barH}
                     {@const segs = tokenSegs(d)}
-                    <!-- stacked colour segments (bottom = input, then cache-write, cache-read, output) -->
+                    <!-- Top-to-bottom matches the legend: input, cache-write, cache-read, output. -->
                     {#each segs as s, si (s.label)}
                       {#if s.pct > 0}
                         {@const segH = (s.v / Math.max(1, d.total_tokens)) * barH}
@@ -847,6 +880,13 @@
                          day 1's text the tooltip for every bar.) -->
                     <rect
                       class="bar-hit"
+                      role="button"
+                      tabindex={selectedDaily?.day === d.day ? 0 : -1}
+                      aria-label="{d.day}: {d.total_tokens.toLocaleString()} tokens, {fmtCost(d.cost_usd)}"
+                      aria-pressed={selectedDaily?.day === d.day}
+                      onclick={() => (selectedDailyKey = d.day)}
+                      onfocus={() => (selectedDailyKey = d.day)}
+                      onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectedDailyKey = d.day; } }}
                       x={x - barW / 2}
                       y={0}
                       width={barW}
@@ -869,6 +909,15 @@
                   <!-- x-axis baseline -->
                   <line class="axis-line" x1={AXIS_L} y1={SVG_H - AXIS_B} x2={SVG_W} y2={SVG_H - AXIS_B} />
                 </svg>
+                </div>
+                {#if selectedDaily}
+                  <div class="usage-chart-details" data-testid="usage-daily-details">
+                    <label>Day <select class="input" aria-label="Daily tokens day" value={selectedDaily.day} onchange={(event) => (selectedDailyKey = event.currentTarget.value)}>
+                      {#each days as d (d.day)}<option value={d.day}>{d.day}</option>{/each}
+                    </select></label>
+                    <p role="status">{selectedDaily.day} · {selectedDaily.total_tokens.toLocaleString()} tokens · ≈ {fmtCost(selectedDaily.cost_usd)} · {breakdownTitle(selectedDaily)}</p>
+                  </div>
+                {/if}
               {:else}
                 <p class="dim small">No daily data in this window.</p>
               {/if}
@@ -1117,7 +1166,8 @@
               <div class="editor-actions">
                 <span class="dim small">Rows without a scope or a cap above $0 are dropped on save.</span>
                 <button
-                  class="btn primary"
+                  class="btn"
+                  class:primary={!configOpen}
                   disabled={usage.savingBudgets || !budgetsDirty || !!budgetValidation}
                   title={budgetValidation || (budgetsDirty ? undefined : 'No changes to save')}
                   onclick={saveBudgets}
@@ -1146,13 +1196,13 @@
               <div class="metrics">
                 <div class="metric">
                   <span class="metric-label">CPU %</span>
-                  <svg viewBox="0 0 300 48" preserveAspectRatio="none" class="spark" role="img" aria-label="CPU over the last {usage.metrics.length} samples">
+                  <svg viewBox="0 0 300 48" preserveAspectRatio="xMidYMid meet" class="spark" role="img" aria-label="CPU over the last {usage.metrics.length} samples">
                     <path d={sparkPath(cpuSeries, 100, 300, 48)} />
                   </svg>
                 </div>
                 <div class="metric">
                   <span class="metric-label">Memory %</span>
-                  <svg viewBox="0 0 300 48" preserveAspectRatio="none" class="spark" role="img" aria-label="Memory over the last {usage.metrics.length} samples">
+                  <svg viewBox="0 0 300 48" preserveAspectRatio="xMidYMid meet" class="spark" role="img" aria-label="Memory over the last {usage.metrics.length} samples">
                     <path d={sparkPath(memSeries, 100, 300, 48)} />
                   </svg>
                 </div>
@@ -1533,8 +1583,18 @@
     fill: transparent;
     cursor: crosshair;
   }
-  .bar-hit:hover {
-    fill: var(--hover);
+  .bar-hit:hover, .bar-hit:focus-visible, .bar-hit[aria-pressed="true"] {
+    stroke: var(--accent-text);
+    stroke-width: 1;
+    outline: none;
+  }
+  .usage-chart { min-width: 0; }
+  .usage-chart-details { font-size: var(--fs-s); overflow-wrap: anywhere; }
+  .usage-chart-details label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .usage-chart-details select { max-width: 100%; }
+  .usage-chart-details p { margin-block: 8px 0; line-height: 1.5; }
+  @media (pointer: coarse), (max-width: 640px) {
+    .usage-chart-details select { min-height: var(--hit-min); }
   }
 
   .metrics {
@@ -1932,8 +1992,12 @@
       grid-row: 2;
     }
     .bar-row .bar-cost {
-      display: none; /* cost stays in the bar's hover title */
+      grid-column: 2;
+      grid-row: 2;
+      text-align: end;
+      white-space: nowrap;
     }
+    .bar-row .bar-track { grid-column: 1; }
     .budget-row {
       grid-template-columns: minmax(0, 1fr) auto;
       grid-template-rows: auto auto;

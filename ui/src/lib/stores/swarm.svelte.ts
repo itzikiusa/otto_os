@@ -85,7 +85,23 @@ class SwarmStore {
   private boardRequest = 0;
   private runsRequest = 0;
   presets: SwarmPreset[] = $state([]);
+  /** Last failed preset fetch. A failure leaves `presets` untouched — never an empty list with no error. */
+  presetsError: string | null = $state(null);
+  presetsLoading = $state(false);
+  private presetsInflight: Promise<void> | null = null;
   graph: SwarmGraph | null = $state(null);
+  /** Last failed graph load. A refresh failure keeps the previous graph. */
+  graphError: string | null = $state(null);
+  graphLoading = $state(false);
+  private graphSeq = 0;
+  /** Failed task-list loads by project id. A missing key means that list is trusted. */
+  tasksError: Record<string, string> = $state({});
+  /** In-flight goal loads by task id. Unset means that task is not loading. */
+  taskGoalsLoading: Record<string, boolean> = $state({});
+  /** Failed goal loads by task id. A missing key means the cached list is trusted. */
+  taskGoalsError: Record<string, string> = $state({});
+  tasksLoading = $state(false);
+  private taskLoads = 0;
   selectedProjectId: string | null = $state(null);
   selectedSessionId: string | null = $state(null);
   loading = $state(false);
@@ -288,6 +304,8 @@ class SwarmStore {
       this.board = [];
       this.boardError = null;
       this.graph = null;
+      this.graphError = null;
+      this.tasksError = {};
       this.selectedProjectId = null;
       this.selectedSessionId = null;
     }
@@ -380,9 +398,13 @@ class SwarmStore {
     this.runsError = null;
     this.board = [];
     this.graph = null;
+    this.graphError = null;
+    this.tasksError = {};
     this.selectedProjectId = null;
     this.selectedSessionId = null;
     this.goalsByTask = {};
+    this.taskGoalsLoading = {};
+    this.taskGoalsError = {};
     this.goalsByProject = {};
     this.standingGoals = [];
     this.verifyByTask = {};
@@ -547,36 +569,98 @@ class SwarmStore {
     const detail = this.detail;
     if (!detail) return;
     const sid = detail.id;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const all = await api.get<SwarmTask[]>(`/swarm/swarms/${sid}/tasks`);
-        if (this.detail?.id !== sid) return; // switched swarms meanwhile
-        const grouped: Record<string, SwarmTask[]> = {};
-        for (const p of detail.projects) grouped[p.id] = [];
-        for (const t of all) (grouped[t.project_id] ??= []).push(t);
-        this.tasksByProject = { ...this.tasksByProject, ...grouped };
-        return;
-      } catch {
-        if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+    const end = this.trackTaskLoad();
+    try {
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const all = await api.get<SwarmTask[]>(`/swarm/swarms/${sid}/tasks`);
+          if (this.detail?.id !== sid) return; // switched swarms meanwhile
+          const grouped: Record<string, SwarmTask[]> = {};
+          for (const p of detail.projects) grouped[p.id] = [];
+          for (const t of all) (grouped[t.project_id] ??= []).push(t);
+          this.tasksByProject = { ...this.tasksByProject, ...grouped };
+          this.clearTaskErrors(Object.keys(grouped));
+          return;
+        } catch (e) {
+          lastError = e;
+          if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+        }
       }
+      if (this.detail?.id !== sid) return;
+      const message = loadErrorText(lastError);
+      const ids = detail.projects.map((p) => p.id);
+      this.setTaskErrors(ids.length > 0 ? ids : ['*'], message);
+    } finally {
+      end();
     }
   }
 
   async loadTasks(pid: string): Promise<void> {
     // One retry: a transient failure (daemon mid-restart, pool contention)
     // used to silently leave the board EMPTY until the next full reload.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const tasks = await api.get<SwarmTask[]>(`/swarm/projects/${pid}/tasks`);
-        // Merge after the await: sibling project loads may replace the cache
-        // while this request is pending. An assignment target before await
-        // would retain the old map and silently lose this project’s tasks.
-        this.tasksByProject = { ...this.tasksByProject, [pid]: tasks };
-        return;
-      } catch {
-        if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+    // A failure is recorded on `tasksError` and the previous list is kept.
+    const sid = this.detail?.id ?? null;
+    const end = this.trackTaskLoad();
+    const stillHere = () => (this.detail?.id ?? null) === sid;
+    try {
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const tasks = await api.get<SwarmTask[]>(`/swarm/projects/${pid}/tasks`);
+          if (!stillHere()) return;
+          // Merge after the await: sibling project loads may replace the cache
+          // while this request is pending. An assignment target before await
+          // would retain the old map and silently lose this project’s tasks.
+          this.tasksByProject = { ...this.tasksByProject, [pid]: tasks };
+          this.clearTaskErrors([pid]);
+          return;
+        } catch (e) {
+          lastError = e;
+          if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+        }
       }
+      if (!stillHere()) return;
+      this.setTaskErrors([pid], loadErrorText(lastError));
+    } finally {
+      end();
     }
+  }
+
+  private trackTaskLoad(): () => void {
+    this.taskLoads += 1;
+    this.tasksLoading = true;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      this.taskLoads = Math.max(0, this.taskLoads - 1);
+      this.tasksLoading = this.taskLoads > 0;
+    };
+  }
+
+  private setTaskErrors(ids: string[], message: string): void {
+    const next = { ...this.tasksError };
+    for (const id of ids) next[id] = message;
+    this.tasksError = next;
+  }
+
+  private clearTaskErrors(ids: string[]): void {
+    const next = { ...this.tasksError };
+    let changed = false;
+    for (const id of ids) {
+      if (!(id in next)) continue;
+      delete next[id];
+      changed = true;
+    }
+    if (changed) this.tasksError = next;
+  }
+
+  /** Keep a task the server already accepted when the follow-up reload failed. */
+  private insertTask(task: SwarmTask): void {
+    const list = this.tasksByProject[task.project_id] ?? [];
+    if (list.some((t) => t.id === task.id)) return;
+    this.tasksByProject = { ...this.tasksByProject, [task.project_id]: [...list, task] };
   }
 
   tasks(pid: string | null): SwarmTask[] {
@@ -589,6 +673,7 @@ class SwarmStore {
   ): Promise<SwarmTask> {
     const created = await api.post<SwarmTask>(`/swarm/projects/${pid}/tasks`, body);
     await this.loadTasks(pid);
+    if (this.tasksError[pid]) this.insertTask(created);
     await this.refreshGraph();
     return created;
   }
@@ -744,12 +829,20 @@ class SwarmStore {
   }
 
   async loadGraph(sid: string): Promise<void> {
+    const seq = ++this.graphSeq;
     this.graphStale = false;
+    this.graphLoading = true;
+    const current = () => this.detail?.id === sid && seq === this.graphSeq;
     try {
       const g = await api.get<SwarmGraph>(`/swarm/swarms/${sid}/graph`);
-      if (this.detail?.id === sid) this.graph = g;
-    } catch {
-      if (this.detail?.id === sid) this.graph = null;
+      if (!current()) return;
+      this.graph = g;
+      this.graphError = null;
+    } catch (e) {
+      // Keep a graph we already have: a failed refresh is not "No work yet".
+      if (current()) this.graphError = loadErrorText(e);
+    } finally {
+      if (seq === this.graphSeq) this.graphLoading = false;
     }
   }
 
@@ -881,14 +974,27 @@ class SwarmStore {
   }
 
   async loadVerification(tid: string): Promise<void> {
+    this.taskGoalsLoading = { ...this.taskGoalsLoading, [tid]: true };
     try {
       const v = await api.get<TaskVerification>(`/swarm/tasks/${tid}/verification`);
       this.verifyByTask[tid] = { running: v.running, task_status: v.task_status };
       this.verifyByTask = { ...this.verifyByTask };
       this.goalsByTask[tid] = v.goals;
       this.goalsByTask = { ...this.goalsByTask };
-    } catch {
-      /* best-effort */
+      if (this.taskGoalsError[tid]) {
+        const next = { ...this.taskGoalsError };
+        delete next[tid];
+        this.taskGoalsError = next;
+      }
+    } catch (e) {
+      // Keep a list we already have. A failed refresh is not "No goals yet".
+      this.taskGoalsError = { ...this.taskGoalsError, [tid]: loadErrorText(e) };
+    } finally {
+      if (this.taskGoalsLoading[tid]) {
+        const next = { ...this.taskGoalsLoading };
+        delete next[tid];
+        this.taskGoalsLoading = next;
+      }
     }
   }
 
@@ -944,11 +1050,21 @@ class SwarmStore {
 
   async loadPresets(): Promise<void> {
     if (this.presets.length) return;
-    try {
-      this.presets = await api.get<SwarmPreset[]>(`/swarm/presets`);
-    } catch {
-      this.presets = [];
-    }
+    if (this.presetsInflight) return this.presetsInflight;
+    this.presetsLoading = true;
+    const run = (async () => {
+      try {
+        this.presets = await api.get<SwarmPreset[]>(`/swarm/presets`);
+        this.presetsError = null;
+      } catch (e) {
+        this.presetsError = loadErrorText(e);
+      } finally {
+        this.presetsLoading = false;
+        this.presetsInflight = null;
+      }
+    })();
+    this.presetsInflight = run;
+    return run;
   }
 
   // -- Live events ----------------------------------------------------------

@@ -8,6 +8,7 @@ import { api, ApiError, authedText, baseUrl, getToken } from '../../../lib/api/c
 import * as design from '../../../lib/api/design';
 import type {
   DesignArtifact,
+  DesignPinnedRef,
   DesignPublish,
   DesignSiteExportReq,
   DesignSiteLocalResp,
@@ -128,15 +129,37 @@ export async function resolveBrand(opts: { projectKitId: string | null; docBrand
   }
 }
 
-/** Resolve one 3D reference for the canvas (title, version, policy, poster). */
-export async function resolveEmbed(uri: string): Promise<EmbedInfo> {
+/** Poster decision recorded on one publish pin.
+ *  - `poster_pinned` and a blob: that captured poster.
+ *  - `poster_pinned` and no blob: the publish pinned the absence — a stand-in.
+ *  - omitted or false: a historical publish that never captured a poster — a
+ *    stand-in. The artifact's current thumbnail is not a substitute. */
+export function pinnedEmbedPoster(ref: Pick<DesignPinnedRef, 'role' | 'poster_pinned' | 'poster_blob'>): { blob: string | null; standIn: boolean } {
+  if (ref.role !== 'embed') return { blob: null, standIn: false };
+  if (ref.poster_pinned === true && ref.poster_blob) return { blob: ref.poster_blob, standIn: false };
+  return { blob: null, standIn: true };
+}
+
+/** Resolve one 3D reference for the live canvas (title, version, policy, poster).
+ *  The live editor uses the artifact's current thumbnail. A publish pin does
+ *  not: a historical pin, or a pin that recorded no poster, stays a stand-in. */
+export async function resolveEmbed(uri: string, pin?: DesignPinnedRef | null): Promise<EmbedInfo> {
   const r = parseRef(uri);
   if (!r) return { title: 'Invalid reference', seq: null, policy: 'follow_approved', poster: null, broken: true };
+  const pinned = pin && pin.role === 'embed' && pin.uri === uri ? pinnedEmbedPoster(pin) : null;
   try {
     const d = await design.getArtifact(r.id);
     const seq = typeof r.sel === 'number' ? r.sel : r.sel === 'latest' ? (d.head?.seq ?? null) : (d.approved?.seq ?? d.head?.seq ?? null);
     let poster: string | null = null;
-    if (d.artifact.thumb_blob) {
+    if (pinned?.standIn) {
+      poster = null;
+    } else if (pinned?.blob) {
+      try {
+        poster = await design.thumbnailUrl(r.id, pinned.blob);
+      } catch {
+        poster = null;
+      }
+    } else if (d.artifact.thumb_blob) {
       try {
         poster = await design.thumbnailUrl(r.id, d.artifact.thumb_blob);
       } catch {

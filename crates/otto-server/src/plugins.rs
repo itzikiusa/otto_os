@@ -181,14 +181,9 @@ impl PluginManager {
         cmd.env("OTTO_HOST_API", &self.host_api_base);
         cmd.env("OTTO_PLUGIN_DATA_DIR", &data_dir);
         cmd.kill_on_drop(true);
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("spawn `{}`: {e}", p.exec.join(" ")))?;
-
-        self.running
-            .lock()
-            .unwrap()
-            .insert(p.slug.clone(), RunningPlugin { port, child });
 
         // Best-effort readiness wait (don't fail the spawn if slow).
         let health = if p.health.is_empty() {
@@ -198,6 +193,15 @@ impl PluginManager {
         };
         let url = format!("http://127.0.0.1:{port}{health}");
         for _ in 0..20 {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("check plugin process: {e}"))?
+            {
+                return Err(format!(
+                    "plugin '{}' exited during startup: {status}",
+                    p.slug
+                ));
+            }
             if self
                 .http
                 .get(&url)
@@ -211,8 +215,42 @@ impl PluginManager {
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("check plugin process: {e}"))?
+        {
+            return Err(format!(
+                "plugin '{}' exited during startup: {status}",
+                p.slug
+            ));
+        }
+        // Keep ownership local during readiness: cancellation or failure kills
+        // the child and cannot leave a stale published port.
+        self.running
+            .lock()
+            .unwrap()
+            .insert(p.slug.clone(), RunningPlugin { port, child });
         tracing::info!(plugin = %p.slug, port, "plugins: sidecar started");
         Ok(port)
+    }
+
+    /// Caller holds the lifecycle lock. Enable only survives a viable startup.
+    async fn enable(&self, slug: &str) -> otto_core::Result<PluginRecord> {
+        let rec = self
+            .repo
+            .get(slug)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("plugin {slug}")))?;
+        self.repo.set_enabled(slug, true).await?;
+        let enabled = PluginRecord {
+            enabled: true,
+            ..rec
+        };
+        if let Err(error) = self.spawn(&enabled).await {
+            self.repo.set_enabled(slug, false).await?;
+            return Err(Error::Internal(format!("spawn: {error}")));
+        }
+        Ok(enabled)
     }
 
     /// Stop a running plugin (kills the child). No-op if not running.
@@ -584,27 +622,7 @@ async fn enable(
     require_root(&user)?;
     crate::auth::require_human(&auth.0)?;
     let _guard = ctx.plugins.lifecycle.lock().await;
-    let rec = ctx
-        .plugins
-        .repo()
-        .get(&slug)
-        .await
-        .map_err(ApiError)?
-        .ok_or_else(|| ApiError(Error::NotFound(format!("plugin {slug}"))))?;
-    ctx.plugins
-        .repo()
-        .set_enabled(&slug, true)
-        .await
-        .map_err(ApiError)?;
-    let enabled = PluginRecord {
-        enabled: true,
-        ..rec
-    };
-    if let Err(e) = ctx.plugins.spawn(&enabled).await {
-        // Roll back the enabled flag if the process won't start.
-        let _ = ctx.plugins.repo().set_enabled(&slug, false).await;
-        return Err(ApiError(Error::Internal(format!("spawn: {e}"))));
-    }
+    let enabled = ctx.plugins.enable(&slug).await.map_err(ApiError)?;
     Ok(Json(enabled))
 }
 
@@ -1075,6 +1093,52 @@ mod proxy_timeout_tests {
         assert!(manager.port_of("fixture").is_none());
         assert!(repo.find_enabled_by_token("old").await.unwrap().is_none());
         assert!(repo.find_enabled_by_token("new").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn exited_plugin_enable_rolls_back_but_slow_live_start_is_allowed() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let repo = PluginsRepo::new(pool);
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PluginManager::new(
+            repo.clone(),
+            tmp.path().join("plugins"),
+            tmp.path().into(),
+            "http://127.0.0.1:1".into(),
+        );
+        for (slug, script) in [("exited", "exit 7"), ("slow", "exec sleep 60")] {
+            repo.upsert(NewPlugin {
+                slug: slug.into(),
+                name: slug.into(),
+                icon: "box".into(),
+                version: "1".into(),
+                description: String::new(),
+                source: tmp.path().to_string_lossy().into(),
+                exec: vec!["/bin/sh".into(), "-c".into(), script.into()],
+                ui_dir: None,
+                health: "/health".into(),
+                token: slug.into(),
+            })
+            .await
+            .unwrap();
+        }
+        let error = manager.enable("exited").await.unwrap_err();
+        assert!(error.to_string().contains("exited"), "{error}");
+        assert!(!repo.get("exited").await.unwrap().unwrap().enabled);
+        assert!(manager.port_of("exited").is_none());
+        let slow = manager.enable("slow").await.unwrap();
+        assert!(slow.enabled);
+        assert!(manager.port_of("slow").is_some());
+        manager.stop("slow").await;
+        assert!(manager.port_of("slow").is_none());
     }
 
     /// A sidecar that accepts and then never answers (the SI-08 hang).

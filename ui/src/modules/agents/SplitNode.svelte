@@ -95,8 +95,9 @@
   function gutterKeydown(e: KeyboardEvent): void {
     if (node.kind !== 'split') return;
     const horizontal = node.axis === 'col';
-    const dec = horizontal ? e.key === 'ArrowLeft' : e.key === 'ArrowUp';
-    const inc = horizontal ? e.key === 'ArrowRight' : e.key === 'ArrowDown';
+    const rtl = el ? getComputedStyle(el).direction === 'rtl' : false;
+    const dec = horizontal ? (rtl ? e.key === 'ArrowRight' : e.key === 'ArrowLeft') : e.key === 'ArrowUp';
+    const inc = horizontal ? (rtl ? e.key === 'ArrowLeft' : e.key === 'ArrowRight') : e.key === 'ArrowDown';
     let next: number | null = null;
     if (dec) next = node.frac - 0.02;
     else if (inc) next = node.frac + 0.02;
@@ -123,8 +124,11 @@
   };
 
   function zoneAt(e: DragEvent): Side | 'centre' {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const px = r.width > 0 ? (e.clientX - r.left) / r.width : 0.5;
+    const target = e.currentTarget as HTMLElement;
+    const r = target.getBoundingClientRect();
+    const rtl = getComputedStyle(target).direction === 'rtl';
+    const rawPx = r.width > 0 ? (e.clientX - r.left) / r.width : 0.5;
+    const px = rtl ? 1 - rawPx : rawPx;
     const py = r.height > 0 ? (e.clientY - r.top) / r.height : 0.5;
     const edge = Math.min(px, 1 - px, py, 1 - py);
     if (edge > 0.25) return 'centre';

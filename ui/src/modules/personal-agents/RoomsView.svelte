@@ -99,11 +99,27 @@
     untrack(() => personalAgents.setActiveRoom(id));
     if (id) untrack(() => void personalAgents.loadMessages(id));
   });
-  // Keep the feed pinned to the latest message — on a NEW newest message
-  // only, so paging older history in doesn't yank the view to the bottom.
+  // Follow the tail only when the reader is already near the bottom.
+  // Paging older history keeps its own scroll position.
+  let atBottom = $state(true);
+  function onFeedScroll(): void {
+    const el = feedEl;
+    if (el) atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  }
+  function jumpLatest(): void {
+    const el = feedEl;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    atBottom = true;
+  }
+  $effect(() => {
+    void selectedId;
+    atBottom = true;
+  });
   $effect(() => {
     void messages.at(-1)?.id;
-    if (feedEl) untrack(() => { if (feedEl) feedEl.scrollTop = feedEl.scrollHeight; });
+    if (!untrack(() => atBottom)) return;
+    untrack(() => { if (feedEl) feedEl.scrollTop = feedEl.scrollHeight; });
   });
 
   function authorName(m: AgentRoomMessage): string {
@@ -176,6 +192,13 @@
 
   async function removeMember(agentId: string): Promise<void> {
     if (!selectedId) return;
+    const name = personalAgents.agent(agentId)?.name ?? 'this agent';
+    const channel = selected?.room.name ?? 'this channel';
+    const ok = await confirmer.ask(
+      `Remove ${name} from ${channel}? They stop posting here. The channel and its messages stay.`,
+      { title: 'Remove from channel', danger: true, confirmLabel: 'Remove' },
+    );
+    if (!ok) return;
     try {
       await personalAgents.removeMember(selectedId, agentId);
     } catch (e) {
@@ -282,10 +305,10 @@
               <AgentAvatar avatar={a?.avatar} name={a?.name ?? '?'} size={18} round />
               <span class="member-name" title={a?.name ?? 'Removed agent'}>{a?.name ?? 'Removed agent'}</span>
               <button
-                class="unlink"
-                aria-label="Remove {a?.name ?? 'this agent'} from the channel"
+                class="icon-btn unlink"
+                aria-label="Remove {a?.name ?? 'this agent'} from {selected.room.name}"
                 title="Remove from channel"
-                onclick={() => removeMember(mid)}><Icon name="x" size={12} /></button>
+                onclick={() => void removeMember(mid)}><Icon name="x" size={12} /></button>
             </span>
           {/each}
           {#if nonMembers.length > 0}
@@ -313,7 +336,8 @@
           </p>
         {/if}
 
-        <div class="feed" bind:this={feedEl} role="log" aria-label="Channel messages" aria-live="polite">
+        <div class="feed-wrap">
+        <div class="feed" bind:this={feedEl} onscroll={onFeedScroll} role="log" aria-label="Channel messages" aria-live="polite">
           <LoadState what="channel messages" loading={personalAgents.messagesLoading[selectedId ?? '']}
             error={personalAgents.messagesError[selectedId ?? '']} empty={messages.length === 0}
             onretry={() => selectedId && void personalAgents.loadMessages(selectedId)}>
@@ -346,6 +370,10 @@
             </div>
           {/each}
           </LoadState>
+        </div>
+        {#if !atBottom && messages.length > 0}
+          <button class="btn small jump" type="button" onclick={jumpLatest}><Icon name="arrowDown" size={12} /> Jump to latest</button>
+        {/if}
         </div>
 
         {#if error}<div class="err" role="alert">{error}</div>{/if}
@@ -397,18 +425,30 @@
   }
   .member-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .unlink {
-    background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 2px;
-    display: inline-flex; align-items: center; border-radius: 50%;
+    color: var(--text-dim);
+    border-radius: 50%;
   }
   .unlink:hover { color: var(--danger); background: var(--hover); }
+  @media (max-width: 640px) {
+    .unlink {
+      min-width: var(--hit-min);
+      min-height: var(--hit-min);
+    }
+  }
   .add-member {
     background: var(--bg); color: var(--text-dim); border: 1px dashed var(--border);
     border-radius: 999px; padding: 2px 8px; font: inherit; font-size: var(--fs-s);
   }
+  .feed-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .feed {
     flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
     border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface); padding: 10px;
   }
+  .jump {
+    position: absolute; inset-inline-start: 50%; bottom: 10px; transform: translateX(-50%);
+    box-shadow: var(--glass-shadow);
+  }
+  :global([dir='rtl']) .jump { transform: translateX(50%); }
   .msg { display: flex; gap: 8px; align-items: flex-start; }
   .earlier { align-self: center; }
   /* Agent-authored: a 2px inline-start rule + an Agent label (patterns.md §2). */

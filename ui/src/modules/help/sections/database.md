@@ -41,8 +41,8 @@ Supported engines: **MySQL**, **PostgreSQL**, **MongoDB**, **Redis** and **Click
 - **Variables**: `:name`, `{name}` or `{{name}}` placeholders get a value and type (string, number, raw) per tab. Otto asks for any missing value when you run.
 - Toolbar: **Save**, **Explain** (a query-plan tree with warnings on costly steps; not for Redis), **Format**, **Ask Otto**, **Ask in English**, **Active database**, **Limit** (100 to 50,000, or All; default 1,000), **Timeout** (MySQL), and **Mask** (the daemon redacts emails, tokens and keys before results leave it).
 - A bare read without its own `LIMIT` gets the row cap added. When results are capped, a **‹ Prev · Next ›** pager appears. It shows an "unordered" hint when there is no `ORDER BY`.
-- **Stop** cancels on the server for MySQL, PostgreSQL, ClickHouse (HTTP transport) and MongoDB (needs the `inprog` and `killop` privileges). For Redis, Stop only drops the request on the client.
-- MongoDB accepts shell-style queries, JSON commands, a SQL subset (translated to find or aggregate), and full **mongosh scripts**. Scripts run through the real `mongosh` CLI, and Otto tells you before you run if it isn't installed.
+- **Stop** cancels on the server for MySQL, PostgreSQL, ClickHouse (HTTP and native transports) and MongoDB (subject to operation-inspection and kill privileges). For Redis, Stop closes the operation's connection; it does not issue a server kill command.
+- MongoDB accepts shell-style queries, JSON commands, a SQL subset (translated to find or aggregate), and full **mongosh scripts**. `db.collection.distinct("field")` runs natively and displays a `value` column. Unsupported shell expressions use the real `mongosh` CLI under the usual write policy; native execution errors are never retried through the shell. Scripts require `mongosh` to be installed.
 
 **Results**
 - Three views: **Grid** (virtualized, resizable and reorderable columns), **Vertical** (one record per block, nested documents expanded) and **JSON** (one object per row). **Auto** clears your pick for the tab.

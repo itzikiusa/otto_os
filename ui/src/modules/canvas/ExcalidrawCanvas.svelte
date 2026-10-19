@@ -26,6 +26,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { CanvasDoc } from './types';
+  import { docFromAssist } from './assistDoc';
   import { buildExcalidrawElements, isSimplified } from './excalidraw-build';
   import { filesForSave, releaseFiles, resolveFiles, sha256Hex } from './canvasFiles';
   import type { ExFile } from './canvasFileRefs';
@@ -223,34 +224,51 @@
   }
 
   /** Ask the agent to edit this scene's canvas.json. The server commits it +
-   *  streams the edit over canvas_updated; the source effect reloads it. */
+   *  streams the edit over canvas_updated; the source effect reloads it. A
+   *  stopped turn, or one that kept a save made while it ran, reloads that
+   *  stored document and does not offer to draw over it. */
   export async function generate(prompt: string): Promise<boolean> {
     const p = prompt.trim();
     if (!p || generating) return false;
     generating = true;
     try {
       const res = await canvas.assist(p);
-      const src = (res as { excalidraw?: unknown }).excalidraw != null
-        ? JSON.stringify((res as { excalidraw?: unknown }).excalidraw)
-        : '';
+      // Read before finishAssistTurn: Undo must not restore the pre-turn board.
+      const kept = canvas.assistKeptSaved(res.note, sceneId);
+      // A stop's body is the scene as read at stop time. Reload the stored
+      // scene instead, so a save that landed after that read is the one shown.
+      if ((res.note ?? '').startsWith('Stopped')) {
+        if (sceneId) await canvas.reloadAfterStop(sceneId);
+        if (canvas.currentId !== sceneId || canvas.saveContext !== saveContext) {
+          toasts.info('Saved changes kept', 'The scene you asked from still has your saved edits.');
+        } else toasts.info('Saved changes kept', res.note || 'Your edits stay on the board.');
+        return true;
+      }
+      const doc = docFromAssist(res, 'excalidraw');
+      const src = doc?.source ?? '';
       if (!src) {
-        toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
+        if (kept) toasts.info('Saved changes kept', 'Your edits stay on the board. A drawing that was only previewed is dropped.');
+        else toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return false;
       }
       // Bound to THIS editor's scene: a switch during the (long) agent turn
       // must not pour the result into the newly-open scene.
       if (canvas.currentId !== sceneId || canvas.saveContext !== saveContext) {
-        toasts.success('Ask Otto finished', 'The drawing was saved to the scene you asked from.');
+        if (kept) toasts.info('Saved changes kept', 'The scene you asked from still has your saved edits.');
+        else toasts.success('Ask Otto finished', 'The drawing was saved to the scene you asked from.');
         return true;
       }
-      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'excalidraw', source: src }, sceneId);
-      toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
+      // ingestDoc drops a source that is not the document saved during this turn.
+      const applied = canvas.ingestDoc(doc!, sceneId);
+      if (kept) toasts.info('Saved changes kept', res.note || 'Your edits stay on the board.');
+      else if (applied) toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
       return true;
     } catch (e) {
       toastError('Couldn’t ask Otto', e);
       return false;
     } finally {
+      canvas.finishAssistTurn(sceneId);
       generating = false;
     }
   }

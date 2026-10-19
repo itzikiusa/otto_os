@@ -446,8 +446,13 @@ async fn update_connection<S: ConnectionsCtx>(
     let replacing_secret = req.secret.is_some();
     let updated = ctx.connections().update(&id, &user.id, req).await?;
     if replacing_secret {
-        if let (Some(tester), Some(secret_ref)) = (ctx.db_tester(), updated.secret_ref.as_deref()) {
-            tester.forget_secret(secret_ref);
+        if let Some(tester) = ctx.db_tester() {
+            for key in [conn.secret_ref.as_deref(), updated.secret_ref.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                tester.forget_secret(key);
+            }
         }
     }
     Ok(Json(updated))
@@ -728,7 +733,7 @@ async fn sftp_list<S: ConnectionsCtx>(
     Query(q): Query<SftpPathQuery>,
 ) -> ApiResult<Json<SftpListResp>> {
     let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Viewer, "sftp_read").await?;
-    let path = match q.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    let path = match q.path.as_deref().filter(|p| !p.is_empty()) {
         Some(p) => p.to_string(),
         None => sftp.pwd().await.map_err(ApiErr)?,
     };
@@ -890,7 +895,6 @@ async fn sftp_read<S: ConnectionsCtx>(
     let remote = q
         .path
         .as_deref()
-        .map(str::trim)
         .filter(|p| !p.is_empty())
         .ok_or_else(|| ApiErr(Error::Invalid("'path' is required".into())))?;
 

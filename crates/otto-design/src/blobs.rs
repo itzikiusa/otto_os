@@ -100,6 +100,44 @@ impl BlobStore {
             .map_err(|_| Error::NotFound(format!("design blob {sha}")))
     }
 
+    /// Inspect length before allocating an export buffer.
+    pub async fn size(&self, sha: &str) -> Result<u64> {
+        tokio::fs::metadata(self.path(sha)?)
+            .await
+            .map(|m| m.len())
+            .map_err(|_| Error::NotFound(format!("design blob {sha}")))
+    }
+
+    /// Bounded read even if an externally modified file grows after stat.
+    pub async fn get_limited(&self, sha: &str, cap: usize) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let file = tokio::fs::File::open(self.path(sha)?)
+            .await
+            .map_err(|_| Error::NotFound(format!("design blob {sha}")))?;
+        if file
+            .metadata()
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?
+            .len()
+            > cap as u64
+        {
+            return Err(Error::PayloadTooLarge(
+                "design asset exceeds its export budget".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(cap as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| Error::Internal(format!("read design asset: {e}")))?;
+        if bytes.len() > cap {
+            return Err(Error::PayloadTooLarge(
+                "design asset exceeds its export budget".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub async fn exists(&self, sha: &str) -> bool {
         match self.path(sha) {
             Ok(p) => tokio::fs::try_exists(&p).await.unwrap_or(false),
@@ -265,5 +303,16 @@ mod tests {
         assert!(!store.exists("ABC").await);
         assert!(is_sha(&sha256_hex(b"")));
         assert!(!is_sha(&sha256_hex(b"").to_uppercase()));
+    }
+    #[tokio::test]
+    async fn bounded_asset_read_rejects_before_allocating_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = BlobStore::new(dir.path());
+        let sha = b.put(b"12345").await.unwrap();
+        assert!(matches!(
+            b.get_limited(&sha, 4).await,
+            Err(Error::PayloadTooLarge(_))
+        ));
+        assert_eq!(b.get_limited(&sha, 5).await.unwrap(), b"12345");
     }
 }

@@ -166,6 +166,9 @@ pub struct PersonalAgentRun {
     #[serde(default)]
     pub read_only: bool,
     pub created_at: String,
+    /// Set only on the in-memory run returned by a proactive admit. Not stored.
+    #[serde(skip)]
+    pub proactive_stamp: Option<ProactiveStampClaim>,
 }
 
 /// Per-agent autonomy config (`personal_agent_autonomy.config_json`, 0153):
@@ -226,6 +229,24 @@ impl Default for StandingGoal {
             last_run_at: None,
         }
     }
+}
+
+/// Terminal note for a proactive run whose session never started. The daily
+/// budget count ignores exactly this row, so the occurrence can be tried again.
+const STOPPED_BEFORE_SESSION: &str = "stopped before the session started";
+
+/// Rows that spend the proactive daily budget. `error IS` is required:
+/// `error =` is UNKNOWN when `error` is NULL, and `NOT (UNKNOWN)` then drops
+/// an ordinary failed row from the count.
+const PROACTIVE_RUN_SPENDS_BUDGET: &str =
+    "NOT (status = 'error' AND session_id IS NULL AND error IS ?)";
+
+/// The goal stamp a proactive admission replaced, and the stamp it wrote.
+/// Release restores `previous` only while the goal still shows `admitted`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProactiveStampClaim {
+    pub previous: Option<String>,
+    pub admitted: String,
 }
 
 /// A plain-language rule, injected into the agent's instructions and — where
@@ -470,6 +491,7 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<PersonalAgentRun> {
         goal_id: r.try_get("goal_id").unwrap_or(None),
         read_only: r.try_get::<i64, _>("read_only").unwrap_or(0) != 0,
         created_at: r.get("created_at"),
+        proactive_stamp: None,
     })
 }
 
@@ -932,6 +954,7 @@ impl PersonalAgentsRepo {
                 "scheduled dispatch requires its captured schedule".into(),
             ));
         }
+        let mut proactive_claim = None;
         if mode == "proactive" {
             let raw: Option<String> = sqlx::query_scalar(
                 "SELECT config_json FROM personal_agent_autonomy WHERE agent_id = ?",
@@ -944,8 +967,19 @@ impl PersonalAgentsRepo {
                 .and_then(|raw| serde_json::from_str(&raw).ok())
                 .unwrap_or_default();
             let since = fmt(Utc::now() - chrono::Duration::hours(24));
-            let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM personal_agent_runs WHERE agent_id = ? AND mode = 'proactive' AND started_at >= ?")
-                .bind(&agent.id).bind(since).fetch_one(&mut *tx).await.map_err(dberr("check proactive admission budget"))?;
+            // A row released before any session existed is not a spent run.
+            // An ordinary failure whose error is NULL still spends the budget.
+            let budget_sql = format!(
+                "SELECT COUNT(*) FROM personal_agent_runs WHERE agent_id = ? AND mode = 'proactive' \
+                 AND started_at >= ? AND {PROACTIVE_RUN_SPENDS_BUDGET}"
+            );
+            let used: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(budget_sql.as_str()))
+                .bind(&agent.id)
+                .bind(since)
+                .bind(STOPPED_BEFORE_SESSION)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(dberr("check proactive admission budget"))?;
             if used >= i64::from(cfg.proactive.runs_per_day.clamp(1, 24)) {
                 return Err(otto_core::Error::Conflict(
                     "proactive daily budget is exhausted".into(),
@@ -958,14 +992,23 @@ impl PersonalAgentsRepo {
                     "proactive goal is no longer enabled".into(),
                 ));
             };
-            goal.last_run_at = Some(fmt(Utc::now()));
+            // Captured in this transaction, after any edit that landed before
+            // admission. A stop before a session restores this value only while
+            // the goal still shows the stamp written here.
+            let previous = goal.last_run_at.clone();
+            let admitted = fmt(Utc::now());
+            // Moves round-robin on even if a started run later fails. A stop
+            // before any session puts this field back via
+            // `release_unstarted_proactive_goal` and does not spend the day.
+            goal.last_run_at = Some(admitted.clone());
+            proactive_claim = Some(ProactiveStampClaim { previous, admitted });
             sqlx::query("UPDATE personal_agent_autonomy SET config_json = ?, updated_at = ? WHERE agent_id = ?")
                 .bind(serde_json::to_string(&cfg).map_err(|e| otto_core::Error::Internal(e.to_string()))?).bind(fmt(Utc::now())).bind(&agent.id)
                 .execute(&mut *tx).await.map_err(dberr("claim proactive goal"))?;
         }
         sqlx::query("UPDATE personal_agents SET admission_generation = admission_generation + 1 WHERE id = ?")
             .bind(&agent.id).execute(&mut *tx).await.map_err(dberr("consume personal agent dispatch"))?;
-        let run = Self::insert_run(
+        let mut run = Self::insert_run(
             &mut tx,
             id,
             NewAgentRun {
@@ -979,6 +1022,7 @@ impl PersonalAgentsRepo {
             goal_id,
         )
         .await?;
+        run.proactive_stamp = proactive_claim;
         tx.commit()
             .await
             .map_err(dberr("commit personal agent admission"))?;
@@ -986,6 +1030,91 @@ impl PersonalAgentsRepo {
             autonomy_cache::invalidate(self.pool.id(), &agent.id);
         }
         Ok(run)
+    }
+
+    /// Give back a proactive goal stamp when the admitted run never started.
+    ///
+    /// Admission writes `goal.last_run_at` in the same transaction as the
+    /// `running` row, before a session exists. While that run is still
+    /// `running`, `mode` is `proactive`, `goal_id` matches, and `session_id`
+    /// is null, this marks it `error` (`stopped before the session started`)
+    /// and restores `claim.previous` on that goal only when the goal still
+    /// shows `claim.admitted`. A stamp written after admission is left alone.
+    /// The busy check then clears and the daily budget ignores the row. A
+    /// session means the turn may have started: the stamp and the row stay.
+    /// Other goals and the rest of the config are kept from the row read in
+    /// this transaction. Returns whether the unstarted row was released.
+    pub async fn release_unstarted_proactive_goal(
+        &self,
+        run_id: &str,
+        agent_id: &str,
+        goal_id: &str,
+        claim: &ProactiveStampClaim,
+    ) -> Result<bool> {
+        let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin unstarted proactive release"))?;
+        let stopped = sqlx::query(
+            "UPDATE personal_agent_runs SET status = 'error', error = ?, finished_at = ?
+             WHERE id = ? AND agent_id = ? AND status = 'running' AND session_id IS NULL
+               AND mode = 'proactive' AND goal_id = ?",
+        )
+        .bind(STOPPED_BEFORE_SESSION)
+        .bind(&now)
+        .bind(run_id)
+        .bind(agent_id)
+        .bind(goal_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("stop unstarted proactive run"))?;
+        if stopped.rows_affected() != 1 {
+            tx.commit()
+                .await
+                .map_err(dberr("commit unstarted proactive release"))?;
+            return Ok(false);
+        }
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT config_json FROM personal_agent_autonomy WHERE agent_id = ?",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(dberr("read proactive release config"))?;
+        if let Some(raw) = raw {
+            if let Ok(mut cfg) = serde_json::from_str::<AgentAutonomy>(&raw) {
+                if let Some(goal) = cfg.goals.iter_mut().find(|goal| goal.id == goal_id) {
+                    if goal.last_run_at.as_deref() != Some(claim.admitted.as_str()) {
+                        tx.commit()
+                            .await
+                            .map_err(dberr("commit unstarted proactive release"))?;
+                        autonomy_cache::invalidate(self.pool.id(), agent_id);
+                        return Ok(true);
+                    }
+                    goal.last_run_at = claim.previous.clone();
+                    let body = serde_json::to_string(&cfg)
+                        .map_err(|e| otto_core::Error::Internal(format!("autonomy json: {e}")))?;
+                    sqlx::query(
+                        "UPDATE personal_agent_autonomy SET config_json = ?, updated_at = ?
+                         WHERE agent_id = ? AND config_json = ?",
+                    )
+                    .bind(&body)
+                    .bind(&now)
+                    .bind(agent_id)
+                    .bind(&raw)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(dberr("restore proactive goal stamp"))?;
+                }
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(dberr("commit unstarted proactive release"))?;
+        autonomy_cache::invalidate(self.pool.id(), agent_id);
+        Ok(true)
     }
 
     // -- Runs ----------------------------------------------------------------
@@ -1127,6 +1256,7 @@ impl PersonalAgentsRepo {
         let q = format!(
             "SELECT agent_id, COUNT(*) AS n FROM personal_agent_runs \
              WHERE agent_id IN ({}) AND mode = 'proactive' AND started_at >= ? \
+             AND {PROACTIVE_RUN_SPENDS_BUDGET} \
              GROUP BY agent_id",
             vec!["?"; agent_ids.len()].join(",")
         );
@@ -1136,6 +1266,7 @@ impl PersonalAgentsRepo {
         }
         let rows = query
             .bind(since)
+            .bind(STOPPED_BEFORE_SESSION)
             .fetch_all(&self.pool)
             .await
             .map_err(dberr("count proactive personal agent runs"))?;
@@ -1817,6 +1948,390 @@ mod tests {
             assert!(current.last_run_at.is_none());
             assert_eq!(current.schedule, replacement);
         }
+    }
+
+    /// A scheduled admit claims the generation and leaves `last_run_at` unset.
+    /// `once` therefore stays unfired, and a recurring cadence stays due for
+    /// the same occurrence until completion settles the cursor. Reap does not
+    /// settle either.
+    #[tokio::test]
+    async fn scheduled_admit_leaves_the_occurrence_unfired() {
+        let (repo, agent, captured) = recovery_schedule().await;
+        let run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                Some(&captured),
+                "schedule",
+                "directed",
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.status, "running");
+        assert!(run.session_id.is_none());
+        let schedule = repo.get_schedule(&captured.id).await.unwrap();
+        assert!(schedule.last_run_at.is_none());
+        assert!(schedule.enabled);
+        assert_eq!(repo.reap_running().await.unwrap(), 1);
+        let schedule = repo.get_schedule(&captured.id).await.unwrap();
+        assert!(schedule.last_run_at.is_none());
+        assert!(schedule.enabled);
+    }
+
+    /// A proactive admit stamps the goal before a session exists. Releasing
+    /// that unstarted row restores only the previous stamp, keeps a sibling
+    /// goal and a later text edit, and does not spend the daily budget. A
+    /// session keeps the stamp.
+    #[tokio::test]
+    async fn unstarted_proactive_goal_restores_its_previous_stamp() {
+        let p = pool().await;
+        seed_ws(&p, "proactive-release").await;
+        let repo = PersonalAgentsRepo::new(p);
+        let agent = repo
+            .create(new_agent("proactive-release", "Agent"))
+            .await
+            .unwrap();
+        let previous = "2026-10-01T00:00:00+00:00";
+        let mut cfg = AgentAutonomy {
+            proactive: ProactiveConfig {
+                enabled: true,
+                runs_per_day: 1,
+                ..ProactiveConfig::default()
+            },
+            goals: vec![
+                StandingGoal {
+                    id: "g1".into(),
+                    text: "watch".into(),
+                    enabled: true,
+                    last_run_at: Some(previous.into()),
+                },
+                StandingGoal {
+                    id: "g2".into(),
+                    text: "other".into(),
+                    enabled: true,
+                    last_run_at: Some("2026-10-02T00:00:00+00:00".into()),
+                },
+            ],
+            ..AgentAutonomy::default()
+        };
+        repo.save_autonomy(&agent.id, &cfg).await.unwrap();
+        // The autonomy insert advances admission_generation, so the create() snapshot is stale.
+        let agent = repo.get(&agent.id).await.unwrap();
+        let run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g1"),
+            )
+            .await
+            .unwrap();
+        let stamped = repo.autonomy(&agent.id).await.unwrap();
+        assert_ne!(stamped.goals[0].last_run_at.as_deref(), Some(previous));
+        assert!(stamped.goals[0].last_run_at.is_some());
+        cfg = stamped;
+        cfg.goals[0].text = "edited".into();
+        repo.save_autonomy(&agent.id, &cfg).await.unwrap();
+        assert_eq!(
+            repo.count_proactive_runs_since(&[&agent.id], "2020-01-01T00:00:00+00:00")
+                .await
+                .unwrap()
+                .get(&agent.id),
+            Some(&1)
+        );
+        let claim = run
+            .proactive_stamp
+            .clone()
+            .expect("admit records its stamp");
+        assert_eq!(claim.previous.as_deref(), Some(previous));
+        assert!(repo
+            .release_unstarted_proactive_goal(&run.id, &agent.id, "g1", &claim)
+            .await
+            .unwrap());
+        let restored = repo.autonomy(&agent.id).await.unwrap();
+        assert_eq!(restored.goals[0].last_run_at.as_deref(), Some(previous));
+        assert_eq!(restored.goals[0].text, "edited");
+        assert_eq!(
+            restored.goals[1].last_run_at.as_deref(),
+            Some("2026-10-02T00:00:00+00:00")
+        );
+        let released = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(released.status, "error");
+        assert_eq!(released.error.as_deref(), Some(STOPPED_BEFORE_SESSION));
+        assert!(!repo
+            .count_proactive_runs_since(&[&agent.id], "2020-01-01T00:00:00+00:00")
+            .await
+            .unwrap()
+            .contains_key(&agent.id));
+        let agent = repo.get(&agent.id).await.unwrap();
+        assert!(repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g1"),
+            )
+            .await
+            .is_ok());
+
+        let started = repo
+            .admit_captured_run(
+                &new_id(),
+                &repo.get(&agent.id).await.unwrap(),
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g2"),
+            )
+            .await;
+        // That counted admit is still running, so another goal is refused.
+        // The session case uses its own agent below.
+        assert!(matches!(started, Err(otto_core::Error::Conflict(_))));
+
+        let other = repo
+            .create(new_agent("proactive-release", "Other"))
+            .await
+            .unwrap();
+        let mut held = AgentAutonomy::default();
+        held.proactive.enabled = true;
+        held.proactive.runs_per_day = 4;
+        held.goals.push(StandingGoal {
+            id: "g1".into(),
+            text: "watch".into(),
+            last_run_at: Some(previous.into()),
+            ..StandingGoal::default()
+        });
+        repo.save_autonomy(&other.id, &held).await.unwrap();
+        let other = repo.get(&other.id).await.unwrap();
+        let live = repo
+            .admit_captured_run(
+                &new_id(),
+                &other,
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g1"),
+            )
+            .await
+            .unwrap();
+        repo.set_run_session(&live.id, "sess").await.unwrap();
+        let live_claim = live
+            .proactive_stamp
+            .clone()
+            .expect("admit records its stamp");
+        assert!(!repo
+            .release_unstarted_proactive_goal(&live.id, &other.id, "g1", &live_claim)
+            .await
+            .unwrap());
+        let kept = repo.autonomy(&other.id).await.unwrap();
+        assert_ne!(kept.goals[0].last_run_at.as_deref(), Some(previous));
+        assert_eq!(repo.get_run(&live.id).await.unwrap().status, "running");
+    }
+
+    /// Edits on either side of admission keep the stamp that belongs there.
+    /// A caller snapshot from before `save_autonomy` is refused. Admission
+    /// then records the stamp it actually replaced, and a later edit survives
+    /// release. An ordinary failed row whose error is NULL still spends the
+    /// daily budget; the exact never-started marker does not.
+    #[tokio::test]
+    async fn proactive_release_keeps_a_newer_stamp_and_counts_null_errors() {
+        let p = pool().await;
+        seed_ws(&p, "proactive-stamp").await;
+        let repo = PersonalAgentsRepo::new(p.clone());
+        let agent = repo
+            .create(new_agent("proactive-stamp", "Agent"))
+            .await
+            .unwrap();
+        let before = "2026-10-01T00:00:00+00:00";
+        let moved_before = "2026-10-08T00:00:00+00:00";
+        let moved_after = "2099-01-01T00:00:00+00:00";
+        let mut cfg = AgentAutonomy {
+            proactive: ProactiveConfig {
+                enabled: true,
+                runs_per_day: 4,
+                ..ProactiveConfig::default()
+            },
+            goals: vec![StandingGoal {
+                id: "g1".into(),
+                text: "watch".into(),
+                last_run_at: Some(before.into()),
+                ..StandingGoal::default()
+            }],
+            ..AgentAutonomy::default()
+        };
+        repo.save_autonomy(&agent.id, &cfg).await.unwrap();
+        // This snapshot still names the first stamp. The next save moves it.
+        let stale = repo.get(&agent.id).await.unwrap();
+        cfg.goals[0].last_run_at = Some(moved_before.into());
+        repo.save_autonomy(&agent.id, &cfg).await.unwrap();
+        let stale_admit = repo
+            .admit_captured_run(
+                &new_id(),
+                &stale,
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g1"),
+            )
+            .await;
+        assert!(matches!(
+            stale_admit,
+            Err(otto_core::Error::Conflict(message)) if message.contains("stale")
+        ));
+        assert_eq!(
+            repo.autonomy(&agent.id).await.unwrap().goals[0]
+                .last_run_at
+                .as_deref(),
+            Some(moved_before)
+        );
+
+        let agent = repo.get(&agent.id).await.unwrap();
+        let run = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g1"),
+            )
+            .await
+            .unwrap();
+        let claim = run
+            .proactive_stamp
+            .clone()
+            .expect("admit records its stamp");
+        assert_eq!(claim.previous.as_deref(), Some(moved_before));
+        assert_ne!(claim.previous.as_deref(), Some(before));
+        assert_eq!(
+            repo.autonomy(&agent.id).await.unwrap().goals[0]
+                .last_run_at
+                .as_deref(),
+            Some(claim.admitted.as_str())
+        );
+        assert!(repo
+            .release_unstarted_proactive_goal(&run.id, &agent.id, "g1", &claim)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.autonomy(&agent.id).await.unwrap().goals[0]
+                .last_run_at
+                .as_deref(),
+            Some(moved_before),
+            "release restores the stamp admission read, not an older caller snapshot"
+        );
+
+        let agent = repo.get(&agent.id).await.unwrap();
+        let again = repo
+            .admit_captured_run(
+                &new_id(),
+                &agent,
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g1"),
+            )
+            .await
+            .unwrap();
+        let again_claim = again
+            .proactive_stamp
+            .clone()
+            .expect("admit records its stamp");
+        assert_eq!(again_claim.previous.as_deref(), Some(moved_before));
+        let mut newer = repo.autonomy(&agent.id).await.unwrap();
+        newer.goals[0].last_run_at = Some(moved_after.into());
+        repo.save_autonomy(&agent.id, &newer).await.unwrap();
+        assert!(repo
+            .release_unstarted_proactive_goal(&again.id, &agent.id, "g1", &again_claim)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.autonomy(&agent.id).await.unwrap().goals[0]
+                .last_run_at
+                .as_deref(),
+            Some(moved_after)
+        );
+        assert_eq!(repo.get_run(&again.id).await.unwrap().status, "error");
+
+        let now = fmt(Utc::now());
+        let null_error_id = new_id();
+        sqlx::query(
+            "INSERT INTO personal_agent_runs (id, agent_id, workspace_id, status, trigger, \
+             started_at, summary, delivered, created_at, mode, read_only, error) \
+             VALUES (?, ?, ?, 'error', 'proactive', ?, '', 0, ?, 'proactive', 1, NULL)",
+        )
+        .bind(&null_error_id)
+        .bind(&agent.id)
+        .bind(&agent.workspace_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&p)
+        .await
+        .unwrap();
+        let stored_error: Option<String> =
+            sqlx::query_scalar("SELECT error FROM personal_agent_runs WHERE id = ?")
+                .bind(&null_error_id)
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        assert!(stored_error.is_none());
+        sqlx::query(
+            "INSERT INTO personal_agent_runs (id, agent_id, workspace_id, status, trigger, \
+             started_at, summary, delivered, created_at, mode, read_only, error, session_id) \
+             VALUES (?, ?, ?, 'error', 'proactive', ?, '', 0, ?, 'proactive', 1, ?, NULL)",
+        )
+        .bind(new_id())
+        .bind(&agent.id)
+        .bind(&agent.workspace_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(STOPPED_BEFORE_SESSION)
+        .execute(&p)
+        .await
+        .unwrap();
+        let counts = repo
+            .count_proactive_runs_since(&[&agent.id], "2020-01-01T00:00:00+00:00")
+            .await
+            .unwrap();
+        assert_eq!(counts.get(&agent.id), Some(&1));
+
+        cfg.proactive.runs_per_day = 1;
+        cfg.goals[0].last_run_at = Some(moved_after.into());
+        repo.save_autonomy(&agent.id, &cfg).await.unwrap();
+        let refused = repo
+            .admit_captured_run(
+                &new_id(),
+                &repo.get(&agent.id).await.unwrap(),
+                None,
+                "proactive",
+                "proactive",
+                true,
+                Some("g1"),
+            )
+            .await;
+        assert!(matches!(
+            refused,
+            Err(otto_core::Error::Conflict(message)) if message.contains("daily budget")
+        ));
+        assert_eq!(
+            repo.autonomy(&agent.id).await.unwrap().goals[0]
+                .last_run_at
+                .as_deref(),
+            Some(moved_after)
+        );
     }
 
     /// A content-only edit while a run is in flight must not orphan that

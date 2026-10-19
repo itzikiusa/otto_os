@@ -83,6 +83,7 @@ pub struct SiteDoc {
     pub version: i64,
     pub title: String,
     /// `otto://design/<brand kit>[@…]` (a `uses_tokens` link).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub brand: Option<String>,
     pub settings: Settings,
     pub pages: Vec<Page>,
@@ -117,6 +118,9 @@ pub struct Section {
     pub style: Style,
     pub responsive: Responsive,
     pub blocks: Vec<Block>,
+    /// Absent when the section was authored here. Serializing `None` as JSON
+    /// null makes the export-time re-check treat provenance as a bad URI.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub derived_from: Option<String>,
     pub hidden: bool,
 }
@@ -236,5 +240,28 @@ mod tests {
             "hidden sections are never rendered, so never pinned"
         );
         assert!(SiteDoc::parse(b"{\"type\":\"nope\",\"version\":1}").is_err());
+    }
+
+    #[test]
+    fn typed_round_trip_omits_absent_provenance_and_stays_valid() {
+        let raw = serde_json::json!({
+            "type": "otto-site", "version": 1,
+            "pages": [{ "id": "home", "title": "Home", "slug": "", "sections": [
+                { "id": "hero", "block": "hero/split" },
+                { "id": "faq", "block": "faq/accordion",
+                  "derived_from": "otto://design/SITE2@v12#faq" }
+            ]}]
+        });
+        let doc = SiteDoc::parse(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let again = serde_json::to_value(&doc).unwrap();
+        assert!(again.get("brand").is_none());
+        assert!(again["pages"][0]["sections"][0]
+            .get("derived_from")
+            .is_none());
+        assert_eq!(
+            again["pages"][0]["sections"][1]["derived_from"],
+            "otto://design/SITE2@v12#faq"
+        );
+        crate::site::validate(&again).expect("typed round trip stays valid");
     }
 }

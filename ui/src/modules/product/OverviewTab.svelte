@@ -1828,7 +1828,7 @@
                     aria-expanded={!collapsed.attachments}
                   >
                     <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed.attachments ? 'chevronRight' : 'chevronDown'} size={12} /></span>
-                    <span class="jira-section-label">Attachments</span>
+                    <span class="jira-section-label">Jira attachments</span>
                     <span class="section-count">({issueFull.attachments.length})</span>
                   </button>
                   {#if !collapsed.attachments}

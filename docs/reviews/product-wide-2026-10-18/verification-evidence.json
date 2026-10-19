@@ -1,0 +1,885 @@
+{
+  "note": "Recorded root-executed results, not a final-snapshot release verdict. Tests ran at different worktree states; attribution and limits are per entry. Original logs were hashed when collected; summaries are retained durably here.",
+  "results": [
+    {
+      "name": "git-lib",
+      "command": "cargo test -p otto-git --lib",
+      "log_sha256": "cecaeafe3e648e85f4332afc4bdcb1f7877aafc4476812eec4368426df91687a",
+      "log_bytes": 29898,
+      "log_mtime_utc": "2026-10-18T17:53:23.706490+00:00",
+      "original_log": "/tmp/otto-product-wide-git-lib.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s",
+        "test result: ok. 408 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 50.07s"
+      ],
+      "boundary": "Before extraction of the unchanged inline local tests; final gate still required."
+    },
+    {
+      "name": "sessions-lib",
+      "command": "cargo test -p otto-sessions --lib",
+      "log_sha256": "beb5c96f70a6ce13314b27115fcaf4c55e58a97498cfeb399028b9e24787eb16",
+      "log_bytes": 20804,
+      "log_mtime_utc": "2026-10-18T18:06:21.873221+00:00",
+      "original_log": "/tmp/otto-product-wide-sessions-lib.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.34s",
+        "test result: ok. 269 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.18s"
+      ],
+      "boundary": "Includes extracted manager tests and capture/grid followups."
+    },
+    {
+      "name": "workflows-lib",
+      "command": "cargo test -p otto-workflows --lib -- --test-threads=2",
+      "log_sha256": "c150e8d71d59178bb30be7563d7436def2d1266f09f5867465dd94ec9b7f4350",
+      "log_bytes": 5424,
+      "log_mtime_utc": "2026-10-18T18:10:18.592660+00:00",
+      "original_log": "/tmp/otto-product-wide-workflows-lib.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.17s",
+        "test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s"
+      ],
+      "boundary": "Library only; server integration tests are separate."
+    },
+    {
+      "name": "core-proof",
+      "command": "cargo test -p otto-core --lib proof::tests -- --test-threads=2",
+      "log_sha256": "cc57d88c56e11de14b47e235a821ba5f12b64799dab689c95737258683188998",
+      "log_bytes": 2301,
+      "log_mtime_utc": "2026-10-18T18:04:41.519057+00:00",
+      "original_log": "/tmp/otto-root-core-proof.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.57s",
+        "test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 156 filtered out; finished in 0.00s"
+      ],
+      "boundary": "Core proof predicate tests only."
+    },
+    {
+      "name": "state-reviews",
+      "command": "cargo test -p otto-state --lib reviews::tests -- --test-threads=2",
+      "log_sha256": "e761c1b5d95142be3963b333e59409cb516d0db6803e1ccac00e5aaba2b7f937",
+      "log_bytes": 1689,
+      "log_mtime_utc": "2026-10-18T18:04:56.139691+00:00",
+      "original_log": "/tmp/otto-root-state-reviews.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.50s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 454 filtered out; finished in 5.06s"
+      ],
+      "boundary": "Substring includes five skill_reviews tests."
+    },
+    {
+      "name": "ui-unit",
+      "command": "npm run test:unit",
+      "log_sha256": "e47a5f97b9cee35de4448f877bb1ac89fc6f21898742815aea7ddc76b0cc5a2b",
+      "log_bytes": 414948,
+      "log_mtime_utc": "2026-10-18T18:16:42.323709+00:00",
+      "original_log": "/tmp/otto-product-wide-ui-unit.log",
+      "summary": [
+        "# tests 2037",
+        "# pass 2037",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0",
+        "# todo 0",
+        "# duration_ms 20683.667334"
+      ],
+      "boundary": "2037 tests; later UI edits need affected verification."
+    },
+    {
+      "name": "server-test-compilation",
+      "command": "cargo check -p otto-server --tests",
+      "log_sha256": "c018b6a4c5114d57c0ce615d5f66856f30fef901a19d2392f4f0504891b08334",
+      "log_bytes": 152,
+      "log_mtime_utc": "2026-10-18T18:27:58.033757+00:00",
+      "original_log": "/tmp/otto-product-wide-server-check.log",
+      "summary": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 06s"
+      ],
+      "boundary": "Compilation only, no tests executed."
+    },
+    {
+      "name": "session-dialog-browser",
+      "command": "OTTO_E2E_SLOT=19 OTTO_E2E_PORT=7811 OTTO_E2E_PW_PORT=5191 OTTO_E2E_SWEEP_ORPHANS=0 OTTO_E2E_BIN=/Users/itziklavon/otto_os/target/debug/ottod npx playwright test e2e/desktop-new-session-sizing.spec.ts --project=desktop-browser --workers=2",
+      "log_sha256": "c6ce179eb8afbe56b7ce66f22c60381ac8f61a39e36d71bf40836baaeb7db537",
+      "log_bytes": 6008,
+      "log_mtime_utc": "2026-10-18T18:23:37.353771+00:00",
+      "original_log": "/tmp/otto-product-wide-sizing-browser-touch.log",
+      "summary": [
+        "  4 passed (8.6s)"
+      ],
+      "boundary": "Current UI on older isolated debug daemon; not current Rust verification."
+    },
+    {
+      "name": "server-budget",
+      "command": "cargo test -p otto-server --lib routes::usage::budget_admission_tests -- --test-threads=2",
+      "original_log": "/tmp/otto-root-server-budget-tests.log",
+      "log_sha256": "d40330d42774032900618b1bf179a39179b36202851cf6da511ff5e9b083e435",
+      "log_mtime_utc": "2026-10-18T18:34:41.228626+00:00",
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1087 filtered out; finished in 0.24s"
+      ],
+      "boundary": "One budget admission regression passed. Linker warned __eh_frame exceeds compact-unwind size; no Rust source warning."
+    },
+    {
+      "name": "server-focused",
+      "command": "target/debug/deps/otto_server-213a8ae94c9fc390 [focused filters listed in coordination.md] --test-threads=2",
+      "original_log": "/tmp/otto-root-server-focused-tests.log",
+      "log_sha256": "03c4f45cd536a66e7b52ffb1873a210d5503ff155a030a375088bac76195a436",
+      "log_mtime_utc": "2026-10-18T18:35:36.530328+00:00",
+      "summary": [
+        "thread 'agent_session::lifecycle::tests::tracked_startup_cancellation_drains_created_and_resumed_cleanup' (54252731) panicked at crates/otto-server/src/agent_session_lifecycle.rs:444:13:",
+        "test result: FAILED. 72 passed; 1 failed; 0 ignored; 0 measured; 1015 filtered out; finished in 8.47s"
+      ],
+      "boundary": "72 passed, one lifecycle cleanup failed; not a passing gate. Narrow manager repair authored after this binary was built; rerun required."
+    },
+    {
+      "name": "sessions-after-kill-retirement",
+      "command": "target/debug/deps/otto_sessions-3bb23b831aee4967 --test-threads=2",
+      "log_sha256": "765fe4d53e83aaef178d168669bda8af706e6f56eac373cb4a3608fc32c44ab0",
+      "summary": [
+        "test result: ok. 270 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.23s"
+      ],
+      "boundary": "Rebuilt sessions library after kill retirement fix. Server startup cancellation requires relink and rerun. Earlier sessions log at same temporary path is superseded."
+    },
+    {
+      "name": "server-lifecycle-repaired",
+      "command": "cargo test -p otto-server --lib agent_session::lifecycle::tests -- --test-threads=2",
+      "log_sha256": "7bc45b7109a45e433635aea040f08c3bc5efb98f74145739c458a2074fdf6055",
+      "summary": [
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1082 filtered out; finished in 1.26s"
+      ],
+      "boundary": "Six tests passed after sessions retirement fix, including previously failing case."
+    },
+    {
+      "name": "server-focused-repaired",
+      "command": "target/debug/deps/otto_server-213a8ae94c9fc390 [focused filters plus budget] --test-threads=2",
+      "log_sha256": "1ceaf8e8185da436a2fbfb69271e8d64b1ea12c2f3daa7f72ba9ad454e42c0e1",
+      "summary": [
+        "test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 1014 filtered out; finished in 7.80s"
+      ],
+      "boundary": "74 passed. Replaces prior failing focused batch at same temporary log path. Final workspace gate still required."
+    },
+    {
+      "name": "server-lib-all",
+      "command": "target/debug/deps/otto_server-213a8ae94c9fc390 --test-threads=2",
+      "original_log": "/tmp/otto-root-server-lib-all.log",
+      "log_sha256": "1ba5ad225e9e27d42e3876310e86d587f064725aa82d68efdb52fc04fb122ebf",
+      "log_bytes": 89947,
+      "log_mtime_utc": "2026-10-18T18:46:34.991550+00:00",
+      "summary": [
+        "test result: ok. 1087 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 87.10s"
+      ],
+      "boundary": "Rebuilt after live-handle retirement repair; before subsequent network cleanup ordering adjustment. Final workspace gate still required."
+    },
+    {
+      "name": "workspace-gate-r2",
+      "command": "PATH=/tmp/otto-nextest-0.9.146:$PATH scripts/check.sh --all --check --no-ui",
+      "original_log": "/tmp/otto-product-wide-workspace-gate-r2.log",
+      "log_sha256": "e6de2d41d44999bf04d873a26892663772258a785cfa96337b4a403877d3cca5",
+      "log_bytes": 678525,
+      "log_mtime_utc": "2026-10-18T19:05:05.770952+00:00",
+      "summary": [
+        "     Summary [ 246.796s] 5973 tests run: 5973 passed, 124 skipped",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "boundary": "5973 pass124 skipped; fmt/clippy/docs pass. Script final filter guard failed only due default Python3.9 lacking tomllib; separate Python3.13 guard pass. Nextest predates atomic late claim repair."
+    },
+    {
+      "name": "nextest-filter-guard",
+      "command": "PATH=/tmp/otto-nextest-0.9.146:$PATH python3.13 scripts/check-nextest-filters.py",
+      "original_log": "/tmp/otto-product-wide-filter-guard.log",
+      "log_sha256": "a5a5f1f56b03c692986ca440e65fc9a2245764bbdff3c0b9add0249d16a387e4",
+      "log_bytes": 12523,
+      "log_mtime_utc": "2026-10-18T19:06:36.377709+00:00",
+      "summary": [],
+      "boundary": "Passed; all override filters match current test inventory."
+    },
+    {
+      "name": "final-sessions-server",
+      "command": "PATH=/tmp/otto-nextest-0.9.146:$PATH cargo nextest run -p otto-sessions -p otto-server --no-fail-fast",
+      "original_log": "/tmp/otto-product-wide-final-sessions-server.log",
+      "log_sha256": "5a40f8a7d95167a1f968a01f74fb0a77d7174e94bd722bbeb800de2eb0de466b",
+      "log_bytes": 186821,
+      "log_mtime_utc": "2026-10-18T19:09:10.112444+00:00",
+      "summary": [
+        "     Summary [ 123.668s] 1586 tests run: 1586 passed, 6 skipped"
+      ],
+      "boundary": "1586 pass6 skipped, includes new atomic late capture claim regression and current kill network cleanup ordering."
+    },
+    {
+      "name": "consumer-clippy-final",
+      "command": "cargo clippy -p otto-sessions -p otto-server -p ottod --all-targets -- -D warnings",
+      "original_log": "/tmp/otto-product-wide-final-consumer-clippy.log",
+      "log_sha256": "b5ba0e90bed0c96d3360ab4927bb7336b23bf71cb1175563b0ea0b2e6d2ad3d1",
+      "log_bytes": 3449,
+      "log_mtime_utc": "2026-10-18T19:10:51.790826+00:00",
+      "summary": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 41s"
+      ],
+      "boundary": "Passed after late capture atomic claim fix; predates subsequent run_scheduler shutdown ownership fix."
+    },
+    {
+      "name": "required-scale",
+      "command": "cargo nextest run --workspace --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'",
+      "original_log": "/tmp/otto-product-wide-scale-gates.log",
+      "log_sha256": "4c4feb4a1668cd3d827708d1fcb8ec212d89a94d700141c68a5da61b5e4d2751",
+      "log_bytes": 895,
+      "log_mtime_utc": "2026-10-18T19:12:27.838727+00:00",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s",
+        "     Summary [  16.758s] 1 test run: 1 passed, 6097 skipped"
+      ],
+      "boundary": "1 selected scale test passed;6097 non-selected skipped."
+    },
+    {
+      "name": "telemetry-recovery",
+      "command": "cargo test -p otto-telemetry --lib -- --ignored --test-threads=1",
+      "original_log": "/tmp/otto-product-wide-telemetry-recovery.log",
+      "log_sha256": "5aa19473372204c4a0f87d99ffe88be3310a0a7c980312cabd2c93a57124e85b",
+      "log_bytes": 821,
+      "log_mtime_utc": "2026-10-18T19:15:10.379992+00:00",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.35s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 158.15s"
+      ],
+      "boundary": "5 passed including real pinned collector delivery/recovery;0ignored."
+    },
+    {
+      "name": "terminal-release-budget",
+      "command": "OTTO_PERF=1 OTTO_PERF_BUDGET_SCALE=3 cargo test -p otto-pty --release --lib perf_budgets -- --nocapture",
+      "original_log": "/tmp/otto-product-wide-terminal-budget.log",
+      "log_sha256": "c61d0ecf82a02061648add6f635f4d370abb2bd1d2d23421c13681e0ec750deb",
+      "log_bytes": 2788,
+      "log_mtime_utc": "2026-10-18T19:16:54.565920+00:00",
+      "summary": [
+        "    Finished `release` profile [optimized] target(s) in 17.69s",
+        "terminal budgets: capture 39.584\u00b5s, format 3.214667ms (655946 bytes), reflow 2.645875ms, feed 64 MB/s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 1.70s"
+      ],
+      "boundary": "1 passed, existing CI scale3; no budget changes."
+    },
+    {
+      "name": "root-ui-closure-browser-current",
+      "command": "Named Playwright Proof/Design/API/Insights specs, slot22, rebuilt debug daemon",
+      "original_log": "/tmp/otto-root-ui-closure-browser-current.log",
+      "log_sha256": "bafaeff97d2a64a1346d121c4cb850022e69122a1449b43b733ad168947712a6",
+      "log_bytes": 10023,
+      "log_mtime_utc": "2026-10-18T20:02:07.512019+00:00",
+      "summary": [
+        "14 passed (27.3s)"
+      ],
+      "boundary": "Four named specs with isolated fixtures; not a full Playwright suite or all external integrations."
+    },
+    {
+      "name": "active-held-session-restart",
+      "command": "python3 docs/reviews/product-wide-2026-10-18/daemon-active-restart-smoke.py",
+      "original_log": "/tmp/otto-root-active-restart-smoke.log",
+      "log_sha256": "a0944c21101d884d599726c7926ab05b915992c91d8553a69df63007935d4c1d",
+      "log_bytes": 637,
+      "log_mtime_utc": "2026-10-18T19:59:35.016713+00:00",
+      "summary": [
+        "Same shell PID survives restart and accepts input; exits0 in0.254s/0.042s; fixture explicitly killed"
+      ],
+      "boundary": "One isolated held shell, not global detached-job drain."
+    },
+    {
+      "name": "ui-unit-closure-inflight",
+      "command": "npm run test:unit",
+      "original_log": "/tmp/otto-root-ui-unit-closure.log",
+      "log_sha256": "e42b679e69d0fe807b64d98fa1689dd412ce8e8ef2a9533b23b006ef044e1692",
+      "log_bytes": 424622,
+      "log_mtime_utc": "2026-10-18T20:00:33.643275+00:00",
+      "summary": [
+        "2050 passed;6 failed;0 skipped;18.29s"
+      ],
+      "boundary": "Failure: Product chat extracted-function harness missing new inFlightBody state; assigned to Ronaldo. Not a passing release gate."
+    },
+    {
+      "name": "workspace-r3-before-reservation-refunds",
+      "command": "PATH=/tmp/otto-nextest-0.9.146:$PATH scripts/check.sh --all --check --no-ui",
+      "original_log": "/tmp/otto-product-wide-workspace-gate-r3.log",
+      "log_sha256": "4e120a5ef2da864c36a5a25b485fc04b45b2eabe9bf0f9db94faed7e351d8a1a",
+      "log_bytes": 679383,
+      "log_mtime_utc": "2026-10-18T20:16:52.190309+00:00",
+      "summary": [
+        "Formatting and all-target clippy passed",
+        "5978 nextest passed;124 skipped;236.056s",
+        "Workspace doc-tests passed",
+        "Final filter guard failed: system Python lacks tomllib; Python3.13 rerun pending"
+      ],
+      "boundary": "Reservation refund changes landed after the test binaries compiled. Separate focused tests/consumer checks are required; this is not final-snapshot release approval."
+    },
+    {
+      "name": "ui-final-check",
+      "command": "npm run check",
+      "original_log": "/tmp/otto-root-ui-final-check.log",
+      "log_sha256": "45289030a7050d8a8b969602a77deaf826e03d0b9b68b7ab95357f003df7e1a9",
+      "log_bytes": 644,
+      "log_mtime_utc": "2026-10-18T20:24:02.504137+00:00",
+      "summary": [
+        "PASS: guards and all TypeScript configurations; Svelte 0 errors, 0 warnings"
+      ],
+      "boundary": "Current root-executed combined UI run; further lane edits require affected checks. Not a release verdict."
+    },
+    {
+      "name": "ui-final-unit",
+      "command": "npm run test:unit",
+      "original_log": "/tmp/otto-root-ui-final-unit.log",
+      "log_sha256": "73b07888771570f3f3f9efcdfaecff04c68af9741ed1b7f2dd905787ef6d4b67",
+      "log_bytes": 419030,
+      "log_mtime_utc": "2026-10-18T20:24:22.655415+00:00",
+      "summary": [
+        "2056 passed, 0 failed, 0 skipped; 19.081s"
+      ],
+      "boundary": "Current root-executed combined UI run; further lane edits require affected checks. Not a release verdict."
+    },
+    {
+      "name": "ui-final-build",
+      "command": "npm run build",
+      "original_log": "/tmp/otto-root-ui-final-build.log",
+      "log_sha256": "1c9ab17558a8912ac6294ea126ef92f4872cf4ff5a69f3f9357076b83d015499",
+      "log_bytes": 82520,
+      "log_mtime_utc": "2026-10-18T20:24:32.545110+00:00",
+      "summary": [
+        "Production build passed"
+      ],
+      "boundary": "Current root-executed combined UI run; further lane edits require affected checks. Not a release verdict."
+    },
+    {
+      "name": "ui-final-bundle",
+      "command": "node scripts/bundle-budget.mjs",
+      "original_log": "/tmp/otto-root-ui-final-bundle.log",
+      "log_sha256": "37413c88eb0e80b86b2edf12d515985731df59ec4ad8539486e0b16d5471e9ef",
+      "log_bytes": 2673,
+      "log_mtime_utc": "2026-10-18T20:24:32.773997+00:00",
+      "summary": [
+        "FAIL: page:plugin 8.5KB versus 8.3KB, +3.3%; all other targets pass configured tolerance; budget unchanged"
+      ],
+      "boundary": "Current root-executed combined UI run; further lane edits require affected checks. Not a release verdict."
+    },
+    {
+      "name": "nextest-filters-python313",
+      "command": "PATH=/tmp/otto-nextest-0.9.146:$PATH /opt/homebrew/bin/python3.13 scripts/check-nextest-filters.py",
+      "original_log": "/tmp/otto-root-nextest-filter-py313.log",
+      "log_sha256": "9829f2ea711082a7bf37456a9bcef2b3d4a2a8e8237b5dad4a1f1ca8f73670bb",
+      "log_bytes": 11549,
+      "log_mtime_utc": "2026-10-18T20:29:38.095152+00:00",
+      "summary": [
+        "Exit0; all configured filters matched current test binaries; existing linker warning only"
+      ],
+      "boundary": "Root-executed scoped evidence; no whole-product release claim."
+    },
+    {
+      "name": "insights-phone-closure",
+      "command": "named Playwright desktop-insights-closure.spec.ts",
+      "original_log": "/tmp/otto-root-insights-phone-final.log",
+      "log_sha256": "9cf023f97dc7a91d35eabedc422c7b23d89d2392ac0b3890b990a337b1ecaa42",
+      "log_bytes": 5692,
+      "log_mtime_utc": "2026-10-18T20:29:49.784265+00:00",
+      "summary": [
+        "3 passed, 0 failed, 11.2s"
+      ],
+      "boundary": "Root-executed scoped evidence; no whole-product release claim."
+    },
+    {
+      "name": "settings-closure",
+      "command": "named Playwright desktop-settings-closure.spec.ts",
+      "original_log": "/tmp/otto-root-settings-closure.log",
+      "log_sha256": "8b32f6359303158523e54b32d59803a53f7e0ab2e0192e40bf1795bbf50e39da",
+      "log_bytes": 5671,
+      "log_mtime_utc": "2026-10-18T20:33:27.105904+00:00",
+      "summary": [
+        "3 passed, 0 failed, 5.2s; Slack Retry and light/dark phone sharing"
+      ],
+      "boundary": "Root-executed scoped evidence; no whole-product release claim."
+    },
+    {
+      "name": "settings-full-check",
+      "command": "npm run check",
+      "original_log": "/tmp/otto-root-settings-check.log",
+      "log_sha256": "45289030a7050d8a8b969602a77deaf826e03d0b9b68b7ab95357f003df7e1a9",
+      "log_bytes": 644,
+      "log_mtime_utc": "2026-10-18T20:34:26.599920+00:00",
+      "summary": [
+        "Exit0; UI guards and Svelte/TypeScript checks passed"
+      ],
+      "boundary": "Root-executed scoped evidence; no whole-product release claim."
+    },
+    {
+      "name": "clickhouse-strict-readonly-live",
+      "command": "OTTO_DBV_PARITY=1 cargo test -p otto-dbviewer --test clickhouse_e2e clickhouse_parity_native_strict_readonly_profile -- --ignored --nocapture",
+      "log_sha256": "f01af85abc52af577dd18267b09a8495107a125a1a12e30525e5d41f0ee64f85",
+      "log_bytes": 419,
+      "log_mtime_utc": "2026-10-18T21:13:29.809213+00:00",
+      "original_log": "/tmp/otto-ch-strict-readonly-green.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.13s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.05s"
+      ],
+      "boundary": "Isolated fixture; same code then exercised in full live parity filter."
+    },
+    {
+      "name": "clickhouse-parity-readonly",
+      "command": "OTTO_DBV_PARITY=1 cargo test -p otto-dbviewer --test clickhouse_e2e clickhouse_parity -- --ignored --nocapture",
+      "log_sha256": "2081e9df953a8f6f8ea93c956c263494619e34598dae1b23be4bcfeb1a3afc71",
+      "log_bytes": 1197,
+      "log_mtime_utc": "2026-10-18T21:13:54.179281+00:00",
+      "original_log": "/tmp/otto-ch-parity-readonly.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.71s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 3.03s"
+      ],
+      "boundary": "12 live cases on isolated26.3; not every version or native type."
+    },
+    {
+      "name": "clickhouse-readonly-clippy",
+      "command": "cargo clippy -p otto-dbviewer --all-targets -- -D warnings",
+      "log_sha256": "269e55ae6e16305d50fab899b559b3646e93f2f8a88a0d4d50450effb6bc23b9",
+      "log_bytes": 885,
+      "log_mtime_utc": "2026-10-18T21:14:31.656590+00:00",
+      "original_log": "/tmp/otto-ch-readonly-clippy.log",
+      "summary": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.77s"
+      ],
+      "boundary": "Includes new vendor startup dependency; full workspace gate remains separate."
+    },
+    {
+      "name": "usage-phone-closure",
+      "command": "Playwright desktop-usage-closure.spec.ts slot22 workers1",
+      "log_sha256": "e02448968da2f84ce8e3fb5656e9e911b6e7fd9106a6a5688958ea0e202212ed",
+      "log_bytes": 5639,
+      "log_mtime_utc": "2026-10-18T21:06:42.232015+00:00",
+      "original_log": "/tmp/otto-usage-closure-browser.log",
+      "summary": [
+        "  2 passed (4.3s)"
+      ],
+      "boundary": "Light/dark390px; mocked usage responses on isolated daemon, not backend accounting proof."
+    },
+    {
+      "name": "workspace-r4",
+      "command": "scripts/check.sh --all --check --no-ui",
+      "log_sha256": "30e0d42be54ffadeef3a24f51a50117716d5453e8bd6dc84c12870425d4952af",
+      "log_bytes": 480975,
+      "log_mtime_utc": "2026-10-18T21:39:10.039385+00:00",
+      "original_log": "/tmp/otto-product-wide-workspace-gate-r4.log",
+      "summary": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 38s",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 35s",
+        "test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+        "test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.01s",
+        "test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.78s",
+        "test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.68s",
+        "test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.15s",
+        "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.15s",
+        "test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.47s",
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 133 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.69s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s",
+        "test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.88s",
+        "test result: ok. 139 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.73s",
+        "test result: ok. 82 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.64s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.48s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.83s",
+        "test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+        "test result: ok. 181 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s",
+        "test result: ok. 525 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 19.73s",
+        "test result: ok. 0 passed; 0 failed; 21 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.98s",
+        "test result: ok. 0 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 32 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 14 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 5 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 3.89s",
+        "test result: ok. 145 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 30.18s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+        "test result: ok. 408 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 20.86s",
+        "test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.60s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s",
+        "test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.16s",
+        "test result: ok. 180 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s",
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.67s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s",
+        "test result: ok. 110 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.03s",
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.52s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.18s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.58s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.67s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.90s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s",
+        "test result: ok. 160 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 30.72s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s",
+        "test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.04s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.10s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.20s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.52s",
+        "test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s",
+        "test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s",
+        "test result: ok. 1090 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 138.02s",
+        "test result: FAILED. 194 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 105.39s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.15s",
+        "test result: ok. 271 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 46.50s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.84s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.61s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.27s",
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s",
+        "test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.02s",
+        "test result: ok. 476 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 266.44s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.74s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.45s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.25s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.75s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.74s",
+        "test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.21s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.08s",
+        "test result: ok. 28 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 6.54s",
+        "test result: ok. 80 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s",
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.22s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.11s",
+        "test result: ok. 91 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 35.22s",
+        "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.30s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.14s",
+        "test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.40s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.86s",
+        "test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "error: 1 target failed:"
+      ],
+      "boundary": "5990 passed, 1 policy snapshot failure,125 ignored; full fmt/clippy passed. Corrected separately; CH fixture ports changed after its binary ran."
+    },
+    {
+      "name": "policy-stop-snapshot",
+      "command": "cargo test -p otto-server --test it policy_coverage::",
+      "log_sha256": "984e84d8c7c6d26ba33752f87cd362fef6944b1a4364135cd693542166e81c9f",
+      "log_bytes": 767,
+      "log_mtime_utc": "2026-10-18T21:43:04.159594+00:00",
+      "original_log": "/tmp/otto-policy-snapshot-verify.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.89s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 194 filtered out; finished in 0.18s"
+      ],
+      "boundary": "3 passed; snapshot contains only 10 added policy entries for Product Stop routes; POST requires Edit."
+    },
+    {
+      "name": "clickhouse-ci-ports",
+      "command": "OTTO_DBV_PARITY=1 OTTO_CLICKHOUSE_PARITY_HTTP_PORT=28123 OTTO_CLICKHOUSE_PARITY_NATIVE_PORT=29000 cargo test -p otto-dbviewer --test clickhouse_e2e clickhouse_parity -- --ignored --nocapture",
+      "log_sha256": "3f2516098348674e2c952ccc335580f57a996377d806cd3ab8f112e0920367fb",
+      "log_bytes": 1349,
+      "log_mtime_utc": "2026-10-18T21:43:14.723162+00:00",
+      "original_log": "/tmp/otto-ch-ci-port-parity.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.44s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 3.07s"
+      ],
+      "boundary": "12 passed on isolated26.3 fixture. CI points at seeded18123/19000; CI26.4 run pending."
+    },
+    {
+      "name": "clickhouse-ci-clippy",
+      "command": "cargo clippy -p otto-dbviewer --all-targets -- -D warnings",
+      "log_sha256": "d435cee0ac96bd1e7ff2a993e25f9da09cff1184fe74910f3063ea0b31995332",
+      "log_bytes": 385,
+      "log_mtime_utc": "2026-10-18T21:43:21.575297+00:00",
+      "original_log": "/tmp/otto-ch-ci-port-clippy.log",
+      "summary": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.78s"
+      ],
+      "boundary": "Passed after port fixture change."
+    },
+    {
+      "name": "workspace-doc-r4",
+      "command": "cargo test --workspace --doc",
+      "log_sha256": "02a082b712df0f64e1faf3a45b92bd986a7a4a3375f30ce45ab3a3ac941aab49",
+      "log_bytes": 5985,
+      "log_mtime_utc": "2026-10-18T21:43:37.204068+00:00",
+      "original_log": "/tmp/otto-workspace-doc-r4.log",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "boundary": "Passed; ignored cases remain explicit in summary."
+    },
+    {
+      "name": "plugin-r4",
+      "command": "OTTO_TP_REQUIRE_BROWSER=1 node --test --test-concurrency=1 test/*.test.js",
+      "log_sha256": "b03c1ac64ba1c0b59853a3416c4b60235fd2fefd602468c565896e0fe18fb62c",
+      "log_bytes": 100116,
+      "log_mtime_utc": "2026-10-18T21:41:32.840870+00:00",
+      "original_log": "/tmp/otto-product-wide-plugin-r4.log",
+      "summary": [
+        "# tests 493",
+        "# pass 492",
+        "# fail 0",
+        "# skipped 1"
+      ],
+      "boundary": "492 passed,0 failed,1 skipped including browser suite."
+    },
+    {
+      "name": "usage-lazy-report-browser",
+      "command": "Playwright desktop-usage-closure.spec.ts slot22 workers1",
+      "log_sha256": "5168885202ba82860bcc5ff628a09638459cc3aab8fd5830c613f7c94d9edb69",
+      "log_bytes": 5635,
+      "log_mtime_utc": "2026-10-18T21:30:05.079594+00:00",
+      "original_log": "/tmp/otto-usage-lazy-browser.log",
+      "summary": [
+        "  2 passed (7.5s)"
+      ],
+      "boundary": "2 passed light/dark phone; report tab mounts after lazy import. Mocked usage routes, isolated daemon."
+    },
+    {
+      "name": "filter-r4",
+      "command": "PATH=/tmp/otto-nextest-0.9.146:/opt/homebrew/opt/python@3.13/libexec/bin:$PATH python3 scripts/check-nextest-filters.py",
+      "original_log": "/tmp/otto-filter-guard-r4.log",
+      "log_sha256": "f0ae2ae7b8ae29e820a81af12414542d1a91d6cf8a3ef6e6455079552b2b2945",
+      "log_bytes": 11549,
+      "summary": [
+        "    4  [default] package(otto-server) & binary(it) & test(/^runtime_lag::/)",
+        "    1  [default] (package(otto-automation) & test(/^goal_loop::goal_loop_tests::until_flag_wakes_on_ring_and_backstops_a_silent_store$/))",
+        "    1  [default] (package(otto-automation) & test(/^goal_loop_commands::tests::cancellation_kills_verification_descendants$/))",
+        "    1  [default] (package(otto-swarm) & test(/^runtime::wake::tests::a_poke_wakes_the_coordinator_after_the_min_gap$/))",
+        "    1  [default] (package(otto-state) & test(/maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed$/))",
+        "    1  [default] (package(otto-keychain) & test(/control::tests::locked_keychain_times_out_instead_of_blocking$/))",
+        "   68  [default] package(otto-pty)",
+        "  298  [default] package(otto-sessions)",
+        "   41  [default] package(otto-sandbox)",
+        "   78  [default] package(otto-automation)",
+        "   73  [default] package(otto-swarm)",
+        "   45  [default] package(otto-agent-run)"
+      ],
+      "boundary": "Exit0; filter guard compiled and listed current test binaries, not an additional execution of all tests."
+    },
+    {
+      "name": "loc-r4",
+      "command": "python3 scripts/loc-ratchet.py",
+      "original_log": "/tmp/otto-loc-r4.log",
+      "log_sha256": "440133fdea8321499f61404ef8e2452a918a11b625c8bc227e849fc252704b68",
+      "log_bytes": 46,
+      "summary": [
+        "loc-ratchet: ok \u2014 otto-server 130572/130939"
+      ],
+      "boundary": "Exit0; filter guard compiled and listed current test binaries, not an additional execution of all tests."
+    },
+    {
+      "name": "ui-unit-r5",
+      "command": "cd ui && npm run test:unit",
+      "original_log": "/tmp/otto-product-wide-ui-unit-r5.log",
+      "log_sha256": "f0a4d4826727b3f614e0d7e63045a8afac67c2bf95bd985bf56e9c87aae890e1",
+      "log_bytes": 420796,
+      "summary": [
+        "1..2062",
+        "# tests 2062",
+        "# suites 0",
+        "# pass 2062",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0",
+        "# todo 0",
+        "# duration_ms 17483.380875"
+      ],
+      "boundary": "2062 passed zero failures/skips after real-helper harness fixes. Subsequent lazy imports require their focused browser/type/build checks."
+    },
+    {
+      "name": "final-ui-check",
+      "command": "npm run check",
+      "original_log": "/tmp/otto-product-wide-ui-check-final.log",
+      "log_sha256": "45289030a7050d8a8b969602a77deaf826e03d0b9b68b7ab95357f003df7e1a9",
+      "log_bytes": 644,
+      "summary": [
+        "",
+        "> ui@0.2.0 check",
+        "> node scripts/ui-guards.mjs && svelte-check --tsconfig ./tsconfig.app.json --fail-on-warnings && node node_modules/typescript7/bin/tsc -p tsconfig.node.json && node node_modules/typescript7/bin/tsc -p tsconfig.e2e.json && node node_modules/typescript7/bin/tsc -p tsconfig.unit.json",
+        "",
+        "ui-guards: ok (1086 files; no native dialogs, no undefined CSS vars, no ratchet regressions; 25 file/rule count(s) now below baseline \u2014 lock that in with `node scripts/ui-guards.mjs --update-baseline`)",
+        "Loading svelte-check in workspace: /Users/itziklavon/otto_os/ui",
+        "Getting Svelte diagnostics...",
+        "",
+        "svelte-check found 0 errors and 0 warnings"
+      ],
+      "boundary": "Frozen UI source; browser uses isolated existing debug daemon, not installed app."
+    },
+    {
+      "name": "final-ui-unit",
+      "command": "npm run test:unit",
+      "original_log": "/tmp/otto-product-wide-ui-unit-final.log",
+      "log_sha256": "23248f102e07e05c22a66212294ca881bb9e8ae34b794f652c458f83e4da3ce2",
+      "log_bytes": 420773,
+      "summary": [
+        "1..2062",
+        "# tests 2062",
+        "# suites 0",
+        "# pass 2062",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0",
+        "# todo 0",
+        "# duration_ms 17399.931792"
+      ],
+      "boundary": "Frozen UI source; browser uses isolated existing debug daemon, not installed app."
+    },
+    {
+      "name": "final-ui-build",
+      "command": "npm run build",
+      "original_log": "/tmp/otto-product-wide-ui-build-final.log",
+      "log_sha256": "5ffbe7514e77a47da425da77a9df1b962f49efd5fcafe16f2ef3e93c36612469",
+      "log_bytes": 83928,
+      "summary": [
+        "The slowest callbacks, timed inside each callback (the wait before a callback starts is excluded, the time it awaits is included):",
+        "  - plugin vite-plugin-svelte:compile transform (78%, 7.3s, 575 calls)",
+        "Additional callback time came from the callbacks below and from callbacks under 1s.",
+        "3 callbacks are listed without a time. Their calls overlapped, so the time inside one call includes work from other calls. To find their cost, profile the build with `node --cpu-prof`:",
+        "  - plugin vite:asset load (47 calls)",
+        "  - plugin vite:css transform (565 calls)",
+        "  - plugin vite:worker-import-meta-url transform (4 calls)",
+        "See https://rolldown.rs/reference/InputOptions.checks#bundlertimings for more details.",
+        ""
+      ],
+      "boundary": "Frozen UI source; browser uses isolated existing debug daemon, not installed app."
+    },
+    {
+      "name": "final-ui-budget",
+      "command": "node scripts/bundle-budget.mjs",
+      "original_log": "/tmp/otto-product-wide-bundle-final.log",
+      "log_sha256": "ec96ee9a01985c57217eff21dd14715990824645da7b988dec7a89fdc629aa2d",
+      "log_bytes": 2592,
+      "summary": [
+        "panel:canvas                 4.6 KB     10.8 KB  ok",
+        "panel:info                   4.7 KB      4.7 KB  ok",
+        "panel:browserV1              6.7 KB      6.6 KB  ok",
+        "panel:browserV2             51.3 KB     50.1 KB  ok",
+        "panel:api                  214.1 KB    212.9 KB  ok",
+        "",
+        "bundle-budget: 5 target(s) shrank past the tolerance (page:mission-control, page:scheduled-tasks, page:personal-agents, page:usage, panel:canvas) \u2014 ratchet with --update.",
+        "",
+        "bundle-budget: within budget"
+      ],
+      "boundary": "Frozen UI source; browser uses isolated existing debug daemon, not installed app."
+    },
+    {
+      "name": "scheduled-render-recovery",
+      "command": "named desktop-scheduled-tasks browser: formatter failure and normal report",
+      "original_log": "/tmp/otto-scheduled-render-recovery.log",
+      "log_sha256": "d8a4a255d590c8357283d835f44468859895c5c040a9e511b7ce214ae211688f",
+      "log_bytes": 5261,
+      "summary": [
+        "",
+        "Running 2 tests using 1 worker",
+        "",
+        "(node:75193) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+        "(Use `node --trace-warnings ...` to show where the warning was created)",
+        "  \u2713  1 [desktop-browser] \u203a e2e/desktop-scheduled-tasks.spec.ts:307:3 \u203a scheduled tasks UI \u203a report formatter load failure offers recovery and keeps plain text usable (3.5s)",
+        "  \u2713  2 [desktop-browser] \u203a e2e/desktop-scheduled-tasks.spec.ts:324:3 \u203a scheduled tasks UI \u203a page renders the seeded task; Run now produces a report row (1.6s)",
+        "",
+        "  2 passed (8.0s)"
+      ],
+      "boundary": "Frozen UI source; browser uses isolated existing debug daemon, not installed app."
+    }
+  ]
+}

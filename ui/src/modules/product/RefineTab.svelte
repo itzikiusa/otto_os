@@ -17,6 +17,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { confirmer } from '../../lib/confirm.svelte';
+  import { runStatus } from '../../lib/status';
   import type { RefinementThread, DiscoveryRunSummary } from './types';
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -123,6 +125,13 @@
 
   async function archiveThread(tid: string): Promise<void> {
     const current = product.captureSelection();
+    const target = threads.find((t) => t.id === tid);
+    const label = target?.title || 'Untitled';
+    const ok = await confirmer.ask(
+      `Archive refinement thread “${label}”? It will be marked archived in this story’s thread list.`,
+      { title: 'Archive thread', confirmLabel: 'Archive', danger: false },
+    );
+    if (!ok || !current()) return;
     try {
       const updated = await product.archiveRefinementThread(tid);
       if (!current()) return;
@@ -184,7 +193,7 @@
             <option value="">New from discovery run…</option>
             {#each discoveryRuns as dr (dr.run.id)}
               <option value={dr.run.id}>
-                {relDate(dr.run.created_at)} — {dr.derived_status}
+                {relDate(dr.run.created_at)} — {runStatus(dr.derived_status).label}
               </option>
             {/each}
           </select>
@@ -202,12 +211,13 @@
       {#if (loading || loadError) && threads.length === 0}
         <LoadState what="threads" variant="compact" loading={loading} error={loadError} empty onretry={() => void loadThreads()} />
       {:else if threads.length === 0}
-        <EmptyState
-          icon="comment"
-          title="No threads yet"
-          body={discoveryRuns.length > 0 ? 'Start one with New thread, or seed it from a discovery run above.' : 'Start one with New thread.'}
-        />
+        <p class="empty-rail-hint">
+          {discoveryRuns.length > 0 ? 'No threads yet — use New thread or seed one from a discovery run above.' : 'No threads yet — use New thread above to start one.'}
+        </p>
       {:else}
+        {#if loadError}
+          <LoadState what="threads" variant="compact" loading={loading} error={loadError} onretry={() => void loadThreads()} />
+        {/if}
         <div class="thread-list">
           {#each threads as t (t.id)}
             <div
@@ -217,6 +227,7 @@
             >
               <button
                 class="thread-btn"
+                aria-current={activeTid === t.id ? 'true' : undefined}
                 onclick={() => (activeTid = t.id)}
               >
                 <span class="thread-title">{t.title}</span>
@@ -232,7 +243,6 @@
                   class="archive-btn reveal-on-hover"
                   onclick={() => archiveThread(t.id)}
                   title="Archive this thread"
-                  aria-label="Archive thread"
                 >
                   Archive
                 </button>
@@ -270,6 +280,13 @@
 
   /* ── Left pane — chrome (width, border, header, scroll) is ListPane's job;
      only the row/picker markup below is RefineTab-specific. ───────────────── */
+
+  .empty-rail-hint {
+    margin: 0;
+    padding: 12px 10px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
 
   /* Discovery run picker */
   .run-picker-row {
@@ -409,4 +426,16 @@
     flex-direction: column;
   }
 
+  @media (max-width: 640px) {
+    .refine-tab {
+      flex-direction: column;
+    }
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .archive-btn {
+      min-height: var(--hit-min);
+      padding: 6px 10px;
+      opacity: 1;
+    }
+  }
 </style>

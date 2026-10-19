@@ -16,8 +16,9 @@
 
   interface Props {
     onclose: () => void;
+    onimported?: () => void;
   }
-  let { onclose }: Props = $props();
+  let { onclose, onimported }: Props = $props();
 
   // ── form state ────────────────────────────────────────────────────────────
   let accounts: IssueAccount[] = $state([]);
@@ -120,6 +121,7 @@
       // Select the newly imported story and switch to Overview tab.
       await product.select(story.id);
       product.tab = 'overview';
+      onimported?.();
       onclose();
     } catch (e) {
       formError = loadErrorText(e);
@@ -399,5 +401,12 @@
     padding: 6px 10px;
     background: color-mix(in srgb, var(--danger) 10%, transparent);
     border-radius: var(--radius-s);
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .change-btn,
+    .manual-toggle {
+      min-height: var(--hit-min);
+      padding: 4px 8px;
+    }
   }
 </style>

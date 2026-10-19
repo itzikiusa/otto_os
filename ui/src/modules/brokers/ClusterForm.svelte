@@ -129,7 +129,7 @@
       {#if bootstrapErr}<span class="field-err">{bootstrapErr}</span>{/if}
     </label>
 
-    <div class="row">
+    <div class="cf-row">
       <label class="field">
         <span>Security</span>
         <select bind:value={security}>
@@ -152,7 +152,7 @@
     </div>
 
     {#if usesSasl}
-      <div class="row">
+      <div class="cf-row">
         <label class="field">
           <span>SASL username</span>
           <input dir="auto" bind:value={saslUser} autocomplete="off" />
@@ -180,7 +180,7 @@
       <input dir="ltr" bind:value={srUrl} placeholder="http://schema-registry:8081" />
     </label>
     {#if srUrl.trim()}
-      <div class="row">
+      <div class="cf-row">
         <label class="field">
           <span>Registry username</span>
           <input dir="auto" bind:value={srUser} autocomplete="off" />
@@ -208,7 +208,7 @@
     </label>
     {#if tunnelOpen}
       <div class="ssh-section">
-        <div class="row">
+        <div class="cf-row">
           <label class="field" style="flex: 1;">
             <span>Tunnel host</span>
             <input dir="ltr" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" aria-invalid={tunHostErr ? 'true' : undefined} />
@@ -233,7 +233,7 @@
       </div>
     {/if}
 
-    <div class="row">
+    <div class="cf-row">
       <label class="field">
         <span>Environment</span>
         <select bind:value={environment}>
@@ -277,11 +277,11 @@
     flex-direction: column;
     gap: 12px;
   }
-  .row {
+  .cf-row {
     display: flex;
     gap: 12px;
   }
-  .row .field {
+  .cf-row .field {
     flex: 1;
   }
   .field {
@@ -348,13 +348,13 @@
   @media (max-width: 640px) {
     /* Stack side-by-side fields and bump text so the form is comfortable on a
        phone (the Modal card itself already caps to the viewport width). */
-    .row {
+    .cf-row {
       flex-direction: column;
       align-items: stretch;
       gap: 12px;
     }
     /* Tunnel host/port were forced to fixed flex bases inline — reset them. */
-    .ssh-section .row .field {
+    .ssh-section .cf-row .field {
       flex: 1 1 auto !important;
     }
     .field span {

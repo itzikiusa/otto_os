@@ -533,11 +533,15 @@ impl GoalLoopsRepo {
     /// Move a loop into the Running state (start/resume): re-anchor the
     /// wall-clock window and clear any prior finish/error so a resumed loop
     /// isn't shown as finished. The controller takes over from here.
-    pub async fn mark_running(&self, id: &Id, run_started_at: DateTime<Utc>) -> Result<()> {
+    ///
+    /// A terminal row is left alone. `false` means a stop or a finish landed
+    /// first, and the caller must not spawn a controller over it.
+    pub async fn mark_running(&self, id: &Id, run_started_at: DateTime<Utc>) -> Result<bool> {
         let now = self.touch();
-        sqlx::query(
+        let res = sqlx::query(
             "UPDATE goal_loops SET status = 'running', run_started_at = ?, finished_at = NULL,
-             error = NULL, updated_at = ? WHERE id = ?",
+             error = NULL, updated_at = ? WHERE id = ?
+             AND status IN ('draft', 'running', 'paused', 'blocked')",
         )
         .bind(fmt(run_started_at))
         .bind(&now)
@@ -545,7 +549,7 @@ impl GoalLoopsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("mark goal loop running"))?;
-        Ok(())
+        Ok(res.rows_affected() > 0)
     }
 
     // -- iterations -------------------------------------------------------
@@ -847,6 +851,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_running_does_not_revive_a_stopped_loop() {
+        let repo = GoalLoopsRepo::new(mem_pool().await);
+        let goal = repo.create(new_loop()).await.unwrap();
+        repo.finalize(
+            &goal.id,
+            GoalLoopStatus::Stopped,
+            Some("stopped by user"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!repo.mark_running(&goal.id, Utc::now()).await.unwrap());
+        let after = repo.get(&goal.id).await.unwrap();
+        assert_eq!(after.status, GoalLoopStatus::Stopped);
+        assert_eq!(after.summary.as_deref(), Some("stopped by user"));
+    }
+
+    #[tokio::test]
     async fn recovery_retry_continuation_survives_ledger_edits_and_restart() {
         let repo = GoalLoopsRepo::new(mem_pool().await);
         let goal = repo.create(new_loop()).await.unwrap();
@@ -861,7 +883,7 @@ mod tests {
         })
         .await
         .unwrap();
-        repo.mark_running(&goal.id, Utc::now()).await.unwrap();
+        assert!(repo.mark_running(&goal.id, Utc::now()).await.unwrap());
         repo.fail_running("restart").await.unwrap();
         let recovered = repo.get(&goal.id).await.unwrap();
         assert_eq!(recovered.status, GoalLoopStatus::Paused);

@@ -12,6 +12,7 @@
   // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
   // colours, every shape). Pan/zoom the preview.
   import { PAN_LABEL, panDelta } from './panKeys';
+  import { PointerZoom } from './pointerZoom';
   import { toastAgentEdit } from './agentUndo';
   import { toastError } from '../../lib/toastError';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
@@ -23,6 +24,7 @@
   import { copyText } from '../../lib/clipboard';
   import { ui } from '../../lib/stores/ui.svelte';
   import type { CanvasDoc, CanvasFormat } from './types';
+  import { docFromAssist } from './assistDoc';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -207,26 +209,25 @@
   }
 
   let dragging = $state(false);
-  let lastX = 0;
-  let lastY = 0;
+  const pointers = new PointerZoom();
   function onPointerDown(e: PointerEvent): void {
-    if ((e.target as HTMLElement)?.closest('a')) return;
+    if ((e.target as HTMLElement)?.closest('a') || !surface) return;
+    const r = surface.getBoundingClientRect();
+    pointers.down(e.pointerId, e.clientX - r.left, e.clientY - r.top);
     dragging = true;
     userAdjusted = true;
-    lastX = e.clientX;
-    lastY = e.clientY;
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
   }
   function onPointerMove(e: PointerEvent): void {
-    if (!dragging) return;
-    tx += e.clientX - lastX;
-    ty += e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
+    if (!surface || !dragging) return;
+    const r = surface.getBoundingClientRect();
+    ({ scale, tx, ty } = pointers.move(e.pointerId, e.clientX - r.left, e.clientY - r.top, { scale, tx, ty }));
   }
   function onPointerUp(e: PointerEvent): void {
-    dragging = false;
-    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    pointers.up(e.pointerId);
+    dragging = pointers.active;
+    const target = e.currentTarget as HTMLElement;
+    if (target.hasPointerCapture?.(e.pointerId)) target.releasePointerCapture(e.pointerId);
   }
 
   function fileBase(): string {
@@ -281,19 +282,37 @@
     canvas.pushConvo('user', p, sceneId);
     try {
       const res = await canvas.assist(p, 'flow');
-      const src = res.mermaid ?? '';
+      // Read before finishAssistTurn: a stop or a save during the turn must not
+      // offer Undo back to the pre-turn diagram.
+      const kept = canvas.assistKeptSaved(res.note, sceneId);
+      // A stop's body is the scene as read at stop time. Reload the stored
+      // scene instead, so a save that landed after that read is the one shown.
+      if ((res.note ?? '').startsWith('Stopped')) {
+        if (sceneId) await canvas.reloadAfterStop(sceneId);
+        canvas.pushConvo('assistant', res.note || 'Saved changes stay on the board.', sceneId);
+        if (canvas.currentId !== sceneId || canvas.saveContext !== saveContext) {
+          toasts.info('Saved changes kept', 'The scene you asked from still has your saved edits.');
+        } else toasts.info('Saved changes kept', res.note || 'Your edits stay on the board.');
+        return true;
+      }
+      const doc = docFromAssist(res, 'mermaid');
+      const src = doc?.source ?? '';
       if (!src.trim()) {
         canvas.pushConvo('assistant', res.note || 'No diagram was produced.', sceneId);
-        toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
+        if (kept) toasts.info('Saved changes kept', 'Your edits stay on the board.');
+        else toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
         return false;
       }
       if (canvas.currentId !== sceneId || canvas.saveContext !== saveContext) {
-        toasts.success('Ask Otto finished', 'The diagram was saved to the scene you asked from.');
+        if (kept) toasts.info('Saved changes kept', 'The scene you asked from still has your saved edits.');
+        else toasts.success('Ask Otto finished', 'The diagram was saved to the scene you asked from.');
         return true;
       }
-      canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'mermaid', source: src }, sceneId);
-      canvas.pushConvo('assistant', res.note || 'Updated the canvas.', sceneId);
-      toastAgentEdit(sceneId, 'Otto edited the diagram', res.note || 'Diagram updated.');
+      // ingestDoc drops a source that is not the document saved during this turn.
+      const applied = canvas.ingestDoc(doc!, sceneId);
+      canvas.pushConvo('assistant', res.note || (kept ? 'Saved changes stay on the board.' : 'Updated the canvas.'), sceneId);
+      if (kept) toasts.info('Saved changes kept', res.note || 'Your edits stay on the board.');
+      else if (applied) toastAgentEdit(sceneId, 'Otto edited the diagram', res.note || 'Diagram updated.');
       void canvas.refreshSession();
       return true;
     } catch (e) {
@@ -301,6 +320,7 @@
       toastError('Couldn’t ask Otto', e);
       return false;
     } finally {
+      canvas.finishAssistTurn(sceneId);
       generating = false;
     }
   }
@@ -602,6 +622,9 @@
     border-color: var(--accent);
     color: var(--accent-text);
   }
+  @media (pointer: coarse), (max-width: 640px) {
+    .code-toggle { min-height: 36px; }
+  }
   .zoombar {
     position: absolute;
     bottom: 16px;
@@ -643,5 +666,8 @@
     height: 18px;
     background: var(--border);
     margin: 0 2px;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .zoombar button { min-inline-size: var(--hit-min); min-block-size: var(--hit-min); }
   }
 </style>

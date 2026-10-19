@@ -487,6 +487,9 @@ async fn delete_story<S: ProductCtx>(
     Path(StoryId { sid }): Path<StoryId>,
 ) -> ApiResult<StatusCode> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // Hold deletion ownership through row/file cleanup. Studio turns are
+    // cancelled first and fully drained, including their final DB writes.
+    let _deleting = crate::story_lifecycle::begin_delete(&sid).await;
     // Stop the story's running agents first (S4-23): once the rows are gone
     // their writes fail silently while they keep spending.
     ctx.stop_story_agents(&sid).await;
@@ -2360,6 +2363,33 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deleting_story_waits_for_cancelled_studio_publication_to_drain() {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool).await;
+        let ctx = TestCtx::new(pool);
+        let id = seed_draft(&ctx, &ws, &user, "Active studio").await;
+        let turn = crate::story_lifecycle::claim(&id).await.unwrap();
+        let cancelled = crate::story_lifecycle::cancellation(&id);
+        let router = app(ctx.clone(), &user);
+        let request = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/product/stories/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let deletion = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+        cancelled.cancelled().await;
+        assert!(!deletion.is_finished());
+        assert!(
+            ctx.repo.get_story(&id).await.is_ok(),
+            "no deletion before publication owner releases"
+        );
+        drop(turn);
+        assert_eq!(deletion.await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert!(ctx.repo.get_story(&id).await.is_err());
     }
 
     #[tokio::test]

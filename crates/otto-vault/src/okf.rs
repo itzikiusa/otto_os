@@ -9,6 +9,7 @@
 //!   without index.md · W5 log `##` headings not ISO `YYYY-MM-DD`.
 //! Warnings never fail a bundle (permissive consumption is intentional).
 
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -302,6 +303,21 @@ impl VaultEngine {
 
         let mut written = 0usize;
         for dir in &all_dirs {
+            let rel = if dir.is_empty() {
+                "index.md".to_string()
+            } else {
+                format!("{dir}/index.md")
+            };
+            // Capture the before-image before building the replacement. Normal
+            // writes below compare this hash and retain a recoverable revision.
+            // A generated index must not bypass the writer's durability seam.
+            Self::abs_guarded(&v.root_path, &rel)?;
+            let (parent, name) = Self::text_parent(&v.root_path, &rel)?;
+            let before = Self::text_file_bytes(&parent, &name).await?;
+            let expected = before
+                .as_deref()
+                .map(|b| hex::encode(Sha256::digest(b)))
+                .unwrap_or_default();
             let child_notes = self.store().dir_notes(id, dir).await?;
             let child_dirs: BTreeSet<String> = all_dirs
                 .iter()
@@ -352,18 +368,18 @@ impl VaultEngine {
                     md.push_str(&format!("* [{name}]({name}/index.md)\n"));
                 }
             }
-            let rel = if is_root {
-                "index.md".to_string()
-            } else {
-                format!("{dir}/index.md")
-            };
-            let abs = std::path::Path::new(&v.root_path).join(&rel);
-            tokio::fs::write(&abs, md)
-                .await
-                .map_err(|e| otto_core::Error::Internal(format!("write {rel}: {e}")))?;
+            #[cfg(test)]
+            {
+                let pause = self.okf_pause.lock().unwrap().take();
+                if let Some((started, resume)) = pause {
+                    let _ = started.send(());
+                    let _ = resume.await;
+                }
+            }
+            self.write_note(ws, id, &rel, &md, Some(&expected)).await?;
             written += 1;
         }
-        self.scan(id).await?;
+        self.rescan_after_mutation(id).await;
         Ok(written)
     }
 }

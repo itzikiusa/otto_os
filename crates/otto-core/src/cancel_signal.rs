@@ -20,7 +20,9 @@ use tokio::sync::Notify;
 
 #[derive(Default)]
 struct Inner {
-    flag: AtomicBool,
+    /// Shared with runners that poll an `AtomicBool` between attempts
+    /// (`run_with_recovery`). `cancel()` sets this same flag.
+    flag: Arc<AtomicBool>,
     notify: Notify,
 }
 
@@ -43,6 +45,12 @@ impl CancelSignal {
 
     pub fn is_cancelled(&self) -> bool {
         self.inner.flag.load(Ordering::SeqCst)
+    }
+
+    /// The flag [`cancel`](Self::cancel) sets, for a recovery loop that polls
+    /// between attempts. The same `AtomicBool` the signal already uses.
+    pub fn share_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.inner.flag)
     }
 
     /// Sleep `d`, or less if cancelled meanwhile. Returns `true` when the
@@ -71,6 +79,16 @@ impl CancelSignal {
     pub fn same(&self, other: &CancelSignal) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
+}
+
+/// Whether a supervisor that just finished an await may start new work.
+///
+/// `cancel()` makes this false, including when the cancel landed while the
+/// scan was already awaiting. It does not abort a task that already passed
+/// this check and was `tokio::spawn`ed. Those runs keep their own cancel
+/// handles. A cancelled supervisor token is not evidence they have stopped.
+pub fn supervisor_may_launch(cancel: &CancelSignal) -> bool {
+    !cancel.is_cancelled()
 }
 
 // ---- Run bookkeeping shared by the scheduled-task and personal-agent engines ----
@@ -215,11 +233,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn share_flag_is_the_bit_cancel_sets() {
+        let sig = CancelSignal::new();
+        let flag = sig.share_flag();
+        assert!(!flag.load(Ordering::SeqCst));
+        sig.cancel();
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(sig.is_cancelled());
+    }
+
     #[tokio::test]
     async fn clones_share_identity() {
         let a = CancelSignal::new();
         let b = a.clone();
         assert!(a.same(&b));
         assert!(!a.same(&CancelSignal::new()));
+    }
+
+    /// Cancel while a scan await is still pending. The launch decision runs
+    /// only after that await, and it must refuse. A task spawned earlier keeps
+    /// running: the supervisor token does not stop it.
+    #[tokio::test]
+    async fn cancel_during_an_await_blocks_the_next_launch_and_leaves_detached_work() {
+        let cancel = CancelSignal::new();
+        let (release_scan, scan_done) = tokio::sync::oneshot::channel::<()>();
+        let (release_work, work_done) = tokio::sync::oneshot::channel::<u8>();
+        let scan = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let _ = scan_done.await;
+                supervisor_may_launch(&cancel)
+            })
+        };
+        let detached = tokio::spawn(async move { work_done.await.unwrap() });
+        cancel.cancel();
+        release_scan.send(()).unwrap();
+        assert!(
+            !scan.await.unwrap(),
+            "a scan that was awaiting must not launch after stop"
+        );
+        assert!(
+            !detached.is_finished(),
+            "cancelling the supervisor token does not stop detached work"
+        );
+        release_work.send(7).unwrap();
+        assert_eq!(detached.await.unwrap(), 7);
     }
 }

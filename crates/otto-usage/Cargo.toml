@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 # Concurrent summary queries (`query_batch`).
 futures-util.workspace = true
+sqlx.workspace = true
 otto-core.workspace = true
 otto-transcript.workspace = true
 tokio.workspace = true

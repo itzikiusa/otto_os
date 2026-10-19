@@ -65,7 +65,7 @@ async fn run_scheduler_start_waits_for_startup_recovery() {
         RunStatus::Failed
     );
     let fresh = live_run(&ctx, "recovery-ws").await;
-    start_run_scheduler(&ctx);
+    let _scheduler = start_run_scheduler(&ctx);
     // The detached supervisor gets its first tick after fresh work is admitted;
     // it must never classify that new live run as belonging to the old daemon.
     tokio::time::sleep(Duration::from_millis(50)).await;

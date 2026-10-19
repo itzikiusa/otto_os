@@ -301,10 +301,10 @@
       <button class="btn small" onclick={onreview} data-testid="review-skill"><Icon name="eye" size={12} /> Review</button>
       {#if isBundled}
         {#if !hasLibrary || variant.bundledState === 'update_available'}
-          <button class="btn small primary" disabled={busy} onclick={install}>{hasLibrary ? 'Update library copy' : 'Install to library'}</button>
+          <button class="btn small" disabled={busy} onclick={install}>{hasLibrary ? 'Update library copy' : 'Install to library'}</button>
         {/if}
       {:else if !hasLibrary}
-        <button class="btn small primary" disabled={busy} onclick={copyToLibrary}>Copy to library</button>
+        <button class="btn small" disabled={busy} onclick={copyToLibrary}>Copy to library</button>
       {/if}
       <button class="icon-btn" onclick={more} aria-label="More actions for {group.name}" title="More actions" aria-haspopup="menu"><Icon name="more" size={14} /></button>
     </div>
@@ -780,6 +780,10 @@
     }
     .d-body {
       padding: 12px 14px 24px;
+    }
+    .variant {
+      min-height: var(--hit-min);
+      padding-inline: 10px;
     }
   }
 </style>

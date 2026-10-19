@@ -1045,29 +1045,43 @@ function build(
     // Life.
     const r = openRoom;
     if (r) {
-      life.step(step);
-      for (const c of characters.values()) {
-        const v = life.kidView(c.id);
-        if (v) placeCharacter(c, v, r, step);
-        c.mixer.update(step / 1000);
+      if (!reduced) {
+        life.step(step);
+        for (const c of characters.values()) {
+          const v = life.kidView(c.id);
+          if (v) placeCharacter(c, v, r, step);
+          c.mixer.update(step / 1000);
+        }
+        const hv = life.headView();
+        if (head && hv) {
+          placeCharacter(head, hv, r, step);
+          head.mixer.update(step / 1000);
+        }
+        updateChairs(r, step);
+        dirty = true;
+      } else if (dirty) {
+        for (const c of characters.values()) {
+          const v = life.kidView(c.id);
+          if (v) placeCharacter(c, v, r, 0);
+          c.mixer.update(0);
+        }
+        const hv = life.headView();
+        if (head && hv) {
+          placeCharacter(head, hv, r, 0);
+          head.mixer.update(0);
+        }
       }
-      const hv = life.headView();
-      if (head && hv) {
-        placeCharacter(head, hv, r, step);
-        head.mixer.update(step / 1000);
-      }
-      updateChairs(r, step);
       for (const [id, k] of kicks) {
         if (life.isGone(id) || now > k.until) {
           kicks.delete(id);
           const c = characters.get(id);
           if (c) c.obj.visible = false;
           k.resolve();
+          dirty = true;
         }
       }
       placeRing(selRing, selected);
       placeRing(hoverRing, hover?.kind === 'kid' && hover.id !== selected ? hover.id : null);
-      dirty = true;
     }
     if (dirty) {
       camera.position.copy(cam.pos);

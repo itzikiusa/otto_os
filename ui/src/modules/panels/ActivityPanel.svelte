@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Badge from '../../lib/components/Badge.svelte';
   // Per-session agent activity: a normalized task tracker + a live trail of
   // what's going on (skills loaded, commands run, files touched, prompts,
@@ -96,7 +97,7 @@
   $effect(() => {
     const sid = session?.id;
     const w = wsId;
-    if (sid && w) void activity.load(w, sid);
+    if (sid && w) return untrack(() => activity.watch(w, sid));
   });
 
   const loadError = $derived(session ? (activity.loadErrorBySession[session.id] ?? null) : null);
@@ -335,7 +336,7 @@
       {:else}
         <ul class="trail">
           {#each filtered as e (e.id)}
-            <li class="row src-{e.source} kind-{e.kind} lvl-{e.level}">
+            <li class="trail-row src-{e.source} kind-{e.kind} lvl-{e.level}">
               {#snippet rowMain()}
                 <span class="row-icon"><Icon name={KIND_ICON[e.kind] ?? 'dot'} size={12} /></span>
                 <span class="row-body">
@@ -454,7 +455,7 @@
   .task-input {
     width: 100%;
     box-sizing: border-box;
-    border: 1px solid var(--border);
+    border: 1px solid var(--control-border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
@@ -600,7 +601,7 @@
     flex: 1;
     min-width: 0;
     height: 22px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--control-border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);
@@ -621,7 +622,7 @@
   .note-input {
     flex: 1;
     min-width: 0;
-    border: 1px solid var(--border);
+    border: 1px solid var(--control-border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text);

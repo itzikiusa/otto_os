@@ -167,17 +167,52 @@ pub async fn run_session_turn(
     stuck_after: Duration,
     on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
+    run_session_turn_cancellable(
+        ctx,
+        ws,
+        user,
+        existing,
+        title,
+        cwd,
+        provider,
+        meta,
+        prompt,
+        stuck_after,
+        None,
+        on_ready,
+    )
+    .await
+}
+
+/// The plain-chat reply protocol with caller-owned cancellation. Existing callers
+/// retain the uncancelled wrapper; Product uses this for story deletion.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_turn_cancellable(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    user: &User,
+    existing: Option<&Id>,
+    title: &str,
+    cwd: &str,
+    provider: &str,
+    meta: Value,
+    prompt: &str,
+    stuck_after: Duration,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    on_ready: impl FnOnce(&Id),
+) -> ApiResult<(String, Id)> {
     let reply = reply::Reply::new()
         .map_err(|e| ApiError(Error::Internal(format!("prepare final reply: {e}"))))?;
     // With permission prompts on, writing the reply file outside the cwd asks
     // for approval and the turn would sit until the idle backstop; claude and
     // codex end their turns natively, so they answer in chat alone instead.
-    let (complete_prompt, opts) =
+    let (complete_prompt, mut opts) =
         if reply::wants_file(provider, ctx.manager.providers().skip_permissions()) {
             (reply.prompt(prompt), reply_turn_options(&reply.path()))
         } else {
             (prompt.to_string(), reply::chat_options())
         };
+    opts.cancel = cancel;
     let (text, sid) = run_session_turn_with(
         ctx,
         ws,
@@ -229,6 +264,7 @@ pub async fn run_session_turn_with(
     let stop_flag = cancel.clone();
     let mut guard = lifecycle::SessionGuard::new(Arc::clone(&ctx.manager), should_stop);
     let slot = Arc::clone(&guard.slot);
+    let startup = lifecycle::Startup::default();
     let turn = run_session_turn_inner(
         ctx,
         ws,
@@ -242,6 +278,7 @@ pub async fn run_session_turn_with(
         stuck_after,
         opts,
         slot,
+        &startup,
         on_ready,
     );
     let result = tokio::select! {
@@ -254,6 +291,11 @@ pub async fn run_session_turn_with(
     };
     if result.is_err() && should_stop {
         let cancelled = stop_flag.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
+        // Only explicit cancellation drains startup. The old absolute timeout
+        // and uncancelled callers keep their existing deadline behavior.
+        if cancelled {
+            startup.drain().await;
+        }
         guard.stop(cancelled).await;
     }
     guard.disarm();
@@ -277,6 +319,7 @@ async fn run_session_turn_inner(
     stuck_after: Duration,
     mut opts: TurnOpts,
     owner: lifecycle::OwnershipSlot,
+    startup: &lifecycle::Startup,
     on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
     // 1. E2E short-circuit: the offline test daemon points CLAUDE_BIN at a
@@ -301,13 +344,29 @@ async fn run_session_turn_inner(
     //    --resume when suspended/dead, guarding supports_resume), else create.
     let (sid, psid, mut created_guard, created_here) = match existing {
         Some(id) if ctx.manager.get(id).await.is_ok() => {
-            let (session, guard) = lifecycle::resume(Arc::clone(&ctx.manager), id.clone())
-                .await
-                .map_err(ApiError)?;
+            let (session, guard) = if let Some(cancel) = opts.cancel.clone() {
+                (
+                    lifecycle::resume_tracked(
+                        Arc::clone(&ctx.manager),
+                        id.clone(),
+                        startup,
+                        owner.clone(),
+                        cancel,
+                    )
+                    .await
+                    .map_err(ApiError)?,
+                    None,
+                )
+            } else {
+                let (session, guard) = lifecycle::resume(Arc::clone(&ctx.manager), id.clone())
+                    .await
+                    .map_err(ApiError)?;
+                (session, Some(guard))
+            };
             (
                 id.clone(),
                 session.provider_session_id.clone(),
-                Some(guard),
+                guard,
                 false,
             )
         }
@@ -321,14 +380,32 @@ async fn run_session_turn_inner(
                 model: None,
                 meta: Some(meta),
             };
-            let (session, guard) =
-                lifecycle::create(Arc::clone(&ctx.manager), ws.clone(), user.id.clone(), req)
+            let (session, guard) = if let Some(cancel) = opts.cancel.clone() {
+                (
+                    lifecycle::create_tracked(
+                        Arc::clone(&ctx.manager),
+                        ws.clone(),
+                        user.id.clone(),
+                        req,
+                        startup,
+                        owner.clone(),
+                        cancel,
+                    )
                     .await
-                    .map_err(ApiError)?;
+                    .map_err(ApiError)?,
+                    None,
+                )
+            } else {
+                let (session, guard) =
+                    lifecycle::create(Arc::clone(&ctx.manager), ws.clone(), user.id.clone(), req)
+                        .await
+                        .map_err(ApiError)?;
+                (session, Some(guard))
+            };
             (
                 session.id.clone(),
                 session.provider_session_id.clone(),
-                Some(guard),
+                guard,
                 true,
             )
         }

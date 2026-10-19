@@ -9,9 +9,7 @@
   // banner below, and it is never logged or persisted (no localStorage, no
   // console.log — just the in-memory `revealed` state, cleared on dismiss).
   //
-  // Standalone panel (not wired into BrowserView by this task) — a caller
-  // renders `<CredentialsPanel workspaceId={ws.currentId} />` wherever the
-  // browser module wants a credentials tab/section.
+  // Mounted from the Browser toolbar in a workspace-scoped modal.
 
   import * as browserApi from '../../lib/api/browser';
   import type { BrowserCredential } from '../../lib/api/types';
@@ -20,6 +18,7 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
@@ -181,11 +180,11 @@
         its database.
       </div>
     </div>
-    <button class="btn primary" onclick={openAdd}>+ Add credential</button>
+    <button class="btn primary" onclick={openAdd}><Icon name="plus" size={14} /> Add credential</button>
   </div>
 
   <LoadState what="credentials" {loading} error={loadError} empty={creds.length === 0} onretry={() => void load()}>
-    {#snippet emptyView()}<p class="empty">No saved credentials yet.</p>{/snippet}
+    {#snippet emptyView()}<EmptyState icon="key" title="No saved site credentials" body="Add a credential to fill a sign-in form when you choose." />{/snippet}
     <ul class="list">
       {#each creds as c (c.id)}
         <li class="row">
@@ -299,11 +298,6 @@
     font-size: var(--fs-s);
     margin-top: 0.2rem;
   }
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    padding: 0.5rem 0.1rem;
-  }
   .list {
     list-style: none;
     margin: 0;
@@ -409,4 +403,5 @@
     border-radius: var(--radius-s);
     padding: 0.4rem 0.55rem;
   }
+  input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
 </style>

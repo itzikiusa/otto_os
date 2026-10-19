@@ -206,6 +206,16 @@
     }
   }
 
+  function onReadKeydown(e: KeyboardEvent): void {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const t = (e.target as HTMLElement).closest('span.tag, a.internal-link');
+    if (!t) return;
+    if (t.classList.contains('tag') || e.key === ' ') {
+      e.preventDefault();
+      (t as HTMLElement).click();
+    }
+  }
+
   // Page previews on inline wikilinks (delegated; same popover as the
   // structured panel’s chips). Leaving the link, scrolling or switching
   // notes closes it.
@@ -463,11 +473,12 @@
       </div>
     {:else}
       <!-- Rendered markdown is sanitized in mdRender (allowlist). -->
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
       <div
         class="read md-body"
         bind:this={readEl}
         onclick={onReadClick}
+        onkeydown={onReadKeydown}
         onmouseover={onReadOver}
         onmouseout={onReadOut}
         onfocusin={onReadOver}
@@ -569,6 +580,12 @@
     font: inherit;
     font-size: var(--fs-s);
   }
+  @media (pointer: coarse), (max-width: 640px) {
+    .mode-btn {
+      min-height: var(--hit-min);
+      min-width: var(--hit-min);
+    }
+  }
   .mode-btn:hover {
     background: var(--hover);
     color: var(--text);
@@ -647,7 +664,6 @@
     border-bottom-color: currentColor;
   }
   .read :global(a.internal-link.unresolved) {
-    opacity: 0.6;
     border-bottom: 1px dashed currentColor;
   }
   .read :global(span.tag) {

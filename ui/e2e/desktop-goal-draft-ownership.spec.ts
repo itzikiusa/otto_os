@@ -34,7 +34,7 @@ test('goal draft Keep stays in A; workspace Discard closes the persistent form a
   await page.getByRole('button',{name:/New goal loop|Define your first goal/}).first().click();
   await page.locator('#gl-seed').fill('Keep all A fields');
   await page.getByPlaceholder('/absolute/path/to/repo').fill('/tmp/workspace-A');
-  await page.getByRole('button',{name:'Define with AI'}).click();
+  await page.getByRole('button',{name:'Draft goal'}).click();
   await page.getByPlaceholder('Criterion description').fill('Edited A criterion');
   await page.getByLabel('Max minutes',{exact:true}).fill('120');
   await select(page,workspaceB);

@@ -222,9 +222,13 @@
         aria-invalid={!!gmailError}
         disabled={hasStoredPassword && !editingPassword}
         title={hasStoredPassword && !editingPassword ? 'Replace the app password to change the sender' : undefined}
+        aria-describedby={hasStoredPassword && !editingPassword ? 'es-gmail-help' : undefined}
         bind:value={fGmail}
         oninput={() => (gmailError = '')}
       />
+      {#if hasStoredPassword && !editingPassword}
+        <span id="es-gmail-help" class="hint">Choose Replace… below to change the app password and sender address together.</span>
+      {/if}
       {#if gmailError}<span class="field-error">{gmailError}</span>{/if}
     </div>
 

@@ -239,6 +239,40 @@ impl WorkspacesRepo {
         self.get(id).await
     }
 
+    /// Atomically patch only the named settings, against the value at write
+    /// time (never a caller's cached snapshot). SQLite's RFC 7396 json_patch
+    /// recursively merges objects, removes null members, and replaces arrays.
+    /// Context remains exclusively owned by its versioned API.
+    pub async fn patch_settings(&self, id: &Id, patch: &serde_json::Value) -> Result<Workspace> {
+        Self::validate_settings_patch(patch)?;
+        let changed = sqlx::query(
+            "UPDATE workspaces SET settings_json = json_patch(settings_json, ?) WHERE id = ?",
+        )
+        .bind(patch.to_string())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("patch workspace settings"))?
+        .rows_affected();
+        if changed == 0 {
+            return Err(Error::NotFound("workspace".into()));
+        }
+        self.get(id).await
+    }
+
+    /// Validate before applying any other fields in a workspace PATCH.
+    pub fn validate_settings_patch(patch: &serde_json::Value) -> Result<()> {
+        let fields = patch
+            .as_object()
+            .ok_or_else(|| Error::Invalid("settings_patch must be an object".into()))?;
+        if fields.contains_key("context") {
+            return Err(Error::Invalid(
+                "context must be updated through the workspace context API".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Patch user-owned context with optimistic concurrency. Compare the raw
     /// settings snapshot as well as the context revision so a concurrent machine
     /// rule or unrelated settings write is re-read rather than overwritten.

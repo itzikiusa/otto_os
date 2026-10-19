@@ -217,6 +217,47 @@ impl CanvasRepo {
         row.as_ref().map(row_to_scene).transpose()
     }
 
+    /// A portable snapshot for imports/exports. Read the row and image bytes
+    /// in ONE SQLite snapshot, so a concurrent edit/delete cannot GC an image
+    /// between reading its marker and materializing its content.
+    pub async fn portable_scene(&self, id: &Id) -> Result<Option<CanvasScene>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("portable canvas begin"))?;
+        let row = sqlx::query("SELECT * FROM canvas_scenes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(dberr("portable canvas scene"))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut scene = row_to_scene(&row)?;
+        let refs = scan_refs(&scene.doc_json);
+        if !refs.is_empty() {
+            let rows = sqlx::query("SELECT sha256, data_url FROM canvas_files WHERE sha256 IN (SELECT value FROM json_each(?))")
+                .bind(serde_json::to_string(&refs)?).fetch_all(&mut *tx).await
+                .map_err(dberr("portable canvas images"))?;
+            let files: std::collections::HashMap<String, String> = rows
+                .iter()
+                .map(|r| (r.get("sha256"), r.get("data_url")))
+                .collect();
+            if files.len() != refs.len() {
+                return Err(Error::NotFound(
+                    "a Canvas image is missing; cannot create a portable copy".into(),
+                ));
+            }
+            tx.commit().await.map_err(dberr("portable canvas commit"))?;
+            let doc = std::mem::take(&mut scene.doc_json);
+            scene.doc_json = tokio::task::spawn_blocking(move || rehydrate_files(&doc, &files))
+                .await
+                .map_err(|e| Error::Internal(format!("portable canvas: {e}")))?;
+        }
+        Ok(Some(scene))
+    }
+
     /// List scenes for a workspace, most-recently-updated first.
     pub async fn list_for_workspace(&self, ws: &Id) -> Result<Vec<CanvasSceneSummary>> {
         let rows = sqlx::query(

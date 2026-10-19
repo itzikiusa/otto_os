@@ -118,10 +118,6 @@ fn sha_key(parts: &[&str]) -> String {
 /// measurability hook for the cache tests.
 static PROTO_COMPILES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// How many channels were actually dialled (channel-cache misses) — the
-/// measurability hook for the channel-reuse test (perf N5).
-static CHANNEL_CONNECTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 /// [`pool_from_proto`] through the pool cache, compiling on the blocking pool
 /// (protox + a tempdir write are synchronous file I/O and CPU).
 async fn pool_from_proto_cached(proto: &str) -> Result<DescriptorPool, Error> {
@@ -317,25 +313,25 @@ fn field_placeholder(field: &prost_reflect::FieldDescriptor, depth: u8) -> Value
 
 // ── invoke ──────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct KV {
     #[serde(default)]
-    key: String,
+    pub key: String,
     #[serde(default)]
-    value: String,
+    pub value: String,
 }
 
 #[derive(Deserialize)]
 pub struct GrpcInvokeReq {
-    url: String,
+    pub url: String,
     #[serde(default)]
-    proto: String,
+    pub proto: String,
     /// `/package.Service/Method`.
-    method: String,
+    pub method: String,
     #[serde(default)]
-    body: String,
+    pub body: String,
     #[serde(default)]
-    headers: Vec<KV>,
+    pub headers: Vec<KV>,
 }
 
 /// Budget for one gRPC call (unary answer, or the whole server stream).
@@ -758,7 +754,6 @@ async fn connect_channel(url: &str, allow_local: bool) -> Result<Channel, Error>
     // SSRF guard (pinned, see `grpc_endpoint`) for the reflection target —
     // honouring the workspace allow-local opt-in exactly like invoke does.
     let endpoint = grpc_endpoint(url, allow_local).await?;
-    CHANNEL_CONNECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match tokio::time::timeout(Duration::from_secs(20), endpoint.connect()).await {
         Ok(Ok(c)) => Ok(c),
         Ok(Err(e)) => Err(upstream(format!("connect failed: {e}"))),
@@ -971,9 +966,9 @@ async fn reflect_pool_inner(
 
 #[derive(Deserialize)]
 pub struct GrpcReflectReq {
-    url: String,
+    pub url: String,
     #[serde(default)]
-    headers: Vec<KV>,
+    pub headers: Vec<KV>,
 }
 
 /// `POST /workspaces/{wid}/api-client/grpc/reflect` — list services/methods via
@@ -1324,33 +1319,39 @@ mod tests {
             }
         });
         let url = format!("http://{addr}");
-        let dials = || CHANNEL_CONNECTS.load(Ordering::Relaxed);
-        let before = dials();
+        // Count this fixture's TCP accepts, not process-wide dials: parallel
+        // reflection tests legitimately connect to their own servers.
         let a = cached_channel(&url, true).await.expect("dial");
         let _b = cached_channel(&url, true).await.expect("reuse");
         let _c = cached_channel(&url, true).await.expect("reuse");
         let mut client = tonic::client::Grpc::new(a);
         client.ready().await.expect("ready");
-        assert_eq!(dials() - before, 1, "three calls, one dial");
         for _ in 0..100 {
             if accepts.load(Ordering::SeqCst) >= 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(accepts.load(Ordering::SeqCst), 1, "one TCP connection");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "three calls, one TCP connection"
+        );
 
         // A transport failure drops the cached channel; the next call redials.
         forget_channel(&url, true);
         let _d = cached_channel(&url, true).await.expect("redial");
-        assert_eq!(dials() - before, 2);
         for _ in 0..100 {
             if accepts.load(Ordering::SeqCst) >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(accepts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "forget causes one new TCP connection"
+        );
         forget_channel(&url, true);
         server.abort();
     }

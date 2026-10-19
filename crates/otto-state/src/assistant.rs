@@ -984,6 +984,19 @@ impl AssistantRepo {
         Ok(rows.iter().map(row_to_task).collect())
     }
 
+    /// Running tasks whose answer was stored but not yet pasted, because the
+    /// asking turn still held the thread.
+    pub async fn tasks_with_pending_followup(&self) -> Result<Vec<AssistantTask>> {
+        let rows = sqlx::query(
+            "SELECT * FROM assistant_tasks WHERE state = 'running' \
+             AND json_extract(result_json, '$.followup_pending') = 1 LIMIT 50",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("pending assistant followups"))?;
+        Ok(rows.iter().map(row_to_task).collect())
+    }
+
     /// Running delegations with a Personal Agent run to watch.
     pub async fn running_delegations(&self) -> Result<Vec<AssistantTask>> {
         let rows = sqlx::query(

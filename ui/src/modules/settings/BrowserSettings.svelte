@@ -19,6 +19,7 @@
   import type { BrowserChromeBuild, BrowserLiveSettings } from '../../lib/api/types';
   import SectionIntro from './SectionIntro.svelte';
   import SettingToggle from './SettingToggle.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
   $effect(() => {
@@ -143,9 +144,8 @@
         <p class="row-desc">This Otto daemon doesn’t include the live browser engine. Update Otto to use it.</p>
       </section>
     {:else if browserLive.loadError && !st}
-      <section class="card bs-card err-card" role="alert">
-        <p class="error">Couldn’t load the browser engine settings: {browserLive.loadError}</p>
-        <button class="btn small" onclick={() => void browserLive.load()}><Icon name="refresh" size={12} /> Retry</button>
+      <section class="card bs-card">
+        <LoadState variant="compact" what="the browser engine settings" error={browserLive.loadError} empty onretry={() => void browserLive.load()} />
       </section>
     {:else if !st}
       <section class="card bs-card"><Skeleton rows={2} height={28} label="browser engine settings" /></section>
@@ -282,15 +282,6 @@
   }
   .toggle-card {
     padding-block: 6px;
-  }
-  .err-card {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .err-card .error {
-    margin: 0;
   }
   .bs-row {
     display: flex;

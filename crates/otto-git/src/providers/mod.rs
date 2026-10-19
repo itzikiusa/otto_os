@@ -279,7 +279,10 @@ pub fn make_provider(account: &GitAccount, token: String) -> Arc<dyn GitProvider
 /// self-hosted remote (`gitlab.corp.example`) sent the token there and acted
 /// on a public namesake project. Without `gitlab_api_base` a non-gitlab.com
 /// remote is refused with the fix (set the account's API base URL); with one,
-/// the user said where the API lives (ssh and API hosts may differ).
+/// the user said where the API lives (ssh and API hosts may differ). The caller
+/// must retain the recorded repo/account association only while origin's forge
+/// identity is unchanged; `http::refresh_remote` invalidates that association
+/// atomically, and automatic adoption requires a matching account identity.
 pub fn check_remote_reachable(
     kind: GitProviderKind,
     remote_url: &str,

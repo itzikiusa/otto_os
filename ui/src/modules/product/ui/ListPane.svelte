@@ -75,4 +75,12 @@
     display: flex;
     flex-direction: column;
   }
+  @media (max-width: 640px) {
+    .list-pane {
+      width: 100% !important;
+      max-height: 196px;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+  }
 </style>

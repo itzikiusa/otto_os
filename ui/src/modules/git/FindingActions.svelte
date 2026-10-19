@@ -143,8 +143,23 @@
       'Regression-test agent started',
     );
   }
+  async function resolveFinding(kind: 'waive' | 'false_positive'): Promise<void> {
+    if (busy) return;
+    const id = finding.id;
+    const waive = kind === 'waive';
+    const reason = await confirmer.promptText(
+      `Record why “${finding.title || finding.body.split('\n')[0]}” ${waive ? 'is being waived' : 'is a false positive'}. The reason stays in its history.`,
+      { title: waive ? 'Waive finding' : 'Mark false positive', confirmLabel: waive ? 'Waive' : 'Mark false positive', placeholder: 'Reason' },
+    );
+    if (!reason || finding.id !== id) return;
+    await run(
+      waive ? 'waive' : 'mark false positive',
+      () => waive ? waiveFinding(id, reason) : falsePositiveFinding(id, reason),
+      waive ? 'Waived' : 'Marked false positive',
+    );
+  }
   function doFalsePositive(): void {
-    void run('mark false positive', () => falsePositiveFinding(finding.id), 'Marked false positive');
+    void resolveFinding('false_positive');
   }
   function doRequireApproval(): void {
     void run('require approval', () => requireApprovalFinding(finding.id), 'Approval required');
@@ -262,7 +277,7 @@
         action: doRequireApproval,
       },
       {
-        label: 'Mark false positive',
+        label: 'Mark false positive…',
         icon: 'eyeOff',
         disabled: !canFalsePositive || !!busy,
         action: doFalsePositive,
@@ -275,9 +290,9 @@
       action: () => void run('accept', () => acceptFinding(finding.id), 'Accepted'),
     });
     items.push({
-      label: 'Waive',
+      label: 'Waive…',
       disabled: !canWaive || !!busy,
-      action: () => void run('waive', () => waiveFinding(finding.id), 'Waived'),
+      action: () => void resolveFinding('waive'),
     });
     ctxMenu.show(e, items);
   }

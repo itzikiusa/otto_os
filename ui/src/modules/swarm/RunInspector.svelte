@@ -6,9 +6,12 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { runStatus, sentenceCase, type BadgeTone } from '../../lib/status';
+  import { loadErrorText } from '../../lib/loadError';
+  import { isAbortError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { openExternal, isExternalUrl } from '../../lib/external';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -30,12 +33,18 @@
   // changes (a finished turn writes the result).
   let fetched = $state.raw<SwarmRun | null>(null);
   let resultError = $state<string | null>(null);
+  let resultAttempt = $state(0);
   $effect(() => {
     const id = run.id;
     const status = run.status;
     const has = run.result != null;
+    const attempt = resultAttempt;
     void status;
-    if (has) return;
+    void attempt;
+    if (has) {
+      resultError = null;
+      return;
+    }
     const ctl = new AbortController();
     resultError = null;
     swarm
@@ -44,7 +53,8 @@
         if (!ctl.signal.aborted) fetched = r;
       })
       .catch((e: unknown) => {
-        if (!ctl.signal.aborted) resultError = e instanceof Error ? e.message : String(e);
+        if (ctl.signal.aborted || isAbortError(e)) return;
+        resultError = loadErrorText(e);
       });
     return () => ctl.abort();
   });
@@ -112,9 +122,13 @@
   }
 
   const rawJson = $derived(result ? JSON.stringify(result, null, 2) : null);
+  const runTitle = $derived.by(() => {
+    const kind = sentenceCase(run.kind);
+    return agent?.name ? `Run detail — ${agent.name} (${kind})` : `Run detail — ${kind}`;
+  });
 </script>
 
-<Modal title="Run detail" width={640} {onclose}>
+<Modal title={runTitle} width={640} {onclose}>
   <div class="insp">
     <!-- Header line: agent · kind · status · timing -->
     <div class="hdr">
@@ -125,7 +139,7 @@
       <StatusBadge status={runStatus(run.status)} />
       <span class="grow"></span>
       {#if run.session_id}
-        <button class="btn small ghost" onclick={() => { swarm.selectedSessionId = run.session_id!; onclose(); }}>
+        <button class="btn small ghost" aria-label="Open {agent?.name ?? 'this run'}’s session" onclick={() => { swarm.selectedSessionId = run.session_id!; onclose(); }}>
           <Icon name="terminal" size={12} /> Open session
         </button>
       {/if}
@@ -200,7 +214,9 @@
     <!-- Artifacts -->
     <section>
       <h3>Artifacts {#if artifacts.length}<span class="count">{artifacts.length}</span>{/if}</h3>
-      {#if artifacts.length === 0}
+      {#if artifacts.length === 0 && result == null}
+        <LoadState what="artifacts" variant="compact" loading={!resultError} error={resultError} empty={false} onretry={() => (resultAttempt += 1)} />
+      {:else if artifacts.length === 0}
         <div class="muted small">No artifacts reported.</div>
       {:else}
         <div class="arts">
@@ -266,20 +282,11 @@
         </div>
         <pre class="block json scrolly">{rawJson}</pre>
       </section>
-    {:else if resultError}
-      <section>
-        <p class="result-err" role="status">Couldn’t load this run’s result: {resultError}</p>
-      </section>
     {/if}
   </div>
 </Modal>
 
 <style>
-  .result-err {
-    margin: 0;
-    color: var(--danger);
-    font-size: var(--fs-s);
-  }
   .insp {
     display: flex;
     flex-direction: column;

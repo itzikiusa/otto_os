@@ -1,0 +1,18 @@
+{
+  "binary": "/Users/itziklavon/otto_os/target/debug/ottod",
+  "sha256": "267ad63c7779c3e780be60ef29d45e613abb302566d2dfc839ed0fb191c3a38b",
+  "isolated_data": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-active-restart-g1cyk8no",
+  "same_shell_pid_after_restart": true,
+  "shell_pid": 71842,
+  "results": [
+    {
+      "exit": 0,
+      "seconds": 0.254
+    },
+    {
+      "exit": 0,
+      "seconds": 0.042
+    }
+  ],
+  "boundary": "One isolated holder-backed shell survives graceful restart and accepts input after reattachment. Explicitly killed fixture before final shutdown. Does not prove every background job drains."
+}

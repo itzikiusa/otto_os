@@ -27,43 +27,72 @@
   let messages = $state<RefinementMessage[]>([]);
   /** The thread's model alias, when it has one — shown in the agent byline. */
   let threadModel = $state<string | null>(null);
+  let messagesEl = $state<HTMLDivElement | null>(null);
   let loadError = $state<string | null>(null);
   let loading = $state(false);
 
   let inputText = $state('');
   let sending = $state(false);
+  let stopping = $state(false);
+  let activeTurnId = $state<string | null>(null);
+  let stopNotice = $state<string | null>(null);
+  let backgroundTurn = $state(false);
 
   let loadSeq = 0;
   let activeId = '';
   let alive = true;
+  let inFlightTurnId: string | null = null;
   const drafts = new Map<string, string>();
+  const stopRequestedTurns = new Set<string>();
   onDestroy(() => { alive = false; ++loadSeq; });
+
+  function newTurnId(): string {
+    return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  // Keep the newest turn in view on initial load, user send, and agent reply.
+  $effect(() => {
+    void messages.length;
+    void sending;
+    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
 
   // ── Load / reload when tid changes ────────────────────────────────────────
   $effect(() => {
     // Reactive on tid — re-runs whenever the active thread switches.
     const currentTid = tid;
+    backgroundTurn = false;
+    stopNotice = null;
     void loadThread(currentTid);
   });
 
-  async function loadThread(threadId: string): Promise<void> {
+  async function loadThread(threadId: string, opts?: { preserveMessages?: RefinementMessage[] }): Promise<void> {
     const my = ++loadSeq;
     const current = () => alive && my === loadSeq && tid === threadId;
     if (activeId !== threadId) {
-      // An empty draft is an intentional decision too. While sending, the
-      // cleared composer belongs to that in-flight request, not a new draft.
-      if (activeId && !sending) drafts.set(activeId, inputText);
+      // An empty draft is an intentional decision too. While sending or stopping,
+      // the cleared composer belongs to that in-flight request, not a new draft.
+      if (activeId && !sending && !stopping) drafts.set(activeId, inputText);
       activeId = threadId;
       inputText = drafts.get(threadId) ?? '';
       messages = [];
       sending = false;
+      stopping = false;
+      activeTurnId = null;
+      inFlightTurnId = null;
+      stopNotice = null;
+      backgroundTurn = false;
     }
     loading = true;
     loadError = null;
     try {
       const detail = await product.getRefinementThread(threadId);
       if (!current()) return;
-      messages = detail.messages;
+      messages = detail.messages.length === 0 && opts?.preserveMessages?.length
+        ? opts.preserveMessages
+        : detail.messages;
       threadModel = detail.thread.model;
     } catch (e) {
       if (current()) loadError = loadErrorText(e);
@@ -72,14 +101,75 @@
     }
   }
 
-  // ── Send ──────────────────────────────────────────────────────────────────
+  // ── Send & Stop ───────────────────────────────────────────────────────────
+
+  async function stopTurn(): Promise<void> {
+    if ((!sending && !stopping) || stopping || !activeTurnId) return;
+    const target = tid;
+    const turnId = activeTurnId;
+    const generation = loadSeq;
+    const ownsTurn = () => alive && tid === target && loadSeq === generation && activeTurnId === turnId;
+    stopRequestedTurns.add(turnId);
+    stopping = true;
+    stopNotice = null;
+    try {
+      const res = await product.stopRefinementTurn(target, turnId);
+      if (!ownsTurn()) return;
+      if (res.stopped) {
+        const snapshot = messages;
+        sending = false;
+        stopping = false;
+        activeTurnId = null;
+        inFlightTurnId = null;
+        backgroundTurn = false;
+        stopNotice = 'Turn stopped.';
+        await loadThread(target, { preserveMessages: snapshot });
+      } else {
+        // stopped: false means the turn was not active on the server (not yet admitted or already finished),
+        // NOT proof of cancellation. Keep the accepted user bubble and report truthfully.
+        stopping = false;
+        stopNotice = 'Couldn’t confirm stop — the turn was not active on the server yet (or already finished).';
+        if (inFlightTurnId !== turnId) {
+          sending = false;
+          activeTurnId = null;
+        }
+      }
+    } catch (e) {
+      if (!ownsTurn()) return;
+      stopping = false;
+      if (inFlightTurnId !== turnId) {
+        sending = false;
+        activeTurnId = null;
+      }
+      toastError('Couldn’t stop the turn', e);
+    }
+  }
+
+  function stopWaiting(): void {
+    if (!sending && !stopping) return;
+    if (activeTurnId) stopRequestedTurns.add(activeTurnId);
+    ++loadSeq;
+    sending = false;
+    stopping = false;
+    activeTurnId = null;
+    inFlightTurnId = null;
+    stopNotice = null;
+    backgroundTurn = true;
+  }
+
+  function reloadAfterStop(): void {
+    backgroundTurn = false;
+    stopNotice = null;
+    void loadThread(tid);
+  }
 
   async function send(): Promise<void> {
     const body = inputText.trim();
-    if (!body || sending) return;
+    if (!body || sending || stopping || loading || Boolean(loadError)) return;
     const target = tid;
+    const turnId = newTurnId();
     const generation = loadSeq;
-    const current = () => alive && tid === target && loadSeq === generation;
+    const current = () => alive && tid === target && loadSeq === generation && activeTurnId === turnId;
     drafts.delete(target);
 
     // Optimistic user bubble (temporary — will be reconciled with server msg).
@@ -93,10 +183,16 @@
     };
     messages = [...messages, optimisticMsg];
     inputText = '';
+    activeTurnId = turnId;
+    inFlightTurnId = turnId;
     sending = true;
+    stopping = false;
+    stopNotice = null;
+    backgroundTurn = false;
 
     try {
-      const resp = await product.sendRefinementMessage(tid, body, provider);
+      const resp = await product.sendRefinementMessage(tid, body, provider, undefined, turnId);
+      if (inFlightTurnId === turnId) inFlightTurnId = null;
 
       if (!current()) return;
       // Reconcile: replace the optimistic bubble with the real one and append agent reply.
@@ -105,7 +201,21 @@
         resp.user_message,
         resp.agent_message,
       ];
+      stopNotice = null;
+      sending = false;
+      stopping = false;
+      activeTurnId = null;
     } catch (e) {
+      if (inFlightTurnId === turnId) inFlightTurnId = null;
+      if (stopRequestedTurns.has(turnId)) {
+        // User requested Stop or Stop waiting on this turn: the user message was
+        // already accepted, so never restore it to the composer or drafts map.
+        if (current() && !stopping) {
+          sending = false;
+          activeTurnId = null;
+        }
+        return;
+      }
       // Keep a failed send with its original conversation; never overwrite
       // the draft the person is composing in the newly selected one.
       // A newer draft (including an explicit clear) wins over an old failure.
@@ -114,9 +224,16 @@
       // Roll back the optimistic bubble, restore the typed text, and show an error.
       messages = messages.filter((m) => m.id !== optimisticMsg.id);
       inputText = body;
+      sending = false;
+      stopping = false;
+      activeTurnId = null;
       toastError('Couldn’t send the message', e);
     } finally {
-      if (current()) sending = false;
+      if (inFlightTurnId === turnId) inFlightTurnId = null;
+      if (current() && !stopping) {
+        sending = false;
+        activeTurnId = null;
+      }
     }
   }
 
@@ -142,12 +259,15 @@
 
 <div class="refine-chat">
   <!-- ── Messages ──────────────────────────────────────────────────────────── -->
-  <div class="messages-area">
+  <div class="messages-area" bind:this={messagesEl}>
     {#if (loading || loadError) && messages.length === 0}
       <LoadState what="this thread" {loading} error={loadError} empty onretry={() => void loadThread(tid)} />
     {:else if messages.length === 0}
       <EmptyState icon="comment" title="No messages yet" body="Type a message below to start the conversation with the agent." />
     {:else}
+      {#if loadError}
+        <LoadState what="this thread" {loading} error={loadError} onretry={() => void loadThread(tid)} />
+      {/if}
       {#each messages as m (m.id)}
         {@const meta = m.role === 'agent' ? parseMeta(m.meta_json) : {}}
         {@const storyUpdated = Boolean(meta.story_updated)}
@@ -163,14 +283,18 @@
                 <RelTime iso={m.created_at} class="bubble-time" />
               {/if}
             </div>
-            <div class="bubble-body md-body">{@html renderMarkdown(m.body)}</div>
+            {#if m.role === 'agent'}
+              <div class="bubble-body md-body">{@html renderMarkdown(m.body)}</div>
+            {:else}
+              <div class="bubble-body plain">{m.body}</div>
+            {/if}
             {#if storyUpdated && versionNo !== null}
               <button
                 class="story-updated-chip"
                 onclick={() => (product.tab = 'rewrite')}
-                title="Switch to Rewrite tab to review the suggested version"
+                title="Switch to Rewrite tab to review and apply this suggested draft version"
               >
-                <Icon name="check" size={12} /> Story updated to v{versionNo}
+                <Icon name="edit" size={12} /> Review draft v{versionNo} in Rewrite
               </button>
             {/if}
           </div>
@@ -178,11 +302,52 @@
       {/each}
 
       <!-- Thinking indicator while a turn is in flight -->
-      {#if sending}
+      {#if sending || stopping}
         <div class="bubble-row row-agent">
           <div class="bubble bubble-agent thinking" role="status">
             <div class="bubble-header"><AgentByline {provider} model={threadModel} /></div>
-            <span class="thinking-dots"><LiveWorkingDot label="Thinking…" /></span>
+            <div class="thinking-row">
+              <span class="thinking-dots">
+                <LiveWorkingDot label={stopping ? 'Stopping…' : 'Thinking…'} />
+              </span>
+              <div class="thinking-actions">
+                <button
+                  class="btn small"
+                  type="button"
+                  onclick={() => void stopTurn()}
+                  disabled={stopping || !activeTurnId}
+                  title="Cancel this in-flight agent turn on the server"
+                >
+                  {stopping ? 'Stopping…' : 'Stop'}
+                </button>
+                <button
+                  class="btn small"
+                  type="button"
+                  onclick={stopWaiting}
+                  title="Stop waiting in the UI (the agent turn may still finish in the background)"
+                >
+                  Stop waiting
+                </button>
+              </div>
+            </div>
+            {#if stopNotice}
+              <p class="stop-notice" role="status">{stopNotice}</p>
+            {/if}
+          </div>
+        </div>
+      {:else if backgroundTurn || stopNotice}
+        <div class="bubble-row row-agent">
+          <div class="bubble bubble-agent thinking" role="status">
+            <div class="thinking-row">
+              <span class="thinking-dots">
+                {backgroundTurn
+                  ? 'Stopped waiting — the agent turn may still finish in the background.'
+                  : stopNotice}
+              </span>
+              <button class="btn small" type="button" onclick={reloadAfterStop}>
+                Reload thread
+              </button>
+            </div>
           </div>
         </div>
       {/if}
@@ -193,7 +358,7 @@
   <div class="input-area">
     <label class="rc-provider">
       <span class="dim">Agent</span>
-      <select bind:value={provider} aria-label="Refinement provider" disabled={sending}>
+      <select bind:value={provider} aria-label="Refinement provider" disabled={sending || stopping || loading || Boolean(loadError)}>
         {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </label>
@@ -202,15 +367,15 @@
       placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
       bind:value={inputText}
       onkeydown={handleKeydown}
-      disabled={sending}
+      disabled={sending || stopping || loading || Boolean(loadError)}
       rows={3}
     ></textarea>
     <button
       class="send-btn"
       onclick={() => void send()}
-      disabled={sending || !inputText.trim()}
+      disabled={sending || stopping || loading || Boolean(loadError) || !inputText.trim()}
     >
-      {sending ? 'Sending…' : 'Send'}
+      {stopping ? 'Stopping…' : sending ? 'Sending…' : 'Send'}
     </button>
   </div>
 </div>
@@ -258,12 +423,13 @@
   .bubble-user {
     background: var(--accent-soft-strong);
     border: 1px solid var(--accent-line);
-    border-bottom-right-radius: 3px;
+    border-end-end-radius: 3px;
   }
   .bubble-agent {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-bottom-left-radius: 3px;
+    border-inline-start: 2px solid var(--accent-line-strong);
+    border-end-start-radius: 3px;
   }
 
   .bubble-header {
@@ -288,6 +454,9 @@
     line-height: 1.55;
     color: var(--text);
     overflow-wrap: break-word;
+  }
+  .bubble-body.plain {
+    white-space: pre-wrap;
   }
 
   /* Markdown inside bubbles */
@@ -314,8 +483,25 @@
   .thinking {
     color: var(--text-dim);
   }
+  .thinking-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
   .thinking-dots {
     font-size: var(--fs-s);
+    color: var(--text-dim);
+  }
+  .thinking-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .stop-notice {
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
     color: var(--text-dim);
   }
 

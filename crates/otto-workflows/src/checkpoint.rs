@@ -7,6 +7,13 @@ use otto_state::WorkflowsRepo;
 use serde_json::Value;
 use std::future::Future;
 
+/// Durable execution result; adoption must not rewrite an earlier handoff.
+pub struct CheckpointOutcome {
+    pub output: Value,
+    pub logs: Vec<String>,
+    pub adopted: bool,
+}
+
 pub async fn execute<F, Fut>(
     repo: &WorkflowsRepo,
     run_id: &Id,
@@ -29,6 +36,7 @@ where
         |_| {},
     )
     .await
+    .map(|outcome| (outcome.output, outcome.logs))
 }
 
 /// As `execute`, publishing each attempt and retry before starting more work.
@@ -40,7 +48,7 @@ pub async fn execute_observed<F, Fut, O>(
     restart_safe: bool,
     mut action: F,
     mut observe: O,
-) -> Result<(Value, Vec<String>)>
+) -> Result<CheckpointOutcome>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(Value, Vec<String>)>>,
@@ -56,13 +64,14 @@ where
                     .and_then(crate::retry::outcome_error)
                     .is_some())
         {
-            return Ok((
-                checkpoint.output.unwrap_or(Value::Null),
-                vec![format!(
+            return Ok(CheckpointOutcome {
+                output: checkpoint.output.unwrap_or(Value::Null),
+                logs: vec![format!(
                     "✓ adopted checkpoint: {} (attempt {})",
                     checkpoint.name, checkpoint.attempts
                 )],
-            ));
+                adopted: true,
+            });
         }
         if checkpoint.status == NodeStatus::Running && !restart_safe {
             return Err(Error::Conflict(format!("{} was interrupted with an unknown outcome; inspect it and explicitly retry the failed step", checkpoint.name)));
@@ -125,7 +134,11 @@ where
                 // Failure to record success is an unknown outcome. Do not
                 // execute the operation again in this process.
                 repo.save_checkpoint(run_id, &checkpoint).await?;
-                return Ok((output, logs));
+                return Ok(CheckpointOutcome {
+                    output,
+                    logs,
+                    adopted: false,
+                });
             }
             Err(error) => {
                 checkpoint.status = NodeStatus::Error;

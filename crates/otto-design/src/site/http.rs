@@ -33,7 +33,7 @@ use otto_core::{Error, Id};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::export::{self, pinned_role, pinned_version, PinnedRef, Resolved};
+use super::export::{self, pinned_role, PinnedRef, Resolved};
 use super::render::{page_file_name, EmbedInfo};
 use super::schema::SiteDoc;
 use super::theme::Theme;
@@ -270,6 +270,56 @@ enum AssetMode {
     Inline(usize),
 }
 
+/// Shared by all assets in one export. Reserve from metadata before reading.
+struct ExportBudget {
+    cap: usize,
+    used: usize,
+    names: std::collections::HashSet<String>,
+}
+impl ExportBudget {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            used: 0,
+            names: Default::default(),
+        }
+    }
+    fn reserve(&mut self, key: &str, size: usize) -> Result<(), Error> {
+        if self.names.contains(key) {
+            return Ok(());
+        }
+        let next = self
+            .used
+            .checked_add(size)
+            .filter(|n| *n <= self.cap)
+            .ok_or_else(|| {
+                Error::PayloadTooLarge("site assets exceed the export byte budget".into())
+            })?;
+        self.used = next;
+        self.names.insert(key.to_string());
+        Ok(())
+    }
+}
+
+async fn read_asset(
+    svc: &DesignService,
+    sha: &str,
+    key: &str,
+    mode: &AssetMode,
+    budget: &mut ExportBudget,
+) -> Result<Vec<u8>, Error> {
+    let size = svc.blobs().size(sha).await?;
+    if size > MAX_ASSET_BYTES as u64 {
+        return Err(Error::PayloadTooLarge(
+            "site asset exceeds the per-file limit".into(),
+        ));
+    }
+    if matches!(mode, AssetMode::Files) {
+        budget.reserve(key, size as usize)?;
+    }
+    svc.blobs().get_limited(sha, size as usize).await
+}
+
 /// Put one asset where the mode wants it; the URL the page uses, if any.
 fn place(
     mode: &mut AssetMode,
@@ -354,6 +404,7 @@ async fn resolve_brand<S: DesignCtx>(
         .await
         .filter(|a| a.format == "otto-brand");
     let version = match &art {
+        Some(_) if pinned.is_some() && pinned_vid.is_none() => None,
         Some(a) => version_for(svc, a, &u.version, pinned_vid.as_deref()).await,
         None => None,
     };
@@ -381,6 +432,8 @@ async fn resolve_brand<S: DesignCtx>(
         title: art.as_ref().map(|a| a.title.clone()).unwrap_or_default(),
         policy: u.policy_for("uses_tokens").into(),
         missing,
+        poster_pinned: false,
+        poster_blob: None,
     };
     Ok((value, Some(r)))
 }
@@ -414,6 +467,8 @@ async fn resolve<S: DesignCtx>(
         title: site.title.clone(),
         policy: "pinned".into(),
         missing: false,
+        poster_pinned: false,
+        poster_blob: None,
     }];
     refs.extend(brand_ref);
     let all = doc.rendered_refs();
@@ -423,27 +478,65 @@ async fn resolve<S: DesignCtx>(
             all.len()
         ));
     }
+    let mut budget = ExportBudget::new(MAX_EXPORT_BYTES);
     for (uri, role) in all.into_iter().take(MAX_REFS) {
         let Some(u) = DesignUri::parse(&uri) else {
             warnings.push(format!("{uri} is not a valid design reference"));
             continue;
         };
-        let pinned_vid = pinned.and_then(|p| pinned_version(p, &uri));
+        let old_pin = pinned.and_then(|pins| pins.iter().find(|p| p.uri == uri && p.role == role));
+        let pinned_vid = old_pin.and_then(|p| p.version_id.clone());
         let art = viewable(ctx, svc, user, &u.artifact_id).await;
         let version = match &art {
+            Some(_)
+                if pinned.is_some()
+                    && old_pin.is_none_or(|p| p.version_id.is_none() || p.missing) =>
+            {
+                None
+            }
             Some(a) => version_for(svc, a, &u.version, pinned_vid.as_deref()).await,
             None => None,
         };
-        let title = art.as_ref().map(|a| a.title.clone()).unwrap_or_default();
+        let title = old_pin
+            .map(|p| p.title.clone())
+            .unwrap_or_else(|| art.as_ref().map(|a| a.title.clone()).unwrap_or_default());
         let seq = version.as_ref().map(|v| v.seq);
         let policy = u.policy_for("embeds").to_string();
         let mut missing = art.is_none() || version.is_none();
+        let poster_blob = if role == "embed" && !missing {
+            match old_pin {
+                Some(p) if p.poster_pinned => p.poster_blob.clone(),
+                Some(_) => {
+                    // Old publications never retained their poster. Do not
+                    // silently substitute a newer, unrelated thumbnail.
+                    warnings.push(format!(
+                        "the original poster for {uri} was not captured; a stand-in is shown"
+                    ));
+                    None
+                }
+                None if pinned.is_none() => art.as_ref().and_then(|a| a.thumb_blob.clone()),
+                None => None,
+            }
+        } else {
+            None
+        };
         match role {
             "embed" => {
                 // The poster is the 3D artifact's rendered thumbnail.
                 let mut poster: Option<String> = None;
-                if let Some(sha) = art.as_ref().and_then(|a| a.thumb_blob.clone()) {
-                    if let Ok(bytes) = svc.blobs().get(&sha).await {
+                if let Some(sha) = &poster_blob {
+                    let asset = read_asset(
+                        svc,
+                        sha,
+                        &format!("{}:{seq:?}:poster", u.artifact_id),
+                        &mode,
+                        &mut budget,
+                    )
+                    .await;
+                    if let Err(Error::PayloadTooLarge(message)) = &asset {
+                        return Err(Error::PayloadTooLarge(message.clone()).into());
+                    }
+                    if let Ok(bytes) = asset {
                         if let Some((ext, mime)) = sniff_image(&bytes) {
                             let name = format!(
                                 "assets/{}-v{}-poster.{ext}",
@@ -472,7 +565,18 @@ async fn resolve<S: DesignCtx>(
             }
             _ => {
                 if let Some(v) = &version {
-                    match svc.version_bytes(v).await {
+                    let asset = read_asset(
+                        svc,
+                        &v.blob_sha256,
+                        &format!("{}:{}", u.artifact_id, v.id),
+                        &mode,
+                        &mut budget,
+                    )
+                    .await;
+                    if let Err(Error::PayloadTooLarge(message)) = &asset {
+                        return Err(Error::PayloadTooLarge(message.clone()).into());
+                    }
+                    match asset {
                         Ok(bytes) => match sniff_image(&bytes) {
                             Some((ext, mime)) => {
                                 let name = format!("assets/{}-v{}.{ext}", u.artifact_id, v.seq);
@@ -507,6 +611,8 @@ async fn resolve<S: DesignCtx>(
             title,
             policy,
             missing,
+            poster_pinned: role == "embed",
+            poster_blob,
         });
     }
     Ok(Resolved {
@@ -558,12 +664,17 @@ async fn export_route<S: DesignCtx>(
     } else {
         AssetMode::Pins
     };
+    // A thumbnail replaced during resolution must remain alive until the
+    // publish row adopts it as a durable GC root.
+    let _blob_refs = svc.blobs().reference_guard().await?;
+    super::validate::validate(&serde_json::to_value(&doc).map_err(Error::from)?)
+        .map_err(|e| Error::Invalid(format!("invalid site: {e:?}")))?;
     let r = resolve(&ctx, &svc, &user, &a, &v, &doc, None, mode).await?;
     let pinned_value =
         serde_json::to_value(&r.pinned).map_err(|e| Error::Internal(format!("pinned set: {e}")))?;
 
     if target == "zip" {
-        let files = export::static_files(&doc, &r);
+        let files = export::static_files(&doc, r, MAX_EXPORT_BYTES)?;
         let total: usize = files.iter().map(|(_, b)| b.len()).sum();
         if total > MAX_EXPORT_BYTES {
             return Err(SiteErr(Error::PayloadTooLarge(format!(
@@ -691,6 +802,8 @@ async fn preview<S: DesignCtx>(
         None => (site_version(&svc, &a, q.version.as_deref()).await?, None),
     };
     let doc = SiteDoc::parse(&svc.version_bytes(&v).await?)?;
+    super::validate::validate(&serde_json::to_value(&doc).map_err(Error::from)?)
+        .map_err(|e| Error::Invalid(format!("invalid site: {e:?}")))?;
     let idx = export::page_index(&doc, page.as_deref()).ok_or_else(|| {
         Error::NotFound(format!(
             "page {:?} of site {}",
@@ -1097,5 +1210,98 @@ mod tests {
         );
         assert_eq!(sniff_image(b"<svg"), None);
         assert_eq!(q_safe("v12\"><script>"), "v12script");
+    }
+    #[tokio::test]
+    async fn published_poster_survives_thumbnail_replacement() {
+        let app = app().await;
+        let (site, card, _) = fixture(&app).await;
+        let p1 = STANDARD.encode(b"\x89PNG\r\n\x1a\npublished");
+        let p2 = STANDARD.encode(b"\x89PNG\r\n\x1a\nnew-thumb");
+        let (st, body, _) = call(
+            &app,
+            Method::POST,
+            &format!("/design/artifacts/{site}/export"),
+            Some(json!({"target":"local"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let absent = j(&body)["publish"]["id"].as_str().unwrap().to_string();
+        let mut captured = String::new();
+        for (data, publish) in [(&p1, true), (&p2, false)] {
+            let (st, _, _) = call(
+                &app,
+                Method::PATCH,
+                &format!("/design/artifacts/{card}"),
+                Some(json!({"thumb_b64":data})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            if publish {
+                let (st, body, _) = call(
+                    &app,
+                    Method::POST,
+                    &format!("/design/artifacts/{site}/export"),
+                    Some(json!({"target":"local"})),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK);
+                captured = j(&body)["publish"]["id"].as_str().unwrap().to_string();
+            }
+        }
+        let publish = captured;
+        let (st, body, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/artifacts/{site}/preview?publish={publish}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let html = String::from_utf8(body).unwrap();
+        assert!(html.contains(&p1), "published poster must survive GC");
+        assert!(!html.contains(&p2));
+        let (st, body, _) = call(
+            &app,
+            Method::GET,
+            &format!("/design/artifacts/{site}/preview?publish={absent}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let html = String::from_utf8(body).unwrap();
+        assert!(
+            !html.contains(&p1) && !html.contains(&p2),
+            "a publish with no poster must not acquire a later thumbnail"
+        );
+    }
+
+    #[test]
+    fn export_budget_rejects_next_asset_before_read() {
+        let mut budget = ExportBudget::new(12);
+        budget.reserve("first", 8).unwrap();
+        budget.reserve("first", 8).unwrap(); // deduped, no additional bytes
+        assert!(budget.reserve("next", 5).is_err());
+        assert_eq!(budget.used, 8);
+        budget.reserve("last", 4).unwrap();
+        assert_eq!(budget.used, 12);
+    }
+    #[tokio::test]
+    async fn asset_reader_enforces_aggregate_budget_before_loading_next_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = DesignService::new(otto_state::db::test_pool().await, dir.path(), None);
+        let sha = svc.blobs().put(b"12345678").await.unwrap();
+        let next = svc.blobs().put(b"12345").await.unwrap();
+        let mut budget = ExportBudget::new(12);
+        assert_eq!(
+            read_asset(&svc, &sha, "first", &AssetMode::Files, &mut budget)
+                .await
+                .unwrap(),
+            b"12345678"
+        );
+        assert!(matches!(
+            read_asset(&svc, &next, "next", &AssetMode::Files, &mut budget).await,
+            Err(Error::PayloadTooLarge(_))
+        ));
+        assert_eq!(budget.used, 8);
     }
 }

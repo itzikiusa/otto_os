@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 
 const META_TIMEOUT: Duration = Duration::from_secs(15);
 const WATERMARK_TIMEOUT: Duration = Duration::from_secs(8);
+/// Includes both batched requests and all fallback waves, not per partition.
+const WATERMARK_BUDGET: Duration = Duration::from_secs(16);
 const GROUP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum raw messages scanned when a key_filter is active (prevents infinite
 /// loops on sparse matches; the caller's `limit` still caps *matching* results).
@@ -376,12 +378,14 @@ trait WatermarkSource: Sync {
     fn offsets_for(
         &self,
         tpl: TopicPartitionList,
+        timeout: Duration,
     ) -> std::result::Result<TopicPartitionList, KafkaError>;
     /// One partition's `(low, high)` (the per-partition fallback).
     fn watermarks(
         &self,
         topic: &str,
         partition: i32,
+        timeout: Duration,
     ) -> std::result::Result<(i64, i64), KafkaError>;
 }
 
@@ -389,15 +393,17 @@ impl WatermarkSource for BaseConsumer<QuietContext> {
     fn offsets_for(
         &self,
         tpl: TopicPartitionList,
+        timeout: Duration,
     ) -> std::result::Result<TopicPartitionList, KafkaError> {
-        self.offsets_for_times(tpl, WATERMARK_TIMEOUT)
+        self.offsets_for_times(tpl, timeout)
     }
     fn watermarks(
         &self,
         topic: &str,
         partition: i32,
+        timeout: Duration,
     ) -> std::result::Result<(i64, i64), KafkaError> {
-        self.fetch_watermarks(topic, partition, WATERMARK_TIMEOUT)
+        self.fetch_watermarks(topic, partition, timeout)
     }
 }
 
@@ -405,6 +411,14 @@ impl WatermarkSource for BaseConsumer<QuietContext> {
 fn batch_watermarks_with<S: WatermarkSource>(
     src: &S,
     parts: &[(&str, i32)],
+) -> HashMap<(String, i32), (i64, i64)> {
+    batch_watermarks_until(src, parts, Instant::now() + WATERMARK_BUDGET)
+}
+
+fn batch_watermarks_until<S: WatermarkSource>(
+    src: &S,
+    parts: &[(&str, i32)],
+    deadline: Instant,
 ) -> HashMap<(String, i32), (i64, i64)> {
     let mut out: HashMap<(String, i32), (i64, i64)> = HashMap::with_capacity(parts.len());
     if parts.is_empty() {
@@ -417,7 +431,13 @@ fn batch_watermarks_with<S: WatermarkSource>(
                 return HashMap::new();
             }
         }
-        match src.offsets_for(tpl) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .min(WATERMARK_TIMEOUT);
+        if remaining.is_zero() {
+            return HashMap::new();
+        }
+        match src.offsets_for(tpl, remaining) {
             Ok(res) => res
                 .elements()
                 .iter()
@@ -449,11 +469,47 @@ fn batch_watermarks_with<S: WatermarkSource>(
         }
     }
     if !missing.is_empty() {
-        for (k, v) in fanout_watermarks_with(src, &missing) {
+        for (k, v) in fanout_watermarks_with(src, &missing, deadline) {
             out.insert(k, v);
         }
     }
     out
+}
+
+/// Bound fallback worker threads across all concurrent cluster requests.
+/// Waiting callers already run on the blocking executor and share the same
+/// deadline; they never create another wave of OS threads while saturated.
+static WATERMARK_SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) = (
+    std::sync::Mutex::new(WATERMARK_WORKERS),
+    std::sync::Condvar::new(),
+);
+struct WatermarkPermit;
+impl WatermarkPermit {
+    fn acquire(deadline: Instant) -> Option<Self> {
+        let (lock, available) = &WATERMARK_SLOTS;
+        let mut slots = lock.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            if *slots > 0 {
+                *slots -= 1;
+                return Some(Self);
+            }
+            slots = available
+                .wait_timeout(slots, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+impl Drop for WatermarkPermit {
+    fn drop(&mut self) {
+        let (lock, available) = &WATERMARK_SLOTS;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        available.notify_one();
+    }
 }
 
 /// Per-partition watermarks fanned across `WATERMARK_WORKERS` threads — the
@@ -461,28 +517,81 @@ fn batch_watermarks_with<S: WatermarkSource>(
 fn fanout_watermarks_with<S: WatermarkSource>(
     src: &S,
     parts: &[(&str, i32)],
+    deadline: Instant,
 ) -> Vec<((String, i32), (i64, i64))> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let results = std::sync::Mutex::new(Vec::with_capacity(parts.len()));
     let next = AtomicUsize::new(0);
     let workers = WATERMARK_WORKERS.min(parts.len()).max(1);
     std::thread::scope(|s| {
+        let next = &next;
+        let results = &results;
         for _ in 0..workers {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&(topic, partition)) = parts.get(i) else {
-                    break;
-                };
-                if let Ok(w) = src.watermarks(topic, partition) {
-                    results
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .push(((topic.to_string(), partition), w));
+            if next.load(Ordering::Relaxed) >= parts.len() {
+                break;
+            }
+            let Some(permit) = WatermarkPermit::acquire(deadline) else {
+                break;
+            };
+            s.spawn(move || {
+                let _permit = permit;
+                loop {
+                    let remaining = deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(WATERMARK_TIMEOUT);
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(topic, partition)) = parts.get(i) else {
+                        break;
+                    };
+                    if let Ok(w) = src.watermarks(topic, partition, remaining) {
+                        results
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .push(((topic.to_string(), partition), w));
+                    }
                 }
             });
         }
     });
     results.into_inner().unwrap_or_else(|p| p.into_inner())
+}
+
+fn required_watermark(
+    wm: &HashMap<(String, i32), (i64, i64)>,
+    topic: &str,
+    partition: i32,
+) -> Result<(i64, i64)> {
+    wm.get(&(topic.to_string(), partition)).copied().ok_or_else(||
+        Error::Upstream(format!("offsets unavailable for {topic} partition {partition}; retry after the broker recovers")))
+}
+
+fn group_offset(
+    topic: &str,
+    partition: i32,
+    current: i64,
+    wm: &HashMap<(String, i32), (i64, i64)>,
+) -> Result<GroupOffset> {
+    let (_, high) = required_watermark(wm, topic, partition)?;
+    Ok(GroupOffset {
+        topic: topic.into(),
+        partition,
+        current_offset: current,
+        high_watermark: high,
+        lag: (high - current).max(0),
+    })
+}
+
+fn complete_message_count(
+    targets: &[(&str, i32)],
+    wm: &HashMap<(String, i32), (i64, i64)>,
+) -> Result<i64> {
+    targets.iter().try_fold(0, |sum, &(topic, partition)| {
+        let (low, high) = required_watermark(wm, topic, partition)?;
+        Ok(sum + (high - low).max(0))
+    })
 }
 
 /// `cell`'s client, built from `cfg` on first use (double-checked under
@@ -832,11 +941,7 @@ impl KafkaClient {
         if targets.is_empty() {
             return Ok(0);
         }
-        Ok(self
-            .batch_watermarks(&targets)
-            .values()
-            .map(|&(low, high)| (high - low).max(0))
-            .sum())
+        complete_message_count(&targets, &self.batch_watermarks(&targets))
     }
 
     /// Message counts for many topics: partition ids from the per-cluster cache
@@ -849,9 +954,18 @@ impl KafkaClient {
         let targets: Vec<(&str, i32)> = owned.iter().map(|(t, p)| (t.as_str(), *p)).collect();
         let wm = self.batch_watermarks(&targets);
         let mut out: HashMap<String, i64> = topics.iter().map(|t| (t.clone(), -1)).collect();
-        for ((t, _), (low, high)) in wm {
-            let e = out.entry(t).or_insert(-1);
-            *e = (*e).max(0) + (high - low).max(0);
+        for topic in topics {
+            let parts: Vec<_> = targets
+                .iter()
+                .copied()
+                .filter(|(t, _)| t == topic)
+                .collect();
+            if !parts.is_empty() {
+                out.insert(
+                    topic.clone(),
+                    complete_message_count(&parts, &wm).unwrap_or(-1),
+                );
+            }
         }
         Ok(out)
     }
@@ -870,11 +984,7 @@ impl KafkaClient {
             .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
         self.remember_partitions(&md);
         let targets: Vec<(&str, i32)> = mt.partitions().iter().map(|p| (topic, p.id())).collect();
-        Ok(self
-            .batch_watermarks(&targets)
-            .values()
-            .map(|&(low, high)| (high - low).max(0))
-            .sum())
+        complete_message_count(&targets, &self.batch_watermarks(&targets))
     }
 
     /// Partitions + watermarks for a topic (the async `topic_configs` is fetched
@@ -898,10 +1008,7 @@ impl KafkaClient {
         let mut partitions = Vec::new();
         let mut total = 0i64;
         for p in mt.partitions() {
-            let (low, high) = wm
-                .get(&(topic.to_string(), p.id()))
-                .copied()
-                .unwrap_or((0, 0));
+            let (low, high) = required_watermark(&wm, topic, p.id())?;
             let count = (high - low).max(0);
             total += count;
             partitions.push(PartitionInfo {
@@ -1278,19 +1385,9 @@ impl KafkaClient {
                 Offset::Offset(o) if o >= 0 => o,
                 _ => continue,
             };
-            let high = wm
-                .get(&(e.topic().to_string(), e.partition()))
-                .map(|&(_, h)| h)
-                .unwrap_or(current);
-            let lag = (high - current).max(0);
-            total_lag += lag;
-            offsets.push(GroupOffset {
-                topic: e.topic().to_string(),
-                partition: e.partition(),
-                current_offset: current,
-                high_watermark: high,
-                lag,
-            });
+            let offset = group_offset(e.topic(), e.partition(), current, &wm)?;
+            total_lag += offset.lag;
+            offsets.push(offset);
         }
         offsets.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.partition.cmp(&b.partition)));
 
@@ -1712,6 +1809,7 @@ mod tests {
         fn offsets_for(
             &self,
             tpl: TopicPartitionList,
+            _timeout: Duration,
         ) -> std::result::Result<TopicPartitionList, KafkaError> {
             self.batch_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_batch {
@@ -1738,6 +1836,7 @@ mod tests {
             &self,
             topic: &str,
             partition: i32,
+            _timeout: Duration,
         ) -> std::result::Result<(i64, i64), KafkaError> {
             let k = (topic.to_string(), partition);
             self.fallback_calls.lock().unwrap().push(k.clone());
@@ -1752,6 +1851,62 @@ mod tests {
 
     fn k(t: &str, p: i32) -> Key {
         (t.to_string(), p)
+    }
+
+    #[test]
+    fn missing_watermark_is_an_error_not_zero_lag() {
+        let mut wm = HashMap::new();
+        assert!(group_offset("orders", 0, 100, &wm).is_err());
+        wm.insert(k("orders", 0), (0, 1000));
+        let offset = group_offset("orders", 0, 100, &wm).unwrap();
+        assert_eq!(offset.high_watermark, 1000);
+        assert_eq!(offset.lag, 900);
+        assert!(group_offset("orders", 1, 100, &wm).is_err());
+        assert!(
+            complete_message_count(&[("orders", 0), ("orders", 1)], &wm).is_err(),
+            "a partial count must not be presented as a complete count"
+        );
+        assert_eq!(complete_message_count(&[("orders", 0)], &wm).unwrap(), 1000);
+    }
+
+    #[test]
+    fn watermark_deadline_stops_scheduling_fallback_partitions() {
+        struct SlowSource(AtomicUsize);
+        impl WatermarkSource for SlowSource {
+            fn offsets_for(
+                &self,
+                _: TopicPartitionList,
+                _: Duration,
+            ) -> std::result::Result<TopicPartitionList, KafkaError> {
+                Err(KafkaError::MetadataFetch(RDKafkaErrorCode::RequestTimedOut))
+            }
+            fn watermarks(
+                &self,
+                _: &str,
+                _: i32,
+                timeout: Duration,
+            ) -> std::result::Result<(i64, i64), KafkaError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(timeout);
+                Err(KafkaError::MetadataFetch(RDKafkaErrorCode::RequestTimedOut))
+            }
+        }
+        let source = SlowSource(AtomicUsize::new(0));
+        let parts: Vec<_> = (0..600).map(|p| ("t", p)).collect();
+        let result =
+            batch_watermarks_until(&source, &parts, Instant::now() + Duration::from_millis(30));
+        assert!(result.is_empty());
+        assert!(
+            source.0.load(Ordering::SeqCst) <= WATERMARK_WORKERS,
+            "deadline must stop the next wave"
+        );
+        let before = source.0.load(Ordering::SeqCst);
+        assert!(batch_watermarks_until(&source, &parts, Instant::now()).is_empty());
+        assert_eq!(
+            source.0.load(Ordering::SeqCst),
+            before,
+            "expired work performs no fallback IO"
+        );
     }
 
     #[test]

@@ -316,7 +316,7 @@
 
           <div class="rows" role="list">
             {#each rows as c, i (c.name + i)}
-              <div class="row" class:disabled={!c.supported} role="listitem">
+              <div class="import-row" class:disabled={!c.supported} role="listitem">
                 <input
                   type="checkbox"
                   class="row-check"
@@ -563,16 +563,16 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
   }
-  .row {
+  .import-row {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 10px;
   }
-  .row:hover:not(.disabled) {
+  .import-row:hover:not(.disabled) {
     background: var(--hover);
   }
-  .row.disabled {
+  .import-row.disabled {
     cursor: not-allowed;
     opacity: var(--disabled-opacity);
   }
@@ -592,7 +592,7 @@
     background: var(--accent-soft);
     color: var(--accent-text);
   }
-  .row.disabled .row-kind {
+  .import-row.disabled .row-kind {
     background: var(--surface-2);
     color: var(--text-dim);
   }

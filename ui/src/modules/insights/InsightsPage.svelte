@@ -27,7 +27,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import { rel } from '../../lib/stores/now.svelte';
+  import { rel, now } from '../../lib/stores/now.svelte';
   import { isPopout, isTauri, openPopout } from '../../lib/desktop';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import Icon from '../../lib/components/Icon.svelte';
@@ -450,8 +450,12 @@
   const canRun = $derived(auth.isRoot);
   let runChoice = $state('day:1');
   let running = $state(false);
-  /** Reason the last run did not start (e.g. skill not installed). */
+  /** Why the last run banner is up: start refused, or a run that ended with no report. */
+  let runFailKind = $state<'start' | 'ended' | null>(null);
+  /** Reason shown under that banner. */
   let runFailReason: string | null = $state(null);
+  /** Session of a run that ended without a report, so the banner can open it. */
+  let endedRunId = $state<string | null>(null);
   let pollRunId: string | null = $state(null);
   let pollReportKey: string | null = null;
   let reportBeforeRun: string | null | undefined;
@@ -463,8 +467,9 @@
   let pollCount = $state(0);
   /** Consecutive poll ticks the run was missing from the active-run list. */
   let pollGoneTicks = 0;
-  /** Seconds already elapsed when a run was picked up again (page re-opened). */
-  let pollBaseSec = $state(0);
+  /** Wall time is independent of visibility-aware polling attempts. */
+  let pollStartedAt = $state(Date.now());
+  const pollElapsed = $derived(Math.max(0, Math.floor((now() - pollStartedAt) / 1000)));
   let stoppingRun = $state(false);
 
   /** A run started earlier (this page was left, or another window started it)
@@ -479,7 +484,7 @@
       pollReportKey = r.report_key;
       reportBeforeRun = r.report_revision;
       pollCount = 0;
-      pollBaseSec = Math.max(0, Math.floor((Date.now() - Date.parse(r.started_at)) / 1000));
+      pollStartedAt = Number.isFinite(Date.parse(r.started_at)) ? Date.parse(r.started_at) : Date.now();
       schedulePoll();
     } catch {
       /* best-effort: without it the page still works, just without the banner */
@@ -511,8 +516,10 @@
     const [p, o] = choice.split(':');
     running = true;
     runFailReason = null;
+    runFailKind = null;
+    endedRunId = null;
     pollCount = 0;
-    pollBaseSec = 0;
+    pollStartedAt = Date.now();
     const period = p as InsightRunPeriod;
     const offset = Number(o) || 1;
     const fallbackKey = localReportKey(period, offset);
@@ -520,12 +527,19 @@
       const resp = await insightsApi.run({ period, offset });
       if (disposed) return;
       if (!resp.started) {
+        runFailKind = 'start';
         runFailReason = resp.reason ?? 'Check that the insights skill is installed.';
         return;
       }
       if (resp.attached) toasts.info('Already generating this report', 'Showing the run in progress instead of starting another.');
       if (resp.run_id) {
         pollRunId = resp.run_id;
+        if (resp.attached) {
+          void insightsApi.activeRuns().then(runs => {
+            const active = runs.find(r => r.run_id === resp.run_id);
+            if (!disposed && pollRunId === resp.run_id && active && Number.isFinite(Date.parse(active.started_at))) pollStartedAt = Date.parse(active.started_at);
+          }).catch(() => {});
+        }
         pollGoneTicks = 0;
         pollReportKey = resp.report_key ?? fallbackKey;
         reportBeforeRun = resp.report_revision;
@@ -585,8 +599,10 @@
           /* unknown — keep polling */
         }
         if (pollGoneTicks >= 2) {
+          endedRunId = pollRunId;
           pollRunId = null;
           pollGoneTicks = 0;
+          runFailKind = 'ended';
           runFailReason = 'The insights run ended without publishing a report — it failed or was stopped. Its session shows what happened.';
           void load();
           return;
@@ -724,18 +740,22 @@
             <div class="banner warn" role="alert">
               <Icon name="warning" size={14} />
               <div class="banner-body">
-                <strong>Couldn’t start the insights run.</strong>
+                <strong>{runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'}</strong>
                 <span>{runFailReason}</span>
               </div>
-              <button class="btn small" onclick={() => router.go('settings/skills')}>Open skills settings</button>
-              <button class="icon-btn" onclick={() => (runFailReason = null)} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={14} /></button>
+              {#if runFailKind === 'ended' && endedRunId}
+                <button class="btn small" onclick={() => endedRunId && ws.navigateToSession(endedRunId)}><Icon name="terminal" size={12} /> View live session</button>
+              {:else}
+                <button class="btn small" onclick={() => router.go('settings/skills')}>Open skills settings</button>
+              {/if}
+              <button class="icon-btn" onclick={() => { runFailReason = null; runFailKind = null; endedRunId = null; }} aria-label="Dismiss" title="Dismiss"><Icon name="x" size={14} /></button>
             </div>
           {/if}
           {#if pollRunId}
             <div class="banner" role="status">
               <Icon name="refresh" size={14} />
-              <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
-              <span class="dim">{Math.floor((pollBaseSec + pollCount * 3) / 60)}:{String((pollBaseSec + pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
+              <span class="banner-text">Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
+              <span class="dim">{Math.floor(pollElapsed / 60)}:{String(pollElapsed % 60).padStart(2, '0')} elapsed</span>
               <button class="btn small" onclick={() => pollRunId && ws.navigateToSession(pollRunId)}><Icon name="terminal" size={12} /> View live session</button>
               {#if canRun}<button class="btn small" disabled={stoppingRun} aria-busy={stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {stoppingRun ? 'Stopping…' : 'Stop'}</button>{/if}
             </div>
@@ -743,10 +763,13 @@
         </div>
       {/if}
 
+      {#if loadError && reports.length > 0}
+        <LoadState what="insight reports" variant="compact" error={loadError} empty={true} onretry={load} />
+      {/if}
       {#if loading && reports.length === 0}
         <div class="split">
           <aside class="list-pane" aria-busy="true"><Skeleton rows={6} height={84} /></aside>
-          <section class="detail-pane"><Skeleton rows={4} height={36} label="insight reports" /></section>
+          <section class="detail-pane" class:hide-phone={viewport.isPhone}><Skeleton rows={4} height={36} label="insight reports" /></section>
         </div>
       {:else if loadError && reports.length === 0}
         <!-- Same inline error + Retry as every other module's failed load. -->
@@ -876,12 +899,17 @@
   .banner {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
     padding: 8px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
     font-size: var(--fs-s);
+  }
+  .banner-text {
+    flex: 1 1 180px;
+    min-width: 0;
   }
   .banner.warn {
     border-color: color-mix(in srgb, var(--warning) 35%, transparent);
@@ -891,11 +919,17 @@
     color: var(--warning);
   }
   .banner-body {
-    flex: 1;
+    flex: 1 1 160px;
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-width: 0;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .run-period {
+      min-height: var(--hit-min);
+      height: auto;
+    }
   }
 
   .split {
@@ -951,6 +985,10 @@
   .filter-chip .count {
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
+  }
+
+  @media (pointer: coarse), (max-width: 640px) {
+    .filter-chip { min-height: var(--hit-min); height: auto; }
   }
 
   .list {

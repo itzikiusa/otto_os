@@ -25,13 +25,16 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import AgentAvatar from './AgentAvatar.svelte';
-  import AgentEditSheet from './AgentEditSheet.svelte';
-  import AgentPage from './AgentPage.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
+
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import RoomsView from './RoomsView.svelte';
   import { loadErrorOf } from './loadError';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
   import type { PersonalAgent, PersonalAgentAutonomy } from '../../lib/api/types';
+
+  const AgentEditSheetLazy = lazyComponent(() => import('./AgentEditSheet.svelte'));
+  const AgentPageLazy = lazyComponent(() => import('./AgentPage.svelte'));
 
   const sub = $derived(router.parts[1] ?? '');
   const agentId = $derived(sub && sub !== 'rooms' ? sub : null);
@@ -143,7 +146,13 @@
 
 {#if agentId}
   {#key agentId}
-    <AgentPage {agentId} />
+    {#if AgentPageLazy.error}
+      <LoadState what="this agent" variant="page" error={AgentPageLazy.error} onretry={() => AgentPageLazy.retry()} />
+    {:else if AgentPageLazy.component}
+      <AgentPageLazy.component {agentId} />
+    {:else}
+      <LoadState what="this agent" variant="page" loading />
+    {/if}
   {/key}
 {:else}
   <div class="pa-page">
@@ -249,11 +258,11 @@
                   <button class="btn small primary" onclick={() => router.go(`personal-agents/${a.id}/chat`)}><Icon name="comment" size={12} /> Chat</button>
                 {/if}
                 {#if a.enabled}
-                  <button class="btn small" disabled={busyId === a.id} onclick={() => void runNow(a)}><Icon name="play" size={12} /> Run now</button>
-                  <button class="btn small" disabled={busyId === a.id} onclick={() => void toggle(a)}>Pause</button>
+                  <button class="btn small" disabled={busyId === a.id} aria-label="Run now {a.name}" onclick={() => void runNow(a)}><Icon name="play" size={12} /> Run now</button>
+                  <button class="btn small" disabled={busyId === a.id} aria-label="Pause {a.name}" onclick={() => void toggle(a)}>Pause</button>
                 {:else}
-                  <button class="btn small" disabled={busyId === a.id} onclick={() => void toggle(a)}><Icon name="check" size={12} /> Enable</button>
-                  <button class="btn small" disabled={busyId === a.id} onclick={() => void runNow(a)} title="Run it once without enabling its schedules">Run once</button>
+                  <button class="btn small" disabled={busyId === a.id} aria-label="Enable {a.name}" onclick={() => void toggle(a)}><Icon name="check" size={12} /> Enable</button>
+                  <button class="btn small" disabled={busyId === a.id} aria-label="Run once {a.name}" onclick={() => void runNow(a)} title="Run it once without enabling its schedules">Run once</button>
                 {/if}
               </div>
             </li>
@@ -263,7 +272,11 @@
     {/if}
 
     {#if creating}
-      <AgentEditSheet agent={null} onclose={() => (creating = false)} />
+      {#if AgentEditSheetLazy.component}
+        <AgentEditSheetLazy.component agent={null} onclose={() => (creating = false)} />
+      {:else}
+        <LoadState what="new-agent form" error={AgentEditSheetLazy.error} loading={!AgentEditSheetLazy.error} empty onretry={() => AgentEditSheetLazy.retry()} />
+      {/if}
     {/if}
   </div>
   </PageBody>

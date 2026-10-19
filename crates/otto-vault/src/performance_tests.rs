@@ -452,7 +452,12 @@ async fn size_limited_note_shrinking_restores_content_index() {
 
 #[tokio::test]
 async fn warm_directories_scale_to_twenty_thousand_indexed_files() {
-    let (e, _dir, id) = fixture().await;
+    let (e, dir, id) = fixture().await;
+    // Directory entries are physical, including empty directories. Keep this
+    // metadata-only scale fixture's actual folders consistent with its index.
+    for n in 0..200 {
+        std::fs::create_dir(dir.path().join(format!("dir{n}"))).unwrap();
+    }
     let mut tx = e.store.pool().begin().await.unwrap();
     for n in 0..20_000 {
         sqlx::query("INSERT INTO vault_notes(vault_id,path,title) VALUES(?,?,?)")

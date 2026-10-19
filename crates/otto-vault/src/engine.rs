@@ -34,7 +34,7 @@ const SCAN_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// `mode=full` graph default edge budget (override via `edge_budget`).
 const DEFAULT_EDGE_BUDGET: usize = 2_000_000;
 
-type VaultWriteKey = (i64, String);
+type VaultWriteKey = String;
 type VaultWriteLock = Arc<tokio::sync::Mutex<()>>;
 /// (vault, source, target) → (source content hash, context line).
 type BacklinkCtxCache = HashMap<(i64, String, String), (String, String, std::time::Instant)>;
@@ -86,10 +86,10 @@ pub struct VaultEngine {
     >,
     #[cfg(test)]
     scan_override: Mutex<Option<WalkResult>>,
-    /// Per-vault scan serialization + coalescing (a kick while a scan runs is
-    /// dropped — the running scan picks up the changes anyway).
+    /// Per-vault scan serialization + coalescing. A kick while running sets
+    /// the rerun bit: a completed walk cannot observe a later filesystem edit.
     scans: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
-    pending_scans: Mutex<HashSet<i64>>,
+    pending_scans: Mutex<HashMap<i64, bool>>,
     /// Unix seconds of the last completed scan per vault (staleness probe).
     last_scan: Mutex<HashMap<i64, Arc<AtomicI64>>>,
     /// Vaults whose row already reads `idle` from a scan this process ran: a
@@ -107,10 +107,20 @@ pub struct VaultEngine {
     /// Built graph payloads per vault, valid for one graph generation and
     /// keyed by the request options (a few entries: full + local views).
     graph_cache: Mutex<HashMap<i64, GraphCacheEntry>>,
-    /// Serialize vault mutations, including folder moves and link rewrites.
+    /// Serialize physical-root mutations, including legacy registrations of
+    /// the same root under different ids, folder moves and link rewrites.
     /// Scans have their own lock; mutation holders may await a scan.
     writes: Mutex<HashMap<VaultWriteKey, VaultWriteLock>>,
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
+    fts_probe: tokio::sync::Mutex<()>,
+    fts_failed_at: Mutex<Option<std::time::Instant>>,
+    #[cfg(test)]
+    pub(crate) okf_pause: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// FSEvents watchers per vault (F2) — see `watch.rs`. Off in unit tests
     /// unless a test opts in (counter-asserting tests must stay deterministic).
     pub(crate) watches: Mutex<HashMap<i64, crate::watch::VaultWatch>>,
@@ -141,7 +151,7 @@ impl VaultEngine {
             #[cfg(test)]
             scan_override: Default::default(),
             scans: Mutex::new(HashMap::new()),
-            pending_scans: Mutex::new(HashSet::new()),
+            pending_scans: Mutex::new(HashMap::new()),
             last_scan: Mutex::new(HashMap::new()),
             quiet_scans: Mutex::new(HashSet::new()),
             backlink_ctx: Mutex::new(HashMap::new()),
@@ -150,6 +160,10 @@ impl VaultEngine {
             graph_cache: Mutex::new(HashMap::new()),
             writes: Mutex::new(HashMap::new()),
             fts_ok: std::sync::atomic::AtomicU8::new(0),
+            fts_probe: Default::default(),
+            fts_failed_at: Default::default(),
+            #[cfg(test)]
+            okf_pause: Default::default(),
             watches: Mutex::new(HashMap::new()),
             watch_starting: Mutex::new(HashSet::new()),
             watch_enabled: std::sync::atomic::AtomicBool::new(cfg!(not(test))),
@@ -168,10 +182,50 @@ impl VaultEngine {
             1 => true,
             2 => false,
             _ => {
-                let ok = self.store.ensure_fts().await;
-                self.fts_ok.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
-                ok
+                let _probe = self.fts_probe.lock().await;
+                match self.fts_ok.load(Ordering::Relaxed) {
+                    1 => return true,
+                    2 => return false,
+                    _ => {}
+                }
+                if self
+                    .fts_failed_at
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(30))
+                {
+                    return false;
+                }
+                match self.store.try_ensure_fts().await {
+                    Ok(ok) => {
+                        self.fts_ok.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
+                        if ok {
+                            // The probe may have marked unchanged files for
+                            // backfill. Do not leave them behind a fresh 10m
+                            // timestamp if recovery was triggered by a read.
+                            for last in self.last_scan.lock().unwrap().values() {
+                                last.store(0, Ordering::Relaxed);
+                            }
+                        }
+                        ok
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "vault FTS probe failed; retrying later");
+                        *self.fts_failed_at.lock().unwrap() = Some(std::time::Instant::now());
+                        false
+                    }
+                }
             }
+        }
+    }
+
+    async fn fts_indexing(&self) -> crate::store::FtsIndexing {
+        if self.fts_ready().await {
+            crate::store::FtsIndexing::Enabled
+        } else if self.fts_ok.load(Ordering::Relaxed) == 2 {
+            crate::store::FtsIndexing::Unavailable
+        } else {
+            crate::store::FtsIndexing::Retry
         }
     }
 
@@ -301,8 +355,8 @@ impl VaultEngine {
 
     /// Unregister — index rows only; the files on disk are untouched.
     pub async fn unregister(&self, ws: &str, id: i64) -> Result<()> {
-        self.get_scoped(ws, id).await?;
-        let write = self.write_lock(id, "");
+        let v = self.get_scoped(ws, id).await?;
+        let write = self.write_lock(&v.root_path);
         let _write = write.lock().await;
         let state = self.index_state(id);
         let _publication = state.publication.lock().await;
@@ -381,7 +435,7 @@ impl VaultEngine {
         // itself — exactly the pre-batch behaviour, error included.
         if let Err(e) = self
             .store
-            .index_notes(id, &notes, self.fts_ready().await)
+            .index_notes(id, &notes, self.fts_indexing().await)
             .await
         {
             tracing::debug!(vault = id, error = %e, "vault scan batch failed; retrying per note");
@@ -485,7 +539,7 @@ impl VaultEngine {
             complete: false,
         };
         self.store
-            .index_note(id, &note, &incoming, self.fts_ready().await)
+            .index_note(id, &note, &incoming, self.fts_indexing().await)
             .await?;
         #[cfg(test)]
         Self::pause_publication(state).await;
@@ -576,24 +630,45 @@ impl VaultEngine {
             .clone()
     }
 
-    pub(crate) fn write_lock(&self, id: i64, _path: &str) -> VaultWriteLock {
+    pub(crate) fn write_lock(&self, root: &str) -> VaultWriteLock {
         self.writes
             .lock()
             .unwrap()
-            .entry((id, String::new()))
+            .entry(root.to_string())
             .or_default()
             .clone()
     }
 
     /// Fire-and-forget scan kick (coalesced).
     pub fn kick_scan(self: &Arc<Self>, id: i64) {
-        if !self.pending_scans.lock().unwrap().insert(id) {
-            return;
+        {
+            let mut pending = self.pending_scans.lock().unwrap();
+            if let Some(rerun) = pending.get_mut(&id) {
+                *rerun = true;
+                return;
+            }
+            pending.insert(id, false);
         }
         let eng = self.clone();
         tokio::spawn(async move {
-            let _ = eng.scan(id).await;
-            eng.pending_scans.lock().unwrap().remove(&id);
+            loop {
+                let _ = eng.scan(id).await;
+                // Clear or consume the rerun bit under the same mutex used by
+                // producers: no event can fall between the decision and clear.
+                let rerun = {
+                    let mut pending = eng.pending_scans.lock().unwrap();
+                    if pending.get(&id) == Some(&true) {
+                        pending.insert(id, false);
+                        true
+                    } else {
+                        pending.remove(&id);
+                        false
+                    }
+                };
+                if !rerun {
+                    break;
+                }
+            }
         });
     }
 
@@ -676,6 +751,9 @@ impl VaultEngine {
     }
 
     async fn scan_inner(&self, id: i64, root: &Path) -> Result<()> {
+        // A successful first probe marks missing FTS rows for re-preparation,
+        // including unchanged files indexed by a previous fallback-only boot.
+        self.fts_ready().await;
         let state = self.index_state(id);
         state.ensure(&self.store, id).await?;
         let epoch = {
@@ -886,6 +964,12 @@ impl VaultEngine {
             return Err(Error::Conflict(
                 "Vault scan incomplete; existing index entries were preserved, retry scan".into(),
             ));
+        }
+        let directories: HashSet<_> = walk.directories.into_iter().collect();
+        let mut indexed_dirs = state.disk_dirs.lock().unwrap();
+        if *indexed_dirs != directories {
+            *indexed_dirs = directories;
+            self.generation(id).fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -1145,7 +1229,7 @@ impl VaultEngine {
     // -- notes ---------------------------------------------------------------------
 
     pub async fn dir(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<DirListing> {
-        self.get_scoped(ws, id).await?;
+        let v = self.get_scoped(ws, id).await?;
         self.ensure_fresh(id);
         let rel = if path.trim().is_empty() {
             String::new()
@@ -1154,13 +1238,40 @@ impl VaultEngine {
         };
         let state = self.index_state(id);
         state.ensure(&self.store, id).await?;
-        let entries = state
+        let mut entries = state
             .cache
             .read()
             .unwrap()
             .as_ref()
             .ok_or_else(|| Error::Conflict("Vault index is refreshing; retry".into()))?
             .dir(&rel);
+        // Files use the warm metadata index; physical directories must also
+        // exist without any indexed descendants. Read just this one level,
+        // off-runtime, so create/remove and restart need no schema migration.
+        let root = PathBuf::from(v.root_path);
+        let directory = rel.clone();
+        let dirs = tokio::task::spawn_blocking(move || scan::child_directories(&root, &directory))
+            .await
+            .map_err(|e| Error::Internal(format!("directory listing task: {e}")))?
+            .map_err(|e| Error::Internal(format!("list vault directories: {e}")))?;
+        let counts: HashMap<_, _> = entries
+            .iter()
+            .filter(|e| e.kind == "dir")
+            .map(|e| (e.path.clone(), e.children))
+            .collect();
+        entries.retain(|e| e.kind != "dir");
+        for path in dirs {
+            entries.push(DirEntry {
+                name: path.rsplit('/').next().unwrap_or(&path).into(),
+                children: counts.get(&path).copied().unwrap_or(0),
+                path,
+                kind: "dir".into(),
+                title: None,
+                okf_type: None,
+                reserved: false,
+            });
+        }
+        entries.sort_by_key(|e| (e.kind != "dir", !e.reserved, e.name.to_lowercase()));
         Ok(DirListing { path: rel, entries })
     }
 
@@ -1239,7 +1350,7 @@ impl VaultEngine {
         if !rel.to_ascii_lowercase().ends_with(".md") {
             return Err(Error::Invalid("notes must end in .md".into()));
         }
-        let lock = self.write_lock(id, &rel);
+        let lock = self.write_lock(&v.root_path);
         let _guard = lock.lock().await;
         let state = self.index_state(id);
         state.ensure(&self.store, id).await?;
@@ -1322,7 +1433,7 @@ impl VaultEngine {
                 bytes.len()
             )));
         }
-        let lock = self.write_lock(id, &rel);
+        let lock = self.write_lock(&v.root_path);
         let _guard = lock.lock().await;
         let state = self.index_state(id);
         state.ensure(&self.store, id).await?;
@@ -1396,7 +1507,7 @@ impl VaultEngine {
     /// Soft delete → `<vault>/.trash/<path>` (never destroys user files).
     pub async fn delete_note(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<()> {
         let v = self.get_scoped(ws, id).await?;
-        let lock = self.write_lock(id, "");
+        let lock = self.write_lock(&v.root_path);
         let _guard = lock.lock().await;
         let rel = Self::check_rel(path)?;
         let state = self.index_state(id);
@@ -1447,13 +1558,15 @@ impl VaultEngine {
 
     pub async fn create_folder(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<()> {
         let v = self.get_scoped(ws, id).await?;
-        let lock = self.write_lock(id, "");
+        let lock = self.write_lock(&v.root_path);
         let _guard = lock.lock().await;
         let rel = Self::check_rel(path)?;
         let abs = Self::abs_guarded(&v.root_path, &rel)?;
         tokio::fs::create_dir_all(&abs)
             .await
             .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
+        self.generation(id).fetch_add(1, Ordering::Relaxed);
+        self.kick_scan(id);
         Ok(())
     }
 
@@ -1467,7 +1580,7 @@ impl VaultEngine {
         to: &str,
     ) -> Result<RenameResult> {
         let v = self.get_scoped(ws, id).await?;
-        let lock = self.write_lock(id, "");
+        let lock = self.write_lock(&v.root_path);
         let _guard = lock.lock().await;
         let from_rel = Self::check_rel(from)?;
         let to_rel = Self::check_rel(to)?;
@@ -2644,6 +2757,10 @@ fn shellexpand_home(p: &str) -> String {
 #[cfg(test)]
 #[path = "performance_tests.rs"]
 mod performance_tests;
+
+#[cfg(test)]
+#[path = "durability_tests.rs"]
+mod durability_tests;
 
 /// The first line of `content` mentioning the backlink target (its lowercased
 /// stem or path), trimmed and capped at 240 chars.

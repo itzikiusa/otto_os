@@ -23,7 +23,9 @@ pub mod recovery;
 mod remote_url;
 #[cfg(test)]
 mod spawn_budget_tests;
+mod stash_identity;
 mod status_cache;
+pub mod transport;
 pub mod types;
 pub mod watch;
 mod working_diff;

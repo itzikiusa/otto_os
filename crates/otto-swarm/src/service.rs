@@ -22,6 +22,28 @@ pub const DEFAULT_MAX_TOTAL_RUNS: i64 = 3000;
 pub const DEFAULT_MAX_RUNTIME_SECS: i64 = 4 * 60 * 60; // 4 hours
 pub const DEFAULT_MAX_ATTEMPTS: i64 = 3;
 
+/// Why a generic `status: active` write must not run. A non-empty pause reason
+/// stays until the resume path clears it. Cost and run caps use the limits the
+/// patch would store, so raising the cap in the same body can activate.
+pub(crate) fn activation_refused(
+    pause_reason: Option<&str>,
+    cost_usd: f64,
+    max_cost_usd: Option<f64>,
+    total_runs: i64,
+    max_total_runs: Option<i64>,
+) -> Option<&'static str> {
+    if pause_reason.is_some_and(|reason| !reason.is_empty()) {
+        return Some("paused with a reason");
+    }
+    if max_cost_usd.is_some_and(|max| cost_usd >= max) {
+        return Some("cost budget reached");
+    }
+    if max_total_runs.is_some_and(|max| total_runs >= max) {
+        return Some("run budget reached");
+    }
+    None
+}
+
 #[derive(Clone)]
 pub struct SwarmService {
     pub repo: SwarmRepo,
@@ -83,13 +105,49 @@ impl SwarmService {
     }
 
     pub async fn update_swarm(&self, id: &Id, req: UpdateSwarmReq) -> Result<Swarm> {
+        // Lifecycle status goes through `set_swarm_status`, which anchors or
+        // clears the runtime clock. A generic column write used to set
+        // `status = active` and leave a budget `pause_reason` in place, so the
+        // scheduler treated the swarm as runnable.
+        let mut status = req.status;
+        if let Some(next) = status.clone() {
+            let cur = self.repo.get_swarm(id).await?;
+            if next == "active" {
+                let max_cost = match req.max_cost_usd {
+                    Some(value) => value,
+                    None => cur.max_cost_usd,
+                };
+                let max_runs = match req.max_total_runs {
+                    Some(value) => value,
+                    None => cur.max_total_runs,
+                };
+                let spend = self.repo.swarm_spend(id).await?;
+                if let Some(why) = activation_refused(
+                    cur.pause_reason.as_deref(),
+                    spend.cost_usd,
+                    max_cost,
+                    spend.total_runs,
+                    max_runs,
+                ) {
+                    return Err(Error::Conflict(format!(
+                        "swarm cannot be set active ({why}); resume it after the pause reason or budget is cleared"
+                    )));
+                }
+            }
+            if matches!(next.as_str(), "active" | "paused" | "aborted") && next != cur.status {
+                self.repo.set_swarm_status(id, &next).await?;
+                status = None;
+            } else if next == cur.status {
+                status = None;
+            }
+        }
         self.repo
             .update_swarm(
                 id,
                 SwarmPatch {
                     name: req.name,
                     description: req.description,
-                    status: req.status,
+                    status,
                     config: req.config,
                     max_total_runs: req.max_total_runs,
                     max_cost_usd: req.max_cost_usd,
@@ -461,5 +519,28 @@ impl SwarmService {
             }
         }
         Ok(SwarmGraph { nodes, edges })
+    }
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::activation_refused;
+
+    #[test]
+    fn activation_stays_closed_for_a_pause_reason_or_spent_budget() {
+        assert_eq!(
+            activation_refused(Some("cost budget reached"), 0.0, None, 0, None),
+            Some("paused with a reason")
+        );
+        assert_eq!(
+            activation_refused(None, 5.0, Some(5.0), 0, None),
+            Some("cost budget reached")
+        );
+        assert_eq!(
+            activation_refused(None, 1.0, Some(5.0), 10, Some(10)),
+            Some("run budget reached")
+        );
+        assert_eq!(activation_refused(None, 1.0, Some(8.0), 1, Some(10)), None);
+        assert_eq!(activation_refused(Some(""), 0.0, None, 0, None), None);
     }
 }

@@ -16,6 +16,7 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
   import { buildExcalidrawElements, isSimplified } from '../../canvas/excalidraw-build';
+  import type { BinaryFileData, BinaryFiles } from '@excalidraw/excalidraw/types';
 
   interface Props {
     source: string;
@@ -60,6 +61,81 @@
     }
   }
 
+  /** Image bytes already inlined by a Design import (`data:` URLs). A historical
+   *  `otto-canvas-file:` marker is left out: Design Hall does not resolve it.
+   *  A row is an Excalidraw file only when the guard below accepts it. */
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  function isBinaryMime(value: string): value is BinaryFileData['mimeType'] {
+    const mimes = [
+      'image/svg+xml',
+      'image/png',
+      'image/jpeg',
+      'image/gif',
+      'image/webp',
+      'image/bmp',
+      'image/x-icon',
+      'image/avif',
+      'image/jfif',
+      'application/octet-stream',
+    ] as const;
+    for (const mime of mimes) {
+      if (mime === value) return true;
+    }
+    return false;
+  }
+
+  function finiteNumber(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  /** Runtime shape of Excalidraw `BinaryFileData`. Brands are not asserted;
+   *  the predicate is the only way a parsed row becomes that type. */
+  function isBinaryFileData(value: {
+    mimeType: string;
+    id: string;
+    dataURL: string;
+    created: number;
+    lastRetrieved?: number;
+    version?: number;
+  }): value is BinaryFileData {
+    return isBinaryMime(value.mimeType) && value.id.length > 0 && value.dataURL.startsWith('data:');
+  }
+
+  function binaryFileFrom(key: string, file: unknown): BinaryFileData | null {
+    if (!isRecord(file)) return null;
+    const dataURL = file.dataURL;
+    if (typeof dataURL !== 'string' || !dataURL.startsWith('data:')) return null;
+    const semi = dataURL.indexOf(';');
+    const header = semi > 5 ? dataURL.slice(5, semi) : '';
+    const mimeType = typeof file.mimeType === 'string' ? file.mimeType : header;
+    const id = typeof file.id === 'string' && file.id.length > 0 ? file.id : key;
+    const lastRetrieved = finiteNumber(file.lastRetrieved);
+    const version = finiteNumber(file.version);
+    const candidate = {
+      mimeType,
+      id,
+      dataURL,
+      created: finiteNumber(file.created) ?? 0,
+      ...(lastRetrieved === null ? {} : { lastRetrieved }),
+      ...(version === null ? {} : { version }),
+    };
+    if (!isBinaryFileData(candidate)) return null;
+    return candidate;
+  }
+
+  function dataUrlFiles(files: unknown): BinaryFiles {
+    const out: BinaryFiles = {};
+    if (!isRecord(files)) return out;
+    for (const [key, file] of Object.entries(files)) {
+      const row = binaryFileFrom(key, file);
+      if (row) out[row.id] = row;
+    }
+    return out;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function normalizeScene(raw: any): any[] {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -90,8 +166,9 @@
           ? { viewBackgroundColor: raw.appState.viewBackgroundColor }
           : undefined,
       });
-      if (raw?.files && typeof ex.addFiles === 'function') {
-        ex.addFiles(Object.values(raw.files));
+      const files = Object.values(dataUrlFiles(raw?.files));
+      if (files.length && typeof ex.addFiles === 'function') {
+        ex.addFiles(files);
       }
       if (elements.length) ex.scrollToContent(elements, { fitToContent: true, animate: false });
     } finally {
@@ -164,14 +241,20 @@
     if (ready && src !== lastApplied) loadScene(src);
   });
 
-  function initialData() {
+  function initialData(): {
+    elements: ReturnType<typeof normalizeScene>;
+    appState: { viewBackgroundColor: string };
+    files: BinaryFiles;
+    scrollToContent: boolean;
+  } {
     const raw = parse(source ?? '');
     const elements = normalizeScene(raw);
     lastApplied = source ?? '';
+    const files: BinaryFiles = dataUrlFiles(raw?.files);
     return {
       elements,
       appState: { viewBackgroundColor: raw?.appState?.viewBackgroundColor ?? '#ffffff' },
-      files: raw?.files ?? {},
+      files,
       scrollToContent: elements.length > 0,
     };
   }

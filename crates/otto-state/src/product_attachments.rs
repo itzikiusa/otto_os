@@ -194,6 +194,31 @@ impl ProductAttachmentRepo {
         self.get_required(id).await
     }
 
+    /// Publish a fully written immutable file. Conditional saves compare both
+    /// revision and prior path; returning the row from this statement avoids a
+    /// later writer changing the response's revision underneath this save.
+    #[allow(clippy::too_many_arguments)] // one atomic row publication; all inputs belong to the same revision
+    pub async fn publish_content(
+        &self,
+        previous: &ProductAttachment,
+        storage_path: &str,
+        size_bytes: i64,
+        sha256: &str,
+        conditional: bool,
+        meta_json: Option<String>,
+    ) -> Result<ProductAttachment> {
+        let now = fmt(Utc::now().max(previous.updated_at + chrono::Duration::microseconds(1)));
+        let expected = conditional.then(|| fmt(previous.updated_at));
+        let row = sqlx::query("UPDATE product_attachments SET storage_path = ?, size_bytes = ?, sha256 = ?, meta_json = ?, updated_at = ? WHERE id = ? AND (? IS NULL OR (updated_at = ? AND storage_path = ?)) RETURNING *")
+            .bind(storage_path).bind(size_bytes).bind(sha256).bind(meta_json).bind(now)
+            .bind(&previous.id).bind(&expected).bind(&expected).bind(&previous.storage_path)
+            .fetch_optional(&self.pool).await.map_err(dberr("publish attachment content"))?;
+        let row = row.ok_or_else(|| {
+            Error::Conflict("attachment changed or was deleted; reload before saving".into())
+        })?;
+        row_to_attachment(&row)
+    }
+
     /// Delete the attachment row. Returns `Ok(())` even if the row was absent.
     pub async fn delete(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM product_attachments WHERE id = ?")

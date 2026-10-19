@@ -1,0 +1,68 @@
+{
+  "predicate": "NOT (status = 'stopped' AND session_id IS NULL AND kind = 'scheduled' AND trigger = 'scheduled' AND error = 'stopped before the turn started')",
+  "results": [
+    {
+      "case": "released",
+      "expected": 0,
+      "actual": 0,
+      "passed": true
+    },
+    {
+      "case": "ordinary-null",
+      "expected": 1,
+      "actual": 0,
+      "passed": false
+    },
+    {
+      "case": "started",
+      "expected": 1,
+      "actual": 1,
+      "passed": true
+    },
+    {
+      "case": "other-error",
+      "expected": 1,
+      "actual": 1,
+      "passed": true
+    },
+    {
+      "case": "running",
+      "expected": 1,
+      "actual": 1,
+      "passed": true
+    }
+  ],
+  "fixed_predicate": "NOT (status = 'stopped' AND session_id IS NULL AND kind = 'scheduled' AND trigger = 'scheduled' AND error IS 'stopped before the turn started')",
+  "fixed_results": [
+    {
+      "case": "released",
+      "expected": 0,
+      "actual": 0,
+      "passed": true
+    },
+    {
+      "case": "ordinary-null",
+      "expected": 1,
+      "actual": 1,
+      "passed": true
+    },
+    {
+      "case": "started",
+      "expected": 1,
+      "actual": 1,
+      "passed": true
+    },
+    {
+      "case": "other-error",
+      "expected": 1,
+      "actual": 1,
+      "passed": true
+    },
+    {
+      "case": "running",
+      "expected": 1,
+      "actual": 1,
+      "passed": true
+    }
+  ]
+}

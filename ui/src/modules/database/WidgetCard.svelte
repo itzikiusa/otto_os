@@ -117,7 +117,7 @@
   );
 
   async function confirmDelete(): Promise<void> {
-    if (await confirmer.ask(`Delete widget “${widget.title}”?`, { title: 'Delete widget' })) {
+    if (await confirmer.ask(`Delete widget “${widget.title}”?`, { title: 'Delete widget', confirmLabel: 'Delete', danger: true })) {
       await database.deleteWidget(widget.id);
     }
   }

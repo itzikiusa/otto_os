@@ -21,7 +21,6 @@
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import ImportDialog from './ImportDialog.svelte';
   import OverviewTab from './OverviewTab.svelte';
   import AnalysisTab from './AnalysisTab.svelte';
   import QuestionsTab from './QuestionsTab.svelte';
@@ -29,13 +28,10 @@
   import RewriteTab from './RewriteTab.svelte';
   import TestCasesTab from './TestCasesTab.svelte';
   import PlanTab from './PlanTab.svelte';
-  import HistoryTab from './HistoryTab.svelte';
-  import InjectTab from './InjectTab.svelte';
   import DiscoveryTab from './DiscoveryTab.svelte';
   import MockupsTab from './MockupsTab.svelte';
   import RefineTab from './RefineTab.svelte';
   import ChatTab from './ChatTab.svelte';
-  import LearningsView from './LearningsView.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory, TreeKind } from './types';
@@ -574,6 +570,7 @@
     <button
       class="story-row"
       class:active={product.selectedId === s.id}
+      aria-current={product.selectedId === s.id ? 'true' : undefined}
       onclick={() => selectStory(s)}
       title={s.source_kind === 'draft' ? s.title : `${s.source_key} · ${s.title}`}
     >
@@ -624,6 +621,11 @@
   crumbs={headerCrumbs}
   subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyze, plan, test, publish back'}
 >
+  {#snippet leading()}
+    {#if viewport.isPhone && product.view === 'stories' && mobileSection === 'content'}
+      <button class="btn ghost" onclick={() => (mobileSection = 'list')} aria-label="Back to stories" title="Back to stories"><Icon name="chevronLeft" size={16} /> Back</button>
+    {/if}
+  {/snippet}
   {#snippet badge()}
     {#if product.view === 'stories' && selectedStory}
       <!-- Open story: its stage (or tree role), folder and source key sit beside
@@ -676,7 +678,8 @@
         </button>
       {/if}
       <button
-        class="btn small primary"
+        class="btn small"
+        class:primary={!noStories && !product.selectedId}
         onclick={newMenu}
         title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
         disabled={draftCreating}
@@ -846,7 +849,9 @@
     <!-- Content -->
     <div class="product-body">
       {#if product.view === 'learnings'}
-        <LearningsView />
+        {#await import('./LearningsView.svelte') then m}
+          <m.default />
+        {/await}
       {:else if storiesError && product.stories.length === 0}
         <LoadState what="stories" variant="page" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
       {:else if noStories}
@@ -912,9 +917,13 @@
       {:else if product.tab === 'plan'}
         <PlanTab />
       {:else if product.tab === 'history'}
-        <HistoryTab />
+        {#await import('./HistoryTab.svelte') then m}
+          <m.default />
+        {/await}
       {:else if product.tab === 'inject'}
-        <InjectTab />
+        {#await import('./InjectTab.svelte') then m}
+          <m.default />
+        {/await}
       {:else if product.tab === 'discovery'}
         <DiscoveryTab />
       {:else if product.tab === 'refine'}
@@ -929,7 +938,12 @@
 </div>
 
 {#if importOpen}
-  <ImportDialog onclose={() => (importOpen = false)} />
+  {#await import('./ImportDialog.svelte') then m}
+    <m.default
+      onclose={() => (importOpen = false)}
+      onimported={() => (mobileSection = 'content')}
+    />
+  {/await}
 {/if}
 
 <style>
@@ -1387,7 +1401,7 @@
 
     /* Slightly bigger touch target for the segmented view toggle. */
     .m-view-toggle > button {
-      height: 30px;
+      min-height: var(--hit-min);
       font-size: var(--fs-m);
       padding: 0 12px;
     }
@@ -1475,24 +1489,29 @@
     .story-tag-chip {
       font-size: var(--fs-s);
     }
+    .tag-filter-btn {
+      min-height: var(--hit-min);
+      padding: 0 10px;
+    }
     .st {
       height: 38px;
       font-size: var(--fs-m);
       padding: 0 12px;
     }
-    /* Keep the sub-nav touch-friendly but still a notch smaller than the groups. */
+    /* Keep the sub-nav touch-friendly while staying visually subordinate. */
     .sub-tab-strip .st {
-      height: 34px;
+      min-height: var(--hit-min);
       font-size: var(--fs-m);
       padding: 0 10px;
     }
     .product-body {
       padding: 14px;
     }
-    /* Comfortable touch target for the per-row ⋯ button. */
-    .row-menu-btn {
-      width: 30px;
-      height: 30px;
+    /* Comfortable touch target for the per-row ⋯ and epic expand buttons. */
+    .row-menu-btn,
+    .tree-toggle {
+      width: var(--hit-min);
+      height: var(--hit-min);
     }
     .story-row {
       padding: 10px 8px;

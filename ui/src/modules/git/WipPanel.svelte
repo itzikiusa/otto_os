@@ -362,7 +362,7 @@
       keepStaged
         ? `Discard unstaged changes to ${label}? This reverts ${them} to the staged version (or the last commit) — staged changes are kept, untracked files are deleted — and cannot be undone.`
         : `Discard changes to ${label}? This reverts ${them} to the last commit (new files are deleted) and cannot be undone.`,
-      { title: keepStaged ? 'Discard unstaged changes' : 'Discard changes', confirmLabel: 'Discard' },
+      { title: keepStaged ? 'Discard unstaged changes' : 'Discard changes', confirmLabel: 'Discard', danger: true },
     );
     if (!ok) return;
     try {
@@ -1072,7 +1072,7 @@
         <span>This commit is already on {amendPublished}. Amending rewrites it — the next push will need a force push with lease.</span>
       </div>
     {/if}
-    <div class="row">
+    <div class="wp-action-row">
       <label class="checkbox-row">
         <input type="checkbox" bind:checked={amend} />
         Amend
@@ -1461,7 +1461,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .row {
+  .wp-action-row {
     display: flex;
     align-items: center;
     gap: 8px;

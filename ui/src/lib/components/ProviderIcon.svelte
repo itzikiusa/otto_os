@@ -29,6 +29,7 @@
     size?: number;
   }
   let { provider, size = 14 }: Props = $props();
+  const uid = $props.id();
   const p = $derived((provider ?? '').toLowerCase());
   // Monogram: up to 2 leading alphanumerics of a custom provider slug.
   const mono = $derived((p.match(/[a-z0-9]/g) ?? []).slice(0, 2).join('').toUpperCase() || '?');
@@ -56,14 +57,14 @@
 {:else if p === 'codex'}
   <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
     <defs>
-      <linearGradient id="otto-pi-codex" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id="otto-pi-codex-{uid}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" stop-color="#8a7bf4" />
         <stop offset="1" stop-color="#2f3fe8" />
       </linearGradient>
     </defs>
     <rect x="1" y="1" width="22" height="22" rx="5.5" fill="#eef0f5" />
     <!-- fluffy cloud = center blob + 6 lobes -->
-    <g fill="url(#otto-pi-codex)">
+    <g fill="url(#otto-pi-codex-{uid})">
       <circle cx="12" cy="12" r="5.6" />
       <circle cx="12" cy="7.2" r="3.1" />
       <circle cx="16.2" cy="9.6" r="3.1" />
@@ -80,7 +81,7 @@
 {:else if p === 'agy'}
   <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
     <defs>
-      <linearGradient id="otto-pi-agy" x1="0" y1="0.8" x2="1" y2="0.4">
+      <linearGradient id="otto-pi-agy-{uid}" x1="0" y1="0.8" x2="1" y2="0.4">
         <stop offset="0" stop-color="#34a853" />
         <stop offset="0.32" stop-color="#fbbc05" />
         <stop offset="0.5" stop-color="#ea4335" />
@@ -91,7 +92,7 @@
     <path
       d="M3 18.5 C6 18.5 7.6 15.8 9.2 12.6 C10.4 10.2 11 7.5 12 7.5 C13 7.5 13.6 10.2 14.8 12.6 C16.4 15.8 18 18.5 21 18.5"
       fill="none"
-      stroke="url(#otto-pi-agy)"
+      stroke="url(#otto-pi-agy-{uid})"
       stroke-width="3.4"
       stroke-linecap="round"
     />

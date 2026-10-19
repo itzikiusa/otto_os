@@ -636,7 +636,7 @@
           data-testid="design-otto-input"
         ></textarea>
         <button class="send btn primary small" disabled={!text.trim() || busy || sending} onclick={sendText}
-          aria-label="Send to Otto (⌘Enter)" title="Send (⌘Enter)" data-testid="design-otto-send">
+          aria-label="Send to Otto" title="Send to Otto" aria-keyshortcuts="Meta+Enter" data-testid="design-otto-send">
           <Icon name="send" size={12} />
         </button>
       </div>

@@ -26,10 +26,9 @@
   import { loadErrorText } from '../../lib/loadError';
   import AgentAvatar from './AgentAvatar.svelte';
   import AgentEditSheet from './AgentEditSheet.svelte';
-  import AgentDocuments from './AgentDocuments.svelte';
   import AgentAutonomy from './AgentAutonomy.svelte';
   import AgentActivity from './AgentActivity.svelte';
-  import AgentMemoryInspector from './AgentMemoryInspector.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import {
     browserTz,
@@ -46,6 +45,9 @@
     PersonalAgentRun,
     PersonalAgentSchedule,
   } from '../../lib/api/types';
+
+  const AgentMemoryInspectorLazy = lazyComponent(() => import('./AgentMemoryInspector.svelte'));
+  const AgentDocumentsLazy = lazyComponent(() => import('./AgentDocuments.svelte'));
 
   interface Props {
     agentId: string;
@@ -135,11 +137,13 @@
     }
   }
 
-  /** Stop a running run — asks first: what it did so far is not reported. */
+  /** Stop a running run — asks first, naming the schedule or the start time. */
   async function stopRun(r: PersonalAgentRun): Promise<void> {
+    const what = scheduleName(r);
+    const when = new Date(r.started_at).toLocaleString();
     const ok = await confirmer.ask(
-      'Stop this run? Its agent session is stopped and nothing is delivered. The agent’s schedules keep running.',
-      { title: 'Stop run', danger: true, confirmLabel: 'Stop run' },
+      `Stop the ${what} run that started ${when}? Its agent session is stopped and nothing is delivered. The agent’s schedules keep running.`,
+      { title: `Stop ${what}?`, danger: true, confirmLabel: 'Stop run' },
     );
     if (!ok) return;
     try {
@@ -378,11 +382,11 @@
   {#snippet actions()}
     {#if agent}
       {#if agent.enabled}
-        <button class="btn small primary" data-icon="play" disabled={busy} onclick={() => runNow()}><Icon name="play" size={12} /> Run now</button>
-        <button class="btn small" data-icon="clock" disabled={busy} onclick={toggleAgent} title="Stop its schedules from firing">Pause</button>
+        <button class="btn small primary" data-icon="play" disabled={busy} aria-label="Run now {agent.name}" onclick={() => runNow()}><Icon name="play" size={12} /> Run now</button>
+        <button class="btn small" data-icon="clock" disabled={busy} aria-label="Pause {agent.name}" onclick={toggleAgent} title="Stop its schedules from firing">Pause</button>
       {:else}
-        <button class="btn small primary" data-icon="check" disabled={busy} onclick={toggleAgent}><Icon name="check" size={12} /> Enable</button>
-        <button class="btn small" data-icon="play" disabled={busy} onclick={() => runNow()} title="Run it once without enabling its schedules">Run once</button>
+        <button class="btn small primary" data-icon="check" disabled={busy} aria-label="Enable {agent.name}" onclick={toggleAgent}><Icon name="check" size={12} /> Enable</button>
+        <button class="btn small" data-icon="play" disabled={busy} aria-label="Run once {agent.name}" onclick={() => runNow()} title="Run it once without enabling its schedules">Run once</button>
       {/if}
       <button class="btn small" data-icon="edit" onclick={() => (editing = true)}><Icon name="edit" size={12} /> Edit</button>
       <button class="icon-btn" data-overflow="-1" data-icon="undo" data-label="Reset agent…" onclick={resetAgent} aria-label="Reset agent" title="Reset agent — forget memory, chat, schedules and runs">
@@ -394,6 +398,12 @@
     {/if}
   {/snippet}
   {#snippet tabs()}
+    <label class="tab-picker">
+      <span class="tab-picker-label">Section</span>
+      <select class="input" aria-label="Agent sections" value={tab} onchange={(e) => void goTab((e.currentTarget as HTMLSelectElement).value as Tab)}>
+        {#each TABS as t (t.id)}<option value={t.id}>{t.label}</option>{/each}
+      </select>
+    </label>
     <div class="tabs" role="tablist" aria-label="Agent sections" tabindex="-1" onkeydown={tabKeys({ activate: 'click' })}>
       {#each TABS as t (t.id)}
         <button
@@ -409,8 +419,8 @@
     </div>
   {/snippet}
 </PageHeader>
-<PageBody width="readable">
-<div class="agent-body">
+<PageBody width="readable" fill={tab === 'chat'}>
+<div class="agent-body" class:chat-fill={tab === 'chat'}>
   {#if !agent}
     {#if personalAgents.loadingAgents}
       <div aria-busy="true" aria-label="Loading the agent"><Skeleton rows={3} height={64} /></div>
@@ -575,8 +585,8 @@
               <p class="directive">{s.directive || 'No directive — runs on the persona alone.'}</p>
             </div>
             <div class="rowactions">
-              <button class="btn small" disabled={busy} onclick={() => runNow(s.id)}>Run now</button>
-              <button class="btn small" onclick={() => toggleSchedule(s)}>{s.enabled ? 'Pause' : 'Enable'}</button>
+              <button class="btn small" disabled={busy} aria-label="Run now {cadenceLabel(s.schedule, s.timezone)}" onclick={() => runNow(s.id)}>Run now</button>
+              <button class="btn small" aria-label="{s.enabled ? 'Pause' : 'Enable'} {cadenceLabel(s.schedule, s.timezone)}" onclick={() => toggleSchedule(s)}>{s.enabled ? 'Pause' : 'Enable'}</button>
               <button class="btn small" onclick={() => openSchedEdit(s)}>Edit</button>
               <button class="icon-btn" onclick={() => deleteSchedule(s)} aria-label="Delete schedule {cadenceLabel(s.schedule, s.timezone)}" title="Delete schedule">
                 <Icon name="trash" size={14} />
@@ -624,7 +634,7 @@
               <button class="btn small" title="Open the agent session this run drove" onclick={() => ws.navigateToSession(r.session_id ?? '')}>Open session</button>
             {/if}
             {#if r.status === 'running'}
-              <button class="btn small danger" title="Stop this run (its agent session is stopped)" onclick={() => void stopRun(r)}>Stop…</button>
+              <button class="btn small danger" title="Stop this run (its agent session is stopped)" aria-label="Stop {scheduleName(r)}" onclick={() => void stopRun(r)}>Stop…</button>
             {/if}
             <!-- Readable without hovering: the error used to hide behind a summary. -->
             {#if r.status === 'error' && r.error && r.summary}
@@ -649,10 +659,22 @@
     {/if}
   {:else if (tab === 'memory' || tab === 'context') && agent}
     {#if tab === 'memory'}
-      <AgentMemoryInspector {agentId} editable={canEditDocuments} reloadKey={memoryReload} />
+      {#if AgentMemoryInspectorLazy.error}
+        <LoadState what="this agent’s memory" error={AgentMemoryInspectorLazy.error} onretry={() => AgentMemoryInspectorLazy.retry()} />
+      {:else if AgentMemoryInspectorLazy.component}
+        <AgentMemoryInspectorLazy.component {agentId} editable={canEditDocuments} reloadKey={memoryReload} />
+      {:else}
+        <LoadState what="this agent’s memory" loading />
+      {/if}
     {/if}
     {#key `${agentId}:${tab}:${memoryReload}`}
-      <AgentDocuments {agentId} workspaceId={agent.workspace_id} kind={tab} editable={canEditDocuments} sharedWorkspace={!!agent.cwd.trim()} />
+      {#if AgentDocumentsLazy.error}
+        <LoadState what={tab === 'memory' ? 'this agent’s document' : 'this agent’s context'} error={AgentDocumentsLazy.error} onretry={() => AgentDocumentsLazy.retry()} />
+      {:else if AgentDocumentsLazy.component}
+        <AgentDocumentsLazy.component {agentId} workspaceId={agent.workspace_id} kind={tab === 'context' ? 'context' : 'memory'} editable={canEditDocuments} sharedWorkspace={!!agent.cwd.trim()} />
+      {:else}
+        <LoadState what={tab === 'memory' ? 'this agent’s document' : 'this agent’s context'} loading />
+      {/if}
     {/key}
   {/if}
 
@@ -684,7 +706,16 @@
   .prov :global(svg) { flex-shrink: 0; }
   .mono { font-family: var(--font-mono); }
   .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tab-picker { display: none; }
   .tabs { display: flex; gap: 4px; overflow-x: auto; padding-inline: 2px; }
+  @media (max-width: 640px) {
+    .tabs { display: none; }
+    .tab-picker {
+      display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+    }
+    .tab-picker-label { color: var(--text-dim); font-size: var(--fs-s); flex: none; }
+    .tab-picker select { flex: 1; min-width: 0; }
+  }
   .tab {
     background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-dim);
     padding: 8px 10px; font: inherit; font-size: var(--fs-m); cursor: pointer; white-space: nowrap;
@@ -739,6 +770,7 @@
   .field-row > .field { flex: 1; min-width: 160px; }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .chatwrap { height: min(64vh, 620px); border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
+  .agent-body.chat-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chatwrap { flex: 1; min-height: 0; height: auto; border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }
   .report { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: var(--fs-s); line-height: 1.45; color: var(--text); margin: 0; }
 </style>

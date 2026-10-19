@@ -9,6 +9,17 @@
   async function remove(member: RoomMember) {
     if (await confirmer.ask(`${member.name} will lose access to the terminal, chat and media immediately.`, {title: 'Remove participant?', confirmLabel: 'Remove', danger: true})) send({type: 'remove', member_id: member.id});
   }
+  async function changeRole(member: RoomMember, next: 'viewer' | 'editor', select: HTMLSelectElement): Promise<void> {
+    if (next === member.role) return;
+    if (next === 'editor') {
+      const ok = await confirmer.ask(
+        `${member.name} may later be given control of the terminal. They cannot type until you give control.`,
+        {title: `Let ${member.name} be granted control?`, confirmLabel: 'Allow'},
+      );
+      if (!ok) { select.value = member.role; return; }
+    }
+    if (!send({type: 'role', member_id: member.id, role: next})) select.value = member.role;
+  }
 </script>
 <section aria-label="Participants">
   <h2>People <span>{room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4</span></h2>
@@ -16,17 +27,17 @@
   <ul>{#each room.members ?? [] as member (member.id)}
     <li>
       <div class="identity"><strong>{member.name}{member.id === room.member_id ? ' (you)' : ''}</strong>
-        <span>{member.admission === 'pending' ? 'Waiting for admission' : member.role === 'host' ? 'Host' : member.role === 'editor' ? 'Can control' : 'View only'} · {member.connected ? 'Connected' : 'Reconnecting'}</span>
+        <span>{member.admission === 'pending' ? 'Waiting for admission' : member.role === 'host' ? 'Host' : member.role === 'editor' ? 'May be granted control' : 'View only'} · {member.connected ? 'Connected' : 'Reconnecting'}</span>
         {#if room.driver_member_id === member.id}<span class="driver">Controls terminal</span>{/if}
         {#if member.audio_joined}<span>{member.room_muted ? 'Muted by host' : member.muted ? 'Microphone muted' : 'Microphone on'}</span>{/if}
       </div>
       {#if host && member.id !== room.member_id}<div class="actions">
         {#if member.admission === 'pending'}
           <button class="btn small" {disabled} onclick={() => send({type: 'admit', member_id: member.id, role: 'viewer'})}>Admit view only</button>
-          {#if member.role === 'editor'}<button class="btn small" {disabled} onclick={() => send({type: 'admit', member_id: member.id, role: 'editor'})}>Admit can control</button>{/if}
+          {#if member.role === 'editor'}<button class="btn small" {disabled} onclick={() => send({type: 'admit', member_id: member.id, role: 'editor'})}>Admit — may be granted control</button>{/if}
           <button class="btn small" {disabled} onclick={() => send({type: 'reject', member_id: member.id})}>Decline</button>
         {:else}
-          <label>Access <select {disabled} value={member.role} onchange={(event) => send({type: 'role', member_id: member.id, role: event.currentTarget.value === 'editor' ? 'editor' : 'viewer'})}><option value="viewer">View only</option><option value="editor">Can control</option></select></label>
+          <label>Access <select {disabled} value={member.role} onchange={(event) => void changeRole(member, event.currentTarget.value === 'editor' ? 'editor' : 'viewer', event.currentTarget)}><option value="viewer">View only</option><option value="editor">May be granted control</option></select></label>
           {#if member.control_requested}<button class="btn small" {disabled} onclick={() => grant(member)}>Give control…</button>{/if}
           {#if member.audio_joined}<button class="btn small" {disabled} onclick={() => send({type: 'mute', member_id: member.id, muted: !member.room_muted})}>{member.room_muted ? 'Allow microphone' : 'Mute in room'}</button>{/if}
           {#if member.presenter_requested}<button class="btn small" {disabled} onclick={() => send({type: 'grant_present', member_id: member.id, allowed: true})}>Allow presentation</button>{/if}

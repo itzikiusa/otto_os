@@ -135,7 +135,7 @@
 <div class="scene-list">
   <div class="search">
     <Icon name="search" size={13} />
-    <input dir="ltr" type="search" placeholder="Filter scenes…" aria-label="Filter scenes" bind:value={filter} spellcheck="false" />
+    <input dir="auto" type="search" placeholder="Filter scenes…" aria-label="Filter scenes" bind:value={filter} spellcheck="false" />
     {#if filter}
       <button class="clear" onclick={() => (filter = '')} aria-label="Clear the filter" title="Clear the filter">
         <Icon name="x" size={12} />

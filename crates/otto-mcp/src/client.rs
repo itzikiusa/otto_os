@@ -195,15 +195,48 @@ impl McpClient {
 
     /// `tools/list` → the advertised tool objects.
     pub async fn list_tools(&self) -> Result<Vec<Value>, String> {
-        let result = self
-            .op(json!({"jsonrpc":"2.0","method":"tools/list"}))
-            .await?;
-        let tools = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        Ok(tools)
+        tokio::time::timeout(Duration::from_secs(60), self.list_all_tools())
+            .await
+            .map_err(|_| "tool discovery timed out; catalog was not updated".to_string())?
+    }
+
+    async fn list_all_tools(&self) -> Result<Vec<Value>, String> {
+        // Explicit failure, never a partial successful catalog, at either limit.
+        const MAX_PAGES: usize = 128;
+        const MAX_CATALOG_BYTES: usize = 16 * MAX_BODY_BYTES;
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        let mut bytes = 0usize;
+        for _ in 0..MAX_PAGES {
+            let mut request = json!({"jsonrpc":"2.0","method":"tools/list"});
+            if let Some(cursor) = &cursor {
+                request["params"] = json!({"cursor":cursor});
+            }
+            let result = self.op(request).await?;
+            bytes += serde_json::to_vec(&result)
+                .map_err(|e| e.to_string())?
+                .len();
+            if bytes > MAX_CATALOG_BYTES {
+                return Err("tool catalog exceeds 16 MiB limit; catalog was not updated".into());
+            }
+            let page = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or("invalid tools/list response: expected tools array")?;
+            tools.extend(page.iter().cloned());
+            cursor = match result.get("nextCursor") {
+                None | Some(Value::Null) => return Ok(tools),
+                Some(Value::String(next)) => {
+                    if !seen.insert(next.clone()) {
+                        return Err("tools/list repeated a cursor; catalog was not updated".into());
+                    }
+                    Some(next.clone())
+                }
+                Some(_) => return Err("invalid tools/list nextCursor: expected string".into()),
+            };
+        }
+        Err("tool discovery exceeds 128 page limit; catalog was not updated".into())
     }
 
     /// `tools/call` for a named tool.
@@ -443,7 +476,8 @@ async fn open_stdio(
     let stdout = child.stdout.take().ok_or("no child stdout")?;
     let mut reader = BufReader::new(stdout);
     write_line(&mut stdin, &init_request()).await?;
-    let _ = read_until_id(&mut reader, Some(&mut stdin), 1).await?;
+    let initialized = read_until_id(&mut reader, Some(&mut stdin), 1).await?;
+    validate_initialize_result(&initialized)?;
     write_line(
         &mut stdin,
         &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -502,8 +536,22 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let _ = parse_http_message(resp, 1).await?; // ensure initialize succeeded
-                                                // notifications/initialized (best-effort).
+    let message = parse_http_message(resp, 1).await?;
+    if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || message.get("id").and_then(Value::as_i64) != Some(1)
+        || message.get("method").is_some()
+    {
+        return Err("invalid initialize response envelope".into());
+    }
+    if let Some(error) = message.get("error") {
+        return Err(format!("initialize: server error: {error}"));
+    }
+    validate_initialize_result(
+        message
+            .get("result")
+            .ok_or("initialize response missing result")?,
+    )?;
+    // notifications/initialized (best-effort).
     let _ = http_send(
         &client,
         url,
@@ -518,6 +566,28 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
         next_id: 2,
         _permit: permit,
     })
+}
+
+/// Both transports must establish the same successful handshake before use.
+fn validate_initialize_result(result: &Value) -> Result<(), String> {
+    if result.get("protocolVersion").and_then(Value::as_str) != Some(PROTOCOL_VERSION) {
+        return Err("initialize: unsupported or missing protocolVersion".into());
+    }
+    if !result.get("capabilities").is_some_and(Value::is_object)
+        || result
+            .get("serverInfo")
+            .and_then(|info| info.get("name"))
+            .and_then(Value::as_str)
+            .is_none()
+        || result
+            .get("serverInfo")
+            .and_then(|info| info.get("version"))
+            .and_then(Value::as_str)
+            .is_none()
+    {
+        return Err("initialize: malformed capabilities or serverInfo".into());
+    }
+    Ok(())
 }
 
 /// Redirects an MCP HTTP transport follows: SAME ORIGIN only (scheme, host and
@@ -1266,7 +1336,7 @@ mod tests {
     }
 
     /// A minimal Streamable-HTTP MCP server on `127.0.0.1:0`: answers every
-    /// POST carrying an `"id"` with `{"tools":[{"name":"t"}]}`, everything else
+    /// initialize with a valid handshake, tool lists with one tool, notifications
     /// with 202. One request per connection (`Connection: close`).
     async fn local_http_mcp_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1306,9 +1376,12 @@ mod tests {
                     .and_then(|d| d.parse::<i64>().ok());
                 let head_and_body = match id {
                     Some(id) => {
-                        let body = format!(
-                            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"tools\":[{{\"name\":\"t\"}}]}}}}"
-                        );
+                        let body = if text.contains("\"method\":\"initialize\"") {
+                            handshake(&json!({"id": id})).to_string()
+                        } else {
+                            json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"t"}]}})
+                                .to_string()
+                        };
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
@@ -1451,6 +1524,169 @@ mod tests {
         assert!(matches!(result, Err(CheckedCallError::Denied(_))));
         assert_eq!(spawns(&log), 1, "initialize really ran");
         assert_eq!(spawns(&calls), 0, "tools/call was never delivered");
+    }
+
+    type HttpFixture = (
+        McpClient,
+        std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    );
+
+    async fn http_fixture(reply: impl Fn(Value) -> Value + Send + Sync + 'static) -> HttpFixture {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
+        let reply = std::sync::Arc::new(reply);
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(move |axum::Json(request): axum::Json<Value>| {
+                let log = log.clone();
+                let reply = reply.clone();
+                async move {
+                    log.lock().unwrap().push(request.clone());
+                    axum::Json(reply(request))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            McpClient::new(Transport::Http {
+                url,
+                headers: BTreeMap::new(),
+            }),
+            requests,
+            task,
+        )
+    }
+
+    fn handshake(request: &Value) -> Value {
+        json!({"jsonrpc":"2.0", "id":request["id"], "result":{
+            "protocolVersion":PROTOCOL_VERSION,"capabilities":{},
+            "serverInfo":{"name":"fixture","version":"1"}
+        }})
+    }
+
+    #[tokio::test]
+    async fn http_discovery_follows_cursor_and_rejects_incomplete_catalogs() {
+        for mode in [
+            "complete",
+            "cycle",
+            "later_error",
+            "malformed",
+            "page_limit",
+            "catalog_limit",
+            "invalid_cursor",
+        ] {
+            let (client, log, task) = http_fixture(move |r| {
+                if r["method"] != "tools/list" { return handshake(&r); }
+                let second = r["params"].get("cursor").is_some();
+                if second && mode == "later_error" {
+                    return json!({"jsonrpc":"2.0","id":r["id"],"error":{"code":-32603,"message":"page failed"}});
+                }
+                let result = if second && mode == "malformed" {
+                    json!({"tools":null})
+                } else if mode == "catalog_limit" {
+                    json!({"tools":[{"name":"large", "description":"x".repeat(600_000)}],"nextCursor":r["id"].to_string()})
+                } else if mode == "invalid_cursor" {
+                    json!({"tools":[],"nextCursor":42})
+                } else if mode == "page_limit" {
+                    json!({"tools":[],"nextCursor":r["id"].to_string()})
+                } else if !second || mode == "cycle" {
+                    json!({"tools":[{"name":"A"}],"nextCursor":"page2"})
+                } else {
+                    json!({"tools":[{"name":"B"}]})
+                };
+                json!({"jsonrpc":"2.0","id":r["id"],"result":result})
+            }).await;
+            let result = client.list_tools().await;
+            task.abort();
+            if mode == "complete" {
+                let tools = result.unwrap();
+                assert_eq!(
+                    tools
+                        .iter()
+                        .map(|t| t["name"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["A", "B"]
+                );
+                let requests = log.lock().unwrap();
+                let pages: Vec<_> = requests
+                    .iter()
+                    .filter(|r| r["method"] == "tools/list")
+                    .collect();
+                assert_eq!(pages.len(), 2);
+                assert_eq!(pages[1]["params"]["cursor"], "page2");
+            } else {
+                let error = result.unwrap_err();
+                let expected = match mode {
+                    "cycle" => "repeated a cursor",
+                    "later_error" => "page failed",
+                    "malformed" => "expected tools array",
+                    "page_limit" => "128 page limit",
+                    "catalog_limit" => "16 MiB limit",
+                    "invalid_cursor" => "nextCursor",
+                    _ => unreachable!(),
+                };
+                assert!(error.contains(expected), "{mode}: {error}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_rejected_or_malformed_handshake_never_announces_initialized() {
+        for response in [
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"unsupported protocol"}}),
+            json!({"jsonrpc":"2.0","id":99,"result":{}}),
+            json!({"jsonrpc":"2.0","id":1,"result":null}),
+            json!({"jsonrpc":"2.0","id":1,"result":{}}),
+        ] {
+            let (client, log, task) = http_fixture(move |_| response.clone()).await;
+            let result = client.health().await;
+            task.abort();
+            assert!(result.is_err(), "rejected handshake was healthy");
+            assert_eq!(
+                log.lock().unwrap().len(),
+                1,
+                "nothing follows a rejected initialize"
+            );
+        }
+        let (client, log, task) = http_fixture(|r| handshake(&r)).await;
+        assert!(client.health().await.is_ok());
+        task.abort();
+        assert_eq!(log.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn stdio_discovery_follows_cursor_and_handshake_failure_stops_delivery() {
+        let script = echo_server_script().replace(
+            "*'\"tools/list\"'*)",
+            "*'\"tools/list\"'*) case \"$line\" in *'page2'*) printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"tools\":[{\"name\":\"second\"}]}}\\n' \"$id\" ;; *) printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"tools\":[{\"name\":\"first\"}],\"nextCursor\":\"page2\"}}\\n' \"$id\" ;; esac; continue ;; *'never'*)",
+        );
+        let client = McpClient::new(Transport::Stdio {
+            command: "sh".into(),
+            args: vec!["-c".into(), script],
+            env: BTreeMap::new(),
+        });
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "first");
+        assert_eq!(tools[1]["name"], "second");
+
+        let dir = tempfile::tempdir().unwrap();
+        let calls = dir.path().join("calls");
+        let script = echo_server_script().replace(
+            "\"protocolVersion\":\"2024-11-05\"",
+            "\"protocolVersion\":\"unsupported\"",
+        );
+        let client = McpClient::new(Transport::Stdio {
+            command: "sh".into(),
+            args: vec!["-c".into(), script],
+            env: BTreeMap::from([("CALLS".into(), calls.display().to_string())]),
+        });
+        let error = client.call_tool("echo", &json!({})).await.err().unwrap();
+        assert!(error.contains("protocolVersion"), "{error}");
+        assert!(!calls.exists(), "no tool call follows rejected initialize");
     }
 
     // Drives the stdio client against a tiny shell MCP server so the framing +

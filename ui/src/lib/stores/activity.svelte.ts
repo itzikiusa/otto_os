@@ -6,8 +6,9 @@
 // the focused session is instant; trail entries accumulate only for sessions
 // whose trail was loaded (the rest just bump their roll-up's recency).
 
-import { api } from '../api/client';
+import { api, getToken } from '../api/client';
 import { loadErrorText } from '../loadError';
+import { createLimiter } from '../poll';
 import type {
   AgentTask,
   AppendTrailReq,
@@ -27,6 +28,29 @@ export interface HistoryIndexProgress {
 
 /** Keep the trail bounded in memory (matches the server's list cap). */
 const TRAIL_CAP = 500;
+
+/** Snapshot requests own their deltas and may commit only while still current. */
+interface ActivityRead {
+  token: string | null;
+  controller: AbortController;
+  trail: TrailEvent[];
+  tasks?: AgentTask[];
+  addedTasks: Map<string, AgentTask>;
+}
+interface ArtifactRead {
+  token: string | null;
+  controller: AbortController;
+  deltas: Map<string, Artifact>;
+}
+
+function mergeArtifacts(snapshot: Artifact[], deltas: Iterable<Artifact>): Artifact[] {
+  const byId = new Map(snapshot.map(a => [a.id, a]));
+  for (const a of deltas) {
+    const old = byId.get(a.id);
+    if (!old || (a.produced_at ?? '') >= (old.produced_at ?? '')) byId.set(a.id, a);
+  }
+  return [...byId.values()].sort((a, b) => (b.produced_at ?? '').localeCompare(a.produced_at ?? ''));
+}
 
 class ActivityStore {
   /** session id -> trail entries, oldest→newest */
@@ -49,6 +73,65 @@ class ActivityStore {
   /** session ids we've already fetched once (avoid refetch churn) */
   private loaded = new Set<string>();
   private artifactsLoaded = new Set<string>();
+  private reads = new Map<string, ActivityRead>();
+  private artifactReads = new Map<string, ArtifactRead>();
+  private epoch = 0;
+  private recoveryGeneration = 0;
+  private removedRevision = new Map<string, number>();
+  private summaryRead = 0;
+  private summaryPending = false;
+  private summaryDeltas = new Map<string, Partial<SessionActivitySummary>>();
+  private watched = new Map<string, { workspaceId: string; refs: number }>();
+  private watchedArtifacts = new Map<string, number>();
+  private recover = createLimiter(2);
+
+  private invalidateReads(): void {
+    for (const read of this.reads.values()) read.controller.abort();
+    for (const read of this.artifactReads.values()) read.controller.abort();
+    this.reads.clear();
+    this.artifactReads.clear();
+  }
+
+  /** Mounted consumers register interest; gaps refresh only these sessions. */
+  watch(workspaceId: string, sessionId: string): () => void {
+    const entry = this.watched.get(sessionId) ?? { workspaceId, refs: 0 };
+    entry.refs++;
+    this.watched.set(sessionId, entry);
+    void this.load(workspaceId, sessionId);
+    return () => { if (--entry.refs === 0 && this.watched.get(sessionId) === entry) this.watched.delete(sessionId); };
+  }
+
+  watchArtifacts(sessionId: string): () => void {
+    this.watchedArtifacts.set(sessionId, (this.watchedArtifacts.get(sessionId) ?? 0) + 1);
+    void this.loadArtifacts(sessionId);
+    return () => {
+      const refs = (this.watchedArtifacts.get(sessionId) ?? 1) - 1;
+      if (refs > 0) this.watchedArtifacts.set(sessionId, refs);
+      else this.watchedArtifacts.delete(sessionId);
+    };
+  }
+
+  /** Invalidate every snapshot after a gap; unopened caches rehydrate lazily. */
+  async resync(): Promise<void> {
+    this.loaded.clear();
+    this.artifactsLoaded.clear();
+    this.invalidateReads();
+    this.artifactsLoadingBySession = {};
+    const generation = ++this.recoveryGeneration;
+    this.summaryRead++;
+    this.summaryPending = false;
+    this.summaryDeltas.clear();
+    const token = getToken();
+    const current = () => generation === this.recoveryGeneration && token === getToken();
+    await Promise.all([
+      ...[...this.watched].map(([id, entry]) => this.recover(async () => {
+        if (current() && this.watched.get(id) === entry) await this.load(entry.workspaceId, id);
+      })),
+      ...[...this.watchedArtifacts.keys()].map(id => this.recover(async () => {
+        if (current() && this.watchedArtifacts.has(id)) await this.loadArtifacts(id);
+      })),
+    ]);
+  }
 
   trail(sessionId: string | null): TrailEvent[] {
     return sessionId ? (this.trailBySession[sessionId] ?? []) : [];
@@ -64,34 +147,61 @@ class ActivityStore {
 
   /** Fetch a session's trail + tasks once (subsequent updates arrive via WS). */
   async load(workspaceId: string, sessionId: string, force = false): Promise<void> {
-    if (!force && this.loaded.has(sessionId)) return;
-    this.loaded.add(sessionId);
+    if (!force && (this.loaded.has(sessionId) || this.reads.get(sessionId)?.token === getToken())) return;
+    this.reads.get(sessionId)?.controller.abort();
+    const read: ActivityRead = { token: getToken(), controller: new AbortController(), trail: [], addedTasks: new Map() };
+    this.reads.set(sessionId, read);
+    const current = () => this.reads.get(sessionId) === read && read.token === getToken();
     const base = `/workspaces/${workspaceId}/sessions/${sessionId}`;
     try {
       const [trail, tasks] = await Promise.all([
-        api.get<TrailEvent[]>(`${base}/trail`),
-        api.get<AgentTask[]>(`${base}/tasks`),
+        api.get<TrailEvent[]>(`${base}/trail`, read.controller.signal),
+        api.get<AgentTask[]>(`${base}/tasks`, read.controller.signal),
       ]);
-      this.trailBySession[sessionId] = trail;
-      this.tasksBySession[sessionId] = tasks;
+      if (!current()) return;
+      const merged = new Map(trail.map(e => [e.id, e]));
+      for (const e of read.trail) merged.set(e.id, e);
+      this.trailBySession[sessionId] = [...merged.values()].sort((a, b) => a.ts.localeCompare(b.ts)).slice(-TRAIL_CAP);
+      const taskRows = new Map((read.tasks ?? tasks).map(t => [t.id, t]));
+      for (const task of read.addedTasks.values()) if (!taskRows.has(task.id)) taskRows.set(task.id, task);
+      this.tasksBySession[sessionId] = [...taskRows.values()];
+      this.loaded.add(sessionId);
       if (this.loadErrorBySession[sessionId]) delete this.loadErrorBySession[sessionId];
     } catch (e) {
+      if (!current()) return;
       this.loaded.delete(sessionId);
       this.loadErrorBySession[sessionId] = loadErrorText(e);
+    } finally {
+      if (this.reads.get(sessionId) === read) this.reads.delete(sessionId);
     }
   }
 
   /** Fetch the workspace-wide per-session roll-up (sidebar chips). */
   async loadSummary(workspaceId: string): Promise<void> {
+    const epoch = this.epoch;
+    const token = getToken();
+    const revision = ++this.summaryRead;
+    this.summaryPending = true;
+    this.summaryDeltas.clear();
     try {
       const rows = await api.get<SessionActivitySummary[]>(
         `/workspaces/${workspaceId}/activity/summary`,
       );
+      if (epoch !== this.epoch || token !== getToken() || revision !== this.summaryRead) return;
       const next: Record<string, SessionActivitySummary> = {};
       for (const r of rows) next[r.session_id] = r;
+      for (const [id, delta] of this.summaryDeltas) {
+        const live = this.summaryBySession[id];
+        if (live) next[id] = { ...(next[id] ?? live), ...delta };
+      }
       this.summaryBySession = next;
     } catch {
       /* best-effort */
+    } finally {
+      if (revision === this.summaryRead) {
+        this.summaryPending = false;
+        this.summaryDeltas.clear();
+      }
     }
   }
 
@@ -101,19 +211,28 @@ class ActivityStore {
 
   /** Fetch a session's artifact list once (`artifact_added` keeps it fresh). */
   async loadArtifacts(sessionId: string, force = false): Promise<void> {
-    if (this.artifactsLoadingBySession[sessionId] || (!force && this.artifactsLoaded.has(sessionId))) return;
-    this.artifactsLoaded.add(sessionId);
+    if (!force && (this.artifactsLoaded.has(sessionId) || this.artifactReads.get(sessionId)?.token === getToken())) return;
+    this.artifactReads.get(sessionId)?.controller.abort();
+    const read: ArtifactRead = { token: getToken(), controller: new AbortController(), deltas: new Map() };
+    this.artifactReads.set(sessionId, read);
+    const current = () => this.artifactReads.get(sessionId) === read && read.token === getToken();
     this.artifactsLoadingBySession[sessionId] = true;
     delete this.artifactsErrorBySession[sessionId];
     try {
-      this.artifactsBySession[sessionId] = await api.get<Artifact[]>(
+      const snapshot = await api.get<Artifact[]>(
         `/sessions/${sessionId}/artifacts`,
+        read.controller.signal,
       );
+      if (!current()) return;
+      this.artifactsBySession[sessionId] = mergeArtifacts(snapshot, read.deltas.values());
+      this.artifactsLoaded.add(sessionId);
     } catch (e) {
+      if (!current()) return;
       this.artifactsLoaded.delete(sessionId);
       this.artifactsErrorBySession[sessionId] = loadErrorText(e);
     } finally {
-      this.artifactsLoadingBySession[sessionId] = false;
+      if (current()) this.artifactsLoadingBySession[sessionId] = false;
+      if (this.artifactReads.get(sessionId) === read) this.artifactReads.delete(sessionId);
     }
   }
 
@@ -124,8 +243,13 @@ class ActivityStore {
    * so the row is visible before the frame lands (dedup by id on arrival).
    */
   async addTask(sessionId: string, title: string, description?: string): Promise<AgentTask> {
+    const epoch = this.epoch;
+    const token = getToken();
+    const removed = this.removedRevision.get(sessionId);
     const body: CreateAgentTaskReq = description ? { title, description } : { title };
     const task = await api.post<AgentTask>(`/sessions/${sessionId}/tasks`, body);
+    if (epoch !== this.epoch || token !== getToken() || removed !== this.removedRevision.get(sessionId)) return task;
+    this.reads.get(sessionId)?.addedTasks.set(task.id, task);
     const list = this.tasksBySession[sessionId] ?? [];
     if (!list.some((t) => t.id === task.id)) {
       const next = [...list, task];
@@ -146,12 +270,14 @@ class ActivityStore {
   applyEvent(ev: OttoEvent): boolean {
     switch (ev.type) {
       case 'trail_appended': {
+        const pending = this.reads.get(ev.session_id);
+        if (pending) pending.trail = [...pending.trail, ev.event].slice(-TRAIL_CAP);
         // Only sessions whose trail was fetched (an Activity panel / chat
         // opened them) keep entries. Every other session used to accumulate
         // 500 entries with their tool inputs in a deep $state record — for
         // every session that emitted while the window was open, in every
         // document (r3-05-03). Opening the panel loads the trail fresh anyway.
-        if (!this.loaded.has(ev.session_id)) {
+        if (!this.loaded.has(ev.session_id) && !pending) {
           this.bumpSummary(ev.session_id, { last_ts: ev.event.ts });
           return true;
         }
@@ -165,17 +291,17 @@ class ActivityStore {
         return true;
       }
       case 'tasks_updated': {
+        const pending = this.reads.get(ev.session_id);
+        if (pending) pending.tasks = ev.tasks;
         this.tasksBySession[ev.session_id] = ev.tasks;
         this.bumpSummary(ev.session_id, this.summarizeTasks(ev.tasks));
         return true;
       }
       case 'artifact_added': {
+        this.artifactReads.get(ev.session_id)?.deltas.set(ev.artifact.id, ev.artifact);
         const list = this.artifactsBySession[ev.session_id] ?? [];
         // Dedup is per path server-side (last producing turn wins) — replace.
-        const idx = list.findIndex((a) => a.id === ev.artifact.id);
-        this.artifactsBySession[ev.session_id] =
-          idx >= 0 ? list.map((a, i) => (i === idx ? ev.artifact : a)) : [...list, ev.artifact];
-        this.artifactsLoaded.add(ev.session_id);
+        this.artifactsBySession[ev.session_id] = mergeArtifacts(list, [ev.artifact]);
         return true;
       }
       case 'history_index_progress': {
@@ -198,6 +324,7 @@ class ActivityStore {
 
   /** Merge a partial update into a session's roll-up, creating it if needed. */
   private bumpSummary(sessionId: string, patch: Partial<SessionActivitySummary>): void {
+    if (this.summaryPending) this.summaryDeltas.set(sessionId, { ...this.summaryDeltas.get(sessionId), ...patch });
     const cur = this.summaryBySession[sessionId] ?? {
       session_id: sessionId,
       total: 0,
@@ -217,6 +344,13 @@ class ActivityStore {
    *  list, roll-up and artifact list — they were read with the previous
    *  identity's token. Panels refetch through `load` / `loadSummary`. */
   reset(): void {
+    this.epoch++;
+    this.recoveryGeneration++;
+    this.summaryRead++;
+    this.summaryPending = false;
+    this.removedRevision.clear();
+    this.invalidateReads();
+    this.summaryDeltas.clear();
     this.trailBySession = {};
     this.tasksBySession = {};
     this.summaryBySession = {};
@@ -224,12 +358,21 @@ class ActivityStore {
     this.artifactsLoadingBySession = {};
     this.artifactsErrorBySession = {};
     this.loadErrorBySession = {};
+    this.historyIndex = null;
     this.loaded.clear();
     this.artifactsLoaded.clear();
   }
 
   /** Drop a removed session's data. */
   forget(sessionId: string): void {
+    this.removedRevision.set(sessionId, (this.removedRevision.get(sessionId) ?? 0) + 1);
+    this.reads.get(sessionId)?.controller.abort();
+    this.artifactReads.get(sessionId)?.controller.abort();
+    this.reads.delete(sessionId);
+    this.artifactReads.delete(sessionId);
+    this.summaryRead++;
+    this.summaryPending = false;
+    this.summaryDeltas.delete(sessionId);
     delete this.trailBySession[sessionId];
     delete this.tasksBySession[sessionId];
     delete this.summaryBySession[sessionId];

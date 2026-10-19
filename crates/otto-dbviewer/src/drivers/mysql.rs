@@ -22,7 +22,7 @@ use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
 
 use crate::driver::Driver;
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
-use crate::split::{split_statements, SqlDialect, StatementSpan};
+use crate::split::{split_statements, SqlDialect, StatementScanner};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, compact_count, CancelToken, Capabilities, Column, ColumnDef, CompletionContext,
@@ -701,75 +701,87 @@ impl Driver for MysqlDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
-        if cfg
+        let deadline = req
+            .timeout_ms
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis);
+        // The service grants host-file authority to root independently of SQL
+        // text. Later SET/EXECUTE can change lexical mode, so preflight splitting
+        // cannot reliably predict every subsequent LOAD command.
+        let local_infile = cfg
             .params
-            .get("__read_only_execution")
+            .get("__mysql_local_infile_authorized")
             .and_then(Value::as_bool)
-            == Some(true)
-        {
-            return governed_read(&self.pool(cfg).await?, cfg, req, token).await;
+            == Some(true);
+        if requires_local_infile(&req.statement) && !local_infile {
+            return Err(otto_core::Error::Forbidden(
+                "LOCAL INFILE requires authorized access to files on the Otto host".into(),
+            ));
         }
-        let text = req.statement.trim();
-        if text.is_empty() {
-            return Err(types::invalid("empty statement"));
-        }
-        let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
-        let pool = self.pool(cfg).await?;
-
-        // The active database (if the user selected one, else the profile
-        // default) scopes unqualified table names: we `USE` it on the
-        // connection before running the query — ALWAYS explicitly, since a
-        // pooled session may still be in another request's database.
-        let scope_db = req.scope_database();
-        let active_db = effective_db(scope_db.as_deref(), cfg);
-
-        // Split with MySQL's lexical rules (backticks, `#` comments, backslash
-        // escapes). A true batch (>1 statement) runs every statement in order on
-        // one shared session; the single-statement fast path keeps its
-        // auto-LIMIT/OFFSET injection and MAX_EXECUTION_TIME hint (§2.2).
-        let spans = split_statements(text, SqlDialect::Mysql);
-        if spans.len() > 1 {
-            return run_batch(&pool, &spans, max_rows, active_db, token).await;
-        }
-        // 0 spans ⇒ comment-only paste: run the original text (unchanged behavior).
-        let statement = spans.first().map(|s| s.text.as_str()).unwrap_or(text);
-        let started = Instant::now();
-
-        let (result, auto_limited) = if is_read_statement(statement) {
-            let ri = types::inject_row_limit(statement, max_rows.saturating_add(1), req.offset);
-            // Inject MySQL's MAX_EXECUTION_TIME(ms) optimizer hint when a per-statement
-            // timeout is requested. The hint goes right after the SELECT keyword so it
-            // is valid even after LIMIT injection. Non-SELECT reads (e.g. SHOW, EXPLAIN)
-            // are passed through unchanged — MySQL only honours the hint on SELECTs.
-            let sql = if let Some(ms) = req.timeout_ms.filter(|&t| t > 0) {
-                if ri.sql.trim_start().to_uppercase().starts_with("SELECT") {
-                    // "SELECT /*+ MAX_EXECUTION_TIME(N) */ ..."
-                    ri.sql.replacen(
-                        "SELECT",
-                        &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"),
-                        1,
-                    )
-                } else {
-                    ri.sql.clone()
-                }
+        let retire = deadline.is_some() || local_infile;
+        let execution = async {
+            if cfg
+                .params
+                .get("__read_only_execution")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                return governed_read(&self.pool(cfg).await?, cfg, req, token).await;
+            }
+            let text = req.statement.trim();
+            if text.is_empty() {
+                return Err(types::invalid("empty statement"));
+            }
+            let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
+            let base_pool = self.pool(cfg).await?;
+            // LOCAL_FILES is never enabled on the shared pool. Clone its TLS,
+            // authentication and setup callbacks onto a request-owned pool.
+            let pool = if local_infile {
+                base_pool
+                    .options()
+                    .clone()
+                    .max_connections(1)
+                    .min_connections(0)
+                    .connect_lazy_with((*base_pool.connect_options()).clone().local_infile(true))
             } else {
-                ri.sql.clone()
+                base_pool
             };
-            (
-                run_read(&pool, &sql, max_rows, ri.limited, active_db, token).await,
-                // Report the user-visible page size (max_rows), not the +1 probe.
-                ri.limited.then_some(max_rows as u64),
-            )
-        } else {
-            (run_write(&pool, statement, active_db, token).await, None)
-        };
-        let duration_ms = started.elapsed().as_millis() as u64;
 
-        let mut result = result?;
-        result.stats.duration_ms = duration_ms;
-        result.stats.row_count = result.rows.len();
-        result.auto_limited = auto_limited;
-        Ok(result)
+            // The active database (if the user selected one, else the profile
+            // default) scopes unqualified table names: we `USE` it on the
+            // connection before running the query — ALWAYS explicitly, since a
+            // pooled session may still be in another request's database.
+            let scope_db = req.scope_database();
+            let active_db = effective_db(scope_db.as_deref(), cfg);
+
+            run_script(
+                &pool,
+                text,
+                req,
+                max_rows,
+                active_db,
+                token,
+                retire,
+                local_infile,
+            )
+            .await
+        };
+        tokio::pin!(execution);
+        if let Some(timeout) = deadline {
+            tokio::select! {
+                result = &mut execution => result,
+                _ = tokio::time::sleep(timeout) => {
+                    // Keep the execution alive (and its session checked out)
+                    // while cancelling, so KILL cannot target a reused session.
+                    if let Some(handle) = token.handle() {
+                        self.cancel(cfg, &handle).await?;
+                    }
+                    Err(types::upstream("mysql query timed out"))
+                }
+            }
+        } else {
+            execution.await
+        }
     }
 
     /// Kill the running query on its backend connection: `KILL QUERY <connid>`.
@@ -912,6 +924,11 @@ impl Driver for MysqlDriver {
         if statement.is_empty() {
             return Err(types::invalid("empty statement"));
         }
+        if split_statements(statement, SqlDialect::Mysql).len() != 1 {
+            return Err(types::invalid(
+                "export requires one row-returning statement",
+            ));
+        }
         if !is_read_statement(statement) {
             return Err(types::invalid(
                 "export supports row-returning statements only",
@@ -921,6 +938,11 @@ impl Driver for MysqlDriver {
         let pool = self.pool(cfg).await?;
         let node = node.map(str::trim).filter(|s| !s.is_empty());
         let mut conn = acquire_scoped(&pool, effective_db(node, cfg), None).await?;
+        // A capped export can leave unread rows; retiring the session avoids
+        // draining the entire result just to roll the read-only transaction back.
+        if max_rows.is_some() || types::sql_leaves_session_state(statement) {
+            conn.close_on_drop();
+        }
         let mut conn = conn
             .begin_with("START TRANSACTION READ ONLY")
             .await
@@ -928,18 +950,27 @@ impl Driver for MysqlDriver {
 
         // A real cursor over the wire: each `try_next().await` fetches the next
         // row; nothing buffers the whole result.
-        let mut rows = sqlx::query(sqlx::AssertSqlSafe(statement)).fetch(&mut *conn);
+        let mut rows = sqlx::raw_sql(sqlx::AssertSqlSafe(statement)).fetch_many(&mut *conn);
         let mut sink = ExportSink::new(w, format);
 
         let mut header_written = false;
         let mut decoders: Vec<CellDecoder> = Vec::new();
         let mut n: usize = 0;
-        while let Some(row) = rows.try_next().await.map_err(types::upstream)? {
-            if let Some(cap) = max_rows {
-                if n >= cap {
-                    break;
+        while let Some(event) = rows.try_next().await.map_err(types::upstream)? {
+            let row = match event {
+                sqlx::Either::Right(row) => row,
+                sqlx::Either::Left(done) => {
+                    if !header_written {
+                        if let Some(metadata) = done.columns() {
+                            sink.write_header(&mysql_columns(metadata)).map_err(|e| {
+                                otto_core::Error::Internal(format!("write export header: {e}"))
+                            })?;
+                            header_written = true;
+                        }
+                    }
+                    continue;
                 }
-            }
+            };
             if !header_written {
                 decoders = column_decoders(&row);
                 let columns: Vec<Column> = row
@@ -951,6 +982,11 @@ impl Driver for MysqlDriver {
                     .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
                 header_written = true;
             }
+            if let Some(cap) = max_rows {
+                if n >= cap {
+                    break;
+                }
+            }
             let cells: Vec<Value> = decoders
                 .iter()
                 .enumerate()
@@ -960,7 +996,7 @@ impl Driver for MysqlDriver {
                 .map_err(|e| otto_core::Error::Internal(format!("write export row: {e}")))?;
             n += 1;
         }
-        // An empty result still needs the header (with-names) / `[]` (json).
+        drop(rows);
         if !header_written {
             sink.write_header(&[])
                 .map_err(|e| otto_core::Error::Internal(format!("write export header: {e}")))?;
@@ -1838,13 +1874,157 @@ fn mysql_session_tz(cfg: &ResolvedConfig) -> String {
 
 // --- Query execution --------------------------------------------------------
 
+/// Whether this request explicitly asks MySQL to read a file from the client.
+/// The service uses this only to apply its existing host-file authorization;
+/// the driver separately validates the filename and grants its bytes once.
+pub fn requires_local_infile(statement: &str) -> bool {
+    local_infile_tokens(statement, false).is_some()
+        || split_statements(statement, SqlDialect::Mysql)
+            .iter()
+            .any(|span| local_infile_tokens(&span.text, false).is_some())
+}
+
+/// Return tokens following LOAD DATA/XML [priority] LOCAL INFILE. Keep tokens
+/// preceding a lexical error: authorization must still recognize a request
+/// whose filename's escaping depends on the session SQL mode.
+fn local_infile_tokens(
+    statement: &str,
+    no_backslash: bool,
+) -> Option<Vec<sqlparser::tokenizer::Token>> {
+    use sqlparser::{
+        dialect::{GenericDialect, MySqlDialect},
+        tokenizer::{Token, Tokenizer},
+    };
+    let dialect: &dyn sqlparser::dialect::Dialect = if no_backslash {
+        &GenericDialect {}
+    } else {
+        &MySqlDialect {}
+    };
+    let mut tokens = Vec::new();
+    let _ = Tokenizer::new(dialect, statement)
+        .with_unescape(false)
+        .tokenize_with_location_into_buf(&mut tokens);
+    let mut tokens = tokens
+        .into_iter()
+        .map(|token| token.token)
+        .filter(|token| !matches!(token, Token::Whitespace(_)));
+    let word = |token: Option<&Token>, expected: &str| matches!(token, Some(Token::Word(w)) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(expected));
+    if !word(tokens.next().as_ref(), "LOAD") {
+        return None;
+    }
+    let kind = tokens.next();
+    if !word(kind.as_ref(), "DATA") && !word(kind.as_ref(), "XML") {
+        return None;
+    }
+    let mut modifier = tokens.next();
+    if word(modifier.as_ref(), "LOW_PRIORITY") || word(modifier.as_ref(), "CONCURRENT") {
+        modifier = tokens.next();
+    }
+    if !word(modifier.as_ref(), "LOCAL") || !word(tokens.next().as_ref(), "INFILE") {
+        return None;
+    }
+    Some(tokens.collect())
+}
+
+fn decode_mysql_filename(value: &str, quote: char, no_backslash: bool) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == quote && chars.peek() == Some(&quote) {
+            chars.next();
+            out.push(ch);
+        } else if ch == '\\' && !no_backslash {
+            if let Some(escaped) = chars.next() {
+                let decoded = match escaped {
+                    '0' => '\0',
+                    'b' => '\u{8}',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'Z' => '\u{1a}',
+                    '%' | '_' => {
+                        out.push('\\');
+                        escaped
+                    }
+                    other => other,
+                };
+                out.push(decoded);
+            } else {
+                out.push(ch);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Load only the literal filename in the explicit command, never a filename
+/// selected by the server. Mirrors the existing local-import size bound.
+async fn authorize_local_infile(
+    conn: &mut sqlx::MySqlConnection,
+    statement: &str,
+    authorized: bool,
+) -> Result<()> {
+    use sqlparser::tokenizer::Token;
+    use tokio::io::AsyncReadExt as _;
+    if local_infile_tokens(statement, false).is_none() {
+        return Ok(());
+    }
+    if !authorized {
+        return Err(otto_core::Error::Forbidden(
+            "LOCAL INFILE requires authorized access to files on the Otto host".into(),
+        ));
+    }
+    // Server status carries this SQL mode bit. An observer SELECT here would
+    // change ROW_COUNT()/FOUND_ROWS() before the user's LOAD ... SET expressions.
+    let no_backslash = conn.no_backslash_escapes();
+    let tokens = local_infile_tokens(statement, no_backslash).unwrap_or_default();
+    let filename = match tokens.first() {
+        Some(Token::SingleQuotedString(filename)) => {
+            decode_mysql_filename(filename, '\'', no_backslash)
+        }
+        Some(Token::DoubleQuotedString(filename)) => {
+            decode_mysql_filename(filename, '"', no_backslash)
+        }
+        Some(Token::Word(word)) if word.quote_style == Some('"') => {
+            decode_mysql_filename(&word.value, '"', no_backslash)
+        }
+        _ => {
+            return Err(types::invalid(
+                "LOAD DATA LOCAL INFILE requires a literal filename",
+            ))
+        }
+    };
+    const MAX_BYTES: u64 = 100 * 1024 * 1024;
+    let file = tokio::fs::File::open(&filename)
+        .await
+        .map_err(|e| types::upstream(format!("open LOCAL INFILE: {e}")))?;
+    let metadata = file.metadata().await.map_err(types::upstream)?;
+    if !metadata.is_file() || metadata.len() > MAX_BYTES {
+        return Err(types::invalid(
+            "LOCAL INFILE requires a regular file no larger than 100 MiB",
+        ));
+    }
+    let mut data = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut data)
+        .await
+        .map_err(types::upstream)?;
+    if data.len() as u64 > MAX_BYTES {
+        return Err(types::invalid("LOCAL INFILE exceeds 100 MiB"));
+    }
+    conn.authorize_local_infile(filename.into_bytes(), data);
+    Ok(())
+}
+
 /// First-keyword detection of read (returns rows) vs write statements.
 fn is_read_statement(statement: &str) -> bool {
     let kw = first_keyword(statement);
     matches!(
         kw.as_str(),
-        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN" | "WITH"
-    )
+        "SELECT" | "SHOW" | "DESC" | "DESCRIBE" | "EXPLAIN"
+    ) || (kw == "WITH" && crate::access::read_is_provable(Engine::Mysql, statement))
 }
 
 /// The first SQL keyword (uppercased), skipping leading whitespace and
@@ -1974,88 +2154,47 @@ async fn acquire_scoped(
     ))
 }
 
-async fn run_read(
+/// Execute on one physical session, parsing each next statement using the
+/// server's current SQL mode. SET/CALL/EXECUTE may change escaping mid-batch.
+#[allow(clippy::too_many_arguments)]
+async fn run_script(
     pool: &sqlx::MySqlPool,
-    statement: &str,
-    max_rows: usize,
-    server_bounded: bool,
-    active_db: Option<&str>,
-    token: &CancelToken,
-) -> Result<QueryResult> {
-    // Acquire a single connection so the `USE <db>` and the statement share
-    // the same session — the default schema must apply to the query.
-    // The backend id is captured in the same round trip as the `USE`, so a
-    // concurrent cancel can `KILL QUERY <id>` it. Best-effort — a query with
-    // no captured id simply can't be server-cancelled.
-    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
-    // Reads leave no session state, except the explicit lock functions.
-    if types::sql_leaves_session_state(statement) {
-        conn.close_on_drop();
-    }
-    let out = exec_read_conn(
-        &mut conn,
-        statement,
-        max_rows,
-        server_bounded,
-        &mut types::ByteBudget::default(),
-    )
-    .await?;
-    if out.unread {
-        // Rows left on the wire: discard the session instead of letting its
-        // next use drain them. (A server-bounded read at the row cap drains
-        // its leftover and keeps the session — DB2-01.)
-        conn.close_on_drop();
-    }
-    Ok(out.result)
-}
-
-async fn run_write(
-    pool: &sqlx::MySqlPool,
-    statement: &str,
-    active_db: Option<&str>,
-    token: &CancelToken,
-) -> Result<QueryResult> {
-    // Same as run_read: `USE <db>` and the statement must share one session.
-    let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
-    // A `SET`/`BEGIN`/`LOCK`/… would outlive this request on a pooled session:
-    // close it afterwards instead of returning it to the pool.
-    if types::sql_leaves_session_state(statement) {
-        conn.close_on_drop();
-    }
-    exec_write_conn(&mut conn, statement).await
-}
-
-/// Execute a true multi-statement batch (>1 statement) on ONE shared pooled
-/// session, in order. The optional `USE <db>` and the captured backend id apply
-/// once to the whole batch (so a concurrent cancel `KILL QUERY`s whichever
-/// statement is running). Each statement's result carries its preview label; on
-/// the first failing statement execution stops and an `errored` entry is appended
-/// — the completed results are returned, not discarded (§2.2). Eligible SELECTs
-/// are bounded at the server, without enabling the single-statement pager.
-/// Non-rewritable reads preserve their SQL and session semantics; if clipped,
-/// SQLx drains their remainder before the next statement on this same session.
-async fn run_batch(
-    pool: &sqlx::MySqlPool,
-    spans: &[StatementSpan],
+    text: &str,
+    req: &QueryRequest,
     max_rows: usize,
     active_db: Option<&str>,
     token: &CancelToken,
+    retire: bool,
+    local_infile_authorized: bool,
 ) -> Result<QueryResult> {
     let mut conn = acquire_scoped(pool, active_db, Some(token)).await?;
-    if spans
-        .iter()
-        .any(|span| types::sql_leaves_session_state(&span.text))
-    {
+    if retire {
         conn.close_on_drop();
     }
-    let mut results: Vec<QueryResult> = Vec::with_capacity(spans.len());
-    // One budget for the whole response, shared by every statement's rows.
+    let mut scanner = StatementScanner::new(text, SqlDialect::Mysql);
+    let first = scanner.next(conn.no_backslash_escapes());
+    let batch = scanner.has_more(conn.no_backslash_escapes());
+    // Preserve the native error/ack for a comment-only request.
+    let mut statement = Some(
+        first
+            .map(|span| span.text)
+            .unwrap_or_else(|| text.to_owned()),
+    );
+    let mut results = Vec::new();
     let mut budget = types::ByteBudget::default();
-    for span in spans {
-        let stmt = span.text.as_str();
+    while let Some(stmt) = statement.take() {
+        if types::sql_leaves_session_state(&stmt) {
+            conn.close_on_drop();
+        }
         let started = Instant::now();
-        let outcome = if is_read_statement(stmt) {
-            let limited = types::inject_row_limit(stmt, max_rows.saturating_add(1), None);
+        let mut auto_limited = None;
+        let outcome = if is_read_statement(&stmt) {
+            let limited = types::inject_row_limit(
+                &stmt,
+                max_rows.saturating_add(1),
+                if batch { None } else { req.offset },
+            );
+            auto_limited = limited.limited.then_some(max_rows as u64);
             exec_read_conn(
                 &mut conn,
                 &limited.sql,
@@ -2065,33 +2204,55 @@ async fn run_batch(
             )
             .await
             .map(|out| {
-                // A LATER statement would drain the unread rows anyway (same
-                // session); the last one's are skipped by closing it.
                 if out.unread {
                     conn.close_on_drop();
                 }
                 out.result
             })
         } else {
-            exec_write_conn(&mut conn, stmt).await
+            exec_write_conn(
+                &mut conn,
+                &stmt,
+                max_rows,
+                &mut budget,
+                local_infile_authorized,
+            )
+            .await
         };
         match outcome {
-            Ok(mut r) => {
-                r.stats.duration_ms = started.elapsed().as_millis() as u64;
-                r.stats.row_count = r.rows.len();
-                r.statement = Some(types::statement_preview(stmt));
-                results.push(r);
+            Ok(mut result) => {
+                result.stats.duration_ms = started.elapsed().as_millis() as u64;
+                result.stats.row_count = result.rows.len();
+                if !batch {
+                    result.auto_limited = auto_limited;
+                    return Ok(result);
+                }
+                result.statement = Some(types::statement_preview(&stmt));
+                let failed = result.errored || result.more_results.iter().any(|r| r.errored);
+                let trailing = std::mem::take(&mut result.more_results);
+                results.push(result);
+                results.extend(trailing.into_iter().map(|mut result| {
+                    result.statement = Some(types::statement_preview(&stmt));
+                    result
+                }));
+                if failed {
+                    break;
+                }
             }
-            Err(e) => {
-                // Stop at the first failure; keep the completed results and flag
-                // this one. The service returns 200 with the partial batch.
+            Err(error) => {
+                if !batch {
+                    return Err(error);
+                }
                 results.push(types::errored_batch_entry(
-                    types::statement_preview(stmt),
-                    e.to_string(),
+                    types::statement_preview(&stmt),
+                    error.to_string(),
                 ));
                 break;
             }
         }
+        statement = scanner
+            .next(conn.no_backslash_escapes())
+            .map(|span| span.text);
     }
     Ok(types::fold_batch_results(results))
 }
@@ -2124,9 +2285,8 @@ struct ReadOut {
 ///   and the session goes back to the pool. Without that, the default "open
 ///   table" view and every page closed its session and the next Run paid a
 ///   full reconnect (DB2-01).
-/// - Ad-hoc SQL is NOT kept in the statement cache (`persistent(false)`): every
-///   distinct statement/page used to be cached per session, evicting the
-///   tree/completion statements that are actually reused (DB2-02).
+/// - Text protocol supports native SHOW/admin variants without preparing SQL
+///   and does not populate the prepared-statement cache.
 /// - Each column's decoder is chosen ONCE from its type ([`CellDecoder`]), not by
 ///   trying up to 11 typed `try_get`s per cell (2.1–2.5 s → ~0.2 s CPU per
 ///   100k×30 rows) — which also stops text that merely LOOKS like JSON being
@@ -2141,9 +2301,7 @@ async fn exec_read_conn(
 ) -> Result<ReadOut> {
     use futures_util::TryStreamExt as _;
 
-    let mut stream = sqlx::query(sqlx::AssertSqlSafe(statement))
-        .persistent(false)
-        .fetch(&mut *conn);
+    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(statement)).fetch_many(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
     let mut decoders: std::sync::Arc<[CellDecoder]> = std::sync::Arc::from(Vec::new());
     let mut chunk: Vec<MySqlRow> = Vec::new();
@@ -2152,7 +2310,37 @@ async fn exec_read_conn(
     let mut truncated = false;
     let mut truncated_reason = None;
     let mut unread = false;
-    while let Some(row) = stream.try_next().await.map_err(types::upstream)? {
+    let mut results = Vec::new();
+    while let Some(event) = stream.try_next().await.map_err(types::upstream)? {
+        let row = match event {
+            sqlx::Either::Right(row) => row,
+            sqlx::Either::Left(done) => {
+                if columns.is_empty() {
+                    if let Some(metadata) = done.columns() {
+                        columns = mysql_columns(metadata);
+                    }
+                }
+                let (rows, cells_truncated) = finish_read_rows(
+                    std::mem::take(&mut chunk),
+                    std::mem::take(&mut decoding),
+                    decoders.clone(),
+                    kept,
+                )
+                .await?;
+                let mut result = QueryResult {
+                    columns: std::mem::take(&mut columns),
+                    rows,
+                    cells_truncated,
+                    rows_affected: done.columns().is_none().then_some(done.rows_affected()),
+                    ..QueryResult::empty()
+                };
+                result.stats.row_count = result.rows.len();
+                results.push(result);
+                kept = 0;
+                decoders = std::sync::Arc::from(Vec::new());
+                continue;
+            }
+        };
         if columns.is_empty() {
             for col in row.columns() {
                 columns.push(Column::typed(col.name(), col.type_info().name()));
@@ -2187,7 +2375,32 @@ async fn exec_read_conn(
         }
     }
     drop(stream);
+    if truncated || !columns.is_empty() {
+        let (rows, cells_truncated) = finish_read_rows(chunk, decoding, decoders, kept).await?;
+        let mut result = QueryResult {
+            cells_truncated,
+            columns,
+            rows,
+            truncated,
+            truncated_reason,
+            ..QueryResult::empty()
+        };
+        result.stats.row_count = result.rows.len();
+        results.push(result);
+    }
+    Ok(ReadOut {
+        result: types::fold_batch_results(results),
+        unread,
+    })
+}
 
+/// Finish one native rowset before starting the next schema/decoder set.
+async fn finish_read_rows(
+    chunk: Vec<MySqlRow>,
+    decoding: Vec<tokio::task::JoinHandle<(Vec<Vec<Value>>, bool)>>,
+    decoders: std::sync::Arc<[CellDecoder]>,
+    kept: usize,
+) -> Result<(Vec<Vec<Value>>, bool)> {
     let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(kept);
     let mut cells_truncated = false;
     for task in decoding {
@@ -2210,17 +2423,15 @@ async fn exec_read_conn(
         cells_truncated |= capped;
     }
 
-    Ok(ReadOut {
-        result: QueryResult {
-            cells_truncated,
-            columns,
-            rows: out_rows,
-            truncated,
-            truncated_reason,
-            ..QueryResult::empty()
-        },
-        unread,
-    })
+    Ok((out_rows, cells_truncated))
+}
+
+/// Metadata is available both on rows and on the result completion packet.
+fn mysql_columns(columns: &[sqlx::mysql::MySqlColumn]) -> Vec<Column> {
+    columns
+        .iter()
+        .map(|column| Column::typed(column.name(), column.type_info().name()))
+        .collect()
 }
 
 /// Decode fetched rows with their per-column decoders (capping oversized cells
@@ -2264,17 +2475,71 @@ fn raw_row_json_len(row: &MySqlRow, decoders: &[CellDecoder]) -> usize {
     n
 }
 
-/// Run a write/DDL statement on an already-prepared connection and return the
-/// affected-row acknowledgement.
-async fn exec_write_conn(conn: &mut sqlx::MySqlConnection, statement: &str) -> Result<QueryResult> {
-    let res = sqlx::query(sqlx::AssertSqlSafe(statement))
-        .execute(&mut *conn)
-        .await
-        .map_err(types::upstream)?;
-    let affected = res.rows_affected();
-    let mut result = QueryResult::message(format!("{affected} row(s) affected"));
-    result.rows_affected = Some(affected);
-    Ok(result)
+/// Execute native commands with COM_QUERY. Commands such as CALL, EXECUTE,
+/// CHECK and ANALYZE can return rows despite not starting with SELECT. Preserve
+/// each wire result boundary and acknowledgement, including CALL's final status.
+/// Drain capped command results so later routine statements still execute.
+async fn exec_write_conn(
+    conn: &mut sqlx::MySqlConnection,
+    statement: &str,
+    max_rows: usize,
+    budget: &mut types::ByteBudget,
+    local_infile_authorized: bool,
+) -> Result<QueryResult> {
+    use futures_util::TryStreamExt as _;
+    authorize_local_infile(conn, statement, local_infile_authorized).await?;
+    let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(statement)).fetch_many(conn);
+    let mut results = Vec::new();
+    let mut current = QueryResult::empty();
+    let mut decoders = Vec::new();
+    loop {
+        match stream.try_next().await {
+            Ok(Some(sqlx::Either::Right(row))) => {
+                if current.columns.is_empty() {
+                    current.columns = row
+                        .columns()
+                        .iter()
+                        .map(|col| Column::typed(col.name(), col.type_info().name()))
+                        .collect();
+                    decoders = column_decoders(&row);
+                }
+                if current.rows.len() >= max_rows {
+                    current.truncated = true;
+                    continue;
+                }
+                if !budget.charge(raw_row_json_len(&row, &decoders)) && !current.rows.is_empty() {
+                    current.truncated = true;
+                    current.truncated_reason = Some(types::TruncatedReason::Bytes);
+                    continue;
+                }
+                let (rows, capped) = decode_rows(&[row], &decoders);
+                current.rows.extend(rows);
+                current.cells_truncated |= capped;
+            }
+            Ok(Some(sqlx::Either::Left(done))) => {
+                if let Some(metadata) = done.columns() {
+                    current.columns = mysql_columns(metadata);
+                } else {
+                    let affected = done.rows_affected();
+                    current.rows_affected = Some(affected);
+                    current.message = Some(format!("{affected} row(s) affected"));
+                }
+                current.stats.row_count = current.rows.len();
+                results.push(std::mem::replace(&mut current, QueryResult::empty()));
+                decoders.clear();
+            }
+            Ok(None) => break,
+            Err(error) if results.is_empty() => return Err(types::upstream(error)),
+            Err(error) => {
+                results.push(types::errored_batch_entry(
+                    types::statement_preview(statement),
+                    error.to_string(),
+                ));
+                break;
+            }
+        }
+    }
+    Ok(types::fold_batch_results(results))
 }
 
 /// How one MySQL result column's cells decode, chosen ONCE per column from its
@@ -2455,6 +2720,20 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     }
     if let Ok(v) = row.try_get::<Option<NaiveTime>, _>(idx) {
         return temporal_to_json(v);
+    }
+    // TIME is a signed duration, not just a time of day. Chrono rejects
+    // negative values and hours >=24; sqlx's native type covers the full range.
+    if let Ok(v) = row.try_get::<Option<sqlx::mysql::types::MySqlTime>, _>(idx) {
+        return v
+            .map(|time| {
+                // MySqlTime's Display leaves single-digit hours unpadded, unlike
+                // the native MySQL hh:mm:ss representation (including negatives).
+                let text = time.to_string();
+                let (hours, rest) = text.split_once(':').expect("MySqlTime has hour separator");
+                let (sign, hours) = hours.strip_prefix('-').map_or(("", hours), |h| ("-", h));
+                Value::String(format!("{sign}{hours:0>2}:{rest}"))
+            })
+            .unwrap_or(Value::Null);
     }
     // Text (covers VARCHAR/TEXT/ENUM and the CAST-to-CHAR helper queries).
     if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
@@ -2788,17 +3067,24 @@ async fn governed_read(
     req: &QueryRequest,
     token: &CancelToken,
 ) -> Result<QueryResult> {
-    let scope_db = req.scope_database();
-    let mut conn =
-        acquire_scoped(pool, effective_db(scope_db.as_deref(), cfg), Some(token)).await?;
-    let mut tx = conn
-        .begin_with("START TRANSACTION READ ONLY")
-        .await
-        .map_err(types::upstream)?;
     let spans = split_statements(req.statement.trim(), SqlDialect::Mysql);
     if spans.is_empty() {
         return Err(types::invalid("empty statement"));
     }
+    let scope_db = req.scope_database();
+    let mut conn =
+        acquire_scoped(pool, effective_db(scope_db.as_deref(), cfg), Some(token)).await?;
+    if req.timeout_ms.is_some_and(|ms| ms > 0)
+        || spans
+            .iter()
+            .any(|span| types::sql_leaves_session_state(&span.text))
+    {
+        conn.close_on_drop();
+    }
+    let mut tx = conn
+        .begin_with("START TRANSACTION READ ONLY")
+        .await
+        .map_err(types::upstream)?;
     let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
     let single = spans.len() == 1;
     let mut results = Vec::new();
@@ -2811,16 +3097,7 @@ async fn governed_read(
             max_rows.saturating_add(1),
             if single { req.offset } else { None },
         );
-        let mut sql = limited.sql;
-        if let Some(ms) = req.timeout_ms.filter(|ms| *ms > 0) {
-            if sql.trim_start().to_uppercase().starts_with("SELECT") {
-                sql = sql.replacen(
-                    "SELECT",
-                    &format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"),
-                    1,
-                );
-            }
-        }
+        let sql = limited.sql;
         let bounded = limited.limited;
         let out = match exec_read_conn(&mut tx, &sql, max_rows, bounded, &mut budget).await {
             Ok(out) => out,
@@ -2862,6 +3139,28 @@ async fn governed_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_infile_detection_and_filename_escaping() {
+        for sql in [
+            "LOAD DATA LOCAL INFILE '/tmp/a' INTO TABLE t",
+            "SELECT 1; LOAD /* source */ DATA LOW_PRIORITY LOCAL INFILE '/tmp/a' INTO TABLE t",
+            "LOAD XML LOCAL INFILE '/tmp/a' INTO TABLE t",
+        ] {
+            assert!(requires_local_infile(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 'LOAD DATA LOCAL INFILE x'",
+            "LOAD DATA INFILE '/server/a' INTO TABLE t",
+            "-- LOAD DATA LOCAL INFILE 'x'\nSELECT 1",
+        ] {
+            assert!(!requires_local_infile(sql), "{sql}");
+        }
+        assert_eq!(decode_mysql_filename(r"a\nb", '\'', false), "a\nb");
+        assert_eq!(decode_mysql_filename(r"a\nb", '\'', true), r"a\nb");
+        assert_eq!(decode_mysql_filename(r"a\ab", '\'', false), "aab");
+        assert_eq!(decode_mysql_filename("a''b", '\'', false), "a'b");
+    }
 
     /// SH-01/SH-02: the decoder is picked from the column type, and ONLY the
     /// native JSON type is parsed as JSON — text that looks like JSON (`null`,
@@ -2943,6 +3242,9 @@ mod tests {
         assert!(is_read_statement("EXPLAIN SELECT 1"));
         assert!(is_read_statement(
             "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        ));
+        assert!(!is_read_statement(
+            "WITH ids AS (SELECT 1 AS id) UPDATE t SET id=2"
         ));
     }
 

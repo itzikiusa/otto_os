@@ -60,13 +60,16 @@
     if (e.defaultPrevented || ui.overlayOpen || ui.navDrawerOpen || ctxMenu.open) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    const rtl = typeof document !== 'undefined' && document.documentElement.dir === 'rtl';
     if (e.key === 'Escape' && home.zoomedId) {
       e.preventDefault();
       home.zoomedId = null;
     } else if (e.key === 'ArrowLeft' && !e.metaKey && !e.altKey && !home.zoomedId && t?.getAttribute('role') !== 'slider') {
-      home.prev();
+      if (rtl) home.next();
+      else home.prev();
     } else if (e.key === 'ArrowRight' && !e.metaKey && !e.altKey && !home.zoomedId && t?.getAttribute('role') !== 'slider') {
-      home.next();
+      if (rtl) home.prev();
+      else home.next();
     }
   }
   let touchX: number | null = null;
@@ -78,7 +81,8 @@
     const dx = (e.changedTouches[0]?.clientX ?? touchX) - touchX;
     touchX = null;
     if (Math.abs(dx) < 60) return;
-    if (dx < 0) home.next();
+    const rtl = typeof document !== 'undefined' && document.documentElement.dir === 'rtl';
+    if (rtl ? dx > 0 : dx < 0) home.next();
     else home.prev();
   }
 
@@ -96,7 +100,7 @@
   async function removeView(): Promise<void> {
     const v = home.active;
     if (!v) return;
-    if (await confirmer.ask(`Delete space “${v.name}” and its ${plural(v.boxes.length, 'widget')}?`, { title: 'Delete space' })) {
+    if (await confirmer.ask(`Delete space “${v.name}” and its ${plural(v.boxes.length, 'widget')}?`, { title: 'Delete space', confirmLabel: 'Delete', danger: true })) {
       home.removeView(v.id);
     }
   }

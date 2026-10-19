@@ -26,7 +26,7 @@
 
 use crate::DbPool;
 use chrono::{Duration, Utc};
-use otto_core::Result;
+use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::convert::{dberr, fmt};
@@ -220,26 +220,38 @@ impl RetentionRepo {
             return Ok(report);
         }
         let now = Utc::now();
-        let cutoff = |days: i64| fmt(now - Duration::days(days));
+        let cutoff = |days: i64| -> Result<String> {
+            Duration::try_days(days)
+                .and_then(|duration| now.checked_sub_signed(duration))
+                .map(fmt)
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "retention window of {days} days exceeds the supported date range"
+                    ))
+                })
+        };
+        // Validate every window before deleting anything. A malformed setting
+        // must return an error, not panic the shared hourly maintenance task or
+        // leave an earlier part of this retention pass committed.
+        let work_cut = cutoff(p.work_events_days)?;
+        let idle_cut = cutoff(p.work_events_idle_days)?;
+        let mcp_cut = cutoff(p.mcp_audit_days)?;
+        let audit_cut = cutoff(p.audit_log_days)?;
+        let review_cut = cutoff(p.review_retry_days)?;
+        let read_cut = cutoff(p.notifications_read_days)?;
+        let unread_cut = cutoff(p.notifications_unread_days)?;
+        let run_cut = cutoff(p.run_history_days)?;
 
         report.work_events = self
-            .prune_work_events(
-                &cutoff(p.work_events_days),
-                &cutoff(p.work_events_idle_days),
-                p.work_events_keep_per_item,
-            )
+            .prune_work_events(&work_cut, &idle_cut, p.work_events_keep_per_item)
             .await?;
-        let mcp_cut = cutoff(p.mcp_audit_days);
         report.mcp_tool_calls = self
             .delete_older("mcp_tool_calls", "created_at", &mcp_cut)
             .await?;
         report.mcp_call_log = self
             .delete_older("mcp_call_log", "created_at", &mcp_cut)
             .await?;
-        report.audit_log = self
-            .delete_older("audit_log", "ts", &cutoff(p.audit_log_days))
-            .await?;
-        let review_cut = cutoff(p.review_retry_days);
+        report.audit_log = self.delete_older("audit_log", "ts", &audit_cut).await?;
         report.review_agent_prompts = self
             .delete_review_artifacts("review_agent_prompts", &review_cut)
             .await?;
@@ -247,11 +259,7 @@ impl RetentionRepo {
             .delete_review_artifacts("review_diffs", &review_cut)
             .await?;
         report.notifications = self
-            .prune_notifications(
-                &cutoff(p.notifications_read_days),
-                &cutoff(p.notifications_unread_days),
-                p.notifications_max_rows,
-            )
+            .prune_notifications(&read_cut, &unread_cut, p.notifications_max_rows)
             .await?;
         if p.room_messages_keep_per_room > 0 {
             report.room_messages = self
@@ -260,7 +268,7 @@ impl RetentionRepo {
         }
         // --- Run history (perf W6) ---
         if p.run_history_days > 0 {
-            report.run_history = self.prune_run_history(&cutoff(p.run_history_days)).await?;
+            report.run_history = self.prune_run_history(&run_cut).await?;
         }
         Ok(report)
     }

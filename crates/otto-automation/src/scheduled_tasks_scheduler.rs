@@ -11,6 +11,25 @@
 //! guard set is the engine's process-wide [`in_flight`] set, shared with the
 //! manual "Run now" path, so a due occurrence never starts on top of a manual
 //! run that is still going.
+//!
+//! Shutdown: [`CancelSignal::cancel`] stops this scan from launching anything
+//! further. The check is after each await and again immediately before
+//! `tokio::spawn`, so a tick already waiting on the database does not fire
+//! when stop wins that race. Admission inside the spawned task is checked
+//! again: a `running` row committed during that await stays for
+//! [`reap_interrupted`] and does not start execution. Work that already
+//! passed the post-admit check is detached. This token does not stop it, and
+//! a cancelled token is not a claim that those runs have finished.
+//!
+//! That stop does not consume the occurrence. Admission inserts the `running`
+//! row and does not write `last_run_at`. The cursor moves only when the run
+//! completes. Reap marks the row `error` ("interrupted by daemon restart")
+//! and does not settle. For `once`, an empty cursor means the shot has not
+//! fired, so it stays due. For a recurring cadence the cursor still names the
+//! previous slot, so the same occurrence stays due once reap clears the
+//! overlap. A skipped overlap does not settle `once` either. A workflow
+//! hand-off (`workflow_run_id` set) is reattached, not reaped, and is not
+//! replayed from here.
 
 use std::time::Duration;
 
@@ -19,7 +38,9 @@ use tracing::{debug, info, warn};
 
 use crate::cadence;
 use crate::cancel_signal::CancelSignal;
-use crate::scheduled_tasks_engine::{in_flight, resume_workflow_handoff, run_task};
+use crate::scheduled_tasks_engine::{
+    in_flight, resume_workflow_handoff, run_task_after_supervisor,
+};
 use crate::AutomationCtx;
 
 const SCAN: Duration = Duration::from_secs(60);
@@ -63,7 +84,7 @@ async fn supervise(ctx: impl AutomationCtx, cancel: CancelSignal) {
         if cancel.is_cancelled() {
             return;
         }
-        if let Err(e) = tick(&ctx).await {
+        if let Err(e) = tick(&ctx, &cancel).await {
             warn!("scheduled tasks scheduler tick: {e}");
         }
         // One timer per scan; cancel() wakes it (no 500 ms polling slices).
@@ -73,12 +94,26 @@ async fn supervise(ctx: impl AutomationCtx, cancel: CancelSignal) {
     }
 }
 
-async fn tick(ctx: &impl AutomationCtx) -> otto_core::Result<()> {
+/// Post-await / pre-spawn gate. False once the supervisor is cancelled.
+fn launch_after_await(cancel: &CancelSignal) -> bool {
+    crate::cancel_signal::supervisor_may_launch(cancel)
+}
+
+async fn tick(ctx: &impl AutomationCtx, cancel: &CancelSignal) -> otto_core::Result<()> {
     let now = Utc::now();
-    for task in ctx.scheduled_tasks().list_enabled().await? {
+    let tasks = ctx.scheduled_tasks().list_enabled().await?;
+    // Stop can land while `list_enabled` is in flight. Do not claim or spawn.
+    if !launch_after_await(cancel) {
+        return Ok(());
+    }
+    for task in tasks {
+        if !launch_after_await(cancel) {
+            break;
+        }
         // Not due → skip. Busy (a scheduled OR manual run in flight) → skip,
         // leaving the cursor untouched (the engine advances it only on
-        // completion), so the occurrence is retried rather than lost.
+        // completion, and then to the served occurrence, not the completion
+        // clock), so the occurrence is retried rather than lost.
         // The cursor never predates the arm instant (created / resumed /
         // re-timed), so a resumed task doesn't fire what it missed while off.
         let last = cadence::effective_cursor(
@@ -96,13 +131,20 @@ async fn tick(ctx: &impl AutomationCtx) -> otto_core::Result<()> {
         let Some(guard) = in_flight().claim(&task.id) else {
             continue;
         };
+        // Re-check after the claim. A stop that arrived since the list await
+        // drops the guard and does not spawn. The guard's drop is the release.
+        if !launch_after_await(cancel) {
+            drop(guard);
+            break;
+        }
 
         debug!(task = %task.id, "scheduled tasks: firing due task");
         let ctx2 = ctx.clone();
+        let supervisor = cancel.clone();
         tokio::spawn(async move {
             // The guard clears the in-flight entry on drop — including on panic.
             let _guard = guard;
-            let _ = run_task(&ctx2, &task, "schedule").await;
+            let _ = run_task_after_supervisor(&ctx2, &task, &supervisor).await;
         });
     }
     Ok(())
@@ -123,5 +165,29 @@ mod tests {
         let s = "2026-06-26T10:00:00+00:00";
         assert!(parse_ts(s).is_some());
         assert!(parse_ts("not-a-time").is_none());
+    }
+
+    /// The scan is parked on its await. Stop is signaled before that await
+    /// completes. The post-await check must not admit a launch. A worker that
+    /// already started is still running afterwards.
+    #[tokio::test]
+    async fn awaiting_tick_does_not_launch_after_stop() {
+        let cancel = CancelSignal::new();
+        let (release_scan, scan_done) = tokio::sync::oneshot::channel::<()>();
+        let (release_work, work_done) = tokio::sync::oneshot::channel::<()>();
+        let scan = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let _ = scan_done.await;
+                launch_after_await(&cancel)
+            })
+        };
+        let detached = tokio::spawn(async move { work_done.await.ok() });
+        cancel.cancel();
+        release_scan.send(()).unwrap();
+        assert!(!scan.await.unwrap());
+        assert!(!detached.is_finished());
+        release_work.send(()).unwrap();
+        detached.await.unwrap();
     }
 }

@@ -592,12 +592,14 @@
       { label: 'Instructions', checked: instructionsOpen, title: 'Standing rules every step follows, by the letter', action: () => (instructionsOpen = !instructionsOpen) },
       { label: 'Triggers', checked: triggersOpen, title: 'Configure what starts this workflow', action: () => (triggersOpen = !triggersOpen) },
       { label: 'Versions', checked: versionsOpen, title: 'Version history', action: () => { versionsOpen = !versionsOpen; if (versionsOpen) void loadVersions(); } },
-      {
-        label: 'Inspector on the side',
-        checked: sideDock,
-        title: sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel',
-        action: () => ui.setWfDockSide(!sideDock),
-      },
+      ...(viewport.isDesktop
+        ? [{
+            label: 'Inspector on the side',
+            checked: ui.wfDockSide,
+            title: ui.wfDockSide ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel',
+            action: () => ui.setWfDockSide(!ui.wfDockSide),
+          } satisfies MenuItem]
+        : []),
       { separator: true },
       {
         label: validating ? 'Checking…' : 'Validate',
@@ -1319,7 +1321,9 @@
   }
   // Whether the node inspector is docked as a right-side column (vs the bottom
   // strip). Only meaningful when something is selected/running.
-  const sideDock = $derived(ui.wfDockSide);
+  // Side dock is a desktop column. Phone and tablet keep the bottom inspector
+  // so a 280–400px panel cannot cover a narrow viewport. The preference stays.
+  const sideDock = $derived(ui.wfDockSide && viewport.isDesktop);
 
   const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
   function resetInsp(): void {
@@ -2091,8 +2095,10 @@
         <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={12} /> Stop run…</button>
       {:else}
         <button
-          class="btn primary small"
+          class="btn small"
+          class:primary={!runInputOpen}
           class:active={runInputOpen}
+          aria-pressed={runInputOpen}
           onclick={openRunInput}
           title="Run — set the input (repo_id / story_id / goals / msg) the trigger emits"
           aria-expanded={runInputOpen}
@@ -2134,7 +2140,6 @@
             {#if r.waiting_approval}
               <span class="run-badge" role="img" title="Waiting for your approval" aria-label="Waiting for your approval"><Icon name="userCheck" size={12} /></span>
             {/if}
-            <span class="grow"></span>
             <code class="run-id" title={r.run_id}>{shortRunId(r.run_id)}</code>
             <span class="run-prog" title={`${r.nodes_done} of ${r.nodes_total} steps done`}>{r.nodes_done}/{r.nodes_total}</span>
             <!-- Ticks with the shared clock (a one-shot "5m ago" froze at load). -->
@@ -2206,7 +2211,7 @@
         <div class="palette wf-pop" role="dialog" aria-label="Add a node" style:inset-inline-end="{popRight}px">
           {#each types as t (t.kind)}
             <button class="pal-item" onclick={() => addNode(t)}>
-              <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
+              <span class="pal-ic"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
               <span class="pal-body">
                 <span class="pal-name">{t.label}</span>
                 <span class="pal-cat">{t.category}</span>
@@ -2291,7 +2296,7 @@
           <div class="ri-actions">
             <button class="btn small" onclick={() => (runInputOpen = false)}>Cancel</button>
             <button class="btn primary small" disabled={running} onclick={confirmRun}>
-              <Icon name="play" size={12} /> Run
+              <Icon name="play" size={12} /> {running ? 'Starting…' : 'Run'}
             </button>
           </div>
         </div>
@@ -2571,7 +2576,7 @@
 
           {#if selectedNode}
             <div class="insp-h">
-              <strong>{selectedNode.name || selectedNode.kind}</strong>
+              <strong title={selectedNode.name || selectedNode.kind}>{selectedNode.name || selectedNode.kind}</strong>
               <span class="mono dim">{selectedNode.kind}</span>
               {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
@@ -3712,6 +3717,10 @@
     flex-direction: column;
     background: var(--surface);
     min-height: 0;
+    /* The list pane's minimum is 220px. Size queries hide nonessential run meta
+       before the row spills across the divider. */
+    container-type: inline-size;
+    container-name: wf-side;
   }
   /* Phone: the list IS the first screen (push navigation). */
   .side.phone {
@@ -4010,6 +4019,8 @@
     align-items: center;
     gap: 6px;
     width: 100%;
+    min-width: 0;
+    overflow: hidden;
     padding: 6px 8px;
     background: none;
     border: none;
@@ -4029,7 +4040,8 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 120px;
+    flex: 1;
+    min-width: 0;
   }
   .run-badge {
     display: inline-flex;
@@ -4050,17 +4062,33 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    flex-shrink: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .run-prog {
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .run-when {
     font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-inline-start: 6px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* 18-03: a 220px list cannot hold a name, an id, and a relative time. */
+  @container wf-side (max-width: 280px) {
+    .running .run-id,
+    .running .run-when {
+      display: none;
+    }
   }
   .main {
     flex: 1;
@@ -4068,6 +4096,7 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+    overflow-y: auto;
     /* Anchor for the side-docked inspector's absolute position. */
     position: relative;
   }
@@ -4152,7 +4181,8 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     outline: none;
-    min-width: 220px;
+    min-width: 0;
+    max-width: 100%;
   }
   .wf-title-edit:focus-visible,
   .row-rename:focus-visible {
@@ -4205,8 +4235,8 @@
     width: 24px;
     height: 24px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--c) 18%, transparent);
-    color: var(--c);
+    background: var(--accent-soft);
+    color: var(--accent-text);
     flex-shrink: 0;
   }
   .pal-body {
@@ -4224,7 +4254,7 @@
   }
   .canvas-wrap {
     flex: 1;
-    min-height: 0;
+    min-height: 160px;
     position: relative;
   }
   .inspector {
@@ -4325,8 +4355,16 @@
   .insp-h {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     font-size: var(--fs-m);
+    min-width: 0;
+  }
+  .insp-h strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .insp-h .dim {
     color: var(--text-dim);
@@ -4800,6 +4838,8 @@
     padding: 10px 12px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
+    max-height: min(50vh, 420px);
+    overflow-y: auto;
   }
   .ri-head {
     display: flex;
@@ -4809,7 +4849,7 @@
   }
   .ri-hint {
     flex: 1;
-    min-width: 200px;
+    min-width: 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
   }

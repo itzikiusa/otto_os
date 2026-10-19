@@ -298,7 +298,15 @@
           {@const subs = g.activity.subagents}
           <div class="subs" data-testid="subagent-rows">
             {#each subs as sa (sa.id)}
-              <div class="sub" data-status={sa.status} title={sa.description}>└ {sa.description} — {sa.status === 'running' ? `running ${fmtSince(sa.started_at)}` : sa.status === 'done' ? `done${sa.started_at && sa.finished_at ? ' in ' + fmtBetween(sa.started_at, sa.finished_at) : ''}` : 'failed'}</div>
+              <div class="sub" data-status={sa.status} title={sa.description}>
+                <span class="sub-desc">{sa.description}</span>
+                <StatusBadge status={runStatus(sa.status)} variant="text" />
+                {#if sa.status === 'running'}
+                  <span class="sub-when">{fmtSince(sa.started_at)}</span>
+                {:else if sa.status === 'done' && sa.started_at && sa.finished_at}
+                  <span class="sub-when">{fmtBetween(sa.started_at, sa.finished_at)}</span>
+                {/if}
+              </div>
             {/each}
           </div>
         {/if}
@@ -365,8 +373,10 @@
   .sess-h {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
     width: 100%;
+    min-width: 0;
     padding: 6px 8px;
     background: transparent;
     border: none;
@@ -383,7 +393,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 50%;
+    flex: 1 1 8rem;
+    min-width: 0;
+    max-width: 100%;
   }
   .s-provider {
     font-size: var(--fs-xs);
@@ -400,6 +412,11 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: ltr;
   }
   .subs {
     display: flex;
@@ -408,11 +425,21 @@
     margin-inline-start: 18px;
   }
   .sub {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  .sub-desc {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .sub-when {
+    flex-shrink: 0;
   }
   .recovery-status {
     white-space: normal;

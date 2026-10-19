@@ -5,6 +5,7 @@
   // drag-to-folder moves.
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -283,12 +284,33 @@
 </script>
 
 <div class="tree" role="tree" aria-label="Vault files" bind:this={treeEl}>
-  {#if flat.length === 0}
+  {#if (vault.treeLoading || vault.treeError) && flat.length === 0}
+    <LoadState
+      what="files"
+      variant="compact"
+      loading={vault.treeLoading}
+      error={vault.treeError}
+      empty
+      onretry={() => void vault.loadRoot()}
+    />
+  {:else if flat.length === 0}
     <div class="empty">
       No notes yet.
-      <button class="btn ghost" onclick={() => onNewNote('')}>New note</button>
+      {#if vault.centerMode !== 'empty'}
+        <button class="btn ghost" onclick={() => onNewNote('')}>New note</button>
+      {:else}
+        <button class="btn ghost only-phone" onclick={() => onNewNote('')}>New note</button>
+      {/if}
     </div>
   {:else}
+    {#if vault.treeError}
+      <LoadState
+        what="files"
+        variant="compact"
+        error={vault.treeError}
+        onretry={() => void vault.loadRoot()}
+      />
+    {/if}
     <!-- findText: ⌘F sees every expanded row, not just the mounted window
          (the name leads the row's text, so match n maps onto the DOM). -->
     <VirtualList
@@ -441,6 +463,8 @@
     flex-direction: column;
     min-height: 0;
     flex: 1;
+    --ft-row-h: 26px;
+    --ft-row-py: 0px;
   }
   .tree :global(.tree-list) {
     flex: 1;
@@ -460,7 +484,8 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    height: 26px;
+    min-height: var(--ft-row-h);
+    padding-block: var(--ft-row-py);
     padding-inline-end: 8px;
     font-size: var(--fs-s);
     color: var(--text);
@@ -596,5 +621,19 @@
     font-size: var(--fs-s);
     padding: 2px 6px;
     z-index: 2;
+  }
+  .only-phone {
+    display: none;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .tree {
+      --ft-row-h: var(--hit-min);
+      --ft-row-py: 4px;
+    }
+  }
+  @media (max-width: 640px) {
+    .only-phone {
+      display: inline-flex;
+    }
   }
 </style>

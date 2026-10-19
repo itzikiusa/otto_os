@@ -8,6 +8,7 @@
   import { dialogFocus } from '../lib/dialogFocus';
   import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
+  import { loadErrorText } from '../lib/loadError';
   import { api, isAbortError } from '../lib/api/client';
   import type { Action, SearchHit } from '../lib/api/types';
   import { untrack } from 'svelte';
@@ -54,6 +55,7 @@
   /** The element focused when the palette opened (restored on close). */
   let returnFocus: HTMLElement | null = null;
   let textareaEl: HTMLTextAreaElement | null = $state(null);
+  let downOnBackdrop = false;
 
   // ---- cross-module search ----
   // Debounced fan-out to GET /workspaces/{id}/search when the query is
@@ -100,7 +102,7 @@
     } catch (e) {
       if (searchAbort === ctrl && !ctrl.signal.aborted && !isAbortError(e)) {
         searchHits = [];
-        searchError = e instanceof Error ? e.message : String(e);
+        searchError = loadErrorText(e);
       }
     } finally {
       if (searchAbort === ctrl) {
@@ -460,8 +462,12 @@
   <div
     class="pal-backdrop"
     role="presentation"
+    onpointerdown={(e) => {
+      downOnBackdrop = e.target === e.currentTarget;
+    }}
     onclick={(e) => {
-      if (e.target === e.currentTarget) close();
+      if (downOnBackdrop && e.target === e.currentTarget) close();
+      downOnBackdrop = false;
     }}
   >
     <div class="palette glass-raised" use:dialogFocus={() => { if (plan) plan = null; else close(); }} role="dialog" aria-modal="true" aria-label="Command palette">

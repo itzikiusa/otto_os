@@ -41,6 +41,9 @@ use crate::state::ServerCtx;
 use crate::turn_oracle::{self, cap_node_logs, CompleteVia, Phase};
 use otto_workflows::catalog::validate_node_output;
 pub use otto_workflows::catalog::{is_known_kind, node_catalog};
+pub(crate) use otto_workflows::location::{
+    ensure_path_in_workspace, git_main_worktree, looks_like_path, match_repo_path,
+};
 use otto_workflows::retry::{outcome_error, retry_backoff};
 
 /// Session and review associations share the ordered progress stream. Reviews
@@ -4224,7 +4227,6 @@ async fn execute_node(
                 .ok_or_else(|| otto_core::Error::Invalid("db_query: missing statement".into()))?
                 .to_string();
             let max_rows = p.get("max_rows").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let dummy_user: Id = "workflow-engine".to_string();
             let req = QueryRequest {
                 statement: stmt.clone(),
                 max_rows: Some(max_rows),
@@ -4236,7 +4238,7 @@ async fn execute_node(
             };
             let result = ctx
                 .db_explorer
-                .run(&conn_id, &dummy_user, &req)
+                .run(&conn_id, &user.id, &req)
                 .await
                 .map_err(|e| otto_core::Error::Upstream(format!("db_query: {e}")))?;
             let rows_returned = result.rows.len();
@@ -4756,67 +4758,9 @@ async fn execute_node(
             ))
         }
 
-        // --- API Run (wired) ------------------------------------------------
-        // Executes an ad-hoc HTTP request through the API-client engine (same
-        // code-path as `POST /workspaces/{wid}/api-client/execute` but inline).
-        // Params mirror ExecuteApiReq: method, url, headers, body, auth.
-        "api_run" => {
-            let method = p
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or("GET")
-                .to_string();
-            let url = p
-                .get("url")
-                .and_then(Value::as_str)
-                .ok_or_else(|| otto_core::Error::Invalid("api_run: missing url".into()))?
-                .to_string();
-            let headers = p.get("headers").cloned().unwrap_or(json!({}));
-            let body = p.get("body").cloned();
-            // body_mode is parsed for documentation/UI purposes; the raw HTTP
-            // path always sends JSON for non-null bodies.
-            let _body_mode = p.get("body_mode").and_then(Value::as_str).unwrap_or("json");
-
-            // Build a minimal ExecuteApiReq and invoke the engine's execute path.
-            // Using the public `build_and_send` path isn't accessible here
-            // (it's a private fn in routes::api_client), so we call the HTTP
-            // endpoint directly via reqwest to keep coupling clean.
-            // This is the same approach as the http_request node but uses the
-            // api_run semantic (so the UI shows it distinctly).
-            // Same SSRF guard + guarded redirects as http_request.
-            otto_netguard::check_url(&url)
-                .await
-                .map_err(otto_core::Error::Upstream)?;
-            // Guarded resolver pins the vetted address (no DNS rebinding).
-            let client = otto_netguard::guarded_client_builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
-            let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
-            if let Some(obj) = headers.as_object() {
-                for (k, v) in obj {
-                    if let Some(s) = v.as_str() {
-                        rb = rb.header(k.as_str(), s);
-                    }
-                }
-            }
-            if let Some(b) = &body {
-                if !b.is_null() {
-                    rb = rb.json(b);
-                }
-            }
-            let resp = rb
-                .send()
-                .await
-                .map_err(|e| otto_core::Error::Upstream(format!("api_run: {e}")))?;
-            let status = resp.status().as_u16();
-            let text = resp.text().await.unwrap_or_default();
-            let resp_body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-            Ok((
-                json!({ "status": status, "body": resp_body }),
-                vec![format!("api_run: HTTP {status} from {url}")],
-            ))
-        }
+        // --- API Run --------------------------------------------------------
+        // Share the API client's environment, auth, transport and history path.
+        "api_run" => api_request::execute(ctx, ws, user, p).await,
 
         // --- Condition (branching primitive) --------------------------------
         "condition" => {
@@ -4996,19 +4940,29 @@ async fn execute_node(
                     )
                     .await
                     {
-                        Ok((out, mut slogs)) => {
-                            // Iteration handoff files — the loop recursion never
-                            // passes the main run loop, so this is the second
-                            // persistence hook site.
-                            let flogs = env.files.persist_step(
-                                &sub_file_base,
-                                &skind,
-                                &sname,
-                                &out,
-                                &slogs,
-                                None,
-                                Some(sub_attempt_started),
-                            );
+                        Ok(outcome) => {
+                            let out = outcome.output;
+                            let mut slogs = outcome.logs;
+                            // A completed checkpoint owns the earlier handoff.
+                            // Restart time is not a new winning attempt timestamp.
+                            let flogs = if outcome.adopted
+                                && env.files.has_file(&format!("{sub_file_base}.md"))
+                            {
+                                if outcome_error(&out).is_none() {
+                                    env.files.adopt_step(&sub_file_base, &skind);
+                                }
+                                vec![]
+                            } else {
+                                env.files.persist_step(
+                                    &sub_file_base,
+                                    &skind,
+                                    &sname,
+                                    &out,
+                                    &slogs,
+                                    outcome_error(&out),
+                                    Some(sub_attempt_started),
+                                )
+                            };
                             for l in slogs.drain(..).chain(flogs) {
                                 let line = format!("  [{i}/{sname}] {l}");
                                 let _ = log_tx.send(line.clone());
@@ -6406,7 +6360,13 @@ async fn execute_node(
                         Ok(acc) => otto_core::secrets::get_async(&ctx.secrets, &acc.token_ref)
                             .await
                             .ok()
-                            .flatten(),
+                            .flatten()
+                            .and_then(|token| {
+                                otto_git::transport::TransportCredential::for_repo(
+                                    token, &acc, &repo,
+                                )
+                                .ok()
+                            }),
                         Err(_) => None,
                     },
                     None => None,
@@ -7649,10 +7609,26 @@ pub(crate) async fn ensure_repo_registered(
 /// workflow's workspace root, and paths inside them. Arbitrary unregistered
 /// folders stay refused. Checked where a run starts from caller input (the
 /// manual-run route, chat); the error names the offending value.
+///
+/// Chat, webhook, and event starts use this strict form. A root user's manual
+/// run passes [`ensure_run_location_as`] with the host-folder exception.
 pub(crate) async fn ensure_run_location(
     ctx: &ServerCtx,
     ws: &Workspace,
     input: &Value,
+) -> otto_core::Result<()> {
+    ensure_run_location_as(ctx, ws, input, false).await
+}
+
+/// [`ensure_run_location`], plus an existing absolute host folder when
+/// `allow_existing_host_folder` is set. Only the manual route sets that, and
+/// only for a person's credential whose user row has `is_root`. The workflow
+/// owner does not count: an external trigger stays on [`ensure_run_location`].
+pub(crate) async fn ensure_run_location_as(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    input: &Value,
+    allow_existing_host_folder: bool,
 ) -> otto_core::Result<()> {
     let repos = ctx.git_store.list_all_repos().await?;
     let pairs: Vec<(String, String)> = repos
@@ -7671,7 +7647,8 @@ pub(crate) async fn ensure_run_location(
     }
     if let Some(wd) = text("working_directory", input) {
         for path in wd.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            ensure_path_in_workspace(ws, &pairs, path).await?;
+            ensure_path_in_workspace(&ws.root_path, &pairs, path, allow_existing_host_folder)
+                .await?;
         }
     }
     for e in crate::workflow_context::parse_repo_entries(input.get("repos").unwrap_or(&Value::Null))
@@ -7682,7 +7659,13 @@ pub(crate) async fn ensure_run_location(
             // repo name or id, and an unknown one says so — not "must be an
             // absolute path".
             if looks_like_path(&e.repo) {
-                ensure_path_in_workspace(ws, &pairs, &e.repo).await?;
+                ensure_path_in_workspace(
+                    &ws.root_path,
+                    &pairs,
+                    &e.repo,
+                    allow_existing_host_folder,
+                )
+                .await?;
             } else {
                 return Err(otto_core::Error::Invalid(format!(
                     "repo '{}' is not a registered repo — name a registered repo by its \
@@ -7695,10 +7678,11 @@ pub(crate) async fn ensure_run_location(
             ensure_repo_registered(ctx, rid).await?;
         }
         if e.kind == "worktree" {
-            ensure_path_in_workspace(ws, &pairs, &e.name).await?;
+            ensure_path_in_workspace(&ws.root_path, &pairs, &e.name, allow_existing_host_folder)
+                .await?;
         }
         if let Some(wt) = &e.worktree {
-            ensure_path_in_workspace(ws, &pairs, wt).await?;
+            ensure_path_in_workspace(&ws.root_path, &pairs, wt, allow_existing_host_folder).await?;
         }
     }
     Ok(())
@@ -7711,80 +7695,6 @@ fn skipped_hooks_note(repo: &str) -> String {
          and did not run for Otto's own commit / push — an agent there can edit them, so \
          unattended runs skip them; CI or your next commit still runs them"
     )
-}
-
-/// Whether a `repos[]` entry is written as a path (`/…`, `~…`, `./…`, `../…`)
-/// rather than a repo name or id.
-fn looks_like_path(repo: &str) -> bool {
-    let r = repo.trim();
-    r.starts_with('/') || r.starts_with('~') || r.starts_with('.')
-}
-
-/// One path of [`ensure_run_location`]: absolute (`~` expanded), and inside
-/// the workspace root, one of `repos` (`(id, path)` of every registered
-/// repo), or a linked worktree whose origin is one of them.
-async fn ensure_path_in_workspace(
-    ws: &Workspace,
-    repos: &[(String, String)],
-    raw: &str,
-) -> otto_core::Result<()> {
-    let expanded = expand_tilde(raw.trim());
-    let path = std::path::Path::new(&expanded);
-    if !path.is_absolute() {
-        return Err(otto_core::Error::Invalid(format!(
-            "working directory '{raw}' must be an absolute path"
-        )));
-    }
-    // A path that does not exist yet is judged by its deepest existing
-    // ancestor (canonical) plus the rest — so it may not climb out with `..`.
-    let target = match std::fs::canonicalize(path) {
-        Ok(p) => p,
-        Err(_)
-            if path
-                .components()
-                .any(|c| c == std::path::Component::ParentDir) =>
-        {
-            return Err(otto_core::Error::Invalid(format!(
-                "working directory '{raw}' may not contain '..'"
-            )));
-        }
-        Err(_) => {
-            let mut base = path.to_path_buf();
-            let mut rest = Vec::new();
-            let canon = loop {
-                if let Ok(c) = std::fs::canonicalize(&base) {
-                    break c;
-                }
-                match (base.file_name().map(|n| n.to_os_string()), base.parent()) {
-                    (Some(name), Some(parent)) => {
-                        rest.push(name);
-                        base = parent.to_path_buf();
-                    }
-                    _ => break base,
-                }
-            };
-            rest.iter().rev().fold(canon, |acc, n| acc.join(n))
-        }
-    };
-    let root = std::fs::canonicalize(&ws.root_path)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&ws.root_path));
-    if target.starts_with(&root) {
-        return Ok(());
-    }
-    let target_s = target.to_string_lossy().into_owned();
-    if match_repo_path(&target_s, repos).is_some() {
-        return Ok(());
-    }
-    if let Some(main) = git_main_worktree(&target_s).await {
-        if match_repo_path(&main, repos).is_some() {
-            return Ok(());
-        }
-    }
-    Err(otto_core::Error::Invalid(format!(
-        "working directory '{raw}' is not a registered repo — a run may only work in a repo \
-         registered in Otto (any workspace) or this workspace's root folder ({})",
-        ws.root_path
-    )))
 }
 
 /// Gather the set of PR targets a `git_pr` node should open — one per changed
@@ -8512,58 +8422,6 @@ async fn resolve_repo_id_for_path(
     None
 }
 
-/// Pure path matcher (canonicalized, component-wise) used by
-/// [`resolve_repo_id_for_path`]; split out so it is unit-testable without a ctx.
-/// `target` matches a repo when it equals the repo path or is nested under it;
-/// the deepest (most specific) registered repo wins. Component-wise so a sibling
-/// like `…/foo_wt` does NOT match a repo at `…/foo`.
-fn match_repo_path(target: &str, repos: &[(String, String)]) -> Option<String> {
-    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
-    let t = canon(target);
-    let mut best: Option<(usize, String)> = None;
-    for (id, rp) in repos {
-        let r = canon(rp);
-        if t == r || t.starts_with(&r) {
-            let depth = r.components().count();
-            if best.as_ref().map(|(d, _)| depth > *d).unwrap_or(true) {
-                best = Some((depth, id.clone()));
-            }
-        }
-    }
-    best.map(|(_, id)| id)
-}
-
-/// For a `git worktree` checkout at `path`, the main worktree directory (the
-/// origin repo): `git -C <path> rev-parse --path-format=absolute
-/// --git-common-dir` yields the shared `…/.git`, whose parent is the origin repo.
-/// `None` when `path` isn't a git repo / git is unavailable. Runs on a blocking
-/// thread so it never stalls the async runtime.
-#[allow(clippy::disallowed_methods)] // the git subprocess runs inside spawn_blocking
-async fn git_main_worktree(path: &str) -> Option<String> {
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let out = otto_git::hardened_std_command()
-            .arg("-C")
-            .arg(&path)
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if common.is_empty() {
-            return None;
-        }
-        std::path::Path::new(&common)
-            .parent()
-            .map(|x| x.to_string_lossy().into_owned())
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
 /// The directory an agent node runs in: a per-node `cwd`/`working_directory`
 /// param, else the run-level working dir, else the workspace root. Tilde-expanded.
 fn node_cwd(node: &WorkflowNode, input: &Value, run_cwd: &str) -> String {
@@ -8714,15 +8572,18 @@ mod canvas_rel_tests;
 mod tests;
 
 #[cfg(test)]
-#[path = "workflow_product_publish_tests.rs"]
+#[path = "../tests/unit/workflow_product_publish_tests.rs"]
 mod product_publish_tests;
 
 #[path = "workflow_product_publish.rs"]
 mod product_publication;
 
 #[cfg(test)]
-#[path = "workflow_recovery_tests.rs"]
+#[path = "../tests/unit/workflow_recovery_tests.rs"]
 mod recovery_tests;
 
 #[path = "workflow_budget.rs"]
 mod budget;
+
+#[path = "workflow_api_request.rs"]
+mod api_request;

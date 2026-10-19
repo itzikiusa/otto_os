@@ -12,15 +12,12 @@
   import { loadErrorText } from '../../lib/loadError';
   import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
-  import { canvas } from '../../lib/stores/canvas.svelte';
   import { canvasRefsBus, canvasDocBus } from '../../lib/events.svelte';
   import { api } from '../../lib/api/client';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { renderMermaid } from '../canvas/mermaid';
-  import { renderD2 } from '../canvas/d2';
   import type { CanvasDoc, CanvasFormat, CanvasScene, CanvasSceneSummary } from '../canvas/types';
 
   const session = $derived(ws.activeSession);
@@ -92,11 +89,17 @@
     // Both renderers theme by scheme — a light Mermaid figure on the dark
     // panel was unreadable (same defect as ActionCard, S18-307).
     const dark = ui.resolvedScheme === 'dark';
-    const out =
-      format === 'd2'
-        ? await renderD2(renderId, source, { sketch: doc.sketch, dark })
-        : await renderMermaid(renderId, source, { dark });
-    previews = { ...previews, [sceneId]: { key, svg: out.svg, error: out.error } };
+    // The bridges pull the render queue. Load one only when a preview expands,
+    // so opening the panel does not fetch Mermaid or D2.
+    try {
+      const out =
+        format === 'd2'
+          ? await (await import('../canvas/d2')).renderD2(renderId, source, { sketch: doc.sketch, dark })
+          : await (await import('../canvas/mermaid')).renderMermaid(renderId, source, { dark });
+      previews = { ...previews, [sceneId]: { key, svg: out.svg, error: out.error } };
+    } catch (e) {
+      previews = { ...previews, [sceneId]: { key, error: e instanceof Error ? e.message : String(e) } };
+    }
   }
 
   async function togglePreview(ref: CanvasSceneSummary): Promise<void> {
@@ -141,9 +144,14 @@
 
   // -- row actions ---------------------------------------------------------
 
-  function openInCanvas(sceneId: string): void {
-    canvas.pendingOpenId = sceneId;
-    router.go('canvas');
+  async function openInCanvas(sceneId: string): Promise<void> {
+    try {
+      const { canvas } = await import('../../lib/stores/canvas.svelte');
+      canvas.pendingOpenId = sceneId;
+      router.go('canvas');
+    } catch (e) {
+      toastError('Couldn’t open Canvas', e);
+    }
   }
 
   async function detach(sceneId: string): Promise<void> {
@@ -218,7 +226,7 @@
         doc,
       });
       await api.post(`/sessions/${sid}/canvas-refs`, { scene_id: created.id });
-      openInCanvas(created.id);
+      await openInCanvas(created.id);
       await load();
     } catch (e) {
       toastError('Couldn’t create canvas', e);
@@ -519,7 +527,7 @@
   .attach-search {
     width: 100%;
     height: 22px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--control-border);
     border-radius: var(--radius-s);
     background: var(--bg);
     color: var(--text);

@@ -92,7 +92,9 @@ pub fn uninstall(name: &str) -> io::Result<()> {
 // Core (dir-explicit, so the home/CODEX_HOME resolution stays out of tests)
 // ---------------------------------------------------------------------------
 
-fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<Vec<PathBuf>> {
+/// Install into explicit provider roots, preserving user-owned entries.
+/// Used by callers that need one stable set of roots for a bulk operation.
+pub fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<Vec<PathBuf>> {
     // `name` arrives from the HTTP layer — refuse anything that is not a
     // single path component before it is joined under the provider dirs.
     let name = otto_core::paths::safe_component(name)
@@ -102,7 +104,13 @@ fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<Vec
         let dest = dir.join(name);
         // `symlink_metadata`: a dangling or live symlink is "present" too, and
         // is never followed or replaced.
-        if let Ok(meta) = fs::symlink_metadata(&dest) {
+        let existed = match fs::symlink_metadata(&dest) {
+            Ok(meta) => Some(meta),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let newly_created = existed.is_none();
+        if let Some(meta) = existed {
             let owned = merge::read_manifest(dir).iter().any(|n| n == name);
             if !owned || meta.file_type().is_symlink() || !meta.is_dir() {
                 user_owned.push(dir.clone());
@@ -110,14 +118,23 @@ fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<Vec
             }
             fs::remove_dir_all(&dest)?; // clean-overwrite so updates replace cleanly
         }
-        copy_tree(src, &dest)?;
-        // Record ownership (idempotent set-insert), keeping the list sorted.
-        let mut owned = merge::read_manifest(dir);
-        if !owned.iter().any(|n| n == name) {
-            owned.push(name.to_string());
-            owned.sort();
-            merge::write_manifest(dir, &owned)?;
+        let result: io::Result<()> = (|| {
+            copy_tree(src, &dest)?;
+            // Record ownership only after a complete copy.
+            let mut owned = merge::read_manifest(dir);
+            if !owned.iter().any(|n| n == name) {
+                owned.push(name.to_string());
+                owned.sort();
+                merge::write_manifest(dir, &owned)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() && newly_created {
+            // Only this attempt's new tree may be cleaned up. In particular,
+            // never delete a pre-existing user/provider tree on failure.
+            let _ = fs::remove_dir_all(&dest);
         }
+        result?;
     }
     Ok(user_owned)
 }
@@ -163,6 +180,43 @@ fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn failed_new_install_does_not_leave_an_unowned_partial_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let src = src_skill(root.path());
+        let provider = root.path().join("provider");
+        fs::create_dir_all(provider.join(".otto-managed.json")).unwrap();
+        // The copy succeeds but ownership publication fails (manifest is a dir).
+        assert!(install_into_dirs(std::slice::from_ref(&provider), "grill", &src).is_err());
+        assert!(!provider.join("grill").exists());
+        fs::remove_dir(provider.join(".otto-managed.json")).unwrap();
+        assert!(
+            install_into_dirs(std::slice::from_ref(&provider), "grill", &src)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(provider.join("grill/SKILL.md").is_file());
+        assert_eq!(merge::read_manifest(&provider), ["grill"]);
+    }
+
+    #[test]
+    fn failure_in_another_provider_preserves_user_owned_content() {
+        let root = tempfile::tempdir().unwrap();
+        let src = src_skill(root.path());
+        let mine = root.path().join("mine");
+        fs::create_dir_all(mine.join("grill")).unwrap();
+        fs::write(mine.join("grill/SKILL.md"), "user-authored").unwrap();
+        let broken = root.path().join("broken");
+        fs::create_dir_all(broken.join(".otto-managed.json")).unwrap();
+        assert!(install_into_dirs(&[mine.clone(), broken.clone()], "grill", &src).is_err());
+        assert_eq!(
+            fs::read_to_string(mine.join("grill/SKILL.md")).unwrap(),
+            "user-authored"
+        );
+        assert!(!broken.join("grill").exists());
+        assert!(merge::read_manifest(&mine).is_empty());
+    }
 
     /// A minimal multi-file source skill under `<root>/src/grill`.
     fn src_skill(root: &Path) -> PathBuf {

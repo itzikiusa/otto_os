@@ -9,6 +9,7 @@
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import StoryLinkCard from './StoryLinkCard.svelte';
   import GoalsPanel from './GoalsPanel.svelte';
@@ -37,6 +38,7 @@
   // shows option 0 visually without writing it back to the model).
   const pid = $derived(swarm.selectedProjectId ?? projects[0]?.id ?? null);
   const tasks = $derived(swarm.tasks(pid));
+  const taskError = $derived(pid ? (swarm.tasksError[pid] ?? null) : null);
   const agents = $derived(swarm.detail?.agents ?? []);
   // Selected project object (needed for the story back-link card + goal view).
   const selectedProject = $derived(projects.find((p) => p.id === pid) ?? null);
@@ -469,7 +471,7 @@
     {#if pid}
       {#if planning}
         <span class="planning" role="status"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
-        <button class="btn small danger" onclick={() => void stopPlan()} title="Stop the planner agents">
+        <button class="btn small danger" data-keep onclick={() => void stopPlan()} title="Stop the planner agents">
           <Icon name="stop" size={12} /> Stop…
         </button>
       {:else}
@@ -488,11 +490,11 @@
   {#if selectedCount > 0}
     <div class="bulk-bar">
       <span class="bulk-count">{selectedCount} selected</span>
-      <button class="btn small" onclick={bulkMoveMenu}><Icon name="split" size={13} /> Move to…</button>
-      <button class="btn small" onclick={bulkAssignMenu}><Icon name="user" size={13} /> Assign…</button>
-      <button class="btn small danger" onclick={bulkDelete}><Icon name="trash" size={13} /> Delete</button>
+      <button class="btn small" data-keep onclick={bulkMoveMenu}><Icon name="split" size={13} /> Move to…</button>
+      <button class="btn small" data-keep onclick={bulkAssignMenu}><Icon name="user" size={13} /> Assign…</button>
+      <button class="btn small danger" data-keep onclick={bulkDelete}><Icon name="trash" size={13} /> Delete</button>
       <span class="grow"></span>
-      <button class="btn small ghost" onclick={clearSelection}>Clear selection</button>
+      <button class="btn small ghost" data-keep onclick={clearSelection}>Clear selection</button>
     </div>
   {/if}
 
@@ -540,6 +542,14 @@
     {#if selectedProject?.story_id}
       <StoryLinkCard project={selectedProject} />
     {/if}
+    <div class="board-body">
+    <LoadState
+      what="tasks"
+      loading={swarm.tasksLoading}
+      error={taskError}
+      empty={tasks.length === 0 && (!!taskError || swarm.tasksLoading)}
+      onretry={() => pid && void swarm.loadTasks(pid)}
+    >
     <div class="columns">
       {#each TASK_COLUMNS as col (col)}
         {@const colTasks = byStatus(col)}
@@ -611,7 +621,7 @@
                       <Icon name="check" size={12} /> {gs.passed}/{gs.total}
                     </button>
                   {:else}
-                    <button class="icon-btn small" onclick={(e) => { e.stopPropagation(); goalsTask = t; }} aria-label="Goals" title="Goals">
+                    <button class="icon-btn small" onclick={(e) => { e.stopPropagation(); goalsTask = t; }} aria-label="Goals for “{t.title}”" title="Goals for “{t.title}”">
                       <Icon name="check" size={13} />
                     </button>
                   {/if}
@@ -637,6 +647,8 @@
           </div>
         </div>
       {/each}
+    </div>
+    </LoadState>
     </div>
   {/if}
 </div>
@@ -670,15 +682,32 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    min-width: 0;
+  }
+  .board-body {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
   }
   .kb-toolbar,
-  .add-row {
+  .add-row,
+  .bulk-bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
     border-block-end: 1px solid var(--border);
     min-height: 40px;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .kb-toolbar > [data-keep],
+  .bulk-bar > [data-keep] {
+    flex: 0 0 auto;
   }
   .kb-project {
     max-width: 240px;
@@ -727,6 +756,11 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
@@ -747,6 +781,7 @@
     overflow-x: auto;
     flex: 1;
     min-height: 0;
+    min-width: 0;
   }
   .column {
     flex: 0 0 240px;
@@ -822,11 +857,6 @@
     cursor: pointer;
   }
   .bulk-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    border-block-end: 1px solid var(--border);
     background: var(--accent-soft);
     font-size: var(--fs-s);
   }

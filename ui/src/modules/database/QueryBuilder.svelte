@@ -1093,7 +1093,7 @@
               <p class="sec-hint">Every column (<code>*</code>). Tick columns on the cards, or add columns and aggregates here.</p>
             {/if}
             {#each clauses.select as it, i (it.id)}
-              <div class="row sel-row">
+              <div class="qb-row sel-row">
                 <span class="ord">{i + 1}</span>
                 {#if it.kind === 'column'}
                   <select class="input grow-2" value={refKey(it.ref)} onchange={(e) => (it.ref = parseKey(e.currentTarget.value))} aria-label="Column">
@@ -1191,7 +1191,7 @@
               <p class="sec-hint">Unsorted — the engine picks the order.</p>
             {/if}
             {#each clauses.orderBy as o, i (o.id)}
-              <div class="row">
+              <div class="qb-row">
                 <span class="ord">{i + 1}</span>
                 <select class="input grow-2" value={orderKey(o)} onchange={(e) => setOrderTarget(o, e.currentTarget.value)} aria-label="Sort by">
                   {#if clauses.select.length}
@@ -1358,7 +1358,7 @@
       {:else}
         {@const k = condKind(it)}
         {@const ar = OPS[it.op].arity}
-        <div class="row cond">
+        <div class="qb-row cond">
           {#if having}
             <select class="input fn" value={it.target.fn ?? 'COUNT'} onchange={(e) => setHavingFn(it, e.currentTarget.value as AggFn)} aria-label="Aggregate">
               {#each aggs as a (a.fn)}<option value={a.fn}>{a.label}</option>{/each}
@@ -1919,14 +1919,14 @@
   .sec-hint code {
     font-family: var(--font-mono);
   }
-  .row {
+  .qb-row {
     display: flex;
     align-items: center;
     gap: 6px;
     margin-top: 4px;
     min-width: 0;
   }
-  .row .input {
+  .qb-row .input {
     height: 26px;
     min-width: 0;
     font-size: var(--fs-s);

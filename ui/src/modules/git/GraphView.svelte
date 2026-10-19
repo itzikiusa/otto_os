@@ -1269,7 +1269,7 @@
         action: () => void clip(c.subject, c.subject),
       },
     );
-    ctxMenu.show(e, items);
+    ctxMenu.show(e, items, { filter: items.length > 12, maxVisible: 12 });
   }
 
   async function cherryPick(c: CommitInfo): Promise<void> {
@@ -1521,7 +1521,7 @@
         action: () => void setCleanupBase(baseName),
       });
     }
-    ctxMenu.show(e, items);
+    ctxMenu.show(e, items, { filter: items.length > 12, maxVisible: 12 });
   }
 
   async function createBranchFrom(ref: string): Promise<void> {
@@ -1875,7 +1875,10 @@
                 'Open "Resolve conflicts".',
               );
             } else {
-              toasts.success(`Switched to ${branch}`);
+              toasts.success(
+                `Switched to ${branch}`,
+                'Your changes were restored; a recovery backup remains in Stashes.',
+              );
             }
             await refreshAfterCheckout(s, true);
           } catch (e2) {

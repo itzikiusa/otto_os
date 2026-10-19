@@ -380,11 +380,20 @@ The graph’s **WIP** panel is the working-tree view, backed by `git status`:
   it is refused (nothing overwritten) when someone pushed since you last
   fetched and integrated. A pull refused by a **dirty tree** comes back as a 409 with git's own
   message, and the UI offers **"Stash, pull & restore"** — a retry with
-  `{auto_stash:true}` that stashes (untracked included), pulls, and pops,
-  reporting what happened to the stash in the response `note`. The same offer
+  `{auto_stash:true}` that stashes (untracked included), pulls, and restores
+  the captured stash by its object ID. The backup remains in Stashes for recovery;
+  the response `note` explains the outcome. The same offer
   appears when a dirty tree blocks a branch **switch** (**"Stash, switch &
   restore"** — `POST /checkout {auto_stash:true}`: stash, switch, restore;
   nothing is pulled — Pull is its own action).
+
+Explicit **Drop** also identifies the selected stash by object ID, under Git's
+reference lock, so another terminal pushing a stash cannot make it delete the
+wrong entry. Interrupted multi-entry drops retain recovery metadata and object
+references; opening Stashes attempts checked recovery without overwriting newer
+external history. A recovery conflict explains what remains for inspection.
+Identity-safe Drop currently supports files/SHA-1 repositories; SHA-256 or
+reftable repositories receive an actionable error directing the user to native Git.
 
 ### Diffs
 

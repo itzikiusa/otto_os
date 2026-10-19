@@ -153,6 +153,13 @@ impl Connection {
         cfg: &ResolvedConfig,
         info: &redis::RedisConnectionInfo,
     ) -> otto_core::Result<Self> {
+        Self::connect_with_timeout(cfg, info, Some(Duration::from_secs(30))).await
+    }
+    pub async fn connect_with_timeout(
+        cfg: &ResolvedConfig,
+        info: &redis::RedisConnectionInfo,
+        response_timeout: Option<Duration>,
+    ) -> otto_core::Result<Self> {
         tokio::time::timeout(Duration::from_secs(10), async {
             let stream = tokio::net::TcpStream::connect((cfg.host.as_str(), cfg.port))
                 .await
@@ -173,11 +180,11 @@ impl Connection {
                     .connect(name, stream)
                     .await
                     .map_err(types::upstream)?;
-                Self::from_stream(stream, info, Limits::default())
+                Self::from_stream_with_timeout(stream, info, Limits::default(), response_timeout)
                     .await
                     .map_err(types::upstream)
             } else {
-                Self::from_stream(stream, info, Limits::default())
+                Self::from_stream_with_timeout(stream, info, Limits::default(), response_timeout)
                     .await
                     .map_err(types::upstream)
             }
@@ -185,10 +192,19 @@ impl Connection {
         .await
         .map_err(|_| types::upstream("redis: connection/handshake timed out after 10s"))?
     }
+    #[cfg(test)]
     async fn from_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         stream: S,
         info: &redis::RedisConnectionInfo,
         limits: Limits,
+    ) -> RedisResult<Self> {
+        Self::from_stream_with_timeout(stream, info, limits, Some(Duration::from_secs(30))).await
+    }
+    async fn from_stream_with_timeout<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+        stream: S,
+        info: &redis::RedisConnectionInfo,
+        limits: Limits,
+        response_timeout: Option<Duration>,
     ) -> RedisResult<Self> {
         let alive = Arc::new(AtomicBool::new(true));
         let failure = Arc::new(std::sync::Mutex::new(None));
@@ -200,8 +216,7 @@ impl Connection {
             failure: failure.clone(),
             alive: alive.clone(),
         };
-        let config =
-            redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
+        let config = redis::AsyncConnectionConfig::new().set_response_timeout(response_timeout);
         let (conn, driver) = MultiplexedConnection::new_with_config(info, bounded, config).await?;
         // Driver owns only `alive`, never Owner: the last cached/in-flight clone
         // must abort its task instead of leaving a reference cycle behind.

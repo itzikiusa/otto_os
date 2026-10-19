@@ -24,6 +24,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
+  import { pollWhileVisible } from '../../lib/poll';
   import Icon from '../../lib/components/Icon.svelte';
   import type { AttachedIssue, BrowserProxyTicket } from '../../lib/api/types';
 
@@ -202,15 +203,14 @@
     ro.observe(document.body);
     window.addEventListener('resize', sync);
     window.addEventListener('transitionend', sync, true);
-    const iv = setInterval(() => {
-      if (document.visibilityState === 'visible') apply();
-    }, 2000);
-    apply();
+    const p = pollWhileVisible(() => {
+      apply();
+    }, { ms: 2000, immediate: true });
     return () => {
       ro.disconnect();
       window.removeEventListener('resize', sync);
       window.removeEventListener('transitionend', sync, true);
-      clearInterval(iv);
+      p.stop();
       if (frame) cancelAnimationFrame(frame);
     };
   });
@@ -527,7 +527,8 @@
           </button>
           <button
             class="btab-close"
-            title="Close tab"
+            tabindex={t.id === activeId ? 0 : -1}
+            title="Close {t.title || 'tab'}"
             aria-label="Close {t.title || 'tab'}"
             onclick={(e) => {
               e.stopPropagation();

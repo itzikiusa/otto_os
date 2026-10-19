@@ -350,9 +350,12 @@ pub(crate) async fn optional_token<S: GitCtx>(
     s: &S,
     user: &AuthUser,
     repo: &Repo,
-) -> Result<Option<String>> {
+) -> Result<Option<crate::transport::TransportCredential>> {
     match authorized_repo_account(s, user, repo).await? {
-        Some(account) => secret(s.secrets(), &account.token_ref).await,
+        Some(account) => secret(s.secrets(), &account.token_ref)
+            .await?
+            .map(|token| crate::transport::TransportCredential::for_repo(token, &account, repo))
+            .transpose(),
         None => Ok(None),
     }
 }
@@ -387,6 +390,35 @@ async fn provider_ctx_with_account<S: GitCtx>(
         Some(account) => account,
         None => adopt_account(s, user, repo, kind).await?,
     };
+    provider_for_bound_account(s, repo, &account).await
+}
+
+/// Resolve an already-authorized autonomous run's bound provider. Unlike a
+/// user route this does not adopt an account or perform caller authorization;
+/// it still refreshes the live origin so an old binding cannot target another
+/// forge's same-named project. The run engine owns authorization at admission.
+pub async fn bound_provider_ctx<S: GitCtx>(
+    s: &S,
+    repo: &Repo,
+) -> Result<(Arc<dyn GitProvider>, RemoteRef)> {
+    let repo = refresh_remote(s, repo.clone()).await?;
+    let account_id = repo
+        .git_account_id
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("repo has no git account".into()))?;
+    let account = s.store().get_account(account_id).await?;
+    let (provider, remote, _) = provider_for_bound_account(s, &repo, &account).await?;
+    Ok((provider, remote))
+}
+
+async fn provider_for_bound_account<S: GitCtx>(
+    s: &S,
+    repo: &Repo,
+    account: &GitAccount,
+) -> Result<(Arc<dyn GitProvider>, RemoteRef, Id)> {
+    let kind = repo
+        .provider
+        .ok_or_else(|| Error::Invalid("repo has no git provider".into()))?;
     if account.provider != kind {
         return Err(Error::Invalid(
             "git account provider does not match repo provider".into(),
@@ -407,8 +439,12 @@ async fn provider_ctx_with_account<S: GitCtx>(
     // Before the token is loaded: a GitHub Enterprise remote must never send
     // it to api.github.com.
     crate::providers::check_remote_reachable(kind, remote, account.api_base_url.as_deref())?;
-    let token = account_token(s, &account).await?;
-    Ok((make_provider(&account, token), remote_ref, account.id))
+    let token = account_token(s, account).await?;
+    Ok((
+        make_provider(account, token),
+        remote_ref,
+        account.id.clone(),
+    ))
 }
 
 /// Bind an unbound repo to the caller's account for `kind` and persist it.
@@ -430,7 +466,17 @@ async fn adopt_account<S: GitCtx>(
         .as_deref()
         .and_then(detect)
         .map(|(_, r)| r.owner);
-    let accounts = s.store().list_accounts(&user.0.id).await?;
+    let accounts = s
+        .store()
+        .list_accounts(&user.0.id)
+        .await?
+        .into_iter()
+        .filter(|account| {
+            repo.remote_url
+                .as_deref()
+                .is_some_and(|remote| crate::transport::account_matches_remote(account, remote))
+        })
+        .collect();
     let Some(account) = pick_account(accounts, kind, owner.as_deref()) else {
         return Err(Error::Invalid(format!(
             "repo has no git account: link a {} account to this repo (Git → repo card → Account)",
@@ -1171,7 +1217,15 @@ async fn register_repo<S: GitCtx>(
     let detected = remote_url.as_deref().and_then(detect);
     let provider = detected.as_ref().map(|(k, _)| *k);
     let owner = detected.as_ref().map(|(_, r)| r.owner.as_str());
-    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider, owner).await?;
+    let account_id = resolve_account(
+        s,
+        user,
+        req.git_account_id.as_ref(),
+        provider,
+        owner,
+        remote_url.as_deref(),
+    )
+    .await?;
     let name = req
         .name
         .clone()
@@ -1229,7 +1283,15 @@ async fn clone_into_workspace<S: GitCtx>(
     let detected = detect(url);
     let provider = detected.as_ref().map(|(k, _)| *k);
     let owner = detected.as_ref().map(|(_, r)| r.owner.as_str());
-    let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider, owner).await?;
+    let account_id = resolve_account(
+        s,
+        user,
+        req.git_account_id.as_ref(),
+        provider,
+        owner,
+        Some(url),
+    )
+    .await?;
 
     let dest_str = dest.to_string_lossy().into_owned();
     // Row first — the UI sees the repo immediately; Notice events track progress.
@@ -1260,7 +1322,12 @@ async fn clone_into_workspace<S: GitCtx>(
     let token = match &account_id {
         Some(aid) => {
             let account = s.store().get_account(aid).await?;
-            secret(s.secrets(), &account.token_ref).await?
+            secret(s.secrets(), &account.token_ref)
+                .await?
+                .map(|token| {
+                    crate::transport::TransportCredential::for_remote(token, &account, Some(url))
+                })
+                .transpose()?
         }
         None => None,
     };
@@ -1279,7 +1346,7 @@ async fn clone_into_workspace<S: GitCtx>(
             "Clone started",
             &format!("Cloning {task_name} from {display_url}"),
         );
-        let result = crate::local::clone_repo(&task_url, &dest, token.as_deref(), |line| {
+        let result = crate::local::clone_repo(&task_url, &dest, token.as_ref(), |line| {
             tracing::debug!(repo = %task_name, "clone: {}", crate::local::strip_url_userinfo(&line));
         })
         .await;
@@ -1319,6 +1386,7 @@ async fn resolve_account<S: GitCtx>(
     explicit: Option<&Id>,
     provider: Option<GitProviderKind>,
     owner: Option<&str>,
+    remote: Option<&str>,
 ) -> Result<Option<Id>> {
     if let Some(id) = explicit {
         let account = s.store().get_account(id).await?;
@@ -1330,7 +1398,15 @@ async fn resolve_account<S: GitCtx>(
     let Some(kind) = provider else {
         return Ok(None);
     };
-    let accounts = s.store().list_accounts(&user.0.id).await?;
+    let accounts = s
+        .store()
+        .list_accounts(&user.0.id)
+        .await?
+        .into_iter()
+        .filter(|account| {
+            remote.is_some_and(|remote| crate::transport::account_matches_remote(account, remote))
+        })
+        .collect();
     Ok(pick_account(accounts, kind, owner).map(|a| a.id))
 }
 
@@ -1461,8 +1537,16 @@ pub(crate) async fn refresh_remote<S: GitCtx>(s: &S, repo: Repo) -> Result<Repo>
         .lock()
         .expect("collaborators cache poisoned")
         .retain(|key, _| !key.starts_with(&format!("{}\u{1f}", repo.id)));
+    // The recorded remote is also the identity approved when this account was
+    // bound. Refreshing metadata must never silently transfer that approval to
+    // another forge (including a same-provider, same-project namesake).
+    let keep_account = matches!(
+        (repo.remote_url.as_deref().and_then(crate::transport::forge_identity),
+         remote_url.as_deref().and_then(crate::transport::forge_identity)),
+        (Some(old), Some(new)) if old == new
+    );
     s.store()
-        .set_repo_remote(&repo.id, remote_url.as_deref(), provider)
+        .refresh_repo_binding(&repo, remote_url.as_deref(), provider, keep_account)
         .await
 }
 

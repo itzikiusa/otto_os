@@ -1,18 +1,21 @@
 <script lang="ts">
   import type { GraphView, GraphNode } from '../../lib/api/types';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { sentenceCase } from '../../lib/status';
-  import { KIND_LABEL, STATUS_LABEL, WORK_KINDS, statusColor } from './lib';
+  import { KIND_LABEL, STATUS_LABEL, WORK_KINDS, statusColor, statusIcon } from './lib';
 
   interface Props {
     graph: GraphView;
     selectedId: string | null;
     onOpen: (id: string) => void;
+    /** A refetch is in flight over a graph that is already on screen. */
+    busy?: boolean;
   }
-  let { graph, selectedId, onOpen }: Props = $props();
+  let { graph, selectedId, onOpen, busy = false }: Props = $props();
 
   const COL_W = 200;
-  const ROW_H = 74;
+  const ROW_H = 96;
   const PAD = 48;
 
   type Placed = { x: number; y: number; r: number; node: GraphNode };
@@ -55,11 +58,13 @@
          width blew its labels up to ~2× the type scale. Wide graphs scroll. -->
     <svg
       class="graph-svg"
+      class:busy
       width={layout.width}
       height={layout.height}
       viewBox={`0 0 ${layout.width} ${layout.height}`}
       role="group"
       aria-label="Work graph"
+      aria-busy={busy}
     >
       <!-- column headers -->
       {#each layout.cols as k, ci (k)}
@@ -100,7 +105,11 @@
           {#if p.node.needs_approval}
             <circle class="approve-ring" cx={p.x} cy={p.y} r={p.r + 4} />
           {/if}
-          <text class="node-label" x={p.x} y={p.y + p.r + 13} text-anchor="middle">{trunc(p.node.title)}</text>
+          <g class="node-icon" transform="translate({p.x - 6} {p.y - 6})" aria-hidden="true">
+            <Icon name={statusIcon(p.node.status)} size={12} />
+          </g>
+          <text class="node-label" x={p.x} y={p.y + p.r + 14} text-anchor="middle">{trunc(p.node.title)}</text>
+          <text class="node-status" x={p.x} y={p.y + p.r + 28} text-anchor="middle">{STATUS_LABEL[p.node.status]}</text>
         </g>
       {/each}
     </svg>
@@ -122,6 +131,9 @@
     display: block;
     margin-inline: auto;
     max-width: none;
+  }
+  .graph-svg.busy {
+    opacity: 0.45;
   }
   /* The .section-title look, drawn in SVG. */
   .col-head {
@@ -154,7 +166,7 @@
   }
   /* Keyboard focus: a visible accent ring (the <g> can't draw an outline). */
   .node:focus-visible > circle:first-of-type {
-    stroke: var(--accent);
+    stroke: var(--accent-text);
     stroke-width: 3;
     stroke-dasharray: 2 2;
   }
@@ -173,6 +185,18 @@
     fill: var(--text);
     font-size: var(--fs-xs);
     pointer-events: none;
+  }
+  .node-status {
+    fill: var(--text-dim);
+    font-size: var(--fs-xs);
+    pointer-events: none;
+  }
+  .node-icon {
+    color: var(--bg);
+    pointer-events: none;
+  }
+  .node-icon :global(svg) {
+    color: var(--bg);
   }
   @media (prefers-reduced-motion: reduce) {
     .node circle {

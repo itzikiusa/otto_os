@@ -600,6 +600,18 @@ agent edits `scene.json`.
 
 ---
 
+### Stopping a conversational turn
+
+Discovery and refinement expose an exact-turn Stop API for clients that supply
+a fresh `turn_id` on each Send. Stop waits for that turn's session cleanup and
+does not stop another conversation or a later turn. The accepted user message
+is retained; clients reload the transcript rather than re-send it. A turn that
+has already begun publishing may leave its completed suggested draft or reply.
+`stopped:false` means no matching active turn was found, not that an in-transit
+Send was cancelled. See the [API contract](../contracts/api.md#product-conversational-stop).
+The UI integration is tracked in the product-wide review ledger; the existing
+Stop waiting action alone only stops waiting for a response.
+
 ## 5. API / contract reference
 
 `docs/contracts/product.md` is authoritative; `api.md` (§ Product) and `ws.md`

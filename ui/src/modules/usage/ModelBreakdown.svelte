@@ -58,7 +58,10 @@
   });
   const maxDay = $derived(Math.max(1, ...byDay.map((d) => d.total)));
 
-  const W = 500;
+  let chartWidth = $state(500);
+  const W = $derived(chartWidth || 500);
+  let selectedDayKey = $state('');
+  const selectedDay = $derived(byDay.find(d => d.day === selectedDayKey) ?? byDay.at(-1));
   const H = 120;
   const AXIS_L = 52;
   const AXIS_B = 22;
@@ -74,9 +77,8 @@
     return AXIS_L + ((i + 0.5) / Math.max(1, n)) * (W - AXIS_L);
   }
   function showX(i: number, n: number): boolean {
-    if (n <= 8) return true;
-    const step = Math.ceil(n / 8);
-    return i % step === 0 || i === n - 1;
+    const step = Math.max(1, Math.ceil(52 * n / Math.max(1, W - AXIS_L)));
+    return i % step === 0;
   }
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   function shortDay(iso: string): string {
@@ -121,12 +123,13 @@
     <p class="dim small">No usage in this window. Each model appears here with its token counts as agents run.</p>
   {:else}
     {#if byDay.length > 0}
-      <div class="legend" aria-hidden="true">
+      <div class="legend">
         {#each series as s (s.name)}
           <span class="lg"><i style="background: {s.color}"></i>{s.name}</span>
         {/each}
       </div>
-      <svg class="model-svg" viewBox="0 0 {W} {H}" role="img" aria-label="Daily tokens by model over the last {days} days, peak {formatCount(maxDay)} tokens">
+      <div class="model-chart" bind:clientWidth={chartWidth}>
+      <svg class="model-svg" viewBox="0 0 {W} {H}" role="group" aria-label="Daily tokens by model over the last {days} days, peak {formatCount(maxDay)} tokens">
         {#each yTicks as t (t)}
           {@const y = plotH - (t / yMax) * plotH}
           <line class="grid-line" x1={AXIS_L} y1={y} x2={W} y2={y} />
@@ -141,7 +144,7 @@
             {#if seg.h > 0}
               <rect
                 x={cx - bw / 2}
-                y={plotH - stack.slice(0, si + 1).reduce((a, b) => a + b.h, 0)}
+                y={plotH - barH + stack.slice(0, si).reduce((a, b) => a + b.h, 0)}
                 width={bw}
                 height={seg.h}
                 fill={seg.s.color}
@@ -149,13 +152,27 @@
               />
             {/if}
           {/each}
-          <rect class="bar-hit" x={cx - bw / 2} y="0" width={bw} height={plotH}><title>{dayTitle(d)}</title></rect>
+          <rect class="bar-hit" x={cx - bw / 2} y="0" width={bw} height={plotH}
+            role="button" tabindex={selectedDay?.day === d.day ? 0 : -1}
+            aria-label={dayTitle(d)} aria-pressed={selectedDay?.day === d.day}
+            onclick={() => (selectedDayKey = d.day)} onfocus={() => (selectedDayKey = d.day)}
+            onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectedDayKey = d.day; } }}
+          ><title>{dayTitle(d)}</title></rect>
           {#if showX(i, byDay.length)}
             <text class="axis-label" x={cx} y={H - 4} text-anchor="middle">{shortDay(d.day)}</text>
           {/if}
         {/each}
         <line class="axis-line" x1={AXIS_L} y1={plotH} x2={W} y2={plotH} />
       </svg>
+      </div>
+      {#if selectedDay}
+        <div class="model-chart-details" data-testid="usage-model-details">
+          <label>Day <select class="input" aria-label="Model tokens day" value={selectedDay.day} onchange={(event) => (selectedDayKey = event.currentTarget.value)}>
+            {#each byDay as d (d.day)}<option value={d.day}>{d.day}</option>{/each}
+          </select></label>
+          <p role="status">{selectedDay.day} · {dayTitle(selectedDay)}</p>
+        </div>
+      {/if}
     {/if}
 
     <div class="tbl-scroll">
@@ -267,8 +284,18 @@
     fill: transparent;
     cursor: crosshair;
   }
-  .bar-hit:hover {
-    fill: var(--hover);
+  .bar-hit:hover, .bar-hit:focus-visible, .bar-hit[aria-pressed="true"] {
+    stroke: var(--accent-text);
+    stroke-width: 1;
+    outline: none;
+  }
+  .model-chart { min-width: 0; }
+  .model-chart-details { font-size: var(--fs-s); overflow-wrap: anywhere; margin-bottom: 12px; }
+  .model-chart-details label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .model-chart-details select { max-width: 100%; }
+  .model-chart-details p { white-space: pre-line; margin-block: 8px 0; line-height: 1.5; }
+  @media (pointer: coarse), (max-width: 640px) {
+    .model-chart-details select { min-height: var(--hit-min); }
   }
   .tbl-scroll {
     overflow-x: auto;

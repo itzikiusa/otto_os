@@ -8,6 +8,8 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -30,7 +32,6 @@
   import { WORK_KINDS, WORK_STATUSES, RISK_LEVELS, KIND_LABEL, STATUS_LABEL, RISK_LABEL, fmtCost } from './lib';
   import { liveDebounce } from './liveDebounce';
   import WorkItemList from './WorkItemList.svelte';
-  import WorkGraphView from './WorkGraphView.svelte';
   import WorkItemDetail from './WorkItemDetail.svelte';
   import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
 
@@ -43,6 +44,9 @@
 
   let view = $state<'list' | 'graph'>('list');
   let selectedId = $state<string | null>(null);
+  // The graph chunk loads only after Graph is selected. The detail pane stays
+  // a direct WorkItemDetail binding so canLeave still sees the open draft.
+  const WorkGraphLazy = lazyComponent(() => import('./WorkGraphView.svelte'));
   let detailPane: ReturnType<typeof WorkItemDetail> | undefined = $state();
   let selectionGeneration = 0;
   /** The user closed the detail pane: don't auto-open it again this visit. */
@@ -397,8 +401,14 @@
         {#if items.length >= ITEM_LIMIT}
           <p class="mc-cap" role="status">Showing the newest {ITEM_LIMIT}{summary && summary.total > ITEM_LIMIT ? ` of ${summary.total}` : ''} items — filter to narrow the list.</p>
         {/if}
+      {:else if loading && graph.nodes.length === 0}
+        <div aria-label="Loading work graph" role="status"><Skeleton rows={6} height={40} /></div>
+      {:else if WorkGraphLazy.error}
+        <LoadState what="the work graph" error={WorkGraphLazy.error} onretry={() => WorkGraphLazy.retry()} />
+      {:else if WorkGraphLazy.component}
+        <WorkGraphLazy.component {graph} {selectedId} onOpen={select} busy={loading} />
       {:else}
-        <WorkGraphView {graph} {selectedId} onOpen={select} />
+        <LoadState what="the work graph" loading />
       {/if}
     </div>
 
@@ -564,6 +574,8 @@
       flex: none;
       border: none;
       border-radius: 0;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
     }
   }
   @media (max-width: 640px) {

@@ -628,7 +628,7 @@
       </div>
     {/if}
     {#if mode === '3d'}
-      <button class="icon-btn" onclick={() => handle?.resetView()} disabled={!handle} title="Reset view" aria-label="Reset the school view"><Icon name="refresh" size={12} /></button>
+      <button class="icon-btn" onclick={() => handle?.resetView()} disabled={!handle} title="Reset the school view" aria-label="Reset the school view"><Icon name="refresh" size={12} /></button>
       <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit full page' : 'Fill the page'} aria-label={zoomed ? 'Exit full page' : 'Fill the page'}>
         <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
       </button>
@@ -681,7 +681,7 @@
               <div class="card-head">
                 <ProviderIcon provider={selKid.provider} size={16} />
                 <b class="ellipsis">{selKid.title}</b>
-                <button class="icon-btn" onclick={() => (selected = null)} aria-label="Close details" title="Close"><Icon name="x" size={12} /></button>
+                <button class="icon-btn" onclick={() => (selected = null)} aria-label="Close details" title="Close details"><Icon name="x" size={12} /></button>
               </div>
               {#each kidLines(selKid, now() ? relTime(selKid.lastActiveAt) : '') as line, i (i)}
                 <div class="card-line" class:needs={i === 0 && selKid.pose === 'needs-you'}>{line}</div>
@@ -761,7 +761,7 @@
                       {#if k.detention}<span class="bg-tag">detention</span>{/if}
                       <span class="st">{k.stateLabel}</span>
                     </button>
-                    <button class="icon-btn" aria-label="More actions for {k.title}" title="More actions" aria-haspopup="menu" onclick={(e) => kidMenu(e, k)}>
+                    <button class="icon-btn" aria-label="More actions for {k.title}" title="More actions for {k.title}" aria-haspopup="menu" onclick={(e) => kidMenu(e, k)}>
                       <Icon name="more" size={12} />
                     </button>
                   </li>
@@ -854,7 +854,8 @@
     outline: none;
   }
   .stage:focus-visible {
-    box-shadow: 0 0 0 2px var(--accent-solid);
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   .canvas {
     position: absolute;

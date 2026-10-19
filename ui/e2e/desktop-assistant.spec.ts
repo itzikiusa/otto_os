@@ -128,9 +128,7 @@ test('composer: @codex routes one turn, the model chip pins the thread, the mic 
   expect(lastCall(s, 'POST', '/assistant/threads/th-personal/turns')?.body).toMatchObject({ text: '@codex fix this script', origin: 'app' });
   await expect(box).toHaveValue('');
 
-  const mic = page.getByRole('button', { name: /Dictate/ });
-  await expect(mic).toBeDisabled();
-  await expect(mic).toHaveAttribute('title', 'Voice arrives in a later phase');
+  await expect(page.getByRole('button', { name: /Dictate/ })).toHaveCount(0);
 
   await page.locator('[data-testid="model-chip"]').click();
   const sheet = page.getByRole('dialog', { name: 'Model for this thread' });

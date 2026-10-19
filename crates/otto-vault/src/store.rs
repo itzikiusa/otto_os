@@ -38,6 +38,12 @@ pub struct NoteRow {
     pub content_index_status: ContentIndexStatus,
 }
 
+#[cfg(test)]
+type RegistrationPausePair = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 #[derive(Clone)]
 pub struct Store {
     pool: DbPool,
@@ -51,6 +57,10 @@ pub struct Store {
     /// Note-index transactions committed — regression counter (F7).
     #[cfg(test)]
     pub(crate) index_commits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    pub(crate) registration_pause: std::sync::Arc<std::sync::Mutex<Option<RegistrationPausePair>>>,
+    #[cfg(test)]
+    pub(crate) fts_fail_once: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The status aggregates that need a COUNT over links/tags/files.
@@ -61,6 +71,13 @@ pub struct StatusCounts {
     pub unresolved: i64,
     pub tags: i64,
     pub attachments: i64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FtsIndexing {
+    Enabled,
+    Unavailable,
+    Retry,
 }
 
 impl Store {
@@ -76,6 +93,10 @@ impl Store {
             status_count_reads: Default::default(),
             #[cfg(test)]
             index_commits: Default::default(),
+            #[cfg(test)]
+            registration_pause: Default::default(),
+            #[cfg(test)]
+            fts_fail_once: Default::default(),
         }
     }
 
@@ -89,15 +110,30 @@ impl Store {
         // Vaults are global — enforce root uniqueness ACROSS workspaces here
         // (the table's UNIQUE(ws_id, root_path) is a pre-global relic; a
         // migration can't retro-tighten it without risking existing rows).
+        // BEGIN IMMEDIATE owns the writer before the duplicate lookup, so a
+        // second workspace cannot pass the check before this insert commits.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("vault.create.begin"))?;
         let dup = sqlx::query("SELECT 1 FROM vaults WHERE root_path = ?")
             .bind(root)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(dberr("vault.create.dup"))?;
         if dup.is_some() {
             return Err(Error::Conflict(format!(
                 "vault already registered at {root}"
             )));
+        }
+        #[cfg(test)]
+        {
+            let pause = self.registration_pause.lock().unwrap().take();
+            if let Some((started, resume)) = pause {
+                let _ = started.send(());
+                let _ = resume.await;
+            }
         }
         let r = sqlx::query(
             "INSERT INTO vaults (ws_id, name, root_path, okf, created_at) VALUES (?,?,?,?,?)",
@@ -107,7 +143,7 @@ impl Store {
         .bind(root)
         .bind(okf as i64)
         .bind(now())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(ref d) if d.message().contains("UNIQUE") => {
@@ -115,7 +151,9 @@ impl Store {
             }
             other => Error::Internal(format!("vault.create: {other}")),
         })?;
-        Ok(r.last_insert_rowid())
+        let id = r.last_insert_rowid();
+        tx.commit().await.map_err(dberr("vault.create.commit"))?;
+        Ok(id)
     }
 
     fn vault_from_row(r: &sqlx::sqlite::SqliteRow) -> VaultRec {
@@ -470,7 +508,7 @@ impl Store {
         vault: i64,
         note: &crate::prepare::PreparedNote,
         incoming: &[(i64, Option<String>)],
-        fts: bool,
+        fts: FtsIndexing,
     ) -> Result<()> {
         let mut tx = self
             .pool
@@ -491,7 +529,7 @@ impl Store {
         &self,
         vault: i64,
         notes: &[crate::prepare::PreparedNote],
-        fts: bool,
+        fts: FtsIndexing,
     ) -> Result<()> {
         let mut tx = self
             .pool
@@ -513,7 +551,7 @@ impl Store {
         vault: i64,
         note: &crate::prepare::PreparedNote,
         incoming: &[(i64, Option<String>)],
-        fts: bool,
+        fts: FtsIndexing,
     ) -> Result<()> {
         Self::upsert_note_conn(tx, vault, &note.row).await?;
         for sql in [
@@ -549,10 +587,19 @@ impl Store {
                 .await
                 .map_err(dberr("vault.index.incoming"))?;
         }
-        if fts {
+        if matches!(fts, FtsIndexing::Enabled) {
             fts_put_conn(tx, vault, &note.row.path, &note.row.title, &note.body)
                 .await
                 .map_err(dberr("vault.index.fts"))?;
+        } else if matches!(fts, FtsIndexing::Retry) {
+            // Persist the repair obligation across restart. A fallback-only
+            // write must not look unchanged when full text becomes available.
+            sqlx::query("UPDATE vault_notes SET mtime_ns=-1 WHERE vault_id=? AND path=?")
+                .bind(vault)
+                .bind(&note.row.path)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("vault.index.fts_pending"))?;
         }
         Ok(())
     }
@@ -1219,17 +1266,34 @@ impl Store {
     /// table itself; a DB indexed before it existed gets it built here once
     /// (one scan), and duplicate FTS rows for one note are dropped.
     pub async fn ensure_fts(&self) -> bool {
+        self.try_ensure_fts().await.unwrap_or(false)
+    }
+
+    /// Only an unavailable SQLite module is permanent; busy/I/O/schema
+    /// initialization failures must be retried by the engine.
+    pub(crate) async fn try_ensure_fts(&self) -> std::result::Result<bool, sqlx::Error> {
+        #[cfg(test)]
+        if self
+            .fts_fail_once
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(sqlx::Error::PoolTimedOut);
+        }
         let created = sqlx::query(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vault_fts USING fts5(\
              vault_id UNINDEXED, path UNINDEXED, title, body, tokenize='unicode61 remove_diacritics 2')",
         )
         .execute(&self.pool)
-        .await
-        .is_ok();
-        if !created {
-            return false;
+        .await;
+        if let Err(e) = created {
+            if matches!(&e, sqlx::Error::Database(d) if d.message().contains("no such module: fts5"))
+            {
+                return Ok(false);
+            }
+            return Err(e);
         }
-        self.ensure_fts_map().await.is_ok()
+        self.ensure_fts_map().await?;
+        Ok(true)
     }
 
     async fn ensure_fts_map(&self) -> std::result::Result<(), sqlx::Error> {
@@ -1257,6 +1321,11 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Repair old fallback-only rows as well as a lost derived FTS table.
+        // The scanner re-reads these files even when their disk signature did
+        // not change. This runs once per successful probe, not per search.
+        sqlx::query("UPDATE vault_notes SET mtime_ns=-1 WHERE NOT EXISTS (SELECT 1 FROM vault_fts_ids i JOIN vault_fts f ON f.rowid=i.rid WHERE i.vault_id=vault_notes.vault_id AND i.path=vault_notes.path)")
+            .execute(&mut *tx).await?;
         tx.commit().await
     }
 

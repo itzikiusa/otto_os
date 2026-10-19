@@ -12,18 +12,29 @@ use otto_core::event::Event;
 use otto_core::run::RunStatus;
 use otto_state::runs::NewRunEvent;
 
+use crate::cancel_signal::CancelSignal;
 use crate::run_engine;
 use crate::state::ServerCtx;
 
 const TICK: Duration = Duration::from_secs(30);
 
-pub fn spawn(ctx: ServerCtx) {
-    tokio::spawn(async move {
-        loop {
-            redrive_resumable(&ctx).await;
-            tokio::time::sleep(TICK).await;
+pub fn spawn(ctx: ServerCtx) -> CancelSignal {
+    let stop = CancelSignal::new();
+    tokio::spawn(run_until_stopped(ctx, stop.clone()));
+    stop
+}
+
+async fn run_until_stopped(ctx: ServerCtx, stop: CancelSignal) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = redrive_resumable(&ctx, &stop) => {},
         }
-    });
+        if stop.sleep(TICK).await {
+            return;
+        }
+    }
 }
 
 /// Settle the previous daemon life before any new work can be admitted.
@@ -62,14 +73,50 @@ pub(crate) async fn recover_interrupted(ctx: &ServerCtx) -> otto_core::Result<()
     Ok(())
 }
 
-async fn redrive_resumable(ctx: &ServerCtx) {
+async fn redrive_resumable(ctx: &ServerCtx, stop: &CancelSignal) {
     if let Ok(runs) = ctx.runs.list_resumable().await {
         for run in runs {
+            if stop.is_cancelled() {
+                return;
+            }
             let c = ctx.clone();
             let id = run.id.clone();
+            let stop = stop.clone();
             tokio::spawn(async move {
-                run_engine::advance(&c, id).await;
+                // A spawned but not yet polled task must not start a stage
+                // after shutdown. Work already advancing keeps its own cleanup.
+                if !stop.is_cancelled() {
+                    run_engine::advance(&c, id).await;
+                }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stopping_during_run_scan_finishes_before_database_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, dir.path()).await;
+        let connection = pool.acquire().await.unwrap();
+        let stop = CancelSignal::new();
+        let running = run_until_stopped(ctx, stop.clone());
+        tokio::pin!(running);
+        tokio::select! {
+            biased;
+            _ = &mut running => panic!("supervisor returned before shutdown"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+        }
+        stop.cancel();
+        // The sole DB connection is still held: teardown cannot wait on a
+        // scan, and no scan result can launch fresh work after cancellation.
+        tokio::time::timeout(Duration::from_secs(1), &mut running)
+            .await
+            .expect("shutdown interrupts an in-flight read-only scan");
+        drop(connection);
     }
 }

@@ -1083,6 +1083,14 @@
       background: var(--bg-sidebar);
     }
   }
+  :global(html[data-transparency='reduced']) .app .surface {
+    background: var(--bg-sidebar);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  :global(html[data-transparency='reduced']) .win .surface {
+    background: var(--bg-sidebar);
+  }
 
   /* ── input row ─────────────────────────────────────────────────────────────── */
   .bar-row {

@@ -243,28 +243,7 @@ impl ConnectionsService {
         id: &Id,
         parent_id: Option<&str>,
     ) -> Result<ConnectionSection> {
-        // Validate the section exists before moving it.
-        self.sections.get(id).await?;
-        if let Some(pid) = parent_id {
-            if pid == id.as_str() {
-                return Err(Error::Invalid("a section cannot be its own parent".into()));
-            }
-            // Reject moving a section under one of its own descendants (one
-            // global tree, so consider every section).
-            let all = self.sections.list_all().await?;
-            let mut cursor = Some(pid.to_string());
-            while let Some(cur) = cursor {
-                if cur == id.as_str() {
-                    return Err(Error::Invalid(
-                        "cannot move a section into its own descendant".into(),
-                    ));
-                }
-                cursor = all
-                    .iter()
-                    .find(|s| s.id == cur)
-                    .and_then(|s| s.parent_id.clone());
-            }
-        }
+        // Validation and mutation share the repository transaction.
         self.sections.reparent(id, parent_id).await
     }
 
@@ -577,8 +556,9 @@ impl ConnectionsService {
         mut req: UpsertConnectionReq,
     ) -> Result<Connection> {
         self.authorize(id, user_id, "configure").await?;
-        let existing = self.get(id).await?;
+        self.get(id).await?; // complete any legacy credential migration first
         let _guard = self.credentials_lock.lock().await;
+        let existing = self.repo.get(id).await?;
         if req.kind != existing.kind {
             return Err(Error::Invalid(
                 "connection kind cannot be changed — create a new connection".into(),
@@ -604,28 +584,40 @@ impl ConnectionsService {
         let will_have_secret = req.secret.is_some() || existing.secret_ref.is_some();
         validate_params(req.kind, &req.params, will_have_secret)?;
 
-        let mut new_secret_ref: Option<Option<String>> = None;
-        if let Some(secret) = &req.secret {
-            let secret_ref = existing
-                .secret_ref
-                .clone()
-                .unwrap_or_else(|| secret_ref_for(id));
-            otto_core::secrets::put_async(&self.secrets, &secret_ref, secret).await?;
-            new_secret_ref = Some(Some(secret_ref));
-        }
-
-        self.repo
+        // Never overwrite the key referenced by the committed row: a failed
+        // SQLite update must leave its credentials usable. Publish a fresh key
+        // with the row, then reclaim the superseded key only after commit.
+        let new_secret_ref = if let Some(secret) = &req.secret {
+            let key = format!("conn-{id}-{}", otto_core::new_id());
+            otto_core::secrets::put_async(&self.secrets, &key, secret).await?;
+            Some(key)
+        } else {
+            None
+        };
+        let result = self
+            .repo
             .update(
                 id,
                 Some(&req.name),
                 Some(&req.params),
-                new_secret_ref.as_ref().map(|opt| opt.as_deref()),
+                new_secret_ref.as_deref().map(Some),
                 Some(req.first_command.as_deref()),
                 Some(req.section_id.as_deref()),
                 req.environment,
                 req.read_only,
             )
-            .await
+            .await;
+        let obsolete = match &result {
+            Ok(_) if new_secret_ref.is_some() => existing.secret_ref.as_deref(),
+            Err(_) => new_secret_ref.as_deref(),
+            _ => None,
+        };
+        if let Some(key) = obsolete {
+            if let Err(error) = otto_core::secrets::delete_async(&self.secrets, key).await {
+                tracing::warn!(connection = %id, %error, "failed to reclaim obsolete connection credential");
+            }
+        }
+        result
     }
 
     /// Copy configuration, never credentials or access grants. The new profile
@@ -653,13 +645,15 @@ impl ConnectionsService {
     /// Delete the profile and its Keychain secret.
     pub async fn delete(&self, id: &Id, user_id: &Id) -> Result<()> {
         self.authorize(id, user_id, "configure").await?;
+        let _guard = self.credentials_lock.lock().await;
         let conn = self.repo.get(id).await?;
+        self.repo.delete(id).await?;
         if let Some(secret_ref) = &conn.secret_ref {
             if let Err(e) = otto_core::secrets::delete_async(&self.secrets, secret_ref).await {
                 tracing::warn!(connection = %id, "failed to delete secret: {e}");
             }
         }
-        self.repo.delete(id).await
+        Ok(())
     }
 
     /// Open a connection as a terminal session in `ws_id` via the spawner.
@@ -673,7 +667,13 @@ impl ConnectionsService {
         spawner: &dyn Spawner,
     ) -> Result<Session> {
         self.authorize(&conn.id, user_id, "shell").await?;
-        if self.is_enforced(&conn.id).await? && conn.kind != ConnectionKind::Ssh {
+        let actor = otto_state::UsersRepo::new(self.repo.pool())
+            .get(user_id)
+            .await?;
+        if actor.disabled {
+            return Err(Error::Forbidden("account disabled".into()));
+        }
+        if !actor.is_root && self.is_enforced(&conn.id).await? && conn.kind != ConnectionKind::Ssh {
             return Err(Error::Forbidden(
                 "governed database/custom profiles cannot open unrestricted terminal sessions"
                     .into(),
@@ -1053,6 +1053,133 @@ mod tests {
             member: ids.pop().unwrap(),
             root: ids.pop().unwrap(),
         }
+    }
+
+    struct RecordingSpawner(Mutex<Vec<String>>);
+    impl Spawner for RecordingSpawner {
+        fn spawn_connection<'a>(
+            &'a self,
+            _: &'a Id,
+            _: &'a Id,
+            _: &'a Connection,
+            spec: CommandSpec,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> BoxFuture<'a, Result<Session>> {
+            self.0.lock().unwrap().push(spec.program);
+            Box::pin(async { Err(Error::Internal("recorded spawn".into())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn enabled_root_can_open_enforced_db_terminal_but_disabled_root_cannot() {
+        let f = fixture().await;
+        let id = create_conn(
+            &f,
+            ConnectionKind::Mysql,
+            serde_json::json!({"host":"localhost"}),
+        )
+        .await;
+        let conn = f.svc.get(&id).await.unwrap();
+        assert!(f.svc.is_enforced(&id).await.unwrap());
+        let spawn = RecordingSpawner(Mutex::new(Vec::new()));
+        let result = f
+            .svc
+            .open(&conn, &"workspace".into(), &f.root, None, &spawn)
+            .await;
+        assert!(matches!(result, Err(Error::Internal(ref msg)) if msg == "recorded spawn"));
+        assert_eq!(*spawn.0.lock().unwrap(), vec!["mysql"]);
+        sqlx::query("INSERT INTO user_feature_grants(user_id,feature,capability) VALUES(?,'connections','edit')")
+            .bind(&f.member).execute(&f.repo.pool()).await.unwrap();
+        otto_state::resource_access::ResourceAccessRepo::new(f.repo.pool())
+            .initialize_owner_policy(
+                otto_core::access::ResourceKind::Connection,
+                &id,
+                &f.member,
+                &["discover".into(), "shell".into()],
+                &[],
+                &otto_core::access::AccessActor {
+                    real_user_id: f.root.clone(),
+                    effective_user_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        f.svc.authorize(&id, &f.member, "shell").await.unwrap();
+        assert!(matches!(
+            f.svc
+                .open(&conn, &"workspace".into(), &f.member, None, &spawn)
+                .await,
+            Err(Error::Forbidden(_))
+        ));
+        assert_eq!(
+            spawn.0.lock().unwrap().len(),
+            1,
+            "delegated shell permission must not bypass DB restriction"
+        );
+        sqlx::query("UPDATE users SET disabled=1 WHERE id=?")
+            .bind(&f.root)
+            .execute(&f.repo.pool())
+            .await
+            .unwrap();
+        assert!(f
+            .svc
+            .open(&conn, &"workspace".into(), &f.root, None, &spawn)
+            .await
+            .is_err());
+        assert_eq!(spawn.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_profile_update_preserves_old_secret_and_removes_new_key() {
+        let f = fixture().await;
+        let req = UpsertConnectionReq {
+            name: "original".into(),
+            kind: ConnectionKind::Mysql,
+            params: serde_json::json!({"host":"localhost"}),
+            secret: Some("old-password".into()),
+            first_command: None,
+            section_id: None,
+            environment: None,
+            read_only: None,
+        };
+        let conn = f.svc.create(None, &f.root, req.clone()).await.unwrap();
+        let old_ref = conn.secret_ref.clone().unwrap();
+        let mut rejected = req.clone();
+        rejected.secret = Some("new-password".into());
+        rejected.section_id = Some("missing-section".into());
+        assert!(f.svc.update(&conn.id, &f.root, rejected).await.is_err());
+        let saved = f.svc.get(&conn.id).await.unwrap();
+        assert_eq!(saved.secret_ref.as_deref(), Some(old_ref.as_str()));
+        assert_eq!(
+            f.secrets.get(&old_ref).unwrap().as_deref(),
+            Some("old-password")
+        );
+        assert_eq!(f.secrets.0.lock().unwrap().len(), 1);
+        let mut accepted = req;
+        accepted.secret = Some("replacement".into());
+        let saved = f.svc.update(&conn.id, &f.root, accepted).await.unwrap();
+        assert_ne!(saved.secret_ref.as_deref(), Some(old_ref.as_str()));
+        assert!(f.secrets.get(&old_ref).unwrap().is_none());
+        assert_eq!(
+            f.secrets
+                .get(saved.secret_ref.as_ref().unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("replacement")
+        );
+        assert_eq!(f.secrets.0.lock().unwrap().len(), 1);
+        sqlx::query("CREATE TRIGGER reject_connection_delete BEFORE DELETE ON connections BEGIN SELECT RAISE(ABORT, 'injected rejection'); END")
+            .execute(&f.repo.pool()).await.unwrap();
+        assert!(f.svc.delete(&conn.id, &f.root).await.is_err());
+        assert!(f.svc.get(&conn.id).await.is_ok());
+        assert_eq!(
+            f.secrets
+                .get(saved.secret_ref.as_ref().unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("replacement")
+        );
     }
 
     /// A profile with no host only opens a local shell — testing it must not

@@ -864,7 +864,7 @@ impl VaultEngine {
     ) -> Result<String> {
         valid_id(entry)?;
         let v = self.get_scoped(ws, id).await?;
-        let lock = self.write_lock(id, "");
+        let lock = self.write_lock(&v.root_path);
         let _guard = lock.lock().await;
         let manifest = format!(".trash/.otto-index/{entry}.json");
         let legacy = entry.starts_with("legacy-");

@@ -73,6 +73,13 @@ impl DbViewerService {
                 if user.is_root || user.disabled {
                     continue;
                 }
+                // The owner on this connection's own account is ordinary
+                // privileged execution, the same exemption as runtime. An
+                // alternate profile (`source` other than the logical id) and
+                // every non-owner still take the native ceiling below.
+                if user.id == logical.created_by && source == &logical.id {
+                    continue;
+                }
                 if !matches!(engine, Engine::Mysql | Engine::Postgres) {
                     return Err(crate::native_access::setup_error(
                         "restricted script execution is unsupported for this engine",

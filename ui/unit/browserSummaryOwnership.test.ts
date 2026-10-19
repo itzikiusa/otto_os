@@ -61,3 +61,15 @@ test('deselect clears reader loading and error state immediately', async () => {
   assert.equal(browser.loadingPage, false);
   assert.equal(browser.pageError, '');
 });
+
+test('summary retains fetch provenance and clears it when leaving the page', async () => {
+  const browser = fixture(async () => ({ summary: 'Draft', engine: 'plain-fetch', degraded: true }));
+  await browser.loadTabs('A');
+  await browser.runSummarize('https://example.test');
+  assert.equal(browser.summaryEngine, 'plain-fetch');
+  assert.equal(browser.summaryDegraded, true);
+  browser.deselect();
+  assert.equal(browser.summary, '');
+  assert.equal(browser.summaryEngine, '');
+  assert.equal(browser.summaryDegraded, false);
+});

@@ -39,20 +39,24 @@
   // channels via the bot token). Null until loaded; ids show bare meanwhile.
   let slackDir = $state<SlackDirectory | null>(null);
   let slackDirLoading = $state(false);
+  let slackDirError = $state('');
+  const directoryLoads = latestOnly();
   const slackUser = $derived(new Map((slackDir?.users ?? []).map((u) => [u.id, u])));
   const slackChannel = $derived(new Map((slackDir?.channels ?? []).map((c) => [c.id, c])));
   async function loadSlackDir(id: string, refresh = false): Promise<void> {
+    const ticket = directoryLoads.begin();
     slackDirLoading = true;
+    slackDirError = '';
     try {
       const d = await api.get<SlackDirectory>(
         `/workspaces/${id}/integrations/slack/directory${refresh ? '?refresh=1' : ''}`,
       );
-      if (wsId === id) slackDir = d;
-    } catch {
-      // Names are a nicety: the ids still work, so a failure stays quiet.
-      if (wsId === id) slackDir = null;
+      if (ticket.current && wsId === id) slackDir = d;
+    } catch (e) {
+      // Manual IDs still work; make the name lookup failure recoverable.
+      if (ticket.current && wsId === id) slackDirError = loadErrorText(e);
     } finally {
-      slackDirLoading = false;
+      if (ticket.current && wsId === id) slackDirLoading = false;
     }
   }
   /** "#general" for a known Slack channel id, else the id. */
@@ -130,6 +134,10 @@
   const needsSecret = $derived(
     editOpen && !integrations.find((i) => i.channel === editChannel)?.has_bot_token && fBotToken.trim() === '',
   );
+  const needsAllowedUser = $derived(
+    editOpen && (editChannel as Channel) !== 'webhook' && fEnabled && fAllowedUsers.trim() === '' && !fOpenToAll,
+  );
+  let showWebhookKey = $state(false);
 
   // The inbound URL an external system POSTs to (host = this Otto daemon).
   const webhookUrl = $derived(wsId ? `${baseUrl()}/api/v1/webhooks/${wsId}` : '');
@@ -140,6 +148,7 @@
     const bytes = new Uint8Array(24);
     crypto.getRandomValues(bytes);
     fBotToken = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    showWebhookKey = true;
   }
 
   async function copyText(text: string): Promise<void> {
@@ -195,6 +204,10 @@
     if (integrationsFor !== id) {
       integrations = [];
       integrationsFor = id;
+      directoryLoads.cancel();
+      slackDir = null;
+      slackDirError = '';
+      slackDirLoading = false;
     }
     loading = true;
     loadError = '';
@@ -225,6 +238,7 @@
     fEnabled = existing?.enabled ?? false;
     fBotToken = '';
     fAppToken = '';
+    showWebhookKey = false;
     fChannelId = existing?.channel_id ?? '';
     fAllowedUsers = existing?.allowed_users ?? '';
     fAgentReply = existing?.agent_reply ?? false;
@@ -232,7 +246,7 @@
     fReplyInstructions = existing?.reply_instructions ?? '';
     fPreferredCli = existing?.preferred_cli ?? '';
     editOpen = true;
-    if (channel === 'slack' && existing?.has_bot_token && wsId && !slackDir && !slackDirLoading) void loadSlackDir(wsId);
+    if (channel === 'slack' && existing?.has_bot_token && wsId && !slackDir && !slackDirLoading && !slackDirError) void loadSlackDir(wsId);
   }
 
   // ---------------------------------------------------------------------------
@@ -672,7 +686,7 @@
         <input
           id="ch-bot"
           class="input mono inline-field"
-          type={editChannel === 'webhook' ? 'text' : 'password'}
+          type={editChannel === 'webhook' && showWebhookKey ? 'text' : 'password'}
           bind:value={fBotToken}
           autocomplete="off"
           spellcheck="false"
@@ -685,6 +699,7 @@
                 : 'paste a key or click Generate'}
         />
         {#if editChannel === 'webhook'}
+          <button class="btn small inline-btn" type="button" onclick={() => (showWebhookKey = !showWebhookKey)}>{showWebhookKey ? 'Hide' : 'Show'}</button>
           <button class="btn small inline-btn" type="button" onclick={generateKey}>Generate</button>
           <button class="btn small inline-btn" type="button" disabled={!fBotToken} onclick={() => void copyText(fBotToken)}>Copy</button>
         {/if}
@@ -701,6 +716,10 @@
 
     <!-- App token (Slack only) -->
     {#if editChannel === 'slack'}
+      {#if slackDirError}
+        <LoadState what="Slack names" variant="compact" error={slackDirError} empty onretry={() => wsId && void loadSlackDir(wsId, true)} />
+        <p class="hint">You can still enter channel and member IDs below.</p>
+      {/if}
       <div class="field">
         <label for="ch-app">App token <span class="dim">(Socket Mode)</span></label>
         <input
@@ -776,7 +795,7 @@
         />
         <span class="hint">
           Comma-separated caller ids, matched against the <code>user</code> field in the POST body.
-          Leave blank to allow everyone.
+          Leave blank to accept any caller ID carrying this webhook’s secret key.
         </span>
       {:else}
         <div class="users-head">
@@ -810,6 +829,10 @@
         {#if fOpenToAll}
           <span class="hint warn" role="note">
             Anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
+          </span>
+        {:else if needsAllowedUser}
+          <span class="hint warn" role="alert">
+            Add at least one allowed user ID above, or check “Open to everyone” before enabling {channelLabel(editChannel)}.
           </span>
         {/if}
       {/if}
