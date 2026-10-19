@@ -1,0 +1,22 @@
+{
+  "binary": "/Users/itziklavon/otto_os/target/debug/ottod",
+  "sha256": "f0e66f77555d13ebbf28d852f1bfc4185180d4deab5c8eebe88c39740d7a60bb",
+  "isolated_data": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-root-shutdown-smoke-x0ruzw40",
+  "results": [
+    {
+      "attempt": 1,
+      "health": true,
+      "sigterm_exit": 0,
+      "shutdown_seconds": 0.043,
+      "log": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-root-shutdown-smoke-x0ruzw40/run-0.log"
+    },
+    {
+      "attempt": 2,
+      "health": true,
+      "sigterm_exit": 0,
+      "shutdown_seconds": 0.04,
+      "log": "/var/folders/6p/t4qb4qmd2jj3gvd85w0shhmc0000gn/T/otto-root-shutdown-smoke-x0ruzw40/run-1.log"
+    }
+  ],
+  "boundary": "Empty isolated daemon with E2E mode; fresh boot and repeat boot graceful SIGTERM. Does not prove active-job drain."
+}

@@ -43,10 +43,16 @@ loopback, private, and cloud-metadata addresses are refused with a `400`.
   `browser_summarize` / `browser_marks` / `browser_login`, so an agent session
   can drive the same fetch pipeline, read the user's marks, and (opt-in) sign
   in to a stored credential without going through the UI.
-- **Site Credentials** — save a domain/username/password Otto can autofill on
+- **Site Credentials** — open the key button in the Browser toolbar to
+  save a domain/username/password Otto can autofill on
   request; the password lives in the macOS Keychain, never in the database or a
   log line, and an agent only gets to use one you've explicitly opted in
   (`allow_agent_use`).
+
+Page summaries stay attributed drafts and show when they were produced, which
+fetch engine supplied the page, and whether JavaScript content was unavailable.
+Sending a mark previews the target session and excerpt before submitting it;
+deleting a mark confirms removal of both the passage and its note.
 
 ## Setup
 

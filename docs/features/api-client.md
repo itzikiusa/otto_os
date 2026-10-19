@@ -170,7 +170,8 @@ via `parent_id` (a collection inside a collection is shown as a "folder").
   files to/from a git repo connected to the workspace. The sheet states which
   repository and branch the commit goes to and that secrets export as `***`:
   - **Pull** imports every recognized collection file (stored under
-    `collections/`) via `POST /repos/{id}/api-collections/pull`.
+    `collections/`) via `POST /repos/{id}/api-collections/pull`. A failed pull
+    keeps the sheet open with Retry; only a successful pull closes it.
   - **Commit & Push** exports each *root* collection to a
     `<name>.postman_collection.json` file and commits via
     `POST /repos/{id}/api-collections/push` (optional target branch → open a PR

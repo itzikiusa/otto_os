@@ -1550,6 +1550,10 @@ parses (and which read fine as plain text in history rows and MCP results):
   Map values use key/value pairs so duplicate keys are not discarded. Native
   transport does not decode JSON/Dynamic/Variant types in the bundled native client;
   use HTTP or explicitly select `toJSONString(value)` for unsupported types.
+  Native connections accept server-enforced `readonly=1` profiles without
+  downgrading them to `readonly=2`. Their active timezone must match the profile
+  timezone requested in Otto (UTC by default); a forbidden timezone change still
+  fails explicitly. No user query is replayed to negotiate these settings.
 - **MongoDB** supports a mongosh-style shorthand, raw JSON command documents,
   **full mongosh scripts** (below), **and**
   a SQL→Mongo translation for a single-base-collection `SELECT` (WHERE / ORDER BY /
@@ -1730,4 +1734,3 @@ Close cleanup owns the retired pools and tunnel leases independently of the HTTP
 - **Cache sweeps.** The five-minute reaper also drops expired schema diagrams
   and completion snapshots. Postgres completion reads `pg_catalog` directly,
   so it stays fast on catalogs with thousands of tables.
-

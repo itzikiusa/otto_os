@@ -23,3 +23,38 @@ Final review traced operation ownership, batch-only native session reuse, native
 | L12 limits/resources/cancellation | 9.7 | Native block export, capped HTTP row streaming, 128 KiB decompression windows, over-128-MiB JSON export, concurrent native operations and asynchronous cleanup verified. Exhaustive cancellation interleavings, very large single cells and old-server raw exception framing remain outside live evidence. |
 
 Reports 04–09 contain distinct review passes and concrete fixes, not repeated score-only reports. Root owns the overall 24-lens decision and publication/deployment; no commit or push was made by this worker.
+
+## Post-integration follow-up: strict native read-only startup
+
+The previously listed readonly=1 startup limitation is now repaired. A live
+SELECT-only fixture first failed before reaching Otto's setup: klickhouse0.15.3
+unconditionally issued SET date_time_input_format='best_effort', rejected with
+server error164. A narrowly documented vendored startup patch accepts this
+specific rejection only after the same connection confirms readonly=1. Otto's
+own setup similarly verifies an already-active matching timezone and preserves
+readonly1 instead of lowering it to readonly2 for enforced reads. Other errors
+and timezone mismatches remain errors; user SQL is never retried.
+
+`clickhouse_parity_native_strict_readonly_profile` failed red in
+/tmp/otto-ch-strict-readonly-red.log, then passed after both startup layers were
+fixed (/tmp/otto-ch-strict-readonly-green.log). It checks ordinary and enforced
+reads retain readonly1, SET readonly0 is rejected, and a different requested
+timezone fails. Unique test-user creation/removal uses the isolated
+`otto-parity-ch-20261018` fixture, not the user's embedded usage server.
+
+The full live parity filter now passes12/12 (3.03s), and focused units40/40 with
+one optional benchmark ignored. Logs: /tmp/otto-ch-parity-readonly.log and
+/tmp/otto-ch-units-readonly.log. L10's specific startup limitation is closed;
+its broader score is not automatically raised: live SSH/TLS and older-server
+coverage remain separate. Native JSON/Dynamic/Variant decoding is still absent.
+
+A further native-format probe on local26.3.1.715 confirmed
+output_format_native_write_json_as_string=1 still emits JSON/Dynamic/Variant
+column type names, so that setting alone cannot repair klickhouse's type parser.
+The exact byte dump is /tmp/otto-ch-native-types.bin. Upstream NativeWriter writes
+the type name independently from serialization:
+https://github.com/ClickHouse/ClickHouse/blob/master/src/Formats/NativeWriter.cpp
+This hypothesis was rejected; no implicit format-setting workaround was enabled.
+
+Follow-up all-target `cargo clippy -p otto-dbviewer --all-targets -- -D warnings`
+passed (18.77s), /tmp/otto-ch-readonly-clippy.log. Final combined consumers pending.

@@ -78,3 +78,58 @@ the isolated local-review port instead of CI's seeded server. The workflow now
 installs checksum-pinned mongosh 2.5.9 (smoke-verified on Ubuntu 24.04) and passes
 the seeded Redis port/password explicitly. No driver behavior or assertions were
 weakened. The corrected CI run remains pending at this snapshot.
+
+## Published-head CI refresh (2026-10-18)
+
+Live GitHub inspection of PR111 confirms the published head is still
+`c009da20cc113c8fb79f3bf0600442d0c6afa358`, and the corrected **DB + Kafka drivers
+(live servers)** job passed. Rust, UI, macOS daemon, blocking E2E smoke and daemon
+performance jobs also passed at that head. Four advisory functional shards and
+the advisory red-count job failed; ci.yml explicitly marks the latter advisory
+with continue-on-error. Desktop packaging was skipped. These results supersede
+the pending CI-fixture note above, but do not validate the expanded uncommitted
+product-wide changes or prove installed-app deployment.
+
+Current local product-wide evidence is maintained separately in
+`../product-wide-2026-10-18/current-verification.md`. Database lens scores above
+are retained rather than raised by unrelated product-wide test counts. Native
+ClickHouse JSON/Dynamic/Variant limitations remain explicit; HTTP transport is
+the supported alternative and automatic replay of a failed native query is not
+claimed. Mongo fallback remains parse-failure-only, preserving the no-write-retry
+invariant documented in the feature guide.
+
+## Native type dependency follow-up
+
+Source inspection of the installed klickhouse0.15.3 confirms its
+`src/convert/json.rs::Json<T>` converts through Value::String/FromSql<String>.
+Enabling its serde/JSON wrapper is therefore not a native JSON/Dynamic/Variant
+decoder and does not close L11. Upstream [Json API documentation](https://docs.rs/klickhouse/latest/klickhouse/struct.Json.html)
+was checked, but the generic latest Type documentation returned a stale0.14.0
+snapshot; it is not evidence for an available upgrade. No dependency or lockfile
+change was made from that inconclusive upgrade search. Existing HTTP support
+and the no-automatic-retry invariant remain the verified behavior.
+
+## Strict read-only startup follow-up (2026-10-19)
+
+A separate, narrowly vendored klickhouse0.15.3 startup repair now permits a
+server-owned readonly=1 profile without changing that policy. The same native
+connection must report readonly=1 after the specific startup READONLY error;
+the driver additionally requires the requested timezone to match the active
+timezone. Other errors propagate. Normal privileged startup is unchanged.
+The new live regression first reproduced error164, then passed for ordinary and
+enforced reads, denied policy changes, and a mismatched timezone. The complete
+isolated ClickHouse parity run passed12/12; focused units40passed/1optional
+benchmarkignored and all-target clippy passed. Ronaldo independently reviewed
+the source and fixture with no concrete defect found. See iteration-10-clickhouse.md
+and vendor/klickhouse/README-OTTO.md for provenance and scope.
+This repair does not add native JSON/Dynamic/Variant decoding or raise the
+broader transport/type scores above.
+
+CI coverage correction: the live-driver workflow now sets OTTO_DBV_PARITY=1
+and ClickHouse HTTP/native parity port overrides18123/19000, matching compose.
+Previously these twelve cases returned early because that separate flag was
+unset. The fixture defaults remain28123/29000 for isolated review servers.
+The explicit override path passed12/12 locally (3.07s) and dbviewer all-target
+clippy passed; the new GitHub job is still pending. Vendor-only changes now
+trigger this job too. This does not retroactively count old CI early returns
+as live parity coverage.
