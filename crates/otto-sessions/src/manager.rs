@@ -2593,10 +2593,11 @@ impl SessionManager {
             args: vec!["mcp-tools".to_string()],
             env: env.clone(),
         };
-        // Claude / agy read the identity-neutral workspace `.mcp.json`; the
-        // entry itself is written by the caller's single per-spawn reconcile
-        // (`sync_workspace_mcp`, which receives `server` below). The
-        // session-specific token and routing values come from the spawn env.
+        // Claude reads the identity-neutral workspace `.mcp.json`, agy its
+        // `.agents/mcp_config.json`; both entries are written by the caller's
+        // single per-spawn reconcile (`sync_workspace_mcp`, which receives
+        // `server` below). The session-specific token and routing values come
+        // from the spawn env (agy passes it through to stdio MCP children).
         //
         // grok reads its own project-scoped `.grok/config.toml`, never
         // `.mcp.json` — without this a grok session has no otto tools.
@@ -2648,7 +2649,8 @@ impl SessionManager {
     /// actually wired up. Best-effort throughout — never blocks the spawn.
     ///
     /// Returns the codex `-c` overrides for the user's servers (codex doesn't
-    /// read `.mcp.json`; grok gets its `.grok/config.toml` tables here too).
+    /// read `.mcp.json`; grok gets its `.grok/config.toml` tables and agy its
+    /// `.agents/mcp_config.json` here too).
     async fn sync_workspace_mcp(
         &self,
         session: &Session,
@@ -2737,6 +2739,12 @@ impl SessionManager {
             .await
         {
             tracing::warn!(session = %session.id, "record MCP server snapshot: {e}");
+        }
+        // agy never reads `.mcp.json` — same managed set, its own file.
+        if session.provider == "agy" {
+            if let Err(e) = crate::mcp::reconcile_managed_servers_agy(&session.cwd, &cfg) {
+                tracing::warn!(session = %session.id, cwd = %session.cwd, "reconcile agy MCP config: {e}");
+            }
         }
         if session.provider == "grok" {
             if let Err(e) = crate::mcp::reconcile_user_servers_grok(&session.cwd, &user_servers) {
