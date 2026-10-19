@@ -500,7 +500,7 @@ async fn released_scheduled_occurrence_does_not_spend_the_lifetime_cap() {
     .unwrap();
     assert_eq!(repo.swarm_spend(&spent.id).await.unwrap().total_runs, 1);
     let spent_agent = repo
-        .create_agent(new_agent(&spent, Some(once)))
+        .create_agent(new_agent(&spent, Some(once.clone())))
         .await
         .unwrap();
     let spent_seen = spent_agent.schedule.clone().unwrap();
@@ -515,6 +515,67 @@ async fn released_scheduled_occurrence_does_not_spend_the_lifetime_cap() {
     assert_eq!(repo.swarm_spend(&spent.id).await.unwrap().total_runs, 1);
     assert!(repo
         .reserve_scheduled_run(sched_run(&spent, &spent_agent.id), &spent_seen, fired)
+        .await
+        .is_err());
+
+    // Negative control: a stopped, sessionless, scheduled row whose error is
+    // SQL NULL is not the release marker. `error IS` keeps it in the lifetime
+    // count, and retention rolls it into `pruned_runs`.
+    let null_err = active_swarm(&pool, &repo).await;
+    sqlx::query("UPDATE swarms SET max_total_runs = 1 WHERE id = ?")
+        .bind(&null_err.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let null_agent = repo
+        .create_agent(new_agent(&null_err, Some(once)))
+        .await
+        .unwrap();
+    let null_seen = null_agent.schedule.clone().unwrap();
+    let ordinary = repo
+        .create_run(NewRun {
+            swarm_id: null_err.id.clone(),
+            workspace_id: null_err.workspace_id.clone(),
+            project_id: None,
+            task_id: None,
+            agent_id: null_agent.id.clone(),
+            kind: "scheduled".into(),
+            trigger: "scheduled".into(),
+        })
+        .await
+        .unwrap();
+    repo.update_run(
+        &ordinary.id,
+        RunPatch {
+            status: Some("stopped".into()),
+            error: Some(None),
+            session_id: Some(None),
+            finished_at: Some(Some(Utc::now() - chrono::Duration::days(40))),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let stored_error: Option<String> =
+        sqlx::query_scalar("SELECT error FROM swarm_runs WHERE id = ?")
+            .bind(&ordinary.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(stored_error.is_none());
+    assert_eq!(repo.total_run_count(&null_err.id).await.unwrap(), 1);
+    assert_eq!(repo.swarm_spend(&null_err.id).await.unwrap().total_runs, 1);
+    assert!(repo
+        .reserve_scheduled_run(sched_run(&null_err, &null_agent.id), &null_seen, fired)
+        .await
+        .is_err());
+    crate::retention::RetentionRepo::new(pool.clone())
+        .prune(&policy)
+        .await
+        .unwrap();
+    assert_eq!(repo.swarm_spend(&null_err.id).await.unwrap().total_runs, 1);
+    assert!(repo
+        .reserve_scheduled_run(sched_run(&null_err, &null_agent.id), &null_seen, fired)
         .await
         .is_err());
 }
