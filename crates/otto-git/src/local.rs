@@ -2488,9 +2488,8 @@ impl LocalGit {
         );
         // Keyed per (repo, base): `refs_with_base` asks for every integration
         // branch, and a single per-repo slot would evict between them.
-        static MEMO: std::sync::OnceLock<
-            std::sync::Mutex<std::collections::HashMap<(PathBuf, String), (u64, Sets)>>,
-        > = std::sync::OnceLock::new();
+        type Memo = std::collections::HashMap<(PathBuf, String), (u64, Sets)>;
+        static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
         let Some(b) = base else {
             return (Default::default(), Default::default());
         };
