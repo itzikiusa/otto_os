@@ -497,7 +497,7 @@
           class="icon-btn ft-nav-btn"
           class:on={showHidden}
           title={showHidden ? 'Hide hidden files' : 'Show hidden files'}
-          aria-label={showHidden ? 'Hide hidden files' : 'Show hidden files'}
+          aria-label="Show hidden files"
           aria-pressed={showHidden}
           onclick={toggleHidden}
         >
