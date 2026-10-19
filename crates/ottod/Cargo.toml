@@ -16,6 +16,7 @@ otto-server.workspace = true
 rust-embed = { workspace = true, optional = true, features = ["deterministic-timestamps"] }
 tokio.workspace = true
 axum.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 tracing.workspace = true
@@ -23,6 +24,8 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 otto-sessions.workspace = true
 otto-usage.workspace = true
+otto-transcript.workspace = true
+sqlx.workspace = true
 otto-telemetry.workspace = true
 # `ottod mcp-tools` (Task B2b): the first-party MCP tool server calls back into
 # the running daemon over loopback HTTP with a per-session read-only token.
@@ -45,7 +48,3 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
 rustls-pemfile = "2.2.0"
 rcgen = "0.14.10"
 sha2 = "0.11.0"
-
-[dev-dependencies]
-# usage_tailer tests seed `sessions` rows directly.
-sqlx.workspace = true

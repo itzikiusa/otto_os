@@ -18,6 +18,9 @@
 //! Only complete transcript lines are consumed. A failed journal commit stops
 //! source advancement until retry succeeds; corrupt journals stop ingestion.
 
+#[path = "usage_tailer/native.rs"]
+mod native;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,6 +106,10 @@ pub struct UsageTailer {
     pool: DbPool,
     /// Home directory — the root of `~/.claude` and `~/.codex`.
     home: PathBuf,
+    account_root: PathBuf,
+    grok_root: PathBuf,
+    agy_extra_dir: Option<PathBuf>,
+    claude_roots: Vec<(PathBuf, String)>,
     cursors: CursorStore,
     /// Size of each transcript when it was last tailed (memory only). Change
     /// detection compares against THIS, not the cursor: the cursor stops at
@@ -121,6 +128,8 @@ pub struct UsageTailer {
     held: HashMap<PathBuf, HeldResponse>,
     /// Attribution of each held response's file: (workspace_id, session_id).
     held_attr: HashMap<PathBuf, (String, String)>,
+    // Additive checkpoint field: old held responses default to Claude.
+    held_providers: HashMap<PathBuf, String>,
     /// When each held response's file last grew; released after HOLD_IDLE.
     held_grew: HashMap<PathBuf, Instant>,
     /// Session-wide cumulative-token baselines for Codex rollout snapshots.
@@ -146,6 +155,7 @@ pub struct UsageTailer {
     stats: TailerStats,
     /// Events and source state are committed together before delivery.
     pending_events: Vec<UsageEvent>,
+    native: native::NativeState,
     commit_failed: bool,
     checkpoint_initialized: bool,
 }
@@ -181,6 +191,7 @@ struct SessionRef {
 struct Attribution {
     /// claude: `provider_session_id` (= transcript filename stem) → session.
     by_provider_session: HashMap<String, SessionRef>,
+    by_provider_identity: HashMap<(String, String), SessionRef>,
 }
 
 impl UsageTailer {
@@ -196,6 +207,10 @@ impl UsageTailer {
         Self {
             usage,
             pool,
+            claude_roots: vec![(home.join(".claude/projects"), "claude".into())],
+            account_root: data_dir.join("provider-accounts"),
+            grok_root: home.join(".grok"),
+            agy_extra_dir: None,
             home,
             cursors,
             last_size: HashMap::new(),
@@ -204,6 +219,7 @@ impl UsageTailer {
             folder: ResponseFolder::new(RECENT_RESPONSES_CAP),
             held: HashMap::new(),
             held_attr: HashMap::new(),
+            held_providers: HashMap::new(),
             held_grew: HashMap::new(),
             codex_counters,
             codex_counters_dirty: false,
@@ -214,9 +230,24 @@ impl UsageTailer {
             generation: otto_state::sessions::attribution_generation,
             stats: TailerStats::default(),
             pending_events: Vec::new(),
+            native: native::NativeState::default(),
             commit_failed: false,
             checkpoint_initialized: false,
         }
+    }
+
+    /// Provider-specific roots are supplied by the daemon, never discovered
+    /// from process environment in isolated tests or fixture daemons.
+    pub fn with_native_roots(
+        mut self,
+        grok_home: Option<PathBuf>,
+        agy_data: Option<PathBuf>,
+    ) -> Self {
+        if let Some(root) = grok_home {
+            self.grok_root = root;
+        }
+        self.agy_extra_dir = agy_data.map(|root| root.join("conversations"));
+        self
     }
 
     fn claude_root(&self) -> PathBuf {
@@ -275,7 +306,10 @@ impl UsageTailer {
                     return;
                 }
                 if let Some(w) = watch.as_mut() {
-                    w.ensure_roots(&[self.claude_root(), self.codex_root()]);
+                    let mut roots: Vec<_> =
+                        self.claude_roots.iter().map(|(p, _)| p.clone()).collect();
+                    roots.push(self.codex_root());
+                    w.ensure_roots(&roots);
                 }
                 let (paths, rescan) = {
                     let mut d = dirty.lock().unwrap_or_else(|e| e.into_inner());
@@ -301,7 +335,7 @@ impl UsageTailer {
                 };
                 // One timer per pass; dropping the handle wakes us at once.
                 tokio::select! {
-                    _ = tokio::time::sleep(timeout) => {}
+                    _ = tokio::time::sleep(timeout.min(SCAN_INTERVAL)) => {}
                     _ = fs_wake.notified() => {
                         // Debounce: an agent writes a burst of lines; take
                         // them in one pass.
@@ -342,7 +376,14 @@ impl UsageTailer {
             if self.cursors.contains(&f) {
                 continue;
             }
-            self.cursors.set(&f, size);
+            // Preserve legacy default-root history; newly supported account
+            // roots were never ingested and can safely backfill at true time.
+            let offset = if f.starts_with(self.claude_root()) {
+                size
+            } else {
+                0
+            };
+            self.cursors.set(&f, offset);
             seeded += 1;
         }
 
@@ -419,6 +460,7 @@ impl UsageTailer {
         let (claude, codex) = self.list_files().await;
         self.tail_listed(&claude, &codex).await;
         self.evict_dead_cursors(&claude, &codex);
+        self.scan_native().await?;
         self.persist().await
     }
 
@@ -427,13 +469,15 @@ impl UsageTailer {
         if self.commit_failed {
             self.persist().await?;
         }
-        let claude_root = self.claude_root();
+        let claude_roots = self.claude_roots.clone();
         let codex_root = self.codex_root();
         let (claude, codex) = tokio::task::spawn_blocking(move || {
             let mut claude = Vec::new();
             let mut codex = Vec::new();
             for p in paths {
-                let is_claude = is_claude_transcript(&claude_root, &p);
+                let is_claude = claude_roots
+                    .iter()
+                    .any(|(root, _)| is_claude_transcript(root, &p));
                 if !is_claude && !is_codex_rollout(&codex_root, &p) {
                     continue;
                 }
@@ -452,6 +496,7 @@ impl UsageTailer {
         .await
         .unwrap_or_default();
         self.tail_listed(&claude, &codex).await;
+        self.scan_native().await?;
         self.persist().await
     }
 
@@ -508,10 +553,11 @@ impl UsageTailer {
     /// held response and late corrections remain exact after restart.
     fn checkpoint(&self) -> serde_json::Value {
         serde_json::json!({
+            "native": self.native,
             "version": 1, "cursors": self.cursors.checkpoint(),
             "seen": self.seen.checkpoint(), "codex": self.codex_counters.checkpoint(),
             "folder": self.folder, "held": self.held, "held_attr": self.held_attr,
-            "codex_meta": self.codex_meta,
+            "codex_meta": self.codex_meta, "held_providers": self.held_providers,
         })
     }
 
@@ -534,6 +580,14 @@ impl UsageTailer {
             serde_json::from_value(state["held_attr"].take()).map_err(|e| e.to_string())?;
         self.codex_meta =
             serde_json::from_value(state["codex_meta"].take()).map_err(|e| e.to_string())?;
+        self.held_providers = match state.get_mut("held_providers") {
+            Some(value) => serde_json::from_value(value.take()).map_err(|e| e.to_string())?,
+            None => HashMap::new(),
+        };
+        self.native = match state.get_mut("native") {
+            Some(value) => serde_json::from_value(value.take()).map_err(|e| e.to_string())?,
+            None => native::NativeState::default(),
+        };
         self.checkpoint_initialized = true;
         self.held_grew = self
             .held
@@ -549,6 +603,7 @@ impl UsageTailer {
             && !self.cursors.is_dirty()
             && !self.seen.has_pending()
             && !self.codex_counters_dirty
+            && !self.native.dirty
             && self.pending_events.is_empty()
         {
             return Ok(());
@@ -564,6 +619,7 @@ impl UsageTailer {
         self.cursors.checkpoint_committed();
         self.seen.checkpoint_committed();
         self.codex_counters_dirty = false;
+        self.native.dirty = false;
         self.commit_failed = false;
         self.checkpoint_initialized = true;
         Ok(())
@@ -610,11 +666,42 @@ impl UsageTailer {
     }
 
     /// List both transcript trees (with sizes) in ONE blocking task.
-    async fn list_files(&self) -> (Vec<(PathBuf, u64)>, Vec<(PathBuf, u64)>) {
+    async fn list_files(&mut self) -> (Vec<(PathBuf, u64)>, Vec<(PathBuf, u64)>) {
         let home = self.home.clone();
-        tokio::task::spawn_blocking(move || (list_claude_files(&home), list_codex_files(&home)))
-            .await
-            .unwrap_or_default()
+        let accounts = self.account_root.clone();
+        match tokio::task::spawn_blocking(move || {
+            let roots = claude_source_roots(&home, &accounts);
+            let mut files = Vec::new();
+            let mut seen = HashSet::new();
+            for (root, _) in &roots {
+                for (path, size) in list_claude_files_under(root) {
+                    let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    if seen.insert(identity) {
+                        files.push((path, size));
+                    }
+                }
+            }
+            (roots, files, list_codex_files(&home))
+        })
+        .await
+        {
+            Ok((roots, claude, codex)) => {
+                self.claude_roots = roots;
+                (claude, codex)
+            }
+            Err(error) => {
+                tracing::warn!("usage tailer: source discovery failed: {error}");
+                (Vec::new(), Vec::new())
+            }
+        }
+    }
+
+    fn claude_provider(&self, file: &Path) -> String {
+        self.claude_roots
+            .iter()
+            .find(|(root, _)| file.starts_with(root))
+            .map(|(_, provider)| provider.clone())
+            .unwrap_or_else(|| "claude".into())
     }
 
     fn set_cursor(&mut self, file: &Path, offset: u64) {
@@ -692,8 +779,7 @@ impl UsageTailer {
             .cloned()
     }
 
-    /// Rebuild the claude (by provider-session-id) and codex (by cwd)
-    /// attribution indexes from the current `sessions` table.
+    /// Rebuild exact provider-session attribution from the current session rows.
     async fn build_attribution(&mut self) -> Attribution {
         self.stats.attribution_builds += 1;
         let repo = SessionsRepo::new(self.pool.clone());
@@ -713,6 +799,8 @@ impl UsageTailer {
             };
             if let Some(psid) = r.provider_session_id {
                 if !psid.is_empty() {
+                    attr.by_provider_identity
+                        .insert((sref.provider.clone(), psid.clone()), sref.clone());
                     attr.by_provider_session.insert(psid, sref.clone());
                 }
             }
@@ -738,9 +826,12 @@ impl UsageTailer {
             // Filename stem is the CLI's session uuid (= provider_session_id);
             // a subagent transcript bills to its parent session.
             let stem = claude_session_stem(file);
-            let ids = match self.lookup_claude(&stem).await {
-                Some(s) => (s.workspace_id, s.otto_session_id),
-                None => (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
+            let (ids, provider) = match self.lookup_claude(&stem).await {
+                Some(s) => ((s.workspace_id, s.otto_session_id), s.provider),
+                None => (
+                    (EXTERNAL_WORKSPACE.to_string(), stem.clone()),
+                    self.claude_provider(file),
+                ),
             };
 
             // One API response = many lines (content blocks, streamed
@@ -755,11 +846,14 @@ impl UsageTailer {
             if let Some(h) = held {
                 self.held.insert(file.to_path_buf(), h);
                 self.held_attr.insert(file.to_path_buf(), ids.clone());
+                self.held_providers
+                    .insert(file.to_path_buf(), provider.clone());
             } else {
                 self.held_attr.remove(file);
+                self.held_providers.remove(file);
             }
             for line in out {
-                self.record_claude(line, &ids);
+                self.record_claude(line, &ids, &provider);
             }
             self.set_cursor(file, new_offset);
             if !more {
@@ -778,17 +872,21 @@ impl UsageTailer {
                 .held_attr
                 .remove(&f)
                 .unwrap_or_else(|| (EXTERNAL_WORKSPACE.to_string(), claude_session_stem(&f)));
+            let provider = self
+                .held_providers
+                .remove(&f)
+                .unwrap_or_else(|| self.claude_provider(&f));
             let mut out = Vec::new();
             self.folder.release(&mut held, &mut self.seen, &mut out);
             // The persisted cursor floor moves on with the next save.
             self.cursors.mark_dirty(&f);
             for line in out {
-                self.record_claude(line, &ids);
+                self.record_claude(line, &ids, &provider);
             }
         }
     }
 
-    fn record_claude(&mut self, line: ClaudeLine, ids: &(String, String)) {
+    fn record_claude(&mut self, line: ClaudeLine, ids: &(String, String), provider: &str) {
         let usage = line.usage;
         let cost = estimate_cost(
             &usage.model,
@@ -801,7 +899,7 @@ impl UsageTailer {
             ts: line.timestamp,
             workspace_id: ids.0.clone(),
             session_id: ids.1.clone(),
-            provider: "claude".to_string(),
+            provider: provider.to_string(),
             model: usage.model,
             kind: "completion".to_string(),
             input_tokens: usage.input,
@@ -1161,10 +1259,36 @@ fn blocking_io<R>(f: impl FnOnce() -> R) -> R {
 /// `<home>/.claude/projects/*/*.jsonl` plus subagent transcripts
 /// `<home>/.claude/projects/*/*/subagents/*.jsonl`. Blocking — call off the
 /// runtime.
+#[cfg(test)]
 fn list_claude_files(home: &Path) -> Vec<(PathBuf, u64)> {
-    let root = home.join(".claude").join("projects");
+    list_claude_files_under(&home.join(".claude/projects"))
+}
+
+fn claude_source_roots(home: &Path, accounts: &Path) -> Vec<(PathBuf, String)> {
+    let mut roots = vec![(home.join(".claude/projects"), "claude".into())];
+    for dir in read_subdirs(home) {
+        let Some(name) = dir.file_name().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if name.starts_with(".claude-") && dir.join("projects").is_dir() {
+            roots.push((
+                dir.join("projects"),
+                name.trim_start_matches('.').to_string(),
+            ));
+        }
+    }
+    roots.push((home.join(".config/claude/projects"), "claude".into()));
+    for dir in read_subdirs(accounts) {
+        if dir.join("projects").is_dir() {
+            roots.push((dir.join("projects"), "claude".into()));
+        }
+    }
+    roots
+}
+
+fn list_claude_files_under(root: &Path) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
-    for project in read_subdirs(&root) {
+    for project in read_subdirs(root) {
         out.extend(read_files_with_ext(&project, "jsonl", |_| true));
         for session in read_subdirs(&project) {
             out.extend(read_files_with_ext(
@@ -1925,6 +2049,200 @@ mod tests {
 #[cfg(test)]
 mod accounting_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn grok_history_backfills_once_with_disjoint_cache_and_original_time() {
+        let root = std::env::temp_dir().join(format!("otto-grok-usage-{}", otto_core::new_id()));
+        let home = root.join("home");
+        let dir = home.join(".grok/sessions/project/provider-grok");
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = serde_json::json!({"timestamp":1785585600, "params":{"sessionId":"provider-grok", "_meta":{"eventId":"event-1", "agentTimestampMs":1785585600000_i64}, "update":{"sessionUpdate":"turn_completed", "usage":{"modelUsage":{"grok-model":{"inputTokens":100,"outputTokens":20,"cachedReadTokens":80,"reasoningTokens":5,"costUsdTicks":1000000000_u64}}}}}}).to_string() + "\n";
+        let file = dir.join("updates.jsonl");
+        std::fs::write(&file, format!("{record}{record}")).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let usage = UsageEngine::start(
+            otto_usage::UsageConfig {
+                enabled: true,
+                clickhouse_path: Some(
+                    root.join("missing-clickhouse")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer =
+            UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home.clone());
+        tailer.seed_existing_files().await;
+        // Read the owed durable events rather than relying on pending memory.
+        tailer.scan_once().await.unwrap();
+        let journal = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(root.join("usage/usage-ingestion.sqlite3"))
+                    .read_only(true),
+            )
+            .await
+            .unwrap();
+        let rows: Vec<String> = sqlx::query_scalar("SELECT payload FROM outbox")
+            .fetch_all(&journal)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "a repeated Grok turn must be counted once");
+        let event: UsageEvent = serde_json::from_str(&rows[0]).unwrap();
+        assert_eq!(event.provider, "grok");
+        assert_eq!(
+            (
+                event.input_tokens,
+                event.cache_read_tokens,
+                event.output_tokens
+            ),
+            (20, 80, 20)
+        );
+        assert_eq!(event.ts.as_deref(), Some("2026-08-01T12:00:00.000Z"));
+        assert!((event.cost_usd - 0.1).abs() < 1e-9);
+        let checkpoint = usage.ingestion_checkpoint().await.unwrap().unwrap();
+        assert!(
+            checkpoint.get("native").is_some(),
+            "Grok must participate in the durable ingestion checkpoint"
+        );
+        let mut recovered = UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home);
+        recovered.restore_checkpoint(checkpoint).unwrap();
+        recovered.seed_existing_files().await;
+        assert_eq!(
+            recovered.cursors.get(&file),
+            Some((record.len() * 2) as u64)
+        );
+        recovered.scan_once().await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox")
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "restart must not append the historical turn again"
+        );
+        journal.close().await;
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_session_provider_survives_a_held_response_restart() {
+        let root = std::env::temp_dir().join(format!("otto-held-provider-{}", otto_core::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let now = "2026-10-19T00:00:00Z";
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces(id,name,root_path,created_at) VALUES('w','w','/repo',?)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions(id,workspace_id,kind,provider,title,status,cwd,provider_session_id,created_by,created_at,last_active_at,meta_json) VALUES('s','w','agent','claude-work','t','running','/repo','psid','u',?,?,'{}')").bind(now).bind(now).execute(&pool).await.unwrap();
+        let usage = UsageEngine::start(
+            otto_usage::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let mut tailer = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("data"),
+            root.join("home"),
+        );
+        let path = root.join("psid.jsonl");
+        let body = serde_json::json!({"type":"assistant", "timestamp":now, "message":{"id":"held", "model":"claude-sonnet-4", "stop_reason":null, "usage":{"input_tokens":100,"output_tokens":5}}}).to_string() + "\n";
+        std::fs::write(&path, &body).unwrap();
+        tailer
+            .tail_claude_file(&path, body.len() as u64)
+            .await
+            .unwrap();
+        assert!(tailer.pending_events.is_empty());
+        tailer.persist().await.unwrap();
+        let mut restarted = UsageTailer::new(
+            usage.clone(),
+            pool.clone(),
+            root.join("data"),
+            root.join("home"),
+        );
+        restarted
+            .restore_checkpoint(usage.ingestion_checkpoint().await.unwrap().unwrap())
+            .unwrap();
+        restarted.release_held(|_| true);
+        assert_eq!(restarted.pending_events.len(), 1);
+        assert_eq!(restarted.pending_events[0].provider, "claude-work");
+        assert_eq!(restarted.pending_events[0].workspace_id, "w");
+        assert_eq!(restarted.pending_events[0].session_id, "s");
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_claude_history_is_discovered_and_keeps_provider_identity() {
+        let root = std::env::temp_dir().join(format!("otto-custom-usage-{}", otto_core::new_id()));
+        let home = root.join("home");
+        let projects = home.join(".claude-work/projects/repo");
+        std::fs::create_dir_all(&projects).unwrap();
+        let file = projects.join("work-session.jsonl");
+        let body = serde_json::json!({"type":"assistant", "timestamp":"2026-08-01T12:00:00Z", "message":{"id":"response-work", "model":"claude-sonnet-4", "stop_reason":"end_turn", "usage":{"input_tokens":100,"output_tokens":20}}}).to_string() + "\n";
+        std::fs::write(&file, &body).unwrap();
+        let pool = otto_state::open(&root.join("state.db")).await.unwrap();
+        let usage = UsageEngine::start(
+            otto_usage::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            root.join("usage"),
+        )
+        .await;
+        let legacy = home.join(".claude/projects/repo/legacy.jsonl");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            body.replace("response-work", "legacy-already-counted"),
+        )
+        .unwrap();
+        let mut tailer =
+            UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home.clone());
+        let (files, _) = tailer.list_files().await;
+        assert!(
+            files.iter().any(|(p, _)| p == &file),
+            "custom Claude account history must be discovered"
+        );
+        tailer.seed_existing_files().await;
+        tailer.tail_listed(&files, &[]).await;
+        assert_eq!(
+            tailer.pending_events.len(),
+            1,
+            "newly supported history must not be seeded to EOF"
+        );
+        assert_eq!(tailer.pending_events[0].provider, "claude-work");
+        assert_eq!(tailer.pending_events[0].input_tokens, 100);
+        assert_eq!(
+            tailer.pending_events[0].ts.as_deref(),
+            Some("2026-08-01T12:00:00Z")
+        );
+        tailer.persist().await.unwrap();
+        let mut restarted = UsageTailer::new(usage.clone(), pool.clone(), root.join("data"), home);
+        restarted
+            .restore_checkpoint(usage.ingestion_checkpoint().await.unwrap().unwrap())
+            .unwrap();
+        restarted.seed_existing_files().await;
+        let (files, _) = restarted.list_files().await;
+        restarted.tail_listed(&files, &[]).await;
+        assert!(restarted.pending_events.is_empty(), "restart must neither replay the backfill nor import legacy default-Claude history twice");
+        pool.close().await;
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[tokio::test]
     async fn codex_exact_identity_timestamp_model_and_restart_delta() {
