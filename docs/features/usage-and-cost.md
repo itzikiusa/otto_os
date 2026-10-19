@@ -27,7 +27,7 @@ exact endpoints, columns, setting keys, on-disk paths, and UI labels.
 | | |
 |---|---|
 | **What it is** | A local usage/cost meter + system-metrics store for the agent CLIs Otto runs. |
-| **How usage is captured** | A background **tailer** reads `~/.claude/projects/**.jsonl` (Claude Code) and `~/.codex/sessions/**/rollout-*.jsonl` (Codex). Zero manual instrumentation. |
+| **How usage is captured** | A background **tailer** imports local Claude/custom-account, Codex, Grok and Antigravity history. Zero manual instrumentation. |
 | **What is recorded** | One row per agent turn: `input / output / cache-read / cache-write` tokens, model, provider, an estimated `cost_usd`, and work-graph attribution. |
 | **Storage engine** | Embedded **ClickHouse** in `clickhouse local --path` mode — no daemon, no port, data on disk. Degrades to a no-op if the binary is missing. |
 | **On disk** | `~/Library/Application Support/Otto/clickhouse/` (data) · `~/Library/Application Support/Otto/bin/clickhouse` (Otto-installed binary). |
@@ -84,13 +84,19 @@ sessions, and daemon restarts.
 
 | Provider | Transcript glob | Per-turn signal |
 |---|---|---|
-| **Claude Code** | `~/.claude/projects/<enc_cwd>/<session-uuid>.jsonl`, plus subagent transcripts `<session-uuid>/subagents/*.jsonl` (billed to the parent session) | `type=="assistant"` lines carry `message.usage.*`; model at `message.model`. Each API response is counted once by its `message.id:requestId` key, so a subagent response that also appears in the parent file is not double counted. |
-| **Codex** | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | `type=="event_msg"` + `payload.type=="token_count"` lines; counts from `payload.info.last_token_usage`. Model from the first `session_meta` line (else `"codex"`). |
-| **agy** | — | **Unsupported** — token usage is encrypted on disk; logged once. |
+| **Claude Code and custom Claude providers** | `~/.claude/projects/<enc_cwd>/<session-uuid>.jsonl`, `~/.claude-*/projects/` (including `claude-work`), `~/.config/claude/projects/`, and Otto subscription-account `projects/` directories, plus subagent transcripts `<session-uuid>/subagents/*.jsonl` (billed to the parent session) | `type=="assistant"` lines carry `message.usage.*`; model at `message.model`. Each API response is counted once by its `message.id:requestId` key, so a subagent response that also appears in the parent file is not double counted. |
+| **Codex** | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | `type=="event_msg"` + `payload.type=="token_count"` lines; counts from `payload.info.total_token_usage`, differenced against a persisted per-session baseline. Model from `session_meta` and `turn_context` (else `"codex"`). |
+| **Grok** | `~/.grok/sessions/**/updates.jsonl` | Completed-turn model usage; cache is split out of input and reasoning is already included in output. Reported `costUsdTicks` is used when available; otherwise cost is estimated. |
+| **Antigravity (`agy`)** | `~/.gemini/{antigravity-cli,antigravity,antigravity-ide}/conversations/*.db` | Read-only per-step SQLite metadata supplies historical dates, models, and disjoint input/output/cache counts. JSONL mirrors are not summed again. |
+
+`GROK_HOME` and `ANTIGRAVITY_DATA_DIR` override/add provider roots for the
+normal daemon. Isolated E2E daemons ignore those environment overrides. Additional
+Antigravity backup/ACP and `~/.config/antigravity` roots are discovered as well.
 
 ### 3.2 Token field mapping (verified against the parsers)
 
-Parsing is in `crates/otto-usage/src/tailer.rs`. Missing fields default to `0`;
+Parsers live in `crates/otto-transcript/src/{usage,grok_usage,agy}.rs`;
+`otto-usage/src/tailer.rs` re-exports the legacy usage parsers. Missing fields default to `0`;
 non-matching lines, lines without usage, and parse failures are silently skipped.
 
 **Claude** (`parse_claude_line`):
@@ -102,15 +108,10 @@ non-matching lines, lines without usage, and parse failures are silently skipped
 | `cache_read` | `cache_read_input_tokens` |
 | `cache_write` | `cache_creation_input_tokens` |
 
-**Codex** (`parse_codex_line`) — reads the **per-turn** `last_token_usage`, *not*
-the cumulative `total_token_usage`, to avoid double-counting:
-
-| Normalized field | Transcript source (`payload.info.last_token_usage.*`) |
-|---|---|
-| `input` | `input_tokens` |
-| `output` | `output_tokens` **+** `reasoning_output_tokens` (reasoning bills as output) |
-| `cache_read` | `cached_input_tokens` |
-| `cache_write` | always `0` (Codex has no cache-creation concept) |
+**Codex** (`parse_codex_line`) reads cumulative `total_token_usage`. The tailer
+records only the increase from the last committed session total. Input excludes
+`cached_input_tokens`; output uses `output_tokens` (reasoning is already included).
+Cache-read uses `cached_input_tokens`, and cache-write is zero.
 
 ### 3.3 Attribution (which session a turn belongs to)
 
@@ -124,10 +125,15 @@ simply not Otto's (external) never re-queries. Indexes:
 
 - **Claude** — by transcript filename stem (= the CLI session UUID =
   `provider_session_id` on the Otto session row).
-- **Codex** — by the rollout file's `cwd` (from its `session_meta` line) →
-  the unique Codex session whose `cwd` matches. Attribution applies **only when
-  exactly one** Codex session matches that directory; otherwise the turn is
-  treated as external.
+- **Codex** — by the exact `session_meta` provider session ID.
+- **Grok** — by the exact `params.sessionId` (or session-directory fallback).
+- **Antigravity** — by conversation UUID, then recorded parent/root conversation.
+
+Shared working directories do not establish ownership.
+
+Custom Claude sessions keep the provider name stored on their Otto session, such
+as `claude-work`. Unmatched transcripts in `~/.claude-work/projects` use the
+`claude-work` label and are visible in the **All** view.
 
 A turn that maps to an Otto session inherits that session's `workspace_id` and id.
 A turn that maps to nothing is recorded under the special workspace id
@@ -137,87 +143,30 @@ default in the dashboard (the **Otto / All** toggle — see §6).
 
 ### 3.4 No double-counting, true-time stamping
 
-ClickHouse has **no idempotency column**, so the tailer guards against
-re-counting itself — at two levels:
+Source offsets, response deduplication, held streaming responses, and Codex
+cumulative baselines commit atomically with owed usage events to
+`usage-ingestion.sqlite3`. Delivery to ClickHouse reuses each journal event ID;
+replay after a crash does not add the event twice. A failed journal commit stops
+source advancement until the same batch commits successfully. Legacy cursor
+files are imported once and are no longer advanced independently.
 
-- **Byte-offset cursor** (no *line* read twice). A persistent
-  `absolute-path → byte offset` map lives at
-  `~/Library/Application Support/Otto/usage_tailer.json` (`CursorStore`, written
-  atomically via tmp-file + rename) plus an append-only sidecar
-  `usage_tailer.json.log` of `path<TAB>offset` lines for the cursors that moved
-  since the last compaction (replayed over the JSON on load, last line wins;
-  compacted after 5k lines or when a dead cursor is evicted). Only complete
-  lines up to the last `\n` are consumed; a partial trailing line is left for
-  the next pass. Change detection compares a file's size with the size it had
-  when last tailed (memory only) — not with the cursor — so a file ending in a
-  partial line is read once, not every pass. A file truncation / rotation
-  (cursor > size) resets the cursor to 0. Reads are capped at 8 MiB per step
-  (a large catch-up streams in windows) and parsed on the blocking pool.
-- **Response-key dedup** (no *API response* counted twice). Claude Code writes
-  one line **per content block**, so a single billed response (one
-  `message.id` + `requestId`) appears on several lines, each repeating the same
-  `usage` object — and resumed sessions replay old lines into the new session's
-  file. Counting every line inflates real usage ~2.4×. The tailer counts a
-  response key **once**. The seen-set holds a 16-byte xxh3-128 hash per key
-  (an ordered set, ~3.6 MB at the cap instead of ~20 MB for the raw strings),
-  is persisted (`usage_tailer_seen.json` as an array of 32-hex hashes — files
-  holding raw `msg_…:req_…` keys from older builds still load — plus an
-  append-only `.log`) and FIFO-capped at 100k keys (~two months of history).
-  Downgrading to a pre-hash build would not recognise the hashed entries.
-- **Final usage per response.** While a response streams, Claude Code writes
-  its early lines with `stop_reason: null` and a **partial** `output_tokens`
-  (subagent transcripts: 5 → 141, 7 → 300); only the last line carries the
-  final count. Counting the first line under-counted output ~3× (279k vs 864k
-  in ccusage on 2026-10-03). The tailer now **holds** the newest response per
-  file (`ResponseFolder`, field-wise max over its lines) and counts it once
-  when a line with a `stop_reason` arrives, the next response starts, or the
-  file writes nothing for a whole scan. A line that still arrives after that
-  becomes a positive **correction** row (same key timestamp), so sums stay
-  exact (the row count can be one higher for such a response). The persisted
-  cursor never passes a held response, so a restart re-reads it instead of
-  losing it. Input / cache counts are identical on every line and unaffected.
-- **True-time stamping.** Claude events carry the transcript line's own
-  `timestamp` into the `ts` column (`date_time_input_format=best_effort` on
-  insert), so late ingestion — catch-up after downtime, or the rebuild below —
-  is dated when the API call actually happened. Codex lines have no usable
-  per-turn timestamp; their pre-existing history is seeded away at startup
-  (`cursor = file size`) exactly as before.
-- **Cadence.** Event-driven: an FSEvents watcher (`notify`) on
-  `~/.claude/projects` and `~/.codex/sessions` collects changed `*.jsonl`
-  paths; the loop wakes on them (2 s debounce) and stats/tails only those.
-  The `sessions` attribution query runs only when a pass actually reads new
-  lines. A full listing runs at boot, every 10 min, and whenever FSEvents
-  reports dropped events (dead cursors are evicted there). A 20 s timer runs
-  only while a streamed response is held (released after 15 s of quiet).
-  Without a watcher it falls back to a full scan every 20 s
-  (`SCAN_INTERVAL`). A bad file or line is logged and skipped; the loop never
-  panics.
-
-#### One-time dedup rebuild (upgrade path)
-
-Stores fed by older tailers are wrong (pre-dedup: inflated; first-line dedup:
-output under-counted; pre-2026-09-25 pricing: Opus 5.5 at the Opus 4.x card).
-On the first start where
-`~/Library/Application Support/Otto/usage_tailer_dedup_rebuild_v2.done` is absent
-(`_v2` re-runs it once for installs that already ran the first rebuild),
-the tailer re-derives Claude usage from scratch: it parses every claude
-transcript from byte 0 (deduped keeping each response's FINAL usage,
-true-time-stamped, re-priced with the current rate card — this also *back-fills*
-history the old tailer skipped at seed time), **purges** its own old rows
-(exactly the `provider='claude' AND kind='completion'` rows with *no*
-work-graph dims, bounded by the oldest rebuilt date), inserts the rebuilt
-events, advances cursors/seen, and writes the marker. Purge-before-insert plus
-marker-last makes a crashed rebuild retry cleanly on the next start. Rows whose
-transcripts were deleted since (Claude Code prunes old sessions) predate the
-bound and survive untouched. `/ingest/usage` rows are safe from the purge: that
-endpoint stamps `origin: "ingest"` when the session carries no work ref.
-
-The rebuild never parks a tokio worker and never holds the whole history:
-it runs on the blocking pool in two streaming passes over the files (pass 1:
-the oldest event date that bounds the purge; pass 2: parse + per-file fold +
-cross-file dedup by key hash, handing 5k-event batches to the inserter as
-they fill). A substring prefilter skips non-usage lines without serde, and
-usage lines deserialize into a typed borrowed struct (no JSON DOM).
+- **Byte offsets:** only complete JSONL lines are consumed. Reads are capped at
+  8 MiB per step. An unchanged file is not parsed again.
+- **Claude response identity:** repeated content blocks and resume copies share
+  `message.id:requestId`. The tailer folds streaming counts, releases final usage,
+  and records only positive corrections for late updates. Held responses and
+  their provider labels survive restart in the checkpoint.
+- **Original timestamps:** Claude and Codex events retain their source event
+  times, so catch-up is attributed to the day the work happened.
+- **Account history:** newly discovered custom Claude account directories are
+  read from the beginning. Existing default-Claude/Codex checkpoints and their
+  startup baseline policy are preserved; upgrading does not delete or rebuild
+  already recorded usage. Historical records remain subject to retention.
+- **Cadence:** Claude/Codex JSONL changes wake the tailer through FSEvents with
+  a two-second debounce. Full discovery runs at boot and every ten minutes,
+  also recovering dropped watcher events. Without a watcher it polls every
+  twenty seconds. Streaming Claude responses release after fifteen seconds of
+  quiet.
 
 #### One-time repartition (schema drift)
 
@@ -644,7 +593,7 @@ last fetch) so sparklines update in near-real-time without blind polling.
 
 **Capabilities**
 
-- Real per-turn token capture for Claude Code and Codex with **zero manual
+- Real per-turn token capture for Claude Code, custom Claude accounts, Codex, Grok, and Antigravity with **zero manual
   instrumentation** — survives resumes, channel sessions, and restarts.
 - Four-class token breakdown + per-model USD cost estimate; attribution by provider,
   day, session, feature, and nine work-graph dimensions; pre-launch cost forecast.
@@ -660,7 +609,7 @@ last fetch) so sparklines update in near-real-time without blind polling.
   (`PRICED_AS_OF`).
 - **No backfill.** Only turns that occur after the engine is up are counted; pre-existing
   transcript history is seeded out.
-- **agy provider is unsupported** (encrypted transcripts).
+- Legacy Antigravity `.pb` archives are not imported; SQLite conversation histories are supported.
 - **Codex attribution is cwd-based** — ambiguous when two Codex sessions share a
   directory (those turns become `external`).
 - **Macro-level only** — the dashboard is root-only and aggregates all workspaces;
@@ -705,20 +654,20 @@ the binary is missing — it just records nothing.
 intentionally slow. Watch daemon logs (`/logs/daemon`) for
 `usage: clickhouse installed at …`.
 
-**Engine available but no usage appears.** Expected for sessions that pre-date the
-engine — history is seeded out (§3.4). Run a *new* agent turn and wait up to the 20 s
-scan interval. Confirm transcripts exist under `~/.claude/projects/**` /
-`~/.codex/sessions/**`. Check `status.usage_rows` is climbing. agy sessions are never
-counted (encrypted).
+**Engine available but no usage appears.** Newly supported Grok, Antigravity,
+and custom Claude roots backfill available history using its original dates.
+Default Claude/Codex legacy baselines remain intact to avoid importing previously
+counted turns twice. Check the date range and switch to **All** to include CLI
+sessions not linked to Otto. Allow a scan interval (up to 20 seconds) for new turns.
 
-**Codex usage lands under "External" instead of a session.** Codex is attributed by
-`cwd`, and only when exactly one Codex session matches that directory. Two Codex
-sessions in the same cwd → both treated as external. Claude attribution is exact
-(by session UUID) and not subject to this.
+**Usage lands under "External" instead of a session.** Attribution requires the
+exact provider session ID recorded by Otto. A shared working directory does not
+establish ownership. Antigravity subagents can inherit their recorded parent/root
+conversation's Otto attribution. Unmatched history remains visible in **All**.
 
 **A session's cost shows "est."** The model id isn't in the rate table, so it was
 priced at the conservative Opus fallback (`fallback_priced: true`). The number is an
-over-estimate, not an error. Bump the rate table in `pricing.rs` for new models.
+estimate, not a provider invoice. Bump the rate table in `pricing.rs` for new models.
 
 **Metrics sparklines are empty / "Collecting metrics…".** The sampler runs only while
 `available()`; it needs ≥ 2 samples to draw a line. Wait one or two

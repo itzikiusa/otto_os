@@ -516,11 +516,9 @@ fn post_listen_housekeeping(data_dir: std::path::PathBuf) {
     }
 }
 
-/// Usage tailer: real token usage from Claude + Codex CLI transcripts. Tails
-/// the CLIs' on-disk JSONL transcripts and records exact per-turn token
-/// usage/cost into the usage store (a persistent byte-offset cursor prevents
-/// double-counting; pre-existing history is skipped to avoid misdated rows).
-/// agy is unsupported (its on-disk usage is encrypted).
+/// Import local CLI usage through the durable source checkpoint/outbox.
+/// Claude (including custom account roots), Codex, Grok, and Antigravity keep
+/// their source timestamps; newly supported roots backfill historical usage.
 fn start_usage_tailer(cfg: &Config, ctx: &ServerCtx) -> usage_tailer::UsageTailerHandle {
     // An isolated E2E daemon must not import the developer's real provider
     // history. Besides privacy, that startup scan distorts load baselines.
@@ -535,8 +533,20 @@ fn start_usage_tailer(cfg: &Config, ctx: &ServerCtx) -> usage_tailer::UsageTaile
         cfg.data_dir.clone(),
         transcript_home,
     );
+    let tailer = if std::env::var("OTTO_E2E").as_deref() == Ok("1") {
+        tailer
+    } else {
+        tailer.with_native_roots(
+            std::env::var_os("GROK_HOME")
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+            std::env::var_os("ANTIGRAVITY_DATA_DIR")
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+        )
+    };
     let handle = tailer.start();
-    tracing::info!("usage tailer: started (claude+codex; agy unsupported)");
+    tracing::info!("usage tailer: started (claude accounts, codex, grok, agy)");
     handle
 }
 

@@ -18,9 +18,11 @@
 //! a silent drop), and the whole local corpus is replayed by the `#[ignore]`d
 //! test in `tests/corpus.rs`.
 
+pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod fold;
+pub mod grok_usage;
 pub mod images;
 pub mod model;
 pub mod peek;
