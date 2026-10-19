@@ -3,7 +3,6 @@
 import { api, getToken } from '../api/client';
 import { plural } from '../plural';
 import { listActiveWorkflowRuns } from '../api/workflows';
-import { fetchWorkspace } from '../api/workspaces';
 import { router } from '../router.svelte';
 import type {
   ActiveWorkflowRun,
@@ -2144,20 +2143,29 @@ class WorkspaceStore {
     this.restartNonces[sessionId] = (this.restartNonces[sessionId] ?? 0) + 1;
   }
 
-  /** Save `notes` into workspace `wsId` (default: current). The PATCH replaces
-   *  the whole settings object, so merge into a FRESH read — a cached copy
-   *  could revert keys changed since (e.g. api_client.allow_local). */
+  private settingsWrites = new Map<Id, Promise<void>>();
+
+  /** Atomic key patches preserve other windows' settings. Serialize this
+   *  document's writes so a delayed response cannot roll its cache backward. */
+  private patchSettings(wsId: Id, patch: Record<string, unknown>): Promise<void> {
+    const token = getToken();
+    const previous = this.settingsWrites.get(wsId) ?? Promise.resolve();
+    const write = previous.catch(() => {}).then(async () => {
+      if (token !== getToken()) throw new Error('Identity changed; retry saving workspace settings.');
+      const updated = await api.patch<Workspace>(`/workspaces/${wsId}`, { settings_patch: patch });
+      if (token !== getToken()) return;
+      this.workspaces = this.workspaces.map(w => w.id === updated.id ? { ...w, ...updated } : w);
+    });
+    this.settingsWrites.set(wsId, write);
+    const cleanup = () => { if (this.settingsWrites.get(wsId) === write) this.settingsWrites.delete(wsId); };
+    void write.then(cleanup, cleanup);
+    return write;
+  }
+
+  /** Save only notes; other settings are merged atomically by the daemon. */
   async saveNotes(notes: string, wsId: Id | null = this.currentId): Promise<void> {
     if (!wsId) return;
-    const token = getToken();
-    const fresh = await fetchWorkspace(wsId);
-    if (token !== getToken()) return;
-    const settings = { ...fresh.settings, notes };
-    const updated = await api.patch<Workspace>(`/workspaces/${wsId}`, { settings });
-    if (token !== getToken()) return;
-    this.workspaces = this.workspaces.map((w) =>
-      w.id === updated.id ? { ...w, ...updated } : w,
-    );
+    await this.patchSettings(wsId, { notes });
   }
 
   /** API-client opt-in: allow requests to localhost/private networks from this
@@ -2171,12 +2179,7 @@ class WorkspaceStore {
    *  workspaces PATCH route). Shallow-merges into the settings JSON. */
   async setApiAllowLocal(allow: boolean): Promise<void> {
     if (!this.currentId || !this.current) return;
-    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
-    const settings = { ...this.current.settings, api_client: { ...prev, allow_local: allow } };
-    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
-    this.workspaces = this.workspaces.map((w) =>
-      w.id === updated.id ? { ...w, ...updated } : w,
-    );
+    await this.patchSettings(this.currentId, { api_client: { allow_local: allow } });
   }
 
   /** API-client history retention for this workspace (the daemon trims after
@@ -2196,15 +2199,7 @@ class WorkspaceStore {
    *  PATCH route). Shallow-merges into the settings JSON. */
   async setApiHistoryRetention(rows: number, days: number): Promise<void> {
     if (!this.currentId || !this.current) return;
-    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
-    const settings = {
-      ...this.current.settings,
-      api_client: { ...prev, history_max_rows: rows, history_max_days: days },
-    };
-    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
-    this.workspaces = this.workspaces.map((w) =>
-      w.id === updated.id ? { ...w, ...updated } : w,
-    );
+    await this.patchSettings(this.currentId, { api_client: { history_max_rows: rows, history_max_days: days } });
   }
 
   /** Newest finished automation runs kept per automation
@@ -2218,21 +2213,14 @@ class WorkspaceStore {
   /** Set the run-history retention (same admin-gated PATCH, shallow merge). */
   async setApiRunsKeep(keep: number): Promise<void> {
     if (!this.currentId || !this.current) return;
-    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
-    const settings = { ...this.current.settings, api_client: { ...prev, automation_runs_keep: keep } };
-    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
-    this.workspaces = this.workspaces.map((w) => (w.id === updated.id ? { ...w, ...updated } : w));
+    await this.patchSettings(this.currentId, { api_client: { automation_runs_keep: keep } });
   }
 
   /** Set this workspace's default agent CLI. '' clears it (use the global
    *  default). Shallow-merges into the workspace settings JSON. */
   async saveDefaultAgent(provider: string): Promise<void> {
     if (!this.currentId || !this.current) return;
-    const settings = { ...this.current.settings, default_provider: provider };
-    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
-    this.workspaces = this.workspaces.map((w) =>
-      w.id === updated.id ? { ...w, ...updated } : w,
-    );
+    await this.patchSettings(this.currentId, { default_provider: provider });
   }
 }
 

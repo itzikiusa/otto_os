@@ -22,7 +22,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
     crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout, performance, encodeURIComponent,
     localStorage: {getItem() {return null;},setItem() {}},
     require: strictRequire([
-      ['/api/client', {api, isAbortError: () => false}],
+      ['/api/client', {api, isAbortError: () => false, newHostConfirmHost: () => null}],
       ['/workspace.svelte', {ws}],
       ['/toast.svelte', {toasts: {error: (message: string) => { notices.push(message); },success() {},info() {}}}],
       // No flow here confirms; a call would be an untested path, so fail loudly.
@@ -632,4 +632,113 @@ test('lists stay pending until this workspace settles once — a refetch never r
   // Another workspace has not settled yet.
   ws.currentId = 'B';
   assert.equal(v.listsPending, true);
+});
+
+test('interactive scripts read captured plain environment values without persisting them as runtime overrides', async () => {
+  const seen: any[] = [], sent: any[] = [];
+  const {v} = setup({post: async (_url: string, body: any) => {sent.push(body); return okResp(200);}}, async (input: any) => {
+    seen.push(input);
+    if (input.kind === 'pre') return {request: input.request, vars: {...input.vars, next:'42'}, run:{logs:[],tests:[],writes:{next:'42'}}};
+    return {vars:input.vars,run:{logs:[],tests:[],writes:{}}};
+  });
+  v.activeEnv = {id:'env',variables:{tenant:'abc',priority:'env'},secret_keys:['token']};
+  v.runtimeVars = {priority:'runtime'};
+  v.draft = {...v.draft,url:'https://example.test',pre_request_script:'read env',post_response_script:'read env'};
+  await v.execute();
+  assert.equal(seen[0].vars.tenant,'abc'); assert.equal(seen[0].vars.priority,'runtime');
+  assert.equal(seen[1].vars.tenant,'abc'); assert.equal(seen[1].vars.next,'42');
+  assert.equal(sent[0].vars.tenant,undefined);
+  assert.deepEqual({...v.runtimeVars},{priority:'runtime',next:'42'});
+});
+
+test('gRPC replacement owns result, cancel, and environment snapshot', async () => {
+  const a = deferred<any>(), b = deferred<any>(); const calls: any[] = [];
+  const {v} = setup({post: (url: string, body: any, signal: AbortSignal) => {calls.push({url,body,signal});return calls.length === 1 ? a.promise : b.promise;}});
+  v.activeEnv = {id:'env-a',variables:{},secret_keys:[]};
+  v.runtimeVars = {tenant:'abc'};
+  v.draft = {...v.draft,kind:'grpc',url:'{{base_url}}',grpc_method:'/Test/Read',body:'{}'};
+  const first = v.executeGrpc(); const second = v.executeGrpc();
+  assert.equal(calls[0].signal.aborted,true); assert.equal(v.sending,true);
+  assert.equal(calls[1].body.environment_id,'env-a'); assert.equal(calls[1].body.vars.tenant,'abc');
+  b.resolve(okResp(200,'new')); await second;
+  a.resolve(okResp(200,'old')); await first;
+  assert.equal(v.lastResponse.body,'new'); assert.equal(v.sending,false);
+  const third = v.executeGrpc(); v.cancelExecute(); await third;
+  assert.equal(v.lastResponse.body,'new');
+});
+
+test('stripped multipart history cannot send until the file is reselected', async () => {
+  let sends = 0;
+  const {v} = setup({post:async () => {sends++;return okResp(200);}});
+  const body = JSON.stringify([{key:'file',type:'file',filename:'hello.txt',value:'',size:6}]);
+  await v.loadHistoryIntoDraft({id:'h',method:'POST',url:'https://upload.test',request:{body_mode:'multipart',body},response:{}});
+  await v.execute(); assert.equal(sends,0);
+  v.draft = {...v.draft,body:JSON.stringify([{key:'file',type:'file',filename:'hello.txt',value:'aGVsbG8='}])};
+  await v.execute(); assert.equal(sends,1);
+});
+
+test('truncated history cannot send or save the retained prefix', async () => {
+  let writes = 0;
+  const {v} = setup({post:async () => {writes++;return okResp(200);}});
+  await v.loadHistoryIntoDraft({id:'h',method:'POST',url:'https://example.test',request:{body_mode:'raw',body:'prefix',request_truncated:true},response:{}});
+  await v.execute(); await v.saveDraft('incomplete',null); assert.equal(writes,0);
+  v.draft = {...v.draft,body:'complete replacement'};
+  await v.execute(); assert.equal(writes,1);
+});
+
+test('metadata-only automation history cannot silently replay as an empty POST', async () => {
+  let sends = 0;
+  const {v} = setup({post:async () => {sends++;return okResp(200);}});
+  await v.loadHistoryIntoDraft({id:'h',method:'POST',url:'https://example.test',request:{source:'automation_run',request_id:'deleted'},response:{}});
+  await v.execute(); await v.saveDraft('bad replay',null); assert.equal(sends,0);
+});
+
+test('gRPC background tab retains its own result and closing a tab aborts its call', async () => {
+  const pending = deferred<any>(); let signal!: AbortSignal;
+  const {v} = setup({post: (_url: string,_body: any,s: AbortSignal) => {signal=s;return pending.promise;}});
+  v.draft = {...v.draft,kind:'grpc',url:'https://example.test',grpc_method:'/Test/Read'};
+  const owner = v.draft.tabId; const run = v.executeGrpc();
+  v.newDraft();
+  pending.resolve(okResp(200,'background')); await run;
+  assert.equal(v.lastResponse,null); assert.equal(v.responses.get(owner).resp.body,'background');
+  v.switchTab(v.tabs.findIndex((t: any) => t.tabId === owner));
+  const again = v.executeGrpc(); v.closeTab(v.activeTab); await again;
+  assert.equal(signal.aborted,true); assert.equal(v.responses.has(owner),false);
+});
+
+test('truncated multipart JSON remains blocked, while a deliberately empty selected file is valid', async () => {
+  let sends = 0;
+  const {v} = setup({post:async () => {sends++;return okResp(200);}});
+  await v.loadHistoryIntoDraft({id:'h',method:'POST',url:'https://example.test',request:{body_mode:'multipart',body:'[{"key":"fi',request_truncated:true},response:{}});
+  await v.execute(); assert.equal(sends,0);
+  v.draft = {...v.draft,body:JSON.stringify([{key:'file',type:'file',filename:'empty.txt',value:''}])};
+  await v.execute(); assert.equal(sends,1);
+});
+
+test('metadata-only history opens the current saved request only through an explicit action', async () => {
+  const full = {...savedReq('r1','https://example.test'),method:'POST',body_mode:'json',body:'{"name":"alice"}',headers:[{key:'X-Tenant',value:'abc'}],query:[]};
+  const {v} = setup({get:async () => full});
+  v.requests = [{...full,workspace_id:'A'}];
+  await v.loadHistoryIntoDraft({id:'h',method:'POST',url:full.url,request:{source:'automation_run',request_id:'r1'},response:{}});
+  assert.ok(v.replayIssue());
+  await v.openHistorySavedRequest();
+  assert.equal(v.replayIssue(),null); assert.equal(v.draft.body,full.body); assert.equal(v.draft.requestId,'r1');
+  assert.equal(v.responseFromHistory,null);
+});
+
+test('gRPC preserves transport failure detail and accepts application failure responses', async () => {
+  const {v} = setup({post:async () => {throw Error('connection refused');}});
+  v.draft = {...v.draft,kind:'grpc',url:'https://example.test',grpc_method:'/Test/Read'};
+  await v.executeGrpc(); assert.match(v.lastError,/connection refused$/); assert.equal(v.sending,false);
+  const {v:w} = setup({post:async () => okResp(500,'grpc status 7')});
+  w.draft = {...w.draft,kind:'grpc',url:'https://example.test',grpc_method:'/Test/Read'};
+  await w.executeGrpc(); assert.equal(w.lastResponse.status,500); assert.equal(w.lastError,null);
+});
+
+test('deleted automation request does not offer an unrelated same-URL request as its saved origin', async () => {
+  const {v} = setup();
+  v.requests = [{id:'other',method:'POST',url:'https://example.test',name:'unrelated'}];
+  await v.loadHistoryIntoDraft({id:'h',method:'POST',url:'https://example.test',request:{source:'automation_run',request_id:'deleted'},response:{}});
+  assert.equal(v.draft.historyReplay.requestId,undefined);
+  assert.ok(v.replayIssue());
 });

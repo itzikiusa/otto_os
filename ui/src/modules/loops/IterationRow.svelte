@@ -122,11 +122,15 @@
       <section>
         <h4>Agents and roles</h4>
         {#each iter.agents as a, i (i)}
+          {@const agentStatus = runStatus(a.status)}
           <div class="agent">
-            <span class={dotClass(a.status)} role="img" aria-label={runStatus(a.status).label}></span>
+            <span class={dotClass(a.status)} aria-hidden="true"></span>
+            <StatusBadge status={agentStatus} variant="text" dot={false} />
             <span class="aname">{a.name}</span>
             <span class="aprov">{a.provider}</span>
-            <span class="anote" title={a.note || a.output_summary || a.status}>{a.note || a.output_summary || a.status}</span>
+            {#if a.note || a.output_summary}
+              <span class="anote" title={a.note || a.output_summary}>{a.note || a.output_summary}</span>
+            {/if}
             {#if a.session_id}
               <button class="btn ghost small" title="Open {a.name}’s session" onclick={() => onopensession(a.session_id ?? '')}>Open session</button>
             {/if}
@@ -252,11 +256,14 @@
     background: var(--status-idle);
     flex: none;
   }
+  /* A ring, so a running agent is distinct from a finished one. In light
+     mode --status-working and --success are the same green. */
   .dot.working {
-    background: var(--status-working);
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--status-working);
   }
   .dot.ok {
-    background: var(--status-working);
+    background: var(--success);
   }
   .dot.warn {
     background: var(--status-warn);

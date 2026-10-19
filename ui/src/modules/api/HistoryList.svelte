@@ -307,6 +307,12 @@
     width: 20px;
     height: 20px;
   }
+  @media (pointer: coarse), (max-width: 640px) {
+    .clear {
+      width: var(--hit-min);
+      height: var(--hit-min);
+    }
+  }
   .filters {
     display: flex;
     align-items: center;

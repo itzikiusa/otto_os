@@ -304,6 +304,23 @@ test.describe('scheduled tasks API (route → policy → engine → report)', ()
 });
 
 test.describe('scheduled tasks UI', () => {
+  test('report formatter load failure offers recovery and keeps plain text usable', async ({ page }) => {
+    let blocked = 0;
+    await page.route('**/src/lib/md.ts*', async route => {
+      blocked++;
+      await route.abort();
+    });
+    await openPage(page, 'scheduled-tasks');
+    const task = page.locator(`[data-task-id="${taskId}"]`);
+    await task.getByRole('button', { name: 'Run now', exact: true }).click();
+    await task.getByRole('button', { name: 'View report', exact: true }).first().click();
+    await expect(page.getByText('Couldn’t load formatted report', { exact: true })).toBeVisible();
+    expect(blocked).toBeGreaterThan(0);
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Plain text', exact: true }).click();
+    await expect(page.locator('pre.report')).toContainText('Processed-ticket follow-up review');
+  });
+
   test('page renders the seeded task; Run now produces a report row', async ({ page }) => {
     await openPage(page, 'scheduled-tasks');
     await expect(page.getByText('E2E Nightly Review').first()).toBeVisible({ timeout: 15_000 });

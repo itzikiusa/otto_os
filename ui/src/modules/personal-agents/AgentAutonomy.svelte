@@ -202,11 +202,11 @@
         <ul class="list">
           {#each goals as g, i (g.id ?? `new-${i}`)}
             <li class="item">
-              <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label="Goal enabled" title="Enabled" />
-              <input dir="auto" class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
+              <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label={g.text.trim() ? `Goal enabled: ${g.text.trim()}` : 'Goal enabled'} title="Enabled" />
+              <input dir="auto" class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label={g.text.trim() ? `Goal: ${g.text.trim()}` : 'Goal'} />
               <span class="meta">Worked <RelTime iso={g.last_run_at} fallback="never" /></span>
               {#if editable && g.id}
-                <button class="btn small" disabled={workingGoal !== null || dirty || saving} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
+                <button class="btn small" disabled={workingGoal !== null || dirty || saving} aria-label={g.text.trim() ? `Work on it now: ${g.text.trim()}` : 'Work on it now'} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
               {/if}
               {#if editable}
                 <button class="icon-btn" disabled={saving} aria-label="Remove goal" title="Remove goal" onclick={() => (goals = goals.filter((_, j) => j !== i))}>

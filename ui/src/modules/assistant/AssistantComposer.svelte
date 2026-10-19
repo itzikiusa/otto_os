@@ -2,7 +2,7 @@
   // The thread composer: multi-line (Enter sends, Shift+Enter breaks the
   // line), a leading `@claude` / `@codex` routes one turn (the daemon strips
   // it), the model chip pins the thread, attachments land in the assistant's
-  // inbox, and the mic is honestly disabled until voice ships.
+  // inbox. There is no dictate control until voice can actually record.
   import Icon from '../../lib/components/Icon.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
@@ -145,9 +145,6 @@
       {#if thread.route_pinned}<ProviderIcon provider={thread.provider} size={12} />{:else}<Icon name="split" size={12} />{/if}
       <span>{chipLabel}</span>
       <Icon name="chevronDown" size={12} />
-    </button>
-    <button class="icon-btn mic" disabled aria-label="Dictate (voice arrives in a later phase)" title="Voice arrives in a later phase">
-      <Icon name="mic" size={14} />
     </button>
     <button class="icon-btn send" onclick={() => void send()} disabled={!canSend} aria-label="Send" title={sendTitle}>
       <Icon name="arrowUp" size={14} />

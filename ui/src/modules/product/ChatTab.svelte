@@ -5,6 +5,7 @@
   // pane. Layout mirrors RefineTab (220px sidebar + chat pane); the
   // conversation works from an EMPTY/Untitled draft to help with early
   // discovery & research.
+  import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
   import { toastError } from '../../lib/toastError';
   import DiscoveryChat from './DiscoveryChat.svelte';
@@ -13,6 +14,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { DiscoveryChat as DiscoveryChatT } from './types';
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -27,7 +29,11 @@
   $effect(() => {
     // Re-run whenever the selected story changes.
     product.selectedId;
-    creating = false;
+    untrack(() => {
+      chats = [];
+      activeCid = null;
+      creating = false;
+    });
     void loadChats();
   });
 
@@ -86,6 +92,13 @@
 
   async function archiveChat(cid: string): Promise<void> {
     const current = product.captureSelection();
+    const target = chats.find((c) => c.id === cid);
+    const label = target?.title || 'Untitled';
+    const ok = await confirmer.ask(
+      `Archive discovery chat “${label}”? It will be marked archived in this story’s chat list.`,
+      { title: 'Archive chat', confirmLabel: 'Archive', danger: false },
+    );
+    if (!ok || !current()) return;
     try {
       const updated = await product.archiveDiscoveryChat(cid);
       if (!current()) return;
@@ -138,6 +151,9 @@
       {#if (loading || loadError) && chats.length === 0}
         <LoadState what="chats" variant="compact" loading={loading} error={loadError} empty onretry={() => void loadChats()} />
       {:else}
+        {#if loadError}
+          <LoadState what="chats" variant="compact" loading={loading} error={loadError} onretry={() => void loadChats()} />
+        {/if}
         <div class="chat-list">
           {#each chats as c (c.id)}
             <div
@@ -145,7 +161,11 @@
               class:active={activeCid === c.id}
               class:archived={c.status === 'archived'}
             >
-              <button class="chat-btn" onclick={() => (activeCid = c.id)}>
+              <button
+                class="chat-btn"
+                aria-current={activeCid === c.id ? 'true' : undefined}
+                onclick={() => (activeCid = c.id)}
+              >
                 <span class="chat-title">{c.title}</span>
                 <span class="chat-meta">
                   <span class="chat-status" class:status-archived={c.status === 'archived'}>
@@ -159,7 +179,6 @@
                   class="archive-btn reveal-on-hover"
                   onclick={() => archiveChat(c.id)}
                   title="Archive this chat"
-                  aria-label="Archive chat"
                 >
                   Archive
                 </button>
@@ -170,11 +189,7 @@
       {/if}
     {/snippet}
     {#snippet empty()}
-      <EmptyState
-        icon="zap"
-        title="No chats yet"
-        body="Start a New chat to figure out what to build."
-      />
+      <p class="empty-rail-hint">No chats yet — use New chat above to start one.</p>
     {/snippet}
   </ListPane>
 
@@ -200,6 +215,13 @@
     height: 100%;
     min-height: 0;
     gap: 0;
+  }
+
+  .empty-rail-hint {
+    margin: 0;
+    padding: 12px 10px;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
 
   /* ── Left pane — chrome (width, border, header, scroll) is ListPane's job;
@@ -320,4 +342,16 @@
     flex-direction: column;
   }
 
+  @media (max-width: 640px) {
+    .chat-tab {
+      flex-direction: column;
+    }
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .archive-btn {
+      min-height: var(--hit-min);
+      padding: 6px 10px;
+      opacity: 1;
+    }
+  }
 </style>

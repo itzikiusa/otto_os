@@ -7,7 +7,7 @@ import { api, authedBlobUrl, authedText, ApiError } from '../api/client';
 import { NO_WORKSPACE } from '../labels';
 import { loadErrorText } from '../loadError';
 import { ws } from './workspace.svelte';
-import type { Session, ProductLens } from '../api/types';
+import type { Session, ProductLens, ProductStopTurnReq, ProductStopTurnResp } from '../api/types';
 import type {
   ProductStory,
   ProductStoryVersion,
@@ -1120,12 +1120,19 @@ class ProductStore {
     body: string,
     provider?: string,
     model?: string,
+    turnId?: string,
   ): Promise<RefineTurnResp> {
     return api.post<RefineTurnResp>(`/product/refinement-threads/${tid}/messages`, {
       body,
       provider: provider || undefined,
       model: model || undefined,
+      turn_id: turnId || undefined,
     });
+  }
+
+  async stopRefinementTurn(tid: string, turnId: string): Promise<ProductStopTurnResp> {
+    const req: ProductStopTurnReq = { turn_id: turnId };
+    return api.post<ProductStopTurnResp>(`/product/refinement-threads/${tid}/stop`, req);
   }
 
   async archiveRefinementThread(tid: string): Promise<RefinementThread> {
@@ -1156,12 +1163,19 @@ class ProductStore {
     body: string,
     provider?: string,
     model?: string,
+    turnId?: string,
   ): Promise<DiscoveryChatTurn> {
     return api.post<DiscoveryChatTurn>(`/product/discovery-chats/${cid}/messages`, {
       body,
       provider: provider || undefined,
       model: model || undefined,
+      turn_id: turnId || undefined,
     });
+  }
+
+  async stopDiscoveryTurn(cid: string, turnId: string): Promise<ProductStopTurnResp> {
+    const req: ProductStopTurnReq = { turn_id: turnId };
+    return api.post<ProductStopTurnResp>(`/product/discovery-chats/${cid}/stop`, req);
   }
 
   async archiveDiscoveryChat(cid: string): Promise<DiscoveryChat> {

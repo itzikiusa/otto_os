@@ -5,6 +5,7 @@
   // handover brief into the target. Optionally review/edit the brief first.
   import Modal from '../../lib/components/Modal.svelte';
   import Badge from '../../lib/components/Badge.svelte';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
@@ -12,6 +13,7 @@
   import { sessionState } from '../../lib/status';
   import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { api } from '../../lib/api/client';
   import type {
     Session,
@@ -65,6 +67,19 @@
   let briefNote = $state('');
   let briefLoading = $state(false);
   let busy = $state(false);
+
+  async function requestClose(): Promise<void> {
+    if (busy || briefLoading) return;
+    if (focus.trim() !== '' || brief.trim() !== '') {
+      const ok = await confirmer.ask('Discard your handover note and close?', {
+        title: 'Discard handover?',
+        confirmLabel: 'Discard',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onclose();
+  }
 
   function toolFound(p: string): boolean {
     return providerReadiness(p).available;
@@ -156,7 +171,16 @@
     }
   }
 
-  function primary(): void {
+  async function primary(): Promise<void> {
+    const sending = phase === 'review' || !reviewBrief;
+    if (sending && archiveSource) {
+      const title = source?.title ?? 'this session';
+      const ok = await confirmer.ask(
+        `Hand over and archive “${title}”? The source session closes after the brief is delivered.`,
+        { title: 'Hand over and archive', confirmLabel: 'Hand over and archive', danger: true },
+      );
+      if (!ok) return;
+    }
     if (phase === 'review') {
       void send(brief);
     } else if (reviewBrief) {
@@ -167,7 +191,7 @@
   }
 </script>
 
-<Modal title="Hand over to another agent" width={560} {onclose}>
+<Modal title="Hand over to another agent" width={600} onclose={() => void requestClose()}>
   {#if phase === 'compose'}
     <p class="lead">
       Pass <strong>{source?.title ?? 'this agent'}</strong>’s context to another agent. Otto
@@ -201,11 +225,13 @@
               class="provider-card"
               class:selected={provider === p}
               class:unavailable={!avail}
+              aria-pressed={provider === p}
               disabled={!avail}
               title={providerReadiness(p).message}
               onclick={() => (provider = p)}
             >
               <span class="provider-name">
+                <ProviderIcon provider={p} size={14} />
                 {p}
                 {#if p === source?.provider}<Badge label="Same" />{/if}
                 {#if !avail}<Badge label="Not found" />{/if}
@@ -223,9 +249,11 @@
               <button
                 class="agent-row"
                 class:selected={existingId === a.id}
+                aria-pressed={existingId === a.id}
                 onclick={() => (existingId = a.id)}
               >
                 <StatusDot state={sessionState(a, ws.statusMap[a.id], ws.needsYou[a.id] === true, { stale: events.state !== 'connected' })} />
+                <ProviderIcon provider={a.provider} size={14} />
                 <span class="agent-title">{a.title}</span>
                 <Badge tone="accent" label={a.provider} />
               </button>
@@ -296,10 +324,10 @@
     {#if phase === 'review'}
       <button class="btn" onclick={() => (phase = 'compose')} disabled={busy}><Icon name="chevronLeft" size={12} /> Back</button>
       <button class="btn primary" disabled={busy || !canSubmit} onclick={primary}>
-        {busy ? 'Sending…' : 'Send handover'}
+        {busy ? 'Sending…' : archiveSource ? 'Send handover and archive' : 'Send handover'}
       </button>
     {:else}
-      <button class="btn" onclick={onclose}>Cancel</button>
+      <button class="btn" onclick={() => void requestClose()}>Cancel</button>
       <button class="btn primary" disabled={busy || briefLoading || !canSubmit} onclick={primary}>
         {#if briefLoading}
           Generating…
@@ -307,6 +335,8 @@
           Starting…
         {:else if reviewBrief}
           Generate brief →
+        {:else if archiveSource}
+          Hand over and archive
         {:else}
           Hand over
         {/if}
@@ -356,6 +386,12 @@
     font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
+  }
+  .seg-btn:focus-visible,
+  .provider-card:focus-visible,
+  .agent-row:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   .seg-btn.active {
     background: var(--surface);

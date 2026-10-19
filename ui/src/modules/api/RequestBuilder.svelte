@@ -14,14 +14,14 @@
   import MethodTag from './MethodTag.svelte';
   import SaveRequestDialog from './SaveRequestDialog.svelte';
   import ImportDialog from './ImportDialog.svelte';
-  import { apiClient, HTTP_METHODS, defaultSettings, confirmNewHost, type ApiDraft, type ApiRequestKind, type ApiSettings } from '../../lib/stores/apiClient.svelte';
+  import { apiClient, HTTP_METHODS, defaultSettings, confirmNewHost, draftSecrets, type ApiDraft, type ApiRequestKind, type ApiSettings } from '../../lib/stores/apiClient.svelte';
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { api, newHostConfirmHost } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
   import { collectionPaths, fullRequestUrl, requestVarNames, resolveVar, splitVars, varNames } from '../../lib/api/apiVars';
   import { marked } from 'marked';
   import { sanitizeHtml } from '../../lib/sanitize';
-  import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse, ApiSecretable } from '../../lib/api/types';
+  import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiSecretable, GrpcReflectReq } from '../../lib/api/types';
   import { isSecretRef } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -223,12 +223,12 @@
   //   • multipart/form-data ('multipart') → JSON `[{key,type,value,filename}]`,
   //     so a row can be a File (value = base64 of the file's bytes).
   type FieldType = 'text' | 'file';
-  interface FormRow { key: string; value: string; type: FieldType; filename?: string; }
+  interface FormRow { key: string; value: string; type: FieldType; filename?: string; missing_content?: boolean; size?: number; }
   function parseForm(s: string, mode: ApiBodyMode): FormRow[] {
     if (mode === 'multipart' && s.trim().startsWith('[')) {
       try {
         const arr = JSON.parse(s) as Partial<FormRow>[];
-        return arr.map((r) => ({ key: r.key ?? '', value: r.value ?? '', type: r.type === 'file' ? 'file' : 'text', filename: r.filename }));
+        return arr.map((r) => ({ key: r.key ?? '', value: r.value ?? '', type: r.type === 'file' ? 'file' : 'text', filename: r.filename, missing_content: r.missing_content || (r.size !== undefined && !r.value) }));
       } catch { /* fall through to urlencoded parsing */ }
     }
     if (!s) return [];
@@ -242,7 +242,7 @@
     const live = rows.filter((r) => r.key.trim() !== '');
     if (mode === 'multipart') {
       return JSON.stringify(live.map((r) => (r.type === 'file'
-        ? { key: r.key, type: 'file', value: r.value, filename: r.filename ?? '' }
+        ? { key: r.key, type: 'file', value: r.value, filename: r.filename ?? '', ...(r.missing_content ? {missing_content:true} : {}) }
         : { key: r.key, type: 'text', value: r.value })));
     }
     return live.map((r) => `${encodeURIComponent(r.key)}=${encodeURIComponent(r.value)}`).join('&');
@@ -288,7 +288,7 @@
     const current = () => ws.currentId === wid && apiClient.draft === owner && formRows[i] === row;
     try {
       const value = await fileToBase64(file);
-      if (current()) updateFormRow(i, { value, filename: file.name });
+      if (current()) updateFormRow(i, { value, filename: file.name, missing_content: false, size: undefined });
     } catch {
       if (current()) toasts.error('Couldn’t read the file', file.name);
     }
@@ -482,7 +482,6 @@
   interface GrpcService { name: string; methods: GrpcMethod[]; }
   let grpcServices = $state<GrpcService[]>([]);
   let grpcParsing = $state(false);
-  let grpcInvoking = $state(false);
 
   async function onProtoFile(input: HTMLInputElement): Promise<void> {
     const f = input.files?.[0];
@@ -531,7 +530,18 @@
     const current = () => ws.currentId === wid && apiClient.draft === owner;
     grpcReflecting = true;
     try {
-      const res = await api.post<{ services: GrpcService[] }>(`/workspaces/${wid}/api-client/grpc/reflect`, { url: draft.url, headers: draft.headers.filter((h) => h.enabled !== false && h.key.trim() !== '') });
+      const env = apiClient.activeEnv;
+      const body: GrpcReflectReq = {url:owner.url, headers:owner.headers.filter(h => h.enabled !== false && h.key.trim() !== ''),
+        environment_id:env?.id ?? null,vars:{...apiClient.runtimeVars}};
+      let res: {services:GrpcService[]};
+      try { res = await api.long.post<{services:GrpcService[]}>(`/workspaces/${wid}/api-client/grpc/reflect`, body); }
+      catch (e) {
+        const host = newHostConfirmHost(e);
+        if (host === null || !current()) throw e;
+        const ok = await confirmNewHost(host, {method:'gRPC reflection',url:body.url,secrets:draftSecrets(owner,env)});
+        if (!ok || !current()) return;
+        res = await api.long.post<{services:GrpcService[]}>(`/workspaces/${wid}/api-client/grpc/reflect`, {...body,confirm_new_host:true});
+      }
       if (!current()) return;
       grpcServices = res.services;
       const first = res.services.find((s) => s.methods.length);
@@ -552,25 +562,6 @@
     const m = grpcServices.flatMap((s) => s.methods).find((x) => x.full === full);
     if (m) selectGrpcMethod(m);
   }
-  async function invokeGrpc(): Promise<void> {
-    const wid = ws.currentId;
-    if (!wid) return;
-    if (!draft.grpc_method) { toasts.error('Pick a method first', 'Upload a .proto or load services from the server.'); return; }
-    const tabId = draft.tabId;
-    grpcInvoking = true;
-    try {
-      const res = await api.post<ApiResponse>(`/workspaces/${wid}/api-client/grpc/invoke`, {
-        url: draft.url, proto: draft.proto ?? '', method: draft.grpc_method, body: draft.body,
-        headers: draft.headers.filter((h) => h.enabled !== false && h.key.trim() !== ''),
-      });
-      // Lands in the initiating tab's slot even if another tab is in front.
-      if (ws.currentId === wid) apiClient.setTabResult(tabId, res, null);
-    } catch (e) {
-      if (ws.currentId === wid) apiClient.setTabResult(tabId, null, e instanceof Error ? e.message : String(e));
-    } finally {
-      grpcInvoking = false;
-    }
-  }
 
   $effect(() => {
     apiStream.retainOwner(ws.currentId, draft.tabId);
@@ -580,7 +571,7 @@
   function send(): void {
     switch (draft.kind) {
       case 'http': void apiClient.execute(); break;
-      case 'grpc': void invokeGrpc(); break;
+      case 'grpc': void apiClient.executeGrpc(); break;
       case 'sse':
       case 'websocket':
         if (apiStream.active) apiStream.disconnect();
@@ -597,7 +588,7 @@
     }
   }
   const sendLabel = $derived(draft.kind === 'grpc' ? 'Invoke' : isStreaming ? (apiStream.active ? 'Disconnect' : 'Connect') : 'Send');
-  const sendBusy = $derived(apiClient.sending || grpcInvoking || apiStream.status === 'connecting');
+  const sendBusy = $derived(apiClient.sending || apiStream.status === 'connecting');
 
   function onUrlKeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter') { e.preventDefault(); send(); }
@@ -625,10 +616,10 @@
   }
 
   function stopRequest(): void {
-    if (draft.kind === 'http') apiClient.cancelExecute();
+    if (draft.kind === 'http' || draft.kind === 'grpc') apiClient.cancelExecute();
     else apiStream.disconnect();
   }
-  const canStop = $derived((draft.kind === 'http' && apiClient.sending) || (isStreaming && apiStream.active));
+  const canStop = $derived(((draft.kind === 'http' || draft.kind === 'grpc') && apiClient.sending) || (isStreaming && apiStream.active));
 
   /** Paste a curl command straight into the address bar → import it. */
   function onUrlPaste(e: ClipboardEvent): void {
@@ -765,6 +756,15 @@
       <button class="btn small" onclick={() => void save()} title={canEdit ? 'Save request (⌘S)' : 'Viewers can’t save requests'} disabled={!canEdit}>Save</button>
       <button class="icon-btn" onclick={moreMenu} aria-label="More request actions" title="More request actions"><Icon name="more" size={14} /></button>
   </div>
+
+  {#if apiClient.replayIssue()}
+    <div class="tab-help" role="status" data-testid="incomplete-history">
+      <p>{apiClient.replayIssue()}</p>
+      {#if draft.historyReplay?.requestId}
+        <button type="button" class="btn small" onclick={() => void apiClient.openHistorySavedRequest()}>Open current saved request</button>
+      {/if}
+    </div>
+  {/if}
 
   <!-- type + method + URL + Send -->
   <div class="urlbar">
@@ -1136,7 +1136,7 @@
         <label class="set-row toggle">
           <input type="checkbox" checked={settings.verify_ssl} onchange={(e) => setSetting('verify_ssl', (e.currentTarget as HTMLInputElement).checked)} />
           <span class="set-label">Verify TLS certificates</span>
-          <span class="set-unit">Turn off only for self-signed development servers.</span>
+          <span class="set-unit">{settings.verify_ssl ? 'Turn off only for self-signed development servers.' : 'This request trusts any TLS certificate. Turn verification back on when you finish testing.'}</span>
         </label>
         {#if draft.kind === 'http'}
           <label class="set-row">

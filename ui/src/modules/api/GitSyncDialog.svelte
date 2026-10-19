@@ -23,6 +23,7 @@
   let commitMsg = $state('Update API collections');
   let branch = $state('');
   let busy = $state(false);
+  let pullError = $state('');
 
   const roots = $derived(apiClient.collections.filter((c) => (c.parent_id ?? null) === null));
   const repo = $derived(repos.find((r) => r.id === repoId) ?? null);
@@ -44,9 +45,15 @@
 
   async function pull(): Promise<void> {
     busy = true;
-    await apiClient.gitPullCollections(repoId);
-    busy = false;
-    onclose();
+    pullError = '';
+    try {
+      await apiClient.gitPullCollections(repoId);
+      onclose();
+    } catch (e) {
+      pullError = loadErrorText(e);
+    } finally {
+      busy = false;
+    }
   }
   async function push(): Promise<void> {
     busy = true;
@@ -81,8 +88,12 @@
       <strong>Commit &amp; push</strong> writes {plural(roots.length, 'collection file')}
       to <code>collections/</code> in <strong>{repo?.name}</strong>{branch.trim() ? ` on ${branch.trim()}` : ''} and pushes to its remote,
       where everyone with access to the repository can read them. Stored secrets are exported as <code>***</code>.
-      <strong>Pull</strong> imports the collection files found there.
+      <strong>Pull</strong> imports the collection files found there as new copies.
+      Pulling again adds duplicates; existing collections are not replaced.
     </p>
+  {/if}
+  {#if pullError}
+    <LoadState what="collection files" error={pullError} empty={true} onretry={pull} />
   {/if}
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>

@@ -90,7 +90,7 @@
 <style>
   .tray {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(160px, 100%), 1fr));
     gap: 8px;
   }
   .card {
@@ -100,7 +100,6 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--bg);
-    overflow: hidden;
   }
   .card.accepted {
     border-color: var(--success);
@@ -111,6 +110,9 @@
     opacity: 0.6;
   }
   .pic {
+    overflow: hidden;
+    border-start-start-radius: var(--radius-m);
+    border-start-end-radius: var(--radius-m);
     position: relative;
     aspect-ratio: 4 / 3;
     border-block-end: 1px solid var(--border);
@@ -203,7 +205,8 @@
     justify-content: center;
     padding-inline: 4px;
   }
-  .acts .icon-btn {
-    width: 20px;
+  .acts :global(.icon-btn) {
+    min-width: var(--hit-min);
+    min-height: var(--hit-min);
   }
 </style>

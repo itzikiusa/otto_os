@@ -407,7 +407,7 @@
     flex-wrap: wrap;
     color: var(--text);
   }
-  .fb-title { font-size: var(--fs-s); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fb-title { flex: 1 0 100%; font-size: var(--fs-s); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fb-caret { display: inline-flex; flex-shrink: 0; }
   .fb-meta {
     display: flex;
@@ -428,8 +428,9 @@
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 320px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    max-width: 100%;
   }
   .fb-reviewer { font-size: var(--fs-xs); }
   .fb-artifact {

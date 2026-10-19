@@ -533,7 +533,8 @@
     background: var(--hover);
   }
   .s3d-row:focus-visible {
-    box-shadow: inset 0 0 0 1px var(--accent);
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   .s3d-row.selected {
     background: var(--accent-soft);

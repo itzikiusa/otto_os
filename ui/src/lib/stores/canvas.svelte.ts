@@ -116,6 +116,13 @@ class CanvasStore {
    *  which inline images the server now holds from it. */
   async persistDoc(id: string, doc: CanvasDoc, context = this.#saveContext): Promise<boolean> {
     if (context !== this.#saveContext) return false;
+    // Captured before any await. open/close/auth bump the visit; assist bumps
+    // the turn. A completion from an older visit must not touch the guard.
+    const stamp = {
+      generation: this.#sceneGeneration,
+      turnId: this.#turnId,
+      duringTurn: this.#turnEpoch !== null && this.#guardSceneId === id && this.#turnSceneId === id,
+    };
     this.stageDoc(id, doc, context);
     const previous = this.#writes.get(id);
     let sent = false;
@@ -131,7 +138,14 @@ class CanvasStore {
       if (this.#drafts.get(id) !== doc) return;
       this.#drafts.delete(id);
       delete this.docSaveErrors[id];
-      if (this.currentId === id) this.markSaved(doc);
+      // The board update follows the scene that is open now. The assist guard
+      // follows the visit + turn captured when this write was queued, so a
+      // late scene-A PUT cannot pin or advance scene B.
+      if (this.currentId === id) {
+        if (typeof doc.source === 'string') this.source = doc.source;
+        this.markSaved(doc);
+      }
+      this.noteLandedSave(id, doc, stamp);
     })();
     this.#writes.set(id, write);
     try { await write; }
@@ -189,6 +203,7 @@ class CanvasStore {
       // the board fetches each once (immutable) instead of a multi-MB doc.
       const row = await api.get<CanvasScene>(`/canvas/scenes/${id}?files=ref`);
       if (sequence !== this.#openSequence) return;
+      this.#resetSceneGuard();
       this.currentId = row.id;
       this.scene = parseScene(row.doc_json, row.title);
       let doc: CanvasDoc | null = null;
@@ -218,6 +233,7 @@ class CanvasStore {
 
   closeScene(): void {
     ++this.#openSequence;
+    this.#resetSceneGuard();
     this.currentId = null;
     this.scene = null;
     this.dirty = false;
@@ -266,19 +282,128 @@ class CanvasStore {
    *  can take minutes, and applying it to whichever scene is open by then
    *  wrote scene A's drawing into scene B on the next autosave. (The server
    *  already committed it to its own scene; opening that scene shows it.) */
-  ingestDoc(doc: CanvasDoc, sceneId?: string | null): void {
-    if (sceneId !== undefined && sceneId !== this.currentId) return;
-    if (typeof doc.source !== 'string') return;
-    if (this.dirty) return;
+  ingestDoc(doc: CanvasDoc, sceneId?: string | null): boolean {
+    if (sceneId !== undefined && sceneId !== this.currentId) return false;
+    if (typeof doc.source !== 'string') return false;
+    if (this.dirty) return false;
+    if (!this.serverDocAllowed(doc.source)) return false;
     this.source = doc.source;
     if (doc.format) this.format = doc.format;
     this.rawDoc = doc;
     this.savedAt = Date.now();
+    return true;
   }
 
   /** Highest `canvasDocBus.tick` already consumed. Plain field (NOT `$state`):
    *  it is bookkeeping, and reading it must not subscribe the live effect. */
   #consumedPushTick = 0;
+  /** Scene that owns `#savedSource`, `#turnEpoch`, `#pinnedSource`, `#stopHold`. */
+  #guardSceneId: string | null = null;
+  /** Source of the last document this client successfully PUT on `#guardSceneId`. */
+  #savedSource: string | null = null;
+  #saveEpoch = 0;
+  /** `saveEpoch` at the start of the open Ask Otto request. */
+  #turnEpoch: number | null = null;
+  /** Scene whose Ask Otto turn `#turnEpoch` belongs to. */
+  #turnSceneId: string | null = null;
+  /** Bumped on every assist and on every scene/auth visit change. */
+  #turnId = 0;
+  /** Bumped on open, close, and auth change. In-flight saves keep the old one. */
+  #sceneGeneration = 0;
+  /** After a save during a turn, a server doc with any other source is stale
+   *  (a live preview, or a stop that echoed the pre-turn board). */
+  #pinnedSource: string | null = null;
+  /** A terminal stop is reloading the stored scene. Events and the stop body
+   *  from before that read stay out until the reload settles. */
+  #stopHold = false;
+
+  /** Drop guard fields without invalidating saves already stamped for this visit.
+   *  Used when Ask Otto or a stop adopts the scene that is already open. */
+  #clearSceneGuard(): void {
+    this.#guardSceneId = null;
+    this.#savedSource = null;
+    this.#saveEpoch = 0;
+    this.#turnEpoch = null;
+    this.#turnSceneId = null;
+    this.#pinnedSource = null;
+    this.#stopHold = false;
+  }
+
+  /** A different scene visit or login. Late callbacks from the previous one no-op. */
+  #resetSceneGuard(): void {
+    this.#sceneGeneration += 1;
+    this.#turnId += 1;
+    this.#clearSceneGuard();
+  }
+
+  private noteLandedSave(
+    id: string,
+    doc: CanvasDoc,
+    stamp: { generation: number; turnId: number; duringTurn: boolean },
+  ): void {
+    if (stamp.generation !== this.#sceneGeneration) return;
+    if (id !== this.currentId) return;
+    if (this.#guardSceneId !== null && this.#guardSceneId !== id) return;
+    const source = typeof doc.source === 'string' ? doc.source : null;
+    if (source !== null) this.#savedSource = source;
+    const ownsGuard = this.#guardSceneId === id;
+    // A newer save on this same visit replaces the echo the guard allows.
+    if (ownsGuard && source !== null && this.#pinnedSource !== null) this.#pinnedSource = source;
+    const landedInTurn = stamp.duringTurn && stamp.turnId === this.#turnId && ownsGuard;
+    if (landedInTurn || (ownsGuard && this.#stopHold)) {
+      if (source !== null) this.#pinnedSource = source;
+      this.#saveEpoch += 1;
+      return;
+    }
+    // A PUT queued before Ask Otto must not look like a save made during it.
+    if (this.#turnEpoch === null) this.#saveEpoch += 1;
+  }
+
+  /** A remote doc may replace the board. A save made while Ask Otto is running
+   *  stays; only an echo of that saved source is applied. */
+  private serverDocAllowed(source: string): boolean {
+    if (this.#guardSceneId !== this.currentId) return true;
+    if (this.#stopHold) return false;
+    if (this.#pinnedSource !== null && source !== this.#pinnedSource) return false;
+    if (
+      this.#turnEpoch !== null &&
+      this.#saveEpoch !== this.#turnEpoch &&
+      this.#savedSource !== null &&
+      source !== this.#savedSource
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  /** True when this turn must not be undone back to the pre-turn board. */
+  assistKeptSaved(note?: string | null, sceneId?: string | null): boolean {
+    const sameScene =
+      (sceneId === undefined || sceneId === this.currentId) &&
+      this.#guardSceneId === this.currentId;
+    const savedDuring = sameScene && this.#turnEpoch !== null && this.#saveEpoch !== this.#turnEpoch;
+    const n = note ?? '';
+    return (
+      savedDuring ||
+      n.startsWith('Stopped') ||
+      n.includes('Kept your manual edits') ||
+      n.includes('saved changes were preserved')
+    );
+  }
+
+  /** End the Ask Otto guard. A save during the turn keeps rejecting other sources
+   *  until the next Ask Otto request. */
+  finishAssistTurn(sceneId?: string | null): void {
+    // No scene id finishes only the turn that is still current. A late callback
+    // from scene A (with or without its id) must not pin or end scene B.
+    if (this.#turnSceneId === null || this.#turnSceneId !== this.currentId) return;
+    if (sceneId !== undefined && sceneId !== this.#turnSceneId) return;
+    if (this.#guardSceneId !== this.currentId) return;
+    if (this.#turnEpoch !== null && this.#saveEpoch !== this.#turnEpoch && this.#savedSource !== null) {
+      this.#pinnedSource = this.#savedSource;
+    }
+    this.#turnEpoch = null;
+  }
 
   /** Consume a live `canvas_updated` push exactly ONCE (r3-02-01). The live
    *  effect re-ran on every `dirty` flip (ingestDoc reads it), so after the
@@ -293,8 +418,7 @@ class CanvasStore {
     if (sceneId !== this.currentId) return false;
     const d = doc as CanvasDoc | null;
     if (!d || typeof d.source !== 'string' || this.dirty) return false;
-    this.ingestDoc(d);
-    return true;
+    return this.ingestDoc(d);
   }
 
   /** A scene's version history, newest first (C5; no documents). */
@@ -375,6 +499,12 @@ class CanvasStore {
 
   // -- agent assist ------------------------------------------------------
   async assist(prompt: string, mode: AssistMode = 'auto'): Promise<AssistResult> {
+    if (this.#guardSceneId !== this.currentId) this.#clearSceneGuard();
+    this.#guardSceneId = this.currentId;
+    this.#turnSceneId = this.currentId;
+    this.#turnId += 1;
+    this.#turnEpoch = this.#saveEpoch;
+    this.#pinnedSource = null;
     const body = { prompt, mode };
     if (this.currentId) {
       return api.post<AssistResult>(`/canvas/scenes/${this.currentId}/assist`, body);
@@ -382,13 +512,53 @@ class CanvasStore {
     return api.post<AssistResult>(`/canvas/assist/preview`, body);
   }
 
-  /** Mark the open scene's running Ask AI turn as stopped (S4-20) so it
-   *  commits nothing when it settles — the board stays as it was before the
-   *  turn. Pair with an Esc interrupt of the agent's PTY. */
+  /** Mark the open scene's running Ask AI turn as stopped. The turn commits
+   *  nothing of its own and the server re-broadcasts the document currently
+   *  stored — a save made during the turn stays. Pair with an Esc interrupt
+   *  of the agent's PTY. */
   async stopAssist(): Promise<boolean> {
     if (!this.currentId) return false;
     const r = await api.post<{ stopping: boolean }>(`/canvas/scenes/${this.currentId}/assist/stop`, {});
     return r.stopping;
+  }
+
+  /** After a terminal stop, load the scene the server has now. The stop
+   *  response is the document read at stop time; a save that lands after that
+   *  read is the one that stays. An in-flight save is waited out first. A save
+   *  that lands during the read wins, and the fetched doc is dropped. */
+  async reloadAfterStop(sceneId: string): Promise<boolean> {
+    if (!sceneId || this.currentId !== sceneId) return false;
+    if (this.#guardSceneId !== sceneId) this.#clearSceneGuard();
+    this.#guardSceneId = sceneId;
+    this.#stopHold = true;
+    const context = this.#saveContext;
+    try {
+      await this.#writes.get(sceneId)?.catch(() => {});
+      if (context !== this.#saveContext || this.currentId !== sceneId) return false;
+      const epoch = this.#saveEpoch;
+      const pending = this.#drafts.get(sceneId);
+      const row = await api.get<CanvasScene>(`/canvas/scenes/${sceneId}?files=ref`);
+      if (context !== this.#saveContext || this.currentId !== sceneId) return false;
+      if (this.#saveEpoch !== epoch || this.dirty || this.#drafts.get(sceneId) !== pending) {
+        if (this.#savedSource !== null) this.#pinnedSource = this.#savedSource;
+        return false;
+      }
+      let doc: CanvasDoc | null = null;
+      try {
+        doc = JSON.parse(row.doc_json) as CanvasDoc;
+      } catch {
+        doc = null;
+      }
+      if (!doc || typeof doc.source !== 'string') return false;
+      this.#stopHold = false;
+      const applied = this.ingestDoc(doc, sceneId);
+      if (applied && typeof doc.source === 'string') this.#pinnedSource = doc.source;
+      return applied;
+    } catch {
+      return false;
+    } finally {
+      if (this.#guardSceneId === sceneId) this.#stopHold = false;
+    }
   }
 }
 

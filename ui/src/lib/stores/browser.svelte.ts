@@ -391,6 +391,9 @@ class BrowserStore {
    *  Store state — not BrowserView's — so an agent-driven summarize (agent UI
    *  control, lib/uiCommands/browser.ts) shows in the same panel as a click. */
   summary = $state('');
+  summaryAt = $state<string | null>(null);
+  summaryEngine = $state('');
+  summaryDegraded = $state(false);
   summarizing = $state(false);
 
   /** Summarize `url` into the summary panel. Returns the text; throws on
@@ -405,7 +408,12 @@ class BrowserStore {
     try {
       const resp = await this.summarize(url, ctl.signal);
       if (this.summarizeCtl === ctl && !ctl.signal.aborted && workspace === this.workspaceGeneration
-        && tab === this.activeId && page === this.pageSeq && this.activeTab?.url === url) this.summary = resp.summary;
+        && tab === this.activeId && page === this.pageSeq && this.activeTab?.url === url) {
+        this.summary = resp.summary;
+        this.summaryAt = new Date().toISOString();
+        this.summaryEngine = resp.engine;
+        this.summaryDegraded = resp.degraded;
+      }
       return resp.summary;
     } finally {
       if (this.summarizeCtl === ctl) {
@@ -427,6 +435,9 @@ class BrowserStore {
   private clearSummary(): void {
     this.stopSummarize();
     this.summary = '';
+    this.summaryAt = null;
+    this.summaryEngine = '';
+    this.summaryDegraded = false;
   }
 
   /** Create a DOM annotation (a "mark") against the active page's URL. Pushes

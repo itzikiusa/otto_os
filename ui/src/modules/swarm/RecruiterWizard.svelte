@@ -9,6 +9,7 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { isAbortError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import type { AgentSkill, CreateAgentReq, RecruitedAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
@@ -117,8 +118,13 @@
     }
   }
 
-  function stopRecruit() {
-    // Kill the live recruiter session server-side, then abandon the UI wait.
+  async function stopRecruit() {
+    const what = role.trim() || 'this role';
+    const ok = await confirmer.ask(
+      `Stop recruiting “${what}”? The recruiter’s session is closed and this proposal is discarded.`,
+      { title: 'Stop recruiting', confirmLabel: 'Stop', danger: true },
+    );
+    if (!ok || !busy) return;
     if (swarm.detail) void swarm.stopAgentRun(swarm.detail.id, 'recruit');
     recruitCtl?.abort();
   }
@@ -244,7 +250,9 @@
     {#if step === 0}
       <button class="btn ghost" onclick={onclose}>Cancel</button>
       {#if busy}
-        <button class="btn" onclick={stopRecruit} title="Stop waiting for the recruiter">Stop</button>
+        <button class="btn small danger" onclick={() => void stopRecruit()} title="Stop recruiting {role.trim() || 'this role'}">
+          <Icon name="stop" size={12} /> Stop…
+        </button>
       {/if}
       <button class="btn primary" onclick={recruit} disabled={!role.trim() || busy}>
         {busy ? 'Recruiting…' : 'Propose agent'}

@@ -9,7 +9,6 @@
 
 import { api } from '../../../lib/api/client';
 import { improveApi } from '../../../lib/api/improve';
-import { fetchWorkspace } from '../../../lib/api/workspaces';
 import type {
   DesignAssistReq,
   DesignAssistTurn,
@@ -81,12 +80,9 @@ export function listDesignMemories(workspaceId: Id) {
 
 /**
  * Set the workspace setting `design_learning` (`"off"` stops proposals;
- * anything else = suggest). The workspaces PATCH replaces the whole settings
- * object, so merge into a FRESH read — a cached copy could revert keys changed
- * since (the same pattern as `ws.saveNotes`). Workspace-admin gated.
+ * anything else = suggest). Patch only this key atomically so other windows'
+ * settings survive. Workspace-admin gated.
  */
 export async function setLearningMode(workspaceId: Id, mode: 'suggest' | 'off'): Promise<Workspace> {
-  const fresh = await fetchWorkspace(workspaceId);
-  const settings = { ...(fresh.settings ?? {}), design_learning: mode };
-  return api.patch<Workspace>(`/workspaces/${enc(workspaceId)}`, { settings });
+  return api.patch<Workspace>(`/workspaces/${enc(workspaceId)}`, { settings_patch: { design_learning: mode } });
 }

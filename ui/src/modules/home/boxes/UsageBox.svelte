@@ -106,7 +106,7 @@
     <span class="spacer"></span>
     <div class="seg" role="radiogroup" aria-label="Window">
       {#each DAYS as d (d)}
-        <button class:on={d === days} role="radio" aria-checked={d === days} onclick={() => home.updateBoxConfig(viewId, box.id, { days: d })}>{d}d</button>
+        <button class:on={d === days} role="radio" aria-checked={d === days} tabindex={d === days ? 0 : -1} onclick={() => home.updateBoxConfig(viewId, box.id, { days: d })}>{d}d</button>
       {/each}
     </div>
   </div>
@@ -119,6 +119,9 @@
       <button class="btn small" onclick={() => router.go('usage')}>Open Usage</button>
     </EmptyState>
   {:else if summary}
+    {#if error}
+      <LoadState what="Usage" variant="compact" {error} empty={false} onretry={() => poller?.now()} />
+    {/if}
     <div class="stats">
       <div class="stat"><span class="n">{fmtUsd(summary.total_cost_usd)}</span><span class="l">spend</span></div>
       <div class="stat"><span class="n">{fmtK(summary.total_tokens)}</span><span class="l">tokens</span></div>

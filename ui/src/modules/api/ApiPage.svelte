@@ -13,7 +13,8 @@
   import { LIST_PANE, loadPaneWidth, paneResizer, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { onTabKey } from '../../lib/tabKeys';
-  import { untrack } from 'svelte';
+  import { untrack, tick } from 'svelte';
+  import { scrollBehavior } from '../../lib/motion';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -29,6 +30,7 @@
   import GitSyncDialog from './GitSyncDialog.svelte';
   import MethodTag from './MethodTag.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
+  import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
@@ -300,6 +302,27 @@
 
   const activeEnvName = $derived(apiClient.activeEnv?.name ?? null);
   const automationName = $derived(view.kind === 'automation' ? (apiClient.automations.find((a) => a.id === (view as { id: Id }).id)?.name ?? 'Automation') : '');
+  let responsePane = $state<HTMLElement | null>(null);
+  let previousResultTab: string | undefined;
+  let previousResult: unknown;
+  $effect(() => {
+    const tab = apiClient.draft?.tabId ?? undefined;
+    const streamResult = apiStream.tabId === tab && (apiStream.status === 'open' || apiStream.status === 'error') ? apiStream.status : null;
+    const result = apiClient.lastError || apiClient.lastResponse || streamResult;
+    const changed = tab === previousResultTab && result && result !== previousResult;
+    previousResultTab = tab;
+    previousResult = result;
+    if (changed && viewport.isPhone) untrack(() => {
+      void tick().then(() => {
+        if (apiClient.draft?.tabId === tab && viewport.isPhone) responsePane?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+      });
+    });
+  });
+  function showTimeoutSettings(): void {
+    builderTab = 'settings';
+    if (viewport.isPhone) void tick().then(() => builderEl?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' }));
+  }
+
   const showList = $derived(!viewport.isPhone || phonePane === 'list');
   const showMain = $derived(!viewport.isPhone || phonePane === 'main');
 </script>
@@ -322,7 +345,7 @@
       <button class="btn small" data-icon="download" data-overflow="0" onclick={() => (importOpen = true)}><Icon name="download" size={12} />Import…</button>
       <button class="btn small" data-icon="branch" data-overflow="-1" onclick={() => (gitOpen = true)} disabled={ws.myRole === 'viewer'} title={ws.myRole === 'viewer' ? 'Viewers can’t sync API collections with Git' : undefined}><Icon name="branch" size={12} />Sync with Git…</button>
       {#if !onboarding}
-        <button class="btn small primary" onclick={newRequest} title="New request (⌘T)" aria-label="New request"><Icon name="plus" size={12} />{#if !viewport.isPhone}New request{/if}</button>
+        <button class="btn small" onclick={newRequest} title="New request (⌘T)" aria-label="New request"><Icon name="plus" size={12} />{#if !viewport.isPhone}New request{/if}</button>
       {/if}
     {/snippet}
   </PageHeader>
@@ -385,15 +408,15 @@
                   {@const active = view.kind === 'request' && apiClient.activeTab === i}
                   {@const st = apiClient.tabStatus(t.tabId)}
                   <div class="req-tab" class:active>
-                    <button class="req-tab-main" aria-current={active ? 'true' : undefined} onclick={() => switchRequestTab(i)}
+                    <button class="req-tab-main" aria-label={`${apiClient.tabLabel(t)}${apiClient.isDirty(t) ? ', unsaved changes' : ''}${st === 'ok' ? ', last send succeeded' : st === 'fail' ? ', last send failed' : st === 'sending' ? ', sending' : ''}`} aria-current={active ? 'true' : undefined} onclick={() => switchRequestTab(i)}
                       title={apiClient.isDirty(t) ? `${apiClient.tabLabel(t)} (unsaved changes)` : apiClient.tabLabel(t)}>
                       <MethodTag method={t.kind === 'http' || t.kind === 'sse' ? t.method : t.kind === 'grpc' ? 'gRPC' : 'WS'} />
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
-                      {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-label="Unsaved changes"></span>{/if}
+                      {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-hidden="true">Edited</span>{/if}
                       {#if st === 'sending'}<span class="spinner" style="--spinner-size: 9px" role="status" aria-label="Sending" title="Sending…"></span>
-                      {:else if st}<span class="req-tab-status {st}" aria-label={st === 'ok' ? 'Last send succeeded' : 'Last send failed'} title={st === 'ok' ? 'Last send succeeded' : 'Last send failed'}></span>{/if}
+                      {:else if st}<span class="req-tab-status {st}" aria-label={st === 'ok' ? 'Last send succeeded' : 'Last send failed'} title={st === 'ok' ? 'Last send succeeded' : 'Last send failed'}><Icon name={st === 'ok' ? 'check' : 'x'} size={12} /></span>{/if}
                     </button>
-                    <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>
+                    <button class="req-tab-close icon-btn" title={`Close tab ${apiClient.tabLabel(t)}`} aria-label={`Close tab ${apiClient.tabLabel(t)}`} onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
                 {#if view.kind !== 'request'}
@@ -436,8 +459,8 @@
                   use:paneResizer={{ onDragStart: startBuilderResize, value: ui.apiBuilderHeight || builderEl?.offsetHeight || 300, min: 180, max: Math.round((typeof window === 'undefined' ? 900 : window.innerHeight) * 0.8), orientation: 'horizontal', step: 10, bigStep: 40, onChange: (h) => ui.setApiBuilderHeight(h), onReset: () => ui.resetApiBuilderHeight(), text: (v) => `${Math.round(v)} pixels tall` }}
                 ></div>
               {/if}
-              <section class="resp-pane" aria-label="Response">
-                <ResponseViewer onsettings={() => (builderTab = 'settings')} />
+              <section bind:this={responsePane} class="resp-pane" aria-label="Response">
+                <ResponseViewer onsettings={showTimeoutSettings} />
               </section>
             {/if}
           </div>
@@ -609,26 +632,13 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .req-tab-dirty {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--warning);
-    flex-shrink: 0;
-  }
-  /* Per-tab response state: a spinner while the tab's send is in flight
-     (it keeps running in the background), then a dot for the outcome. */
-  .req-tab-status {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .req-tab-status.ok {
-    background: var(--success);
-  }
-  .req-tab-status.fail {
-    background: var(--danger);
+  .req-tab-dirty { color: var(--warning); font-size: var(--fs-xs); flex-shrink: 0; }
+  .req-tab-status { display: inline-flex; flex-shrink: 0; }
+  .req-tab-status.ok { color: var(--success); }
+  .req-tab-status.fail { color: var(--danger); }
+  @media (pointer: coarse), (max-width: 640px) {
+    .req-tab-main { min-height: 36px; }
+    .req-tab-close { min-width: 36px; min-height: 36px; }
   }
   .req-tab-close {
     width: 20px;

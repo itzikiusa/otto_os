@@ -238,7 +238,11 @@
     <div class="add-form">
       <label class="fl">
         <span>Kind</span>
-        <select bind:value={form.kind} disabled={editingId !== null}>
+        <select
+          bind:value={form.kind}
+          disabled={editingId !== null}
+          title={editingId !== null ? 'Kind can’t be changed. Delete this trigger and add a new one.' : 'Trigger kind'}
+        >
           <option value="schedule">Schedule</option>
           <option value="webhook">Webhook</option>
           <option value="event">Event</option>

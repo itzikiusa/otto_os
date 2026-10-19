@@ -2,6 +2,8 @@
   // A colored pill for a proof pack's overall status (missing/partial/passed/
   // failed/waived), with an optional risk score. `compact` shrinks it for the
   // inline sidebar session-row use.
+  import { sentenceCase } from '../labels';
+
   interface Props {
     status: string;
     risk?: number;
@@ -26,8 +28,8 @@
   class:compact
   title={showRisk ? `proof: ${status} · risk ${risk}` : `proof: ${status}`}
 >
-  <span class="lbl">{status}</span>
-  {#if showRisk}<span class="risk">{risk}</span>{/if}
+  <span class="lbl">{sentenceCase(status)}</span>
+  {#if showRisk}<span class="risk">risk {risk}</span>{/if}
 </span>
 
 <style>

@@ -34,7 +34,6 @@
   import { openExternal } from '../../lib/external';
   import { copyText } from '../../lib/clipboard';
   import { sentenceCase, type Tone } from '../../lib/status';
-  import { swarm } from '../../lib/stores/swarm.svelte';
   import { SOURCE_MODULE, directRoute, reviewRoute, stopPath, isActive } from './sourceLinks';
 
   interface Props {
@@ -257,6 +256,7 @@
         const p = await missionControlApi.sourceProject(d.source_id);
         if (p.swarm_id) {
           if (!(await router.goChecked(`swarm/${encodeURIComponent(p.swarm_id)}`))) return;
+          const { swarm } = await import('../../lib/stores/swarm.svelte');
           await swarm.openProject(wsId, p.swarm_id, p.id);
         } else await router.goChecked('swarm');
       } else if (d.kind === 'workflow') {
@@ -356,7 +356,10 @@
         {/if}
       </div>
     </div>
-    <button class="icon-btn" title="Close details" aria-label="Close details" onclick={onClose}><Icon name="x" size={14} /></button>
+    <button class="icon-btn detail-back" title="Back" aria-label="Back" onclick={onClose}>
+      <Icon name="chevronLeft" size={14} />
+      <span class="back-word">Back</span>
+    </button>
   </header>
 
   {#if loading && !detail}
@@ -543,6 +546,26 @@
     gap: 8px;
     padding-block: 12px; padding-inline: 14px 10px;
     border-bottom: 1px solid var(--border);
+  }
+  .back-word {
+    display: none;
+  }
+  @media (pointer: coarse) {
+    .detail-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      width: auto;
+      height: auto;
+      min-block-size: var(--hit-min);
+      min-inline-size: var(--hit-min);
+      padding-inline: 8px;
+      color: var(--text);
+    }
+    .back-word {
+      display: inline;
+      font-size: var(--fs-m);
+    }
   }
   .d-title {
     display: flex;

@@ -46,7 +46,7 @@
   const listError = $derived(!artifacts && sid ? activity.artifactsErrorBySession[sid] : null);
   $effect(() => {
     const session = sid;
-    if (!artifacts && session) untrack(() => void activity.loadArtifacts(session));
+    if (!artifacts && session) return untrack(() => activity.watchArtifacts(session));
   });
 
   // ── Selection + preview ──────────────────────────────────────────────────────

@@ -37,7 +37,7 @@ test('human evidence, questions and role sessions survive reload', async ({ page
   await expect(page.getByRole('button',{name:'Resume',exact:true})).toBeDisabled();
   await expect(page.getByText('Planner',{exact:true})).toBeVisible();
   await expect(page.getByText('agy',{exact:true})).toBeVisible();
-  await page.getByLabel('Evidence for h').fill('Read the complete report');
+  await page.getByLabel('Evidence for Inspect the report').fill('Read the complete report');
   await page.getByRole('button',{name:'Record verification'}).click();
   await expect(page.getByText('Verified by human-user: Read the complete report')).toBeVisible();
   await page.getByLabel('Answer question').fill('Use Markdown');

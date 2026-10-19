@@ -19,6 +19,35 @@ for (const selector of ['latest', 'approved', 'v3']) {
   });
 }
 
+test('a historical publish pin stands in and does not fetch the current thumbnail', async () => {
+  const thumbs: string[] = [];
+  const { resolveEmbed, pinnedEmbedPoster } = loadSource(new URL('../src/modules/design-hall/site/siteApi.ts', import.meta.url), {
+    '../../../lib/api/client': {}, './engine/theme': { buildTheme: (doc: unknown) => doc },
+    '../../../lib/api/design': {
+      getArtifact: async () => ({ artifact: { id: 'card', title: 'Card', thumb_blob: 'current-thumb' }, head: { seq: 4 }, approved: { seq: 3 } }),
+      thumbnailUrl: async (_id: string, blob: string) => { thumbs.push(blob); return `blob:${blob}`; },
+    },
+  });
+  const uri = 'otto://design/card@approved';
+  const historical = { role: 'embed', uri, poster_pinned: false, poster_blob: null };
+  const omitted = { role: 'embed', uri };
+  const absent = { role: 'embed', uri, poster_pinned: true, poster_blob: null };
+  const captured = { role: 'embed', uri, poster_pinned: true, poster_blob: 'pinned-poster' };
+  assert.equal(pinnedEmbedPoster(historical).standIn, true);
+  assert.equal(pinnedEmbedPoster(omitted).standIn, true);
+  assert.equal(pinnedEmbedPoster(absent).standIn, true);
+  assert.equal(pinnedEmbedPoster(captured).blob, 'pinned-poster');
+  for (const pin of [historical, omitted, absent]) {
+    const info = await resolveEmbed(uri, pin);
+    assert.equal(info.poster, null);
+  }
+  const live = await resolveEmbed(uri);
+  const pinned = await resolveEmbed(uri, captured);
+  assert.deepEqual(thumbs, ['current-thumb', 'pinned-poster']);
+  assert.equal(live.poster, 'blob:current-thumb');
+  assert.equal(pinned.poster, 'blob:pinned-poster');
+});
+
 test('brand content beyond inline cap loads the exact resolved version', async () => {
   const downloads: unknown[][] = [];
   const { resolveBrand } = loadSource(new URL('../src/modules/design-hall/site/siteApi.ts', import.meta.url), {

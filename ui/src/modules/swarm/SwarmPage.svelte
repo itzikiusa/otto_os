@@ -49,13 +49,13 @@
   /** Swarm lifecycle → the shared badge tone (patterns.md §1). */
   const SWARM_TONE: Record<string, Tone> = { active: 'success', paused: 'neutral', aborted: 'danger' };
 
-  // On phone and tablet, the swarm picker becomes a compact band above the
-  // detail. Keep the view mounted when the picker opens or closes.
+  // On a phone the picker collapses once a swarm is open. Tablet and desktop
+  // keep the list visible. The view stays mounted when the picker toggles.
   let railOpen = $state(true);
   let railEl = $state<HTMLElement | null>(null);
   let railToggle = $state<HTMLButtonElement | null>(null);
   let lastOpenedId: string | null = null;
-  let wasCompact = false;
+  let wasPhone = false;
   async function collapseRail(): Promise<void> {
     const restoreFocus = railEl?.querySelector('.rail-list')?.contains(document.activeElement);
     railOpen = false;
@@ -63,17 +63,17 @@
     if (restoreFocus) railToggle?.focus();
   }
   $effect.pre(() => {
-    const compact = viewport.isMobile;
+    const phone = viewport.isPhone;
     const id = swarm.detail?.id ?? null;
-    if (compact && id && (id !== lastOpenedId || !wasCompact)) {
+    if (phone && id && (id !== lastOpenedId || !wasPhone)) {
       untrack(() => void collapseRail());
     }
     lastOpenedId = id;
-    wasCompact = compact;
+    wasPhone = phone;
   });
   async function pickSwarm(id: string): Promise<void> {
     await openSwarm(id);
-    if (viewport.isMobile && swarm.detail?.id === id) await collapseRail();
+    if (viewport.isPhone && swarm.detail?.id === id) await collapseRail();
   }
 
   let showNew = $state(false);
@@ -380,6 +380,18 @@
     }
   }
 
+  function projectMenu(e: MouseEvent) {
+    ctxMenu.show(e, [
+      {
+        label: 'Delete project…',
+        icon: 'trash',
+        danger: true,
+        title: 'Delete this project, its tasks and feed',
+        action: () => void deleteProject(),
+      },
+    ]);
+  }
+
   async function deleteProject() {
     if (!projEditId) return;
     const p = detail?.projects.find((x) => x.id === projEditId);
@@ -596,7 +608,8 @@
             onclick={() => void pickSwarm(s.id)}
           >
             <span class="grow ellipsis">{s.name}</span>
-            <span class="dot {s.status}" role="img" aria-label={sentenceCase(s.status)}></span>
+            <span class="dot {s.status}" aria-hidden="true"></span>
+            <span class="rail-status">{sentenceCase(s.status)}</span>
           </button>
         {/each}
       </LoadState>
@@ -734,7 +747,7 @@
           {#if view === 'tree'}
             <OrgTree onedit={(a) => openEditor(a)} onruntask={runForAgent} onadd={openEditorWithParent} onduplicate={duplicateAgent} />
           {:else if view === 'graph'}
-            <AgentGraph />
+            <AgentGraph onedit={(a) => openEditor(a)} onadd={openEditorWithParent} />
           {:else if view === 'kanban'}
             <KanbanBoard onnewproject={openProjectCreate} oneditproject={openProjectEdit} />
           {:else if view === 'runs'}
@@ -795,16 +808,25 @@
 {/if}
 {#if projModal}
   <Modal title={projEditId ? 'Edit project' : 'New project'} width={480} onclose={() => (projModal = false)}>
+    {#if projEditId}
+      <div class="proj-actions">
+        <button
+          class="icon-btn"
+          aria-label="More actions for {projName.trim() || 'this project'}"
+          title="More actions"
+          aria-haspopup="menu"
+          onclick={projectMenu}
+          disabled={projSaving}
+        >
+          <Icon name="more" size={14} />
+        </button>
+      </div>
+    {/if}
     <div class="field"><label for="p-name">Name</label><input dir="auto" id="p-name" class="input" bind:value={projName} /></div>
     <div class="field"><label for="p-repo">Repository path (optional, for code projects)</label><PathField bind:value={projRepo}><input dir="ltr" id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
     <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea dir="auto" id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
-      {#if projEditId}
-        <button class="btn danger" style="margin-inline-end:auto" onclick={deleteProject} disabled={projSaving} title="Delete this project, its tasks and feed">
-          Delete project…
-        </button>
-      {/if}
       <button class="btn ghost" onclick={() => (projModal = false)}>Cancel</button>
       <button class="btn primary" onclick={saveProject} disabled={!projName.trim() || projSaving} title={projName.trim() ? undefined : 'Name the project first'}>
         {projSaving ? 'Saving…' : projEditId ? 'Save' : 'Create project'}
@@ -937,6 +959,16 @@
   }
   .dot.aborted {
     background: var(--status-exited);
+  }
+  .rail-status {
+    flex: none;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+  }
+  .proj-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 8px;
   }
   .ellipsis {
     overflow: hidden;
@@ -1161,29 +1193,38 @@
 
   @media (max-width: 640px) {
     .swarm-page.phone .cap {
-      flex: none;
+      flex: 0 0 auto;
     }
     .swarm-page.phone .budget-bars {
-      flex: none;
-      flex-wrap: nowrap;
+      flex: 1 1 auto;
+      min-width: 0;
     }
 
-    /* View switcher: horizontally scrollable so all 5 tabs are reachable on a
-       320px screen, instead of the last one ("Feed") clipping off the edge. */
+    /* Tabs scroll on their own row. Budget meters and Max parallel wrap onto
+       the next row instead of hiding off the end of the tab strip. */
     .swarm-page.phone .switcher {
-      overflow-x: auto;
-      flex-wrap: nowrap;
-      scrollbar-width: none;
-      -webkit-overflow-scrolling: touch;
+      flex-wrap: wrap;
+      overflow: visible;
+      row-gap: 8px;
     }
-    .swarm-page.phone .switcher::-webkit-scrollbar {
+    .swarm-page.phone .switcher-spacer {
       display: none;
+    }
+    .swarm-page.phone .seg-tabs {
+      flex: 1 1 100%;
+      max-width: 100%;
+      min-width: 0;
+      overflow-x: auto;
     }
     .swarm-page.phone .seg {
       flex: none;
       font-size: var(--fs-m);
-      height: 32px;
+      height: auto;
+      min-height: 44px;
       padding: 0 12px;
+    }
+    .swarm-page.phone .view {
+      overflow: auto;
     }
 
     /* When a session panel opens, stack it under the view (vertical split) rather

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { plural } from '../../../lib/plural';
   import { loadErrorText } from '../../../lib/loadError';
   // Brand Kit editor (`#/design/brand/<id>`): one `otto-brand/1` kit.
@@ -463,28 +464,34 @@
   });
 </script>
 
+{#snippet brandBack()}
+  {#if viewport.isPhone}
+    <button class="icon-btn" onclick={() => router.go('design')} aria-label="Back to Design Hall" title="Back to Design Hall"><Icon name="chevronLeft" size={16} /></button>
+  {/if}
+{/snippet}
+
 <svelte:window onkeydown={onKey} />
 
 {#if phase === 'loading'}
-  <PageHeader title="Brand Kit" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
+  <PageHeader title="Brand Kit" leading={brandBack} crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]} />
   <PageBody><Skeleton rows={3} height={160} /></PageBody>
 {:else if phase === 'error'}
-  <PageHeader title="Brand Kit" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
+  <PageHeader title="Brand Kit" leading={brandBack} crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]} />
   <PageBody>
     <LoadState variant="compact" what="the brand kit" error={loadError || 'No details were reported.'} empty onretry={() => void load()} />
   </PageBody>
 {:else if phase === 'gone'}
-  <PageHeader title="Brand Kit" crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
+  <PageHeader title="Brand Kit" leading={brandBack} crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]} />
   <PageBody>
     <EmptyState variant="page" icon="palette" title="This brand kit is gone" body="It was deleted, or you no longer have access to its workspace." actionLabel="All brand kits" onaction={() => router.go('design/brand')} />
   </PageBody>
 {:else if phase === 'invalid' && artifact}
-  <PageHeader title={artifact.title} crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]} />
+  <PageHeader title={artifact.title} leading={brandBack} crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]} />
   <PageBody>
-    <EmptyState variant="page" icon="palette" title="This design isn’t a brand kit" body="Only otto-brand documents open in the Brand Kit editor." actionLabel="Open the design" onaction={() => router.go(`design/a/${encodeURIComponent(id)}`)} />
+    <EmptyState variant="page" icon="palette" title="This design isn’t a brand kit" body="Open this design in its studio instead." actionLabel="Open the design" onaction={() => router.go(`design/a/${encodeURIComponent(id)}`)} />
   </PageBody>
 {:else if artifact}
-  <PageHeader title={artifact.title} crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }, { label: 'Brand Kit', onclick: () => router.go('design/brand') }]}>
+  <PageHeader title={artifact.title} leading={brandBack} crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }, { label: 'Brand Kit', onclick: () => router.go('design/brand') }]}>
     {#snippet titleContent()}
       <button class="switcher" onclick={kitMenu} aria-haspopup="menu" title="Switch brand kit" data-testid="brand-switcher">
         <span class="kit-tile" aria-hidden="true"><Icon name="palette" size={12} /></span>
@@ -622,7 +629,7 @@
     grid-template-columns: minmax(0, 1fr) 336px;
     gap: 24px;
     max-width: 1360px;
-    margin: 0 auto;
+    margin: 0;
     align-items: start;
   }
   .main {

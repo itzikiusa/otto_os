@@ -269,6 +269,7 @@
       <div class="vh-text">
         <h2>{automation.name}{#if dirty}<span class="unsaved" title="Unsaved changes"> · edited</span>{/if}</h2>
         <p>Runs saved requests in order. Each step can <strong>check</strong> the response and <strong>save values</strong> from it (like a token or an id) as <code>{'{{variables}}'}</code> for the steps after it. Saved values only live for the run; environments aren’t changed.</p>
+        <p>Run sends {steps.length} saved {steps.length === 1 ? 'request' : 'requests'} per dataset row to their configured URLs, using <strong>{apiClient.environments.find(e => e.id === environmentId)?.name || apiClient.activeEnv?.name || 'no environment'}</strong>. These calls leave this Mac and can change data on the destination servers.</p>
       </div>
       <div class="vh-actions">
         {#if showRun}

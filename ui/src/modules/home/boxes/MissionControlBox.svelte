@@ -93,6 +93,21 @@
 
   const active = $derived(items.filter((i) => i.status === 'running' || i.status === 'waiting' || i.status === 'blocked'));
   const recent = $derived(items.filter((i) => !active.includes(i)));
+  function statusTextColor(s: WorkItem['status']): string {
+    switch (s) {
+      case 'running':
+        return 'var(--success)';
+      case 'waiting':
+      case 'blocked':
+        return 'var(--warning)';
+      case 'failed':
+        return 'var(--danger)';
+      case 'done':
+        return 'var(--accent-text)';
+      default:
+        return 'var(--text-dim)';
+    }
+  }
 </script>
 
 <div class="mc">
@@ -101,6 +116,9 @@
   {:else if error && !summary}
     <LoadState what="Mission Control" error={error} empty onretry={() => poller?.now()} />
   {:else if summary}
+    {#if error}
+      <LoadState what="Mission Control" variant="compact" {error} empty={false} onretry={() => poller?.now()} />
+    {/if}
     <div class="stats">
       <div class="stat"><span class="n" class:working={summary.active > 0}>{summary.active}</span><span class="l">active</span></div>
       <div class="stat"><span class="n" class:needs={summary.needs_approval > 0}>{summary.needs_approval}</span><span class="l">need approval</span></div>
@@ -122,11 +140,11 @@
       <ul class="rows">
         {#each [...active, ...recent] as it (it.id)}
           <li>
-            <button class="row" onclick={() => router.go(`mission-control/${it.id}`)} title={it.title}>
+            <button class="mc-row" onclick={() => router.go(`mission-control/${it.id}`)} title={it.title}>
               <span class="dot" style:background={statusColor(it.status)}></span>
               <Icon name={KIND_ICON[it.kind]} size={12} />
               <span class="title ellipsis">{it.title}</span>
-              <span class="st" style:color={statusColor(it.status)}>{STATUS_LABEL[it.status]}</span>
+              <span class="st" style:color={statusTextColor(it.status)}>{STATUS_LABEL[it.status]}</span>
               <span class="ago" title={new Date(it.updated_at).toLocaleString()}>{now() && relTime(it.updated_at)}</span>
             </button>
           </li>
@@ -202,7 +220,7 @@
     min-height: 0;
     flex: 1;
   }
-  .row {
+  .mc-row {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -217,7 +235,7 @@
     font: inherit;
     font-size: var(--fs-s);
   }
-  .row:hover {
+  .mc-row:hover {
     background: var(--hover);
   }
   .foot {

@@ -20,6 +20,7 @@
 // root) uses it to start the first page's chunk alongside the shell's.
 
 import { startMeasurement } from '../lib/telemetry';
+import { loadErrorText } from '../lib/loadError';
 import type { Component } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 
@@ -153,7 +154,7 @@ export function loadPage(key: string): Promise<PageComponent> {
       (e: unknown) => {
         measured?.finish('error');
         pending.delete(key);
-        failed.set(key, e instanceof Error ? e.message : String(e));
+        failed.set(key, loadErrorText(e));
         throw e;
       },
     );

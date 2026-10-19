@@ -34,7 +34,30 @@
   let fSkill = $state('');
   let fTest = $state('');
   let fLint = $state('');
+  let fBuild = $state('');
   let fRubric = $state('');
+  let fTags = $state('');
+  let fEnabled = $state(true);
+  let initialSnapshot = $state('');
+
+  function currentSnapshot(): string {
+    return JSON.stringify([
+      (fName ?? '').trim(),
+      (fPrompt ?? '').trim(),
+      (fSkill ?? '').trim(),
+      (fTest ?? '').trim(),
+      (fLint ?? '').trim(),
+      (fBuild ?? '').trim(),
+      (fRubric ?? '').trim(),
+      (fTags ?? '').trim(),
+      fEnabled ?? true,
+    ]);
+  }
+
+  function isFormDirty(): boolean {
+    if (!showForm) return false;
+    return currentSnapshot() !== initialSnapshot;
+  }
 
   // Reload whenever the active workspace changes.
   $effect(() => {
@@ -94,20 +117,36 @@
     fSkill = '';
     fTest = '';
     fLint = '';
+    fBuild = '';
     fRubric = '';
+    fTags = '';
+    fEnabled = true;
+    initialSnapshot = currentSnapshot();
   }
 
-  function toggleCreate(): void {
+  async function confirmDiscardForm(): Promise<boolean> {
+    if (!isFormDirty()) return true;
+    return confirmer.ask('You have unsaved changes to this golden task. Discard them?', {
+      title: 'Discard unsaved changes?',
+      confirmLabel: 'Discard',
+      cancelLabel: 'Keep editing',
+      danger: true,
+    });
+  }
+
+  async function toggleCreate(): Promise<void> {
     if (showForm && editingId === null) {
-      closeForm();
+      await cancelForm();
       return;
     }
+    if (!(await confirmDiscardForm())) return;
     editingId = null;
     resetFields();
     showForm = true;
   }
 
-  function openEdit(t: GoldenTask): void {
+  async function openEdit(t: GoldenTask): Promise<void> {
+    if (editingId !== t.id && !(await confirmDiscardForm())) return;
     formGeneration++;
     editingId = t.id;
     fName = t.name;
@@ -115,7 +154,11 @@
     fSkill = t.skill;
     fTest = t.test_cmd;
     fLint = t.lint_cmd;
+    fBuild = t.build_cmd ?? '';
     fRubric = t.rubric;
+    fTags = (t.tags ?? []).join(', ');
+    fEnabled = t.enabled ?? true;
+    initialSnapshot = currentSnapshot();
     showForm = true;
   }
 
@@ -123,6 +166,11 @@
     showForm = false;
     editingId = null;
     resetFields();
+  }
+
+  async function cancelForm(): Promise<void> {
+    if (!(await confirmDiscardForm())) return;
+    closeForm();
   }
 
   async function submit(): Promise<void> {
@@ -133,13 +181,18 @@
     const id = editingId;
     const generation = formGeneration;
     saving = true;
+    const rawBuild = typeof fBuild === 'string' ? fBuild.trim() : '';
+    const rawTags = typeof fTags === 'string' ? fTags.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     const body: GoldenTaskReq = {
       name: fName.trim(),
       prompt: fPrompt.trim(),
       skill: fSkill.trim() || undefined,
       test_cmd: fTest.trim() || undefined,
       lint_cmd: fLint.trim() || undefined,
+      ...(rawBuild ? { build_cmd: rawBuild } : {}),
       rubric: fRubric.trim() || undefined,
+      ...(rawTags && rawTags.length > 0 ? { tags: rawTags } : {}),
+      ...(id && typeof fEnabled === 'boolean' ? { enabled: fEnabled } : {}),
     };
     try {
       if (id) {
@@ -203,12 +256,14 @@
       Reusable, per-repo evaluation cases — a prompt plus a test command. Failed evaluations can be
       saved here as regression cases.
     </p>
-    <!-- While the list is empty its EmptyState owns the one "New" action. -->
+    <!-- While the list is empty its EmptyState owns the one "New" action; while
+         the form is open, the form's submit button is the only primary CTA. -->
     {#if tasks.length > 0 || showForm}
       <button
-        class="btn small primary"
+        class="btn small"
+        class:primary={!showForm}
         data-testid="golden-new-btn"
-        onclick={toggleCreate}
+        onclick={() => void toggleCreate()}
         disabled={!ws.currentId}
         aria-expanded={showForm && editingId === null}
       >
@@ -222,7 +277,7 @@
       <div class="gt-form-head">
         <h3 class="gt-form-title">{editingId ? 'Edit golden task' : 'New golden task'}</h3>
         <span class="grow"></span>
-        <button type="button" class="icon-btn" onclick={closeForm} title="Close form" aria-label="Close form">
+        <button type="button" class="icon-btn" onclick={() => void cancelForm()} title="Close form" aria-label="Close form">
           <Icon name="x" size={14} />
         </button>
       </div>
@@ -265,6 +320,14 @@
           <label class="field-label" for="gt-lint">Lint command</label>
           <input dir="auto" id="gt-lint" class="input" placeholder="cargo clippy · npm run check" bind:value={fLint} />
         </div>
+        <div>
+          <label class="field-label" for="gt-build">Build command</label>
+          <input dir="auto" id="gt-build" class="input" placeholder="cargo build · npm run build (optional)" bind:value={fBuild} />
+        </div>
+        <div>
+          <label class="field-label" for="gt-tags">Tags</label>
+          <input dir="auto" id="gt-tags" class="input" placeholder="regression, auth (optional)" bind:value={fTags} />
+        </div>
       </div>
 
       <label class="field-label" for="gt-rubric">Rubric</label>
@@ -278,7 +341,7 @@
 
       <div class="gt-form-actions">
         <span class="grow"></span>
-        <button type="button" class="btn small ghost" onclick={closeForm}>Cancel</button>
+        <button type="button" class="btn small ghost" onclick={() => void cancelForm()}>Cancel</button>
         <button class="btn small primary" data-testid="golden-save" disabled={!canSave}>
           {saving ? 'Saving…' : editingId ? 'Save changes' : 'Add golden task'}
         </button>

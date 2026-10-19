@@ -36,6 +36,15 @@ for (const viewport of [{ width: 1440, height: 1200 }, { width: 390, height: 844
         }).toBeLessThan(1);
         await expectFullyInViewport(page, dialog);
         await expectFullyInViewport(page, dialog.locator('footer'));
+        if (viewport.width <= 640) {
+          const counters = dialog.locator('.cbtn:visible');
+          expect(await counters.count()).toBeGreaterThan(0);
+          for (const counter of await counters.all()) {
+            const box = await counter.boundingBox();
+            expect(box?.width).toBeGreaterThanOrEqual(36);
+            expect(box?.height).toBeGreaterThanOrEqual(36);
+          }
+        }
       }
       await dialog.locator('#ns-extra-dir').scrollIntoViewIfNeeded();
       await expect(dialog.locator('#ns-extra-dir')).toBeInViewport();

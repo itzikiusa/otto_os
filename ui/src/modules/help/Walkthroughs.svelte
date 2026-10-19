@@ -315,7 +315,9 @@
                 <EmptyState
                   icon="book"
                   title="There’s no guide called “{param}”"
-                  body="It may have been renamed. Pick one from the list, or start at the beginning."
+                  body={viewport.isPhone
+                    ? 'It may have been renamed. Go back to all guides, or start at the beginning.'
+                    : 'It may have been renamed. Pick one from the list, or start at the beginning.'}
                   actionLabel="Open Getting started"
                   onaction={() => open(DEFAULT_GUIDE_ID)}
                 />

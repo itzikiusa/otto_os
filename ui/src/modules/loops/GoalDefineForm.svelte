@@ -111,7 +111,15 @@
   function canLaunch(): boolean {
     if (!alive || !ws.currentId || !draft || !name.trim()) return false;
     const cs = draft.definition.acceptance_criteria;
-    return cs.length > 0 && cs.every((c) => c.text.trim() !== '' && c.verify.trim() !== '');
+    return (
+      cs.length > 0 &&
+      cs.every(
+        (c) =>
+          c.text.trim() !== '' &&
+          c.verify.trim() !== '' &&
+          (c.verify_kind !== 'command' || (c.verify_cmd ?? '').trim() !== ''),
+      )
+    );
   }
 
   async function launch(): Promise<void> {
@@ -234,13 +242,16 @@
     <select id="gl-define-provider" class="input in" bind:value={defProvider} onchange={() => (defModel = '')}>{#each providers as p (p)}<option value={p}>{p}</option>{/each}</select>
     <ModelPicker provider={defProvider} value={defModel} onchange={(m) => (defModel = m)} />
     <div class="frow">
-      <button class="btn" class:primary={!draft} onclick={define} disabled={!ws.currentId || defining || !seed.trim() || (mode === 'build' && !repoPath.trim())}
-        title={!ws.currentId ? 'Add a workspace first' : !seed.trim() ? 'Describe the goal first' : mode === 'build' && !repoPath.trim() ? 'Choose the repository first' : 'Draft criteria and a budget from your goal'}>
-        {defining ? 'Defining…' : draft ? 'Re-define' : 'Define with AI'}
-      </button>
       {#if draft}
-        <input dir="ltr" aria-label="Refine the draft" class="input in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
-        <button class="btn" onclick={define} disabled={!ws.currentId || defining || !feedback.trim()}>Refine</button>
+        <input dir="auto" aria-label="Refine the draft" class="input in grow" bind:value={feedback} placeholder="What to change about the draft" />
+        <button class="btn" onclick={define} disabled={!ws.currentId || defining || !feedback.trim() || !seed.trim() || (mode === 'build' && !repoPath.trim())}>
+          {defining ? 'Updating…' : 'Update draft'}
+        </button>
+      {:else}
+        <button class="btn primary" onclick={define} disabled={!ws.currentId || defining || !seed.trim() || (mode === 'build' && !repoPath.trim())}
+          title={!ws.currentId ? 'Add a workspace first' : !seed.trim() ? 'Describe the goal first' : mode === 'build' && !repoPath.trim() ? 'Choose the repository first' : 'Draft criteria and a budget from your goal'}>
+          {defining ? 'Drafting…' : 'Draft goal'}
+        </button>
       {/if}
     </div>
   </section>
@@ -279,6 +290,9 @@
         </div>
       {/each}
       <button class="btn small" onclick={addCriterion}><Icon name="plus" size={12} /> Add criterion</button>
+      {#if !canLaunch()}
+        <p class="muted small" role="status">Each criterion needs a description and how it is verified.</p>
+      {/if}
     </section>
 
     <section class="block">
@@ -318,7 +332,7 @@
     <section class="block adv">
       <button type="button" class="adv-toggle" aria-expanded={showAdvanced} aria-controls="gl-advanced" onclick={() => (showAdvanced = !showAdvanced)}>
         <Icon name={showAdvanced ? 'chevronDown' : 'chevronRight'} size={12} /> Advanced
-        <span class="hint">sources, skills, planner / evaluator / digester agents</span>
+        <span class="hint adv-hint">sources, skills, planner / evaluator / digester agents</span>
       </button>
       {#if showAdvanced}
       <div id="gl-advanced">
@@ -343,7 +357,7 @@
         class="btn primary"
         onclick={launch}
         disabled={launching || !canLaunch()}
-        title={launching || canLaunch() ? undefined : 'Give the loop a name and at least one criterion, each with a description and how to verify it'}
+        title={launching || canLaunch() ? undefined : 'Give the loop a name and at least one criterion, each with a description, how to verify it, and a shell command when verification runs a command'}
       >
         {launching ? 'Launching…' : 'Launch loop'}
       </button>
@@ -419,6 +433,7 @@
   }
   .frow {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: center;
     margin-top: 12px;
@@ -442,7 +457,10 @@
     width: 100%;
     text-align: start;
   }
-  .adv-toggle .hint {
+  .adv-toggle .hint,
+  .adv-hint {
+    flex: 1;
+    min-width: 0;
     font-weight: 400;
     font-size: var(--fs-s);
     overflow: hidden;
@@ -451,6 +469,7 @@
   }
   .grow {
     flex: 1;
+    min-width: 0;
   }
   .crit {
     border: 1px solid var(--border);
@@ -467,8 +486,9 @@
     align-items: center;
   }
   .kind {
-    width: 190px;
-    flex: none;
+    flex: 1 1 160px;
+    width: auto;
+    max-width: 100%;
   }
   .num {
     width: 80px;
@@ -500,12 +520,19 @@
   .block > :global(.checkbox-row) + :global(.checkbox-row) {
     margin-top: 8px;
   }
-  @media (max-width: 640px) {
-    .crit-row {
+  @media (max-width: 1024px) {
+    .crit-row,
+    .frow,
+    .repo-row {
       flex-wrap: wrap;
     }
-    .kind {
+    .kind,
+    .repo-row .grow,
+    .frow .grow,
+    .crit-row .grow {
       width: 100%;
+      min-width: 0;
+      flex: 1 1 100%;
     }
   }
 </style>

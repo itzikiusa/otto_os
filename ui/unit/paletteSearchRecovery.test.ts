@@ -4,15 +4,17 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
 import {deferred} from './sourceHarness.ts';
+import {loadErrorText} from '../src/lib/loadError.ts';
 function setup() {
   const text = readFileSync(new URL('../src/shell/Palette.svelte', import.meta.url), 'utf8');
   const source = text.slice(text.indexOf('>') + 1, text.indexOf('</script>'));
+  assert.match(source, /import\s+\{\s*loadErrorText\s*\}\s+from\s+['"]\.\.\/lib\/loadError['"]/);
   const ast = ts.createSourceFile('palette.ts', source, ts.ScriptTarget.Latest, true);
   const fn = ast.statements.find(s => ts.isFunctionDeclaration(s) && s.name?.text === 'doSearch')!;
   const requests: ReturnType<typeof deferred<any[]>>[] = [];
   const context: Record<string, any> = {searchHits: [], searchError: null, searchBusy: false, searchAbort: null,
     api: {get: () => {const r = deferred<any[]>(); requests.push(r); return r.promise;}},
-    AbortController, isAbortError: (e: any) => e?.name === 'AbortError'};
+    AbortController, isAbortError: (e: any) => e?.name === 'AbortError', loadErrorText};
   runInNewContext(ts.transpileModule(fn.getText(ast), {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText, context);
   return {context, requests};
 }

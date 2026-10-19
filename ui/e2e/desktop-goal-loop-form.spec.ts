@@ -3,7 +3,7 @@ import { apiCtx, seedWorkspace } from './seed';
 import { openPage, expectNoHorizontalOverflow } from './helpers';
 
 // New-goal-loop form E2E (focused): the repository FolderPicker and the form's
-// always-visible controls. "Define with AI" is NOT driven here — it needs a live
+// always-visible controls. "Draft goal" is NOT driven here — it needs a live
 // CLI; the executor provider/model override logic it gates is unit-tested and
 // exercised end-to-end via the run-with-otto launch API.
 
@@ -43,12 +43,12 @@ test.describe('goal-loop form', () => {
     await picker.getByRole('button', { name: 'Cancel' }).click();
     await expect(picker).toHaveCount(0);
 
-    // A typed path + goal enables Define with AI (the AI step itself is not driven).
+    // A typed path + goal enables Draft goal (the AI step itself is not driven).
     await repoInput.fill('/tmp/some-repo');
     await page
       .getByPlaceholder('e.g. Make the export endpoint stream instead of buffering, and add a test.')
       .fill('E2E: form gate check');
-    await expect(page.getByRole('button', { name: 'Define with AI' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Draft goal' })).toBeEnabled();
     await expectNoHorizontalOverflow(page);
   });
 });

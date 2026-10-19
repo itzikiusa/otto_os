@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { registry } from '../../lib/commands.svelte';
   import { plural } from '../../lib/plural';
   // Local working-tree review panel: diff against a chosen base branch, run
   // the configured review agents, show findings with checkboxes, and hand
@@ -20,6 +21,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
   import FindingsBoard from './FindingsBoard.svelte';
+  import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { agentProviders } from '../../lib/providers';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { reviewBus } from '../../lib/events.svelte';
@@ -47,6 +49,7 @@
   let history: Review[] = $state([]);
   let reviewLoading = $state(true);
   let starting = $state(false);
+  let cancelling = $state(false);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   /** False once the panel unmounts: a poll already in flight then must not
    *  re-arm the timer (it kept polling — and could toast "taking too long" —
@@ -302,6 +305,35 @@
     }
   }
 
+  async function cancelReview(): Promise<void> {
+    if (cancelling || !review || review.status !== 'running') return;
+    if (pollTimer !== null) clearTimeout(pollTimer);
+    cancelling = true;
+    try {
+      const updated = await api.post<Review>(`/reviews/${review.id}/cancel`, {});
+      if (!alive) return;
+      review = updated;
+      history = history.map((r) => (r.id === updated.id ? updated : r));
+      toasts.info('Review stopped');
+    } catch (e) {
+      toastError('Couldn’t stop the review', e);
+    } finally {
+      if (alive) {
+        cancelling = false;
+        if (review?.status === 'running') schedulePoll();
+      }
+    }
+  }
+
+  const draftedBy = $derived.by(() => {
+    const ag = review?.agents ?? [];
+    if (ag.length === 0) return null;
+    const summ = ag[ag.length - 1];
+    const reviewers = ag.length > 1 ? ag.slice(0, -1) : ag;
+    const lenses = [...new Set(reviewers.map((a) => a.lens ?? a.name).filter((n) => n.trim() !== ''))];
+    return { provider: summ.provider, model: summ.model, lenses };
+  });
+
   // ---------------------------------------------------------------------------
   // Select all / none helpers
   // ---------------------------------------------------------------------------
@@ -397,6 +429,11 @@
       ...refs.local.map((b) => ({ name: b.name, value: remotes.has(b.name) ? `refs/heads/${b.name}` : b.name, label: remotes.has(b.name) ? `${b.name} (local)` : b.name })),
     ];
   });
+  $effect(() => registry.register(`local-review:${repoId}`, reviewLoading || focusId ? [] : [
+    review?.status === 'running'
+      ? { id: `local-review.stop.${repoId}`, title: 'Stop local review', group: 'Git', keywords: 'review findings changes', disabled: cancelling, run: cancelReview }
+      : { id: `local-review.start.${repoId}`, title: 'Send local changes to review agents', group: 'Git', keywords: 'review findings changes', disabled: starting || !selectedBase || refsLoading, run: startReview },
+  ]));
 </script>
 
 <div class="lrp">
@@ -489,12 +526,29 @@
     <div class="lrp-running-header">
       <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
       <span class="lrp-running-title">Reviewing…</span>
+      <span class="grow"></span>
+      <button
+        class="btn small ghost"
+        disabled={cancelling}
+        onclick={cancelReview}
+        data-testid="local-review-cancel"
+      >
+        <Icon name="stop" size={12} /> {cancelling ? 'Stopping…' : 'Stop review'}
+      </button>
     </div>
     {#if review.agents && review.agents.length > 0}
       <ReviewAgents {review} view="running" onretried={onAgentRetried} />
     {:else}
       <p class="dim" style="font-size: var(--fs-s);padding:8px 0">Agents starting…</p>
     {/if}
+  {:else if review.status === 'cancelled'}
+    <div class="lrp-error card" data-testid="local-review-cancelled">
+      <Icon name="x" size={14} />
+      <span class="lrp-error-msg">Review canceled.</span>
+      <button class="btn small" disabled={starting} onclick={startReview}>
+        {starting ? 'Starting…' : 'Run again'}
+      </button>
+    </div>
   {:else if review.status === 'error'}
     <div class="lrp-error card" role="alert">
       <Icon name="warning" size={14} />
@@ -529,6 +583,14 @@
         No findings — your changes look clean vs <strong>{selectedBase || 'base'}</strong>.
       </p>
     {:else}
+      {#if draftedBy}
+        <p class="lrp-attrib dim">
+          <ProviderIcon provider={draftedBy.provider} size={12} />
+          <span>
+            Drafted by Otto’s review ({draftedBy.provider}{draftedBy.model ? ` · ${draftedBy.model}` : ''}){draftedBy.lenses.length > 0 ? ` from ${draftedBy.lenses.join(', ')}` : ''}. Select findings to hand off to an agent.
+          </span>
+        </p>
+      {/if}
       <div class="lrp-findings-header">
         <span class="lrp-findings-count">{plural(review.comments.length, 'finding')}</span>
         <div class="lrp-sel-btns">
@@ -539,11 +601,12 @@
 
       <div class="lrp-list">
         {#each review.comments as c (c.id)}
-          <label class="lrp-comment card" for="lrp-chk-{c.id}">
+          <div class="lrp-comment card">
             <input
               id="lrp-chk-{c.id}"
               type="checkbox"
               class="lrp-chk"
+              aria-label={`Select ${c.severity} finding: ${c.body}`}
               checked={!!checked[c.id]}
               onchange={(e) => { checked = { ...checked, [c.id]: (e.target as HTMLInputElement).checked }; }}
             />
@@ -556,7 +619,7 @@
               </div>
               <p class="lrp-comment-text">{c.body}</p>
             </div>
-          </label>
+          </div>
         {/each}
       </div>
 
@@ -792,6 +855,13 @@
     gap: 8px;
     margin-bottom: 8px;
     flex-wrap: wrap;
+  }
+  .lrp-attrib {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
   }
   .lrp-findings-count {
     font-size: var(--fs-s);

@@ -2,24 +2,36 @@
   import { scrollBehavior } from '../../lib/motion';
   import { loops } from '../../lib/stores/loops.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import SessionView from '../agents/SessionView.svelte';
   import IterationRow from './IterationRow.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { humanVerification } from './verification';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { loopStatus } from './loopStatus';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { formatSeconds } from '../../lib/metric-format';
   import Modal from '../../lib/components/Modal.svelte';
   import type { GoalLoop } from '../../lib/api/types';
   import { budgetCap, extendDefaults, hasBudgetLeft } from './budget';
   import { tick } from 'svelte';
 
-  let { id, onback }: { id: string; onback: () => void } = $props();
+  /** ⌘K verbs registered by the detail page (or bound via optional actions prop). */
+  export interface LoopActions {
+    pause: () => void;
+    resume: () => void;
+    stop: () => void;
+    extend: () => void;
+  }
+
+  let { id, onback, actions }: { id: string; onback: () => void; actions?: LoopActions } = $props();
 
   let answers = $state<Record<string, string>>({});
   let evidence = $state<Record<string, string>>({});
@@ -28,11 +40,22 @@
 
   let openSessionId = $state<string | null>(null);
   let sessEl = $state<HTMLElement | null>(null);
-  /** Open an agent's session in the pane above the timeline and bring it into view. */
+  /** True only while focus is inside the embedded session — it must not take keys otherwise. */
+  let sessFocused = $state(false);
+  /** Phone has no room for an embedded transcript; open the session in Agents. */
   async function openSession(sid: string): Promise<void> {
+    if (viewport.isPhone) {
+      ws.navigateToSession(sid);
+      return;
+    }
+    sessFocused = false;
     openSessionId = sid;
     await tick();
     sessEl?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+  }
+  function sessionBlur(e: FocusEvent): void {
+    const next = e.relatedTarget;
+    if (!(next instanceof Node) || !sessEl?.contains(next)) sessFocused = false;
   }
 
   // Load + poll the open detail; stop polling when this view goes away.
@@ -67,6 +90,34 @@
     const p = loop.phase === 'waiting' ? 'executing' : loop.phase;
     return PHASES.indexOf(p as (typeof PHASES)[number]);
   }
+  /** Succeeded marks every phase done. Anything else keeps a current phase; only a running loop pulses. */
+  function stepVisual(l: GoalLoop, i: number): { past: boolean; active: boolean; current: boolean } {
+    if (l.status === 'succeeded') return { past: true, active: false, current: false };
+    let idx = phaseIndex(l);
+    if (idx < 0) idx = PHASES.length - 1;
+    const onStep = idx === i;
+    return { past: idx > i, active: l.status === 'running' && onStep, current: onStep };
+  }
+  function progressFill(status: string): string {
+    switch (status) {
+      case 'running':
+        return 'running';
+      case 'blocked':
+      case 'exhausted':
+        return 'warn';
+      case 'failed':
+        return 'bad';
+      case 'succeeded':
+        return 'ok';
+      default:
+        return 'dim';
+    }
+  }
+  function criterionMark(met: boolean | undefined): { icon: IconName; label: string; kind: string } {
+    if (met === true) return { icon: 'check', label: 'Met', kind: 'met' };
+    if (met === false) return { icon: 'x', label: 'Not met', kind: 'unmet' };
+    return { icon: 'minus', label: 'Not checked', kind: 'unchecked' };
+  }
 
   function elapsedSecs(l: GoalLoop): number {
     let s = l.elapsed_secs;
@@ -76,17 +127,13 @@
     return s;
   }
 
-  function errText(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
-  }
-
-  /** Run a lifecycle/ledger call; a failure toasts with a human title. */
+  /** Run a lifecycle/ledger call; a failure toasts with a human title and cause. */
   async function act(fn: () => Promise<void>, failTitle: string): Promise<void> {
     acting = true;
     try {
       await fn();
     } catch (e) {
-      toasts.error(failTitle, errText(e));
+      toastError(failTitle, e);
     } finally {
       acting = false;
     }
@@ -100,7 +147,7 @@
     try {
       await loops.remove(loopId);
     } catch (e) {
-      toasts.error('Couldn’t delete the goal loop', errText(e));
+      toastError('Couldn’t delete the goal loop', e);
       return;
     }
     toasts.success('Goal loop deleted', name);
@@ -112,12 +159,17 @@
     if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', danger: true, confirmLabel: 'Stop loop' }))) return;
     await act(() => loops.stop(loopId), 'Couldn’t stop the goal loop');
   }
-  /** ⋯ next to Pause/Resume: the destructive verbs stay one step away from the primary. */
+  /** ⋯ next to the primary verb. A draft’s Delete lives here so Start is the only header button. */
   function moreMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
-      { label: 'Stop loop…', icon: 'stop', danger: true, action: () => void stop() },
-      ...(loop?.status === 'running' ? [] : [{ label: 'Delete loop…', icon: 'trash' as const, danger: true, action: () => void del() }]),
-    ]);
+    const status = loop?.status;
+    const items: MenuItem[] = [];
+    if (status && status !== 'draft') {
+      items.push({ label: 'Stop loop…', icon: 'stop' as const, danger: true, action: () => void stop() });
+    }
+    if (status !== 'running') {
+      items.push({ label: 'Delete loop…', icon: 'trash' as const, danger: true, action: () => void del() });
+    }
+    ctxMenu.show(e, items);
   }
   // ---- Extend budget (L1): an exhausted loop re-exhausts on a plain Resume,
   // so raise its caps (PATCH limits) and then resume, in one step.
@@ -128,8 +180,10 @@
   let savedExtension = $state('');
   const cap = $derived(loop ? budgetCap(loop, elapsedSecs(loop)) : null);
   const budgetLeft = $derived(!!loop && hasBudgetLeft(loop, elapsedSecs(loop)));
+  const unanswered = $derived(loop?.ledger?.questions.some((q) => !q.answer) ?? false);
   function openExtend(): void {
-    if (!loop) return;
+    if (!loop || acting || unanswered) return;
+    if (loop.status !== 'paused' && loop.status !== 'blocked' && loop.status !== 'exhausted') return;
     const d = extendDefaults(loop, elapsedSecs(loop));
     extIters = d.max_iterations;
     extMinutes = d.runtime_minutes;
@@ -161,19 +215,58 @@
       await loops.resume(loopId);
       if (id === loopId) extendOpen = false;
     } catch (e) {
+      const detail = loadErrorText(e);
       const message = savedExtension === `${loopId}:${iters}:${mins}`
-        ? `Budget saved, but the loop did not resume. Retry to resume with the saved budget. ${errText(e)}`
-        : errText(e);
+        ? `Budget saved, but the loop did not resume. Retry to resume with the saved budget. ${detail}`
+        : detail;
       if (id === loopId && extendOpen) extError = message;
       else toasts.error('Couldn’t resume the goal loop', message);
     } finally {
       acting = false;
     }
   }
-  const unanswered = $derived(loop?.ledger?.questions.some((q) => !q.answer) ?? false);
   const openQuestions = $derived((loop?.ledger?.questions ?? []).filter((q) => !q.answer));
   const answeredQuestions = $derived((loop?.ledger?.questions ?? []).filter((q) => !!q.answer));
   const canVerify = $derived(!!loop && ['paused', 'blocked', 'exhausted'].includes(loop.status));
+  const canResume = $derived(!!loop && (loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'));
+
+  $effect(() => {
+    const loopId = id;
+    const current = loop;
+    const busy = acting;
+    const blocked = unanswered;
+    const resumable = canResume;
+    const pauseFn = () => {
+      if (busy || current?.status !== 'running') return;
+      void act(() => loops.pause(loopId), 'Couldn’t pause the goal loop');
+    };
+    const resumeFn = () => {
+      if (busy || blocked || !resumable || !current) return;
+      if (!hasBudgetLeft(current, elapsedSecs(current))) {
+        openExtend();
+        return;
+      }
+      void act(() => loops.resume(loopId), 'Couldn’t resume the goal loop');
+    };
+    const stopFn = () => {
+      if (!current || current.status === 'draft') return;
+      void stop();
+    };
+    const extendFn = () => {
+      openExtend();
+    };
+    if (!actions) return;
+    actions.pause = pauseFn;
+    actions.resume = resumeFn;
+    actions.stop = stopFn;
+    actions.extend = extendFn;
+    return () => {
+      actions.pause = () => {};
+      actions.resume = () => {};
+      actions.stop = () => {};
+      actions.extend = () => {};
+    };
+  });
 </script>
 
 <div class="detail-page">
@@ -196,13 +289,13 @@
         </button>
       {:else if loop.status === 'paused' || loop.status === 'blocked' || loop.status === 'exhausted'}
         {#if budgetLeft}
-          <button class="btn small" data-overflow="-1" data-icon="plus" disabled={acting} onclick={openExtend}
-            title="Raise the iteration and runtime caps">Extend budget…</button>
-          <button class="btn small primary" disabled={unanswered || acting} title={unanswered ? 'Answer the open decision below first' : 'Continue iterating toward the goal'}
+          <button class="btn small" data-overflow="-1" data-icon="plus" disabled={unanswered || acting} onclick={openExtend}
+            title={unanswered ? 'Resume stays off until this answer is recorded.' : 'Raise the iteration and runtime caps'}>Extend budget…</button>
+          <button class="btn small" class:primary={!unanswered} disabled={unanswered || acting} title={unanswered ? 'Resume stays off until this answer is recorded.' : 'Continue iterating toward the goal'}
             onclick={() => act(() => loops.resume(id), 'Couldn’t resume the goal loop')}><Icon name="play" size={12} /> Resume</button>
         {:else}
           <!-- No budget left: a plain Resume would re-exhaust at once. -->
-          <button class="btn small primary" disabled={unanswered || acting} title={unanswered ? 'Answer the open decision below first' : 'Raise the caps, then continue iterating'}
+          <button class="btn small" class:primary={!unanswered} disabled={unanswered || acting} title={unanswered ? 'Resume stays off until this answer is recorded.' : 'Raise the caps, then continue iterating'}
             onclick={openExtend}><Icon name="play" size={12} /> Extend &amp; resume…</button>
         {/if}
         <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu}
@@ -210,10 +303,12 @@
           <Icon name="more" size={14} />
         </button>
       {:else if loop.status === 'draft'}
-        <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete loop" onclick={del}
-          aria-label="Delete goal loop" title="Delete goal loop"><Icon name="trash" size={14} /></button>
         <button class="btn small primary" disabled={acting} title="Start iterating toward the goal"
           onclick={() => act(() => loops.start(id), 'Couldn’t start the goal loop')}><Icon name="play" size={12} /> Start</button>
+        <button class="icon-btn" data-overflow="-10" data-icon="more" data-label="More actions" onclick={moreMenu}
+          aria-label="More actions" title="More actions" aria-haspopup="menu">
+          <Icon name="more" size={14} />
+        </button>
       {:else}
         <button class="icon-btn" data-overflow="-2" data-icon="trash" data-label="Delete loop" onclick={del}
           aria-label="Delete goal loop" title="Delete goal loop"><Icon name="trash" size={14} /></button>
@@ -237,16 +332,16 @@
     <section class="overview card-box" aria-label="Progress">
       <div class="progress-row">
         <div class="bar" role="progressbar" aria-label="Progress toward the goal" aria-valuemin={0} aria-valuemax={100} aria-valuenow={loop.progress_pct}>
-          <span class="bar-fill" class:done={loop.status === 'succeeded'} style:width={`${loop.progress_pct}%`}></span>
+          <span class="bar-fill {progressFill(loop.status)}" style:width={`${loop.progress_pct}%`}></span>
         </div>
         <span class="pct">{loop.progress_pct}%</span>
       </div>
 
       <ol class="stepper" aria-label="Iteration phases">
         {#each PHASES as p, i (p)}
-          {@const cur = loop.status === 'running' ? phaseIndex(loop) : -1}
-          <li class="step" class:active={cur === i} class:past={cur > i} aria-current={cur === i ? 'step' : undefined}>
-            <span class="step-dot">{#if cur > i}<Icon name="check" size={12} />{/if}</span>{PHASE_LABEL[p]}
+          {@const vis = stepVisual(loop, i)}
+          <li class="step" class:active={vis.active} class:current={vis.current && !vis.active} class:past={vis.past} aria-current={vis.current ? 'step' : undefined}>
+            <span class="step-dot">{#if vis.past}<Icon name="check" size={12} />{/if}</span>{PHASE_LABEL[p]}
           </li>
         {/each}
         {#if loop.status === 'running' && loop.phase === 'waiting'}<li class="step waiting">Waiting on an agent</li>{/if}
@@ -273,9 +368,10 @@
       <section class="decision" aria-label="Decision needed">
         <h3 class="section-title"><Icon name="warning" size={12} /> Decision needed</h3>
         <p class="q">{q.question}</p>
+        <p class="resume-hint">Resume stays off until this answer is recorded.</p>
         <textarea dir="auto" class="input answer" rows="2" aria-label="Answer question" placeholder="Your answer — the agents read it on Resume" bind:value={answers[q.id]}></textarea>
         <div class="row-end">
-          <button class="btn small" disabled={!answers[q.id]?.trim() || loop.status !== 'blocked' || acting}
+          <button class="btn small primary" disabled={!answers[q.id]?.trim() || loop.status !== 'blocked' || acting}
             title={loop.status !== 'blocked' ? 'Answers are recorded while the loop is blocked' : undefined}
             onclick={() => act(() => loops.answerQuestion(id, q.id, answers[q.id]), 'Couldn’t record the answer')}>Record answer</button>
         </div>
@@ -297,19 +393,20 @@
       <p class="goal-sum">{loop.definition.summary || loop.definition.title}</p>
       <ul class="crit-list" aria-label="Acceptance criteria">
         {#each loop.definition.acceptance_criteria as c (c.id)}
-          {@const met = latestMet[c.id]}
+          {@const mark = criterionMark(latestMet[c.id])}
           <li class="crit">
-            <span class="crit-mark" class:met={met === true} title={met === true ? 'Met at the last evaluation' : met === false ? 'Not met at the last evaluation' : 'Not evaluated yet'}>
-              <Icon name={met === true ? 'check' : 'dot'} size={12} />
+            <span class="crit-mark {mark.kind}" title={mark.label}>
+              <Icon name={mark.icon} size={12} />
             </span>
             <div class="crit-body">
-              <span class="crit-text">{c.text}</span>
+              <span class="crit-state {mark.kind}">{mark.label}</span>
+              <span class="crit-text" id={`crit-text-${c.id}`}>{c.text}</span>
               <span class="crit-how">Verified by {c.verify_kind === 'human' ? 'a person' : c.verify_kind === 'command' ? 'a shell command' : 'an agent'} — {c.verify}</span>
               {#if c.verify_kind === 'human'}
                 {@const approval = humanVerification(c, loop.ledger)}
                 {#if approval}<p class="verified"><Icon name="userCheck" size={12} /> Verified by {approval.verified_by}: {approval.evidence}</p>
                 {:else}
-                  <textarea dir="auto" class="input answer" rows="2" aria-label={`Evidence for ${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
+                  <textarea dir="auto" class="input answer" rows="2" aria-label={`Evidence for ${c.text}`} aria-describedby={`crit-text-${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
                   <div class="row-end">
                     <button class="btn small" disabled={!evidence[c.id]?.trim() || !canVerify || acting}
                       title={canVerify ? undefined : 'Record verification while the loop is paused, blocked or exhausted'}
@@ -332,22 +429,27 @@
       </section>
     {/if}
 
-    {#if openSessionId}
-      <section class="sess" bind:this={sessEl} aria-label="Agent session">
-        <SessionView
-          sessionId={openSessionId}
-          focused={true}
-          showClose={true}
-          onfocus={() => {}}
-          onclosepane={() => (openSessionId = null)}
-        />
+    {#if openSessionId && !viewport.isPhone}
+      <section class="sess" bind:this={sessEl} aria-label="Agent session" onfocusin={() => (sessFocused = true)} onfocusout={sessionBlur}>
+        <div class="sess-bar">
+          <button type="button" class="btn small" onclick={() => ws.navigateToSession(openSessionId ?? '')}>Open in Agents</button>
+        </div>
+        <div class="sess-pane">
+          <SessionView
+            sessionId={openSessionId}
+            focused={sessFocused}
+            showClose={true}
+            onfocus={() => (sessFocused = true)}
+            onclosepane={() => { openSessionId = null; sessFocused = false; }}
+          />
+        </div>
       </section>
     {/if}
 
     <section class="timeline">
       <h3 class="section-title">Iterations</h3>
       {#if iterations.length === 0}
-        <p class="dim empty-line">{loop.status === 'running' ? 'The first iteration is being planned…' : 'No iterations yet.'}</p>
+        <p class="dim empty-line">{loop.status === 'running' && loop.phase === 'waiting' ? 'Waiting on an agent.' : loop.status === 'running' ? 'The first iteration is being planned…' : 'No iterations yet.'}</p>
       {:else}
         {#each iterations as it, i (it.id)}
           <IterationRow
@@ -376,15 +478,15 @@
         Used so far: {loop.iterations_started} iterations, {formatSeconds(Math.round(elapsedSecs(loop)))}.
       </p>
       <label class="extend-lbl" for="gl-ext-iters">Max iterations</label>
-      <input id="gl-ext-iters" type="number" min={loop.iterations_started + 1} step="1" bind:value={extIters} />
+      <input id="gl-ext-iters" class="input" type="number" min={loop.iterations_started + 1} step="1" bind:value={extIters} />
       <label class="extend-lbl" for="gl-ext-mins">Max runtime (minutes)</label>
-      <input id="gl-ext-mins" type="number" min="1" step="1" bind:value={extMinutes} />
+      <input id="gl-ext-mins" class="input" type="number" min="1" step="1" bind:value={extMinutes} />
       {#if extError}<p class="errline" role="alert"><Icon name="warning" size={13} /> <span>{extError}</span></p>{/if}
     </form>
     {#snippet footer()}
       <button class="btn" disabled={acting} onclick={() => (extendOpen = false)}>Cancel</button>
       <button class="btn primary" type="submit" form="gl-extend-form" disabled={acting || unanswered}
-        title={unanswered ? 'Answer the open decision first' : undefined}>{acting ? 'Resuming…' : 'Extend & resume'}</button>
+        title={unanswered ? 'Resume stays off until this answer is recorded.' : undefined}>{acting ? 'Resuming…' : 'Extend & resume'}</button>
     {/snippet}
   </Modal>
 {/if}
@@ -406,6 +508,8 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+    flex: 1;
+    min-height: 0;
   }
   .card-box {
     border: 1px solid var(--border);
@@ -428,11 +532,13 @@
   .bar-fill {
     display: block;
     height: 100%;
-    background: var(--status-working);
+    background: var(--text-dim);
   }
-  .bar-fill.done {
-    background: var(--success);
-  }
+  .bar-fill.running { background: var(--info); }
+  .bar-fill.warn { background: var(--warning); }
+  .bar-fill.bad { background: var(--danger); }
+  .bar-fill.ok { background: var(--success); }
+  .bar-fill.dim { background: var(--text-dim); }
   .pct {
     font-size: var(--fs-s);
     font-weight: 600;
@@ -455,7 +561,8 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
-  .step.active {
+  .step.active,
+  .step.current {
     color: var(--text);
     font-weight: 600;
   }
@@ -475,6 +582,9 @@
   .step.past .step-dot {
     border-color: var(--status-working);
     color: var(--success);
+  }
+  .step.current .step-dot {
+    border-color: var(--text);
   }
   .step.active .step-dot {
     background: var(--status-working);
@@ -584,6 +694,11 @@
     font-size: var(--fs-m);
     margin: 0 0 8px;
   }
+  .resume-hint {
+    margin: -4px 0 8px;
+    font-size: var(--fs-s);
+    color: var(--text);
+  }
   .q-done {
     font-size: var(--fs-m);
     margin: 0 0 8px;
@@ -642,6 +757,17 @@
     color: var(--success);
     background: var(--success-soft);
   }
+  .crit-mark.unmet {
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+  .crit-state {
+    font-size: var(--fs-s);
+    font-weight: 600;
+  }
+  .crit-state.met { color: var(--success); }
+  .crit-state.unmet { color: var(--danger); }
+  .crit-state.unchecked { color: var(--text-dim); }
   .crit-body {
     display: flex;
     flex-direction: column;
@@ -668,10 +794,35 @@
     font-size: var(--fs-m);
     margin: 0;
   }
+  .detail-page :global(.page-body-inner) {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
   .sess {
-    height: 360px;
+    flex: 1;
+    min-height: 320px;
+    display: flex;
+    flex-direction: column;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
+  }
+  .sess-bar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex: none;
+  }
+  .sess-pane {
+    flex: 1;
+    min-height: 0;
+  }
+  .sess-pane :global(.pane) {
+    height: 100%;
+    border: none;
+    border-radius: 0;
   }
 </style>

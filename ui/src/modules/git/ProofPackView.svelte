@@ -9,6 +9,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import type { ReviewProofPack, Finding, FindingEvent } from '../../lib/api/types';
   import Modal from '../../lib/components/Modal.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -24,34 +25,44 @@
   let loadErr = $state('');
   let exporting = $state(false);
   let exportedMd = $state('');
+  let loadGeneration = 0;
 
   $effect(() => {
     void load(reviewId);
+    return () => { loadGeneration++; };
   });
 
   async function load(rid: string): Promise<void> {
+    const generation = ++loadGeneration;
     loading = true;
     loadErr = '';
+    pack = null;
+    exportedMd = '';
+    exporting = false;
     try {
-      pack = await getProofPack(rid);
+      const result = await getProofPack(rid);
+      if (generation === loadGeneration) pack = result;
     } catch (e) {
-      loadErr = loadErrorText(e);
+      if (generation === loadGeneration) loadErr = loadErrorText(e);
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
     }
   }
 
   async function doExport(): Promise<void> {
-    if (exporting) return;
+    if (exporting || loading || loadErr || !pack) return;
+    const generation = loadGeneration;
+    const id = reviewId;
     exporting = true;
     try {
-      const res = await exportProofPack(reviewId);
+      const res = await exportProofPack(id);
+      if (generation !== loadGeneration) return;
       exportedMd = res.markdown;
       toasts.success('Proof Pack exported', 'A markdown snapshot was saved.');
     } catch (e) {
-      toastError('Couldn’t export Proof Pack', e);
+      if (generation === loadGeneration) toastError('Couldn’t export Proof Pack', e);
     } finally {
-      exporting = false;
+      if (generation === loadGeneration) exporting = false;
     }
   }
 
@@ -78,7 +89,7 @@
 
   /** " · from → to" suffix for an event that carried a status transition. */
   function transitionLabel(ev: FindingEvent): string {
-    if (ev.from_status && ev.to_status) return ` · ${ev.from_status} → ${ev.to_status}`;
+    if (ev.from_status && ev.to_status) return ` · ${sentenceCase(ev.from_status)} → ${sentenceCase(ev.to_status)}`;
     return '';
   }
 </script>
@@ -88,7 +99,7 @@
     {#if loading}
       <Skeleton rows={4} height={32} />
     {:else if loadErr}
-      <p class="pp-err">{loadErr}</p>
+      <LoadState what="the proof pack" error={loadErr} empty onretry={() => void load(reviewId)} />
     {:else if pack}
       <!-- Summary counts -->
       <div class="pp-summary">
@@ -101,10 +112,10 @@
       </div>
       <div class="pp-breakdown">
         {#each sortedStatus(pack.summary.by_status) as [st, n] (st)}
-          <span class="chip pp-chip status-{st}">{st.replace('_', ' ')}: {n}</span>
+          <span class="chip pp-chip status-{st}">{sentenceCase(st)}: {n}</span>
         {/each}
         {#each sortedStatus(pack.summary.by_severity) as [sv, n] (sv)}
-          <span class="chip pp-chip sev2-{sv}">{sv}: {n}</span>
+          <span class="chip pp-chip sev2-{sv}">{severityLabel(sv)}: {n}</span>
         {/each}
       </div>
 
@@ -168,7 +179,7 @@
     {#if exportedMd}
       <button class="btn ghost" onclick={() => void copyMarkdown()}>Copy markdown</button>
     {/if}
-    <button class="btn primary" disabled={exporting || loading} onclick={() => void doExport()}>
+    <button class="btn primary" disabled={exporting || loading || !!loadErr || !pack} onclick={() => void doExport()}>
       {exporting ? 'Exporting…' : 'Export'}
     </button>
     <button class="btn ghost" onclick={onclose}>Close</button>
@@ -244,7 +255,6 @@
     overflow-x: auto;
     max-height: 220px;
   }
-  .pp-err { color: var(--danger); font-size: var(--fs-s); }
   .dim { color: var(--text-dim); }
   .mono { font-family: var(--font-mono); }
 

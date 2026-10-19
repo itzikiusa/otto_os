@@ -533,7 +533,7 @@
     border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
-    z-index: 1;
+    z-index: var(--z-sticky);
     background: var(--bg);
   }
   .audit-table td {

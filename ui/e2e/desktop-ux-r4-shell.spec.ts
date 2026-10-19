@@ -211,7 +211,7 @@ test('Notes serializes saves so the newest draft wins a delayed older request', 
   const writes: string[] = [];
   await page.route(`**/workspaces/${workspaceId}`, async route => {
     if (route.request().method() !== 'PATCH') return route.continue();
-    writes.push(route.request().postDataJSON().settings.notes);
+    writes.push(route.request().postDataJSON().settings_patch.notes);
     if (writes.length === 1) await gate;
     await route.continue();
   });
@@ -307,7 +307,7 @@ test('queued Notes edits cannot be submitted under a replacement login', async (
     if (route.request().method() !== 'PATCH') return route.continue();
     writes.push(route.request().headers().authorization ?? '');
     if (writes.length === 1) await held;
-    await route.fulfill({ json: { id: workspaceId, name: 'Notes context', root_path: '/tmp', settings: route.request().postDataJSON().settings } });
+    await route.fulfill({ json: { id: workspaceId, name: 'Notes context', root_path: '/tmp', settings: route.request().postDataJSON().settings_patch } });
   });
   await boot(page);
   await page.locator('textarea.notes').fill('Old account first draft');
@@ -318,4 +318,88 @@ test('queued Notes edits cannot be submitted under a replacement login', async (
   release();
   await page.waitForTimeout(800); // The released queue settles without dispatching a second write.
   expect(writes).toHaveLength(1);
+});
+
+test('mounted Activity and Outputs watchers merge late GET snapshots with in-flight WS deltas and recover on WS resync', async ({ page }) => {
+  let send!: (message: string) => void;
+  await page.routeWebSocket('**/ws/events**', socket => {
+    const server = socket.connectToServer();
+    send = message => socket.send(message);
+    socket.onMessage(message => server.send(message));
+    server.onMessage(message => socket.send(message));
+  });
+  const now = '2026-09-25T10:00:00Z';
+  const baseTask = { id: 'task-1', session_id: sessionId, workspace_id: workspaceId, ext_id: '1', title: 'Verify release candidate', status: 'in_progress', position: 0, source: 'agent', description: null, nudge_pending: false, nudged_at: null, created_at: now, updated_at: now };
+  const snapTrail = { id: 'trail-snap', session_id: sessionId, workspace_id: workspaceId, ts: now, source: 'agent', kind: 'note', level: 'info', summary: 'Snapshot baseline trail', detail: {} };
+  const deltaTrail = { id: 'trail-delta', session_id: sessionId, workspace_id: workspaceId, ts: '2026-09-25T10:01:00Z', source: 'agent', kind: 'command', level: 'info', summary: 'In-flight WS delta trail', detail: { command: 'verify' } };
+  const gapTask = { ...baseTask, id: 'task-gap', ext_id: '2', title: 'Recovered task after WS gap', status: 'completed', position: 1 };
+  const gapTrail = { id: 'trail-gap', session_id: sessionId, workspace_id: workspaceId, ts: '2026-09-25T10:02:00Z', source: 'agent', kind: 'command', level: 'info', summary: 'Recovered trail after WS gap', detail: {} };
+
+  let releaseActivityGet!: () => void;
+  const activityGate = new Promise<void>(resolve => { releaseActivityGet = resolve; });
+  let trailReads = 0, taskReads = 0;
+  let tasksPayload = [baseTask];
+  let trailPayload = [snapTrail];
+  await page.route(`**/workspaces/${workspaceId}/sessions/${sessionId}/tasks`, async route => {
+    taskReads++;
+    if (taskReads === 1) await activityGate;
+    await route.fulfill({ json: tasksPayload });
+  });
+  await page.route(`**/workspaces/${workspaceId}/sessions/${sessionId}/trail`, async route => {
+    trailReads++;
+    if (trailReads === 1) await activityGate;
+    await route.fulfill({ json: trailPayload });
+  });
+
+  const snapArt = { id: 'art-snap', kind: 'report', label: 'Snapshot baseline report', path: '/tmp/snap.md', url: null, mime: 'text/markdown', produced_at: now, turn_id: 'turn-1' };
+  const deltaArt = { id: 'art-delta', kind: 'report', label: 'In-flight WS delta report', path: '/tmp/delta.md', url: null, mime: 'text/markdown', produced_at: '2026-09-25T10:01:00Z', turn_id: 'turn-2' };
+  const gapArt = { id: 'art-gap', kind: 'report', label: 'Recovered gap report', path: '/tmp/gap.md', url: null, mime: 'text/markdown', produced_at: '2026-09-25T10:03:00Z', turn_id: 'turn-3' };
+  let releaseArtifactsGet!: () => void;
+  const artifactsGate = new Promise<void>(resolve => { releaseArtifactsGet = resolve; });
+  let artifactReads = 0;
+  let artifactsPayload = [snapArt];
+  await page.route(`**/sessions/${sessionId}/artifacts`, async route => {
+    artifactReads++;
+    if (artifactReads === 1) await artifactsGate;
+    await route.fulfill({ json: artifactsPayload });
+  });
+  await page.route(`**/sessions/${sessionId}/artifacts/*`, route => route.fulfill({ body: '# Artifact preview', contentType: 'text/markdown' }));
+
+  await boot(page, 'activity');
+  await expect.poll(() => trailReads >= 1 && taskReads >= 1).toBe(true);
+  send(JSON.stringify({ type: 'tasks_updated', workspace_id: workspaceId, session_id: sessionId, tasks: [{ ...baseTask, status: 'completed' }] }));
+  send(JSON.stringify({ type: 'trail_appended', workspace_id: workspaceId, session_id: sessionId, event: deltaTrail }));
+  await expect(page.locator('.rpanel').getByText('In-flight WS delta trail', { exact: true })).toBeVisible();
+  await expect(page.locator('.rpanel').getByText('1/1', { exact: true })).toBeVisible();
+
+  releaseActivityGet();
+  await expect(page.locator('.rpanel').getByText('Snapshot baseline trail', { exact: true })).toBeVisible();
+  await expect(page.locator('.rpanel').getByText('In-flight WS delta trail', { exact: true })).toBeVisible();
+  await expect(page.locator('.rpanel').getByText('1/1', { exact: true })).toBeVisible();
+
+  tasksPayload = [{ ...baseTask, status: 'completed' }, gapTask];
+  trailPayload = [snapTrail, deltaTrail, gapTrail];
+  send(JSON.stringify({ type: 'resync', dropped: 4 }));
+  await expect(page.locator('.rpanel').getByText('Recovered task after WS gap', { exact: true })).toBeVisible();
+  await expect(page.locator('.rpanel').getByText('2/2', { exact: true })).toBeVisible();
+  await expect(page.locator('.rpanel').getByText('Recovered trail after WS gap', { exact: true })).toBeVisible();
+
+  await page.locator('.rstrip').getByRole('button', { name: 'Outputs', exact: true }).click();
+  await expect.poll(() => artifactReads).toBe(1);
+  send(JSON.stringify({ type: 'artifact_added', workspace_id: workspaceId, session_id: sessionId, artifact: deltaArt }));
+  await expect(page.locator('.rpanel').getByRole('option').filter({ hasText: 'In-flight WS delta report' })).toBeVisible();
+
+  releaseArtifactsGet();
+  await expect(page.locator('.rpanel').getByRole('option').filter({ hasText: 'Snapshot baseline report' })).toBeVisible();
+  await expect(page.locator('.rpanel').getByRole('option').filter({ hasText: 'In-flight WS delta report' })).toBeVisible();
+
+  artifactsPayload = [gapArt, deltaArt, snapArt];
+  send(JSON.stringify({ type: 'resync', dropped: 2 }));
+  await expect(page.locator('.rpanel').getByRole('option').filter({ hasText: 'Recovered gap report' })).toBeVisible();
+  expect(artifactReads).toBe(2);
+  expect(trailReads).toBe(2);
+  expect(taskReads).toBe(2);
+
+  await page.locator('.rstrip').getByRole('button', { name: 'Activity', exact: true }).click();
+  await expect.poll(() => trailReads === 3 && taskReads === 3).toBe(true);
 });

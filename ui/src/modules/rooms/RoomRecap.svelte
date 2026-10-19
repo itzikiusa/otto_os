@@ -8,6 +8,7 @@
   import {RoomRecapCapture, type RecapCaptureStatus} from './recap-capture';
   import {recapRequest} from './recap-client';
   import {auth} from '../../lib/stores/auth.svelte';
+  import {confirmer} from '../../lib/confirm.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import RecapSettingsModal from './RecapSettingsModal.svelte';
   import RecapPanel from './RecapPanel.svelte';
@@ -35,7 +36,16 @@
   function start() { capture?.prepareAudio(); send({type: 'recap_start', epoch: room.recap!.epoch}); }
   async function openPrepare() { partial = false; prepare = true; busy = true; error = ''; capability = null; try { capability = await recapRequest<RecapCapabilities>('/room-recap-capabilities'); } catch (e) { error = e instanceof Error ? e.message : 'Could not check local recap engines.'; } finally { busy = false; } }
   async function create() { busy = true; error = ''; try { await recapRequest(`/rooms/${room.room_id}/recaps`, {allow_unavailable_speech: partial}); prepare = false; } catch (e) { error = e instanceof Error ? e.message : 'Could not prepare the recap.'; } finally { busy = false; } }
-  function withdraw() { capture?.cancelCapture(); send({type: 'recap_consent', epoch: room.recap!.epoch, allow: false}); }
+  async function withdraw(): Promise<void> {
+    const ok = await confirmer.ask('The host stops capturing speech, chat and screens until everyone consents again.', {
+      title: 'Pause capture for everyone?',
+      confirmLabel: 'Pause capture',
+      danger: true,
+    });
+    if (!ok) return;
+    capture?.cancelCapture();
+    send({type: 'recap_consent', epoch: room.recap!.epoch, allow: false});
+  }
   async function stop(final: boolean) { busy = true; try { if (final) await capture?.finish(); else capture?.cancelCapture(); send({type: final ? 'recap_stop' : 'recap_pause'}); } finally { busy = false; } }
 </script>
 <section class="recap-banner" aria-label="Room recap">
@@ -46,8 +56,8 @@
     {#if room.recap.state !== 'stopped'}
       <p>The host keeps a local transcript and images of shared screens. Sampling may miss changes between frames. You can withdraw consent to pause capture for everyone.</p>
       <div class="actions">
-        {#if consented}<span>You consented</span><button class="btn small" disabled={!connected || busy} onclick={withdraw}>Withdraw consent</button>
-        {:else}<button class="btn small" disabled={!connected || busy} onclick={() => send({type: 'recap_consent', epoch: room.recap!.epoch, allow: true})}>I consent to capture</button><button class="btn small" disabled={!connected || busy} onclick={withdraw}>Do not consent</button>{/if}
+        {#if consented}<span>You consented</span><button class="btn small" disabled={!connected || busy} onclick={() => void withdraw()}>Withdraw consent</button>
+        {:else}<button class="btn small" disabled={!connected || busy} onclick={() => send({type: 'recap_consent', epoch: room.recap!.epoch, allow: true})}>I consent to capture</button><button class="btn small" disabled={!connected || busy} onclick={() => void withdraw()}>Do not consent</button>{/if}
         {#if host && room.recap.state !== 'finalizing'}
           {#if room.recap.state === 'capturing'}<button class="btn small" disabled={busy} title="Pause immediately; unfinished speech is discarded" onclick={() => stop(false)}>Pause capture</button><button class="btn small" disabled={busy} onclick={() => stop(true)}>Finish recap</button>
           {:else}<button class="btn small" disabled={!connected || busy || room.recap.state !== 'ready'} onclick={start}>Start capture</button><button class="btn small" disabled={!connected || busy} onclick={() => stop(true)}>Finish recap</button>{/if}

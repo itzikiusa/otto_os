@@ -446,11 +446,15 @@
     color: var(--text);
     width: 100%;
   }
-  .s3d-head-name-input:hover:not(:disabled),
-  .s3d-head-name-input:focus {
+  .s3d-head-name-input:hover:not(:disabled) {
     border-color: var(--border);
     background: var(--bg);
+  }
+  .s3d-head-name-input:focus-visible {
+    border-color: var(--accent-text);
+    background: var(--bg);
     outline: none;
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .s3d-head-sub {
     font-size: var(--fs-xs);

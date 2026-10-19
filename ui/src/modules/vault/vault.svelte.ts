@@ -104,6 +104,8 @@ class VaultStore {
 
   // File tree (roots of the current vault).
   roots = $state<TreeNode[]>([]);
+  treeLoading = $state(false);
+  treeError = $state('');
 
   // Open note.
   note = $state<VaultNote | null>(null);
@@ -316,6 +318,8 @@ class VaultStore {
     this.okfReport = null;
     this.okfBusy = false;
     this.roots = [];
+    this.treeLoading = false;
+    this.treeError = '';
     this.docsRun = null;
     this.docsRuns = [];
     this.docsRunsSig = '';
@@ -485,9 +489,18 @@ class VaultStore {
   async loadRoot(): Promise<void> {
     if (!this.current) return;
     const id = this.current.id, wsId = this.wsId, sequence = ++this.treeRefreshSequence;
-    const listing = await vaultDir(wsId, id, '');
-    if (this.current?.id !== id || this.wsId !== wsId || sequence !== this.treeRefreshSequence) return;
-    this.roots = mergeLevel(this.roots, listing.entries, 0);
+    const current = () => this.current?.id === id && this.wsId === wsId && sequence === this.treeRefreshSequence;
+    this.treeLoading = true;
+    this.treeError = '';
+    try {
+      const listing = await vaultDir(wsId, id, '');
+      if (!current()) return;
+      this.roots = mergeLevel(this.roots, listing.entries, 0);
+    } catch (e) {
+      if (current()) this.treeError = msg(e);
+    } finally {
+      if (current()) this.treeLoading = false;
+    }
   }
 
   private directoryLoads = new WeakMap<TreeNode, object>();
@@ -508,6 +521,11 @@ class VaultStore {
           async path => (await vaultDir(wsId, id, path)).entries, current,
           node.entry.path, node.depth + 1);
         if (current()) { node.children = children; node.loaded = true; }
+      } catch (e) {
+        if (current()) {
+          node.open = false;
+          toasts.error(`Couldn’t open “${node.entry.name}”`, msg(e));
+        }
       } finally {
         if (this.directoryLoads.get(node) === owner) node.loading = false;
       }
@@ -1259,7 +1277,11 @@ class VaultStore {
         this.searchedQuery = q;
       }
     } catch (e) {
-      if (current()) this.searchError = msg(e);
+      if (current()) {
+        this.searchError = msg(e);
+        this.searchHits = [];
+        this.searchedQuery = '';
+      }
     } finally {
       if (current()) this.searching = false;
     }

@@ -5,7 +5,7 @@
 
 import type { VaultOutgoingLink } from '../../lib/api/types';
 import { sanitizeHtml } from '../../lib/sanitize';
-import { renderNote, resolverFrom, stripFrontmatter } from './mdRender';
+import { postProcessVaultHtml, renderNote, resolverFrom, stripFrontmatter } from './mdRender';
 import { plainPreview, renderFailurePlan, type RenderFailure } from './noteRenderPlan';
 import type { NoteRenderIn, NoteRenderOut } from './noteRender.worker';
 
@@ -50,7 +50,7 @@ function getWorker(): Worker | null {
     const p = pending.get(e.data.id);
     if (!p) return;
     pending.delete(e.data.id);
-    if ('html' in e.data) p.resolve(sanitizeHtml(e.data.html));
+    if ('html' in e.data) p.resolve(sanitizeHtml(e.data.html, postProcessVaultHtml));
     else p.reject(new Error(e.data.error));
   };
   // A worker that failed to load: fail every waiter (callers fall back to

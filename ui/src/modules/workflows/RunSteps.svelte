@@ -323,14 +323,15 @@
           {/if}
         </details>
       {/each}
-      {#if checkpointPageIndex>0}<button onclick={()=>void loadCheckpointPage(checkpointPageIndex-1)} disabled={checkpointLoading}>Previous checkpoints</button>{/if}
-      {#if checkpointPages[checkpointPageIndex]?.page.next_cursor}<button onclick={()=>void loadCheckpointPage(checkpointPageIndex+1)} disabled={checkpointLoading}>More checkpoints</button>{/if}
+      {#if checkpointPageIndex>0}<button class="btn small" onclick={()=>void loadCheckpointPage(checkpointPageIndex-1)} disabled={checkpointLoading}>{checkpointLoading ? 'Loading checkpoints…' : 'Previous checkpoints'}</button>{/if}
+      {#if checkpointPages[checkpointPageIndex]?.page.next_cursor}<button class="btn small" onclick={()=>void loadCheckpointPage(checkpointPageIndex+1)} disabled={checkpointLoading}>{checkpointLoading ? 'Loading checkpoints…' : 'More checkpoints'}</button>{/if}
     {/if}
   </details>
 {/if}
 <div class="steps">
   {#each run.nodes as summary (summary.node_id)}
     {@const ns = displayedNode(summary)}
+    <div class="step-wrap">
     <details
       class="step"
       open={isOpen(ns)}
@@ -349,27 +350,22 @@
           <span class="ms live">{fmtMs(elapsedMs(ns))}</span>
         {/if}
         {#if ns.status === 'running' && ns.activity && ns.activity.subagents.length}
-          {@const running = ns.activity.subagents.filter((s) => s.status === 'running').length}
-          {@const done = ns.activity.subagents.filter((s) => s.status === 'done').length}
+          {@const subs = ns.activity.subagents}
+          {@const running = subs.filter((s) => s.status === 'running').length}
+          {@const done = subs.filter((s) => s.status === 'done').length}
+          {@const failed = subs.filter((s) => s.status === 'failed').length}
+          {@const subParts = [
+            plural(subs.length, 'sub-agent'),
+            running ? `${running} running` : '',
+            done ? `${done} done` : '',
+            failed ? `${failed} failed` : '',
+          ].filter(Boolean)}
           <Badge
             testid="subagent-chip"
             title="Sub-agents / background tasks the step launched"
-            label={`${plural(ns.activity.subagents.length, 'sub-agent')} · ${running ? `${running} running` : `${done} done`}`}
+            label={subParts.join(' · ')}
           />
         {/if}
-        <button
-          class="zoom-btn"
-          title="Zoom in on this step"
-          aria-label="Zoom in on this step"
-          onclick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            zoomed = summary;
-            void loadBody(summary);
-          }}
-        >
-          <Icon name="maximize" size={12} />
-        </button>
         {#if ns.status === 'running' && ns.activity?.phase}
           <!-- What the engine is waiting for right now; `hold_reason` wins when
                the step LOOKS idle but is deliberately being held. It belongs to
@@ -449,6 +445,20 @@
       </div>
       {/if}
     </details>
+    <button
+      class="zoom-btn"
+      title="Zoom in on this step"
+      aria-label="Zoom in on {nodeName(summary.node_id)}"
+      onclick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zoomed = summary;
+        void loadBody(summary);
+      }}
+    >
+      <Icon name="maximize" size={12} />
+    </button>
+    </div>
   {/each}
 </div>
 
@@ -556,7 +566,8 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
-    padding: 8px 12px;
+    padding-block: 8px;
+    padding-inline: 12px 32px;
     cursor: pointer;
     list-style: none;
     font-size: var(--fs-m);
@@ -652,10 +663,18 @@
   .sp-grow {
     flex: 1;
   }
+  .step-wrap {
+    position: relative;
+  }
   .zoom-btn {
+    position: absolute;
+    inset-block-start: 6px;
+    inset-inline-end: 6px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    min-width: 28px;
+    min-height: 28px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -663,6 +682,13 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     flex-shrink: 0;
+    z-index: 1;
+  }
+  @media (pointer: coarse) {
+    .zoom-btn {
+      min-width: var(--hit-min);
+      min-height: var(--hit-min);
+    }
   }
   .zoom-btn:hover {
     color: var(--text);

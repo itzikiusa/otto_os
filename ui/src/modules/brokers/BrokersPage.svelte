@@ -260,7 +260,7 @@
     if (
       !(await confirmer.ask(
         `Delete section “${sec.name}”? Sub-sections are removed too and their clusters become ungrouped.`,
-        { title: 'Delete section' },
+        { title: 'Delete section', confirmLabel: 'Delete', danger: true },
       ))
     )
       return;

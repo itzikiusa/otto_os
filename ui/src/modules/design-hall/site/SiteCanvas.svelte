@@ -291,6 +291,7 @@
   let hoverBox = $state<Box | null>(null);
   let dropY = $state<number | null>(null);
   let tbW = $state(0);
+  let tbH = $state(0);
 
   function boxOf(el: Element | null | undefined): Box | null {
     if (!el || !hostEl) return null;
@@ -468,7 +469,7 @@
   const tb = $derived.by(() => {
     if (!selBox || editing || readonly) return null;
     if (selBox.y + selBox.h < 24 || selBox.y > viewH - 24) return null;
-    const y = Math.max(8, Math.min(viewH - 48, selBox.y - 44));
+    const y = Math.max(8, Math.min(viewH - tbH - 8, selBox.y - tbH - 8));
     const x = Math.max(8, Math.min(viewW - tbW - 8, selBox.x + selBox.w - tbW));
     return { x, y };
   });
@@ -535,7 +536,7 @@
     {/if}
     {#if tb && selectedSection}
       {@const sid = selectedSection}
-      <div class="toolbar" style:left={`${tb.x}px`} style:top={`${tb.y}px`} bind:clientWidth={tbW} role="toolbar" aria-label="Section actions" data-testid="site-section-toolbar">
+      <div class="toolbar" style:left={`${tb.x}px`} style:top={`${tb.y}px`} bind:clientWidth={tbW} bind:clientHeight={tbH} role="toolbar" aria-label="Section actions" data-testid="site-section-toolbar">
         <button class="tb-text" onclick={(e) => onaction('ask', sid, e)} title="Ask Otto about this section"><Icon name="sparkle" size={12} /> Ask Otto</button>
         <button class="tb-text" onclick={(e) => onaction('variants', sid, e)} title="Ask Otto for 3 directions"><Icon name="columns" size={12} /> Variants</button>
         <span class="sep"></span>
@@ -684,6 +685,12 @@
   .toolbar {
     position: absolute;
     display: flex;
+    flex-wrap: wrap;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: calc(100% - 16px);
+    max-height: calc(100% - 16px);
+    overflow-y: auto;
     align-items: center;
     gap: 2px;
     padding: 4px;
@@ -711,6 +718,9 @@
   }
   .toolbar button:hover {
     background: var(--hover);
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .toolbar button { min-width: 36px; min-height: 36px; }
   }
   .toolbar button:focus-visible {
     outline: 2px solid var(--accent-text);

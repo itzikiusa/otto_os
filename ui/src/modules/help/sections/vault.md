@@ -22,7 +22,7 @@ A vault is a folder of Markdown files on your Mac. Otto indexes it for links, ta
 
 **Vaults**
 - Register several vaults; every workspace can see all of them. Switch with the vault button in the header.
-- **Rescan** re-indexes the folder. **Unregister vault…** removes Otto's index only; the files stay on disk.
+- **Rescan** re-indexes the folder. **Unregister vault** removes Otto's index only; the files stay on disk.
 - Changes made outside Otto (for example in Obsidian) appear within a few seconds.
 
 **Files and tabs**
@@ -36,7 +36,7 @@ A vault is a folder of Markdown files on your Mac. Otto indexes it for links, ta
 - The editor autosaves shortly after you stop typing. `⌘S` saves at once.
 - Type `[[` to link to a note (matches titles, aliases and paths) and `#` to pick an existing tag.
 - If the file changed on disk while you were editing, a banner lets you reload the disk version or keep yours. Otto never overwrites silently.
-- Reading view supports wikilinks in every form (`[[note]]`, `[[note|alias]]`, `[[note#heading]]`, `[[#heading]]`), embeds (`![[note]]`, images), callouts, `%%comments%%`, tags as chips, and Mermaid and D2 diagrams. Clicking an unresolved link creates that note.
+- Reading view supports wikilinks in every form (`[[note]]`, `[[note|alias]]`, `[[note#heading]]`, `[[#heading]]`), embeds (`![[note]]`, images), callouts, `%%comments%%`, tags as chips, and Mermaid and D2 diagrams. Clicking an unresolved link, outgoing entry or graph ghost node asks to create that note.
 - Other files open in a matching viewer: OpenAPI and Swagger specs, JSON, CSV and TSV tables, images, PDFs, and code.
 
 **Right panel**
@@ -58,9 +58,9 @@ A vault is a folder of Markdown files on your Mac. Otto indexes it for links, ta
 - **Edit history** keeps before and after versions of edits made in Otto and by agents. **Note edit history** filters it to one note. Compare any revision and restore either side. Restoring always adds a new revision.
 
 **Agents**
-- **Docs agent** (the ✨ button): 1 to 4 writer agents, a summarizer, and ready-made prompts for a repository deep dive, flows, APIs with OpenAPI, datastores, messaging and incremental updates. Written notes are listed when the run ends.
+- **Docs agent** (the ⚡ bolt button in the header): 1 to 4 writer agents, a summarizer, and ready-made prompts for a repository deep dive, flows, APIs with OpenAPI, datastores, messaging and incremental updates. Written notes are listed when the run ends.
 - Optional **Review outcomes**: 1 to 4 read-only reviewers, each with its own provider, model, method and focus. The author fixes their findings for up to 3 rounds by default (1 to 10). You can retry a single reviewer or revision, or cancel the run.
-- **Refine with AI** on an open note starts a session that edits that note on request.
+- **Refine with Otto** (the ✨ sparkle button on an open note) starts a session that edits that note on request.
 - Agents in any session can list, read, search, write, rename and delete vault notes through Otto's tools, with the same permissions as their owner.
 - A chip in the header shows how many docs-agent runs are active.
 

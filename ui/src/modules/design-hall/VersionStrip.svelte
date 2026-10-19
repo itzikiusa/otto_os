@@ -30,7 +30,7 @@
   $effect(() => {
     void ordered.length;
     const el = scroller;
-    if (el) queueMicrotask(() => (el.scrollLeft = el.scrollWidth));
+    if (el) queueMicrotask(() => el.querySelector('button.vchip:last-of-type')?.scrollIntoView({ inline: 'nearest', block: 'nearest' }));
   });
 
   function tip(v: DesignVersion): string {
@@ -43,7 +43,8 @@
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
     const btns = scroller?.querySelectorAll<HTMLButtonElement>('button.vchip');
-    const j = Math.max(0, Math.min((btns?.length ?? 1) - 1, i + (e.key === 'ArrowRight' ? 1 : -1)));
+    const direction = scroller && getComputedStyle(scroller).direction === 'rtl' ? -1 : 1;
+    const j = Math.max(0, Math.min((btns?.length ?? 1) - 1, i + (e.key === 'ArrowRight' ? direction : -direction)));
     btns?.[j]?.focus();
   }
 
@@ -203,5 +204,10 @@
   .strip-skel {
     flex: none;
     inline-size: 200px;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .strip { height: auto; min-block-size: 44px; }
+    .vchip { min-block-size: var(--hit-min); }
+    .hint { display: none; }
   }
 </style>

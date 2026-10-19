@@ -1069,6 +1069,37 @@ const routes: Route[] = [
     handle: (m, body) => {
       const w = workspaces.find((x) => x.id === m[1]);
       if (!w) return problem(404, 'not_found', 'workspace');
+      if (body.settings != null && body.settings_patch != null) {
+        return problem(400, 'invalid', 'settings and settings_patch are mutually exclusive');
+      }
+      if (body.settings_patch != null) {
+        if (typeof body.settings_patch !== 'object' || Array.isArray(body.settings_patch)) {
+          return problem(400, 'invalid', 'settings_patch must be a JSON object');
+        }
+        if ('context' in body.settings_patch) {
+          return problem(400, 'invalid', 'settings_patch cannot modify context');
+        }
+        const mergePatch = (target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> => {
+          const out: Record<string, unknown> = { ...target };
+          for (const [k, v] of Object.entries(patch)) {
+            if (v === null) {
+              delete out[k];
+            } else if (
+              typeof v === 'object' &&
+              !Array.isArray(v) &&
+              typeof out[k] === 'object' &&
+              out[k] !== null &&
+              !Array.isArray(out[k])
+            ) {
+              out[k] = mergePatch(out[k] as Record<string, unknown>, v as Record<string, unknown>);
+            } else {
+              out[k] = v;
+            }
+          }
+          return out;
+        };
+        w.settings = mergePatch((w.settings ?? {}) as Record<string, unknown>, body.settings_patch as Record<string, unknown>);
+      }
       if (body.name != null) w.name = body.name;
       if (body.root_path != null) w.root_path = body.root_path;
       if (body.settings != null) w.settings = body.settings;

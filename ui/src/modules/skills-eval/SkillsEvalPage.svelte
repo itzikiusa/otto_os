@@ -40,10 +40,15 @@
     listCollapsed?: boolean;
     /** Tells the host whether this view has a runs list to toggle. */
     onlistable?: (listable: boolean) => void;
+    /** Phone push-navigation: tells the host whether a Back button should show. */
+    onphonedetail?: (open: boolean) => void;
   }
-  let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed, listCollapsed = false, onlistable }: Props = $props();
+  let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed, listCollapsed = false, onlistable, onphonedetail }: Props = $props();
   // The skill the start form should pre-select (kept until the form is left).
   let formSkill = $state<{ name: string; source: string } | null>(null);
+  let phoneListOpen = $state(false);
+  let matrixPhoneDetail = $state(false);
+  let matrixView = $state<ReturnType<typeof MatrixView> | null>(null);
   $effect(() => {
     if (!initialSkill) return;
     formSkill = initialSkill;
@@ -51,6 +56,7 @@
     compareMode = false;
     selectedId = null;
     mode = 'form';
+    phoneListOpen = false;
     onconsumed?.();
   });
 
@@ -60,6 +66,7 @@
     onrunconsumed?.();
     formSkill = null;
     compareMode = false;
+    phoneListOpen = false;
     void openRunById(id);
   });
 
@@ -80,7 +87,6 @@
   let selectedId: string | null = $state(null);
   let starting = $state(false);
   const listHidden = $derived(listCollapsed);
-  $effect(() => onlistable?.(tab === 'runs'));
   // The view is part of the route (`#/skills-eval/evaluator[/golden|/matrix]`)
   // so back/forward and deep links land on it.
   const TABS: { id: Tab; label: string; icon: 'zap' | 'target' | 'grid' }[] = [
@@ -89,6 +95,7 @@
     { id: 'matrix', label: 'Matrix', icon: 'grid' },
   ];
   const tab = $derived<Tab>(router.parts[2] === 'golden' ? 'golden' : router.parts[2] === 'matrix' ? 'matrix' : 'runs');
+  $effect(() => onlistable?.(tab === 'runs' || tab === 'matrix'));
   function setTab(t: Tab): void {
     if (t === tab) return;
     router.go(t === 'runs' ? 'skills-eval/evaluator' : `skills-eval/evaluator/${t}`);
@@ -102,6 +109,7 @@
     if (wsId) await loadList(wsId);
     selectedId = id;
     mode = 'detail';
+    phoneListOpen = false;
   }
   function openRun(e: SkillEval): void {
     runs = [toSummary(e), ...runs.filter((r) => r.id !== e.id)];
@@ -122,25 +130,70 @@
   let compareSel = $state<Set<string>>(new Set());
   // Compare reads iterations: full runs are fetched for the selected ids only.
   let compareFull = $state.raw<Record<string, SkillEval>>({});
+  let compareErrors = $state.raw<Record<string, string>>({});
+  let compareLoading = $state.raw<Record<string, boolean>>({});
+  function loadCompareRun(id: string): void {
+    const nextErr = { ...compareErrors };
+    delete nextErr[id];
+    compareErrors = nextErr;
+    compareLoading = { ...compareLoading, [id]: true };
+    void skillsEvalApi.get(id).then(
+      (e) => {
+        compareFull = { ...compareFull, [id]: e };
+      },
+      (err) => {
+        compareErrors = { ...compareErrors, [id]: loadErrorText(err) };
+      },
+    ).finally(() => {
+      const nextLoad = { ...compareLoading };
+      delete nextLoad[id];
+      compareLoading = nextLoad;
+    });
+  }
   $effect(() => {
     const ids = [...compareSel];
     untrack(() => {
       for (const id of ids) {
-        if (compareFull[id]) continue;
-        void skillsEvalApi.get(id).then(
-          (e) => (compareFull = { ...compareFull, [id]: e }),
-          () => {},
-        );
+        if (compareFull[id] || compareLoading[id] || compareErrors[id]) continue;
+        loadCompareRun(id);
       }
     });
   });
   const compareRuns = $derived(
     runs.filter((r) => compareSel.has(r.id)).map((r) => compareFull[r.id]).filter((e): e is SkillEval => !!e),
   );
+  const selectedCompareErrors = $derived(
+    [...compareSel]
+      .filter((id) => !!compareErrors[id])
+      .map((id) => ({
+        id,
+        name: runs.find((r) => r.id === id)?.source_skill ?? id,
+        error: compareErrors[id],
+      })),
+  );
+  const comparePending = $derived(
+    [...compareSel].some((id) => !compareFull[id] && !compareErrors[id]),
+  );
+
+  const showRunsPhoneList = $derived(
+    viewport.isPhone && (phoneListOpen || (compareMode && compareSel.size < 2) || ((loading || !!loadError) && runs.length === 0)),
+  );
+  $effect(() => {
+    onphonedetail?.(
+      viewport.isPhone &&
+        ((tab === 'runs' && !showRunsPhoneList && runs.length > 0) ||
+          (tab === 'matrix' && matrixPhoneDetail)),
+    );
+  });
+  export function back(): void {
+    if (tab === 'matrix') matrixView?.back();
+    else phoneListOpen = true;
+  }
 
   function toggleCompare(): void {
     compareMode = !compareMode;
     if (!compareMode) compareSel = new Set();
+    else if (viewport.isPhone && compareSel.size < 2) phoneListOpen = true;
   }
 
   function toggleCompareSel(id: string): void {
@@ -160,6 +213,9 @@
     compareMode = false;
     compareSel = new Set();
     compareFull = {};
+    compareErrors = {};
+    compareLoading = {};
+    phoneListOpen = false;
     if (wsId) {
       void loadList(wsId);
     } else {
@@ -213,12 +269,14 @@
     formSkill = null;
     selectedId = null;
     mode = 'form';
+    phoneListOpen = false;
   }
 
   function selectRun(id: string): void {
     formSkill = null;
     selectedId = id;
     mode = 'detail';
+    phoneListOpen = false;
   }
 
   async function start(req: StartSkillEvalReq): Promise<void> {
@@ -232,6 +290,7 @@
       formSkill = null;
       selectedId = created.id;
       mode = 'detail';
+      phoneListOpen = false;
       toasts.success('Evaluation started', 'Watch progress in the report.');
     } catch (e) {
       toastError("Couldn’t start the evaluation", e);
@@ -275,10 +334,10 @@
     {#if tab === 'golden'}
       <GoldenTasksView onopenrun={openRun} />
     {:else if tab === 'matrix'}
-      <MatrixView onopenrun={openRunById} />
+      <MatrixView bind:this={matrixView} {listCollapsed} onopenrun={openRunById} onphonedetail={(o) => (matrixPhoneDetail = o)} />
     {:else}
-<div class="se-page" class:list-hidden={listHidden}>
-  <aside class="se-side" id="evaluations-list" style={viewport.isPhone ? undefined : `width:${sideW}px`}>
+<div class="se-page" class:list-hidden={listHidden && !viewport.isPhone}>
+  <aside class="se-side" class:hide-phone={viewport.isPhone && !showRunsPhoneList} id="evaluations-list" style={viewport.isPhone ? undefined : `width:${sideW}px`}>
     <div class="se-side-head">
       <span class="se-side-title">Evaluations</span>
       <button
@@ -296,7 +355,10 @@
     </div>
     {#if compareMode}
       <div class="se-compare-hint">
-        Select 2+ runs to compare ({compareSel.size} selected).
+        <span>Select 2+ runs to compare ({compareSel.size} selected).</span>
+        {#if viewport.isPhone && compareSel.size >= 2 && showRunsPhoneList}
+          <button class="btn small" type="button" onclick={() => (phoneListOpen = false)}>Compare</button>
+        {/if}
       </div>
     {/if}
     <div class="se-list">
@@ -343,20 +405,33 @@
     </div>
   </aside>
 
-  {#if !listHidden}<PaneDivider bind:width={sideW} storageKey="skillsEval.sideW" label="Resize the evaluations list" />{/if}
+  {#if !listHidden && !viewport.isPhone}<PaneDivider bind:width={sideW} storageKey="skillsEval.sideW" label="Resize the evaluations list" />{/if}
 
-  <main class="se-main">
+  <main class="se-main" class:hide-phone={viewport.isPhone && showRunsPhoneList}>
     {#if !ws.currentId}
       <EmptyState icon="zap" title="No workspace selected" body="Pick a workspace to evaluate its skills." />
     {:else if compareMode}
-      {#if compareRuns.length >= 2}
-        <CompareView runs={compareRuns} />
-      {:else}
+      {#if compareSel.size < 2}
         <EmptyState
           icon="grid"
           title="Compare runs"
           body="Select two or more runs from the list to compare their scores side by side."
         />
+      {:else}
+        {#if selectedCompareErrors.length > 0}
+          <LoadState
+            what="comparison runs"
+            variant={compareRuns.length >= 2 ? 'compact' : 'page'}
+            error={selectedCompareErrors.map((x) => `${x.name}: ${x.error}`).join(' · ')}
+            empty={compareRuns.length < 2}
+            onretry={() => { for (const x of selectedCompareErrors) loadCompareRun(x.id); }}
+          />
+        {/if}
+        {#if compareRuns.length >= 2}
+          <CompareView runs={compareRuns} />
+        {:else if comparePending}
+          <LoadState what="comparison runs" variant="page" loading empty />
+        {/if}
       {/if}
     {:else if mode === 'form'}
       <StartEvalForm {starting} onstart={start} initialSkill={formSkill} />
@@ -519,16 +594,18 @@
   .se-dot.st-error {
     background: var(--status-exited);
   }
-  /* Phone: the run list stacks above the report (no room for a side pane). */
+  /* Phone: push navigation between the runs list and the open report / form. */
   @media (max-width: 640px) {
     .se-page {
       flex-direction: column;
     }
+    .hide-phone {
+      display: none;
+    }
     .se-side {
       width: 100%;
-      max-height: 40%;
+      flex: 1;
       border-inline-end: none;
-      border-bottom: 1px solid var(--border);
     }
     .se-main {
       flex: 1;
@@ -537,6 +614,9 @@
     .se-subhead {
       overflow-x: auto;
       padding: 8px;
+    }
+    .se-item {
+      min-height: var(--hit-min);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -550,6 +630,10 @@
     overflow: hidden;
   }
   .se-compare-hint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     padding: 6px 12px;
     font-size: var(--fs-xs);
     color: var(--text-dim);

@@ -26,6 +26,7 @@ import type {
   ApiSecretable,
   Connection,
   ExecuteApiReq,
+  GrpcInvokeReq,
   Id,
   ImportCurlReq,
   ParsedCurl,
@@ -112,6 +113,8 @@ export interface ApiDraft {
   /** UI-only: the collection a new draft was started in ("New request here"),
    *  preselected by the save sheet. Never sent to the daemon. */
   collectionHint?: Id | null;
+  /** Incomplete historical input is not a runnable/savable request. */
+  historyReplay?: { reason: string; body?: string; requestId?: Id };
 }
 
 export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
@@ -1181,19 +1184,15 @@ class ApiClientStore {
 
   /** Pull Postman collection files from a connected git repo and import them. */
   async gitPullCollections(repoId: Id): Promise<void> {
-    try {
-      const res = await api.post<{ files: { name: string; content: string }[] }>(`/repos/${repoId}/api-collections/pull`, {});
-      let imported = 0;
-      for (const f of res.files) {
-        try {
-          await this.importParsed(detectAndParse(f.content, f.name));
-          imported++;
-        } catch { /* skip non-collection json */ }
-      }
-      toasts.success('Pulled from git', `${imported} collection file(s)`);
-    } catch (e) {
-      toasts.error('Couldn’t git pull', errMsg(e));
+    const res = await api.post<{ files: { name: string; content: string }[] }>(`/repos/${repoId}/api-collections/pull`, {});
+    let imported = 0;
+    for (const f of res.files) {
+      try {
+        await this.importParsed(detectAndParse(f.content, f.name));
+        imported++;
+      } catch { /* skip non-collection json */ }
     }
+    toasts.success('Pulled from git', plural(imported, 'collection file'));
   }
 
   /** Export all root collections to Postman files and push them to a git repo. */
@@ -1292,6 +1291,8 @@ class ApiClientStore {
   /** Persist the current draft into a collection. Returns the saved request. */
   async saveDraft(name: string, collectionId: Id | null): Promise<ApiRequest | null> {
     const d = this.draft;
+    const issue = this.replayIssue(d);
+    if (issue) { toasts.error('Incomplete history request', issue); return null; }
     const wid = this.wsId(), tabId = d.tabId;
     const submittedAuth = JSON.stringify(d.auth);
     const body: UpsertApiRequestReq = {
@@ -1418,11 +1419,72 @@ class ApiClientStore {
     delete next[key];
     this.runtimeVars = next;
   }
+  /** Explain why a history snapshot cannot be sent as a complete request. */
+  replayIssue(draft: ApiDraft = this.draft): string | null {
+    const replay = draft.historyReplay;
+    if (replay && (replay.body === undefined || replay.body === draft.body)) return replay.reason;
+    if (draft.body_mode === 'multipart') {
+      try {
+        const rows = JSON.parse(draft.body);
+        if (Array.isArray(rows) && rows.some(r => r.type === 'file' && (r.missing_content || (r.size !== undefined && !r.value)))) {
+          return 'History does not retain uploaded files. Reselect each missing file before sending or saving.';
+        }
+      } catch { /* Request validation reports malformed input. */ }
+    }
+    return null;
+  }
+
+  /** Load today's saved request explicitly, never label it as the historical send. */
+  async openHistorySavedRequest(): Promise<void> {
+    const id = this.draft.historyReplay?.requestId;
+    if (id) await this.openRequest(id);
+  }
+
+  /** gRPC shares HTTP's per-tab cancellation and replacement ownership. */
+  async executeGrpc(draft: ApiDraft = this.draft): Promise<ApiResponse | null> {
+    const base = this.base(), wid = this.wsId();
+    if (!base || !wid) return null;
+    if (!draft.grpc_method) { toasts.error('Pick a method first'); return null; }
+    const issue = this.replayIssue(draft);
+    if (issue) { this.patchSlot(draft.tabId, {error: issue}); return null; }
+    draft = $state.snapshot(draft);
+    const tabId = draft.tabId;
+    this.cancelExecute(tabId);
+    const controller = new AbortController(), signal = controller.signal;
+    this.patchSlot(tabId, {ctrl:controller, sending:true, error:null, tests:[], logs:[], history:null});
+    const current = () => this.slot(tabId)?.ctrl === controller && !signal.aborted
+      && this.wsId() === wid && this.tabs.some(t => t.tabId === tabId);
+    const env = this.activeEnv;
+    const body: GrpcInvokeReq = {url:draft.url,proto:draft.proto ?? '',method:draft.grpc_method!,body:draft.body,
+      headers:liveKv(draft.headers),environment_id:env?.id ?? null,vars:{...this.runtimeVars}};
+    try {
+      let resp: ApiResponse;
+      try { resp = await api.long.post<ApiResponse>(`${base}/grpc/invoke`, body, signal); }
+      catch (e) {
+        const host = newHostConfirmHost(e);
+        if (host === null || !current()) throw e;
+        const ok = await confirmNewHost(host, {method:'gRPC',url:body.url,secrets:draftSecrets(draft,env)});
+        if (!ok || !current()) return null;
+        resp = await api.long.post<ApiResponse>(`${base}/grpc/invoke`, {...body,confirm_new_host:true}, signal);
+      }
+      if (!current()) return null;
+      this.patchSlot(tabId, {resp,error:null});
+      return resp;
+    } catch (e) {
+      if (current() && !isAbortError(e)) this.patchSlot(tabId, {resp:null,error:errMsg(e)});
+      return null;
+    } finally {
+      if (this.slot(tabId)?.ctrl === controller) this.patchSlot(tabId, {sending:false,ctrl:null});
+    }
+  }
+
   /** Send the given draft through the daemon. Sets lastResponse + refreshes history. */
   async execute(draft: ApiDraft = this.draft): Promise<ApiResponse | null> {
     const base = this.base();
     if (!base) { toasts.error('No workspace selected'); return null; }
     if (!draft.url.trim()) { toasts.error('URL is empty'); return null; }
+    const issue = this.replayIssue(draft);
+    if (issue) { this.patchSlot(draft.tabId, {error: issue}); return null; }
 
     // Own the complete pre → HTTP → post sequence before any user code runs.
     // Snapshot reactive fields so editing another draft cannot alter this send.
@@ -1441,6 +1503,10 @@ class ApiClientStore {
     const ownsView = ownsExecution;
     const checkCurrent = () => { if (!ownsExecution()) throw new DOMException('Request canceled', 'AbortError'); };
     let runtimeVars = {...this.runtimeVars};
+    // Plain environment values are readable by scripts; only explicit writes
+    // become session overrides. Keychain values remain on the daemon.
+    const plainEnv = {...this.activeEnv?.variables};
+    let scriptVars = {...plainEnv, ...runtimeVars};
     const logs: string[] = [];
     let reqCtx: PreRequestReq = {
       method: draft.method, url: draft.url,
@@ -1450,12 +1516,13 @@ class ApiClientStore {
       // Bad variables JSON fails the send here, inline, before any script runs.
       const gqlVariables = draft.body_mode === 'graphql' ? parseGraphqlVariables(draft.graphql_variables) : null;
       if (draft.pre_request_script?.trim()) {
-        const pre = await runScript({ kind:'pre', code:draft.pre_request_script, request:reqCtx, vars:runtimeVars }, signal);
+        const pre = await runScript({ kind:'pre', code:draft.pre_request_script, request:reqCtx, vars:scriptVars }, signal);
         checkCurrent();
         logs.push(...pre.run.logs.map(l => `[pre] ${l}`));
         if (pre.run.error) throw new Error(`Pre-request script failed: ${pre.run.error}`);
         if (!pre.request) throw new Error('Pre-request script returned no request.');
-        reqCtx = pre.request; runtimeVars = pre.vars;
+        reqCtx = pre.request; scriptVars = pre.vars;
+        runtimeVars = mergeVariableWrites(runtimeVars, pre.run.writes ?? {});
         this.runtimeScopes = {...this.runtimeScopes, [wid]: mergeVariableWrites(this.runtimeScopes[wid] ?? {}, pre.run.writes ?? {})};
       }
       checkCurrent();
@@ -1499,7 +1566,7 @@ class ApiClientStore {
         const headers: Record<string, string> = {};
         for (const h of resp.headers) headers[h.key.toLowerCase()] = h.value;
         const post = await runScript({kind:'post', code:draft.post_response_script,
-          response:{code:resp.status,status:resp.status_text,responseTime:resp.duration_ms,headers,bodyText:resp.body}, vars:runtimeVars}, signal);
+          response:{code:resp.status,status:resp.status_text,responseTime:resp.duration_ms,headers,bodyText:resp.body}, vars:scriptVars}, signal);
         checkCurrent();
         logs.push(...post.run.logs.map(l => `[test] ${l}`));
         if (ownsView()) this.patchSlot(tabId, { tests: post.run.tests });
@@ -2044,11 +2111,16 @@ class ApiClientStore {
    *  with the same method + URL), otherwise blanked with a re-enter hint —
    *  the mask itself is never sent as a credential. */
   async loadHistoryIntoDraft(h: ApiHistoryEntry): Promise<void> {
-    const snap = (h.request ?? {}) as Partial<ExecuteApiReq> & { request_id?: Id | null };
+    const snap = (h.request ?? {}) as Partial<ExecuteApiReq> & { request_id?: Id | null; source?: unknown; request_truncated?: boolean };
+    const resultOnly = snap.source === 'automation_run';
+    let multipartFieldsComplete = false;
+    if (snap.body_mode === 'multipart') {
+      try { multipartFieldsComplete = Array.isArray(JSON.parse(snap.body ?? '')); } catch { /* capped JSON is incomplete */ }
+    }
     const method = snap.method ?? h.method;
     const url = snap.url ?? h.url;
     let savedId = snap.request_id && this.requests.some((r) => r.id === snap.request_id) ? snap.request_id : undefined;
-    if (!savedId) {
+    if (!savedId && !resultOnly) {
       const same = this.requests.filter((r) => r.method === method && r.url === url);
       if (same.length === 1) savedId = same[0].id;
     }
@@ -2070,6 +2142,11 @@ class ApiClientStore {
       query: un.query,
       body_mode: snap.body_mode ?? 'none',
       body: snap.body ?? '',
+      historyReplay: resultOnly
+        ? {reason:'This automation history entry contains results only. Open the current saved request to run it again.', ...(savedId ? {requestId:savedId} : {})}
+        : snap.request_truncated && !multipartFieldsComplete
+          ? {reason:'History retained only a body preview. Replace the body before sending or saving.',body:snap.body ?? ''}
+          : undefined,
       auth: un.auth,
       ssh_connection_id: snap.ssh_connection_id ?? null,
       proto: '',
@@ -2084,6 +2161,8 @@ class ApiClientStore {
         ? { at: h.executed_at, truncated: stored.resp?.truncated ?? false }
         : null,
     });
+    const replayIssue = this.replayIssue();
+    if (replayIssue) toasts.info('Incomplete history request', replayIssue);
     if (un.blanked) {
       toasts.info('Re-enter credentials', 'History stores secrets masked — fill the blanked credential fields before sending.');
     }

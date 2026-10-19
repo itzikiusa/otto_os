@@ -225,7 +225,7 @@
         toasts.info(
           'Nothing to install',
           skipped > 0
-            ? `All ${category} skills are up to date, or have local edits that Install all leaves alone.`
+            ? `Library copies of these ${category} skills are already current, or ahead with local edits, so those files were left as they are. Their provider copies were still reconciled.`
             : `All ${category} skills are already up to date.`,
         );
       } else if (b > 0) {

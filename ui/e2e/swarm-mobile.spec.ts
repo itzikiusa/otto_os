@@ -8,7 +8,7 @@ import { expectFullyInViewport } from './helpers';
 // a dependency chain, and board posts. That makes the page's five views render
 // with CONTENT so we can assert real layout behavior on a phone:
 //
-//   • the view switcher reaches all 5 tabs (it scrolls horizontally on a phone),
+//   • the view switcher reaches all 5 tabs (the tab strip scrolls on a phone),
 //   • each view (Org / Graph / Kanban / Runs / Feed) renders and fits the
 //     viewport width (no element forces the page wider than the screen — the
 //     Kanban columns + Graph canvas are the only INTENDED horizontal scrollers),
@@ -116,12 +116,13 @@ test('all five tabs are reachable (switcher scrolls on a phone) and each fits', 
 }) => {
   await openSwarm(page);
 
-  // At phone width the switcher must be a horizontal scroll container so the last
-  // tab ("Feed") is reachable even on a 320px screen. (At ≥641px the desktop tab
-  // row applies, so this is gated on the actual viewport width, not device type.)
+  // On a phone the tab strip (`.seg-tabs`) scrolls so Feed stays reachable on a
+  // 320px screen. The switcher row itself wraps so the budget is not clipped
+  // off that strip. At ≥641px the desktop tab row applies, so this is gated on
+  // the actual viewport width, not device type.
   if (phoneWidth(page)) {
     const overflowX = await page
-      .locator('.switcher')
+      .locator('.switcher .seg-tabs')
       .evaluate((el) => getComputedStyle(el).overflowX);
     expect(['auto', 'scroll']).toContain(overflowX);
   }

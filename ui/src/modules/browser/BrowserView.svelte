@@ -4,6 +4,7 @@
 
   import { untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
@@ -19,6 +20,13 @@
   import type { BrowserCredential } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import TabStrip from './TabStrip.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
+  let showCredentials = $state(false);
+  let credentialsPanel = $state<Promise<typeof import('./CredentialsPanel.svelte')> | null>(null);
+  function openCredentials(): void {
+    credentialsPanel = import('./CredentialsPanel.svelte');
+    showCredentials = true;
+  }
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import ReaderView from './ReaderView.svelte';
@@ -629,6 +637,9 @@
   {:else}
     <!-- Module page: the page tabs ride inline in the unified header bar. -->
     <PageHeader title="Browser">
+      {#snippet actions()}
+        <button class="icon-btn" aria-label="Site credentials" title="Site credentials" onclick={openCredentials}><Icon name="key" size={14} /></button>
+      {/snippet}
       {#snippet tabs()}
         <TabStrip onnew={newTab} inbar />
       {/snippet}
@@ -780,6 +791,7 @@
         <span>Summary · drafted by Otto</span>
         <button class="icon-btn" onclick={() => (browser.summary = '')} aria-label="Close summary" title="Close summary"><Icon name="x" size={12} /></button>
       </div>
+      <p class="dim-line">{#if browser.summaryAt}<time datetime={browser.summaryAt}>{new Date(browser.summaryAt).toLocaleTimeString()}</time> · {/if}Fetched with {browser.summaryEngine || 'the browser'}{#if browser.summaryDegraded} · No JavaScript ran; dynamic content may be missing.{/if}</p>
       <p>{browser.summary}</p>
     </div>
   {/if}
@@ -837,8 +849,21 @@
   {/if}
 </div>
 
+{#if showCredentials && ws.currentId}
+  <Modal title="Site credentials" width={640} onclose={() => { showCredentials = false; const id = ws.currentId; if (id) void browserApi.listCredentials(id).then(c => { if (ws.currentId === id) credentials = c; }).catch(() => {}); }}>
+    {#await credentialsPanel}
+      <LoadState what="site credentials" loading />
+    {:then panel}
+      {#if panel}<panel.default workspaceId={ws.currentId} />{/if}
+    {:catch error}
+      <LoadState what="site credentials" error={loadErrorText(error)} onretry={openCredentials} />
+    {/await}
+  </Modal>
+{/if}
+
 <style>
   .browser {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -928,7 +953,7 @@
     font-size: var(--fs-m);
   }
   /* Urlbar tools: the shared .icon-btn, framed like the address field. */
-  .icon-btn.tool {
+  .tool {
     flex: none;
     width: 30px;
     height: 30px;
@@ -936,11 +961,11 @@
     background: var(--surface);
     color: var(--text);
   }
-  .icon-btn.tool:disabled {
+  .tool:disabled {
     opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
-  .icon-btn.tool.active {
+  .tool.active {
     background: var(--accent-soft);
     color: var(--accent-text);
     border-color: var(--accent);
@@ -953,7 +978,7 @@
       flex-basis: 100%;
       order: -1;
     }
-    .icon-btn.tool {
+    .tool {
       width: 36px;
       height: 36px;
     }
@@ -962,6 +987,14 @@
     .go-btn {
       display: none;
     }
+  }
+  @container (max-width: 560px) {
+    .urlbar { flex-wrap: wrap; }
+    .urlbar input { flex-basis: 100%; order: -1; }
+    .tool { width: 36px; height: 36px; }
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .seg { min-width: 36px; min-height: 36px; }
   }
   .summary {
     margin: 10px 12px 0;
@@ -978,8 +1011,6 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
     margin-bottom: 6px;
   }
   .summary .dim-line {

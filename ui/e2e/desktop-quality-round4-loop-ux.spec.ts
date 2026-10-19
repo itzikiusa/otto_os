@@ -10,7 +10,7 @@ function loop(id: string, workspace: string) {
     definition: { title: `Report ${id}`, summary: `Verify the independently generated report ${id}`, acceptance_criteria: [criterion] },
     config: { executors: [{ name: 'Executor', provider: 'codex', model: '' }], mode: 'build', allow_commits: false },
     limits: { max_iterations: 3, max_runtime_secs: 300 },
-    ledger: { questions: [{ id: 'format', question: `Which format for ${id}?`, answer: null, answered_by: null }],
+    ledger: { questions: [{ id: 'format', question: `Which format for ${id}?`, answer: null as string | null, answered_by: null as string | null }],
       verifications: [], next_action: 'Review the report', review_summary: '', review_passed: false } };
 }
 async function fixture(page: Page, scheme: string) {
@@ -38,11 +38,11 @@ for (const scheme of ['light', 'dark']) {
     await page.goto('/#/loops/alpha');
     await expect(page.getByRole('heading', { name: 'Report alpha', exact: true })).toBeVisible();
     await page.getByLabel('Answer question').fill('Alpha must use Markdown');
-    await page.getByLabel('Evidence for human-check').fill('I inspected alpha only');
+    await page.getByLabel('Evidence for Inspect the report').fill('I inspected alpha only');
     await page.evaluate(() => { location.hash = '#/loops/beta'; });
     await expect(page.getByRole('heading', { name: 'Report beta', exact: true })).toBeVisible();
     await expect(page.getByLabel('Answer question')).toHaveValue('');
-    await expect(page.getByLabel('Evidence for human-check')).toHaveValue('');
+    await expect(page.getByLabel('Evidence for Inspect the report')).toHaveValue('');
     await expect(page.getByRole('button', { name: 'Record answer', exact: true })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Record verification', exact: true })).toBeDisabled();
     await page.screenshot({ path: info.outputPath(`loop-desktop-${scheme}.png`) });
@@ -57,19 +57,32 @@ for (const scheme of ['light', 'dark']) {
     await page.evaluate(() => { location.hash = '#/loops/alpha'; });
     await expect(page.getByRole('heading', { name: 'Report alpha', exact: true })).toBeVisible();
     await expect(page.getByLabel('Answer question')).toHaveValue('');
-    await expect(page.getByLabel('Evidence for human-check')).toHaveValue('');
+    await expect(page.getByLabel('Evidence for Inspect the report')).toHaveValue('');
   });
 }
 
 test('direct loop navigation closes the previous budget dialog', async ({ page }) => {
-  await fixture(page, 'light');
+  const loops = await fixture(page, 'light');
+  await page.route('**/goal-loops/*/questions/*/answer', async (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-3);
+    const item = loops.find((loop) => loop.id === id);
+    if (item) {
+      item.ledger.questions[0].answer = 'Markdown';
+      item.ledger.questions[0].answered_by = 'human-user';
+    }
+    await route.fulfill({ json: item ?? {} });
+  });
   await page.goto('/#/loops/alpha');
+  await page.getByLabel('Answer question').fill('Markdown');
+  await page.getByRole('button', { name: 'Record answer', exact: true }).click();
   await page.getByRole('button', { name: 'Extend budget…', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Extend budget' })).toBeVisible();
   await page.getByLabel('Max iterations').fill('12');
   await page.evaluate(() => { location.hash = '#/loops/beta'; });
   await expect(page.getByRole('heading', { name: 'Report beta', exact: true })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Extend budget' })).toHaveCount(0);
+  await page.getByLabel('Answer question').fill('Plain text');
+  await page.getByRole('button', { name: 'Record answer', exact: true }).click();
   await page.getByRole('button', { name: 'Extend budget…', exact: true }).click();
   await expect(page.getByLabel('Max iterations')).not.toHaveValue('12');
   await page.getByRole('button', { name: 'Cancel', exact: true }).press('Enter');

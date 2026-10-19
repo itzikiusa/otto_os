@@ -319,6 +319,7 @@
            reach). The wrapper only draws the shared chrome. -->
       <div
         class="tab"
+        role="presentation"
         class:active={ws.activeSessionId === id}
         class:resumable={isResumable(id)}
         class:needs-you={needsYou(id)}

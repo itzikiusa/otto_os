@@ -109,12 +109,31 @@
     });
   });
 
-  // ⌘K: the page's verbs.
-  $effect(() =>
-    registry.register('loops', [
-      { id: 'loops.new', title: 'New goal loop…', group: 'Goal Loops', keywords: 'create goal iterate objective', run: () => { if (selectedId) back(); creating = true; } },
-    ]),
-  );
+  // ⌘K verbs for the open loop. The detail owns confirm/extend; this only registers them.
+  const loopActions = {
+    pause: () => {},
+    resume: () => {},
+    stop: () => {},
+    extend: () => {},
+  };
+  // ⌘K: create on the list; Pause / Resume / Extend budget / Stop while a loop is open.
+  $effect(() => {
+    const create = { id: 'loops.new', title: 'New goal loop…', group: 'Goal Loops', keywords: 'create goal iterate objective', run: () => { if (selectedId) back(); creating = true; } };
+    const openId = selectedId;
+    if (!openId) return registry.register('loops', [create]);
+    const loop = loops.detail?.loop.id === openId ? loops.detail.loop : null;
+    const name = loop?.name ?? 'goal loop';
+    const status = loop?.status;
+    const resumable = status === 'paused' || status === 'blocked' || status === 'exhausted';
+    const needsAnswer = loop?.ledger?.questions.some((q) => !q.answer) ?? false;
+    return registry.register('loops', [
+      create,
+      { id: 'loops.pause', title: `Pause “${name}”`, group: 'Goal Loops', keywords: 'pause goal loop', disabled: status !== 'running', run: () => loopActions.pause() },
+      { id: 'loops.resume', title: `Resume “${name}”`, group: 'Goal Loops', keywords: 'resume goal loop', disabled: !resumable || needsAnswer, run: () => loopActions.resume() },
+      { id: 'loops.extend', title: `Extend budget for “${name}”`, group: 'Goal Loops', keywords: 'extend budget iterations runtime', disabled: !resumable || needsAnswer, run: () => loopActions.extend() },
+      { id: 'loops.stop', title: `Stop “${name}”`, group: 'Goal Loops', keywords: 'stop goal loop', disabled: !loop || status === 'draft' || status === 'succeeded' || status === 'failed' || status === 'stopped', run: () => loopActions.stop() },
+    ]);
+  });
 </script>
 
 <div class="loops">
@@ -122,7 +141,7 @@
     <!-- A direct link can switch ids without leaving this page. Draft answers,
          verification evidence and open dialogs belong to exactly one loop. -->
     {#key selectedId}
-      <LoopDetail id={selectedId} onback={back} />
+      <LoopDetail id={selectedId} onback={back} actions={loopActions} />
     {/key}
   {:else if creating}
     <GoalDefineForm oncancel={() => (creating = false)} oncreated={open} />
@@ -177,7 +196,7 @@
                 <StatusBadge status={loopStatus(l.status)} />
               </div>
               {#if l.definition?.summary}<span class="goal" title={l.definition.summary}>{l.definition.summary}</span>{/if}
-              <div class="bar" aria-hidden="true"><span class="bar-fill" class:done={l.status === 'succeeded'} style:width={`${l.progress_pct}%`}></span></div>
+              <div class="bar" aria-hidden="true"><span class="bar-fill status-{l.status}" style:width={`${l.progress_pct}%`}></span></div>
               <div class="card-meta">
                 <span>Iteration {l.current_iteration} of {l.limits.max_iterations}</span>
                 <span>{l.progress_pct}% complete</span>
@@ -206,7 +225,7 @@
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
     gap: 12px;
   }
   .loop-card {
@@ -274,9 +293,24 @@
   .bar-fill {
     display: block;
     height: 100%;
-    background: var(--status-working);
+    background: var(--text-dim);
   }
-  .bar-fill.done {
+  .bar-fill.status-running {
+    background: var(--info);
+  }
+  .bar-fill.status-blocked,
+  .bar-fill.status-exhausted {
+    background: var(--warning);
+  }
+  .bar-fill.status-failed {
+    background: var(--danger);
+  }
+  .bar-fill.status-succeeded {
     background: var(--success);
+  }
+  .bar-fill.status-paused,
+  .bar-fill.status-draft,
+  .bar-fill.status-stopped {
+    background: var(--text-dim);
   }
 </style>

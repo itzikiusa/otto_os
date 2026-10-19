@@ -111,7 +111,9 @@
   });
   // Board-task nudges for the composer status line.
   $effect(() => {
-    if (sessionId && workspaceId) void activity.load(workspaceId, sessionId);
+    const sid = sessionId;
+    const wid = workspaceId;
+    if (sid && wid) return untrack(() => activity.watch(wid, sid));
   });
 
   const t = $derived(conv.transcript);

@@ -260,9 +260,8 @@
   }
 
   function openMore(e: MouseEvent): void {
-    // Anchor under the ⋯ button (a keyboard "click" carries no cursor point).
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    ctxMenu.show(new MouseEvent('click', { clientX: r.left, clientY: r.bottom + 4 }), [
+    // Anchor under the ⋯ button (showAt handles keyboard activation & RTL).
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
       {
         label: 'Clear all notifications…',
         icon: 'trash',
@@ -279,7 +278,7 @@
     const n = notifications.notices.length;
     const ok = await confirmer.ask(
       `Delete all ${plural(n, 'notification')}? This can’t be undone.`,
-      { title: 'Clear all notifications', confirmLabel: 'Clear all' },
+      { title: 'Clear all notifications', confirmLabel: 'Clear all', danger: true },
     );
     if (ok) await notifications.clear();
   }
@@ -323,7 +322,7 @@
     aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'}
     aria-haspopup="dialog"
     aria-expanded={open}
-    title="Notifications"
+    title={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'}
   >
     <Icon name="bell" size={14} />
     {#if unreadCount > 0}
@@ -371,7 +370,7 @@
               class="btn ghost small nb-more-btn"
               onclick={openMore}
               aria-label="More notification actions"
-              title="More"
+              title="More notification actions"
             >
               <Icon name="more" size={13} />
             </button>
@@ -446,7 +445,7 @@
                           {#if row.notices.length > 1}
                             <span class="nb-count">×{row.notices.length}</span>
                           {/if}
-                          <time class="nb-time" datetime={n.created_at}>{relative(n.created_at)}</time>
+                          <time class="nb-time" datetime={n.created_at} title={new Date(n.created_at).toLocaleString()}>{relative(n.created_at)}</time>
                         </span>
                         {#if row.text}
                           <span class="nb-text" class:one={row.sessionId !== null} title={row.sessionId ? row.text : undefined}>
@@ -480,7 +479,7 @@
                           ? notifications.dismissMany(row.notices.map((x) => x.id))
                           : notifications.dismiss(n.id)}
                       aria-label={`Dismiss ${row.title}`}
-                      title="Dismiss"
+                      title={`Dismiss ${row.title}`}
                     >
                       <Icon name="x" size={12} />
                     </button>

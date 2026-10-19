@@ -38,6 +38,8 @@
   let localAttUrls = $state<Record<string, string>>({});
   // Per-id loading flags for blob URL fetch.
   let localAttUrlLoading = $state<Record<string, boolean>>({});
+  // Per-id error messages when a preview/blob URL fetch fails.
+  let localAttUrlError = $state<Record<string, string>>({});
   // All created object URLs — revoked on unmount.
   let createdLocalUrls: string[] = [];
 
@@ -62,6 +64,7 @@
     for (const url of stale) URL.revokeObjectURL(url);
     localAttUrls = {};
     localAttUrlLoading = {};
+    localAttUrlError = {};
     localAtts = [];
     void loadAttachments();
   });
@@ -121,12 +124,14 @@
   async function loadAttUrl(id: string): Promise<void> {
     if (localAttUrls[id] || localAttUrlLoading[id]) return;
     localAttUrlLoading = { ...localAttUrlLoading, [id]: true };
+    const { [id]: _cleared, ...restErr } = localAttUrlError;
+    localAttUrlError = restErr;
     try {
       const url = await authedBlobUrl(`/product/attachments/${id}`);
       createdLocalUrls.push(url);
       localAttUrls = { ...localAttUrls, [id]: url };
     } catch (e) {
-      console.warn('[AttachmentsPanel] preview load failed', id, e);
+      localAttUrlError = { ...localAttUrlError, [id]: loadErrorText(e) };
     } finally {
       localAttUrlLoading = { ...localAttUrlLoading, [id]: false };
     }
@@ -301,6 +306,9 @@
 
   <!-- Attachment list -->
   {#if localAtts.length > 0}
+    {#if loadError}
+      <LoadState what="attachments" variant="compact" loading={localAttLoading} error={loadError} onretry={() => void loadAttachments()} />
+    {/if}
     <div class="att-list">
       {#each localAtts as att (att.id)}
         <div class="att-item">
@@ -324,6 +332,13 @@
                 />
               {:else if localAttUrlLoading[att.id]}
                 <Skeleton rows={1} height={64} label="the preview" />
+              {:else if localAttUrlError[att.id]}
+                <LoadState
+                  what={att.filename}
+                  error={localAttUrlError[att.id]}
+                  empty
+                  onretry={() => loadAttUrl(att.id)}
+                />
               {:else}
                 <button
                   class="att-load-btn"
@@ -342,6 +357,13 @@
                   title={att.filename}
                   sandbox="allow-scripts allow-same-origin"
                 ></iframe>
+              {:else if localAttUrlError[att.id]}
+                <LoadState
+                  what={att.filename}
+                  error={localAttUrlError[att.id]}
+                  empty
+                  onretry={() => loadAttUrl(att.id)}
+                />
               {:else}
                 <button
                   class="att-load-btn"
@@ -355,7 +377,7 @@
           {:else}
             <!-- Non-image, non-PDF: file chip + download -->
             <div class="att-file-chip">
-              <span class="att-chip-icon">📄</span>
+              <span class="att-chip-icon" aria-hidden="true"><Icon name="file" size={14} /></span>
               <span class="att-chip-name">{att.filename}</span>
               {#if localAttUrls[att.id]}
                 <a
@@ -363,7 +385,7 @@
                   href={localAttUrls[att.id]}
                   download={att.filename}
                 >Download</a>
-              {:else}
+              {:else if !localAttUrlError[att.id]}
                 <button
                   class="att-load-btn"
                   onclick={() => loadAttUrl(att.id)}
@@ -373,6 +395,14 @@
                 </button>
               {/if}
             </div>
+            {#if localAttUrlError[att.id]}
+              <LoadState
+                what={att.filename}
+                error={localAttUrlError[att.id]}
+                empty
+                onretry={() => loadAttUrl(att.id)}
+              />
+            {/if}
           {/if}
 
           <!-- Action row -->
@@ -538,7 +568,9 @@
     padding: 4px 0;
   }
   .att-chip-icon {
-    font-size: var(--fs-m);
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-dim);
   }
   .att-chip-name {
     font-size: var(--fs-s);
@@ -580,5 +612,12 @@
   .att-delete-btn:hover {
     border-color: var(--danger);
     color: var(--danger);
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .att-load-btn,
+    .att-action-btn {
+      min-height: var(--hit-min);
+      padding: 6px 10px;
+    }
   }
 </style>

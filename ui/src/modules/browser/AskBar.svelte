@@ -202,4 +202,8 @@
     opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
+  .send:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  @media (pointer: coarse), (max-width: 640px) {
+    .send { min-width: 36px; min-height: 36px; }
+  }
 </style>

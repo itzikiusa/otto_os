@@ -47,6 +47,23 @@ export const STATUS_LABEL: Record<WorkStatus, string> = {
   done: workStatus('done').label,
 };
 
+/** A glyph for a work status, so a graph node is not colour alone.
+ *  Waiting, blocked and failed stay distinct (hand / warning / x). */
+const STATUS_ICON: Record<WorkStatus, IconName> = {
+  pending: 'clock',
+  running: 'play',
+  waiting: 'hand',
+  blocked: 'warning',
+  succeeded: 'check',
+  failed: 'x',
+  cancelled: 'stop',
+  done: 'check',
+};
+
+export function statusIcon(status: WorkStatus): IconName {
+  return STATUS_ICON[status];
+}
+
 export const RISK_LABEL: Record<RiskLevel, string> = {
   low: 'Low',
   medium: 'Medium',

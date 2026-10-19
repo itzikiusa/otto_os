@@ -78,22 +78,48 @@
 
   const wsId = $derived(ws.currentId ?? '');
   let browser = $state<ReturnType<typeof SkillsBrowser> | null>(null);
+  let reviewPanel = $state<ReturnType<typeof SkillReviewPanel> | null>(null);
+  let evalPage = $state<ReturnType<typeof SkillsEvalPage> | null>(null);
   let canCreate = $state(true);
-  let phoneDetail = $state(false);
+  let skillsPhoneDetail = $state(false);
+  let reviewPhoneDetail = $state(false);
+  let evalPhoneDetail = $state(false);
   let listCollapsed = $state(false);
-  // The Evaluator only has a runs list on its Runs view.
+  // The Evaluator has a collapsible list on Runs and Matrix views.
   let evalListable = $state(true);
+
+  const phoneBackLabel = $derived(
+    tab === 'skills'
+      ? 'Back to skills'
+      : tab === 'review'
+        ? 'Back to reviews'
+        : evalView === 'matrix'
+          ? 'Back to matrices'
+          : 'Back to evaluations',
+  );
+  const showPhoneBack = $derived(
+    viewport.isPhone &&
+      ((tab === 'skills' && skillsPhoneDetail) ||
+        (tab === 'review' && reviewPhoneDetail) ||
+        (tab === 'evaluator' && evalPhoneDetail)),
+  );
+  function onPhoneBack(): void {
+    if (tab === 'skills') void browser?.back();
+    else if (tab === 'review') reviewPanel?.back();
+    else evalPage?.back();
+  }
 </script>
 
 <div class="skills-lab">
   <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined} tabsPlacement={tab === 'evaluator' ? 'below' : 'inline'}>
     {#snippet leading()}
-      {#if ((tab === 'skills') || (tab === 'evaluator' && evalListable)) && !viewport.isPhone}
-        {@const what = tab === 'skills' ? 'skills' : 'evaluations'}
-        <button class="icon-btn" onclick={() => (listCollapsed = !listCollapsed)} aria-label={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} title={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} aria-expanded={!listCollapsed} aria-controls={tab === 'skills' ? 'skills-list-pane' : 'evaluations-list'}><Icon name="sidebar" size={16} /></button>
+      {#if (tab === 'skills' || tab === 'review' || (tab === 'evaluator' && evalListable)) && !viewport.isPhone}
+        {@const what = tab === 'skills' ? 'skills' : tab === 'review' ? 'reviews' : evalView === 'matrix' ? 'matrices' : 'evaluations'}
+        {@const targetId = tab === 'skills' ? 'skills-list-pane' : tab === 'review' ? 'reviews-list' : evalView === 'matrix' ? 'matrices-list' : 'evaluations-list'}
+        <button class="icon-btn" onclick={() => (listCollapsed = !listCollapsed)} aria-label={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} title={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} aria-expanded={!listCollapsed} aria-controls={targetId}><Icon name="sidebar" size={16} /></button>
       {/if}
-      {#if tab === 'skills' && phoneDetail}
-        <button class="icon-btn" onclick={() => browser?.back()} aria-label="Back to skills" title="Back to skills"><Icon name="chevronLeft" size={16} /></button>
+      {#if showPhoneBack}
+        <button class="icon-btn" onclick={onPhoneBack} aria-label={phoneBackLabel} title={phoneBackLabel}><Icon name="chevronLeft" size={16} /></button>
       {/if}
     {/snippet}
     {#snippet tabs()}
@@ -146,11 +172,11 @@
   <PageBody fill padded={false}>
   <div class="lab-body">
     {#if tab === 'skills'}
-      <SkillsBrowser {listCollapsed} bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (phoneDetail = o)} onopenreview={openReview} />
+      <SkillsBrowser {listCollapsed} bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (skillsPhoneDetail = o)} onopenreview={openReview} />
     {:else if tab === 'review'}
-      <SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} />
+      <SkillReviewPanel bind:this={reviewPanel} {wsId} {listCollapsed} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} onphonedetail={(o) => (reviewPhoneDetail = o)} />
     {:else}
-      <SkillsEvalPage initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} {listCollapsed} onlistable={(v) => (evalListable = v)} />
+      <SkillsEvalPage bind:this={evalPage} initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} {listCollapsed} onlistable={(v) => (evalListable = v)} onphonedetail={(o) => (evalPhoneDetail = o)} />
     {/if}
   </div>
   </PageBody>
@@ -173,9 +199,6 @@
   .lab-tabs-sep {
     display: inline-flex;
     color: var(--text-dim);
-  }
-  :global([dir='rtl']) .lab-tabs-sep {
-    transform: scaleX(-1);
   }
   .lab-body {
     flex: 1;

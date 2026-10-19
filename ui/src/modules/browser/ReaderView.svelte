@@ -255,7 +255,7 @@
       onclick={onArticleClick}
       onkeydown={onArticleKey}
     >
-      <h1 class="page-title">{page.title || page.url}</h1>
+      <h2 class="page-title">{page.title || page.url}</h2>
       <!-- eslint-disable-next-line svelte/no-at-html-tags -->
       {@html html}
     </article>

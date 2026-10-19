@@ -222,7 +222,9 @@ export interface AssistResult {
   mermaid: string | null;
   /** A D2 diagram source (when the scene's format is `d2`). */
   d2?: string | null;
-  /** The scene's source format — `mermaid` (default) | `excalidraw` | `d2`. */
+  /** The scene's current source format — `mermaid` | `excalidraw` | `d2`.
+   *  A stop returns the format stored now, which can differ from the editor
+   *  that started the turn. Absent only on an older response. */
   format?: CanvasFormat;
   /** Freeform nodes when the agent produced tier-2 JSON instead of mermaid. */
   nodes: Partial<CanvasNode>[];

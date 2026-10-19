@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { rowMenu } from '../../lib/rowMenu';
   // Saved requests, grouped into collections and nested folders (parent_id).
   // Click a request to open it (an already-open or edited tab is never
@@ -37,7 +38,15 @@
     | { kind: 'req'; id: string; r: ApiRequest; depth: number }
     | { kind: 'empty'; id: string; col: ApiCollection; depth: number }
     | { kind: 'section'; id: string };
-  const ROW_H = 29; // 28 px row + 1 px gap
+  let touchRows = $state(false);
+  const ROW_H = $derived(touchRows ? 37 : 29);
+  onMount(() => {
+    const media = window.matchMedia('(pointer: coarse), (max-width: 640px)');
+    const update = () => { touchRows = media.matches; };
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  });
   /** ⌘F text of a tree row — what it shows, in DOM order. */
   function rowFindText(row: Row): string {
     if (row.kind === 'col') return `${row.node.col.name}\n${row.node.count}`;
@@ -281,7 +290,7 @@
   }
 </script>
 
-<div class="tree-wrap">
+<div class="tree-wrap" style:--request-row-height={`${ROW_H - 1}px`}>
   <div class="tree-tools">
     <label class="search">
       <Icon name="search" size={12} />
@@ -441,7 +450,7 @@
     min-height: 0;
   }
   .vrow {
-    height: 29px;
+    height: calc(var(--request-row-height) + 1px);
     padding-bottom: 1px;
     box-sizing: border-box;
   }
@@ -458,7 +467,7 @@
   .req-row {
     display: flex;
     align-items: center;
-    height: 28px;
+    height: var(--request-row-height);
     padding-inline-end: 2px;
     border-radius: var(--radius-s);
   }
@@ -476,7 +485,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    height: 28px;
+    height: var(--request-row-height);
     padding: 0 4px;
     border: none;
     background: transparent;
@@ -520,7 +529,7 @@
   }
   .empty-folder {
     width: 100%;
-    height: 28px;
+    height: var(--request-row-height);
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -537,5 +546,8 @@
     .row-more {
       opacity: 1;
     }
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .clear, .row-more { min-width: 36px; min-height: 36px; opacity: 1; }
   }
 </style>

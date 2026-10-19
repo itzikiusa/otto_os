@@ -29,7 +29,7 @@ for (const [theme, scheme, width, rtl] of [['native','light',1440,false],['nativ
     await openPage(page,'browser');
     await page.getByPlaceholder('e.g. https://example.com').fill('https://example.invalid/keyboard');
     await page.getByPlaceholder('e.g. https://example.com').press('Enter');
-    await expect(page.locator('.reader h1')).toHaveText('Keyboard reader');
+    await expect(page.locator('.reader .page-title')).toHaveText('Keyboard reader');
     await page.getByRole('button',{name:'Mark passage',exact:true}).focus();
     await page.keyboard.press('Enter');
     await page.keyboard.press('Tab');

@@ -92,12 +92,15 @@
       <button class="btn small" onclick={() => router.go('insights')}>Open Insights</button>
     </EmptyState>
   {:else}
+    {#if error}
+      <LoadState what="Insights" variant="compact" {error} empty={false} onretry={() => poller?.now()} />
+    {/if}
     <ul class="rows">
       {#each shown as r (r.html_path)}
         <li>
           <!-- Deep-link to THIS report (InsightsPage's `#/insights/r/<kind>/<start>/<end>`),
                not just the Insights page, which opens on whatever was last viewed. -->
-          <button class="card" onclick={() => router.go(`insights/r/${r.kind}/${r.period_start}/${r.period_end}`)} title="Open this report in Insights">
+          <button class="ins-card" onclick={() => router.go(`insights/r/${r.kind}/${r.period_start}/${r.period_end}`)} title="Open this report in Insights">
             <div class="head">
               <span class="kind">{KIND_LABEL[r.kind] ?? r.kind}</span>
               <span class="per">{period(r)}</span>
@@ -129,7 +132,7 @@
     flex-direction: column;
     gap: 6px;
   }
-  .card {
+  .ins-card {
     display: block;
     width: 100%;
     padding: 8px 10px;
@@ -141,7 +144,7 @@
     text-align: start;
     font: inherit;
   }
-  .card:hover {
+  .ins-card:hover {
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   }
   .head {

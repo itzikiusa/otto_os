@@ -17,6 +17,7 @@
   import { formatBytes } from '../../kubernetes/k8s-util';
   import EnvBadge from '../../../lib/components/EnvBadge.svelte';
   import { WINDOWS, fmtPct, fmtRate, healthLabel, isWindow } from '../../kubernetes/monitor/monitor-util';
+  import { loadErrorText } from '../../../lib/loadError';
   import { home, type HomeBox } from '../home.svelte';
   import { freshness, poll, type Poller } from './poll';
 
@@ -43,19 +44,16 @@
     // perf K8s R5: status, the cluster list and the overview start together
     // (they were three serial round-trips on mount); the overview is aborted
     // with the poller when the box unmounts or leaves the screen.
-    const boot = booted ? null : Promise.all([k8s.loadStatus(), k8s.loadClusters()]);
-    booted = true;
-    // Request token: a window change restarts the poller while the old
-    // overview fetch may still be in flight — only the newest may land.
     const mine = ++seq;
-    const overview = k8sApi.monitorOverview(win, signal);
-    if (boot) await boot;
-    if (k8s.unavailable) {
-      overview.catch(() => undefined);
-      loading = false;
-      return true;
-    }
     try {
+      const boot = booted ? null : Promise.all([k8s.loadStatus(), k8s.loadClusters()]);
+      booted = true;
+      const overview = k8sApi.monitorOverview(win, signal);
+      if (boot) await boot;
+      if (k8s.unavailable) {
+        overview.catch(() => undefined);
+        return true;
+      }
       const next = await overview;
       if (mine !== seq) return true;
       rows = next;
@@ -63,7 +61,7 @@
       return true;
     } catch (e) {
       if (mine !== seq || signal?.aborted) return true;
-      error = e instanceof Error ? e.message : String(e);
+      error = loadErrorText(e);
       return false;
     } finally {
       if (mine === seq) loading = false;
@@ -112,7 +110,7 @@
       <span class="spacer"></span>
       <div class="seg" role="radiogroup" aria-label="Window">
         {#each WINDOWS as w (w)}
-          <button class:on={w === win} role="radio" aria-checked={w === win} onclick={() => home.updateBoxConfig(viewId, box.id, { window: w })}>{w}</button>
+          <button class:on={w === win} role="radio" aria-checked={w === win} tabindex={w === win ? 0 : -1} onclick={() => home.updateBoxConfig(viewId, box.id, { window: w })}>{w}</button>
         {/each}
       </div>
     </div>
@@ -130,14 +128,16 @@
     </EmptyState>
   {:else}
     {#if error && !monitored}
-      <div class="note" title={error}><Icon name="warning" size={12} />Monitor data unavailable — showing the registry</div>
+      <LoadState what="Kubernetes monitor" variant="compact" {error} empty={false} onretry={() => poller?.now()}>
+        <span class="dim">Showing the cluster registry.</span>
+      </LoadState>
     {/if}
     <ul class="rows">
       {#each k8s.clusters as c (c.id)}
         {@const r = byId.get(c.id)}
         {@const h = healthLabel(r?.health ?? 'unknown')}
         <li>
-          <button class="row" onclick={() => router.go(`kubernetes/${encodeURIComponent(c.id)}`)} title="Open {c.name}">
+          <button class="k8s-row" onclick={() => router.go(`kubernetes/${encodeURIComponent(c.id)}`)} title="Open {c.name}">
             <span class="cdot" style:background={c.color ?? 'var(--text-dim)'}></span>
             <span class="name ellipsis">{c.name}</span>
             <EnvBadge env={c.environment} />
@@ -203,17 +203,6 @@
     background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
-  .note {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    align-self: flex-start;
-    padding: 1px 6px;
-    font-size: var(--fs-xs);
-    color: var(--warning);
-    background: var(--status-warn-soft);
-    border-radius: 999px;
-  }
   .rows {
     list-style: none;
     margin: 0;
@@ -222,7 +211,7 @@
     min-height: 0;
     flex: 1;
   }
-  .row {
+  .k8s-row {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
@@ -238,7 +227,7 @@
     font: inherit;
     font-size: var(--fs-s);
   }
-  .row:hover {
+  .k8s-row:hover {
     background: var(--hover);
   }
   .cdot {

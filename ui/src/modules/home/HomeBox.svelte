@@ -113,10 +113,11 @@
     const startY = e.clientY;
     const w0 = box.w;
     const h0 = box.h;
+    const dir = getComputedStyle(el).direction === 'rtl' ? -1 : 1;
     resizing = true;
     home.interacting = true;
     const move = (ev: PointerEvent): void => {
-      const w = Math.min(COLS, Math.max(MIN_W, Math.round(w0 + (ev.clientX - startX) / colPx)));
+      const w = Math.min(COLS, Math.max(MIN_W, Math.round(w0 + ((ev.clientX - startX) * dir) / colPx)));
       const h = Math.min(MAX_H, Math.max(MIN_H, Math.round(h0 + (ev.clientY - startY) / rowPx)));
       home.resizeBox(viewId, box.id, w, h);
     };
@@ -134,7 +135,8 @@
 
   // Keyboard resize on the handle: arrows nudge one grid unit.
   function onResizeKey(e: KeyboardEvent): void {
-    const d: Record<string, [number, number]> = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowDown: [0, 1], ArrowUp: [0, -1] };
+    const dir = el && getComputedStyle(el).direction === 'rtl' ? -1 : 1;
+    const d: Record<string, [number, number]> = { ArrowRight: [dir, 0], ArrowLeft: [-dir, 0], ArrowDown: [0, 1], ArrowUp: [0, -1] };
     const v = d[e.key];
     if (!v) return;
     e.preventDefault();
@@ -214,11 +216,11 @@
     {/if}
     <span class="hb-icon"><Icon name={def.icon} size={13} /></span>
     <span class="hb-title ellipsis">{def.label}</span>
-    <button class="icon-btn" onclick={() => (tick += 1)} title="Refresh" aria-label="Refresh {def.label}"><Icon name="refresh" size={12} /></button>
-    <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit zoom (Esc)' : 'Zoom in'} aria-label={zoomed ? 'Exit zoom' : 'Zoom in'}>
+    <button class="icon-btn" onclick={() => (tick += 1)} title="Refresh {def.label}" aria-label="Refresh {def.label}"><Icon name="refresh" size={12} /></button>
+    <button class="icon-btn" onclick={() => home.toggleZoom(box.id)} title={zoomed ? 'Exit zoom' : 'Zoom in'} aria-label={zoomed ? 'Exit zoom' : 'Zoom in'} aria-keyshortcuts={zoomed ? 'Escape' : undefined}>
       <Icon name={zoomed ? 'minimize' : 'maximize'} size={12} />
     </button>
-    <button class="icon-btn" onclick={menu} title="Widget options" aria-label="{def.label} widget options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
+    <button class="icon-btn" onclick={menu} title="{def.label} widget options" aria-label="{def.label} widget options" aria-haspopup="menu"><Icon name="more" size={14} /></button>
   </header>
   <div class="hb-body">
     {#if Body}

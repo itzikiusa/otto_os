@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { loadErrorText } from '../src/lib/loadError.ts';
 import { deferred, loadSource } from './sourceHarness.ts';
 
 function functions(file: string, names: string[], context: Record<string, any>) {
@@ -17,7 +18,7 @@ function functions(file: string, names: string[], context: Record<string, any>) 
 test('template retry preserves the first created agent and schedule request key', async () => {
   let creates = 0;
   const attempts: any[] = [];
-  const c = functions('modules/personal-agents/AgentEditSheet.svelte', ['save', 'buildDelivery'], {
+  const c = functions('modules/personal-agents/AgentEditSheet.svelte', ['save', 'buildDelivery', 'deliversReports'], {
     busy: false, error: '', agent: null, createdAgent: null, pendingSchedule: null,
     fName: 'Recap', fAvatar: '', fSoul: '', fProvider: 'claude', fModel: '', fCwd: '', fBrowser: false,
     fEnabled: true, fDestType: 'none', fTemplate: 'recap', ws: { currentId: 'workspace' },
@@ -26,7 +27,7 @@ test('template retry preserves the first created agent and schedule request key'
     personalAgents: { create: async () => { creates++; return { id: 'first-agent', name: 'Recap' }; },
       update: async () => ({ id: 'first-agent', name: 'Recap' }),
       createSchedule: async (id: string, body: any) => { attempts.push({ id, body }); if (attempts.length === 1) throw new Error('offline'); } },
-    toasts: { success() {} }, loadErrorText: (e: Error) => e.message, onclose() {},
+    toasts: { success() {} }, loadErrorText, onclose() {},
   });
   await c.save();
   assert.match(c.error, /Agent created; its schedule could not be added/);

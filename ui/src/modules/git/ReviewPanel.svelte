@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { registry } from '../../lib/commands.svelte';
   import { plural } from '../../lib/plural';
   // AI review panel: start review agents, refresh via WS reviewBus (no poll),
   // approve/decline individual draft comments. Supports live per-agent progress
@@ -112,6 +113,8 @@
   // Merge-readiness data from the dedicated endpoint (fetched after a run completes).
   let mergeReadiness: MergeReadiness | null = $state(null);
   let mergeReadinessLoading = $state(false);
+  let readinessError = $state<string | null>(null);
+  let readinessRequest = 0;
   // Persistent findings (keyed by fingerprint) from the findings endpoint.
   let findings: ReviewFindingRow[] = $state([]);
   let findingsLoading = $state(false);
@@ -304,6 +307,9 @@
 
   /** Load the merge-readiness and persistent findings for a completed review. */
   async function loadFindingsAndReadiness(reviewId: string): Promise<void> {
+    const generation = reviewGeneration;
+    const request = ++readinessRequest;
+    const current = () => !disposed && generation === reviewGeneration && request === readinessRequest && review?.id === reviewId;
     // Only show the loading state on the FIRST load. This function is called on
     // every `review_changed` bus event (refreshFromBus); flipping the loading
     // flag on each background refetch made the merge-readiness box flicker
@@ -319,13 +325,17 @@
         api.get<ReviewFindingRow[]>(`/reviews/${reviewId}/findings`),
         api.get<MergeReadiness>(`/reviews/${reviewId}/merge-readiness`),
       ]);
+      if (!current()) return;
       findings = fp;
       mergeReadiness = mr;
-    } catch {
-      // Non-blocking — the review summary still shows without these.
+      readinessError = null;
+    } catch (e) {
+      if (current()) readinessError = loadErrorText(e);
     } finally {
-      findingsLoading = false;
-      mergeReadinessLoading = false;
+      if (current()) {
+        findingsLoading = false;
+        mergeReadinessLoading = false;
+      }
     }
   }
 
@@ -365,6 +375,7 @@
     loadError = null;
     resetSnippets();
     mergeReadiness = null;
+    readinessError = null;
     findings = [];
     try {
       const runs = await api.get<Review[]>(`/repos/${rid}/prs/${num}/reviews`);
@@ -488,12 +499,14 @@
   }
 
   async function startReview(): Promise<void> {
+    if (starting) return;
     const generation = ++reviewGeneration;
     if (pollTimer !== null) clearTimeout(pollTimer);
     starting = true;
     pollCount = 0;
     resetSnippets();
     mergeReadiness = null;
+    readinessError = null;
     findings = [];
     try {
       const body: StartReviewReq = {};
@@ -1010,9 +1023,9 @@
     }));
     const items =
       customItems.length > 0
-        ? [...builtinItems, { label: '─── Your presets ───', disabled: true, action: () => {} }, ...customItems]
+        ? [...builtinItems, { label: '', separator: true, action: () => {} }, ...customItems]
         : builtinItems;
-    ctxMenu.show(e, items);
+    ctxMenu.show(e, items, { filter: items.length > 12, maxVisible: 12 });
   }
 
   async function saveConfig(): Promise<void> {
@@ -1135,7 +1148,44 @@
   function toggleHistoryRun(idx: number): void {
     historyExpanded = { ...historyExpanded, [idx]: !historyExpanded[idx] };
   }
+  $effect(() => registry.register(`pr-review:${repoId}:${prNumber}`, loading || loadError ? [] : [
+    review?.status === 'running'
+      ? { id: `review.stop.${repoId}.${prNumber}`, title: 'Stop PR review', group: 'Git', keywords: 'review findings pr', disabled: cancelling, run: cancelReview }
+      : { id: `review.start.${repoId}.${prNumber}`, title: 'Send PR to review agents', group: 'Git', keywords: 'review findings pr', disabled: starting, run: startReview },
+    ...(review?.status === 'done' && postableCount > 0 ? [{ id: `review.post.${repoId}.${prNumber}`, title: `Post ${postableCount} review comments to PR…`, group: 'Git', keywords: 'review findings pr', disabled: postingAll || editingAny, run: postAllDrafts }] : []),
+  ]));
 </script>
+
+{#snippet reviewLaunchControls()}
+      <div class="rp-jira-row">
+        {#if attachedIssue}
+          <span class="chip rp-jira-chip">
+            <Icon name="ticket" size={12} />
+            <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
+            <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
+          </span>
+        {:else}
+          <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
+        {/if}
+      </div>
+      <div class="rp-context-row">
+        <textarea dir="auto" aria-label="Review focus"
+          class="rp-context-input"
+          rows={2}
+          placeholder="What should the reviewers focus on? (optional)"
+          bind:value={reviewContext}
+        ></textarea>
+      </div>
+      <button class="btn small ghost rp-cfg-btn" onclick={openConfig}>
+        <Icon name="gear" size={12} /> Configure agents…
+        {#if repoCfgBadge !== ''}
+          <span class="chip rp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
+        {/if}
+      </button>
+  <div class="rp-launch-action">
+    <button class="btn primary" disabled={starting} onclick={startReview}>{starting ? 'Starting…' : 'Send to review agents'}</button>
+  </div>
+{/snippet}
 
 <div class="rp">
   <!-- Non-blocking pre-check: review skills missing or with available updates.
@@ -1167,34 +1217,8 @@
         icon="zap"
         title="No review yet"
         body="Run AI agents to analyze the diff and generate draft comments."
-        actionLabel={starting ? 'Starting…' : 'Send to review agents'}
-        onaction={startReview}
       />
-      <div class="rp-jira-row">
-        {#if attachedIssue}
-          <span class="chip rp-jira-chip">
-            <Icon name="ticket" size={12} />
-            <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
-            <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
-          </span>
-        {:else}
-          <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
-        {/if}
-      </div>
-      <div class="rp-context-row">
-        <textarea dir="auto" aria-label="Review focus"
-          class="rp-context-input"
-          rows={2}
-          placeholder="What should the reviewers focus on? (optional)"
-          bind:value={reviewContext}
-        ></textarea>
-      </div>
-      <button class="btn small ghost rp-cfg-btn" onclick={openConfig}>
-        <Icon name="gear" size={12} /> Configure agents…
-        {#if repoCfgBadge !== ''}
-          <span class="chip rp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
-        {/if}
-      </button>
+      {@render reviewLaunchControls()}
     </div>
   {:else if review.status === 'running'}
     <div class="rp-running-header">
@@ -1221,29 +1245,14 @@
     <div class="rp-error card" data-testid="review-cancelled">
       <Icon name="x" size={14} />
       <span class="rp-error-msg">Review canceled.</span>
-      <button class="btn small" disabled={starting} onclick={startReview}>
-        {starting ? 'Starting…' : 'Run again'}
-      </button>
     </div>
+    {@render reviewLaunchControls()}
   {:else if review.status === 'error'}
     <div class="rp-error card" role="alert">
       <Icon name="warning" size={14} />
       <span class="rp-error-msg">The review failed. <span class="dim">{review.error ?? 'No reason was reported — check Settings → Logs.'}</span></span>
-      <button class="btn small" disabled={starting} onclick={startReview}>
-        {starting ? 'Starting…' : 'Try again'}<!-- ui-guards: allow — re-runs the review (an action), not a failed load -->
-      </button>
     </div>
-    <div class="rp-jira-row">
-      {#if attachedIssue}
-        <span class="chip rp-jira-chip">
-          <Icon name="ticket" size={12} />
-          <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
-          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
-        </span>
-      {:else}
-        <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
-      {/if}
-    </div>
+    {@render reviewLaunchControls()}
   {:else}
     <!-- status === 'done' -->
     <div class="rp-header">
@@ -1321,6 +1330,9 @@
 
     <!-- A1: Merge-readiness panel — CI pill, approvals, unresolved findings,
          mergeable/conflicts from the /merge-readiness endpoint. -->
+    {#if readinessError}
+      <LoadState what="merge readiness" error={readinessError} empty={mergeReadiness === null} variant="compact" onretry={() => review && void loadFindingsAndReadiness(review.id)} />
+    {/if}
     {#if mergeReadiness !== null || mergeReadinessLoading}
       <div class="rp-readiness card">
         <div class="rp-readiness-row">
@@ -1334,7 +1346,7 @@
               class="chip rp-ci-pill rp-ci-{ciState}"
               title="CI: {ciState}"
             >
-              CI {ciState}
+              {ciState === 'none' ? 'No CI checks' : ciState === 'pending' ? 'CI pending' : ciState === 'success' ? 'CI passed' : ciState === 'failure' ? 'CI failed' : `CI ${ciState}`}
             </span>
             <!-- Approvals -->
             {@const approvals = (mergeReadiness as any).approvals ?? 0}
@@ -1881,9 +1893,7 @@
     position: relative;
   }
   .rp-cfg-btn {
-    position: absolute;
-    top: 0;
-    inset-inline-end: 0;
+    margin-block-start: 8px;
     font-size: var(--fs-xs);
   }
 
@@ -2057,12 +2067,13 @@
     white-space: pre-wrap;
   }
   .rp-loc {
+    overflow-wrap: anywhere;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 280px;
+    white-space: normal;
+    max-width: 100%;
   }
   .rp-badge {
     font-size: var(--fs-xs);
@@ -2511,4 +2522,8 @@
     opacity: 0.85;
   }
 
+  .rp-launch-action { margin-block-start: 12px; }
+  @media (pointer: coarse), (max-width: 1024px) {
+    .rp-diff-toggle { min-block-size: var(--hit-min); }
+  }
 </style>

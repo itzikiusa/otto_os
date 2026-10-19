@@ -90,76 +90,70 @@
 
   function themeVars(): Record<string, string> {
     const cs = getComputedStyle(document.documentElement);
-    // The semantic set a plugin needs to look native: surfaces, text, the
-    // accent trio, status tones, border/radius and the two font stacks.
-    const pick = [
-      '--bg', '--surface', '--surface-2', '--text', '--text-dim', '--border',
-      '--accent', '--accent-solid', '--accent-contrast', '--accent-text', '--accent-soft',
-      '--danger', '--warning', '--success', '--info',
-      '--radius-s', '--radius-m', '--font-ui', '--font-mono',
-    ];
     const out: Record<string, string> = {};
-    for (const v of pick) out[v] = cs.getPropertyValue(v).trim();
+    for (const k of 'bg surface surface-2 surface-3 hover text text-dim border accent accent-solid accent-contrast accent-text accent-soft danger danger-soft warning warning-soft success success-soft info info-soft radius-s radius-m font-ui font-mono fs-xs fs-s fs-m fs-l'.split(' ')) {
+      const v = `--${k}`;
+      out[v] = cs.getPropertyValue(v).trim();
+    }
     return out;
   }
 
-  function onload() {
-    frameLoaded = true;
-    if (!slugOk) return;
+  function relayKey(init: KeyboardEventInit) {
+    window.dispatchEvent(new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true }));
+  }
+
+  function postTheme(type: 'otto:init' | 'otto:theme', extra?: Record<string, unknown>) {
+    const dir = ui.direction || document.documentElement.dir || 'ltr';
+    try {
+      if (frame?.contentDocument?.documentElement) frame.contentDocument.documentElement.dir = dir;
+    } catch { /* cross-origin */ }
     frame?.contentWindow?.postMessage(
       {
-        type: 'otto:init',
-        slug,
-        apiBase: `${baseUrl()}/api/v1/plugins/${encodeURIComponent(slug)}`,
-        token: getToken(),
+        type,
         theme: themeVars(),
+        themeName: ui.theme,
         scheme: ui.resolvedScheme,
-        // The live agent-provider registry (built-ins + custom, e.g. grok) so a
-        // plugin's provider pickers stay in sync with Otto — never hardcoded.
-        providers: agentProviders(),
+        dir,
+        reducedMotion: typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches,
+        ...extra,
       },
       origin,
     );
   }
 
-  // Follow the app's appearance live: a light/dark, theme or accent change
-  // after load re-sends the vars as `otto:theme` so an open plugin never stays
-  // in the old scheme. (The attributes/vars are applied synchronously by the
-  // ui store, so computed style is already current here.)
+  function onload() {
+    frameLoaded = true;
+    if (!slugOk) return;
+    try {
+      frame?.contentWindow?.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === 'Escape' && !e.defaultPrevented) relayKey({ key: 'Escape' });
+      });
+    } catch { /* cross-origin */ }
+    postTheme('otto:init', {
+      slug,
+      apiBase: `${baseUrl()}/api/v1/plugins/${encodeURIComponent(slug)}`,
+      token: getToken(),
+      providers: agentProviders(),
+    });
+  }
+
   $effect(() => {
-    const scheme = ui.resolvedScheme;
+    void ui.resolvedScheme;
     void ui.theme;
+    void ui.direction;
     void ui.accent;
     if (!frameLoaded) return;
-    untrack(() => {
-      frame?.contentWindow?.postMessage({ type: 'otto:theme', theme: themeVars(), scheme }, origin);
-    });
+    untrack(() => postTheme('otto:theme'));
   });
 
   function onMessage(ev: MessageEvent) {
     const m = ev.data;
-    if (!m || m.type !== 'otto:keydown' || typeof m.key !== 'string') return;
-    // Only accept from OUR plugin frame, by window identity. An origin check
-    // is not enough: every plugin (and any other daemon-served document) shares
-    // the daemon origin, so it would let a different frame synthesize app
-    // shortcuts here. A message without a matching `source` is dropped.
-    if (!frame || ev.source == null || ev.source !== frame.contentWindow) return;
-    // Re-dispatch as a real keydown so the shell's global key map (keys.ts,
-    // capture-phase window listener) handles it exactly as if the app itself
-    // were focused — an external plugin inherits every app shortcut.
-    window.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: m.key,
-        code: typeof m.code === 'string' ? m.code : undefined,
-        keyCode: typeof m.keyCode === 'number' ? m.keyCode : 0,
-        metaKey: !!m.metaKey,
-        ctrlKey: !!m.ctrlKey,
-        altKey: !!m.altKey,
-        shiftKey: !!m.shiftKey,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
+    if (!m || !frame || ev.source == null || ev.source !== frame.contentWindow) return;
+    if (m.type === 'otto:focus-leave') {
+      document.querySelector<HTMLElement>('.plugin-page .icon-btn')?.focus();
+    } else if (m.type === 'otto:keydown' && typeof m.key === 'string') {
+      relayKey(m);
+    }
   }
 </script>
 

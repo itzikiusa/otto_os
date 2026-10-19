@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { api } from '../../lib/api/client';
   import type { ConnectionExportFormat, ConnectionExportResult } from '../../lib/api/types';
   import { downloadText } from '../../lib/components/exporters';
@@ -83,7 +84,11 @@
       <button class="btn ghost" onclick={() => result = null}>Clear prepared export</button>
     </div>
   {/if}
-  {#if error}<p class="error" role="alert"><strong>{formats.length ? 'Couldn’t prepare the export.' : 'Couldn’t load export formats.'}</strong> {error}</p>{#if !formats.length}<button class="btn small" onclick={load}>Retry</button>{/if}{/if}
+  {#if error && !formats.length}
+    <LoadState variant="compact" what="export formats" {error} empty onretry={load} />
+  {:else if error}
+    <p class="error" role="alert"><strong>Couldn’t prepare the export.</strong> {error}</p>
+  {/if}
 </section>
 
 <style>

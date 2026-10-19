@@ -36,6 +36,8 @@ function scheduled(create=false) {
     ws:{currentId:'ws-A'},tzOk:true,cronFieldCount:5,browserTz:'UTC',defaultAgentProvider:()=> 'claude',
     formGeneration:0,formWorkspaceId:'ws-A',alive:true,
     confirmer:{ask:async()=>{prompts++;return confirm;}},confirmOutward:async()=>true,toasts:{success(){},error(){}},
+    fieldError:null,intervalError:'',
+    loadErrorText:(e:unknown)=>e instanceof Error?e.message:String(e),toastError(){},
     scheduledTasks:{
       update:(id:string,body:any)=>{const result=deferred<any>();calls.push({kind:'patch',id,body,result});return result.promise;},
       create:(id:string,body:any)=>{const result=deferred<any>();calls.push({kind:'create',id,body,result});return result.promise;},

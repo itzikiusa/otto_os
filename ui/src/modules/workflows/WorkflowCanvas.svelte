@@ -87,8 +87,12 @@
   function spec(kind: string): NodeTypeSpec | undefined {
     return typeMap.get(kind);
   }
-  function color(kind: string): string {
-    return spec(kind)?.color ?? 'var(--text-dim)';
+  /** Kind mark for the stripe only. Selection, ports, and focus stay on the theme accent. */
+  function kindMark(kind: string): string {
+    if (kind === 'human_approval' || kind === 'approval') return 'var(--warning)';
+    if (kind === 'condition' || kind === 'loop' || kind === 'foreach') return 'var(--info)';
+    if (kind === 'delay' || kind === 'transform') return 'var(--text-dim)';
+    return 'var(--accent-text)';
   }
 
   // Graph coords from a client (screen) point.
@@ -390,7 +394,7 @@
         class:selected={selectedId === n.id}
         class:loop={n.kind === 'loop'}
         data-status={st}
-        style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --accent:{color(n.kind)};"
+        style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --kind-mark:{kindMark(n.kind)};"
       >
         <!-- The press that selects / starts a move belongs to the node's own
              button (it fills the card), not to the box around it. -->
@@ -538,7 +542,7 @@
   }
   .edge-hit:hover + .edge,
   .edge-hit:hover {
-    stroke: var(--status-exited);
+    stroke: var(--accent);
   }
   /* A focused connection: a soft accent band along the curve (an SVG path
      has no outline box). */
@@ -546,7 +550,7 @@
     outline: none;
   }
   .edge-hit:focus-visible {
-    stroke: color-mix(in srgb, var(--accent-solid) 45%, transparent);
+    stroke: var(--accent-text);
     stroke-width: 8;
   }
   .node {
@@ -675,7 +679,7 @@
     bottom: 8px;
     width: 4px;
     border-radius: var(--radius-s);
-    background: var(--accent);
+    background: var(--kind-mark, var(--accent));
   }
   .ic {
     display: grid;
@@ -798,6 +802,15 @@
   }
   .zbtn:hover {
     background: var(--accent-soft);
+  }
+  @media (pointer: coarse) {
+    .zbtn {
+      width: 44px;
+      height: 44px;
+    }
+    button.port.out::after {
+      inset: -16px;
+    }
   }
   .zpct {
     font-size: var(--fs-xs);

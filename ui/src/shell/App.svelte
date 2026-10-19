@@ -515,8 +515,17 @@
   // window its window-level chords) and nothing else.
   function runKeyAction(action: KeyAction | 'shortcuts', index?: number): void {
     // A dialog is up: ⌘W closes it, window verbs never act behind it.
-    const verdict = modalKeyVerdict(action, ui.modalCount > 0);
-    if (verdict === 'dismiss') return dismissTopDialog();
+    const verdict =
+      ui.paletteOpen && ui.modalCount === 0 && (action === 'palette' || action === 'askOtto')
+        ? 'run'
+        : modalKeyVerdict(action, ui.modalCount > 0 || ui.paletteOpen);
+    if (verdict === 'dismiss') {
+      if (ui.paletteOpen && ui.modalCount === 0) {
+        ui.paletteOpen = false;
+        return;
+      }
+      return dismissTopDialog();
+    }
     if (verdict === 'drop') return;
     switch (action) {
       case 'shortcuts':
@@ -625,7 +634,7 @@
     return installKeyMap((action, _e, index) => {
       if (isEmbedded) {
         // A dialog open in the pane owns its chords (see runKeyAction).
-        if (ui.modalCount > 0) return runKeyAction(action, index);
+        if (ui.modalCount > 0 || ui.paletteOpen) return runKeyAction(action, index);
         // The side pane: pane verbs run here, window verbs in the host.
         const target = embeddedKeyTarget(action, paneKey(router.parts.join('/')));
         if (target === 'host') postToHost({ type: 'key', action, ...(index ? { index } : {}) });
@@ -698,7 +707,7 @@
         },
       })),
       { id: 'core.shortcuts', title: 'Show keyboard shortcuts', group: 'Help', shortcut: '?', keywords: 'keys cheat sheet bindings hotkeys', run: () => (shortcutsOpen = true) },
-      { id: 'core.logout', title: 'Sign out', group: 'Account', keywords: 'log out logout account', run: () => auth.logout() },
+      { id: 'core.logout', title: 'Sign out', group: 'Tools', keywords: 'log out logout account', run: () => auth.logout() },
     ]);
     return unreg;
   });
@@ -1182,7 +1191,7 @@
         Local work remains available.
       </span>
       <span class="grow"></span>
-      <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss">
+      <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss notice">
         <Icon name="x" size={12} />
       </button>
     </div>

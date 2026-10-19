@@ -128,6 +128,8 @@
     }
   }
 
+  let showSecrets = $state(false);
+
   function resetForm(): void {
     editing = null;
     fName = '';
@@ -136,6 +138,7 @@
     fEnv = '';
     fSecretEnv = '';
     fEnabled = false;
+    showSecrets = false;
   }
 
   function openCreate(): void {
@@ -156,6 +159,7 @@
     // blank value means "keep what's in the Keychain".
     fSecretEnv = s.secret_env_keys.map((k) => `${k}=`).join('\n');
     fEnabled = s.enabled;
+    showSecrets = false;
     formOpen = true;
   }
 
@@ -345,10 +349,7 @@
       For this workspace; the same switch as “Attach to sessions” on the MCP page.
     </SettingToggle>
     {#if ottoError}
-      <div class="otto-error" role="alert">
-        <span>Couldn’t read this workspace’s setting: {ottoError}</span>
-        <button class="btn small" onclick={() => ws.currentId && void loadOttoSetting(ws.currentId)}>Retry</button>
-      </div>
+      <LoadState variant="compact" what="this workspace’s setting" error={ottoError} empty onretry={() => ws.currentId && void loadOttoSetting(ws.currentId)} />
     {/if}
   </div>
 
@@ -508,10 +509,16 @@
       <span class="hint">Non-secret values only — stored in Otto’s database. Put tokens and keys below.</span>
     </div>
     <div class="field">
-      <label for="mcp-secret-env"><Icon name="lock" size={12} /> Secret environment <span class="dim">(KEY=value, one per line)</span></label>
+      <div class="secret-label-row">
+        <label for="mcp-secret-env"><Icon name="lock" size={12} /> Secret environment <span class="dim">(KEY=value, one per line)</span></label>
+        <button class="btn small ghost" type="button" onclick={() => (showSecrets = !showSecrets)}>
+          {showSecrets ? 'Hide' : 'Show'}
+        </button>
+      </div>
       <textarea dir="ltr"
         id="mcp-secret-env"
         class="input mono"
+        class:masked-secret={!showSecrets}
         rows="3"
         bind:value={fSecretEnv}
         disabled={!auth.isRoot}
@@ -576,13 +583,14 @@
   .otto {
     padding: 4px 16px;
   }
-  .otto-error {
+  .secret-label-row {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--danger);
+  }
+  .masked-secret {
+    -webkit-text-security: disc;
   }
   .owner-note {
     margin: 0 0 12px;

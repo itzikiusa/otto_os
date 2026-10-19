@@ -106,7 +106,7 @@ test('goal definition: workspace switching asks before discarding the complete d
   expect(await currentWorkspace()).toBe(originalId);
   await expect(page.locator('#gl-seed')).toHaveValue('Compare approaches and retain this draft');
   await expect(page.locator('#gl-mode')).toHaveValue('research');
-  await expect(page.getByRole('button', { name: 'Define with AI', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Draft goal', exact: true })).toBeEnabled();
   expect(writes).toBe(0);
   await switchWorkspace();
   await discard.getByRole('button', { name: 'Discard', exact: true }).click();
@@ -306,7 +306,7 @@ test('goal research flow: draft, edit, launch and inspect within a phone viewpor
   await page.getByRole('button', { name: 'New goal loop', exact: true }).click();
   await page.locator('#gl-seed').fill('Compare release options');
   await page.locator('#gl-mode').selectOption('research');
-  await page.getByRole('button', { name: 'Define with AI', exact: true }).click();
+  await page.getByRole('button', { name: 'Draft goal', exact: true }).click();
   await expect(page.locator('#gl-name')).toHaveValue('Research release options');
   await page.locator('#gl-name').fill('Reviewed research plan');
   await expectNoHorizontalOverflow(page);

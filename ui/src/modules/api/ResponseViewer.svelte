@@ -348,7 +348,7 @@
         <div class="ws-send">
           <input dir="ltr" class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
             bind:value={wsSend} disabled={apiStream.status !== 'open'} onkeydown={(e) => { if (e.key === 'Enter') sendWs(); }} />
-          <button class="btn small primary" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send message</button>
+          <button class="btn small" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send message</button>
         </div>
       {/if}
     </div>
@@ -364,7 +364,7 @@
           <div class="f-actions"><button class="btn small" onclick={allowPrivate}>Allow private addresses…</button></div>
         {:else if timedOut}
           <p class="f-hint">Requests give up after 60 seconds unless you set a timeout.</p>
-          {#if onsettings}<div class="f-actions"><button class="btn small" onclick={onsettings}>Open Settings</button></div>{/if}
+          {#if onsettings}<div class="f-actions"><button class="btn small" onclick={onsettings}>Set a timeout</button></div>{/if}
         {:else}
           <p class="f-hint">Check the URL and the active environment, then send again. The request is recorded in History.</p>
         {/if}
@@ -704,6 +704,12 @@
   .clear {
     width: 20px;
     height: 20px;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .clear {
+      width: var(--hit-min);
+      height: var(--hit-min);
+    }
   }
   .resp-editor,
   .tree-wrap {

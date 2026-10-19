@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { plural } from '../../lib/plural';
   import { loadErrorText } from '../../lib/loadError';
   // What Otto learned from your team (`#/design/learned[/pending|rules|memory|
@@ -321,7 +322,10 @@
 </script>
 
 <PageHeader title="What Otto learned"
-  crumbs={[{ label: 'Design Hall', onclick: () => router.go('design') }]}>
+  crumbs={viewport.isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]}>
+  {#snippet leading()}
+    {#if viewport.isPhone}<button class="icon-btn" onclick={() => router.go('design')} aria-label="Back to Design Hall" title="Back to Design Hall"><Icon name="chevronLeft" size={16} /></button>{/if}
+  {/snippet}
   {#snippet tabs()}
     <div class="segmented" role="tablist" aria-label="Learning">
       {#each TABS as t (t.id)}
@@ -338,7 +342,7 @@
       title="Workspace learning mode">
       Learning: {learned?.mode === 'off' ? 'Off' : 'Suggest only'} <Icon name="chevronDown" size={12} />
     </button>
-    <button class="btn small primary" onclick={() => void lookNow()} disabled={!wsId || !canEdit || extracting || learned?.mode === 'off'}
+    <button class="btn small" onclick={() => void lookNow()} disabled={!wsId || !canEdit || extracting || learned?.mode === 'off'}
       data-testid="design-learned-extract"
       title={learned?.mode === 'off'
         ? 'Learning is off — switch it to Suggest only to look for rules'
@@ -399,7 +403,7 @@
         body="Atomic preferences (“avoid”, “prefer”, “pattern”) land here when agents or people save them to the design collection." />
     {:else}
       <label class="search"><Icon name="search" size={13} />
-        <input dir="ltr" class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
+        <input dir="auto" class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Kind</th><th>Memory</th><th>Source</th><th>Created</th></tr></thead>

@@ -85,4 +85,9 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
   }
+  @media (pointer: coarse), (max-width: 640px) {
+    .tag-row {
+      min-height: var(--hit-min);
+    }
+  }
 </style>

@@ -342,7 +342,8 @@
   </div>
   {#if isOpen}
     {#each sessions as s (s.id)}
-      <div
+      <button
+        type="button"
         class="session-row"
         class:selected={swarm.selectedSessionId === s.id}
         style="padding-inline-start:{depth * 14 + 30}px"
@@ -359,8 +360,9 @@
       >
         <Icon name="terminal" size={12} />
         <span class="grow mono ellipsis">{s.title || s.provider}</span>
+        <span class="sess-status">{sessionDot(s.id, s.status).label}</span>
         <StatusDot state={sessionDot(s.id, s.status)} size={8} />
-      </div>
+      </button>
     {/each}
     {#each kids as k (k.id)}
       {@render node(k, depth + 1)}
@@ -558,8 +560,14 @@
     color: var(--text-dim);
     cursor: pointer;
     text-align: start;
+    font: inherit;
     font-size: var(--fs-s);
     padding-inline-end: 12px;
+  }
+  .sess-status {
+    flex: none;
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
   }
   .session-row:hover {
     background: var(--hover);

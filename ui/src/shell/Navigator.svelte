@@ -129,7 +129,7 @@
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
       `Delete ${plural(ids.length, 'session')} and their entire history? This cannot be undone.`,
-      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
+      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
     await ws.killSessions(ids);
@@ -165,7 +165,7 @@
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
       `Delete ${plural(ids.length, 'archived session')} and their entire history? This cannot be undone.`,
-      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
+      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
     await ws.killSessions(ids);
@@ -251,8 +251,8 @@
     rowDragId = null;
     rowDragOverId = null;
   }
-  function openSortMenu(e: MouseEvent | KeyboardEvent): void {
-    ctxMenu.show(e, [
+  function openSortMenu(e: MouseEvent): void {
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
       { label: 'Sort: Recent', checked: sessionOrder.mode === 'recent', action: () => sessionOrder.setMode('recent') },
       {
         label: 'Sort: Manual (drag rows)',
@@ -277,7 +277,7 @@
   const visTelegram = $derived(q || telegramShowAll ? fTelegram : fTelegram.slice(0, CHANNEL_CAP));
   const visSlack = $derived(q || slackShowAll ? fSlack : fSlack.slice(0, CHANNEL_CAP));
 
-  // Drag-to-resize the navigator from its right edge (widens the session area).
+  // Drag-to-resize the navigator from its inline-end edge (widens the session area).
   let resizing = $state(false);
   // Overlay cursor + one width write per frame + one localStorage write on
   // release (lib/dragCursor.ts) — no body.style restyle of the whole app.
@@ -285,8 +285,9 @@
     resizing = true;
     const startX = e.clientX;
     const startW = ui.railWidth;
+    const rtl = typeof document !== 'undefined' && getComputedStyle(document.documentElement).direction === 'rtl';
     startMouseDrag(e, {
-      onMove: (ev) => ui.setRailWidth(startW + (ev.clientX - startX), false),
+      onMove: (ev) => ui.setRailWidth(startW + (rtl ? startX - ev.clientX : ev.clientX - startX), false),
       onEnd: () => {
         resizing = false;
         ui.setRailWidth(ui.railWidth);
@@ -349,8 +350,8 @@
     }));
     if (items.length > 0) items.push({ separator: true });
     items.push({ label: 'Add workspace…', icon: 'plus', pinned: true, action: () => (ui.newWorkspaceOpen = true) });
-    ctxMenu.show(
-      e,
+    ctxMenu.showAt(
+      e.currentTarget as HTMLElement,
       items,
       ws.workspaces.length >= WS_FILTER_MIN ? { filter: true, filterPlaceholder: 'Switch workspace…', maxVisible: 12 } : undefined,
     );
@@ -394,7 +395,7 @@
   async function removeWorkspace(w: WorkspaceWithRole): Promise<void> {
     const ok = await confirmer.ask(
       `Remove “${w.name}” from Otto? It leaves the sidebar with its sessions; the folder and its files on disk are not touched.`,
-      { title: 'Remove workspace', confirmLabel: 'Remove' },
+      { title: 'Remove workspace', confirmLabel: 'Remove', danger: true },
     );
     if (!ok) return;
     try {
@@ -822,8 +823,9 @@
     <button
       class="icon-btn"
       onclick={() => (viewport.isPhone ? (ui.navDrawerOpen = false) : ui.toggleRail())}
-      title={viewport.isPhone ? 'Close sidebar' : 'Collapse sidebar (⌘1)'}
+      title={viewport.isPhone ? 'Close sidebar' : 'Collapse sidebar'}
       aria-label={viewport.isPhone ? 'Close sidebar' : 'Collapse sidebar'}
+      aria-keyshortcuts={viewport.isPhone ? undefined : 'Meta+1'}
     >
       <Icon name="sidebar" size={14} />
     </button>
@@ -1190,7 +1192,7 @@
       <button
         class="row-action"
         onclick={() => ui.toggleSidebarHidden(m.id)}
-        title={isHidden(m.id) ? 'Show' : 'Hide'}
+        title={isHidden(m.id) ? `Show ${m.label}` : `Hide ${m.label}`}
         aria-label={isHidden(m.id) ? `Show ${m.label}` : `Hide ${m.label}`}
         data-testid={`sidebar-hide-${m.id}`}
       >
@@ -1252,7 +1254,6 @@
         class="icon-btn twisty sort-toggle"
         class:on={sessionOrder.mode === 'manual' || tokensSort}
         onclick={openSortMenu}
-        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openSortMenu(e)}
         title={sessionOrder.mode === 'manual' ? 'Manual order — click to change' : tokensSort ? 'Sorted by tokens — click to change' : 'Sort sessions'}
         aria-label="Sort sessions"
         data-testid="agents-sort-toggle"
@@ -1502,10 +1503,10 @@
                 {/if}
               </div>
               {#if ws.canEditSession(s)}
-                <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
+                <button class="row-action" title="Restore session" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
                   <Icon name="refresh" size={12} />
                 </button>
-                <button class="row-action danger" title="Delete" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
+                <button class="row-action danger" title="Delete session" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
                   <Icon name="trash" size={12} />
                 </button>
               {/if}
@@ -2397,7 +2398,7 @@
     background: color-mix(in srgb, var(--status-warn) 18%, transparent);
   }
   .nested-row.needs-you .nested-item:not(.active) {
-    box-shadow: inset 2px 0 0 var(--status-warn);
+    border-inline-start: 2px solid var(--status-warn);
   }
   .needs-you-filter {
     display: flex;

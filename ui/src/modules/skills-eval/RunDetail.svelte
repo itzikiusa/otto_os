@@ -20,6 +20,8 @@
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -74,6 +76,9 @@
   let retrying = $state<Set<string>>(new Set());
   let cancelling = $state(false);
   let deleting = $state(false);
+
+  // Promote is a root-only server route (`promote_skill`).
+  const canPromote = $derived(auth.isRoot);
 
   // Promote modal.
   let promoteOpen = $state(false);
@@ -446,6 +451,17 @@
       savingReg = next;
     }
   }
+  function moreRunActions(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      {
+        label: 'Delete evaluation…',
+        icon: 'trash',
+        danger: true,
+        disabled: deleting,
+        action: () => void deleteRun(),
+      },
+    ]);
+  }
 </script>
 
 {#if (loading || loadError) && !run}
@@ -454,7 +470,7 @@
   <div class="rd">
     <header class="rd-head">
       <!-- One row: what this run is, its state, and its actions (the primary
-           — promote — last before the quiet destructive icon). -->
+           — promote — last before the ⋯ menu that holds destructive delete). -->
       <div class="rd-title-row">
         <Icon name="zap" size={16} />
         <h2 class="rd-title" title={run.source_skill}>{run.source_skill}</h2>
@@ -467,13 +483,13 @@
             <Icon name="stop" size={12} /> {cancelling ? 'Stopping…' : 'Stop run…'}
           </button>
         {/if}
-        {#if run.best_iteration != null}
+        {#if run.best_iteration != null && canPromote}
           <button class="btn small primary" onclick={promoteWinner} title="Save the best-scoring iteration’s skill to the library">
             <Icon name="check" size={12} /> Promote winning skill
           </button>
         {/if}
-        <button class="icon-btn" disabled={deleting} onclick={deleteRun} aria-label="Delete this evaluation" title="Delete this evaluation and its worktrees">
-          <Icon name="trash" size={14} />
+        <button class="icon-btn" disabled={deleting} onclick={moreRunActions} aria-label="More actions" title="More actions" aria-haspopup="menu">
+          <Icon name="more" size={14} />
         </button>
       </div>
 
@@ -661,7 +677,11 @@
           <span class="grow"></span>
           <button class="btn small ghost" onclick={() => copySkill(it, 'tested')}>Copy</button>
           <button class="btn small ghost" onclick={() => downloadSkill(it, 'tested')}>Download</button>
-          <button class="btn small ghost" onclick={() => openPromote(it, 'tested')}>Promote</button>
+          {#if canPromote}
+            <button class="btn small ghost" onclick={() => openPromote(it, 'tested')}>Promote</button>
+          {:else}
+            <span class="promote-note dim">Saving to the library is an admin action</span>
+          {/if}
         </div>
 
         <!-- Improvement -->
@@ -672,7 +692,9 @@
               <span class="grow"></span>
               {#if it.skill_after}
                 <button class="btn small ghost" onclick={() => copySkill(it, 'improved')}>Copy improved</button>
-                <button class="btn small ghost" onclick={() => openPromote(it, 'improved')}>Promote improved</button>
+                {#if canPromote}
+                  <button class="btn small ghost" onclick={() => openPromote(it, 'improved')}>Promote improved</button>
+                {/if}
               {/if}
               {#if it.skill_diff}
                 <button class="btn small ghost" onclick={() => (openDiffs = toggle(openDiffs, it.id))}>
@@ -695,7 +717,7 @@
   </div>
 {/if}
 
-{#if promoteOpen}
+{#if promoteOpen && canPromote}
   <Modal title="Promote skill to library" width={460} onclose={() => (promoteOpen = false)}>
     {#snippet children()}
       <p class="modal-lede">
@@ -734,10 +756,12 @@
             <ul class="gate-reasons">
               {#each promoteGate.reasons as r, ri (ri)}<li>{r}</li>{/each}
             </ul>
-            <label class="force-row">
-              <input type="checkbox" bind:checked={promoteForce} data-testid="promote-force" />
-              Force promote anyway (root override — audited, waives proof)
-            </label>
+            {#if canPromote}
+              <label class="force-row">
+                <input type="checkbox" bind:checked={promoteForce} data-testid="promote-force" />
+                Force promote anyway (root override — audited, waives proof)
+              </label>
+            {/if}
           {/if}
         {/if}
       </div>
@@ -790,6 +814,15 @@
     cursor: pointer;
     color: var(--text-dim);
     padding: 0;
+  }
+  .promote-note {
+    font-size: var(--fs-xs);
+  }
+  @media (max-width: 640px), (pointer: coarse) {
+    .star {
+      min-width: var(--hit-min);
+      min-height: var(--hit-min);
+    }
   }
   .star:hover:not(:disabled) {
     background: var(--hover);

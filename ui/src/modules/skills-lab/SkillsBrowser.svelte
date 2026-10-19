@@ -348,7 +348,7 @@
   {#if loading}
     <div class="split">
       <aside class="list-pane" aria-busy="true"><div class="pad"><Skeleton rows={10} height={40} /></div></aside>
-      <section class="detail-pane"><div class="pad"><Skeleton rows={6} height={28} announce={false} /></div></section>
+      <section class="detail-pane hide-phone"><div class="pad"><Skeleton rows={6} height={28} announce={false} /></div></section>
     </div>
   {:else if loadError}
     <LoadState what="skills" variant="page" loading={retrying} error={loadError} empty={true} onretry={retryLoad} />
@@ -737,6 +737,10 @@
     }
     .hide-phone {
       display: none;
+    }
+    .fchip {
+      min-height: var(--hit-min);
+      padding-inline: 10px;
     }
     .row {
       min-height: 44px;

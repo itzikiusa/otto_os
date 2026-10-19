@@ -77,7 +77,7 @@
   async function deleteAlert(alert: LagAlert) {
     const ok = await confirmer.ask(
       `Delete the lag alert for "${alert.topic}" / "${alert.group_name}"? It stops being evaluated.`,
-      { title: 'Delete alert' },
+      { title: 'Delete alert', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
     try {

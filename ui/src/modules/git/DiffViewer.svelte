@@ -977,7 +977,7 @@
       const what = picked ? plural(picked.length, 'changed line') : 'this whole hunk';
       const ok = await confirmer.ask(
         `Discard ${what}? This rewrites the working file and cannot be undone from the file — a backup stash \`otto: backup before hunk discard\` is kept.`,
-        { title: picked ? 'Discard lines' : 'Discard hunk', confirmLabel: 'Discard' },
+        { title: picked ? 'Discard lines' : 'Discard hunk', confirmLabel: 'Discard', danger: true },
       );
       if (!ok) return;
       // The diff changed under the dialog: the pick and the hunk index may no
@@ -2250,22 +2250,7 @@
     /* Sidebar collapse button. */
     .nav-collapse-btn { min-width: 36px; min-height: 36px; justify-content: center; }
     /* "Show N more lines" hunk-cap button. */
-    .line-cut-btn {
-    display: inline;
-    margin-inline-start: 6px;
-    padding: 0 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--accent-text);
-    font: inherit;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .line-cut-btn:hover { background: var(--accent-soft); }
-  .line-cut-btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
-  .hunk-cap-btn { font-size: var(--fs-s); min-height: 32px; padding: 6px 12px; }
+    .hunk-cap-btn { font-size: var(--fs-s); min-height: 32px; padding: 6px 12px; }
     /* Comment composer Cancel/Comment buttons. */
     .composer-actions .btn { min-height: 36px; padding: 6px 14px; }
     /* PR inline-comment affordance: widen the gutter tap zone and surface a
@@ -2286,6 +2271,22 @@
       pointer-events: none;
     }
   }
+
+  .line-cut-btn {
+    display: inline;
+    margin-inline-start: 6px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--accent-text);
+    font: inherit;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .line-cut-btn:hover { background: var(--accent-soft); }
+  .line-cut-btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
 
   /* Hunk line cap: "Show N more lines" affordance */
   .hunk-cap-cell {

@@ -145,15 +145,15 @@
               </span>
               <span class="c-act">
                 {#if r.session_id}
-                  <button class="icon-btn" title="Open this run’s session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
+                  <button class="icon-btn" title="Open {agent?.name ?? 'this agent'}’s session beside the view" aria-label="Open {agent?.name ?? 'this agent'}’s {sentenceCase(r.kind).toLowerCase()} session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
                     <Icon name="terminal" size={14} />
                   </button>
                 {/if}
                 {#if r.kind === 'recruit' && r.status === 'done' && r.result && onhire && !swarm.recruitHired.has(r.id)}
-                  <button class="btn small primary" title="Review & hire this proposed agent" onclick={() => onhire?.(r.result as unknown as RecruitedAgent, r.id)}>Hire</button>
+                  <button class="btn small primary" title="Review and hire {(r.result as { name?: string }).name || agent?.name || 'this candidate'}" aria-label="Hire {(r.result as { name?: string }).name || agent?.name || 'this candidate'}" onclick={() => onhire?.(r.result as unknown as RecruitedAgent, r.id)}>Hire</button>
                 {/if}
                 {#if active(r)}
-                  <button class="btn small danger" title="Stop this run; its session is closed" onclick={() => void stop(r)}><Icon name="stop" size={12} /> Stop…</button>
+                  <button class="btn small danger" title="Stop {agent?.name ?? 'this agent'}’s {sentenceCase(r.kind).toLowerCase()} run" aria-label="Stop {agent?.name ?? 'this agent'}’s {sentenceCase(r.kind).toLowerCase()} run" onclick={() => void stop(r)}><Icon name="stop" size={12} /> Stop…</button>
                 {/if}
               </span>
             </div>

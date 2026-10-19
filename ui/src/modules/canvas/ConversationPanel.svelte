@@ -72,9 +72,9 @@
 
   const working = $derived(busy || editor?.isGenerating());
 
-  // Stop: flag the turn as stopped server-side (it then commits nothing and
-  // restores the pre-turn board, S4-20), then interrupt the agent (Esc into
-  // its PTY) so the pending Ask Otto request settles.
+  // Stop: flag the turn server-side. It commits nothing of its own and
+  // broadcasts the document currently stored, so a save made during the turn
+  // stays. Then interrupt the agent (Esc into its PTY).
   let stopping = $state(false);
   async function stop(): Promise<void> {
     const sid = canvas.sessionId;
@@ -83,7 +83,7 @@
     try {
       await canvas.stopAssist();
       await interruptSession(sid);
-      toasts.info('Stopped Ask Otto', 'The board was left as it was before this turn.');
+      toasts.info('Stopping Ask Otto', 'Saved changes stay on the board. A drawing that was only previewed is dropped.');
     } catch (e) {
       toastError('Couldn’t stop the agent', e);
     } finally {
@@ -141,6 +141,10 @@
 <aside class="assistant">
   <header class="head">
     <span class="title"><Icon name="terminal" size={14} /> Assistant</span>
+    <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
+      <Icon name="x" size={14} />
+    </button>
+    <div class="head-controls">
     {#if providers.length > 1}
       <select
         class="provider"
@@ -169,9 +173,7 @@
     >
       <Icon name="undo" size={14} />
     </button>
-    <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
-      <Icon name="x" size={14} />
-    </button>
+    </div>
   </header>
 
   <div class="shell">
@@ -197,7 +199,7 @@
       rows="2"
       disabled={busy}
     ></textarea>
-    <button class="send" onclick={send} disabled={busy || !draft.trim()} aria-label="Send" title="Send (Enter)">
+    <button class="send" onclick={send} disabled={busy || !draft.trim()} aria-label="Send" title="Send" aria-keyshortcuts="Enter">
       <Icon name="arrowUp" size={16} />
     </button>
   </div>
@@ -206,6 +208,7 @@
 <style>
   .assistant {
     width: 100%;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -214,6 +217,7 @@
   }
   .head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 10px 12px;
@@ -227,7 +231,22 @@
     font-size: var(--fs-m);
     font-weight: 600;
   }
+  .head-controls { display: contents; }
+  .head > .close { order: 2; }
+  @media (max-width: 640px) {
+    .head > .close { order: 0; }
+    .head-controls {
+      display: flex;
+      flex: 1 0 100%;
+      min-width: 0;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+  }
   .provider {
+    min-width: 0;
+    max-width: 100%;
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
@@ -268,9 +287,6 @@
   }
   .hist-btn.history {
     margin-inline-start: auto;
-  }
-  .hist-btn.history + .close {
-    margin-inline-start: 0;
   }
   .hist-btn:hover:not(:disabled) {
     background: var(--hover);
@@ -349,5 +365,8 @@
   .send:disabled {
     opacity: var(--disabled-opacity);
     cursor: default;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .hist-btn, .close, .send { min-inline-size: var(--hit-min); min-block-size: var(--hit-min); }
   }
 </style>

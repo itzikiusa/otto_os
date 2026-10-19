@@ -182,11 +182,16 @@
     text-align: end;
   }
   @media (max-width: 640px) {
+    .wi-row {
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
     .wi-cost,
     .wi-time {
       display: none;
     }
     .wi-meta {
+      flex-basis: 100%;
       gap: 4px;
     }
   }

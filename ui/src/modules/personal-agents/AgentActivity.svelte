@@ -5,20 +5,25 @@
   // changes); polls only while the event socket is down.
   import { onDestroy, untrack } from 'svelte';
   import { personalAgentsApi } from '../../lib/api/personalAgents';
+  import { mcpCpApi } from '../../lib/api/mcp';
   import { liveQuery } from '../../lib/live';
   import type { Poller } from '../../lib/poll';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { router } from '../../lib/router.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, sessionState } from '../../lib/status';
   import { approvalConcernsFeed, mergeActivity } from './activityFeed';
   import type {
     PersonalAgentActivity,
+    PersonalAgentActivityApproval,
     PersonalAgentActivityItem,
     PersonalAgentRun,
   } from '../../lib/api/types';
@@ -104,7 +109,71 @@
 
   function modeLabel(r: PersonalAgentRun): string {
     const m = r.mode ?? 'directed';
-    return m === 'proactive' ? 'Proactive' : m === 'scheduled' ? 'Scheduled' : 'Directed';
+    if (m === 'proactive') return 'Proactive';
+    if (m === 'scheduled') return 'Scheduled';
+    return 'Directed';
+  }
+
+  function sessionLabel(raw: string): string {
+    switch (raw) {
+      case 'idle':
+      case 'working':
+      case 'running':
+      case 'exited':
+      case 'reconnectable':
+        return sessionState(null, raw).label;
+      default:
+        return runStatus(raw).label;
+    }
+  }
+
+  const agentName = $derived(personalAgents.agent(agentId)?.name ?? 'This agent');
+  let deciding = $state<string | null>(null);
+  let decidingAs = $state<'approve' | 'deny' | null>(null);
+  let stopping = $state(false);
+
+  function approvalWhat(a: PersonalAgentActivityApproval): string {
+    return a.title?.trim() || `otto.${a.tool}`;
+  }
+
+  async function stopRun(run: PersonalAgentRun): Promise<void> {
+    const when = new Date(run.started_at).toLocaleString();
+    const name = run.summary?.trim() || `${modeLabel(run)} run`;
+    const ok = await confirmer.ask(
+      `Stop “${name}”, started ${when}? Its agent session is stopped and nothing is delivered.`,
+      { title: `Stop ${name}?`, danger: true, confirmLabel: 'Stop run' },
+    );
+    if (!ok) return;
+    stopping = true;
+    try {
+      await personalAgentsApi.cancelRun(run.id);
+    } catch (e) {
+      toastError('Couldn’t stop the run', e);
+    } finally {
+      stopping = false;
+    }
+  }
+
+  async function decide(a: PersonalAgentActivityApproval, approved: boolean): Promise<void> {
+    const what = approvalWhat(a);
+    if (!approved) {
+      const ok = await confirmer.ask(
+        `Deny “${what}” from ${agentName}? The tool will not run.`,
+        { title: 'Deny this?', confirmLabel: 'Deny', danger: true },
+      );
+      if (!ok) return;
+    }
+    deciding = a.approval_id;
+    decidingAs = approved ? 'approve' : 'deny';
+    try {
+      await mcpCpApi.cpDecide(a.approval_id, { approved });
+      await load();
+    } catch (e) {
+      toastError(approved ? 'Couldn’t approve' : 'Couldn’t deny', e);
+    } finally {
+      deciding = null;
+      decidingAs = null;
+    }
   }
 </script>
 
@@ -119,10 +188,13 @@
           <span class="chip">{modeLabel(run)}</span>
           {#if run.read_only}<span class="chip pa-ichip"><Icon name="lock" size={12} /> Read-only</span>{/if}
           <span class="meta">Started <RelTime iso={run.started_at} /></span>
-          {#if data.now.session_status}<span class="meta">Session: {data.now.session_status}</span>{/if}
+          {#if data.now.session_status}<span class="meta">Session: {sessionLabel(data.now.session_status)}</span>{/if}
           {#if run.session_id}
             <button class="btn small" onclick={() => ws.navigateToSession(run.session_id ?? '')}>Watch session</button>
           {/if}
+          <button class="btn small danger" disabled={stopping} aria-label="Stop {run.summary?.trim() || modeLabel(run)}" onclick={() => void stopRun(run)}>
+            <Icon name="stop" size={12} /> {stopping ? 'Stopping…' : 'Stop…'}
+          </button>
         </div>
       {:else}
         <p class="muted">Idle — no run in progress.</p>
@@ -134,9 +206,17 @@
             <li class="wait">
               <Icon name="hand" size={14} />
               <div class="grow">
-                <strong>otto.{a.tool}</strong>
-                {#if a.risk_label === 'sensitive'}<span class="chip pa-ichip pa-warn">Sensitive</span>{:else if a.risk_label === 'agent_rule'}<span class="chip">Agent rule</span>{/if}
+                <strong>{approvalWhat(a)}</strong>
+                <p class="detail">{agentName} is waiting for you to allow otto.{a.tool}.</p>
                 {#if a.detail}<p class="detail">{a.detail}</p>{/if}
+                {#if a.risk_label === 'sensitive'}<span class="chip pa-ichip pa-warn">Sensitive</span>{:else if a.risk_label === 'agent_rule'}<span class="chip">Agent rule</span>{/if}
+                <div class="wait-actions">
+                  <button class="btn small" disabled={deciding === a.approval_id} aria-label="Deny {approvalWhat(a)}" onclick={() => void decide(a, false)}>{deciding === a.approval_id && decidingAs === 'deny' ? 'Denying…' : 'Deny'}</button>
+                  <button class="btn small primary" disabled={deciding === a.approval_id} aria-label="Approve {approvalWhat(a)}" onclick={() => void decide(a, true)}>
+                    {deciding === a.approval_id && decidingAs === 'approve' ? 'Approving…' : 'Approve'}
+                  </button>
+                  <button class="link" onclick={() => router.go('mcp/activity')}>Open approval</button>
+                </div>
               </div>
               <span class="meta"><RelTime iso={a.at} /></span>
             </li>
@@ -200,6 +280,8 @@
   .meta { color: var(--text-dim); font-size: var(--fs-s); white-space: nowrap; }
   .pa-ichip { display: inline-flex; align-items: center; gap: 4px; }
   .pa-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
+  .wait-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .wait-actions .link { margin-top: 0; }
   .link { border: 0; background: none; padding: 0; margin-top: 6px; font: inherit; font-size: var(--fs-s); color: var(--accent-text); cursor: pointer; }
   .link:hover { text-decoration: underline; }
 </style>

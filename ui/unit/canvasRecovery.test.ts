@@ -2,16 +2,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
 import { deferred } from './sourceHarness.ts';
+import { docFromAssist } from '../src/modules/canvas/assistDoc.ts';
 
 const panelPath = new URL('../src/modules/canvas/ConversationPanel.svelte', import.meta.url);
 const editorPath = (name: string) => new URL(`../src/modules/canvas/${name}Canvas.svelte`, import.meta.url);
 
 for (const name of ['Excalidraw', 'Mermaid', 'D2']) {
   test(`${name} assist failure retains the exact composer prompt`, async () => {
-    const canvas = { currentId: 'scene-A', assist: async () => { throw new Error('Provider unavailable'); }, pushConvo() {} };
+    const canvas = {
+      currentId: 'scene-A', assist: async () => { throw new Error('Provider unavailable'); }, pushConvo() {},
+      assistKeptSaved: () => false, finishAssistTurn() {},
+    };
     const editor = componentFunctions(editorPath(name), ['generate'], {
       canvas, sceneId: 'scene-A', saveContext: undefined, generating: false, userAdjusted: false,
-      toastAgentEdit() {}, toastError() {}, toasts: { info() {}, success() {} },
+      docFromAssist, toastAgentEdit() {}, toastError() {}, toasts: { info() {}, success() {} },
     });
     const panel = componentFunctions(panelPath, ['send'], {
       canvas, editor, busy: false, draft: '  Draw the login flow\nwith retries  ', toastError() {},
@@ -25,10 +29,11 @@ for (const name of ['Excalidraw', 'Mermaid', 'D2']) {
     let response: Record<string, unknown> = {};
     let applied = 0;
     const canvas = { currentId: 'scene-A', saveContext: 'visit-A', assist: async () => response,
-      pushConvo() {}, ingestDoc() { applied++; }, refreshSession: async () => {} };
+      pushConvo() {}, ingestDoc() { applied++; return true; }, refreshSession: async () => {},
+      assistKeptSaved: () => false, finishAssistTurn() {} };
     const editor = componentFunctions(editorPath(name), ['generate'], {
       canvas, sceneId: 'scene-A', saveContext: 'visit-A', generating: false, userAdjusted: false, sketch: false,
-      toastAgentEdit() {}, toastError() {}, toasts: { info() {}, success() {} },
+      docFromAssist, toastAgentEdit() {}, toastError() {}, toasts: { info() {}, success() {} },
     });
     assert.equal(await editor.generate('Draw a flow'), false);
     assert.equal(applied, 0);
@@ -40,7 +45,63 @@ for (const name of ['Excalidraw', 'Mermaid', 'D2']) {
     assert.equal(await editor.generate('Another flow'), false);
     assert.equal(applied, 1);
   });
+
+  test(`${name} keeps a save made during the turn and does not offer undo`, async () => {
+    let undos = 0;
+    const infos: string[] = [];
+    const successes: string[] = [];
+    const note = 'Stopped — your saved changes were preserved.';
+    const response = name === 'Excalidraw'
+      ? { excalidraw: { elements: [{ id: 'b' }] }, note }
+      : name === 'Mermaid' ? { mermaid: 'graph LR\nB', note } : { d2: 'B', note };
+    let finished = 0;
+    let ingested = 0;
+    let reloaded = 0;
+    const canvas = {
+      currentId: 'scene-A', saveContext: 'visit-A', assist: async () => response,
+      pushConvo() {}, ingestDoc() { ingested += 1; return false; }, refreshSession: async () => {},
+      reloadAfterStop: async () => { reloaded += 1; return true; },
+      assistKeptSaved: (n?: string) => (n ?? '').startsWith('Stopped'),
+      finishAssistTurn() { finished += 1; },
+    };
+    const editor = componentFunctions(editorPath(name), ['generate'], {
+      canvas, sceneId: 'scene-A', saveContext: 'visit-A', generating: false, userAdjusted: false, sketch: false,
+      docFromAssist, toastAgentEdit() { undos += 1; }, toastError() {},
+      toasts: { info(title: string) { infos.push(title); }, success(title: string) { successes.push(title); } },
+    });
+    assert.equal(await editor.generate('Draw a flow'), true);
+    assert.equal(ingested, 0, 'the stop body is not applied over a later save');
+    assert.equal(reloaded, 1);
+    assert.equal(undos, 0);
+    assert.equal(successes.length, 0);
+    assert.deepEqual(infos, ['Saved changes kept']);
+    assert.equal(finished, 1);
+  });
 }
+
+test('Mermaid and D2 apply res.format instead of the editor that started the turn', async () => {
+  const cases = [
+    { name: 'Mermaid', response: { format: 'd2', d2: 'A -> B', mermaid: 'graph LR\nA-->B', note: '' }, format: 'd2', source: 'A -> B' },
+    { name: 'D2', response: { format: 'mermaid', mermaid: 'graph LR\nA-->B', d2: 'A -> B', note: '' }, format: 'mermaid', source: 'graph LR\nA-->B' },
+    { name: 'Excalidraw', response: { format: 'd2', d2: 'A -> B', excalidraw: { elements: [{ id: 'a' }] }, note: '' }, format: 'd2', source: 'A -> B' },
+  ] as const;
+  for (const item of cases) {
+    const docs: { format?: string; source?: string }[] = [];
+    const canvas = {
+      currentId: 'scene-A', saveContext: 'visit-A', assist: async () => item.response,
+      pushConvo() {}, ingestDoc(doc: { format?: string; source?: string }) { docs.push(doc); return true; },
+      refreshSession: async () => {}, assistKeptSaved: () => false, finishAssistTurn() {},
+    };
+    const editor = componentFunctions(editorPath(item.name), ['generate'], {
+      canvas, sceneId: 'scene-A', saveContext: 'visit-A', generating: false, userAdjusted: false, sketch: true,
+      docFromAssist, toastAgentEdit() {}, toastError() {}, toasts: { info() {}, success() {} },
+    });
+    assert.equal(await editor.generate('Draw a flow'), true);
+    assert.equal(docs.length, 1);
+    assert.equal(docs[0].format, item.format);
+    assert.equal(docs[0].source, item.source);
+  }
+});
 
 test('Canvas keeps an unaccepted prompt while the request is pending', async () => {
   const request = deferred<boolean>();

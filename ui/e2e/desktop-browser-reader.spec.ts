@@ -69,18 +69,18 @@ test.afterEach(async () => {
 async function openFixture(page: Page): Promise<void> {
   await page.getByPlaceholder('e.g. https://example.com').fill(FIXTURE_URL);
   await page.getByRole('button', { name: 'Go', exact: true }).click();
-  await expect(page.locator('.reader h1')).toHaveText('Fixture Page', { timeout: 15_000 });
+  await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page', { timeout: 15_000 });
 }
 
 test('restores the selected reader after reload and captures responsive reader states', async ({ page }, info) => {
   await openFixture(page);
   await page.reload();
-  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page');
   for (const scheme of ['light', 'dark']) {
     await page.evaluate((value) => localStorage.setItem('otto_scheme', value), scheme);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.reload();
-    await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+    await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page');
     await page.screenshot({ path: info.outputPath(`reader-${scheme}.png`) });
   }
   await page.setViewportSize({ width: 390, height: 844 });
@@ -97,21 +97,21 @@ test('tab list failures show an inline retry and recover the saved reader', asyn
   await page.screenshot({ path: info.outputPath('reader-tabs-error.png') });
   await page.unroute('**/browser/tabs');
   await error.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page');
 });
 
 test('mark → note → rail shows it', async ({ page }) => {
   await openFixture(page);
 
   await page.getByRole('button', { name: 'Mark passage' }).click();
-  await page.locator('.reader h1').click();
+  await page.locator('.reader .page-title').click();
   await page.getByLabel('Note for this mark').fill('interesting');
   await page.getByRole('button', { name: 'Save mark' }).click();
 
   await expect(page.locator('.notes-rail')).toContainText('interesting');
   // The marked element itself gets a highlight class once the annotation
   // round-trips and ReaderView re-resolves its selector against the DOM.
-  await expect(page.locator('.reader h1')).toHaveClass(/marked/);
+  await expect(page.locator('.reader .page-title')).toHaveClass(/marked/);
 });
 
 test('send-to-session posts the annotation id + chosen session', async ({ page }) => {
@@ -123,7 +123,7 @@ test('send-to-session posts the annotation id + chosen session', async ({ page }
 
   await openFixture(page);
   await page.getByRole('button', { name: 'Mark passage' }).click();
-  await page.locator('.reader h1').click();
+  await page.locator('.reader .page-title').click();
   await page.getByLabel('Note for this mark').fill('send me');
   await page.getByRole('button', { name: 'Save mark' }).click();
   await expect(page.locator('.notes-rail')).toContainText('send me');
@@ -134,6 +134,7 @@ test('send-to-session posts the annotation id + chosen session', async ({ page }
   );
   await row.getByTitle('Send to session').click();
   await page.getByRole('menuitem', { name: /Browser E2E target/ }).click();
+  await page.getByRole('dialog', { name: 'Send mark' }).getByRole('button', { name: 'Send mark', exact: true }).click();
   const req = await sendReq;
   expect(req.postDataJSON()).toEqual({ session_id: sessionId });
 });
@@ -182,11 +183,11 @@ test('switching between reader tabs does not refetch the page', async ({ page })
   await page.getByPlaceholder('e.g. https://example.com').fill('https://example.invalid/second-page');
   await page.getByRole('button', { name: 'Go', exact: true }).click();
   await expect(page.locator('.tab')).toHaveCount(2, { timeout: 15_000 });
-  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page');
   expect(pageFetches).toBe(2);
   await page.locator('.tab .tab-main').first().click();
-  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page');
   await page.locator('.tab .tab-main').nth(1).click();
-  await expect(page.locator('.reader h1')).toHaveText('Fixture Page');
+  await expect(page.locator('.reader .page-title')).toHaveText('Fixture Page');
   expect(pageFetches).toBe(2);
 });

@@ -23,6 +23,7 @@
   import { splitter } from '../../lib/paneResizer';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { winKey } from '../../lib/win';
   import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
   import { layout } from '../../lib/stores/splitLayout.svelte';
@@ -42,13 +43,14 @@
   // dead ids are skipped) — everything below counts/lays out `ordered`.
   const ordered = $derived(applyTileOrder(ws.mainSessions, layout.tileOrder));
 
-  // Column count scales with tile count: 1→1, 2-4→2, 5-9→3, 10+→4.
+  // Column count scales with tile count: 1→1, 2-4→2, 5-9→3, 10+→4, capped on
+  // phone (1 col) and tablet (2 cols) so tiles stay readable.
   const cols = $derived.by(() => {
     const n = ordered.length;
-    if (n <= 1) return 1;
-    if (n <= 4) return 2;
-    if (n <= 9) return 3;
-    return 4;
+    const raw = n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4;
+    if (viewport.isPhone) return 1;
+    if (viewport.isTablet) return Math.min(2, raw);
+    return raw;
   });
 
   // Explicit row count so every tile fits the viewport (no clipped bottom row).
@@ -110,6 +112,7 @@
     start: number;
     span: number;
     total: number;
+    rtl?: boolean;
     apply: (t: Tracks, first: number) => void;
   }
   function colPair(r: number, k: number): PairDrag | null {
@@ -120,11 +123,13 @@
     if (!a || !b) return null;
     const ra = a.getBoundingClientRect();
     const rb = b.getBoundingClientRect();
+    const rtl = getComputedStyle(grid).direction === 'rtl';
     const total = colFr[r][k - 1] + colFr[r][k];
     return {
-      start: ra.left,
-      span: rb.right - ra.left,
+      start: rtl ? ra.right : ra.left,
+      span: rtl ? ra.right - rb.left : rb.right - ra.left,
       total,
+      rtl,
       apply: (t, first) => {
         t.cols[r][k - 1] = first;
         t.cols[r][k] = total - first;
@@ -166,7 +171,7 @@
     const move = (ev: PointerEvent): void => {
       if (shapeKey !== shape) return; // the grid reshaped under the drag
       const t = currentTracks();
-      if (col) col.apply(t, splitOf(col, ev.clientX - col.start));
+      if (col) col.apply(t, splitOf(col, col.rtl ? col.start - ev.clientX : ev.clientX - col.start));
       if (row) row.apply(t, splitOf(row, ev.clientY - row.start));
       tracks = { ...tracks, [shape]: t };
     };
@@ -191,8 +196,9 @@
   function trackKeydown(e: KeyboardEvent, col: PairDrag | null, row: PairDrag | null): void {
     const p = col ?? row;
     if (!p) return;
-    const dec = col ? e.key === 'ArrowLeft' : e.key === 'ArrowUp';
-    const inc = col ? e.key === 'ArrowRight' : e.key === 'ArrowDown';
+    const rtl = gridEl ? getComputedStyle(gridEl).direction === 'rtl' : false;
+    const dec = col ? (rtl ? e.key === 'ArrowRight' : e.key === 'ArrowLeft') : e.key === 'ArrowUp';
+    const inc = col ? (rtl ? e.key === 'ArrowLeft' : e.key === 'ArrowRight') : e.key === 'ArrowDown';
     if (!dec && !inc) return;
     e.preventDefault();
     const t = currentTracks();
@@ -436,7 +442,7 @@
         <!-- Row divider: only these two rows move. 20px grab zone (6px into
              each neighbour), 2px line at rest. -->
         <div
-          class="tgut row"
+          class="tgut r-gut"
           role="separator"
           aria-orientation="horizontal"
           aria-label="Resize rows (drag, arrow keys; double-click to equalise)"
@@ -608,7 +614,7 @@
   .tgut.col {
     cursor: col-resize;
   }
-  .tgut.row {
+  .tgut.r-gut {
     cursor: row-resize;
   }
   .tgut::before {
@@ -619,7 +625,7 @@
   .tgut.col::before {
     inset: 0 -6px;
   }
-  .tgut.row::before {
+  .tgut.r-gut::before {
     inset: -6px 0;
   }
   .tgut::after {
@@ -634,7 +640,7 @@
   .tgut.col::after {
     width: 2px;
   }
-  .tgut.row::after {
+  .tgut.r-gut::after {
     height: 2px;
   }
   .tgut:hover::after,
@@ -654,6 +660,9 @@
     z-index: 9; /* over the divider it meets */
     cursor: nwse-resize;
     touch-action: none;
+  }
+  :global(html[dir='rtl']) .tile-corner {
+    cursor: nesw-resize;
   }
   .tile-corner.w:not(.h) {
     cursor: ew-resize;
