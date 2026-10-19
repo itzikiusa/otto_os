@@ -802,6 +802,44 @@ impl DiffTarget {
     }
 }
 
+/// The `(label, rev)` integration branches a branch can have "landed in": the
+/// cleanup base first, then whichever of `develop` / `main` / `master` exist —
+/// the local branch when there is one (a merge not pushed yet still counts),
+/// else `origin/<name>`. Read off the `for-each-ref` listings already in hand
+/// (`refs_with_base`), so it costs no extra spawn.
+fn integration_bases(
+    base: Option<&str>,
+    local_out: &str,
+    remote_out: &str,
+) -> Vec<(String, String)> {
+    let local_has = |name: &str| {
+        local_out
+            .lines()
+            .any(|l| l.split('\t').next() == Some(name))
+    };
+    let remote_has = |name: &str| {
+        let full = format!("refs/remotes/origin/{name}");
+        remote_out
+            .lines()
+            .any(|l| l.split('\t').next() == Some(full.as_str()))
+    };
+    let mut out: Vec<(String, String)> = base
+        .map(|b| (b.to_string(), b.to_string()))
+        .into_iter()
+        .collect();
+    for cand in ["develop", "main", "master"] {
+        if out.iter().any(|(label, _)| label == cand) {
+            continue;
+        }
+        if local_has(cand) {
+            out.push((cand.to_string(), cand.to_string()));
+        } else if remote_has(cand) {
+            out.push((cand.to_string(), format!("origin/{cand}")));
+        }
+    }
+    out
+}
+
 /// A full-length (SHA-1 or SHA-256) hex object id.
 pub(crate) fn is_full_oid(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -2290,9 +2328,38 @@ impl LocalGit {
             self.resolve_cleanup_base(base_override),
         );
         let (local_out, remote_out, tags_out) = (local_out?, remote_out?, tags_out?);
-        let (merged_local, merged_remote) = self
-            .merged_sets_cached(base.as_deref(), &local_out, &remote_out)
-            .await;
+        let integrations = integration_bases(base.as_deref(), &local_out, &remote_out);
+        let landed_sets = futures_util::future::join_all(
+            integrations
+                .iter()
+                .map(|(_, rev)| self.merged_sets_cached(Some(rev), &local_out, &remote_out)),
+        )
+        .await;
+        // The base is always first in `integrations` when there is one.
+        let empty = Default::default();
+        let (merged_local, merged_remote) = match base {
+            Some(_) => landed_sets.first().unwrap_or(&empty),
+            None => &empty,
+        };
+        let is_integration = |name: &str| integrations.iter().any(|(label, _)| label == name);
+        // Labels of every integration branch holding `name` (none for an
+        // integration branch itself — main ⊂ develop is not a cleanup hint).
+        let landed_in = |name: &str, remote: bool| -> Vec<String> {
+            let own = if remote {
+                name.split_once('/').map_or(name, |(_, b)| b)
+            } else {
+                name
+            };
+            if is_integration(own) {
+                return Vec::new();
+            }
+            integrations
+                .iter()
+                .zip(&landed_sets)
+                .filter(|(_, (l, r))| if remote { r } else { l }.contains(name))
+                .map(|((label, _), _)| label.clone())
+                .collect()
+        };
 
         let local = local_out
             .lines()
@@ -2307,6 +2374,7 @@ impl LocalGit {
                     crate::parse::parse_upstream_tracking(cols.next().unwrap_or(""));
                 let merged =
                     base.as_deref() != Some(name.as_str()) && merged_local.contains(name.as_str());
+                let merged_into = landed_in(&name, false);
                 RefBranch {
                     name,
                     is_current: head == "*",
@@ -2319,6 +2387,7 @@ impl LocalGit {
                     ahead,
                     behind,
                     merged_into_base: merged,
+                    merged_into,
                     sha,
                 }
             })
@@ -2347,6 +2416,7 @@ impl LocalGit {
                     .as_deref()
                     .is_some_and(|b| name.strip_prefix("origin/") == Some(b));
                 let merged = !is_base_remote && merged_remote.contains(name.as_str());
+                let merged_into = landed_in(&name, true);
                 RefBranch {
                     name,
                     is_current: false,
@@ -2355,6 +2425,7 @@ impl LocalGit {
                     ahead: 0,
                     behind: 0,
                     merged_into_base: merged,
+                    merged_into,
                     sha,
                 }
             })
@@ -2415,8 +2486,10 @@ impl LocalGit {
             std::collections::HashSet<String>,
             std::collections::HashSet<String>,
         );
+        // Keyed per (repo, base): `refs_with_base` asks for every integration
+        // branch, and a single per-repo slot would evict between them.
         static MEMO: std::sync::OnceLock<
-            std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, Sets)>>,
+            std::sync::Mutex<std::collections::HashMap<(PathBuf, String), (u64, Sets)>>,
         > = std::sync::OnceLock::new();
         let Some(b) = base else {
             return (Default::default(), Default::default());
@@ -2434,7 +2507,7 @@ impl LocalGit {
         if let Some((k, sets)) = memo
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(&self.repo_path)
+            .get(&(self.repo_path.clone(), b.to_string()))
         {
             if *k == state {
                 return sets.clone();
@@ -2444,9 +2517,10 @@ impl LocalGit {
         // A failed `branch --merged` (timeout, lock) is never memoized: its
         // empty set would stick until a ref moved.
         if complete {
-            memo.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(self.repo_path.clone(), (state, sets.clone()));
+            memo.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                (self.repo_path.clone(), b.to_string()),
+                (state, sets.clone()),
+            );
         }
         sets
     }

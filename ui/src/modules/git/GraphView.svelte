@@ -3045,11 +3045,14 @@
     return r?.base_branch ?? null;
   });
 
-  /** True when this branch row should show the "merged — safe to delete" mark. */
-  function showMerged(b: RefBranch): boolean {
-    if (!b.merged_into_base) return false;
-    if (b.remote) return true; // backend already excludes the base's remote twin
-    return !b.is_current && b.name !== baseBranch;
+  /** The integration branches (develop / main / the base…) already holding this
+   *  branch's tip — what the row's "landed" mark names. A daemon predating
+   *  `merged_into` only knows the base, so fall back to that single flag. */
+  function landedIn(b: RefBranch): string[] {
+    if (b.merged_into) return b.merged_into;
+    if (!b.merged_into_base || !baseBranch) return [];
+    if (b.remote) return [baseBranch]; // backend already excludes the base's remote twin
+    return !b.is_current && b.name !== baseBranch ? [baseBranch] : [];
   }
 
   /** Set (or clear, on null) the per-repo cleanup base branch, then re-derive the
@@ -3243,16 +3246,15 @@
         {/if}
       {/snippet}
 
-      <!-- "Merged into base → safe to delete" indicator (Feature 3). Never shown
-           on the base branch itself or the current branch (see showMerged). -->
-      {#snippet mergedMark()}
+      <!-- "Already in develop / main" mark: names every integration branch that
+           holds the tip (git-flow lands in develop long before main). Never shown
+           on an integration branch itself (see landedIn). -->
+      {#snippet mergedMark(b: RefBranch, into: string[])}
         <span
           class="merged-mark"
-          title={baseBranch
-            ? `Merged into ${baseBranch} — safe to delete`
-            : 'Merged — safe to delete'}
+          title={`Already in ${into.join(', ')}${b.is_current ? '' : ' — safe to delete'}`}
         >
-          <Icon name="check" size={12} />
+          <Icon name="check" size={12} /><span class="merged-into">{into.join(' · ')}</span>
         </span>
       {/snippet}
 
@@ -3260,6 +3262,7 @@
            is the short leaf name; `b.name` stays the full ref for every action. -->
       {#snippet localRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
+        {@const into = landedIn(b)}
         {@const tracking = branchTracking(b, status)}
         {@const wtElsewhere = worktreeByBranch.get(b.name)}
         <div class="ref-action-row">
@@ -3294,7 +3297,7 @@
             <Icon name="dot" size={12} />
           {/if}
           {@render refName(leaf.label)}
-          {#if showMerged(b)}{@render mergedMark()}{/if}
+          {#if into.length > 0}{@render mergedMark(b, into)}{/if}
           {#if wtElsewhere}
             <span class="wt-open-hint" title="Open worktree (do not switch branch)">open worktree</span>
           {/if}
@@ -3330,6 +3333,7 @@
 
       {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
+        {@const into = landedIn(b)}
         <div class="ref-action-row">
         <button use:rowMenu
           class="ref-row remote"
@@ -3346,7 +3350,7 @@
         >
           <Icon name="dot" size={12} />
           {@render refName(leaf.label)}
-          {#if showMerged(b)}{@render mergedMark()}{/if}
+          {#if into.length > 0}{@render mergedMark(b, into)}{/if}
           {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
         </button>
         <button
@@ -4166,13 +4170,18 @@
     flex: 0 0 auto;
     white-space: nowrap;
   }
-  /* "Merged into base → safe to delete" mark: a small, muted success check. */
+  /* "Already in develop / main" mark: a small, muted success check + names. */
   .merged-mark {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
+    gap: 2px;
     color: var(--success);
     opacity: 0.85;
+  }
+  .merged-into {
+    font-size: var(--fs-xs);
+    white-space: nowrap;
   }
   .ref-row:hover .merged-mark {
     opacity: 1;
