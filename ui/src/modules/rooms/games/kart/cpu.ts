@@ -1,23 +1,73 @@
 /**
- * CPU drivers: follow a racing line ahead on the centre spline, take the inside
- * of corners, drift through long bends for mini-turbos (normal/hard), dodge
- * bananas and use items situationally. Easy CPUs wobble and never drift.
+ * CPU drivers: follow a racing line ahead along their chosen route (a lap's
+ * worth of branch picks in `cpuRoute`), take the inside of corners, drift
+ * through long bends for mini-turbos (normal/hard), keep to the middle of
+ * narrow rail-less decks, dodge bananas, rollers and crushers, ride half-pipe
+ * walls for the trick lip, and use items situationally. A boost-only shortcut
+ * is taken only with a mushroom (or star) in hand, saved for its off-road.
+ * Easy CPUs wobble, never drift and do not read hazards.
  */
 import { clamp, type Rng, wrapAngle } from '../common/math.ts';
-import { pointAt, sampleAt, type Track } from './tracks.ts';
+import { advance, circ, F_PIPE, F_RAILS, obstacleAt, pointAt, sampleAt, type Spot, type Track } from './tracks.ts';
 import type { KartInput, KartState, Racer } from './sim.ts';
 
 const _pt = [0, 0, 0, 0];
+const _ob = [0, 0, 0, 0];
+const _spot: Spot = { seg: 0, s: 0 };
+
+/** Curvature `d` metres ahead along the racer's route. */
+function curveAhead(track: Track, r: Racer, d: number): number {
+  advance(track, r.seg, r.segS, d, r.cpuRoute, _spot);
+  const p = track.paths[_spot.seg];
+  return p.curve[sampleAt(p, _spot.s)];
+}
+
+/** Whether the road `d` metres ahead on the racer's route is a rail-less deck over a drop. */
+function exposedAt(track: Track, r: Racer, d: number): boolean {
+  advance(track, r.seg, r.segS, d, r.cpuRoute, _spot);
+  const p = track.paths[_spot.seg], i = sampleAt(p, _spot.s);
+  return p.drop[i] > 0.5 && !(p.flags[i] & F_RAILS);
+}
+
+/** Holding something that blasts through off-road. */
+const hasBoost = (r: Racer): boolean => r.roll <= 0 && (r.item === 'mushroom' || r.item === 'triple' || r.item === 'star');
+/** Metres to the fork of the next boost-only branch on the racer's route within `d` (Infinity if none). */
+function boostForkAhead(track: Track, r: Racer, d: number): number {
+  if (r.seg !== 0) return Infinity;
+  let best = Infinity;
+  for (let b = 1; b < track.paths.length; b++) {
+    const p = track.paths[b];
+    if (!p.boost || !(r.cpuRoute & (1 << (b - 1)))) continue;
+    const g = circ(p.from - r.segS, track.length);
+    if (g > 0 && g < d && g < best) best = g;
+  }
+  return best;
+}
 
 export function cpuInput(state: KartState, track: Track, r: Racer, rng: Rng, cruise: boolean): KartInput {
   const input: KartInput = { throttle: 1, steer: 0, drift: false, item: false, respawn: false };
   const speed = Math.max(0, r.speed);
-  const look = 8 + speed * 0.5;
-  const curveAhead = track.curve[sampleAt(track, r.lastS + look * 0.8)];
-  const curveFar = track.curve[sampleAt(track, r.lastS + look * 1.8)];
+  // A boost-only shortcut without a boost in hand: stay on the main road this lap.
+  if (r.seg === 0) for (let b = 1; b < track.paths.length; b++) {
+    const p = track.paths[b];
+    if (!p.boost || !(r.cpuRoute & (1 << (b - 1)))) continue;
+    const g = circ(p.from - r.segS, track.length);
+    // Decided at the last moment (an item may still be rolling from the boxes before the fork).
+    if (g > 0 && (g < 6 || (g < 24 && r.roll <= 0)) && !hasBoost(r) && r.boost <= 0) r.cpuRoute &= ~(1 << (b - 1));
+  }
+  // Narrow decks without rails (here or just ahead): hold the middle, look closer, don't drift.
+  const exposed = exposedAt(track, r, 0) || exposedAt(track, r, 18);
+  const look = exposed ? 5 + speed * 0.28 : 8 + speed * 0.5;
+  const curveNear = curveAhead(track, r, look * 0.8);
+  const curveFar = curveAhead(track, r, look * 1.8);
+  advance(track, r.seg, r.segS, look, r.cpuRoute, _spot);
+  const target = track.paths[_spot.seg];
+  const hw = target.halfWidth;
   // Inside line: positive curvature turns left, and lateral > 0 is left.
-  const inside = clamp((curveAhead + curveFar) * 14, -0.55, 0.55);
-  let lane = clamp(r.cpuLane * 0.5 + inside, -0.7, 0.7) * track.halfWidth;
+  const inside = clamp((curveNear + curveFar) * 14, -0.55, 0.55);
+  let lane = clamp(r.cpuLane * 0.5 + inside, -0.7, 0.7) * hw * (exposed ? 0.25 : 1);
+  // Half-pipe: every other skilled CPU rides a wall for the trick off the lip.
+  if (state.difficulty !== 'easy' && r.id % 2 === 0 && target.flags[sampleAt(target, _spot.s)] & F_PIPE) lane = (r.cpuLane >= 0 ? 1 : -1) * hw * 0.8;
   // Dodge bananas sitting on the line ahead.
   for (const hz of state.hazards) {
     const dx = hz.x - r.x, dz = hz.z - r.z, d = Math.hypot(dx, dz);
@@ -27,36 +77,60 @@ export function cpuInput(state: KartState, track: Track, r: Racer, rng: Rng, cru
     const side = dx * Math.cos(r.yaw) - dz * Math.sin(r.yaw); // > 0: hazard on the left
     if (Math.abs(side) < 2.6) lane += (side > 0 ? -1 : 1) * 4.5;
   }
-  lane = clamp(lane, -track.halfWidth * 0.8, track.halfWidth * 0.8);
-  pointAt(track, r.lastS + look, lane, _pt);
+  if (state.difficulty !== 'easy') {
+    // Rollers and crushers: steer for where they will be on arrival.
+    for (const o of track.obstacles) {
+      if (o.seg !== _spot.seg && o.seg !== r.seg) continue;
+      const d = o.s - r.segS;
+      if (o.seg !== r.seg || d < 0 || d > 34) continue;
+      const eta = d / Math.max(8, speed);
+      obstacleAt(track, o, state.raceTime + eta, _ob);
+      const path = track.paths[o.seg];
+      if (o.kind === 'roller') {
+        if (Math.abs(lane - _ob[3]) < 3.4) lane = _ob[3] > 0 ? _ob[3] - 4.2 : _ob[3] + 4.2;
+      } else if (_ob[3] < 3) {
+        const lat = o.lane * path.halfWidth * 0.5;
+        if (Math.abs(lane - lat) < 3.6) lane = lat > 0 ? lat - 4.4 : lat + 4.4;
+      }
+    }
+  }
+  lane = clamp(lane, -hw * 0.8, hw * 0.8);
+  pointAt(target, _spot.s, lane, _pt);
   const angle = wrapAngle(Math.atan2(_pt[0] - r.x, _pt[2] - r.z) - r.yaw);
   input.steer = clamp(-angle * 2.4, -1, 1);
   if (state.difficulty === 'easy') {
     r.cpuMistake -= 1 / 60;
     if (r.cpuMistake < -3 && rng.chance(0.004)) r.cpuMistake = 0.6;
-    if (r.cpuMistake > 0) input.steer = clamp(input.steer + Math.sin(state.raceTime * 7 + r.id) * 0.6, -1, 1);
+    if (r.cpuMistake > 0 && !exposed) input.steer = clamp(input.steer + Math.sin(state.raceTime * 7 + r.id) * 0.6, -1, 1);
   }
   if (Math.abs(angle) > 1.2) input.throttle = 0.5;
+  else if (exposed && Math.abs(curveNear) > 0.012 && speed > 22) input.throttle = 0.3;
+  else if (exposed && r.surface === 'ice' && Math.abs(angle) > 0.12 && speed > 18) input.throttle = 0.4;
   if (r.wrong > 1.5 || Math.abs(angle) > 2.2) input.steer = angle > 0 ? -1 : 1;
   if (cruise) { input.throttle = 0.6; return input; }
 
   // Drift through sustained bends at speed.
-  const bend = Math.abs(curveAhead) > 0.022 && Math.sign(curveAhead) === Math.sign(curveFar);
+  const bend = Math.abs(curveNear) > 0.022 && Math.sign(curveNear) === Math.sign(curveFar);
   const wantLevel = state.difficulty === 'hard' ? 2 : 1;
-  if (state.difficulty !== 'easy' && speed > 17) {
+  if (state.difficulty !== 'easy' && speed > 17 && !exposed && !r.glide) {
     if (r.drift === 0 && bend && r.grounded) {
       input.drift = true;
-      input.steer = curveAhead > 0 ? -0.8 : 0.8;
+      input.steer = curveNear > 0 ? -0.8 : 0.8;
     } else if (r.drift !== 0) {
       // Drift -1 turns left; its outside is the right-hand side (lateral < 0).
       const outside = r.lateral * r.drift;
       const wantsTurn = angle * -r.drift;
-      input.drift = (r.driftLevel < wantLevel || Math.abs(curveAhead) > 0.012) && outside < track.halfWidth * 0.55 && wantsTurn > -0.2;
+      input.drift = (r.driftLevel < wantLevel || Math.abs(curveNear) > 0.012) && outside < track.paths[r.seg].halfWidth * 0.55 && wantsTurn > -0.2;
       input.steer = clamp(r.drift * (wantsTurn * 3 - 0.2), -1, 1);
     }
   }
+  // Mid-air: trick for the landing boost.
+  if (!r.grounded && r.trickReady && r.air > 0.15 && state.difficulty !== 'easy' && rng.chance(0.2)) input.drift = !r.prevDrift;
 
-  // Items.
+  // Items. On a boost-only shortcut the mushroom (or star) goes off as soon as the wheels hit the sand.
+  const boostPath = track.paths[r.seg].boost;
+  if (boostPath && hasBoost(r) && r.surface === 'grass' && r.boost <= 0) { input.item = !r.prevItem; return input; }
+  const saving = boostForkAhead(track, r, 600) < Infinity;
   if (r.item && r.roll <= 0) {
     r.cpuItemDelay -= 1 / 60;
     if (r.cpuItemDelay <= 0) {
@@ -65,10 +139,10 @@ export function cpuInput(state: KartState, track: Track, r: Racer, rng: Rng, cru
       const gap = ahead ? ahead.travel - r.travel : Infinity;
       let use = false;
       switch (r.item) {
-        case 'mushroom': case 'triple': use = Math.abs(curveAhead) < 0.012 || r.surface === 'grass'; break;
+        case 'mushroom': case 'triple': use = (Math.abs(curveNear) < 0.012 || r.surface === 'grass') && !exposed && !saving && !boostPath; break;
         case 'banana': use = behind || rng.chance(0.004); break;
         case 'bomb': use = gap < 70 || rng.chance(0.003); break;
-        case 'star': use = gap < 30 || rng.chance(0.004); break;
+        case 'star': use = (gap < 30 || rng.chance(0.004)) && !saving && !boostPath; break;
         case 'bolt': use = r.place > 2; break;
       }
       if (use) { input.item = !r.prevItem; r.cpuItemDelay = rng.range(0.4, 2.2); }

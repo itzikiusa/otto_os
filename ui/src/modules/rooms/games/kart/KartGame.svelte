@@ -15,8 +15,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import LoadState from '../../../../lib/components/LoadState.svelte';
-  import { createRace, idleInput, standings, stepRace, type KartEvent } from './sim';
-  import { trackFor } from './tracks';
+  import { createRace, idleInput, MAX_COINS, standings, stepRace, type KartEvent } from './sim';
+  import { drawLift, F_GAP, pointAt, trackFor, type Path } from './tracks';
   import { racerDef } from './roster';
   import { ITEMS } from './items';
   import { InputState } from '../common/input';
@@ -41,6 +41,7 @@
   let notice = $state(''), noticeKind = $state('');
   let rouletteIcon = $state(0);
   let waitingFor = $state<string[]>([]);
+  let underwater = $state(false);
   const audio = new GameAudio(['voice-3', 'voice-2', 'voice-1', 'voice-go', 'item', 'tick', 'boost', 'turbo', 'spin', 'explode', 'bump', 'lap', 'finallap', 'drop', 'shield', 'land', 'pickup', 'voice-win', 'voice-congrats', 'voice-over', 'select']);
   let renderer: KartRenderer | undefined, input: InputState | undefined;
   let stop: (() => void) | undefined;
@@ -93,6 +94,14 @@
       case 'trick': if (own) { audio.play('select'); announce('Trick!', 'small', 700); } break;
       case 'land': if (own) audio.play('land', { volume: 0.6 }); break;
       case 'respawn': if (own) announce('Rescued', 'small', 900); break;
+      case 'splash':
+        // value 1: diving under on purpose; 0: fell in the water; 2: lava.
+        if (e.value === 1) { if (own) audio.play('land', { volume: 0.5, rate: 0.7 }); break; }
+        audio.play(e.value === 2 ? 'explode' : 'land', { ...vol, rate: e.value === 2 ? 0.6 : 0.5 });
+        if (own) announce(e.value === 2 ? 'Too hot!' : 'Splash!', 'bad', 900);
+        break;
+      case 'glide': if (own) { audio.play('boost', { rate: 0.8 }); announce('Glider!', 'good', 900); } break;
+      case 'crush': audio.play('bump', { ...vol, volume: 0.9, rate: 0.7 }); if (own) announce('Squashed!', 'bad', 900); break;
       case 'lap': if (own) { audio.play('lap'); announce(`Lap ${(e.value ?? 0) + 1}`, 'good'); } break;
       case 'final': if (own) { audio.play('finallap'); announce('Final lap!', 'good', 1800); } break;
       case 'finish':
@@ -109,17 +118,47 @@
     const track = trackFor(state.track);
     const w = c.width, h = c.height;
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (let i = 0; i < track.count; i++) { minX = Math.min(minX, track.px[i]); maxX = Math.max(maxX, track.px[i]); minZ = Math.min(minZ, track.pz[i]); maxZ = Math.max(maxZ, track.pz[i]); }
+    for (const p of track.paths) for (let i = 0; i < p.count; i++) { minX = Math.min(minX, p.px[i]); maxX = Math.max(maxX, p.px[i]); minZ = Math.min(minZ, p.pz[i]); maxZ = Math.max(maxZ, p.pz[i]); }
     const sc = Math.min((w - 20) / (maxX - minX), (h - 20) / (maxZ - minZ));
     // Mirror X so the map matches the chase view (+X is to the left when facing +Z).
     const mx = (x: number) => w - (10 + (x - minX) * sc + (w - 20 - (maxX - minX) * sc) / 2);
     const mz = (z: number) => 10 + (z - minZ) * sc + (h - 20 - (maxZ - minZ) * sc) / 2;
+    /** Traces a route, lifting the pen over gaps (jumps and glides show as breaks). */
+    const trace = (p: Path) => {
+      g.beginPath();
+      let pen = false;
+      for (let i = 0; i <= (p.closed ? p.count : p.count - 1); i++) {
+        const k = i % p.count;
+        if (p.flags[k] & F_GAP) { pen = false; continue; }
+        if (pen) g.lineTo(mx(p.px[k]), mz(p.pz[k])); else g.moveTo(mx(p.px[k]), mz(p.pz[k]));
+        pen = true;
+      }
+    };
     g.clearRect(0, 0, w, h);
     g.lineJoin = 'round';
-    g.beginPath();
-    for (let i = 0; i <= track.count; i++) { const k = i % track.count; if (i === 0) g.moveTo(mx(track.px[k]), mz(track.pz[k])); else g.lineTo(mx(track.px[k]), mz(track.pz[k])); }
-    g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = 9; g.stroke();
-    g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = 5; g.stroke();
+    // Branches first (shortcuts dashed yellow, boost-only cuts dashed orange, alternative
+    // routes light blue); then the main loop on top.
+    for (const p of [...track.paths.slice(1), track]) {
+      trace(p);
+      g.setLineDash(p.shortcut ? [5, 4] : []);
+      g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = p.index === 0 ? 9 : 7; g.stroke();
+      g.strokeStyle = p.index === 0 ? 'rgba(255,255,255,0.9)' : p.boost ? 'rgba(255,154,46,0.95)' : p.shortcut ? 'rgba(255,214,90,0.95)' : 'rgba(140,215,255,0.95)';
+      g.lineWidth = p.index === 0 ? 5 : 3.5; g.stroke();
+    }
+    g.setLineDash([]);
+    // Forks: a marker where each route splits off.
+    for (const p of track.paths.slice(1)) {
+      g.beginPath(); g.arc(mx(p.px[0]), mz(p.pz[0]), 4, 0, Math.PI * 2);
+      g.fillStyle = p.boost ? '#ff9a2e' : p.shortcut ? '#ffd65a' : '#8cd7ff'; g.fill();
+      g.lineWidth = 1.5; g.strokeStyle = '#111'; g.stroke();
+    }
+    // Drawbridges: a bar across the road, red while the leaves are up.
+    for (const p of track.paths) for (const d of p.features.drawbridges) {
+      pointAt(p, (d.from + d.to) / 2 * p.length, 0, _mp);
+      const ax = Math.cos(_mp[3]) * 6, az = Math.sin(_mp[3]) * 6; // across the road (the map mirrors X)
+      g.beginPath(); g.moveTo(mx(_mp[0]) - ax, mz(_mp[2]) - az); g.lineTo(mx(_mp[0]) + ax, mz(_mp[2]) + az);
+      g.lineWidth = 3; g.strokeStyle = drawLift(d, state.raceTime) > 0.05 ? '#ff4d4d' : '#5ad17a'; g.stroke();
+    }
     g.fillStyle = '#111'; g.fillRect(mx(track.px[0]) - 4, mz(track.pz[0]) - 4, 8, 8);
     for (const b of state.shells) { g.fillStyle = '#ff7a2a'; g.beginPath(); g.arc(mx(b.x), mz(b.z), 3, 0, Math.PI * 2); g.fill(); }
     const order = [...state.racers].sort((a, b) => b.place - a.place);
@@ -130,6 +169,8 @@
       g.lineWidth = own ? 3 : 1.5; g.strokeStyle = own ? '#fff' : 'rgba(0,0,0,0.6)'; g.stroke();
     }
   }
+
+  const _mp = [0, 0, 0, 0];
 
   /** Guest view: interpolate between buffered snapshots ~100 ms behind real time. */
   let view: KartState | null = null;
@@ -157,7 +198,7 @@
   function start(): void {
     stop?.();
     const abort = new AbortController();
-    let disposed = false, frame = 0, last = performance.now(), lastHud = 0, lastSend = 0, lastEvent = 0, rouletteAt = 0;
+    let disposed = false, frame = 0, last = performance.now(), lastHud = 0, lastSend = 0, lastEvent = 0, rouletteAt = 0, coinsSeen = 0;
     const bootAt = performance.now();
     const latch = { item: false, drift: false, respawn: false };
     let state: KartState | null = setup ? createRace(setup.track, setup.seats, setup.difficulty, setup.seed) : null;
@@ -222,6 +263,9 @@
       if (renderer) {
         renderer.frame(state, dt, input?.down('KeyQ', 'KeyC', 'Back') ?? false);
         const me = state.racers[mineIndex];
+        // Coins have no event of their own: chime when our purse grows.
+        if (me.coins > coinsSeen) audio.play('pickup', { volume: 0.35, rate: 1.6 });
+        coinsSeen = me.coins;
         audio.engineLevel(Math.abs(me.speed) / 30, me.boost > 0, !paused && !menu && state.phase !== 'done' && me.respawn <= 0);
       }
       input?.endFrame();
@@ -229,6 +273,7 @@
         hud = { ...state, boxes: state.boxes.map(b => ({ ...b })), racers: state.racers.map(r => ({ ...r, lapTimes: [...r.lapTimes] })) };
         if (state.racers[mineIndex]?.roll > 0 && now - rouletteAt > 80) { rouletteIcon = (rouletteIcon + 1) % ROULETTE.length; rouletteAt = now; audio.play('tick', { volume: 0.3 }); }
         drawMinimap(state, mineIndex);
+        underwater = renderer?.isUnderwater ?? false;
         lastHud = now;
       }
       if (state.phase === 'done' && !finished) { finished = true; input?.release(); onfinish?.(state); audio.play(state.racers[mineIndex].place === 1 ? 'voice-win' : 'voice-over'); }
@@ -267,11 +312,14 @@
 
 <div class="kart-play game-play" bind:this={root} data-game="kart" data-track={setup?.track ?? hud?.track} data-phase={hud?.phase ?? 'loading'} onpointerdown={wake} role="presentation">
   <div class="kart-stage" bind:this={stage}></div>
+  {#if underwater}<div class="kart-underwater" aria-hidden="true"></div>{/if}
   {#if loading && !error}<div class="kart-overlay" role="status"><h2>{isGuest && !hud ? 'Waiting for the host…' : 'Building the circuit…'}</h2><p>Loading karts, racers and scenery</p></div>{/if}
   {#if error}<div class="kart-overlay"><LoadState what="race" {error} empty onretry={start} /><button class="btn" onclick={onexit}>Back to games</button></div>{/if}
   {#if hud && self && !loading && !error}
     <div class="kart-top">
       <div class="kart-lap" aria-label="Lap"><span>Lap</span><strong>{lapNow}<small>/{hud.laps}</small></strong><time>{raceClock(hud.raceTime)}</time>
+        {#if self.seg > 0}<em class="kart-route">{trackFor(hud.track).paths[self.seg]?.name ?? ''}</em>{/if}
+        <div class="kart-coins" class:full={self.coins >= MAX_COINS} aria-label={`${self.coins} of ${MAX_COINS} coins`}><i aria-hidden="true"></i>{self.coins}<small>/{MAX_COINS}</small></div>
         {#if self.lapTimes.length}<ol class="kart-laptimes">{#each self.lapTimes as t, i (i)}<li class:best={t === best}>L{i + 1} {raceClock(t)}</li>{/each}</ol>{/if}
       </div>
       <div class="kart-item" class:rolling={self.roll > 0} aria-label="Item">
@@ -330,6 +378,12 @@
   .kart-stage { position: absolute; inset: 0; }
   .kart-stage :global(canvas) { display: block; width: 100%; height: 100%; }
   .kart-stage :global(canvas:focus-visible) { outline: 2px solid var(--accent-line-strong); outline-offset: -2px; }
+  .kart-underwater { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, color-mix(in srgb, var(--info) 8%, transparent), color-mix(in srgb, var(--info) 30%, transparent)); }
+  .kart-lap .kart-coins { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; font-size: var(--fs-l); font-variant-numeric: tabular-nums; margin-block-start: 2px; }
+  .kart-lap .kart-coins i { width: 14px; height: 14px; border-radius: 50%; background: var(--warning); box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--on-scrim) 35%, transparent); }
+  .kart-lap .kart-coins small { font-size: var(--fs-s); opacity: .75; }
+  .kart-lap .kart-coins.full { color: var(--warning); font-weight: 600; }
+  .kart-route { grid-column: 1 / -1; font-style: normal; font-size: var(--fs-s); color: var(--warning); text-transform: uppercase; letter-spacing: .06em; }
   .kart-overlay { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; background: color-mix(in srgb, var(--surface) 90%, transparent); }
   .kart-overlay h2 { margin: 0; font-size: var(--fs-2xl); }
   .kart-overlay p { margin: 0; max-width: 560px; color: var(--text-dim); line-height: 1.6; }

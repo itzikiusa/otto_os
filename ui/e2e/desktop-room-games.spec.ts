@@ -47,6 +47,7 @@ async function capture(page: Page, name: string, info: TestInfo) {
   await page.screenshot({ path });
   await info.attach(name, { path, contentType: 'image/png' });
 }
+function wrap(a: number): number { return Math.atan2(Math.sin(a), Math.cos(a)); }
 async function measure(page: Page, ms: number): Promise<{ fps: number; drawCalls: number; triangles: number; frameMs: number }> {
   const a = await stats(page), t0 = Date.now();
   await expect.poll(async () => (await stats(page)).frames - a.frames, { timeout: ms + 10_000 }).toBeGreaterThan(Math.floor(ms / 1000 * 25));
@@ -59,7 +60,7 @@ test('chooser shows both games, tracks, islands and rosters', async ({ page }, i
   const errors = observe(page);
   await boot(page, 'light');
   await expect(page.locator('.games-titles img')).toHaveCount(2);
-  await expect(page.locator('.games-environments > button')).toHaveCount(4);
+  await expect(page.locator('.games-environments > button')).toHaveCount(7);
   await expect(page.locator('.games-roster button')).toHaveCount(8);
   await expectNoHorizontalOverflow(page);
   await expect.poll(() => page.locator('.games-page img').evaluateAll(imgs => imgs.every(i => (i as HTMLImageElement).complete && (i as HTMLImageElement).naturalWidth > 0))).toBe(true);
@@ -72,7 +73,7 @@ test('chooser shows both games, tracks, islands and rosters', async ({ page }, i
   expect(errors).toEqual([]);
 });
 
-for (const track of [{ id: 'meadow', name: 'Sunny Meadow' }, { id: 'downtown', name: 'Downtown Dash' }, { id: 'canyon', name: 'Canyon Run' }, { id: 'frost', name: 'Frostbite Pass' }]) {
+for (const track of [{ id: 'meadow', name: 'Sunny Meadow' }, { id: 'downtown', name: 'Downtown Dash' }, { id: 'canyon', name: 'Canyon Run' }, { id: 'frost', name: 'Frostbite Pass' }, { id: 'lagoon', name: 'Coral Lagoon' }, { id: 'volcano', name: 'Magma Peak' }, { id: 'skyway', name: 'Neon Skyway' }]) {
   test(`kart ${track.id}: 8-racer grid, countdown, driving, drifting and HUD`, async ({ page }, info) => {
     const errors = observe(page);
     await boot(page);
@@ -84,8 +85,20 @@ for (const track of [{ id: 'meadow', name: 'Sunny Meadow' }, { id: 'downtown', n
     await page.locator('.kart-play canvas').first().click();
     await page.keyboard.down('w');
     await expect(page.locator('.kart-play')).toHaveAttribute('data-phase', 'race', { timeout: 15_000 });
-    await expect.poll(async () => (await snap<KartState>(page)).raceTime, { timeout: 15_000 }).toBeGreaterThan(4);
     const me = (s: KartState) => s.racers.find(r => r.human)!;
+    // Follow the road until the race has run a few seconds and the kart is up to drifting speed
+    // (some grids open on a bend, where a blind straight run ends in the barrier).
+    const road = trackFor(track.id as Parameters<typeof trackFor>[0]);
+    let steer: string | null = null;
+    await expect.poll(async () => {
+      const s = await snap<KartState>(page), r = me(s);
+      const p = pointAt(road, r.lastS + 10 + Math.max(0, r.speed) * 0.45, 0);
+      const angle = wrap(Math.atan2(p[0] - r.x, p[2] - r.z) - r.yaw);
+      const want = angle > 0.05 ? 'a' : angle < -0.05 ? 'd' : null;
+      if (want !== steer) { if (steer) await page.keyboard.up(steer); if (want) await page.keyboard.down(want); steer = want; }
+      return s.raceTime > 4 && r.speed > 16;
+    }, { timeout: 20_000, intervals: [50] }).toBe(true);
+    if (steer) await page.keyboard.up(steer);
     expect(me(await snap<KartState>(page)).travel).toBeGreaterThan(20);
     // Drift through the next bend: hold Space while steering.
     await page.keyboard.down('d'); await page.keyboard.down('Space');
@@ -136,12 +149,14 @@ for (const map of [{ id: 'isle', name: 'Palm Isle' }, { id: 'mesa', name: 'Red M
     writeFileSync(resolve(evidence, `shooter-${map.id}-perf.json`), JSON.stringify(perf, null, 2));
     await capture(page, `shooter-${map.id}-ground`, info);
     await expect(page.locator('.br-vitals')).toBeVisible();
-    await expect(page.locator('.br-inventory .br-slot')).toHaveCount(3);
+    // Five hotbar slots plus the pickaxe.
+    await expect(page.locator('.br-inventory .br-slot')).toHaveCount(6);
     expect(errors).toEqual([]);
   });
 }
 
-const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+/** Hotbar items that are guns (the rest are heals and shields). */
+const GUNS: string[] = ['pistol', 'smg', 'rifle', 'shotgun', 'sniper', 'rocket'];
 const look = (page: Page, yaw: number, pitch: number) => page.locator('.game-play div').first().evaluate((el, [y, p]) => (el as HTMLDivElement & { __ottoGame: Diagnostic<unknown> }).__ottoGame.look?.(y, p), [yaw, pitch] as const);
 
 test('kart full Grand Prix: autopilot races 3 laps, uses items and reaches the results', async ({ page }, info) => {
@@ -207,7 +222,7 @@ test('shooter: loot a weapon, aim at a bot and fire', async ({ page }, info) => 
   const deadline = Date.now() + 90_000;
   for (;;) {
     const s = await snap<ShooterState>(page), p = me(s);
-    if (p.weapons.some(Boolean) || Date.now() > deadline || p.mode === 'dead') break;
+    if (p.weapons.some(w => w && GUNS.includes(w.w)) || Date.now() > deadline || p.mode === 'dead') break;
     const loot = s.loot.filter(l => l.kind === 'weapon' && !skip.has(l.id)).sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
     if (!loot) break;
     // Give up on an item that is not getting closer (blocked by a prop) and try the next.
@@ -221,7 +236,7 @@ test('shooter: loot a weapon, aim at a bot and fire', async ({ page }, info) => 
   }
   if (walking) await page.keyboard.up('w');
   const armed = me(await snap<ShooterState>(page));
-  expect(armed.weapons.some(Boolean)).toBe(true);
+  expect(armed.weapons.some(w => w && GUNS.includes(w.w))).toBe(true);
   await capture(page, 'shooter-mesa-armed', info);
   // Aim at the nearest living fighter and fire a burst.
   const s = await snap<ShooterState>(page), p = me(s);
@@ -239,9 +254,12 @@ test('shooter: loot a weapon, aim at a bot and fire', async ({ page }, info) => 
   expect(errors).toEqual([]);
 });
 
-test('shooter: the storm closes in, eliminations end the match and show results', async ({ page }, info) => {
+test('shooter: the storm closes in phase by phase, eliminations end the match and show results', async ({ page }, info) => {
   test.setTimeout(240_000);
   const errors = observe(page);
+  // Test hook: the storm runs at 6% of its schedule (all seven phases in about 25 s instead of
+  // seven minutes), so the final circle ends the match on its own whatever the fight does.
+  await page.addInitScript(() => { (window as Window & { __ottoGameTest?: { stormScale: number } }).__ottoGameTest = { stormScale: 0.06 }; });
   await boot(page);
   await page.getByRole('button', { name: /Storm Royale/ }).click();
   await page.getByRole('button', { name: /Palm Isle/ }).click();
@@ -255,12 +273,14 @@ test('shooter: the storm closes in, eliminations end the match and show results'
   await page.keyboard.press('Space');
   const me = (s: ShooterState) => s.players.find(p => p.human)!;
   await expect.poll(async () => me(await snap<ShooterState>(page)).mode, { timeout: 60_000 }).toBe('ground');
-  // Head for the nearest survivor until somebody wins the fight.
+  // Head for the nearest survivor while the storm closes; record every storm phase seen.
   await page.keyboard.down('w');
   let stormShot = false, feedShot = false;
-  const deadline = Date.now() + 170_000;
+  const stages: number[] = [];
+  const deadline = Date.now() + 120_000;
   for (;;) {
     const s = await snap<ShooterState>(page), p = me(s);
+    if (stages.at(-1) !== s.storm.stage) stages.push(s.storm.stage);
     if (s.phase === 'done' || Date.now() > deadline) break;
     if (p.mode === 'ground') {
       const target = s.players.filter(q => q.id !== p.id && q.mode === 'ground').sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
@@ -270,10 +290,34 @@ test('shooter: the storm closes in, eliminations end the match and show results'
     if (!feedShot && await page.locator('.br-feed li').count()) { feedShot = true; await capture(page, 'shooter-isle-killfeed', info); }
   }
   await page.keyboard.up('w');
+  // Phases only ever advance, and the storm formed before the match ended.
+  expect(stages.every((v, i) => i === 0 || v > stages[i - 1]), `storm stages ${stages.join(' → ')}`).toBe(true);
+  expect(Math.max(...stages)).toBeGreaterThanOrEqual(0);
   await expect(page.locator('.br-play')).toHaveAttribute('data-phase', 'done', { timeout: 15_000 });
   await expect(page.locator('.br-results tbody tr').first()).toBeVisible();
   await expect(page.locator('.br-results h2')).toContainText(/Victory Royale|You placed/);
   await capture(page, 'shooter-isle-results', info);
+  expect(errors).toEqual([]);
+});
+
+test('shooter duos: a bot teammate, the team panel and team colours', async ({ page }, info) => {
+  test.setTimeout(120_000);
+  const errors = observe(page);
+  await boot(page);
+  await page.getByRole('button', { name: /Storm Royale/ }).click();
+  await page.getByRole('button', { name: /Red Mesa/ }).click();
+  await page.getByRole('button', { name: 'Duos', exact: true }).click();
+  await page.getByRole('combobox', { name: /Computer difficulty/ }).selectOption('easy');
+  await page.getByRole('slider', { name: /Bots on the island/ }).fill('7');
+  await page.getByRole('button', { name: 'Drop in', exact: true }).click();
+  await expect.poll(async () => (await snap<ShooterState>(page))?.players.length ?? 0, { timeout: 30_000 }).toBe(8);
+  const s = await snap<ShooterState>(page);
+  expect(s.squad).toBe(2);
+  // Four teams of two; the human's teammate is the first bot.
+  expect(s.players.map(p => p.team)).toEqual([0, 0, 1, 1, 2, 2, 3, 3]);
+  await expect(page.locator('.br-team li')).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator('.br-stats')).toContainText('teams');
+  await capture(page, 'shooter-duos-team-panel', info);
   expect(errors).toEqual([]);
 });
 
@@ -289,7 +333,11 @@ test('phone: chooser fits and touch controls drive a kart', async ({ page: deskt
     await expect(page.getByRole('button', { name: 'Drift', exact: true })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     const before = (await snap<KartState>(page)).racers.find(r => r.human)!.travel;
-    await page.getByRole('button', { name: 'Steer left', exact: true }).dispatchEvent('pointerdown', { pointerId: 1 });
+    // A tap on the steering pad (the kart accelerates by itself on touch); holding it would loop the kart round.
+    const left = page.getByRole('button', { name: 'Steer left', exact: true });
+    await left.dispatchEvent('pointerdown', { pointerId: 1 });
+    await expect.poll(async () => (await snap<KartState>(page)).racers.find(r => r.human)!.steer, { timeout: 5000 }).not.toBe(0);
+    await left.dispatchEvent('pointerup', { pointerId: 1 });
     await expect.poll(async () => (await snap<KartState>(page)).racers.find(r => r.human)!.travel, { timeout: 10_000 }).toBeGreaterThan(before + 10);
     await capture(page, 'kart-phone', info);
   } finally { await context.close(); }
@@ -304,7 +352,7 @@ test('menu art from live frames', async ({ page }) => {
   mkdirSync(art, { recursive: true });
   await page.setViewportSize({ width: 1600, height: 1000 });
   const hide = () => page.addStyleTag({ content: '.kart-top,.kart-ranking,.kart-place,.kart-minimap,.kart-intro,.kart-hint,.kart-notice,.kart-drift,.br-top,.br-mapbox,.br-vitals,.br-inventory,.br-prompt,.br-toast,.br-cross,.br-hint,.br-overlay{display:none!important}' });
-  for (const [id, name] of [['meadow', 'Sunny Meadow'], ['downtown', 'Downtown Dash'], ['canyon', 'Canyon Run'], ['frost', 'Frostbite Pass']]) {
+  for (const [id, name] of [['meadow', 'Sunny Meadow'], ['downtown', 'Downtown Dash'], ['canyon', 'Canyon Run'], ['frost', 'Frostbite Pass'], ['lagoon', 'Coral Lagoon'], ['volcano', 'Magma Peak'], ['skyway', 'Neon Skyway']]) {
     await boot(page);
     await page.getByRole('button', { name: new RegExp(name) }).click();
     await page.getByRole('button', { name: 'Start race', exact: true }).click();

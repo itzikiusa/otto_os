@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyDamage, damageAt, rollRarity, rollWeapon, WEAPON_IDS, WEAPONS, type Rarity, type WeaponId } from '../src/modules/rooms/games/shooter/weapons.ts';
-import { GRID, HALF, mapFor, terrainHeight, type Box, type Cylinder, type ShooterMap } from '../src/modules/rooms/games/shooter/map.ts';
-import { groundAt, RADIUS, raycast, resolve, STEP, visible, worldFor, type Body } from '../src/modules/rooms/games/shooter/collide.ts';
+import { dryLand, GRID, HALF, harvestOf, mapFor, SEA_SURFACE, terrainHeight, waterLevel, type Box, type Cylinder, type ShooterMap } from '../src/modules/rooms/games/shooter/map.ts';
+import { groundAt, RADIUS, raycast, resolve, STEP, syncFelled, visible, worldFor, type Body } from '../src/modules/rooms/games/shooter/collide.ts';
 import type { ShooterMapId } from '../src/modules/rooms/games/shooter/catalog.ts';
 
 // ---------------------------------------------------------------- weapons
@@ -130,7 +130,18 @@ test('both maps have colliders, props, loot spots and chests inside the bounds',
     assert.ok(m.boxes.length > 50 && m.cylinders.length > 20, `${id} colliders`);
     assert.ok(m.lootSpots.length >= 20, `${id} loot spots ${m.lootSpots.length}`);
     assert.ok(m.chests.length >= 5, `${id} chests ${m.chests.length}`);
-    assert.equal(m.pois.length, 5);
+    assert.ok(m.pois.length >= 7, `${id} pois ${m.pois.length}`);
+    for (const kind of ['town', 'factory', 'forest', 'hill', 'lake', 'farm', 'camp'] as const) assert.ok(m.pois.some(p => p.kind === kind), `${id} has a ${kind}`);
+    assert.equal(new Set(m.pois.map(p => p.name)).size, m.pois.length, 'unique names');
+    assert.equal(m.boxMats.length, m.boxes.length, 'harvest material per box');
+    assert.ok(m.boxMats.every(v => v >= -1 && v <= 2));
+    // Walk-in architecture: hundreds of blocks (walls, slabs, steps), indoor loot on upper floors, chests indoors.
+    assert.ok(m.blocks.length > 400, `${id} blocks ${m.blocks.length}`);
+    for (const b of m.blocks) assert.ok(m.boxes.includes(b), 'every block collides');
+    const indoor = m.lootSpots.filter(l => l.y !== undefined);
+    assert.ok(indoor.length >= 15, `${id} indoor loot ${indoor.length}`);
+    assert.ok(indoor.some(l => l.y! > terrainHeight(m, l.x, l.z) + 6), 'loot two floors up');
+    assert.ok(m.chests.some(c => c.y !== undefined), 'a chest indoors');
     for (const p of m.props) {
       assert.ok(Math.abs(p.x) <= HALF && Math.abs(p.z) <= HALF, `${id} prop ${p.key} at ${p.x},${p.z}`);
       assert.ok([p.x, p.y, p.z, p.yaw, p.scale].every(Number.isFinite) && p.scale > 0);
@@ -143,6 +154,38 @@ test('both maps have colliders, props, loot spots and chests inside the bounds',
   }
 });
 
+test('water: the isle sea, river and lake sit below the surface; the mesa oasis holds water, dry land elsewhere', () => {
+  const isle = mapFor('isle'), mesa = mapFor('mesa');
+  const lake = isle.pois.find(p => p.kind === 'lake')!;
+  assert.ok(terrainHeight(isle, lake.x, lake.z) < SEA_SURFACE - 1, 'Loot Lake is deep');
+  for (let i = 1; i < isle.river.length - 1; i++) {
+    const [x, z] = isle.river[i];
+    assert.ok(terrainHeight(isle, x, z) < SEA_SURFACE, `river at ${x},${z}`);
+    assert.equal(dryLand(isle, x, z), false);
+  }
+  assert.equal(waterLevel(isle, 0, 0), SEA_SURFACE);
+  const oasis = mesa.pois.find(p => p.kind === 'lake')!;
+  assert.equal(mesa.waters.length, 1);
+  assert.ok(terrainHeight(mesa, oasis.x, oasis.z) < mesa.waters[0].y - 1, 'oasis is deep');
+  assert.equal(waterLevel(mesa, oasis.x, oasis.z), mesa.waters[0].y);
+  assert.equal(waterLevel(mesa, -150, 150), -Infinity);
+  assert.equal(dryLand(mesa, oasis.x, oasis.z), false);
+  const town = mesa.pois.find(p => p.kind === 'town')!;
+  assert.equal(dryLand(mesa, town.x + 20, town.z + 20), true);
+  // Footbridges span the isle river.
+  assert.ok(isle.blocks.filter(b => b.mat === 7).length > 30, 'decks');
+});
+
+test('harvestOf: trees and boxes give wood, rocks brick, vehicles and metal metal', () => {
+  assert.equal(harvestOf('surv-box-large'), 0);
+  assert.equal(harvestOf('house-building-type-a'), 0);
+  assert.equal(harvestOf('nat-rock_tallB'), 1);
+  assert.equal(harvestOf('surv-rock-sand-a'), 1);
+  assert.equal(harvestOf('car-police'), 2);
+  assert.equal(harvestOf('ind-shipping-container-a'), 2);
+  assert.equal(harvestOf('surv-barrel'), 2);
+});
+
 // ---------------------------------------------------------------- collide
 
 /** A flat test island (height 0) with one 2×3×2 crate and one tree trunk. */
@@ -150,7 +193,7 @@ function flatMap(id: string, boxes: Box[], cylinders: Cylinder[], height: (x: nu
   const size = HALF * 2 / GRID + 1;
   const heights = new Float32Array(size * size);
   for (let iz = 0; iz < size; iz++) for (let ix = 0; ix < size; ix++) heights[iz * size + ix] = height(-HALF + ix * GRID, -HALF + iz * GRID);
-  return { id: id as ShooterMapId, theme: 'mesa', heights, size, props: [], boxes, cylinders, pois: [], lootSpots: [], chests: [] };
+  return { id: id as ShooterMapId, theme: 'mesa', heights, size, props: [], boxes, cylinders, pois: [], boxMats: boxes.map(() => 0), trunkProps: cylinders.map(() => -1), blocks: [], waters: [], river: [], lootSpots: [], chests: [], climbs: [], pads: [] };
 }
 const crate: Box = { minX: 10, minY: -1, minZ: -1, maxX: 12, maxY: 3, maxZ: 1 };
 const trunk: Cylinder = { x: 0, z: 20, r: 1, y0: -1, y1: 7 };
@@ -231,4 +274,25 @@ test('groundAt stands on a crate top only when stepping up is possible', () => {
   const isle = mapFor('isle'), world = worldFor(isle);
   const chest = isle.chests[0], gy = terrainHeight(isle, chest.x, chest.z);
   assert.ok(groundAt(world, chest.x, chest.z, gy + 0.8) >= gy + 0.8 - 1e-6);
+});
+
+test('syncFelled: a felled trunk stops blocking rays and bodies until the list brings it back', () => {
+  const ray = () => raycast(flat, 0, 1.5, 10, 0, 0, 1, 20);
+  assert.equal(ray().kind, 'prop');
+  const felled = [0];
+  syncFelled(flat, felled);
+  assert.equal(ray().kind, 'none');
+  const p = body(0, 0, 20.3); // standing where the trunk was
+  assert.equal(resolve(flat, p), false);
+  assert.equal(p.z, 20.3);
+  // The same list is a no-op; a new (empty) list restores the trunk.
+  flat.felled[0] = 0;
+  syncFelled(flat, felled);
+  assert.equal(flat.felled[0], 0, 'unchanged list: mask not rebuilt');
+  syncFelled(flat, []);
+  assert.equal(ray().kind, 'prop');
+  assert.equal(resolve(flat, p), true);
+  // Out-of-range indices are ignored.
+  syncFelled(flat, [5, -1]);
+  assert.equal(ray().kind, 'prop');
 });

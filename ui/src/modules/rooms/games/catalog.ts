@@ -14,13 +14,13 @@ export const GAMES: GameChoice[] = [
   {
     kind: 'kart', title: 'Kart Grand Prix', tagline: 'Drift, boost and bump your way to the podium.',
     cover: '/room-games/cover-kart.webp', coverAlt: 'Karts racing through a sunny meadow circuit',
-    summary: '8 racers · 3 laps · items & drifting', maxPlayers: 8,
+    summary: '8 racers · 3 laps · route choices, gliders, drawbridges & coins', maxPlayers: 8,
     maps: (Object.keys(TRACK_DEFS) as TrackId[]).map(id => ({ id, name: TRACK_DEFS[id].name, blurb: TRACK_DEFS[id].blurb })),
   },
   {
     kind: 'shooter', title: 'Storm Royale', tagline: 'Drop in, loot up, outlast the storm.',
     cover: '/room-games/cover-shooter.webp', coverAlt: 'Third-person survivors fighting across an island town',
-    summary: 'Battle royale · up to 16 · bots fill the island', maxPlayers: 4,
+    summary: 'Battle royale · up to 16 · solo, duos or squads', maxPlayers: 4,
     maps: SHOOTER_MAPS.map(m => ({ id: m.id, name: m.name, blurb: m.blurb })),
   },
 ];
