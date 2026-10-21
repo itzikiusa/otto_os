@@ -1,7 +1,9 @@
 /**
- * Kart Grand Prix renderer: builds the track world (terrain, road, curbs or
- * barriers, ramps, dash panels, item boxes, themed Kenney props) and animates
- * karts, drivers, items and effects from simulation/snapshot state.
+ * Kart Grand Prix renderer: builds the track world (terrain, every route's road,
+ * curbs, walls and rails, banking, bridges with pillars, tunnels, water or lava,
+ * ramps, launch pads, dash panels, item boxes, obstacles, themed Kenney props)
+ * and animates karts, drivers, gliders, items and effects from
+ * simulation/snapshot state. Under the water surface the camera fogs over blue.
  */
 import * as THREE from 'three';
 import { AssetLibrary, PropBatch } from '../common/assets';
@@ -9,28 +11,50 @@ import { GameView, owned, type Theme } from '../common/view';
 import { Particles } from '../common/particles';
 import { approach, clamp, fbm, hashString, lerp, makeNoise, Rng, smoothstep, wrapAngle } from '../common/math';
 import { asphaltTexture, checkerTexture, chevronTexture, curbTexture, groundDetailTexture, labelTexture, stripeTexture } from '../common/textures';
-import { nearest, pointAt, rampHeight, RAMP_LENGTH, RAMP_HEIGHT, type Near, type Track } from './tracks';
+import {
+  circ, CRUSHER_HALF, F_BRIDGE, FORK_ZONE, F_GAP, F_GLASS, F_RAILS, F_TUNNEL, LAUNCH_HEIGHT, LAUNCH_LENGTH, nearest, RAIL_SHOULDER, newNear, obstacleAt, pointAt, rampOn,
+  RAMP_HEIGHT, RAMP_LENGTH, ROLLER_RADIUS, sampleAt, TUNNEL_HEIGHT, type Near, type Path, type ThemeId, type Track,
+} from './tracks';
 import { racerDef, RACERS, type RacerId } from './roster';
 import type { KartEvent, KartState } from './sim';
 
-const THEMES: Record<Track['def']['theme'], Theme & { ground: number[]; far: number; water: number | null; road: string; edge: number }> = {
-  meadow: { skyTop: 0x3f86d8, skyHorizon: 0xcde9ff, fog: 0xd6ecff, fogNear: 180, fogFar: 720, sun: 0xfff3dc, sunIntensity: 2.6, ambientSky: 0xcfe6ff, ambientGround: 0x5d7a3a, ambient: 1.1, ground: [0x6cbf4a, 0x58a93c, 0x8fcd5c, 0x7bb84f], far: -10, water: 0x3d9bd6, road: '#5a5e66', edge: 0x9bd36a },
-  city: { skyTop: 0x4d8fd6, skyHorizon: 0xd7e7f5, fog: 0xd9e4ef, fogNear: 160, fogFar: 640, sun: 0xfff1d6, sunIntensity: 2.5, ambientSky: 0xdde8f5, ambientGround: 0x666a70, ambient: 1.15, ground: [0x9a9ea6, 0x8e939b, 0xa4a8ae, 0x7fae5a], far: 0, water: null, road: '#4d5158', edge: 0xb9bdc4 },
-  canyon: { skyTop: 0x3a78c4, skyHorizon: 0xf5d9b0, fog: 0xf0d2a8, fogNear: 170, fogFar: 700, sun: 0xffe2b8, sunIntensity: 2.8, ambientSky: 0xffe7c9, ambientGround: 0x9a5a35, ambient: 1.05, ground: [0xd9955a, 0xc8763f, 0xe0ac70, 0xb86534], far: 34, water: null, road: '#6a5e58', edge: 0xe7b47a },
-  frost: { skyTop: 0x6d9fd6, skyHorizon: 0xe8f2fc, fog: 0xe6eff9, fogNear: 150, fogFar: 640, sun: 0xffffff, sunIntensity: 2.2, ambientSky: 0xeaf3ff, ambientGround: 0x9fb3c8, ambient: 1.25, ground: [0xf3f7fc, 0xe2ebf5, 0xffffff, 0xd2deeb], far: 30, water: null, road: '#5d6670', edge: 0xffffff },
+interface KartTheme extends Theme {
+  ground: number[]; far: number; water: number | null; road: string; edge: number;
+  /** Colour of the track's liquid (lagoon water, lava) and of the land just below it. */
+  liquid: number; bed: number;
+  wall: [string, string]; obstacle: number;
+}
+const THEMES: Record<ThemeId, KartTheme> = {
+  meadow: { skyTop: 0x3f86d8, skyHorizon: 0xcde9ff, fog: 0xd6ecff, fogNear: 180, fogFar: 720, sun: 0xfff3dc, sunIntensity: 2.6, ambientSky: 0xcfe6ff, ambientGround: 0x5d7a3a, ambient: 1.1, ground: [0x6cbf4a, 0x58a93c, 0x8fcd5c, 0x7bb84f], far: -10, water: 0x3d9bd6, road: '#5a5e66', edge: 0x9bd36a, liquid: 0x3d9bd6, bed: 0xd8c48a, wall: ['#d8322f', '#f4f4f4'], obstacle: 0x8a7a66 },
+  city: { skyTop: 0x4d8fd6, skyHorizon: 0xd7e7f5, fog: 0xd9e4ef, fogNear: 160, fogFar: 640, sun: 0xfff1d6, sunIntensity: 2.5, ambientSky: 0xdde8f5, ambientGround: 0x666a70, ambient: 1.15, ground: [0x9a9ea6, 0x8e939b, 0xa4a8ae, 0x7fae5a], far: 0, water: null, road: '#4d5158', edge: 0xb9bdc4, liquid: 0x3d8fc0, bed: 0x6f7378, wall: ['#d8322f', '#f4f4f4'], obstacle: 0xd8322f },
+  canyon: { skyTop: 0x3a78c4, skyHorizon: 0xf5d9b0, fog: 0xf0d2a8, fogNear: 170, fogFar: 700, sun: 0xffe2b8, sunIntensity: 2.8, ambientSky: 0xffe7c9, ambientGround: 0x9a5a35, ambient: 1.05, ground: [0xd9955a, 0xc8763f, 0xe0ac70, 0xb86534], far: 34, water: null, road: '#6a5e58', edge: 0xe7b47a, liquid: 0x3d8fc0, bed: 0xb86534, wall: ['#b5562c', '#e8c79a'], obstacle: 0x9a5a35 },
+  frost: { skyTop: 0x6d9fd6, skyHorizon: 0xe8f2fc, fog: 0xe6eff9, fogNear: 150, fogFar: 640, sun: 0xffffff, sunIntensity: 2.2, ambientSky: 0xeaf3ff, ambientGround: 0x9fb3c8, ambient: 1.25, ground: [0xf3f7fc, 0xe2ebf5, 0xffffff, 0xd2deeb], far: 30, water: null, road: '#5d6670', edge: 0xffffff, liquid: 0x7fb6d9, bed: 0xd2deeb, wall: ['#2f6fd8', '#f4f4f4'], obstacle: 0xf4f8ff },
+  lagoon: { skyTop: 0x2f8fe0, skyHorizon: 0xc9f1ff, fog: 0xc9eefc, fogNear: 200, fogFar: 820, sun: 0xfff1d0, sunIntensity: 2.8, ambientSky: 0xd2f3ff, ambientGround: 0x5f8f5a, ambient: 1.15, ground: [0x5fbf4f, 0x4aa844, 0x86d06a, 0xe9d7a0], far: -14, water: null, road: '#6b6a68', edge: 0xf1e3b0, liquid: 0x1fa8c9, bed: 0xe8d49a, wall: ['#2aa7a1', '#f6efe0'], obstacle: 0x8b6a4a },
+  volcano: { skyTop: 0x3b2c3f, skyHorizon: 0xd98a5a, fog: 0x9a5a48, fogNear: 150, fogFar: 640, sun: 0xffc48a, sunIntensity: 2.4, ambientSky: 0xffb08a, ambientGround: 0x3a2622, ambient: 1.0, ground: [0x4a3c3a, 0x3a2f2e, 0x5c4a44, 0x2c2423], far: -16, water: null, road: '#3f3a3c', edge: 0x6b5a52, liquid: 0xff5a1a, bed: 0x8a2a10, wall: ['#e0582a', '#2a2222'], obstacle: 0x4a3a34 },
+  dusk: { skyTop: 0x2b2f6b, skyHorizon: 0xf2a079, fog: 0xc98a86, fogNear: 160, fogFar: 660, sun: 0xffb27a, sunIntensity: 2.2, ambientSky: 0xc8a8e8, ambientGround: 0x4a4458, ambient: 1.2, ground: [0x8e8a96, 0x7f7b88, 0x9c98a4, 0x6f9e5a], far: 0, water: null, road: '#3e4049', edge: 0xb0acb8, liquid: 0x2c6f9e, bed: 0x4a5a6a, wall: ['#ff4fa3', '#2f2f3a'], obstacle: 0xffb000 },
 };
 const KART_SCALE = 2.0;
 const SPARK = [0x9a9a9a, 0x4fc3ff, 0xff9a2e, 0xd36bff];
-const _near: Near = { index: 0, t: 0, s: 0, lateral: 0, y: 0, tx: 0, tz: 1, distance: 0 };
+/** Underwater fog. */
+const DEEP = { color: 0x0d5f78, near: 2, far: 120 };
+const _near: Near = newNear();
+const _tn: Near = newNear();
 const _pt = [0, 0, 0, 0];
+const _ob = [0, 0, 0, 0];
 const _v = new THREE.Vector3();
 const _look = new THREE.Vector3();
+const _m = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _s = new THREE.Vector3();
+const _p = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 
 interface KartVisual {
   racer: RacerId; root: THREE.Group; body: THREE.Group; wheels: THREE.Object3D[]; front: THREE.Object3D[];
-  mixer: THREE.AnimationMixer | null; flames: THREE.Mesh[]; bubble: THREE.Mesh; label: THREE.Sprite | null;
-  wheelSpin: number; tilt: number; bounce: number; visualYaw: number; spinAngle: number;
+  mixer: THREE.AnimationMixer | null; flames: THREE.Mesh[]; bubble: THREE.Mesh; label: THREE.Sprite | null; wing: THREE.Group;
+  wheelSpin: number; tilt: number; bounce: number; visualYaw: number; spinAngle: number; pitch: number; wingOpen: number;
 }
+interface ObstacleVisual { mesh: THREE.Mesh; roll: number }
 
 export interface RenderRacer { id: number; racer: RacerId; human: boolean; name: string }
 
@@ -38,21 +62,27 @@ export class KartRenderer {
   readonly view: GameView;
   private lib: AssetLibrary;
   private track: Track;
-  private theme: (typeof THEMES)[keyof typeof THEMES];
+  private theme: KartTheme;
   private karts: KartVisual[] = [];
   private boxes: THREE.Object3D[] = [];
   private bananas = new Map<number, THREE.Object3D>();
   private bombs = new Map<number, THREE.Object3D>();
+  private obstacles: ObstacleVisual[] = [];
   private particles = new Particles(2400, true);
-  private smoke = new Particles(600, false);
+  private smoke = new Particles(700, false);
   private camPos = new THREE.Vector3();
   private camLook = new THREE.Vector3();
   private camReady = false;
+  private underwater = false;
   private time = 0;
+  private lava: THREE.Texture | null = null;
   private flameGeo = new THREE.ConeGeometry(0.22, 1.2, 10, 1, true);
   private flameMat = new THREE.MeshBasicMaterial({ color: 0xff8a2a, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false });
   private bubbleGeo = new THREE.SphereGeometry(2.0, 20, 14);
   private bubbleMat = new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false });
+  private wingGeo = new THREE.BoxGeometry(4.2, 0.08, 1.5);
+  private strutGeo = new THREE.CylinderGeometry(0.05, 0.05, 1.3, 6);
+  private strutMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
   private racers: RenderRacer[];
   private self: number;
 
@@ -73,40 +103,87 @@ export class KartRenderer {
     this.buildWorld();
     for (const r of this.racers) this.karts.push(this.buildKart(r));
     this.view.scene.add(this.particles.points, this.smoke.points);
-    for (const m of [this.flameGeo, this.flameMat, this.bubbleGeo, this.bubbleMat]) this.lib.own(m);
+    for (const m of [this.flameGeo, this.flameMat, this.bubbleGeo, this.bubbleMat, this.wingGeo, this.strutGeo, this.strutMat]) this.lib.own(m);
   }
 
   // ── World ────────────────────────────────────────────────────────────────
+  /**
+   * Landscape height at (x, z) over every route: the lowest road bed when the
+   * point is on a road (under an overpass the land meets the lower road),
+   * otherwise each nearby road's own off-road ground blended by closeness, so
+   * the land near a road is what the simulation drives on and slopes between
+   * roads at different heights.
+   */
+  private terrainY(x: number, z: number): number {
+    const { track } = this;
+    let road = Infinity, sum = 0, weight = 0, far = 0, farD = Infinity;
+    const levels = this.levels, dists = this.levelDist;
+    for (const p of track.paths) {
+      // Nearest sample per stretch within reach: stacked or neighbouring stretches of one
+      // path (spirals, a road passing under itself, hairpins) are separate candidates.
+      let bd = Infinity, bi = 0, nl = 0;
+      const reach = (p.halfWidth + 40) ** 2;
+      for (let i = 0; i < p.count; i += 5) {
+        const d = (p.px[i] - x) ** 2 + (p.pz[i] - z) ** 2;
+        if (d < bd) { bd = d; bi = i; }
+        if (d > reach) continue;
+        let slot = -1;
+        for (let k = 0; k < nl; k++) {
+          const gap = Math.abs(i - levels[k]);
+          if (Math.abs(p.py[i] - p.py[levels[k]]) < 4 && Math.min(gap, p.closed ? p.count - gap : gap) < 40) { slot = k; break; }
+        }
+        if (slot < 0) { if (nl < levels.length) { levels[nl] = i; dists[nl] = d; nl++; } }
+        else if (d < dists[slot]) { levels[slot] = i; dists[slot] = d; }
+      }
+      if (nl === 0) { levels[0] = bi; nl = 1; }
+      for (let k = 0; k < nl; k++) {
+        const n = nearest(p, x, z, levels[k], _tn, 8);
+        const g = track.terrain(x, z, n);
+        const off = Math.abs(n.lateral) - p.halfWidth;
+        if (off <= 1 && !(p.flags[n.index] & (F_BRIDGE | F_GAP))) road = Math.min(road, g);
+        if (n.distance < p.halfWidth + 90) { const w = 1 / Math.max(1, off) ** 3; sum += g * w; weight += w; }
+        if (n.distance < farD) { farD = n.distance; far = g; }
+      }
+    }
+    return road < Infinity ? road : weight > 0 ? sum / weight : far;
+  }
+  private levels = new Int32Array(6);
+  private levelDist = new Float64Array(6);
+  /** Distance in plan from (x, z) to the nearest centre line of any route, minus its half width. */
+  private roadGap(x: number, z: number): number {
+    let best = Infinity;
+    for (const p of this.track.paths) for (let i = 0; i < p.count; i += 3) {
+      const d = Math.sqrt((p.px[i] - x) ** 2 + (p.pz[i] - z) ** 2) - p.halfWidth;
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
   private buildWorld(): void {
     const { track, theme } = this;
     const scene = this.view.scene;
     const noise = makeNoise(hashString(track.def.id) ^ 0x51ed);
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (let i = 0; i < track.count; i++) {
-      minX = Math.min(minX, track.px[i]); maxX = Math.max(maxX, track.px[i]);
-      minZ = Math.min(minZ, track.pz[i]); maxZ = Math.max(maxZ, track.pz[i]);
+    for (const p of track.paths) for (let i = 0; i < p.count; i++) {
+      minX = Math.min(minX, p.px[i]); maxX = Math.max(maxX, p.px[i]);
+      minZ = Math.min(minZ, p.pz[i]); maxZ = Math.max(maxZ, p.pz[i]);
     }
     const margin = 260, step = 4;
     const x0 = minX - margin, z0 = minZ - margin;
     const nx = Math.ceil((maxX - minX + margin * 2) / step) + 1, nz = Math.ceil((maxZ - minZ + margin * 2) / step) + 1;
     const positions = new Float32Array(nx * nz * 3), colors = new Float32Array(nx * nz * 3), uvs = new Float32Array(nx * nz * 2);
     const palette = theme.ground.map(c => new THREE.Color(c));
-    const edge = new THREE.Color(theme.edge);
+    const edge = new THREE.Color(theme.edge), bed = new THREE.Color(theme.bed);
     const tmp = new THREE.Color();
-    const coarse = (x: number, z: number): Near => {
-      // Coarse global search, then refine locally.
-      let best = Infinity, bi = 0;
-      for (let i = 0; i < track.count; i += 6) {
-        const d = (track.px[i] - x) ** 2 + (track.pz[i] - z) ** 2;
-        if (d < best) { best = d; bi = i; }
-      }
-      return nearest(track, x, z, bi, _near, 8);
-    };
+    const liquid = track.liquid;
     for (let iz = 0; iz < nz; iz++) for (let ix = 0; ix < nx; ix++) {
       const k = iz * nx + ix, x = x0 + ix * step, z = z0 + iz * step;
-      const near = coarse(x, z);
-      const off = Math.abs(near.lateral) - track.halfWidth;
-      let y = off <= 1 ? near.y - 0.35 : track.ground(x, z, near);
+      let y = this.terrainY(x, z);
+      // Main-loop distance drives the far-field shaping (mountains, sea).
+      let bd = Infinity, bi = 0;
+      for (let i = 0; i < track.count; i += 6) { const d = (track.px[i] - x) ** 2 + (track.pz[i] - z) ** 2; if (d < bd) { bd = d; bi = i; } }
+      const near = nearest(track, x, z, bi, _near, 8);
+      const off = Math.min(Math.abs(near.lateral) - track.halfWidth, Math.sqrt(bd) - track.halfWidth);
       const far = smoothstep(60, 240, off);
       y += far * theme.far * (0.55 + 0.45 * fbm(noise, x * 0.006, z * 0.006, 3));
       positions[k * 3] = x; positions[k * 3 + 1] = y; positions[k * 3 + 2] = z;
@@ -114,9 +191,14 @@ export class KartRenderer {
       const n = fbm(noise, x * 0.03, z * 0.03, 3) * 0.5 + 0.5;
       tmp.copy(palette[0]).lerp(palette[1], n);
       tmp.lerp(palette[2], smoothstep(0.55, 0.9, fbm(noise, x * 0.011 + 40, z * 0.011, 2) * 0.5 + 0.5) * 0.6);
-      if (track.def.theme === 'city') tmp.lerp(palette[3], smoothstep(30, 60, off) * smoothstep(0.4, 0.7, n));
-      if (track.def.theme === 'canyon') tmp.lerp(palette[3], smoothstep(4, 30, y - near.y) * 0.8);
+      const theme_ = track.def.theme;
+      if (theme_ === 'city' || theme_ === 'dusk') tmp.lerp(palette[3], smoothstep(30, 60, off) * smoothstep(0.4, 0.7, n));
+      if (theme_ === 'canyon') tmp.lerp(palette[3], smoothstep(4, 30, y - near.y) * 0.8);
+      if (theme_ === 'volcano') tmp.lerp(palette[3], smoothstep(4, 24, y - near.y) * 0.7);
       if (off < 3.5 && off > -1) tmp.lerp(edge, 0.55 * (1 - smoothstep(0, 3.5, off)));
+      // Beaches and lakebeds (or glowing lava shores) around the liquid line.
+      if (liquid !== null) tmp.lerp(bed, smoothstep(liquid + 2.5, liquid - 0.5, y) * (track.lava ? 0.9 : 0.85));
+      if (theme_ === 'lagoon' && liquid !== null) tmp.lerp(palette[3], smoothstep(liquid + 6, liquid + 2, y) * smoothstep(liquid - 1, liquid + 1, y) * 0.8);
       colors[k * 3] = tmp.r; colors[k * 3 + 1] = tmp.g; colors[k * 3 + 2] = tmp.b;
     }
     const index: number[] = [];
@@ -134,38 +216,56 @@ export class KartRenderer {
     const terrain = owned(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: detail })));
     terrain.receiveShadow = true;
     scene.add(terrain);
-    if (theme.water !== null) {
+    if (theme.water !== null && liquid === null) {
       const water = owned(new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshLambertMaterial({ color: theme.water, transparent: true, opacity: 0.92 })));
       water.rotation.x = -Math.PI / 2; water.position.y = -3.2;
       scene.add(water);
     }
-    this.buildRoad();
+    if (liquid !== null) {
+      let mat: THREE.Material;
+      if (track.lava) {
+        this.lava = this.lib.own(groundDetailTexture());
+        this.lava.repeat.set(160, 160);
+        mat = new THREE.MeshBasicMaterial({ color: theme.liquid, map: this.lava });
+      } else mat = new THREE.MeshLambertMaterial({ color: theme.liquid, transparent: true, opacity: 0.74, side: THREE.DoubleSide, depthWrite: false });
+      const surface = owned(new THREE.Mesh(new THREE.PlaneGeometry(6000, 6000), mat));
+      surface.rotation.x = -Math.PI / 2; surface.position.y = liquid;
+      surface.renderOrder = 2;
+      scene.add(surface);
+    }
+    for (const p of track.paths) this.buildRoad(p);
+    this.buildStart();
+    this.buildObstacles();
     this.buildProps();
-    for (let i = 0; i < track.def.itemRows.length * 5; i++) {
+    for (let i = 0; i < this.itemBoxCount(); i++) {
       const box = this.lib.instance('toy-item-box');
       box.scale.setScalar(4);
       scene.add(box);
       this.boxes.push(box);
     }
   }
+  private itemBoxCount(): number {
+    let n = 0;
+    for (const p of this.track.paths) n += p.features.itemRows.length * (p.halfWidth < 6 ? 3 : 5);
+    return n;
+  }
 
-  /** Strip mesh following the centre line between two lateral offsets. */
-  private strip(fromLat: number, toLat: number, lift: number, vScale: number, material: THREE.Material, filter?: (i: number) => boolean, withRamp = true): THREE.Mesh {
-    const { track } = this;
+  /** Strip mesh following a path between two lateral offsets (banked like the road). */
+  private strip(path: Path, fromLat: number, toLat: number, lift: number, vScale: number, material: THREE.Material, filter?: (i: number) => boolean, withRamp = true): THREE.Mesh {
     const pos: number[] = [], uv: number[] = [], idx: number[] = [];
-    let v = 0, open = false;
-    for (let i = 0; i <= track.count; i++) {
-      const k = i % track.count;
+    let open = false;
+    const n = path.count, last = path.closed ? n : n - 1;
+    for (let i = 0; i <= last; i++) {
+      const k = i % n;
       if (filter && !filter(k)) { open = false; continue; }
-      const s = track.dist[k];
-      const ramp = withRamp ? rampHeight(track.def, track.length, s) : 0;
-      const lx = track.tz[k], lz = -track.tx[k];
-      const y = track.py[k] + lift + ramp;
-      pos.push(track.px[k] + lx * fromLat, y, track.pz[k] + lz * fromLat, track.px[k] + lx * toLat, y, track.pz[k] + lz * toLat);
-      v = i === 0 ? 0 : v + (track.length / track.count) / vScale;
+      const ramp = withRamp ? rampOn(path, path.dist[k]) : 0;
+      const lx = path.tz[k], lz = -path.tx[k], b = path.bank[k];
+      const y = path.py[k] + lift + ramp;
+      pos.push(path.px[k] + lx * fromLat, y - fromLat * b, path.pz[k] + lz * fromLat, path.px[k] + lx * toLat, y - toLat * b, path.pz[k] + lz * toLat);
+      const v = (i === n && path.closed ? path.length : path.dist[k]) / vScale;
       uv.push(0, v, 1, v);
-      const n = pos.length / 3;
-      if (open) idx.push(n - 4, n - 2, n - 3, n - 3, n - 2, n - 1);
+      const m = pos.length / 3;
+      if (open) idx.push(m - 4, m - 2, m - 3, m - 3, m - 2, m - 1);
       open = true;
     }
     const geo = new THREE.BufferGeometry();
@@ -178,76 +278,29 @@ export class KartRenderer {
     return mesh;
   }
 
-  private buildRoad(): void {
-    const { track, theme, view } = this;
-    const hw = track.halfWidth;
-    const asphalt = this.lib.own(asphaltTexture(theme.road));
-    view.scene.add(this.strip(-hw, hw, 0.06, 14, new THREE.MeshLambertMaterial({ map: asphalt })));
-    const ice = track.def.ice;
-    if (ice.length) {
-      const iceMat = new THREE.MeshLambertMaterial({ color: 0xbfe6ff, transparent: true, opacity: 0.75 });
-      view.scene.add(this.strip(-hw, hw, 0.09, 10, iceMat, i => ice.some(([a, b]) => track.dist[i] / track.length >= a && track.dist[i] / track.length <= b)));
-    }
-    if (track.def.edge === 'grass') {
-      const curb = new THREE.MeshLambertMaterial({ map: this.lib.own(curbTexture()) });
-      view.scene.add(this.strip(hw, hw + 1.1, 0.08, 3, curb), this.strip(-hw - 1.1, -hw, 0.08, 3, curb));
-    } else {
-      // Continuous barrier walls matching the collision limit.
-      const wallMat = new THREE.MeshLambertMaterial({ map: this.lib.own(curbTexture(track.def.theme === 'city' ? '#d8322f' : '#b5562c', track.def.theme === 'city' ? '#f4f4f4' : '#e8c79a')) });
-      for (const side of [-1, 1]) view.scene.add(this.wall(side * (hw + 1.4), side, wallMat));
-    }
-    // Start line + finish gate.
-    const checker = new THREE.MeshBasicMaterial({ map: this.lib.own(checkerTexture()) });
-    const start = owned(new THREE.Mesh(new THREE.PlaneGeometry(hw * 2, 2.4), checker));
-    pointAt(track, 0, 0, _pt);
-    start.position.set(_pt[0], _pt[1] + 0.1, _pt[2]);
-    start.rotation.set(-Math.PI / 2, _pt[3], 0, 'YXZ');
-    view.scene.add(start);
-    // Dash panels.
-    const chevron = new THREE.MeshBasicMaterial({ map: this.lib.own(chevronTexture()), toneMapped: false });
-    for (const pad of track.def.boostPads) {
-      const mesh = owned(new THREE.Mesh(new THREE.PlaneGeometry(4.4, 4.4), chevron));
-      pointAt(track, pad.at * track.length, pad.lane * hw, _pt);
-      mesh.position.set(_pt[0], _pt[1] + 0.12, _pt[2]);
-      mesh.rotation.set(-Math.PI / 2, _pt[3] + Math.PI, 0, 'YXZ');
-      view.scene.add(mesh);
-    }
-    // Ramps: striped deck over the rising road + lip face.
-    const stripes = new THREE.MeshLambertMaterial({ map: this.lib.own(stripeTexture()) });
-    for (const at of track.def.ramps) {
-      const s0 = at * track.length - RAMP_LENGTH;
-      view.scene.add(this.strip(-hw, hw, 0.1, 2, stripes, i => {
-        const d = track.dist[i] - s0;
-        return d >= -2 && d <= RAMP_LENGTH + 2;
-      }));
-      pointAt(track, at * track.length, 0, _pt);
-      const face = owned(new THREE.Mesh(new THREE.BoxGeometry(hw * 2, RAMP_HEIGHT, 0.5), new THREE.MeshLambertMaterial({ color: 0x333333 })));
-      face.position.set(_pt[0], _pt[1] + RAMP_HEIGHT / 2 + 0.05, _pt[2]);
-      face.rotation.y = _pt[3];
-      view.scene.add(face);
-    }
-  }
-
-  private wall(lateral: number, side: number, material: THREE.Material): THREE.Mesh {
-    const { track } = this;
+  /** Barrier along a path at `lateral` (side = which way its thickness goes), only where `filter` allows. */
+  private wall(path: Path, lateral: number, side: number, material: THREE.Material, filter?: (i: number) => boolean, top = 1.3, bottom = -0.4, thick = 0.6): THREE.Mesh {
     const pos: number[] = [], uv: number[] = [], idx: number[] = [];
-    const h = track.def.theme === 'city' ? 1.0 : 1.3, t = 0.6;
-    for (let i = 0; i <= track.count; i++) {
-      const k = i % track.count;
-      const lx = track.tz[k], lz = -track.tx[k];
-      const bx = track.px[k] + lx * lateral, bz = track.pz[k] + lz * lateral, y = track.py[k];
-      const ox = lx * side * t, oz = lz * side * t;
+    const n = path.count, last = path.closed ? n : n - 1;
+    let open = false;
+    for (let i = 0; i <= last; i++) {
+      const k = i % n;
+      if (filter && !filter(k)) { open = false; continue; }
+      const lx = path.tz[k], lz = -path.tx[k];
+      const bx = path.px[k] + lx * lateral, bz = path.pz[k] + lz * lateral, y = path.py[k] - lateral * path.bank[k];
+      const ox = lx * side * thick, oz = lz * side * thick;
       // inner bottom, inner top, outer top, outer bottom
-      pos.push(bx, y - 0.4, bz, bx, y + h, bz, bx + ox, y + h, bz + oz, bx + ox, y - 0.4, bz + oz);
-      const v = track.dist[k] / 4 + (i === track.count ? track.length / 4 : 0);
+      pos.push(bx, y + bottom, bz, bx, y + top, bz, bx + ox, y + top, bz + oz, bx + ox, y + bottom, bz + oz);
+      const v = (i === n && path.closed ? path.length : path.dist[k]) / 4;
       uv.push(0, v, 0.5, v, 0.75, v, 1, v);
-      if (i > 0) {
-        const n = pos.length / 3, a = n - 8, b = n - 4;
+      if (open) {
+        const m = pos.length / 3, a = m - 8, b = m - 4;
         for (let f = 0; f < 3; f++) {
           const p = a + f, q = a + f + 1, r = b + f, s = b + f + 1;
           if (side > 0) idx.push(p, r, q, q, r, s); else idx.push(p, q, r, q, s, r);
         }
       }
+      open = true;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -259,80 +312,354 @@ export class KartRenderer {
     return mesh;
   }
 
+  /** Whether the point `lat` metres beside sample `i` of `path` lies on another route's road (forks and merges). */
+  private onOtherRoad(path: Path, i: number, lat: number): boolean {
+    const { track } = this;
+    if (track.paths.length < 2) return false;
+    const zone = FORK_ZONE * 2.5;
+    pointAt(path, path.dist[i], lat, _pt);
+    for (const q of track.paths) {
+      if (q === path) continue;
+      let hint: number;
+      if (path.index === 0) {
+        // Main loop: only near this branch's fork or merge.
+        const s = path.dist[i];
+        if (Math.abs(circ(s - q.from, track.length)) < zone) hint = sampleAt(q, s - q.from);
+        else if (Math.abs(circ(s - q.to, track.length)) < zone) hint = sampleAt(q, q.length - (q.to - s));
+        else continue;
+      } else if (q.index === 0) {
+        const s = path.dist[i];
+        if (s < zone) hint = sampleAt(track, path.from + s);
+        else if (s > path.length - zone) hint = sampleAt(track, path.to - (path.length - s));
+        else continue;
+      } else continue;
+      const n = nearest(q, _pt[0], _pt[2], hint, _tn, 30, _pt[1]);
+      if (Math.abs(n.lateral) < q.halfWidth + 0.6 && Math.abs(n.y - _pt[1]) < 3) return true;
+    }
+    return false;
+  }
+
+  private buildRoad(path: Path): void {
+    const { track, theme, view } = this;
+    const scene = view.scene;
+    const hw = path.halfWidth;
+    const flag = (i: number, f: number) => (path.flags[i] & f) !== 0;
+    const notGap = (i: number) => !flag(i, F_GAP);
+    // Edge furniture stops where the edge runs over the other road at a fork or merge.
+    const clearL = new Uint8Array(path.count), clearR = new Uint8Array(path.count);
+    for (let i = 0; i < path.count; i++) { clearL[i] = this.onOtherRoad(path, i, hw + 0.8) ? 0 : 1; clearR[i] = this.onOtherRoad(path, i, -hw - 0.8) ? 0 : 1; }
+    const clear = (side: number) => (i: number) => (side > 0 ? clearL[i] : clearR[i]) === 1;
+    const frac = (i: number) => path.dist[i] / path.length;
+    // Branches sit a hair above the main road where they overlap at the fork and merge.
+    const lift = path.index === 0 ? 0.06 : 0.075;
+    const asphalt = this.lib.own(asphaltTexture(theme.road));
+    scene.add(this.strip(path, -hw, hw, lift, 14, new THREE.MeshLambertMaterial({ map: asphalt }), notGap));
+    const ice = path.features.ice;
+    if (ice.length) {
+      const iceMat = new THREE.MeshLambertMaterial({ color: 0xbfe6ff, transparent: true, opacity: 0.75 });
+      scene.add(this.strip(path, -hw, hw, lift + 0.03, 10, iceMat, i => ice.some(([a, b]) => frac(i) >= a && frac(i) <= b)));
+    }
+    // Off-road patches: sand, gravel or cinders laid over the tarmac.
+    for (const o of path.features.offroad) {
+      const [l0, l1] = o.lanes ?? [-1, 1];
+      const mat = new THREE.MeshLambertMaterial({ color: theme.bed, map: this.lib.own(groundDetailTexture()) });
+      scene.add(this.strip(path, l0 * hw, l1 * hw, lift + 0.04, 6, mat, i => frac(i) >= o.from && frac(i) <= o.to && notGap(i)));
+    }
+    // Edges: curbs on open grass road, barriers on walled roads, rails on bridges and in tunnels.
+    const [wa, wb] = theme.wall;
+    const wallMat = new THREE.MeshLambertMaterial({ map: this.lib.own(curbTexture(wa, wb)) });
+    if (path.edge === 'grass') {
+      const curb = new THREE.MeshLambertMaterial({ map: this.lib.own(curbTexture()) });
+      const curbed = (i: number) => notGap(i) && !flag(i, F_BRIDGE) && !flag(i, F_TUNNEL);
+      scene.add(this.strip(path, hw, hw + 1.1, lift + 0.02, 3, curb, i => curbed(i) && clearL[i] === 1), this.strip(path, -hw - 1.1, -hw, lift + 0.02, 3, curb, i => curbed(i) && clearR[i] === 1));
+      const railed = (i: number) => flag(i, F_RAILS) && !flag(i, F_TUNNEL) && notGap(i);
+      let rails = false;
+      for (let i = 0; i < path.count && !rails; i++) rails = railed(i);
+      if (rails) for (const side of [-1, 1]) scene.add(this.wall(path, side * (hw + 1.4), side, wallMat, i => railed(i) && clear(side)(i), 1.0));
+    } else {
+      // Continuous barrier walls matching the collision limit (none over gaps, open at forks).
+      const h = track.def.theme === 'city' || track.def.theme === 'dusk' ? 1.0 : 1.3;
+      for (const side of [-1, 1]) scene.add(this.wall(path, side * (hw + 1.4), side, wallMat, i => notGap(i) && !flag(i, F_TUNNEL) && clear(side)(i), h));
+    }
+    this.buildBridges(path);
+    this.buildTunnels(path);
+    // Dash panels.
+    const chevron = new THREE.MeshBasicMaterial({ map: this.lib.own(chevronTexture()), toneMapped: false });
+    for (const pad of path.features.boostPads) {
+      const mesh = owned(new THREE.Mesh(new THREE.PlaneGeometry(4.4, 4.4), chevron));
+      pointAt(path, pad.at * path.length, pad.lane * hw, _pt);
+      const b = path.bank[sampleAt(path, pad.at * path.length)];
+      mesh.position.set(_pt[0], _pt[1] + lift + 0.06 - pad.lane * hw * b, _pt[2]);
+      mesh.rotation.set(-Math.PI / 2, _pt[3] + Math.PI, 0, 'YXZ');
+      scene.add(mesh);
+    }
+    // Kicker ramps: striped deck over the rising road + lip face.
+    const stripes = new THREE.MeshLambertMaterial({ map: this.lib.own(stripeTexture()) });
+    for (const at of path.features.ramps) {
+      const s0 = at * path.length - RAMP_LENGTH;
+      scene.add(this.strip(path, -hw, hw, lift + 0.04, 2, stripes, i => { const d = path.dist[i] - s0; return d >= -2 && d <= RAMP_LENGTH + 2; }));
+      this.lip(path, at, RAMP_HEIGHT, 0x333333);
+    }
+    // Launch ramps (and glider pads): long striped ramp, chevrons, a gantry with a banner.
+    const glideStripes = new THREE.MeshLambertMaterial({ map: this.lib.own(stripeTexture('#38b6ff', '#ffffff')) });
+    for (const l of path.features.launches) {
+      const s0 = l.at * path.length - LAUNCH_LENGTH;
+      scene.add(this.strip(path, -hw, hw, lift + 0.04, 3, l.glide ? glideStripes : stripes, i => { const d = path.dist[i] - s0; return d >= -2 && d <= LAUNCH_LENGTH + 1; }));
+      this.lip(path, l.at, LAUNCH_HEIGHT, l.glide ? 0x1f6fb2 : 0x333333);
+      const label = this.lib.own(labelTexture(l.glide ? 'GLIDER' : 'JUMP', l.glide ? '#38b6ff' : '#ffcc00'));
+      pointAt(path, s0 - 6, 0, _pt);
+      const banner = owned(new THREE.Mesh(new THREE.PlaneGeometry(hw * 1.4, hw * 0.35), new THREE.MeshBasicMaterial({ map: label, transparent: true, side: THREE.DoubleSide })));
+      banner.position.set(_pt[0], _pt[1] + 6.5, _pt[2]);
+      banner.rotation.y = _pt[3] + Math.PI;
+      scene.add(banner);
+      for (const side of [-1, 1]) {
+        pointAt(path, s0 - 6, side * (hw + 1.2), _pt);
+        const post = owned(new THREE.Mesh(new THREE.BoxGeometry(0.5, 7.2, 0.5), new THREE.MeshLambertMaterial({ color: 0x333333 })));
+        post.position.set(_pt[0], _pt[1] + 3.6, _pt[2]);
+        scene.add(post);
+      }
+    }
+    // A sign in the gore where each branch splits from the main road, facing the oncoming racers.
+    if (path.index > 0) {
+      const tex = this.lib.own(labelTexture(path.shortcut ? `${path.name} · shortcut` : path.name, path.shortcut ? '#ffcc00' : '#ffffff'));
+      let at = -1;
+      for (let s = 24; s < Math.min(120, path.length / 2) && at < 0; s += 4) {
+        pointAt(path, s, 0, _pt);
+        const n = nearest(track, _pt[0], _pt[2], sampleAt(track, path.from + s), _tn, 30);
+        if (n.distance > path.halfWidth + track.halfWidth + 5) at = s;
+      }
+      if (at > 0) {
+        pointAt(path, at, 0, _pt);
+        const bx = _pt[0], bz = _pt[2], yaw = _pt[3];
+        const n = nearest(track, bx, bz, sampleAt(track, path.from + at), _tn, 30);
+        const mx = bx - n.lateral * n.tz, mz = bz + n.lateral * n.tx; // closest main-road point
+        const x = (bx + mx) / 2, z = (bz + mz) / 2, y = this.terrainY(x, z);
+        const sign = owned(new THREE.Mesh(new THREE.PlaneGeometry(9, 2.2), new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide })));
+        sign.position.set(x, y + 3.6, z);
+        sign.rotation.y = yaw + Math.PI;
+        const post = owned(new THREE.Mesh(new THREE.BoxGeometry(0.4, 3.6, 0.4), new THREE.MeshLambertMaterial({ color: 0x333333 })));
+        post.position.set(x, y + 1.8, z);
+        scene.add(sign, post);
+      }
+    }
+  }
+
+  /** Dark lip face at a ramp's top edge. */
+  private lip(path: Path, at: number, height: number, color: number): void {
+    const hw = path.halfWidth;
+    pointAt(path, at * path.length, 0, _pt);
+    const face = owned(new THREE.Mesh(new THREE.BoxGeometry(hw * 2, height, 0.5), new THREE.MeshLambertMaterial({ color })));
+    face.position.set(_pt[0], _pt[1] + height / 2 + 0.05, _pt[2]);
+    face.rotation.y = _pt[3];
+    this.view.scene.add(face);
+  }
+
+  /** Deck slab under bridge stretches and pillars down to the land (never onto a road below). */
+  private buildBridges(path: Path): void {
+    const hw = path.halfWidth;
+    const bridge = (i: number) => (path.flags[i] & F_BRIDGE) !== 0 && !(path.flags[i] & F_GAP);
+    let any = false;
+    for (let i = 0; i < path.count && !any; i++) any = bridge(i);
+    if (!any) return;
+    const scene = this.view.scene;
+    const concrete = new THREE.MeshLambertMaterial({ color: this.track.def.theme === 'lagoon' ? 0xb08a5a : 0x9a9aa2, side: THREE.DoubleSide });
+    scene.add(this.strip(path, -hw - RAIL_SHOULDER, hw + RAIL_SHOULDER, -1.2, 6, concrete, bridge, false));
+    // Deck shoulders out to the rails (the road strip covers the lanes).
+    const railedDeck = (i: number) => bridge(i) && (path.flags[i] & F_RAILS) !== 0;
+    scene.add(this.strip(path, hw - 0.05, hw + RAIL_SHOULDER, 0.03, 6, concrete, railedDeck, false), this.strip(path, -hw - RAIL_SHOULDER, -hw + 0.05, 0.03, 6, concrete, railedDeck, false));
+    for (const side of [-1, 1]) scene.add(this.wall(path, side * (hw + RAIL_SHOULDER), side, concrete, bridge, 0.05, -1.2, 0.01));
+    const spots: number[] = [];
+    for (let i = 0; i < path.count; i += 8) {
+      if (!bridge(i)) continue;
+      for (const side of [-1, 1]) {
+        // Just outside the deck (and outside the rails of a stacked road below).
+        const lat = side * (hw + RAIL_SHOULDER + 0.6);
+        pointAt(path, path.dist[i], lat, _pt);
+        const top = path.py[i] - lat * path.bank[i] - 1.2;
+        const base = this.terrainY(_pt[0], _pt[2]);
+        if (top - base < 2.5 || this.roadBelow(_pt[0], _pt[2], top)) continue;
+        spots.push(_pt[0], base - 1, _pt[2], top - base + 1);
+      }
+    }
+    if (!spots.length) return;
+    const pillars = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.7, 0.9, 1, 10), concrete, spots.length / 4);
+    for (let k = 0; k < spots.length; k += 4) {
+      _p.set(spots[k], spots[k + 1] + spots[k + 3] / 2, spots[k + 2]);
+      _s.set(1, spots[k + 3], 1);
+      pillars.setMatrixAt(k / 4, _m.compose(_p, _q.identity(), _s));
+    }
+    pillars.instanceMatrix.needsUpdate = true;
+    pillars.computeBoundingSphere();
+    pillars.castShadow = true; pillars.receiveShadow = true;
+    scene.add(owned(pillars));
+  }
+  /** Whether a road surface (lanes and shoulder) lies under (x, z) more than 2 m below `y`. */
+  private roadBelow(x: number, z: number, y: number): boolean {
+    for (const p of this.track.paths) for (let i = 0; i < p.count; i += 2) {
+      if (p.py[i] > y - 2) continue;
+      const dx = p.px[i] - x, dz = p.pz[i] - z, r = p.halfWidth + 1.4;
+      if (dx * dx + dz * dz < r * r) return true;
+    }
+    return false;
+  }
+
+  /** Arched tubes over tunnel stretches: rock with ceiling lights, or glass under the water. */
+  private buildTunnels(path: Path): void {
+    const scene = this.view.scene;
+    for (const glass of [false, true]) {
+      const inTube = (i: number) => (path.flags[i] & F_TUNNEL) !== 0 && ((path.flags[i] & F_GLASS) !== 0) === glass;
+      const pos: number[] = [], idx: number[] = [];
+      const M = 12, R = path.halfWidth + 1.6;
+      let open = false;
+      const lights: number[] = [];
+      for (let i = 0; i < path.count; i++) {
+        if (!inTube(i)) { open = false; continue; }
+        const lx = path.tz[i], lz = -path.tx[i];
+        for (let a = 0; a <= M; a++) {
+          const t = (a / M) * Math.PI;
+          const lat = Math.cos(t) * R;
+          pos.push(path.px[i] + lx * lat, path.py[i] - lat * path.bank[i] + Math.sin(t) * TUNNEL_HEIGHT - 0.4, path.pz[i] + lz * lat);
+        }
+        if (open) {
+          const b = pos.length / 3 - (M + 1), a0 = b - (M + 1);
+          for (let a = 0; a < M; a++) idx.push(a0 + a, b + a, a0 + a + 1, a0 + a + 1, b + a, b + a + 1);
+        }
+        open = true;
+        if (i % 5 === 0) lights.push(path.px[i], path.py[i] + TUNNEL_HEIGHT - 0.7, path.pz[i], Math.atan2(path.tx[i], path.tz[i]));
+      }
+      if (!idx.length) continue;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      geo.setIndex(idx);
+      geo.computeVertexNormals();
+      const mat = glass
+        ? new THREE.MeshLambertMaterial({ color: 0xa8ecff, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false })
+        : new THREE.MeshLambertMaterial({ color: this.theme.obstacle, map: this.lib.own(groundDetailTexture()), side: THREE.DoubleSide });
+      const tube = owned(new THREE.Mesh(geo, mat));
+      tube.castShadow = !glass; tube.receiveShadow = true;
+      if (glass) tube.renderOrder = 3;
+      scene.add(tube);
+      const lamp = new THREE.InstancedMesh(new THREE.BoxGeometry(2.4, 0.15, 0.5), new THREE.MeshBasicMaterial({ color: glass ? 0x9ff6ff : 0xffe7a8, toneMapped: false }), lights.length / 4);
+      for (let k = 0; k < lights.length; k += 4) {
+        _p.set(lights[k], lights[k + 1], lights[k + 2]);
+        _q.setFromAxisAngle(_up, lights[k + 3]);
+        lamp.setMatrixAt(k / 4, _m.compose(_p, _q, _s.set(1, 1, 1)));
+      }
+      lamp.instanceMatrix.needsUpdate = true;
+      lamp.computeBoundingSphere();
+      scene.add(owned(lamp));
+    }
+  }
+
+  private buildStart(): void {
+    const { track, view } = this;
+    // Start line + finish gate.
+    const checker = new THREE.MeshBasicMaterial({ map: this.lib.own(checkerTexture()) });
+    const start = owned(new THREE.Mesh(new THREE.PlaneGeometry(track.halfWidth * 2, 2.4), checker));
+    pointAt(track, 0, 0, _pt);
+    start.position.set(_pt[0], _pt[1] + 0.1, _pt[2]);
+    start.rotation.set(-Math.PI / 2, _pt[3], 0, 'YXZ');
+    view.scene.add(start);
+  }
+
+  private buildObstacles(): void {
+    const { track, theme } = this;
+    const rollerMat = new THREE.MeshLambertMaterial({ color: theme.obstacle, map: this.lib.own(track.def.theme === 'dusk' ? stripeTexture('#ffb000', '#2a2a2a') : groundDetailTexture()) });
+    const crusherMat = new THREE.MeshLambertMaterial({ color: 0x6d6a72, map: this.lib.own(groundDetailTexture()) });
+    const rollerGeo = this.lib.own(new THREE.SphereGeometry(ROLLER_RADIUS, 18, 12));
+    const crusherGeo = this.lib.own(new THREE.BoxGeometry(CRUSHER_HALF * 2, 2.6, CRUSHER_HALF * 2));
+    this.lib.own(rollerMat); this.lib.own(crusherMat);
+    for (const o of track.obstacles) {
+      const mesh = new THREE.Mesh(o.kind === 'roller' ? rollerGeo : crusherGeo, o.kind === 'roller' ? rollerMat : crusherMat);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      this.view.scene.add(mesh);
+      this.obstacles.push({ mesh, roll: 0 });
+    }
+  }
+
   private buildProps(): void {
     const { track } = this;
     const batch = new PropBatch(this.lib);
     const rng = new Rng(hashString(track.def.id) ^ 0x2f1);
     const hw = track.halfWidth;
-    const clearOf = (x: number, z: number, gap: number) => {
-      let best = Infinity;
-      for (let i = 0; i < track.count; i += 3) best = Math.min(best, (track.px[i] - x) ** 2 + (track.pz[i] - z) ** 2);
-      return Math.sqrt(best) > hw + gap;
-    };
-    const groundAt = (x: number, z: number) => {
-      let best = Infinity, bi = 0;
-      for (let i = 0; i < track.count; i += 6) { const d = (track.px[i] - x) ** 2 + (track.pz[i] - z) ** 2; if (d < best) { best = d; bi = i; } }
-      const n = nearest(track, x, z, bi, _near, 8);
-      return track.ground(x, z, n);
-    };
-    /** Place along the track at lateral distance (beyond the road edge). */
-    const beside = (key: string, s: number, side: number, dist: number, scale: number, faceRoad = true, jitterYaw = 0) => {
-      pointAt(track, s, side * (hw + dist), _pt);
-      if (!clearOf(_pt[0], _pt[2], dist * 0.6)) return;
+    const liquid = track.liquid;
+    /** Place along a path at lateral distance (beyond the road edge), on dry land clear of every road. */
+    const beside = (path: Path, key: string, s: number, side: number, dist: number, scale: number, faceRoad = true, jitterYaw = 0) => {
+      pointAt(path, s, side * (path.halfWidth + dist), _pt);
+      if (this.roadGap(_pt[0], _pt[2]) < dist * 0.6) return;
+      const y = this.terrainY(_pt[0], _pt[2]);
+      if (liquid !== null && y < liquid + 0.4) return;
       const yaw = faceRoad ? _pt[3] + (side > 0 ? -Math.PI / 2 : Math.PI / 2) : rng.range(0, Math.PI * 2);
-      batch.add(key, _pt[0], groundAt(_pt[0], _pt[2]) - 0.05, _pt[2], yaw + rng.range(-jitterYaw, jitterYaw), scale);
+      batch.add(key, _pt[0], y - 0.05, _pt[2], yaw + rng.range(-jitterYaw, jitterYaw), scale);
     };
     const scatter = (keys: string[], count: number, minD: number, maxD: number, scale: [number, number]) => {
       for (let n = 0; n < count; n++) {
-        const s = rng.range(0, track.length), side = rng.chance(0.5) ? 1 : -1, d = rng.range(minD, maxD);
-        beside(rng.pick(keys), s, side, d, rng.range(scale[0], scale[1]), false);
+        const path = track.paths.length > 1 && rng.chance(0.15) ? track.paths[1 + rng.int(track.paths.length - 1)] : track;
+        const s = rng.range(0, path.length), side = rng.chance(0.5) ? 1 : -1, d = rng.range(minD, maxD);
+        beside(path, rng.pick(keys), s, side, d, rng.range(scale[0], scale[1]), false);
       }
     };
     // Solid structures stay beyond the reachable area: outside the walls, or
     // past the rescue line on grass tracks (karts never drive through them).
     const gap = track.def.edge === 'grass' ? track.def.outOfBounds + 2 : 3;
+    const t = track.def.theme;
+    const urban = t === 'city' || t === 'dusk';
     // Start area: grandstands, banner towers, flags, tents.
     for (let s = -70; s <= 70; s += 12) {
-      beside(track.def.theme === 'city' ? 'race-grandStandCovered' : 'race-grandStand', s, 1, gap + 6, 11);
-      if (Math.abs(s) > 20) beside('race-tentLong', s, -1, gap + 3, 6);
+      beside(track, urban ? 'race-grandStandCovered' : 'race-grandStand', s, 1, gap + 6, 11);
+      if (Math.abs(s) > 20) beside(track, 'race-tentLong', s, -1, gap + 3, 6);
     }
-    beside('race-pitsGarage', -24, -1, gap + 5, 10); beside('race-pitsOffice', 0, -1, gap + 5, 10); beside('race-pitsGarage', 24, -1, gap + 5, 10);
-    for (let s = -90; s < 110; s += 30) { beside('race-flagCheckers', s, -1, gap, 5); beside('race-flagRed', s + 15, 1, gap, 5); }
+    beside(track, 'race-pitsGarage', -24, -1, gap + 5, 10); beside(track, 'race-pitsOffice', 0, -1, gap + 5, 10); beside(track, 'race-pitsGarage', 24, -1, gap + 5, 10);
+    for (let s = -90; s < 110; s += 30) { beside(track, 'race-flagCheckers', s, -1, gap, 5); beside(track, 'race-flagRed', s + 15, 1, gap, 5); }
     pointAt(track, 2, 0, _pt);
     batch.add('toy-gate-finish', _pt[0], _pt[1], _pt[2], _pt[3], (hw * 2 + 6) / 1.55, 9);
     // Billboards and flags on corners.
-    for (let i = 0; i < track.count; i += 22) {
-      if (Math.abs(track.curve[i]) < 0.02) continue;
-      const side = track.curve[i] > 0 ? -1 : 1; // outside of the bend
-      beside(rng.chance(0.5) ? 'race-billboard' : 'race-billboardLow', track.dist[i], side, gap + 4, 9);
-      beside(rng.pick(['race-flagRed', 'race-flagGreen', 'race-flagCheckers']), track.dist[i] + 8, side, gap, 4);
+    for (const path of track.paths) for (let i = 0; i < path.count; i += 22) {
+      if (Math.abs(path.curve[i]) < 0.02 || path.drop[i] > 0) continue;
+      const side = path.curve[i] > 0 ? -1 : 1; // outside of the bend
+      beside(path, rng.chance(0.5) ? 'race-billboard' : 'race-billboardLow', path.dist[i], side, gap + 4, 9);
+      beside(path, rng.pick(['race-flagRed', 'race-flagGreen', 'race-flagCheckers']), path.dist[i] + 8, side, gap, 4);
     }
-    const t = track.def.theme;
     if (t === 'meadow') {
       scatter(['nat-tree_default', 'nat-tree_oak', 'nat-tree_detailed', 'nat-tree_fat', 'race-treeLarge'], 520, gap, 150, [6, 9]);
       scatter(['nat-plant_bushLarge', 'nat-plant_bush', 'nat-flower_redA', 'nat-flower_yellowB', 'nat-flower_purpleA', 'nat-mushroom_redGroup'], 600, 3, 40, [5, 8]);
       scatter(['nat-tent_detailedOpen', 'nat-log_stack', 'nat-stump_old'], 50, gap, 50, [6, 8]);
-      for (let i = 0; i < track.count; i += 7) if (Math.abs(track.curve[i]) > 0.018) beside('nat-fence_simple', track.dist[i], track.curve[i] > 0 ? -1 : 1, gap - 1, 5);
-    } else if (t === 'city') {
+      for (let i = 0; i < track.count; i += 7) if (Math.abs(track.curve[i]) > 0.018) beside(track, 'nat-fence_simple', track.dist[i], track.curve[i] > 0 ? -1 : 1, gap - 1, 5);
+    } else if (urban) {
       const blocks = ['city-building-a', 'city-building-b', 'city-building-c', 'city-building-d', 'city-building-e', 'city-building-f', 'city-building-g', 'city-building-h', 'city-building-i', 'city-building-j', 'city-building-k', 'city-building-l'];
-      for (let s = 0; s < track.length; s += 15) for (const side of [-1, 1]) {
-        if (Math.abs(((s + 70) % track.length) - 70) < 80 && side > 0) continue; // grandstands
-        beside(rng.pick(blocks), s, side, rng.range(12, 16), rng.range(10, 12));
-        if (rng.chance(0.25)) beside('race-lightPostLarge', s + 7, side, 2.4, 7);
+      for (const path of track.paths) for (let s = 0; s < path.length; s += 15) for (const side of [-1, 1]) {
+        if (path.index === 0 && Math.abs(((s + 70) % path.length) - 70) < 80 && side > 0) continue; // grandstands
+        const i = sampleAt(path, s);
+        if (t === 'dusk' && (path.drop[i] > 0 || path.py[i] > 4)) continue; // not beside the freeway decks
+        beside(path, rng.pick(blocks), s, side, rng.range(12, 16), rng.range(10, 12));
+        if (rng.chance(0.25)) beside(path, 'race-lightPostLarge', s + 7, side, 2.4, 7);
       }
-      scatter(['city-building-skyscraper-a', 'city-building-skyscraper-b', 'city-building-skyscraper-c', 'city-building-skyscraper-d'], 120, 40, 200, [12, 15]);
+      scatter(['city-building-skyscraper-a', 'city-building-skyscraper-b', 'city-building-skyscraper-c', 'city-building-skyscraper-d'], 140, 40, 200, [12, 15]);
       scatter(['house-tree-large', 'house-tree-small', 'city-detail-parasol-a'], 160, 4, 10, [9, 12]);
+      if (t === 'dusk') scatter(['race-lightPostLarge', 'city-detail-awning'], 90, 3, 9, [6, 8]);
     } else if (t === 'canyon') {
       for (let s = 0; s < track.length; s += 9) for (const side of [-1, 1]) {
-        if (rng.chance(0.75)) beside(rng.pick(['nat-cliff_block_rock', 'nat-cliff_large_rock', 'nat-rock_tallB']), s, side, rng.range(5, 9), rng.range(9, 14), true, 0.4);
+        if (rng.chance(0.75)) beside(track, rng.pick(['nat-cliff_block_rock', 'nat-cliff_large_rock', 'nat-rock_tallB']), s, side, rng.range(5, 9), rng.range(9, 14), true, 0.4);
       }
       scatter(['nat-rock_tallB', 'nat-rock_tallE', 'nat-rock_tallG', 'nat-cliff_block_rock'], 260, 20, 180, [12, 26]);
       scatter(['nat-cactus_tall', 'nat-cactus_short', 'nat-rock_largeA', 'nat-rock_largeC'], 260, 6, 70, [5, 9]);
       scatter(['nat-tree_palmTall', 'nat-tree_palmBend'], 40, 10, 60, [6, 8]);
-    } else {
+    } else if (t === 'frost') {
       scatter(['plat-tree-pine-snow', 'plat-tree-snow', 'plat-tree-pine-snow-small'], 620, gap, 170, [4, 7]);
       scatter(['plat-rocks', 'plat-block-snow-large', 'nat-rock_largeA'], 120, gap, 90, [4, 8]);
       scatter(['plat-stones'], 90, 4, gap - 2, [3, 5]);
+    } else if (t === 'lagoon') {
+      scatter(['nat-tree_palmTall', 'nat-tree_palmBend', 'nat-tree_palmTall'], 520, gap, 150, [6, 9]);
+      scatter(['nat-plant_bushLarge', 'nat-plant_bush', 'nat-flower_redA', 'nat-flower_yellowB', 'nat-flower_purpleA'], 520, 3, 40, [5, 8]);
+      scatter(['nat-rock_largeA', 'nat-rock_largeC', 'nat-cliff_block_rock'], 120, gap, 90, [6, 12]);
+      scatter(['city-detail-parasol-a', 'nat-tent_detailedOpen', 'nat-log_stack'], 70, gap, 40, [6, 9]);
+    } else {
+      // Volcano: basalt spires along the road, boulder fields, dead stumps.
+      for (let s = 0; s < track.length; s += 12) for (const side of [-1, 1]) {
+        if (rng.chance(0.45)) beside(track, rng.pick(['nat-cliff_block_rock', 'nat-cliff_large_rock', 'nat-rock_tallE']), s, side, rng.range(gap, gap + 8), rng.range(8, 14), true, 0.5);
+      }
+      scatter(['nat-rock_tallB', 'nat-rock_tallE', 'nat-rock_tallG', 'nat-cliff_large_rock'], 300, 20, 180, [12, 28]);
+      scatter(['nat-rock_largeA', 'nat-rock_largeC', 'plat-rocks', 'nat-stump_old', 'nat-log_stack'], 260, 5, 70, [5, 9]);
     }
     const group = new THREE.Group();
     batch.build(group, true);
@@ -373,6 +700,15 @@ export class KartRenderer {
     const bubble = new THREE.Mesh(this.bubbleGeo, this.bubbleMat);
     bubble.position.y = 1.1; bubble.visible = false;
     root.add(bubble);
+    // Glider: a canopy in the racer's colour on two struts, folded away until launch.
+    const wing = new THREE.Group();
+    const canopy = new THREE.Mesh(this.wingGeo, this.lib.own(new THREE.MeshLambertMaterial({ color: def.color })));
+    canopy.position.y = 1.35; canopy.castShadow = true;
+    wing.add(canopy);
+    for (const x of [-0.7, 0.7]) { const strut = new THREE.Mesh(this.strutGeo, this.strutMat); strut.position.set(x, 0.7, 0); wing.add(strut); }
+    wing.position.set(0, 1.2, -0.2);
+    wing.visible = false;
+    root.add(wing);
     let label: THREE.Sprite | null = null;
     if (r.human && r.id !== this.self) {
       const tex = this.lib.own(labelTexture(r.name, '#ffffff'));
@@ -381,7 +717,7 @@ export class KartRenderer {
       root.add(label);
     }
     this.view.scene.add(root);
-    return { racer: r.racer, root, body, wheels, front, mixer, flames, bubble, label, wheelSpin: 0, tilt: 0, bounce: 0, visualYaw: 0, spinAngle: 0 };
+    return { racer: r.racer, root, body, wheels, front, mixer, flames, bubble, label, wing, wheelSpin: 0, tilt: 0, bounce: 0, visualYaw: 0, spinAngle: 0, pitch: 0, wingOpen: 0 };
   }
 
   // ── Frame ────────────────────────────────────────────────────────────────
@@ -396,6 +732,15 @@ export class KartRenderer {
       case 'bolt': p.burst(e.x, e.y + 4, e.z, 50, 0x9ad7ff, 14, 0.9, 0.6, 0); break;
       case 'respawn': p.burst(e.x, e.y + 1, e.z, 30, 0xffffff, 6, 1, 0.8); break;
       case 'land': for (let i = 0; i < 10; i++) this.smoke.spawn(e.x, e.y + 0.3, e.z, (Math.random() - 0.5) * 5, 1, (Math.random() - 0.5) * 5, 0xb9a88f, 1.6, 0.7, 0, 2); break;
+      case 'glide': p.burst(e.x, e.y + 2, e.z, 30, 0x9fe6ff, 7, 0.7, 0.6, 0); break;
+      case 'crush': for (let i = 0; i < 16; i++) this.smoke.spawn(e.x, e.y + 0.4, e.z, (Math.random() - 0.5) * 9, 1.5, (Math.random() - 0.5) * 9, 0x8a8a8a, 2.2, 0.9, 0, 2); break;
+      case 'splash': {
+        // value 1: diving under on purpose; 0: fell in the water; 2: lava.
+        const y = this.track.liquid ?? e.y, lava = e.value === 2;
+        p.burst(e.x, y + 0.3, e.z, e.value === 1 ? 30 : 60, lava ? 0xff7a2a : 0xe8fbff, e.value === 1 ? 6 : 10, lava ? 0.9 : 1.1, 0.9, -12);
+        if (lava) for (let i = 0; i < 14; i++) this.smoke.spawn(e.x, y + 0.5, e.z, (Math.random() - 0.5) * 3, 3 + Math.random() * 2, (Math.random() - 0.5) * 3, 0x3a3030, 3, 1.6, 0, 1);
+        break;
+      }
       default: break;
     }
   }
@@ -426,16 +771,44 @@ export class KartRenderer {
       box.position.set(b.x, b.y - 0.9 + Math.sin(this.time * 2 + i) * 0.25, b.z);
       box.rotation.set(0.3, this.time * 1.5 + i, 0.2);
     });
+    this.updateObstacles(state);
     this.syncPool(this.bananas, state.hazards, 'toy-item-banana', 5, (o, h) => { o.position.set(h.x, h.y + 0.05, h.z); });
     this.syncPool(this.bombs, state.shells, 'plat-bomb', 2.6, (o, s) => {
       o.position.set(s.x, s.y - 0.4 + Math.abs(Math.sin(this.time * 9)) * 0.4, s.z); o.rotation.y = s.yaw;
       if (Math.random() < 0.6) this.particles.spawn(s.x, s.y + 0.6, s.z, 0, 1.5, 0, 0xffa040, 0.5, 0.35);
     });
+    if (this.lava) { this.lava.offset.x = (this.time * 0.02) % 1; this.lava.offset.y = (this.time * 0.013) % 1; }
     this.particles.update(dt);
     this.smoke.update(dt);
     this.updateCamera(state, self, dt, lookBack);
+    this.updateFog();
     this.view.focusShadow(self.x, self.y, self.z);
     this.view.render();
+  }
+
+  /** Rollers roll across the road, crushers rise and slam (same clock as the simulation). */
+  private updateObstacles(state: KartState): void {
+    const { track } = this;
+    track.obstacles.forEach((o, i) => {
+      const v = this.obstacles[i];
+      if (!v) return;
+      obstacleAt(track, o, state.raceTime, _ob);
+      if (o.kind === 'roller') {
+        const path = track.paths[o.seg];
+        const k = sampleAt(path, o.s);
+        v.mesh.position.set(_ob[0], _ob[1], _ob[2]);
+        // Roll about the road's direction as it crosses.
+        const dLat = _ob[3] - v.roll;
+        v.roll = _ob[3];
+        v.mesh.rotateOnWorldAxis(_p.set(path.tx[k], 0, path.tz[k]), -dLat / ROLLER_RADIUS);
+      } else {
+        const path = track.paths[o.seg];
+        v.mesh.position.set(_ob[0], _ob[1] + 1.3 + _ob[3], _ob[2]);
+        v.mesh.rotation.y = Math.atan2(path.tx[sampleAt(path, o.s)], path.tz[sampleAt(path, o.s)]);
+        if (_ob[3] < 0.05 && v.roll > 0.05) for (let n = 0; n < 8; n++) this.smoke.spawn(_ob[0], _ob[1] + 0.3, _ob[2], (Math.random() - 0.5) * 8, 1, (Math.random() - 0.5) * 8, 0x8a8a8a, 2, 0.6, 0, 2);
+        v.roll = _ob[3];
+      }
+    });
   }
 
   private alive = new Set<number>();
@@ -461,14 +834,27 @@ export class KartRenderer {
     v.visualYaw = approach(v.visualYaw, driftAngle, 8, dt);
     if (r.spin > 0) v.spinAngle += dt * 14; else v.spinAngle = approach(wrapAngle(v.spinAngle), 0, 10, dt);
     v.root.rotation.y = r.yaw + v.visualYaw + v.spinAngle + (r.trick > 0 ? (0.45 - r.trick) / 0.45 * Math.PI * 2 : 0);
-    v.tilt = approach(v.tilt, clamp(-r.steer * Math.abs(r.speed) * 0.004, -0.12, 0.12) + (r.drift !== 0 ? r.drift * 0.08 : 0), 8, dt);
+    // Road shape under the kart: banking rolls it, slopes pitch it.
+    const path = this.track.paths[r.seg] ?? this.track;
+    const k = r.hint >= 0 && r.hint < path.count ? r.hint : sampleAt(path, 0);
+    const bank = r.grounded ? Math.atan(-path.bank[k]) : 0;
+    const k2 = path.closed ? (k + 1) % path.count : Math.min(path.count - 1, k + 1);
+    const slope = (path.py[k2] - path.py[k]) / Math.max(0.5, path.length / path.count);
+    // Slope sign relative to the kart's heading (driving the wrong way flips it).
+    const along = Math.sin(r.yaw) * path.tx[k] + Math.cos(r.yaw) * path.tz[k];
+    v.tilt = approach(v.tilt, clamp(-r.steer * Math.abs(r.speed) * 0.004, -0.12, 0.12) + (r.drift !== 0 ? r.drift * 0.08 : 0) + bank * Math.sign(along || 1), 8, dt);
     v.body.rotation.z = v.tilt;
-    v.body.rotation.x = r.grounded ? approach(v.body.rotation.x, 0, 10, dt) : clamp(-r.vy * 0.02, -0.25, 0.25);
+    v.pitch = r.grounded ? approach(v.pitch, -Math.atan(slope) * Math.sign(along || 1), 10, dt) : clamp(-r.vy * 0.02, -0.25, 0.25);
+    v.body.rotation.x = v.pitch;
     v.bounce = approach(v.bounce, 0, 12, dt);
     v.wheelSpin += r.speed * dt / 0.42;
     for (const w of v.wheels) w.rotation.x = v.wheelSpin;
     for (const w of v.front) w.rotation.y = -r.steer * 0.45;
     v.mixer?.update(dt);
+    // Glider canopy unfolds on launch.
+    v.wingOpen = approach(v.wingOpen, r.glide ? 1 : 0, 8, dt);
+    v.wing.visible = v.wingOpen > 0.02;
+    if (v.wing.visible) { v.wing.scale.set(v.wingOpen, 1, 1); v.wing.rotation.z = -r.steer * 0.25 * v.wingOpen; }
     const boosting = r.boost > 0;
     for (const f of v.flames) {
       f.visible = boosting;
@@ -486,14 +872,32 @@ export class KartRenderer {
       }
     }
     if (near && r.grounded && r.surface === 'grass' && Math.abs(r.speed) > 6 && Math.random() < 0.7) {
-      this.smoke.spawn(r.x - fx * 1.2, r.y + 0.3, r.z - fz * 1.2, (Math.random() - 0.5) * 2, 1.2, (Math.random() - 0.5) * 2, this.track.def.theme === 'frost' ? 0xffffff : 0x8a7a55, 1.1, 0.6, 0, 2);
+      this.smoke.spawn(r.x - fx * 1.2, r.y + 0.3, r.z - fz * 1.2, (Math.random() - 0.5) * 2, 1.2, (Math.random() - 0.5) * 2, this.track.def.theme === 'frost' ? 0xffffff : this.theme.bed, 1.1, 0.6, 0, 2);
     }
+    // Underwater: a trail of bubbles rising to the surface.
+    if (near && r.under && Math.random() < 0.6) this.particles.spawn(r.x - fx * 1.4 + (Math.random() - 0.5), r.y + 0.6, r.z - fz * 1.4 + (Math.random() - 0.5), (Math.random() - 0.5) * 0.6, 2 + Math.random() * 1.5, (Math.random() - 0.5) * 0.6, 0xd8f6ff, 0.35, 1.6, 1.5, 0.5);
     if (near && boosting && Math.random() < 0.8) this.particles.spawn(r.x - fx * 1.6, r.y + 0.6, r.z - fz * 1.6, -fx * 4, 0.5, -fz * 4, 0xffb347, 0.5, 0.25, 0, 3);
     if (r.star > 0 && Math.random() < 0.5) this.particles.spawn(r.x + (Math.random() - 0.5) * 2, r.y + Math.random() * 2, r.z + (Math.random() - 0.5) * 2, 0, 1, 0, 0xfff27a, 0.4, 0.5);
   }
 
+  /** Blue fog once the camera dips under the water surface. */
+  private updateFog(): void {
+    const { track, theme } = this;
+    const under = track.liquid !== null && !track.lava && this.view.camera.position.y < track.liquid;
+    if (under === this.underwater) return;
+    this.underwater = under;
+    const fog = this.view.scene.fog as THREE.Fog;
+    fog.color.setHex(under ? DEEP.color : theme.fog);
+    fog.near = under ? DEEP.near : theme.fogNear;
+    fog.far = under ? DEEP.far : theme.fogFar;
+    (this.view.scene.background as THREE.Color).setHex(under ? DEEP.color : theme.skyHorizon);
+  }
+  /** Whether the camera is under water (the HUD tints the view). */
+  get isUnderwater(): boolean { return this.underwater; }
+
   private updateCamera(state: KartState, self: KartState['racers'][number], dt: number, lookBack: boolean): void {
     const cam = this.view.camera;
+    const path = this.track.paths[self.seg] ?? this.track;
     if (state.phase === 'intro') {
       // Sweep around the grid before the countdown.
       const t = Math.min(1, state.clock / 2.5);
@@ -502,7 +906,7 @@ export class KartRenderer {
       const d = lerp(34, 8, ease), h = lerp(30, 3.4, ease * ease);
       cam.position.set(self.x + Math.sin(a) * d, self.y + h, self.z + Math.cos(a) * d);
       // Keep the sweep above walls/cliffs beside the grid.
-      const n0 = nearest(this.track, cam.position.x, cam.position.z, self.hint, _near, 40);
+      const n0 = nearest(path, cam.position.x, cam.position.z, self.hint, _near, 40);
       cam.position.y = Math.max(cam.position.y, this.track.ground(cam.position.x, cam.position.z, n0) + 6);
       cam.lookAt(self.x, self.y + 1.2, self.z);
       this.camPos.copy(cam.position); this.camLook.set(self.x, self.y + 1.2, self.z); this.camReady = true;
@@ -510,28 +914,31 @@ export class KartRenderer {
     }
     const heading = r_heading(self);
     const back = lookBack ? -1 : 1;
-    const dist = 7.8 + clamp(self.speed, 0, 40) * 0.05;
-    _v.set(self.x - Math.sin(heading) * dist * back, self.y + 3.4, self.z - Math.cos(heading) * dist * back);
-    // Keep the camera above the terrain.
-    const n = nearest(this.track, _v.x, _v.z, self.hint, _near, 20);
-    _v.y = Math.max(_v.y, this.track.ground(_v.x, _v.z, n) + 1.5);
+    const dist = 7.8 + clamp(self.speed, 0, 40) * 0.05 + (self.glide ? 3 : 0);
+    _v.set(self.x - Math.sin(heading) * dist * back, self.y + 3.4 + (self.glide ? 1.6 : 0), self.z - Math.cos(heading) * dist * back);
+    // Keep the camera above the terrain, and under the roof in tunnels.
+    const n = nearest(path, _v.x, _v.z, self.hint, _near, 20);
+    const ground = this.track.ground(_v.x, _v.z, n);
+    if (Math.abs(n.lateral) < path.halfWidth + 6 || !(path.drop[n.index] > 0)) _v.y = Math.max(_v.y, ground + 1.5);
+    if (path.flags[n.index] & F_TUNNEL && Math.abs(n.lateral) < path.halfWidth + 1) _v.y = Math.min(_v.y, n.y + TUNNEL_HEIGHT - 1.4);
     _look.set(self.x + Math.sin(heading) * 4 * back, self.y + 1.3, self.z + Math.cos(heading) * 4 * back);
     if (!this.camReady || lookBack) { this.camPos.copy(_v); this.camLook.copy(_look); this.camReady = true; }
     this.camPos.x = approach(this.camPos.x, _v.x, 7, dt); this.camPos.y = approach(this.camPos.y, _v.y, 5, dt); this.camPos.z = approach(this.camPos.z, _v.z, 7, dt);
     this.camLook.x = approach(this.camLook.x, _look.x, 14, dt); this.camLook.y = approach(this.camLook.y, _look.y, 10, dt); this.camLook.z = approach(this.camLook.z, _look.z, 14, dt);
     cam.position.copy(this.camPos);
     cam.lookAt(this.camLook);
-    const fov = 68 + (self.boost > 0 ? 9 : 0) + clamp(self.speed - 20, 0, 20) * 0.25;
+    const fov = 68 + (self.boost > 0 ? 9 : 0) + clamp(self.speed - 20, 0, 20) * 0.25 + (self.glide ? 6 : 0);
     cam.fov = approach(cam.fov, fov, 4, dt);
     cam.updateProjectionMatrix();
   }
 
-  stats() { return { ...this.view.stats(), camera: { x: this.camPos.x, y: this.camPos.y, z: this.camPos.z } }; }
+  stats() { return { ...this.view.stats(), camera: { x: this.camPos.x, y: this.camPos.y, z: this.camPos.z }, underwater: this.underwater }; }
 
   dispose(): void {
     this.particles.dispose();
     this.smoke.dispose();
     for (const k of this.karts) k.mixer?.stopAllAction();
+    for (const o of this.obstacles) o.mesh.removeFromParent();
     this.view.dispose();
     this.lib.dispose();
   }

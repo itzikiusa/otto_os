@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Rng } from '../src/modules/rooms/games/common/math.ts';
-import { nearest, pointAt, TRACK_IDS, trackFor, type TrackId } from '../src/modules/rooms/games/kart/tracks.ts';
+import { clamp, Rng, wrapAngle } from '../src/modules/rooms/games/common/math.ts';
 import {
-  COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, idleInput, INTRO_SECONDS, LAPS, MAX_RACERS, rank, sanitize, spinOut, standings, STEP, stepRace, tick, TURBO_SECONDS,
+  advance, circ, CRUSHER_HALF, F_RAILS, F_UNDER, inLaunchZone, nearest, newNear, obstacleAt, pointAt, progressOf, ROLLER_RADIUS, RUN_UP, sampleAt, TRACK_IDS, trackFor, type TrackId,
+} from '../src/modules/rooms/games/kart/tracks.ts';
+import {
+  COUNTDOWN_SECONDS, createRace, DRIFT_LEVELS, idleInput, INTRO_SECONDS, LAPS, MAX_RACERS, pickRoute, rank, sanitize, spinOut, standings, STEP, stepRace, tick, TURBO_SECONDS,
   type Difficulty, type KartEventType, type KartInput, type KartSeat, type KartState, type Racer,
 } from '../src/modules/rooms/games/kart/sim.ts';
 import { cpuInput } from '../src/modules/rooms/games/kart/cpu.ts';
@@ -26,13 +28,24 @@ const humansRace = (count: number, track: TrackId = 'meadow'): KartState => {
   return s;
 };
 /** Teleports a racer onto the track at distance `s` (lap distance) and lateral offset. */
-function put(state: KartState, r: Racer, s: number, lateral: number, speed = 0, yawOffset = 0): void {
-  const track = trackFor(state.track);
-  const pt = pointAt(track, s, lateral);
-  const near = nearest(track, pt[0], pt[2], -1, { index: 0, t: 0, s: 0, lateral: 0, y: 0, tx: 0, tz: 1, distance: 0 });
+function put(state: KartState, r: Racer, s: number, lateral: number, speed = 0, yawOffset = 0): void { putOn(state, r, 0, s, lateral, speed, yawOffset); }
+/** Teleports a racer onto path `seg` (0 = main loop, k = branch k) at local distance `s`. */
+function putOn(state: KartState, r: Racer, seg: number, s: number, lateral: number, speed = 0, yawOffset = 0): void {
+  const track = trackFor(state.track), path = track.paths[seg];
+  const pt = pointAt(path, s, lateral);
+  const near = nearest(path, pt[0], pt[2], sampleAt(path, s), newNear());
   r.x = pt[0]; r.z = pt[2]; r.y = track.ground(pt[0], pt[2], near); r.yaw = pt[3] + yawOffset;
-  r.speed = speed; r.vx = Math.sin(r.yaw) * speed; r.vz = Math.cos(r.yaw) * speed; r.vy = 0; r.grounded = true;
-  r.hint = -1; r.lastS = near.s; r.travel = s; r.spin = 0; r.boost = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+  r.speed = speed; r.vx = Math.sin(r.yaw) * speed; r.vz = Math.cos(r.yaw) * speed; r.vy = 0; r.grounded = true; r.glide = false; r.under = false;
+  r.seg = seg; r.segS = near.s; r.safeSeg = seg; r.safeS = near.s;
+  r.hint = -1; r.lastS = progressOf(track, seg, near.s); r.travel = r.lastS; r.spin = 0; r.boost = 0; r.drift = 0; r.driftCharge = 0; r.driftLevel = 0;
+}
+/** Autopilot for a human racer: steer for the road ahead along `route` (a CPU-style branch bitmask). */
+function pilot(state: KartState, r: Racer, route: number, extra: Partial<KartInput> = {}): KartInput {
+  const track = trackFor(state.track);
+  const spot = advance(track, r.seg, r.segS, 7 + Math.max(0, r.speed) * 0.3, route, { seg: 0, s: 0 });
+  const p = pointAt(track.paths[spot.seg], spot.s, 0);
+  const angle = wrapAngle(Math.atan2(p[0] - r.x, p[2] - r.z) - r.yaw);
+  return { ...idleInput(), throttle: 1, steer: clamp(-angle * 2.4, -1, 1), ...extra };
 }
 const events = (state: KartState, type: KartEventType, from = 0) => state.events.filter(e => e.id > from && e.type === type);
 const press = (k: Partial<KartInput>): KartInput => ({ ...idleInput(), ...k });
@@ -468,8 +481,9 @@ test('an 8-CPU race finishes on every track with a time for every racer; hard be
     for (const difficulty of ['easy', 'hard'] as Difficulty[]) {
       const { s, seen } = fullRace(track, difficulty);
       assert.equal(s.phase, 'done', `${track}/${difficulty} finished`);
-      assert.ok(s.raceTime < 240, `${track}/${difficulty}: ${s.raceTime.toFixed(1)} s`);
       const t = trackFor(track);
+      // About 20 m/s average including items, jumps and rescues (the new Grand Prix tracks run 4–6 minutes).
+      assert.ok(s.raceTime < Math.max(240, LAPS * t.length / 20 + 30), `${track}/${difficulty}: ${s.raceTime.toFixed(1)} s`);
       for (const r of s.racers) {
         assert.ok(r.finish !== null && r.finish > 60, `${track}/${difficulty} racer ${r.id}: ${r.finish}`);
         assert.equal(r.lap, LAPS);
@@ -499,4 +513,256 @@ test('with an idle human the race still ends: unfinished racers get a projected 
   // Ended ~45 s after the first finisher.
   assert.ok(s.firstFinish !== null && s.raceTime - s.firstFinish >= 45 && s.raceTime - s.firstFinish < 50);
   assert.ok(s.racers.every(r => r.finish !== null));
+});
+
+// ── Branching routes, vertical features, water, hazards ──────────────────────
+
+/** Runs `racer` (a human, slot input 0) with the autopilot until `until` or `seconds` pass; records what happened. */
+function drive(state: KartState, r: Racer, route: number, seconds: number, until: (r: Racer) => boolean = () => false) {
+  const segs = new Set<number>();
+  let maxWrong = 0, maxAir = 0, glided = false, under = false;
+  const from = state.eventSeq;
+  const startTravel = r.travel, startTime = state.raceTime;
+  for (let i = 0, n = Math.round(seconds / STEP); i < n && !until(r); i++) {
+    const inputs: (KartInput | undefined)[] = state.racers.map(o => (o === r ? pilot(state, r, route) : idleInput()));
+    tick(state, inputs);
+    segs.add(r.seg); maxWrong = Math.max(maxWrong, r.wrong); maxAir = Math.max(maxAir, r.air);
+    glided ||= r.glide; under ||= r.under;
+  }
+  return { segs, maxWrong, maxAir, glided, under, travelled: r.travel - startTravel, time: state.raceTime - startTime, events: (type: KartEventType) => events(state, type, from) };
+}
+
+test('branches: the shortcut switches path, keeps lap progress, merges back and saves time', () => {
+  const times: number[] = [];
+  for (const route of [0, 1]) {
+    const s = humansRace(1, 'lagoon');
+    const t = trackFor('lagoon'), b = t.paths[1];
+    const r = s.racers[0];
+    put(s, r, b.from - 60, 0, 25);
+    const target = b.to + 40;
+    const run = drive(s, r, route, 40, x => x.seg === 0 && x.lastS > target && x.lastS < target + 50);
+    assert.ok(r.lastS > target, `route ${route}: reached the merge (at ${r.lastS.toFixed(0)})`);
+    assert.equal(r.seg, 0);
+    assert.equal(run.segs.has(1), route === 1, `route ${route}: took the branch`);
+    assert.equal(run.events('respawn').length + run.events('splash').length, 0, `route ${route}: clean run`);
+    assert.ok(run.maxWrong < 0.2, 'never the wrong way');
+    // Progress is continuous across the fork and the merge: travel matches the distance covered on the lap.
+    assert.ok(Math.abs(run.travelled - (r.lastS - (b.from - 60))) < 3, `route ${route}: travelled ${run.travelled.toFixed(1)}`);
+    times.push(run.time);
+  }
+  assert.ok(times[1] < times[0] - 1, `shortcut ${times[1].toFixed(1)} s vs main ${times[0].toFixed(1)} s`);
+});
+
+test('branches: driving backwards on a branch is wrong-way; ranking uses mapped progress', () => {
+  const s = humansRace(2, 'skyway');
+  const t = trackFor('skyway'), b = t.paths[1];
+  const [a, c] = s.racers;
+  putOn(s, a, 1, b.length / 2, 0, 15, Math.PI);
+  putOn(s, c, 0, b.from + (b.to - b.from) * 0.4, 0, 0);
+  run(s, 1.2, [press({ throttle: 1 }), idleInput()]);
+  assert.equal(a.seg, 1);
+  assert.ok(a.wrong > 0.5, `wrong ${a.wrong}`);
+  // Halfway along the alley is further round the lap than 40 % along the main road it skips.
+  const s2 = humansRace(2, 'skyway');
+  putOn(s2, s2.racers[0], 1, b.length / 2, 0);
+  putOn(s2, s2.racers[1], 0, b.from + (b.to - b.from) * 0.4, 0);
+  tick(s2, []);
+  assert.deepEqual(s2.racers.map(r => r.place), [1, 2]);
+});
+
+test('falling off the rail-less boardwalk: splash, rescue behind on the road, no progress credit', () => {
+  const s = humansRace(1, 'lagoon');
+  const t = trackFor('lagoon'), b = t.paths[1];
+  const r = s.racers[0];
+  putOn(s, r, 1, b.length / 2, 0, 24, Math.PI / 2);
+  const before = r.travel;
+  let n = 0;
+  while (r.respawn <= 0 && n++ < 300) tick(s, [press({ throttle: 1 })]);
+  assert.ok(r.respawn > 0, 'fell in');
+  assert.equal(events(s, 'splash').at(-1)?.value, 0);
+  run(s, 1.5, [idleInput()]);
+  assert.equal(r.respawn <= 0, true);
+  const path = t.paths[r.seg];
+  const near = nearest(path, r.x, r.z, -1, newNear());
+  assert.ok(Math.abs(near.lateral) < 0.5 && r.grounded, 'back on the deck centre');
+  assert.ok(r.travel <= before + 0.5, `travel ${r.travel.toFixed(1)} vs ${before.toFixed(1)}`);
+  // Then it drives on normally.
+  const d = drive(s, r, 1, 3);
+  assert.equal(d.events('splash').length, 0);
+});
+
+test('glider: the cliff launch opens the glider, the racer soars over the cove and lands on the beach', () => {
+  const s = humansRace(1, 'lagoon');
+  const t = trackFor('lagoon');
+  const r = s.racers[0];
+  const launch = t.def.launches!.find(l => l.glide)!, gapEnd = t.def.gaps![0][1] * t.length;
+  put(s, r, launch.at * t.length - 50, 0, 26);
+  const run = drive(s, r, 0, 14, x => x.grounded && x.lastS > gapEnd + 5 && x.lastS < gapEnd + 300);
+  assert.equal(run.events('glide').length, 1);
+  assert.ok(run.glided && run.maxAir > 3, `glided for ${run.maxAir.toFixed(1)} s`);
+  assert.equal(run.events('splash').length + run.events('respawn').length, 0);
+  assert.ok(r.grounded && !r.glide && r.lastS > gapEnd, 'landed past the gap');
+});
+
+test('launch ramps clear their gaps from any speed: broken freeway and lava river', () => {
+  for (const [id, speed] of [['skyway', 30], ['skyway', 9], ['volcano', 30], ['volcano', 9]] as [TrackId, number][]) {
+    const s = humansRace(1, id);
+    const t = trackFor(id);
+    const r = s.racers[0];
+    const l = t.def.launches!.find(x => !x.glide)!, gap = t.def.gaps!.find(([a]) => a > l.at && a - l.at < 0.01)!;
+    put(s, r, l.at * t.length - 6, 0, speed);
+    const run = drive(s, r, 0, 6, x => x.grounded && x.lastS > gap[1] * t.length + 3);
+    assert.equal(run.events('splash').length + run.events('respawn').length, 0, `${id} @ ${speed}`);
+    assert.ok(r.lastS > gap[1] * t.length, `${id} @ ${speed}: landed beyond the gap`);
+    assert.ok(run.maxAir > 0.6, `${id}: airtime ${run.maxAir.toFixed(2)}`);
+  }
+});
+
+test('missing the lava jump: burnt, rescued before the run-up and set back in progress', () => {
+  const s = humansRace(1, 'volcano');
+  const t = trackFor('volcano');
+  const r = s.racers[0];
+  const l = t.def.launches![0], gap = t.def.gaps![0];
+  // Rolling slowly off the end of the ramp (no take-off) into the lava river.
+  put(s, r, (gap[0] + gap[1]) / 2 * t.length, 0, 3);
+  r.safeS = l.at * t.length - 4; // last on-road spot: the ramp
+  const before = r.travel;
+  let n = 0;
+  while (r.respawn <= 0 && n++ < 300) tick(s, [idleInput()]);
+  assert.equal(events(s, 'splash').at(-1)?.value, 2);
+  run(s, 1.5, [idleInput()]);
+  assert.ok(r.respawn <= 0 && r.grounded);
+  assert.ok(!inLaunchZone(t, r.segS), `rescued at ${r.segS.toFixed(0)}, outside the run-up`);
+  assert.ok(r.segS < l.at * t.length - RUN_UP + 1);
+  assert.ok(r.travel < before - RUN_UP, 'no progress credit for the fall');
+  // From there a normal run clears the jump.
+  const run2 = drive(s, r, 0, 8, x => x.lastS > gap[1] * t.length + 10);
+  assert.equal(run2.events('splash').length, 0);
+});
+
+test('underwater: the seabed road is drivable, slower and floaty; diving in splashes but never rescues', () => {
+  const s = humansRace(1, 'lagoon');
+  const t = trackFor('lagoon');
+  const r = s.racers[0];
+  let dive = 0;
+  while (!(t.flags[dive] & F_UNDER)) dive++;
+  put(s, r, t.dist[dive] - 30, 0, 25);
+  const d = drive(s, r, 0, 4);
+  assert.ok(d.under, 'went under');
+  assert.equal(events(s, 'splash').filter(e => e.value === 1).length, 1, 'one splash going in');
+  assert.equal(d.events('respawn').length + events(s, 'splash').filter(e => e.value !== 1).length, 0);
+  // Top speed under water is lower than on land.
+  const deepest = t.py.indexOf(Math.min(...t.py));
+  const wet = humansRace(1, 'lagoon'), dry = humansRace(1, 'lagoon');
+  put(wet, wet.racers[0], t.dist[deepest] - 60, 0, 0);
+  put(dry, dry.racers[0], 20, 0, 0);
+  for (let i = 0; i < 240; i++) { tick(wet, [pilot(wet, wet.racers[0], 0)]); tick(dry, [pilot(dry, dry.racers[0], 0)]); }
+  assert.ok(wet.racers[0].under);
+  assert.ok(wet.racers[0].speed < dry.racers[0].speed - 1, `under ${wet.racers[0].speed.toFixed(1)} vs dry ${dry.racers[0].speed.toFixed(1)}`);
+});
+
+test('rails keep racers on bridge decks and in tunnels', () => {
+  for (const [id, from] of [['lagoon', 0.65], ['volcano', 0.5]] as [TrackId, number][]) {
+    const s = humansRace(1, id);
+    const t = trackFor(id);
+    const at = from * t.length;
+    assert.ok(t.flags[sampleAt(t, at)] & F_RAILS, `${id}: railed at ${from}`);
+    for (const side of [1, -1]) {
+      put(s, s.racers[0], at, 0, 28, side * Math.PI / 2);
+      const r = s.racers[0];
+      let max = 0;
+      for (let i = 0; i < 90; i++) { tick(s, [press({ throttle: 1 })]); max = Math.max(max, Math.abs(r.lateral)); }
+      assert.ok(max < t.halfWidth + 2, `${id}: lateral ${max.toFixed(1)}`);
+      assert.equal(r.respawn, 0);
+    }
+  }
+});
+
+test('obstacles: rollers and crushers spin racers out; a star shrugs them off', () => {
+  const s = humansRace(1, 'volcano');
+  const t = trackFor('volcano');
+  const r = s.racers[0];
+  const roller = t.obstacles.find(o => o.kind === 'roller')!;
+  // Pick a moment when the roller is crossing the centre line, and park the racer right there.
+  const at = (u: number, o: typeof roller) => (u - o.phase) * o.period + 10 * o.period;
+  s.raceTime = at(0, roller) - STEP;
+  const pose = obstacleAt(t, roller, s.raceTime + STEP, [0, 0, 0, 0]);
+  put(s, r, roller.s - 1, 0, 8);
+  r.x = pose[0] - Math.sin(r.yaw) * (ROLLER_RADIUS + 0.6); r.z = pose[2] - Math.cos(r.yaw) * (ROLLER_RADIUS + 0.6);
+  tick(s, [press({ throttle: 1 })]);
+  assert.ok(r.spin > 0, 'rolled over');
+  assert.ok(events(s, 'bump').length > 0);
+  // Crusher slammed down on its lane.
+  const crusher = t.obstacles.find(o => o.kind === 'crusher')!;
+  const s2 = humansRace(2, 'volcano');
+  const [a, star] = s2.racers;
+  s2.raceTime = at(0.74, crusher) - STEP;
+  const lat = crusher.lane * t.halfWidth * 0.5;
+  put(s2, a, crusher.s, lat, 2); put(s2, star, crusher.s, lat + 2.6, 2); // under the block, not touching
+  star.star = 5;
+  tick(s2, [idleInput(), idleInput()]);
+  assert.equal(events(s2, 'crush').length, 1);
+  assert.equal(events(s2, 'crush')[0].racer, a.id);
+  assert.ok(a.spin > 1 && a.speed <= 4);
+  assert.equal(star.spin, 0);
+  // Raised: harmless.
+  const s3 = humansRace(1, 'volcano');
+  s3.raceTime = at(0.3, crusher) - STEP;
+  put(s3, s3.racers[0], crusher.s, lat, 2);
+  tick(s3, [idleInput()]);
+  assert.equal(events(s3, 'crush').length, 0);
+  assert.ok(Math.abs(s3.racers[0].x - pointAt(t, crusher.s, lat)[0]) < CRUSHER_HALF + 2);
+});
+
+test('CPU routes: per-difficulty odds, re-rolled each lap, and CPUs really take the shortcut', () => {
+  const t = trackFor('lagoon'), b = t.paths[1];
+  for (const [k, diff] of (['easy', 'normal', 'hard'] as Difficulty[]).entries()) {
+    const rng = new Rng(99 + k);
+    let taken = 0;
+    for (let i = 0; i < 4000; i++) taken += pickRoute(t, diff, rng) & 1;
+    assert.ok(Math.abs(taken / 4000 - b.cpu[k]) < 0.03, `${diff}: ${taken / 4000} vs ${b.cpu[k]}`);
+  }
+  assert.equal(pickRoute(trackFor('meadow'), 'hard', new Rng(1)), 0, 'no branches, no bits');
+  const s = createRace('lagoon', kartSeats([], true), 'hard', 41);
+  let onBranch = 0;
+  const routes = new Set<number>();
+  for (let i = 0; i < 60 * 200 && s.phase !== 'done'; i++) {
+    tick(s, []);
+    for (const r of s.racers) { if (r.seg === 1) onBranch++; routes.add(r.cpuRoute); }
+  }
+  assert.ok(onBranch > 100, `CPU ticks on the boardwalk: ${onBranch}`);
+  assert.deepEqual([...routes].sort(), [0, 1]);
+});
+
+test('races on branching tracks are deterministic for a seed', () => {
+  for (const id of ['lagoon', 'volcano', 'skyway'] as TrackId[]) {
+    const a = createRace(id, kartSeats([], true), 'hard', 5), b = createRace(id, kartSeats([], true), 'hard', 5);
+    run(a, 40); run(b, 40);
+    assert.deepEqual(a.racers.map(r => [r.x, r.z, r.travel, r.seg]), b.racers.map(r => [r.x, r.z, r.travel, r.seg]));
+  }
+});
+
+test('progress never jumps: travel tracks lap distance across every fork, merge, jump and dive', () => {
+  for (const id of ['lagoon', 'volcano', 'skyway'] as TrackId[]) {
+    const s = createRace(id, kartSeats([], true), 'normal', 13);
+    const t = trackFor(id);
+    const prev = s.racers.map(r => r.travel), seg = s.racers.map(r => r.seg);
+    let switches = 0;
+    for (let i = 0; i < 60 * 150; i++) {
+      tick(s, []);
+      s.racers.forEach((r, k) => {
+        if (r.respawn > 0) { prev[k] = r.travel; seg[k] = r.seg; return; }
+        const d = r.travel - prev[k];
+        // < 1 m per tick at top speed; switching between a branch and the main loop may add a few metres
+        // (the two centre lines differ slightly in length through a fork zone).
+        if (r.seg !== seg[k]) switches++;
+        assert.ok(d < (r.seg !== seg[k] ? 4.5 : 1.6), `${id} racer ${k}: +${d.toFixed(2)} m in one tick (seg ${seg[k]} -> ${r.seg})`);
+        seg[k] = r.seg;
+        // travel mirrors lap progress
+        assert.ok(Math.abs(circ(r.travel - r.lastS, t.length)) < 1e-6 || r.respawn > 0, `${id} racer ${k}: travel ${r.travel} vs lastS ${r.lastS}`);
+        prev[k] = r.travel;
+      });
+    }
+    assert.ok(switches > 0, `${id}: some CPU took the branch`);
+  }
 });

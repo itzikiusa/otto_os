@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeInput, decodeSnapshot, encodeInput, encodeSnapshot, type KartSnapshot } from '../src/modules/rooms/games/kart/net.ts';
+import { decodeInput, decodeSnapshot, encodeInput, encodeSnapshot, RACER_FIELDS, type KartSnapshot } from '../src/modules/rooms/games/kart/net.ts';
 import { createRace, MAX_HAZARDS, MAX_SHELLS, tick, type KartState } from '../src/modules/rooms/games/kart/sim.ts';
 import { RACER_IDS, type RacerId } from '../src/modules/rooms/games/kart/roster.ts';
 import { trackFor } from '../src/modules/rooms/games/kart/tracks.ts';
@@ -18,7 +18,7 @@ function midRace(): KartState {
   s.racers[0].item = 'triple'; s.racers[0].itemCount = 2;
   s.racers[1].finish = 123.4567; s.racers[1].lapTimes = [40.1234, 41.5, 41.8333];
   s.hazards.push({ id: 900, x: 1.234, y: 2, z: 3.456, owner: 3 });
-  s.shells.push({ id: 901, x: 4, y: 5, z: 6, yaw: 0.12345, target: 2, owner: 5, life: 3, hint: 10 });
+  s.shells.push({ id: 901, x: 4, y: 5, z: 6, yaw: 0.12345, target: 2, owner: 5, life: 3, hint: 10, seg: 0 });
   cached = s;
   return s;
 }
@@ -68,7 +68,8 @@ test('encodeSnapshot/decodeSnapshot round-trip', () => {
 
 test('decodeSnapshot rejects malformed payloads', () => {
   const bad: [string, (s: KartSnapshot) => unknown][] = [
-    ['version', s => ({ ...s, v: 2 })],
+    ['old version', s => ({ ...s, v: 1 })],
+    ['future version', s => ({ ...s, v: 3 })],
     ['track', s => ({ ...s, tr: 'moon' })],
     ['phase', s => ({ ...s, p: 9 })],
     ['difficulty', s => ({ ...s, d: -1 })],
@@ -87,6 +88,10 @@ test('decodeSnapshot rejects malformed payloads', () => {
     ['place zero', s => { const r = s.r.map(x => [...x]); r[0][22] = 0; return { ...s, r }; }],
     ['surface out of range', s => { const r = s.r.map(x => [...x]); r[0][27] = 3; return { ...s, r }; }],
     ['hint out of range', s => { const r = s.r.map(x => [...x]); r[0][28] = trackFor('canyon').count; return { ...s, r }; }],
+    ['path out of range', s => { const r = s.r.map(x => [...x]); r[0][30] = 1; return { ...s, r }; }],
+    ['negative path', s => { const r = s.r.map(x => [...x]); r[0][30] = -1; return { ...s, r }; }],
+    ['fractional path', s => { const r = s.r.map(x => [...x]); r[0][30] = 0.5; return { ...s, r }; }],
+    ['long racer row', s => ({ ...s, r: [[...s.r[0], 0], ...s.r.slice(1)] })],
     ['too many lap times', s => ({ ...s, lt: [[1, 2, 3, 4], ...s.lt.slice(1)] })],
     ['box count', s => ({ ...s, b: s.b.slice(1) })],
     ['NaN box timer', s => ({ ...s, b: [NaN, ...s.b.slice(1)] })],
@@ -109,7 +114,7 @@ test('snapshot of 8 racers + 24 events + max hazards/shells stays under 16 KiB',
   const big: KartState = {
     ...s,
     hazards: Array.from({ length: MAX_HAZARDS }, (_, i) => ({ id: 1000 + i, x: -123.456, y: 12.345, z: 234.567, owner: 7 })),
-    shells: Array.from({ length: MAX_SHELLS }, (_, i) => ({ id: 2000 + i, x: -123.456, y: 12.345, z: 234.567, yaw: -3.14159, target: 7, owner: 6, life: 5, hint: 400 })),
+    shells: Array.from({ length: MAX_SHELLS }, (_, i) => ({ id: 2000 + i, x: -123.456, y: 12.345, z: 234.567, yaw: -3.14159, target: 7, owner: 6, life: 5, hint: 400, seg: 0 })),
   };
   const evs = Array.from({ length: 48 }, (_, i) => ({ id: 100000 + i, type: 'explode' as const, racer: 7, x: -123.456, y: 12.345, z: 234.567, value: 123.456 }));
   const json = JSON.stringify(encodeSnapshot(big, evs));
@@ -139,4 +144,37 @@ test('decodeInput rejects malformed input', () => {
     { k: [1.5, 0, 0, 0] }, { k: [0, -1.01, 0, 0] }, { k: [0, 0, 8, 0] }, { k: [0, 0, -1, 0] },
     { k: [0, 0, 0, 8] }, { k: [0, 0, 0, -1] }, { k: [NaN, 0, 0, 0] }, { k: [0, Infinity, 0, 0] }, { k: [0, 0, 0, null] }, { k: ['1', 0, 0, 0] },
   ]) assert.equal(decodeInput(junk), null, JSON.stringify(junk));
+});
+
+test('branching tracks: path, glider and underwater state survive the wire; hints are checked per path', () => {
+  const s = createRace('lagoon', kartSeats([{ slot: 1, name: 'Ann', pick: 'rosa' }], true), 'hard', 5);
+  for (let i = 0; i < 60 * 8; i++) tick(s, []);
+  const t = trackFor('lagoon'), branch = t.paths[1];
+  const [a, b, c] = s.racers;
+  a.seg = 1; a.hint = branch.count - 1; a.segS = 100;
+  b.glide = true; b.grounded = false;
+  c.under = true;
+  s.events.push({ id: ++s.eventSeq, type: 'splash', racer: 2, x: 1, y: 2, z: 3, value: 2 }, { id: ++s.eventSeq, type: 'glide', racer: 1, x: 1, y: 2, z: 3 }, { id: ++s.eventSeq, type: 'crush', racer: 0, x: 1, y: 2, z: 3 });
+  const snap = wire(encodeSnapshot(s, s.events)) as KartSnapshot;
+  assert.equal(snap.v, 2);
+  assert.ok(snap.r.every(row => row.length === RACER_FIELDS));
+  assert.equal(snap.b.length, s.boxes.length, 'boxes on every route');
+  const back = decodeSnapshot(snap, names);
+  assert.ok(back);
+  assert.deepEqual(back.racers.map(r => r.seg), s.racers.map(r => r.seg));
+  assert.deepEqual(back.racers.map(r => [r.glide, r.under, r.grounded]), s.racers.map(r => [r.glide, r.under, r.grounded]));
+  assert.equal(back.racers[0].hint, branch.count - 1);
+  assert.deepEqual(back.events.slice(-3).map(e => [e.type, e.value]), [['splash', 2], ['glide', 0], ['crush', 0]]);
+  assert.deepEqual(wire(encodeSnapshot(back, back.events)), snap, 'stable re-encode');
+  // A branch hint beyond that branch's samples (but valid on the main loop) is rejected.
+  const bad = structuredClone(snap);
+  bad.r[0][28] = branch.count;
+  assert.ok(branch.count < t.count);
+  assert.equal(decodeSnapshot(bad, names), null);
+  // So is a path index this track does not have.
+  const bad2 = structuredClone(snap);
+  bad2.r[0][30] = t.paths.length;
+  assert.equal(decodeSnapshot(bad2, names), null);
+  // A box list sized for the main loop only no longer fits.
+  assert.equal(decodeSnapshot({ ...snap, b: snap.b.slice(0, t.def.itemRows.length * 5) }, names), null);
 });

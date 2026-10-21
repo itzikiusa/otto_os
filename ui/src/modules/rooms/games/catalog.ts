@@ -14,7 +14,7 @@ export const GAMES: GameChoice[] = [
   {
     kind: 'kart', title: 'Kart Grand Prix', tagline: 'Drift, boost and bump your way to the podium.',
     cover: '/room-games/cover-kart.webp', coverAlt: 'Karts racing through a sunny meadow circuit',
-    summary: '8 racers · 3 laps · items & drifting', maxPlayers: 8,
+    summary: '8 racers · 3 laps · shortcuts, gliders & underwater runs', maxPlayers: 8,
     maps: (Object.keys(TRACK_DEFS) as TrackId[]).map(id => ({ id, name: TRACK_DEFS[id].name, blurb: TRACK_DEFS[id].blurb })),
   },
   {
