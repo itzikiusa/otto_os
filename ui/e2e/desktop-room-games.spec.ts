@@ -72,7 +72,7 @@ test('chooser shows both games, tracks, islands and rosters', async ({ page }, i
   expect(errors).toEqual([]);
 });
 
-for (const track of [{ id: 'meadow', name: 'Sunny Meadow' }, { id: 'downtown', name: 'Downtown Dash' }, { id: 'canyon', name: 'Canyon Run' }, { id: 'frost', name: 'Frostbite Pass' }]) {
+for (const track of [{ id: 'meadow', name: 'Sunny Meadow' }, { id: 'downtown', name: 'Downtown Dash' }, { id: 'canyon', name: 'Canyon Run' }, { id: 'frost', name: 'Frostbite Pass' }, { id: 'lagoon', name: 'Coral Lagoon' }, { id: 'volcano', name: 'Magma Peak' }, { id: 'skyway', name: 'Neon Skyway' }]) {
   test(`kart ${track.id}: 8-racer grid, countdown, driving, drifting and HUD`, async ({ page }, info) => {
     const errors = observe(page);
     await boot(page);
@@ -136,12 +136,15 @@ for (const map of [{ id: 'isle', name: 'Palm Isle' }, { id: 'mesa', name: 'Red M
     writeFileSync(resolve(evidence, `shooter-${map.id}-perf.json`), JSON.stringify(perf, null, 2));
     await capture(page, `shooter-${map.id}-ground`, info);
     await expect(page.locator('.br-vitals')).toBeVisible();
-    await expect(page.locator('.br-inventory .br-slot')).toHaveCount(3);
+    // Five hotbar slots plus the pickaxe.
+    await expect(page.locator('.br-inventory .br-slot')).toHaveCount(6);
     expect(errors).toEqual([]);
   });
 }
 
 const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+/** Hotbar items that are guns (the rest are heals and shields). */
+const GUNS: string[] = ['pistol', 'smg', 'rifle', 'shotgun', 'sniper', 'rocket'];
 const look = (page: Page, yaw: number, pitch: number) => page.locator('.game-play div').first().evaluate((el, [y, p]) => (el as HTMLDivElement & { __ottoGame: Diagnostic<unknown> }).__ottoGame.look?.(y, p), [yaw, pitch] as const);
 
 test('kart full Grand Prix: autopilot races 3 laps, uses items and reaches the results', async ({ page }, info) => {
@@ -207,7 +210,7 @@ test('shooter: loot a weapon, aim at a bot and fire', async ({ page }, info) => 
   const deadline = Date.now() + 90_000;
   for (;;) {
     const s = await snap<ShooterState>(page), p = me(s);
-    if (p.weapons.some(Boolean) || Date.now() > deadline || p.mode === 'dead') break;
+    if (p.weapons.some(w => w && GUNS.includes(w.w)) || Date.now() > deadline || p.mode === 'dead') break;
     const loot = s.loot.filter(l => l.kind === 'weapon' && !skip.has(l.id)).sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z))[0];
     if (!loot) break;
     // Give up on an item that is not getting closer (blocked by a prop) and try the next.
@@ -221,7 +224,7 @@ test('shooter: loot a weapon, aim at a bot and fire', async ({ page }, info) => 
   }
   if (walking) await page.keyboard.up('w');
   const armed = me(await snap<ShooterState>(page));
-  expect(armed.weapons.some(Boolean)).toBe(true);
+  expect(armed.weapons.some(w => w && GUNS.includes(w.w))).toBe(true);
   await capture(page, 'shooter-mesa-armed', info);
   // Aim at the nearest living fighter and fire a burst.
   const s = await snap<ShooterState>(page), p = me(s);
@@ -304,7 +307,7 @@ test('menu art from live frames', async ({ page }) => {
   mkdirSync(art, { recursive: true });
   await page.setViewportSize({ width: 1600, height: 1000 });
   const hide = () => page.addStyleTag({ content: '.kart-top,.kart-ranking,.kart-place,.kart-minimap,.kart-intro,.kart-hint,.kart-notice,.kart-drift,.br-top,.br-mapbox,.br-vitals,.br-inventory,.br-prompt,.br-toast,.br-cross,.br-hint,.br-overlay{display:none!important}' });
-  for (const [id, name] of [['meadow', 'Sunny Meadow'], ['downtown', 'Downtown Dash'], ['canyon', 'Canyon Run'], ['frost', 'Frostbite Pass']]) {
+  for (const [id, name] of [['meadow', 'Sunny Meadow'], ['downtown', 'Downtown Dash'], ['canyon', 'Canyon Run'], ['frost', 'Frostbite Pass'], ['lagoon', 'Coral Lagoon'], ['volcano', 'Magma Peak'], ['skyway', 'Neon Skyway']]) {
     await boot(page);
     await page.getByRole('button', { name: new RegExp(name) }).click();
     await page.getByRole('button', { name: 'Start race', exact: true }).click();
