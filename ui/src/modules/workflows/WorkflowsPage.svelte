@@ -190,12 +190,18 @@
     }),
   );
 
+  // Tracks ONLY the workspace id: `load()` reads `current`, `types` and
+  // `templates` before its first await, and tracking those re-fired the list
+  // fetch ~4× per page entry as each one landed.
   $effect(() => {
-    if (ws.currentId) {
-      void load();
-      // Populate the "Running" sidebar list on entry (also kept live by the
-      // store's WS-event refresh).
-      void ws.refreshActiveWorkflowRuns();
+    const id = ws.currentId;
+    if (id) {
+      untrack(() => {
+        void load();
+        // Populate the "Running" sidebar list on entry (also kept live by the
+        // store's WS-event refresh).
+        void ws.refreshActiveWorkflowRuns();
+      });
     }
   });
 
@@ -641,9 +647,16 @@
     }
     wfLoading = true;
     try {
-      if (types.length === 0) types = await api.get<NodeTypeSpec[]>('/workflows/node-types');
-      if (templates.length === 0) templates = await api.get<WorkflowTemplate[]>('/workflows/templates');
-      const rows = await api.get<Workflow[]>(`/workspaces/${wsId}/workflows`);
+      // The node catalog and templates are workspace-independent: fetched once,
+      // in parallel with the list rather than as two sequential round trips.
+      const needTypes = types.length === 0, needTemplates = templates.length === 0;
+      const [nextTypes, nextTemplates, rows] = await Promise.all([
+        needTypes ? api.get<NodeTypeSpec[]>('/workflows/node-types') : null,
+        needTemplates ? api.get<WorkflowTemplate[]>('/workflows/templates') : null,
+        api.get<Workflow[]>(`/workspaces/${wsId}/workflows`),
+      ]);
+      if (nextTypes && types.length === 0) types = nextTypes;
+      if (nextTemplates && templates.length === 0) templates = nextTemplates;
       if (seq !== loadSeq) return;
       workflows = rows;
       wfError = null;
@@ -2520,7 +2533,7 @@
                 data-testid="run-detail-max"
                 onclick={() => (runDetailMax = !runDetailMax)}
                 aria-pressed={runDetailMax}
-                aria-label={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
+                aria-label="Maximize run detail"
                 title={runDetailMax ? 'Restore run-detail height' : 'Maximize run detail'}
               >
                 <Icon name={runDetailMax ? 'minimize' : 'maximize'} size={13} />

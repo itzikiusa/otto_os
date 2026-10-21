@@ -59,22 +59,3 @@ export function parseCssColor(input: string | null | undefined): Rgba | null {
   const a = aPart !== undefined ? alpha(aPart) : parts.length >= 4 ? alpha(parts[3]) : 1;
   return { r: channel(parts[0], unit), g: channel(parts[1], unit), b: channel(parts[2], unit), a };
 }
-
-/** Resolve CSS custom properties to computed colours, in `host`'s context (so
- *  a scoped `[data-scheme]` / inline accent applies). Missing tokens → null. */
-export function readTokenColors<K extends string>(names: readonly K[], host: Element = document.documentElement): Record<K, Rgba | null> {
-  const probe = document.createElement('span');
-  probe.style.display = 'none';
-  host.appendChild(probe);
-  const out = {} as Record<K, Rgba | null>;
-  try {
-    for (const name of names) {
-      probe.style.color = '';
-      probe.style.color = `var(${name})`;
-      out[name] = parseCssColor(getComputedStyle(probe).color);
-    }
-  } finally {
-    probe.remove();
-  }
-  return out;
-}

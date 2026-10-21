@@ -9,6 +9,8 @@
 // toggles classes on the live DOM. No component per code block, nothing
 // re-rendered on click, the cache stays a string memo.
 
+import { copyTextOrThrow } from '../../../lib/clipboard.ts';
+
 // Header labels for fence tags and hljs ids (static: no hljs needed, so the
 // label is right before the lazy highlighter lands and in node unit tests).
 const LANG_LABELS: Record<string, string> = {
@@ -108,7 +110,7 @@ export function runCodeAction(target: EventTarget | null, host: CodeActionHost =
   if (!btn || !block) return false;
   const act = btn.dataset.codeAct;
   if (act === 'copy') {
-    const copy = host.copy ?? ((t: string) => navigator.clipboard.writeText(t));
+    const copy = host.copy ?? copyTextOrThrow;
     void copy(codeText(block)).then(
       () => flash(btn, 'Copied'),
       () => flash(btn, 'Copy failed'),

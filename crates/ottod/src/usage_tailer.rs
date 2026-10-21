@@ -258,6 +258,22 @@ impl UsageTailer {
         self.home.join(".codex").join("sessions")
     }
 
+    /// Where Grok writes `updates.jsonl` (watched like the transcript roots).
+    fn grok_sessions_root(&self) -> PathBuf {
+        self.grok_root.join("sessions")
+    }
+
+    /// Every directory Antigravity conversation DBs are discovered in.
+    fn agy_roots(&self) -> Vec<PathBuf> {
+        self.agy_extra_dir
+            .iter()
+            .cloned()
+            .chain(otto_transcript::agy::default_agy_conversation_dirs(
+                &self.home,
+            ))
+            .collect()
+    }
+
     /// Spawn the background loop. Returns immediately.
     ///
     /// Event-driven: an FSEvents watcher (notify) on the two transcript roots
@@ -309,6 +325,10 @@ impl UsageTailer {
                     let mut roots: Vec<_> =
                         self.claude_roots.iter().map(|(p, _)| p.clone()).collect();
                     roots.push(self.codex_root());
+                    // Native providers too: an event-driven pass only scans
+                    // them when one of their files changed (see scan_paths).
+                    roots.push(self.grok_sessions_root());
+                    roots.extend(self.agy_roots());
                     w.ensure_roots(&roots);
                 }
                 let (paths, rescan) = {
@@ -469,6 +489,15 @@ impl UsageTailer {
         if self.commit_failed {
             self.persist().await?;
         }
+        // Grok / Antigravity are polled only when the watcher saw one of
+        // their files change; the reconcile pass (scan_once) covers the rest.
+        // An idle event-driven pass used to walk both trees every ≤20 s.
+        let grok_root = self.grok_sessions_root();
+        let agy_roots = self.agy_roots();
+        let grok_dirty = paths.iter().any(|p| p.starts_with(&grok_root));
+        let agy_dirty = paths
+            .iter()
+            .any(|p| agy_roots.iter().any(|root| p.starts_with(root)));
         let claude_roots = self.claude_roots.clone();
         let codex_root = self.codex_root();
         let (claude, codex) = tokio::task::spawn_blocking(move || {
@@ -496,7 +525,7 @@ impl UsageTailer {
         .await
         .unwrap_or_default();
         self.tail_listed(&claude, &codex).await;
-        self.scan_native().await?;
+        self.scan_native_parts(grok_dirty, agy_dirty).await?;
         self.persist().await
     }
 
@@ -652,6 +681,9 @@ impl UsageTailer {
             if !dead.is_empty() {
                 let removed = self.cursors.retain(|k| !dead.contains(k));
                 tracing::debug!("usage tailer: evicted {removed} cursor(s) of deleted transcripts");
+                // A deleted Grok `updates.jsonl` takes its per-turn
+                // baselines with it (other providers' keys never match).
+                self.native.forget_grok_files(&dead);
             }
         }
         if self.codex_meta.len() > codex.len() {
@@ -1118,7 +1150,11 @@ impl TranscriptWatch {
                     }
                     let mut hit = ev.need_rescan();
                     for p in ev.paths {
-                        if p.extension().is_some_and(|x| x == "jsonl") {
+                        // Transcripts / Grok updates, and Antigravity's
+                        // SQLite DB + WAL.
+                        if p.extension()
+                            .is_some_and(|x| x == "jsonl" || x == "db" || x == "db-wal")
+                        {
                             d.paths.insert(p);
                             hit = true;
                         }

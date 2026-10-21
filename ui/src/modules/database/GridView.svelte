@@ -17,11 +17,10 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import type { Attachment } from 'svelte/attachments';
   import Icon from '../../lib/components/Icon.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import { bsonScalar } from './bson';
   import type { QueryResult } from '../../lib/api/types';
   import type { EditFlow } from './EditFlow.svelte';
-  import { CELL_MAX, cellDisplay, cellStr, clip, copyText, isComplex, previewJson } from './results-format';
+  import { CELL_MAX, cellDisplay, cellStr, clip, copyWithToast, isComplex, previewJson } from './results-format';
   import { registerFindProvider } from '../../lib/findProviders';
   import { columnKind, moveColumn, rowNumberWidthCh, type ColumnKind } from './grid-format';
   import { buildCell, widthStyle } from './grid-cells';
@@ -774,8 +773,7 @@
       // A real text selection keeps the native copy.
       if (window.getSelection()?.toString()) return;
       e.preventDefault();
-      void copyText(v === null || v === undefined ? '' : cellStr(v));
-      toasts.success('Copied', 'Cell value copied');
+      void copyWithToast(v === null || v === undefined ? '' : cellStr(v), ['Copied', 'Cell value copied']);
       return;
     }
     if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {

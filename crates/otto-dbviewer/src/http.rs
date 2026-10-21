@@ -1229,8 +1229,11 @@ async fn mongosh_info<S: DbViewerCtx>(
     }
     let probe = tokio::time::timeout(
         Duration::from_secs(10),
+        // `kill_on_drop`: a timed-out probe drops the `output()` future —
+        // without it the `mongosh` process would keep running unsupervised.
         tokio::process::Command::new("mongosh")
             .arg("--version")
+            .kill_on_drop(true)
             .output(),
     )
     .await;

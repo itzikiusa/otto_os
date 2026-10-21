@@ -704,7 +704,7 @@
                     <div class="mr-table-wrap" use:scrollRegion={`Result of run ${it.index + 1}`}>
                       <table class="mr-table mono">
                         <thead>
-                          <tr>{#each detail.result.columns as col (col.name)}<th>{col.name}</th>{/each}</tr>
+                          <tr>{#each detail.result.columns as col, ci (ci)}<th>{col.name}</th>{/each}</tr>
                         </thead>
                         <tbody>
                           {#each detail.result.rows.slice(0, 200) as row, ri (ri)}

@@ -2,6 +2,16 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// Files Otto's session launchers write into an agent's working directory,
+/// root-relative: the claude/codex `.mcp.json`, agy's
+/// `.agents/mcp_config.json` and grok's `.grok/config.toml`. They carry the
+/// absolute `ottod` path and the resolved env (secrets included) of every
+/// enabled MCP server, so they are runtime state, never work product: the
+/// workflow auto-commit excludes them and the Otto Run proof gate ignores
+/// them while untracked. One list so a new provider's file is added once.
+pub const LAUNCHER_ARTIFACTS: [&str; 3] =
+    [".mcp.json", ".agents/mcp_config.json", ".grok/config.toml"];
+
 /// Validate a user-supplied string that must name a SINGLE path component
 /// (an id, a file name) before it is joined under a trusted directory.
 /// Rejects empty names, `.`/`..`, separators, and NULs — anything that could

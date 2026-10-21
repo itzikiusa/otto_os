@@ -308,10 +308,16 @@ impl Mirror {
         let mut guard = self.sessions.lock().await;
 
         // A live tailer already exists: just point it at this turn's
-        // destination (it re-reads it when `begin_turn` starts the turn).
+        // destination (it re-reads it when `begin_turn` starts the turn). A
+        // CANCELLED entry is a tailer that has not woken to tear down yet (it
+        // sleeps up to `IDLE_LIVENESS`) — reusing it would leave this turn
+        // untailed once it does, so it counts as absent and is replaced below
+        // (its teardown only removes its own entry, see `remove_own`).
         if let Some(entry) = guard.get(&session_id) {
-            *entry.dest.lock().unwrap_or_else(|p| p.into_inner()) = destination;
-            return;
+            if !entry.cancel.load(Ordering::Relaxed) {
+                *entry.dest.lock().unwrap_or_else(|p| p.into_inner()) = destination;
+                return;
+            }
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
@@ -391,7 +397,7 @@ impl Mirror {
                         "Otto could not read this agent's reply transcript. Open its session in Otto to see the result.").await;
                 }
                 debug!(session = %session_id, "mirror: cancelled or timed-out waiting for transcript");
-                self.sessions.lock().await.remove(&session_id);
+                self.remove_own(&session_id, &cancel).await;
                 return;
             }
         };
@@ -700,8 +706,22 @@ impl Mirror {
         typing_stop.store(true, Ordering::Relaxed);
         cancel.store(true, Ordering::Relaxed);
 
-        self.sessions.lock().await.remove(&session_id);
+        self.remove_own(&session_id, &cancel).await;
         debug!(session = %session_id, "mirror: tailer finished");
+    }
+
+    /// Drop `session_id`'s entry only if it is still THIS tailer's (same
+    /// `cancel` flag). An `attach` after a cancel installs a fresh entry with
+    /// its own tailer before the old one wakes; removing by key alone would
+    /// orphan that newer tailer's turn (no `begin_turn`, no `wait_turn_done`).
+    async fn remove_own(&self, session_id: &Id, cancel: &Arc<AtomicBool>) {
+        let mut guard = self.sessions.lock().await;
+        if guard
+            .get(session_id)
+            .is_some_and(|e| Arc::ptr_eq(&e.cancel, cancel))
+        {
+            guard.remove(session_id);
+        }
     }
 
     /// Wait for the session manager's provider/account-aware artifact lookup.
@@ -1170,6 +1190,48 @@ async fn post_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attach_after_cancel_replaces_the_dying_tailer() {
+        let directory =
+            std::env::temp_dir().join(format!("otto-mirror-reattach-{}", otto_core::new_id()));
+        let pool = otto_state::db::open(&directory.join("state.sqlite"))
+            .await
+            .unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let manager = Arc::new(SessionManager::new(
+            otto_state::SessionsRepo::new(pool),
+            events,
+            otto_sessions::providers::ProviderRegistry::new(None),
+        ));
+        let mirror = Mirror::new(manager);
+        let adapter: Arc<dyn Adapter> = Arc::new(CountingAdapter::default());
+        // An unknown session keeps its tailer parked in `wait_for_artifact`,
+        // which only re-checks `cancel` every `PSID_POLL`.
+        let sid: Id = otto_core::new_id();
+        mirror
+            .attach(sid.clone(), adapter.clone(), "c".into(), None, false)
+            .await;
+        let first = Arc::clone(&mirror.sessions.lock().await[&sid].cancel);
+        mirror.cancel(&sid).await;
+        // Turn N+1 attaches before the cancelled tailer has woken.
+        mirror
+            .attach(sid.clone(), adapter, "c".into(), None, false)
+            .await;
+        let second = Arc::clone(&mirror.sessions.lock().await[&sid].cancel);
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "a cancelled entry is replaced"
+        );
+        // Let the old tailer wake, see its cancel and tear down.
+        tokio::time::sleep(PSID_POLL * 3).await;
+        let guard = mirror.sessions.lock().await;
+        let entry = guard.get(&sid).expect("the new tailer's entry survives");
+        assert!(Arc::ptr_eq(&entry.cancel, &second));
+        assert!(!entry.cancel.load(Ordering::Relaxed));
+        drop(guard);
+        mirror.cancel(&sid).await;
+    }
 
     #[test]
     fn reply_delay_never_shortens_server_cooldown() {

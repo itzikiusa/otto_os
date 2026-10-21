@@ -1277,7 +1277,7 @@ fn base_tool_catalog() -> Value {
             {
                 "name": "otto_open_session",
                 "description": "MUTATING (Agents Edit): open a new agent session (claude | codex) in this workspace and queue `prompt` as its first message once the TUI is up. Returns the session; poll otto_wait_session. For delegating work to visible, resumable worker sessions — never spawn more than the user's budget.",
-                "inputSchema": { "type": "object", "properties": { "provider": { "type": "string" }, "title": { "type": "string" }, "cwd": { "type": "string" }, "model": { "type": "string", "description": "optional; provider default when omitted" }, "prompt": { "type": "string" } }, "required": ["provider"] }
+                "inputSchema": { "type": "object", "properties": { "provider": { "type": "string", "description": "claude | codex" }, "title": { "type": "string" }, "cwd": { "type": "string" }, "model": { "type": "string", "description": "optional; provider default when omitted" }, "prompt": { "type": "string", "description": "submitted as the first user message" } }, "required": ["provider"] }
             },
             {
                 "name": "otto_send_message",
@@ -1302,19 +1302,20 @@ fn base_tool_catalog() -> Value {
             {
                 "name": "otto_get_pr",
                 "description": "Read-only: one pull request plus its existing review comments (id, body, path, line, thread_id). Call this BEFORE commenting so you can dedupe and reply in-thread instead of posting duplicates.",
-                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string", "description": REPO_REF_DESC }, "pr_number": { "type": "integer" } }, "required": ["pr_number"] }
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string", "description": REPO_REF_DESC }, "number": { "type": "integer", "description": PR_NUMBER_DESC }, "pr_number": { "type": "integer", "description": "Alias of `number`." } } }
             },
             {
                 "name": "otto_comment_pr",
                 "description": "Post a comment on a pull request. Pass `path` (and optionally `line`) to anchor it INLINE on a file in the diff; omit both for a PR-level comment; pass `in_reply_to` with an existing comment id to reply in that thread. Mutating and outward-facing — the comment is visible to everyone on the PR.",
                 "inputSchema": { "type": "object", "properties": {
                     "repo_id": { "type": "string", "description": REPO_REF_DESC },
-                    "pr_number": { "type": "integer" },
+                    "number": { "type": "integer", "description": PR_NUMBER_DESC },
+                    "pr_number": { "type": "integer", "description": "Alias of `number`." },
                     "body": { "type": "string", "description": "Markdown comment body." },
                     "path": { "type": "string", "description": "Repo-relative file path to anchor the comment to." },
                     "line": { "type": "integer", "description": "1-indexed line in `path` to anchor to." },
                     "in_reply_to": { "type": "string", "description": "Existing comment id to reply to." }
-                }, "required": ["pr_number", "body"] }
+                }, "required": ["body"] }
             },
             {
                 "name": "otto_usage_summary",
@@ -1329,7 +1330,7 @@ fn base_tool_catalog() -> Value {
             {
                 "name": "otto_list_improvement_edits",
                 "description": "Read-only: list a workspace's self-improvement edit suggestions. `status` defaults to pending; pass applied / rejected / rolled_back / conflict to see others. Default: this session's workspace.",
-                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": "Optional workspace id or name." }, "status": { "type": "string" } } }
+                "inputSchema": { "type": "object", "properties": { "workspace_id": { "type": "string", "description": "Optional workspace id or name." }, "status": { "type": "string", "description": "pending (default) | applied | rejected | rolled_back | conflict" } } }
             },
             {
                 "name": "otto_vault_list",
@@ -1339,57 +1340,57 @@ fn base_tool_catalog() -> Value {
             {
                 "name": "otto_vault_dir",
                 "description": "Read-only: one level of a vault's folder tree — subfolders (with child counts), notes and attachments. Empty `path` = vault root. Read `index.md` first in OKF vaults (progressive disclosure).",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative folder path; empty for root." } }, "required": ["vault_id"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "path": { "type": "string", "description": "Vault-relative folder path; empty for root." } }, "required": ["vault_id"] }
             },
             {
                 "name": "otto_vault_read",
                 "description": "Read-only: a note's raw markdown + indexed metadata (frontmatter, tags, aliases, headings, word count, hash for optimistic writes) + outgoing links (resolved).",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" } }, "required": ["vault_id", "path"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" } }, "required": ["vault_id", "path"] }
             },
             {
                 "name": "otto_vault_search",
                 "description": "Read-only: full-text (FTS5) search over a vault's notes with snippets; supports tag:/path:/type: operators inside the query.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "query": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["vault_id", "query"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "query": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["vault_id", "query"] }
             },
             {
                 "name": "otto_vault_backlinks",
                 "description": "Read-only: notes that link TO a given note (linked mentions), each with a context snippet.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string" } }, "required": ["vault_id", "path"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "path": { "type": "string" } }, "required": ["vault_id", "path"] }
             },
             {
                 "name": "otto_vault_tags",
                 "description": "Read-only: every tag in a vault with its note count.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" } }, "required": ["vault_id"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC } }, "required": ["vault_id"] }
             },
             {
                 "name": "otto_vault_graph",
                 "description": "Read-only: the vault link graph in a compact form (parallel node arrays + flat [src,dst,...] edge index pairs). Defaults to the LOCAL neighborhood of `path` (depth 1-3); mode=full returns the whole graph (edge-budgeted).",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "mode": { "type": "string", "description": "local (default when path given) | full" }, "path": { "type": "string" }, "depth": { "type": "integer" } }, "required": ["vault_id"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "mode": { "type": "string", "description": "local (default when path given) | full" }, "path": { "type": "string" }, "depth": { "type": "integer" } }, "required": ["vault_id"] }
             },
             {
                 "name": "otto_vault_okf_validate",
                 "description": "Read-only: deterministic OKF v0.1 conformance report for a vault — errors E1 (no/unparseable frontmatter), E2 (missing type), E3 (reserved-file structure); warnings W1-W5. Never eyeball conformance: run this.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" } }, "required": ["vault_id"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC } }, "required": ["vault_id"] }
             },
             {
                 "name": "otto_vault_write",
                 "description": "Create or update a markdown note in a doc vault (Editor-gated; parent folders auto-created). Pass `if_hash` from otto_vault_read for optimistic concurrency (\"\" = must-not-exist). Prefer OKF format: YAML frontmatter with `type` (+ one-sentence description), markdown links, then otto_vault_okf_validate.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
             },
             {
                 "name": "otto_vault_write_file",
                 "description": "Create or update a guarded UTF-8 documentation artifact (Editor-gated): OpenAPI YAML, JSON, D2, Mermaid, text, or CSV. Parent folders are auto-created; pass `if_hash` for optimistic concurrency. Markdown must use otto_vault_write.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative path ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "path": { "type": "string", "description": "Vault-relative path ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
             },
             {
                 "name": "otto_vault_rename",
                 "description": "Rename/move a note or folder (Editor-gated). Every referencing wikilink/markdown link across the vault is rewritten on disk; returns links_updated.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["vault_id", "from", "to"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["vault_id", "from", "to"] }
             },
             {
                 "name": "otto_vault_delete",
                 "description": "Soft-delete a note (Editor-gated): moves it into the vault's .trash/ folder — never destroys files. Prefer an OKF **Deprecation** log entry over deletion for knowledge that aged out.",
-                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string" } }, "required": ["vault_id", "path"] }
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": ["integer", "string"], "description": VAULT_REF_DESC }, "path": { "type": "string" } }, "required": ["vault_id", "path"] }
             },
             {
                 "name": "browser_navigate",
@@ -1429,12 +1430,12 @@ fn base_tool_catalog() -> Value {
             {
                 "name": "otto_room_post",
                 "description": "Personal agents: post a message (max 16KB) into an agent room this agent is a member of. The message is persisted and shown to the user live — rooms are the only agent-to-agent channel. Your session identity determines which agent is speaking.",
-                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "text": { "type": "string" } }, "required": ["room_id", "text"] }
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string", "description": ROOM_REF_DESC }, "text": { "type": "string" } }, "required": ["room_id", "text"] }
             },
             {
                 "name": "otto_room_read",
                 "description": "Personal agents: read messages from an agent room this agent is a member of (oldest first within the page). With no cursor it returns the room's NEWEST messages (default 50); pass `after` (the last message id you saw) to get only newer ones, or `before` (the oldest id you hold) to page back through history.",
-                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "after": { "type": "string" }, "before": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string", "description": ROOM_REF_DESC }, "after": { "type": "string" }, "before": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
             },
             // ---- API client. Reads return the daemon's masked agent shapes;
             // writers use the normal ApiClient:Edit routes as the session owner.
@@ -2262,6 +2263,14 @@ const WS_DIR_DESC: &str = "Optional workspace id or name; omit = all you can rea
 const ISSUE_ACCOUNT_DESC: &str =
     "Jira/Confluence account id, label, email or URL; omit if you have one.";
 
+/// The native spellings of the outward catalog's argument descriptions
+/// (`otto_mcp::outward::catalog`), with tool references in this surface's
+/// `otto_x` form. Kept identical modulo that mapping by
+/// `native_and_governed_twins_share_one_input_schema`.
+const VAULT_REF_DESC: &str = "Vault id (integer) or vault name (otto_vault_list).";
+const ROOM_REF_DESC: &str = "Agent room id or name (otto_list_agent_rooms).";
+const PR_NUMBER_DESC: &str = "Pull request number (otto_list_prs).";
+
 /// Kept SHORT (perf2/10-mcp R2): it repeats in every repo-taking schema of a
 /// catalog Codex re-reads each turn; an ambiguous/unknown reference still
 /// answers with the candidates.
@@ -2594,7 +2603,7 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         "otto_get_pr" => ReadCall::get(format!(
             "/repos/{}/prs/{}",
             seg(&arg_str(args, "repo_id")?),
-            arg_u64(args, "pr_number")?
+            arg_pr_number(args)?
         )),
         "otto_usage_summary" => {
             let q = opt_query(args, &[("days", "days"), ("otto_only", "otto_only")]);
@@ -2974,6 +2983,19 @@ fn arg_u64(args: &Value, key: &str) -> Result<u64, String> {
             .map_err(|_| format!("argument `{key}` must be a non-negative integer")),
         Some(_) => Err(format!("argument `{key}` must be a number")),
         None => Err(format!("missing required integer argument `{key}`")),
+    }
+}
+
+/// The PR number of `otto_get_pr` / `otto_comment_pr`: `number` (the outward
+/// catalog's name) or its alias `pr_number`, the same pair the governed
+/// `otto.get_pr` / `otto.comment_pr` accept.
+fn arg_pr_number(args: &Value) -> Result<u64, String> {
+    if args.get("number").is_some() {
+        arg_u64(args, "number")
+    } else if args.get("pr_number").is_some() {
+        arg_u64(args, "pr_number")
+    } else {
+        Err("missing required integer argument `number` (or `pr_number`)".into())
     }
 }
 
@@ -4098,7 +4120,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         // and the call is audited like every other.
         "otto_comment_pr" => {
             let repo_id = arg_str(args, "repo_id")?;
-            let number = arg_u64(args, "pr_number")?;
+            let number = arg_pr_number(args)?;
             let body = arg_str(args, "body")?;
             let mut payload = json!({ "body": body });
             // path/line anchor the comment inline; in_reply_to threads it. All
@@ -4929,6 +4951,9 @@ async fn write_line<W: AsyncWrite + Unpin>(stdout: &mut W, value: &Value) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catalog-shape tests (twin schema parity, byte budget): `tests/catalog_tests.rs`.
+    mod catalog_tests;
 
     /// S5-20: an over-long line is dropped (to its newline) and the next one
     /// still reads; memory never holds more than the cap.
@@ -7343,75 +7368,13 @@ mod tests {
         );
     }
 
-    /// The `tools/list` size budget: everything a default session can be
-    /// shown, UI tools hidden (no grant). Fails when the catalog silently
-    /// grows past the budget — raise it deliberately, with a reason.
-    #[test]
-    fn tools_list_catalog_stays_within_its_byte_budget() {
-        let info = EnabledInfo {
-            names: all_governed_names(),
-            ui_granted: false,
-        };
-        let listing = |source: Option<&str>, info: &EnabledInfo| -> usize {
-            let mut cat = tool_catalog_for_source(source);
-            let arr = cat["tools"].as_array_mut().unwrap();
-            arr.extend(governed_tools_for_session(info));
-            scope_listing_for_source(arr, source);
-            serde_json::to_vec(&cat).unwrap().len()
-        };
-        let ungranted = listing(None, &info);
-        let granted_info = EnabledInfo {
-            ui_granted: true,
-            ..info.clone()
-        };
-        let granted = listing(None, &granted_info);
-        let narrow = listing(Some("review"), &info);
-        eprintln!("tools/list bytes: ungranted={ungranted} granted={granted} review={narrow}");
-        assert!(
-            ungranted < granted * 3 / 4,
-            "hiding the UI tools must cut the catalog by >25% ({ungranted} vs {granted})"
-        );
-        assert!(
-            ungranted <= TOOLS_LIST_BYTE_BUDGET,
-            "tools/list grew to {ungranted} bytes (budget {TOOLS_LIST_BYTE_BUDGET})"
-        );
-        assert!(
-            narrow <= NARROW_TOOLS_LIST_BYTE_BUDGET,
-            "a review session's tools/list grew to {narrow} bytes \
-             (budget {NARROW_TOOLS_LIST_BYTE_BUDGET})"
-        );
-        // Scoping is listing-only and really trims: no infra console left.
-        assert!(narrow < ungranted);
-    }
-
-    /// A narrow (review) session's listing hides the infra/canvas/browser
-    /// families, but the default and assistant listings keep them.
-    #[test]
-    fn narrow_sources_drop_the_infra_consoles_from_the_listing() {
-        let names = |source: Option<&str>| -> Vec<String> {
-            let mut cat = tool_catalog_for_source(source);
-            let arr = cat["tools"].as_array_mut().unwrap();
-            scope_listing_for_source(arr, source);
-            arr.iter()
-                .map(|t| t["name"].as_str().unwrap().to_string())
-                .collect()
-        };
-        let review = names(Some("review"));
-        assert!(!review
-            .iter()
-            .any(|n| n.starts_with("k8s_") || n.starts_with("aws_")));
-        assert!(review.iter().any(|n| n == "otto_get_pr"), "{review:?}");
-        let default = names(None);
-        assert!(default.iter().any(|n| n.starts_with("k8s_")));
-        assert!(names(Some("workflow"))
-            .iter()
-            .any(|n| n.starts_with("aws_")));
-    }
-
     /// See [`tools_list_catalog_stays_within_its_byte_budget`]. 79_748 at
     /// perf2/10-mcp R2 (shorter repeated reference texts; granted 131_940);
-    /// 83_418 at perf/10-mcp (granted: 135_610).
-    const TOOLS_LIST_BYTE_BUDGET: usize = 82_000;
+    /// 83_418 at perf/10-mcp (granted: 135_610). 83_318 after
+    /// architecture-1-05 aligned the native twins with the outward catalog
+    /// (vault_id advertised as id-or-name, the PR `number` alias, room refs):
+    /// that text was missing, not padding — agents were told integer-only.
+    const TOOLS_LIST_BYTE_BUDGET: usize = 84_000;
     /// A review-type session (R2 per-source scoping): 56_830 measured.
     const NARROW_TOOLS_LIST_BYTE_BUDGET: usize = 59_000;
 

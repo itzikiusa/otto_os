@@ -4,7 +4,9 @@ import {CaptureUploadQueue, changedFrame, encodeMonoWav} from './recap-capture-p
 import {recapRequest} from './recap-client';
 interface AudioSlot {source: RoomRecapAudioSource; input: MediaStreamAudioSourceNode; processor: AudioWorkletNode; offset: number; flushed?: () => void; closing?: Promise<void>}
 interface ScreenSlot {generation: number; video: HTMLVideoElement; fingerprint: Uint8Array | null; sampled: number; busy: boolean; created: number}
-export interface RecapCaptureStatus {audioSources: number; screenSources: number; gaps: string[]}
+/** `speechIssue` is the latest reason speech capture is degraded (cleared once it
+ * runs again); it gates the host's "Retry speech capture" action. */
+export interface RecapCaptureStatus {audioSources: number; screenSources: number; gaps: string[]; speechIssue?: string | null}
 export class RoomRecapCapture {
   private room: RoomSnapshot | null = null;
   private epoch = -1;
@@ -19,7 +21,7 @@ export class RoomRecapCapture {
   private sequences = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private queue: CaptureUploadQueue;
-  private status: RecapCaptureStatus = {audioSources: 0, screenSources: 0, gaps: []};
+  private status: RecapCaptureStatus = {audioSources: 0, screenSources: 0, gaps: [], speechIssue: null};
   private reported = new Set<string>();
   private sources: () => ReadonlyMap<string, RoomRecapAudioSource>;
   private streams: () => ReadonlyMap<string, MediaStream>;
@@ -36,7 +38,7 @@ export class RoomRecapCapture {
     if (next === this.finishingEpoch && next >= 0) return;
     if (next !== this.epoch) {
       this.finishingEpoch = -1;
-      this.reset(); this.epoch = next; this.queue.reset(next); this.sequences.clear(); this.reported.clear();
+      this.reset(); this.epoch = next; this.queue.reset(next); this.sequences.clear(); this.reported.clear(); this.status.speechIssue = null;
       if (next >= 0) { void this.resumeAudio(); this.timer = setInterval(() => this.sync(), 500); }
     }
     if (next >= 0) { if (speechBecameAvailable) void this.resumeAudio(); this.sync(); }
@@ -57,8 +59,13 @@ export class RoomRecapCapture {
       await context.audioWorklet.addModule(new URL('/room-recap-worklet.js', location.href).href);
       await Promise.race([context.resume(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Choose Retry speech capture to allow local audio processing.')), 2000))]);
       if (this.epoch !== epoch) { await context.close(); return; }
-      this.workletReady = true; this.sync();
-    } catch (e) { if (this.epoch === epoch) this.gap('audio', e instanceof Error ? e.message : 'Speech capture is unavailable.'); }
+      this.workletReady = true; this.status.speechIssue = null; this.sync();
+    } catch (e) {
+      if (this.epoch !== epoch) return;
+      const reason = e instanceof Error ? e.message : 'Speech capture is unavailable.';
+      // A repeated failure is logged as a gap once, but always re-arms the Retry.
+      this.status.speechIssue = reason; this.emit(); this.gap('audio', reason);
+    }
     finally { this.preparing = false; }
   }
   private startTime(): number { return Date.parse(this.room?.recap?.started_at ?? '') || Date.now(); }

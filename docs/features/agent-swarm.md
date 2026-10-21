@@ -233,7 +233,7 @@ bars. Adjust budgets later via the swarm patch / **Raise budget & resume**.
 Click **Start**. Status flips to **active**; the coordinator begins scheduling
 ready tasks onto agents, leaders delegate, hand-offs and reviews spawn follow-up
 tasks, and the team posts to the **Feed** as it works. Watch progress in **Org**
-(live status dots + active-run badges), **Graph** (the DAG), **Board** (Kanban),
+(live status dots + active-run badges), **Graph** (the team around its coordinator), **Board** (Kanban),
 **Runs** (every turn), and **Feed** (the board).
 
 Pause, abort, or resume at any time (§5.6). Open any agent's session to watch it
@@ -355,19 +355,23 @@ menu. Empty state: *"No agents yet. Use **Recruit** to add one."*
 Every agent turn runs in a real Otto **Agent session** (PTY running the agent's
 provider CLI). The session is created on the agent's first turn and **reused**
 across later turns — the run row carries its `session_id`, and you can **open** it
-live from the Org tree (session rows), the **Runs** list (**Open**), the **Run
-Graph** (a node tagged *"· open"*), or the **Run Inspector** (**Open session**).
+live from the Org tree (session rows), the **Runs** list (**Open**), the
+**Graph** (a member's **Open session**), or the **Run Inspector** (**Open session**).
 Opening it gives you the same terminal you'd get for any agent session — see
 `./agent-sessions.md`.
 
-### 5.4 Run Graph (`RunGraph.svelte`)
+### 5.4 Graph (`AgentGraph.svelte`)
 
-A live left-to-right DAG of task/run nodes laid out by dependency depth, with
-edges for `depends` (solid), `handoff`, and `review` (dashed). Node cards show a
-status badge, label, and agent. Pan by dragging the background; zoom with the
-wheel or the **+ / − / fit** controls. Click a node to **inspect** its latest run
-(opens the Run Inspector) or **open** its session. Empty state: *"No work yet —
-Tasks and their dependencies show up here as a live graph."*
+An agent-centric view: the **team members** are the nodes (not tasks), laid out
+radially around the coordinator by `reports_to`, each with a live status dot.
+Click a member for **Edit**, **Open session** and **Add report**. A side rail
+shows a **Team brief** per member and their current live tasks. It reads the
+swarm detail, tasks and runs the page already holds, so it makes no extra
+request.
+
+> The older task/run dependency DAG (`RunGraph.svelte`) was removed. Its route,
+> `GET /swarm/swarms/{sid}/graph` (#83 below), is still served for API and agent
+> use; no Otto view reads it.
 
 ### 5.5 Kanban + Runs
 
@@ -533,7 +537,7 @@ authoritative spec is `docs/contracts/api.md` (#59–#86 + "Swarm lifecycle") an
 | 78 | `DELETE /swarm/tasks/{tid}` | editor | → 204 |
 | 80 | `GET /workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status=` | viewer | → `SwarmRun[]` |
 | 81 | `GET /swarm/runs/{rid}` | viewer | → `SwarmRun` |
-| 83 | `GET /swarm/swarms/{sid}/graph` | viewer | → `SwarmGraph` |
+| 83 | `GET /swarm/swarms/{sid}/graph` | viewer | → `SwarmGraph` (task/run dependency DAG; **API-only** — no UI view reads it) |
 | 85 | `GET /swarm/swarms/{sid}/board?project_id=&task_id=` | viewer | → `SwarmMessage[]` (latest 300) |
 | 86 | `POST /swarm/swarms/{sid}/board` | editor | `PostMessageReq` → `SwarmMessage` |
 | — | `GET /swarm/tasks/{tid}/story` | viewer | → `TaskStoryLink` (always 200; `story:null` if none) |
@@ -591,7 +595,7 @@ Always 204 (fire-and-forget). The session's `meta` supplies `swarm_id`/`agent_id
 {"type":"swarm_message_posted","workspace_id":"…","swarm_id":"…","message":{…SwarmMessage…}}
 ```
 
-The UI routes these into the swarm store, updating the org tree, run graph,
+The UI routes these into the swarm store, updating the org tree, agent graph,
 Kanban, runs list and board live. (`run`/`task`/`message` payloads travel as
 serialized JSON.)
 

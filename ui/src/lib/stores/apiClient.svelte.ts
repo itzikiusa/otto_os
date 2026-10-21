@@ -1054,18 +1054,20 @@ class ApiClientStore {
     }
   }
 
-  async importParsed(parsed: ImportedDoc, quiet = false): Promise<void> {
+  /** `created`: the root collection (or environment) now exists — false when
+   *  read-only or its save failed (already toasted). `failed`: how many of its
+   *  folders/requests couldn't be created (summarised in one toast here). */
+  async importParsed(parsed: ImportedDoc, quiet = false): Promise<{ created: boolean; failed: number }> {
     if (ws.myRole === 'viewer') {
       toasts.error('Read-only', 'You have viewer access to this workspace');
-      return;
+      return { created: false, failed: 0 };
     }
     if (isImportedEnvironment(parsed)) {
-      await this.importEnvironment(parsed, quiet);
-      return;
+      return { created: await this.importEnvironment(parsed, quiet), failed: 0 };
     }
     const base = this.base();
     const root = await this.saveCollection({ name: parsed.name, parent_id: null });
-    if (!root || !base) return;
+    if (!root || !base) return { created: false, failed: 0 };
     // Items are created in order (the daemon assigns positions by count), but
     // in bulk: no per-item list reassignment / tree rebuild — one reload at
     // the end — and one summary toast instead of one per failure.
@@ -1108,10 +1110,12 @@ class ApiClientStore {
     if (!quiet) {
       toasts.success('Imported', `${parsed.name} · ${parsed.requests.length} request(s) (${parsed.format})`);
     }
+    return { created: true, failed };
   }
 
   /** Import a Postman environment export as a new API environment. */
-  async importEnvironment(env: ImportedEnvironment, quiet = false): Promise<void> {
+  /** True when the environment was saved (a failure is already toasted). */
+  async importEnvironment(env: ImportedEnvironment, quiet = false): Promise<boolean> {
     // Secret variables go to the Keychain (write-only `secret_values`), never
     // into the environment row.
     const saved = await this.saveEnvironment(environmentUpsertFor(env));
@@ -1122,6 +1126,7 @@ class ApiClientStore {
         `${env.name} · ${Object.keys(env.variables).length} variable(s)${secrets ? `, ${secrets} kept in the Keychain` : ''}`,
       );
     }
+    return saved != null;
   }
 
   /** One-shot Postman ACCOUNT sync: the daemon fetches every collection +
@@ -1152,19 +1157,21 @@ class ApiClientStore {
       const name =
         (doc as { info?: { name?: string } }).info?.name ?? 'collection';
       try {
-        await this.importParsed(detectAndParse(JSON.stringify(doc), 'postman.json'), true);
-        cols++;
+        // Only a created root counts; a failed save already toasted its cause.
+        if ((await this.importParsed(detectAndParse(JSON.stringify(doc), 'postman.json'), true)).created) cols++;
+        else failed.push({ name, error: 'The collection couldn’t be saved.' });
       } catch (e) {
         failed.push({ name, error: errMsg(e) });
       }
     }
     for (const env of res.environments) {
       try {
-        await this.importParsed(
+        const { created } = await this.importParsed(
           detectAndParse(JSON.stringify(env), 'postman_environment.json'),
           true,
         );
-        envs++;
+        if (created) envs++;
+        else failed.push({ name: env.name ?? 'environment', error: 'The environment couldn’t be saved.' });
       } catch (e) {
         failed.push({ name: env.name ?? 'environment', error: errMsg(e) });
       }
@@ -1185,14 +1192,38 @@ class ApiClientStore {
   /** Pull Postman collection files from a connected git repo and import them. */
   async gitPullCollections(repoId: Id): Promise<void> {
     const res = await api.post<{ files: { name: string; content: string }[] }>(`/repos/${repoId}/api-collections/pull`, {});
+    // Three different outcomes, reported separately: a file that isn't a
+    // collection (parse error) is SKIPPED; one whose save failed (API error,
+    // read-only — importParsed already toasted the cause) FAILED; only a
+    // created root counts as imported.
     let imported = 0;
+    let skipped = 0;
+    let failed = 0;
     for (const f of res.files) {
+      let doc: ImportedDoc;
       try {
-        await this.importParsed(detectAndParse(f.content, f.name));
-        imported++;
-      } catch { /* skip non-collection json */ }
+        doc = detectAndParse(f.content, f.name);
+      } catch {
+        skipped++;
+        continue;
+      }
+      try {
+        if ((await this.importParsed(doc)).created) imported++;
+        else failed++;
+      } catch {
+        failed++;
+      }
     }
-    toasts.success('Pulled from git', plural(imported, 'collection file'));
+    const skippedNote = skipped > 0 ? `${plural(skipped, 'file')} skipped (not a collection)` : '';
+    if (imported > 0) {
+      toasts.success('Pulled from git', [plural(imported, 'collection file'), skippedNote].filter(Boolean).join(' · '));
+    } else if (failed === 0) {
+      toasts.info('Nothing imported from git', skippedNote || 'The repo has no collection files.');
+    }
+    if (failed > 0) {
+      // Each file's cause was already toasted by importParsed / saveCollection.
+      toasts.error(`Couldn’t import ${plural(failed, 'collection file')} from git`, imported === 0 ? skippedNote || undefined : undefined);
+    }
   }
 
   /** Export all root collections to Postman files and push them to a git repo. */

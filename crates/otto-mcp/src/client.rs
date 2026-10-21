@@ -38,7 +38,16 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+/// The protocol version Otto offers in `initialize`.
 const PROTOCOL_VERSION: &str = "2024-11-05";
+/// Versions a server may answer with (MCP version negotiation: a server that
+/// no longer speaks the offered one replies with its own). Everything Otto
+/// uses — `tools/list` paging, `tools/call`, ping, server→client requests —
+/// is unchanged across these; the HTTP transport adds the
+/// `MCP-Protocol-Version` header on every later request (see [`http_send`]).
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
+/// Bytes of a stdio server's stderr kept for diagnostics ([`StderrTail`]).
+const STDERR_TAIL_BYTES: usize = 4096;
 const OP_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Parked (reusable) sessions per client: a second one serves sustained
@@ -94,6 +103,78 @@ struct StdioIo {
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
+    stderr: StderrTail,
+}
+
+/// The last [`STDERR_TAIL_BYTES`] a stdio server wrote to stderr, drained by
+/// a background task. A server that dies on startup (missing env var, bad
+/// token, `npx` package not found) explains itself there; without this the
+/// user only ever saw "server closed before responding". Appended — redacted —
+/// to handshake and EOF errors ([`StderrTail::annotate`]).
+#[derive(Clone)]
+struct StderrTail {
+    buf: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>,
+    /// Flips to `true` once the pipe is closed and fully drained.
+    drained: tokio::sync::watch::Receiver<bool>,
+    /// The server's configured env values: never echoed back in an error.
+    secrets: std::sync::Arc<Vec<String>>,
+}
+
+impl StderrTail {
+    fn spawn(mut stderr: tokio::process::ChildStderr, env: &BTreeMap<String, String>) -> Self {
+        use tokio::io::AsyncReadExt;
+        let (done, drained) = tokio::sync::watch::channel(false);
+        let tail = Self {
+            buf: Default::default(),
+            drained,
+            // Short values ("1", "true") would redact ordinary words.
+            secrets: std::sync::Arc::new(env.values().filter(|v| v.len() >= 4).cloned().collect()),
+        };
+        let buf = std::sync::Arc::clone(&tail.buf);
+        tokio::spawn(async move {
+            let mut chunk = [0u8; 1024];
+            while let Ok(n) = stderr.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                b.extend(&chunk[..n]);
+                let excess = b.len().saturating_sub(STDERR_TAIL_BYTES);
+                b.drain(..excess);
+            }
+            let _ = done.send(true);
+        });
+        tail
+    }
+
+    /// `error` plus the redacted stderr tail, when there is one. Waits briefly
+    /// for a dying server's last stderr bytes to be drained first.
+    async fn annotate(&self, error: String) -> String {
+        let mut drained = self.drained.clone();
+        let _ =
+            tokio::time::timeout(Duration::from_millis(250), drained.wait_for(|done| *done)).await;
+        match self.render() {
+            Some(tail) => format!("{error}; server stderr: {tail}"),
+            None => error,
+        }
+    }
+
+    fn render(&self) -> Option<String> {
+        let bytes: Vec<u8> = {
+            let b = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+            b.iter().copied().collect()
+        };
+        let mut text = String::from_utf8_lossy(&bytes).trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        for secret in self.secrets.iter() {
+            text = text.replace(secret.as_str(), "[redacted]");
+        }
+        let text = otto_core::redact::redact_text(&text).value;
+        // Collapse to one line for health/discovery rows and logs.
+        Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
 }
 
 /// An initialized, reusable session.
@@ -106,6 +187,8 @@ enum Live {
     Http {
         client: reqwest::Client,
         session_id: Option<String>,
+        /// The negotiated protocol version, sent as `MCP-Protocol-Version`.
+        version: String,
         next_id: i64,
         _permit: tokio::sync::OwnedSemaphorePermit,
     },
@@ -468,26 +551,33 @@ async fn open_stdio(
         .envs(env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawn '{command}': {e}"))?;
     let mut stdin = child.stdin.take().ok_or("no child stdin")?;
     let stdout = child.stdout.take().ok_or("no child stdout")?;
+    let stderr = StderrTail::spawn(child.stderr.take().ok_or("no child stderr")?, env);
     let mut reader = BufReader::new(stdout);
-    write_line(&mut stdin, &init_request()).await?;
-    let initialized = read_until_id(&mut reader, Some(&mut stdin), 1).await?;
-    validate_initialize_result(&initialized)?;
-    write_line(
-        &mut stdin,
-        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-    )
-    .await?;
+    let handshake = async {
+        write_line(&mut stdin, &init_request()).await?;
+        let initialized = read_until_id(&mut reader, Some(&mut stdin), 1).await?;
+        validate_initialize_result(&initialized)?;
+        write_line(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        )
+        .await
+    };
+    if let Err(error) = handshake.await {
+        return Err(stderr.annotate(error).await);
+    }
     Ok(Live::Stdio {
         io: Box::new(StdioIo {
             child,
             stdin,
             reader,
+            stderr,
         }),
         next_id: 2,
         _permit: permit,
@@ -528,7 +618,7 @@ async fn http_client_for(url: &str) -> Result<reqwest::Client, String> {
 async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live, String> {
     let permit = transport_permit().await?;
     let client = http_client_for(url).await?;
-    let resp = http_send(&client, url, headers, init_request(), None)
+    let resp = http_send(&client, url, headers, init_request(), None, None)
         .await
         .map_err(|e| format!("initialize: {e}"))?;
     let session_id = resp
@@ -546,7 +636,7 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
     if let Some(error) = message.get("error") {
         return Err(format!("initialize: server error: {error}"));
     }
-    validate_initialize_result(
+    let version = validate_initialize_result(
         message
             .get("result")
             .ok_or("initialize response missing result")?,
@@ -558,21 +648,34 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
         headers,
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
         session_id.clone(),
+        Some(&version),
     )
     .await;
     Ok(Live::Http {
         client,
         session_id,
+        version,
         next_id: 2,
         _permit: permit,
     })
 }
 
 /// Both transports must establish the same successful handshake before use.
-fn validate_initialize_result(result: &Value) -> Result<(), String> {
-    if result.get("protocolVersion").and_then(Value::as_str) != Some(PROTOCOL_VERSION) {
-        return Err("initialize: unsupported or missing protocolVersion".into());
-    }
+/// Returns the negotiated protocol version (one of
+/// [`SUPPORTED_PROTOCOL_VERSIONS`]).
+fn validate_initialize_result(result: &Value) -> Result<String, String> {
+    let version = match result.get("protocolVersion").and_then(Value::as_str) {
+        Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v.to_string(),
+        Some(v) => {
+            let shown: String = v.chars().take(40).collect();
+            return Err(format!(
+                "initialize: server offered unsupported protocolVersion \"{shown}\" \
+                 (Otto offered {PROTOCOL_VERSION}; supports {})",
+                SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+            ));
+        }
+        None => return Err("initialize: missing protocolVersion".into()),
+    };
     if !result.get("capabilities").is_some_and(Value::is_object)
         || result
             .get("serverInfo")
@@ -587,7 +690,7 @@ fn validate_initialize_result(result: &Value) -> Result<(), String> {
     {
         return Err("initialize: malformed capabilities or serverInfo".into());
     }
-    Ok(())
+    Ok(version)
 }
 
 /// Redirects an MCP HTTP transport follows: SAME ORIGIN only (scheme, host and
@@ -625,12 +728,16 @@ fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
         && a.port_or_known_default() == b.port_or_known_default()
 }
 
+/// One Streamable-HTTP POST. `version` is the negotiated protocol version,
+/// sent as `MCP-Protocol-Version` on every request after `initialize` (the
+/// 2025-06-18 transport requires it; older servers ignore it).
 fn http_send(
     client: &reqwest::Client,
     url: &str,
     headers: &BTreeMap<String, String>,
     body: Value,
     session: Option<String>,
+    version: Option<&str>,
 ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> {
     let mut rb = client
         .post(url)
@@ -641,6 +748,9 @@ fn http_send(
     }
     if let Some(s) = session {
         rb = rb.header("Mcp-Session-Id", s);
+    }
+    if let Some(v) = version {
+        rb = rb.header("MCP-Protocol-Version", v);
     }
     rb.json(&body).send()
 }
@@ -668,24 +778,29 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
                 child,
                 stdin,
                 reader,
+                stderr,
             } = io.as_mut();
             // A child that already exited while parked never saw this request.
             if let Ok(Some(_)) = child.try_wait() {
-                return Err(OpError::NotDelivered("server process exited".into()));
+                return Err(OpError::NotDelivered(
+                    stderr.annotate("server process exited".into()).await,
+                ));
             }
             let id = *next_id;
             *next_id += 1;
             let request = with_id(&request, id);
-            write_line(stdin, &request)
-                .await
-                .map_err(OpError::NotDelivered)?;
-            read_until_id(reader, Some(stdin), id)
-                .await
-                .map_err(OpError::Failed)
+            if let Err(e) = write_line(stdin, &request).await {
+                return Err(OpError::NotDelivered(stderr.annotate(e).await));
+            }
+            match read_until_id(reader, Some(stdin), id).await {
+                Ok(value) => Ok(value),
+                Err(e) => Err(OpError::Failed(stderr.annotate(e).await)),
+            }
         }
         Live::Http {
             client,
             session_id,
+            version,
             next_id,
             ..
         } => {
@@ -695,16 +810,23 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
             let id = *next_id;
             *next_id += 1;
             let request = with_id(&request, id);
-            let resp = http_send(client, url, headers, request, session_id.clone())
-                .await
-                .map_err(|e| {
-                    // A connect failure never reached the server.
-                    if e.is_connect() {
-                        OpError::NotDelivered(format!("op: {e}"))
-                    } else {
-                        OpError::Failed(format!("op: {e}"))
-                    }
-                })?;
+            let resp = http_send(
+                client,
+                url,
+                headers,
+                request,
+                session_id.clone(),
+                Some(version),
+            )
+            .await
+            .map_err(|e| {
+                // A connect failure never reached the server.
+                if e.is_connect() {
+                    OpError::NotDelivered(format!("op: {e}"))
+                } else {
+                    OpError::Failed(format!("op: {e}"))
+                }
+            })?;
             // Streamable HTTP: 404 on a request carrying a session id means the
             // server dropped the session and did NOT process the request.
             if resp.status() == reqwest::StatusCode::NOT_FOUND && session_id.is_some() {
@@ -713,14 +835,15 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
             // Server→client requests on the stream are answered with a POST
             // of their own (spawned: the stream is still being read).
             let answer = |reply: Value| {
-                let (client, url, headers, sid) = (
+                let (client, url, headers, sid, version) = (
                     client.clone(),
                     url.clone(),
                     headers.clone(),
                     session_id.clone(),
+                    version.clone(),
                 );
                 tokio::spawn(async move {
-                    let _ = http_send(&client, &url, &headers, reply, sid).await;
+                    let _ = http_send(&client, &url, &headers, reply, sid, Some(&version)).await;
                 });
             };
             let msg = parse_http_message_answering(resp, id, &answer)
@@ -1236,14 +1359,14 @@ mod tests {
         });
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("http://{address}/mcp");
-        let resp = http_send(&client, &url, &BTreeMap::new(), init_request(), None)
+        let resp = http_send(&client, &url, &BTreeMap::new(), init_request(), None, None)
             .await
             .unwrap();
         let (c2, u2) = (client.clone(), url.clone());
         let answer = move |reply: Value| {
             let (c, u) = (c2.clone(), u2.clone());
             tokio::spawn(async move {
-                let _ = http_send(&c, &u, &BTreeMap::new(), reply, None).await;
+                let _ = http_send(&c, &u, &BTreeMap::new(), reply, None, None).await;
             });
         };
         let msg = tokio::time::timeout(
@@ -1323,6 +1446,7 @@ mod tests {
             &format!("http://{origin_addr}/mcp"),
             &headers,
             init_request(),
+            None,
             None,
         )
         .await
@@ -1453,6 +1577,108 @@ mod tests {
         let msg = parse_http_message(response, 5).await.unwrap();
         assert_eq!(msg["result"]["tools"], json!([]));
         server.await.unwrap();
+    }
+
+    /// integrations-1-06: a server that negotiates a newer known version is
+    /// accepted, and every later HTTP request carries `MCP-Protocol-Version`;
+    /// an unknown version fails naming what the server offered.
+    #[tokio::test]
+    async fn http_accepts_negotiated_versions_and_sends_the_version_header() {
+        let seen =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let log = seen.clone();
+        let offered = std::sync::Arc::new(std::sync::Mutex::new("2025-06-18".to_string()));
+        let version = offered.clone();
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, axum::Json(request): axum::Json<Value>| {
+                    let log = log.clone();
+                    let version = version.lock().unwrap().clone();
+                    async move {
+                        let method = request["method"].as_str().unwrap_or("").to_string();
+                        let header = headers
+                            .get("mcp-protocol-version")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        log.lock().unwrap().push((method.clone(), header));
+                        axum::Json(match method.as_str() {
+                            "initialize" => json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                                "protocolVersion":version,"capabilities":{},
+                                "serverInfo":{"name":"fixture","version":"1"}}}),
+                            _ => json!({"jsonrpc":"2.0","id":request["id"],"result":{"tools":[]}}),
+                        })
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = McpClient::new(Transport::Http {
+            url: url.clone(),
+            headers: BTreeMap::new(),
+        });
+        assert!(client.list_tools().await.unwrap().is_empty());
+        let seen_now = seen.lock().unwrap().clone();
+        assert_eq!(seen_now[0], ("initialize".to_string(), None));
+        for (method, header) in &seen_now[1..] {
+            assert_eq!(
+                header.as_deref(),
+                Some("2025-06-18"),
+                "{method} lacks the header"
+            );
+        }
+        assert!(seen_now.iter().any(|(m, _)| m == "tools/list"));
+
+        *offered.lock().unwrap() = "2099-01-01".to_string();
+        let error = McpClient::new(Transport::Http {
+            url,
+            headers: BTreeMap::new(),
+        })
+        .health()
+        .await
+        .unwrap_err();
+        assert!(error.contains("\"2099-01-01\""), "{error}");
+        assert!(error.contains(PROTOCOL_VERSION), "{error}");
+        task.abort();
+    }
+
+    /// integrations-1-07: a stdio server that dies on startup explains itself
+    /// on stderr; that tail reaches the error — with its configured secret env
+    /// values redacted.
+    #[tokio::test]
+    async fn stdio_startup_failure_surfaces_redacted_stderr() {
+        let client = McpClient::new(Transport::Stdio {
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo \"FATAL: GITHUB_TOKEN rejected ($GITHUB_TOKEN)\" >&2; exit 1".into(),
+            ],
+            env: BTreeMap::from([("GITHUB_TOKEN".into(), "ghx-very-secret-value".into())]),
+        });
+        let error = client.health().await.unwrap_err();
+        assert!(error.contains("server closed before responding"), "{error}");
+        assert!(error.contains("FATAL: GITHUB_TOKEN rejected"), "{error}");
+        assert!(
+            !error.contains("ghx-very-secret-value"),
+            "secret leaked: {error}"
+        );
+
+        // A noisy server keeps only the bounded tail.
+        let client = McpClient::new(Transport::Stdio {
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "i=0; while [ $i -lt 400 ]; do echo \"noise line $i\" >&2; i=$((i+1)); done; echo LAST >&2; exit 1"
+                    .into(),
+            ],
+            env: BTreeMap::new(),
+        });
+        let error = client.health().await.unwrap_err();
+        assert!(error.ends_with("LAST"), "{error}");
+        assert!(!error.contains("noise line 0 "), "{error}");
+        assert!(error.len() < STDERR_TAIL_BYTES + 200, "{}", error.len());
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from '../../../lib/clipboard';
   import { rowMenu } from '../../../lib/rowMenu';
   import { toastError } from '../../../lib/toastError';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
@@ -217,13 +218,9 @@
     ws.navigateToSession(sid);
   }
 
-  async function copyText(v: string, what = 'Copied'): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(v);
-      toasts.info(what, v);
-    } catch {
-      toasts.error('Couldn’t copy', v);
-    }
+  async function copyNotify(v: string, what = 'Copied'): Promise<void> {
+    if (await copyText(v)) toasts.info(what, v);
+    else toasts.error('Couldn’t copy', v);
   }
 
   /** Reveal the folder in the OS file manager (desktop app); in a plain
@@ -238,7 +235,7 @@
         /* permission not granted in this build — fall through to copy */
       }
     }
-    await copyText(e.cwd, 'Path copied (no file-manager bridge here)');
+    await copyNotify(e.cwd, 'Path copied (no file-manager bridge here)');
   }
 
   async function archive(e: HistoryEntry): Promise<void> {
@@ -279,8 +276,8 @@
         ? { label: 'Unarchive', icon: 'archive', disabled: !canEdit || !e.session_id, action: () => void unarchive(e) }
         : { label: resumeLabel(e), icon: 'play', disabled: !canEdit || !canResume(e), action: () => void resume(e) },
       { label: 'Open folder', icon: 'folder', action: () => void openFolder(e) },
-      { label: 'Copy transcript path', icon: 'copy', action: () => void copyText(e.transcript_path) },
-      { label: 'Copy folder path', icon: 'copy', action: () => void copyText(e.cwd) },
+      { label: 'Copy transcript path', icon: 'copy', action: () => void copyNotify(e.transcript_path) },
+      { label: 'Copy folder path', icon: 'copy', action: () => void copyNotify(e.cwd) },
       { separator: true },
       {
         label: 'Archive',
@@ -438,7 +435,7 @@
           <Icon name="archive" size={14} />
         </button>
       {/if}
-      <button class="btn small" data-overflow="-2" data-icon="copy" data-label="Copy transcript path" onclick={() => void copyText(cur.transcript_path, 'Transcript path copied')} title={cur.transcript_path}>
+      <button class="btn small" data-overflow="-2" data-icon="copy" data-label="Copy transcript path" onclick={() => void copyNotify(cur.transcript_path, 'Transcript path copied')} title={cur.transcript_path}>
         <Icon name="copy" size={12} /> Copy path
       </button>
       <button class="btn small" data-overflow="-1" data-icon="folder" data-label="Open folder" onclick={() => void openFolder(cur)} title="Reveal {cur.cwd}">

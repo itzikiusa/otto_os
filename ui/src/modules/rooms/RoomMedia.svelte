@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { RoomSnapshot, RoomAction, RoomEvent } from '../../lib/api/room-types';
   import { RoomMediaClient, type RoomMediaState } from './room-media';
   import RoomScreens from './RoomScreens.svelte';
@@ -13,7 +13,10 @@
     media = new RoomMediaClient({memberId: room.member_id, send, onState: value => mediaState = value, onStreams: value => streams = value});
     return () => media?.dispose();
   });
-  $effect(() => { if (!media) return; if (connected) media.update(room); else media.disconnect(); });
+  // Tracks only the media client and `connected`: every snapshot already reaches
+  // the client through handleEvent, and annotation/chat traffic re-creates `room`
+  // without touching media state, so tracking it rebuilt the audio mix per event.
+  $effect(() => { const client = media; if (!client) return; if (connected) untrack(() => client.update(room)); else client.disconnect(); });
   export function handleEvent(event: RoomEvent) { if (event.type === 'snapshot') media?.update(event.room); media?.handleEvent(event); }
   export function getRecapAudioSources() { return media?.getRecapAudioSources() ?? new Map(); }
   export function getPresentationStreams() { return streams; }
@@ -38,7 +41,7 @@
     {#if mediaState.presenting}<button class="btn small" onclick={() => media?.stopPresentation()}>Stop sharing screen</button>
     {:else if self?.role === 'host' || self?.presenter_allowed}<button class="btn small" disabled={!connected || busy} onclick={() => act(async () => { await media?.startPresentation(); })}>Share screen…</button>
     {:else}<button class="btn small" disabled={!connected || self?.presenter_requested} onclick={() => send({type: 'request_present'})}>{self?.presenter_requested ? 'Presentation requested' : 'Request to present'}</button>{/if}
-    {#if room.member_id === room.host_member_id}<button class="btn small" aria-pressed={room.annotations_enabled !== false} onclick={() => send({type: 'annotations_enabled', enabled: room.annotations_enabled === false})}>{room.annotations_enabled === false ? 'Allow annotations' : 'Disable annotations'}</button>{/if}
+    {#if room.member_id === room.host_member_id}<button class="btn small" onclick={() => send({type: 'annotations_enabled', enabled: room.annotations_enabled === false})}>{room.annotations_enabled === false ? 'Allow annotations' : 'Disable annotations'}</button>{/if}
   </div>
   {#if mediaState.connection === 'connecting'}<p role="status">Connecting voice and screens…</p>{/if}
   {#if !mediaState.relayConfigured}<p>A media relay is not configured. Voice and screen sharing may not connect across networks. Session and chat remain available.</p>{/if}

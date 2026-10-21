@@ -504,23 +504,6 @@ impl SessionsRepo {
             .map_err(dberr("auto-archive candidate ids"))
     }
 
-    /// Sessions that should be revived or marked reconnectable on daemon boot.
-    ///
-    /// Includes exited agent sessions that have a `provider_session_id` — those
-    /// can be resumed with `--resume` even after the daemon restarts.
-    pub async fn list_all_restorable(&self) -> Result<Vec<Session>> {
-        let rows = sqlx::query(
-            "SELECT * FROM sessions \
-             WHERE archived = 0 \
-               AND (status != 'exited' \
-                    OR (kind = 'agent' AND provider_session_id IS NOT NULL))",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("sessions"))?;
-        rows.iter().map(row_to_session).collect()
-    }
-
     pub async fn update_status(&self, id: &Id, status: SessionStatus) -> Result<()> {
         sqlx::query("UPDATE sessions SET status = ?, last_active_at = ? WHERE id = ?")
             .bind(status.as_str())

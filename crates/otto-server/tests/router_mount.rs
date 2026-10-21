@@ -18,8 +18,14 @@
 //! or the placeholder page for any other root path. Each route is tried under
 //! `/api/v1` first, then at the root (WS sockets, `/browser/proxy`, plugin
 //! assets). No credentials are sent, so no protected handler ever runs.
+//!
+//! It also pins WHO MAY CALL WITHOUT A TOKEN (test-quality-1-01): every
+//! matched probe must answer 401 unless it is in [`PUBLIC_ROUTES`]. A route
+//! moved out of the `protected` router (or a new router added to the root
+//! vec) therefore fails here with a diff instead of going public silently —
+//! making a route public is a reviewed edit to that list.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use otto_server::ServerCtx;
@@ -58,7 +64,8 @@ fn concrete(path: &str) -> String {
 /// What the router answered for one request, reduced to "did a route match".
 #[derive(Debug)]
 enum Outcome {
-    Matched,
+    /// A route answered, with this status.
+    Matched(u16),
     Unmatched(String),
 }
 
@@ -100,7 +107,7 @@ async fn probe(
         if body.contains("no such route") {
             return Outcome::Unmatched(format!("404 fallback: {body}"));
         }
-        return Outcome::Matched;
+        return Outcome::Matched(status);
     }
     if status == 200 && ctype.starts_with("text/html") {
         let body = resp.text().await.unwrap_or_default();
@@ -108,7 +115,7 @@ async fn probe(
             return Outcome::Unmatched("SPA placeholder fallback".into());
         }
     }
-    Outcome::Matched
+    Outcome::Matched(status)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -154,6 +161,8 @@ async fn every_inventoried_route_is_mounted_on_the_daemon_router() {
     cases.dedup();
 
     let mut unmounted = Vec::new();
+    // Every matched probe that did NOT answer 401 without credentials.
+    let mut open = BTreeSet::new();
     for (method, raw) in &cases {
         let rel = raw.strip_prefix("/api/v1").unwrap_or(raw);
         let rel = if rel.is_empty() { "/" } else { rel };
@@ -166,12 +175,21 @@ async fn every_inventoried_route_is_mounted_on_the_daemon_router() {
             &placeholder,
         )
         .await;
-        if matches!(api, Outcome::Matched) {
+        if let Outcome::Matched(status) = api {
+            if status != 401 {
+                open.insert(format!("{method} /api/v1{rel}"));
+            }
             continue;
         }
-        let root = probe(&http, &base, method, &path, &placeholder).await;
-        if let Outcome::Unmatched(why) = root {
-            unmounted.push(format!("  {method} {raw}  (api: {api:?}; root: {why})"));
+        match probe(&http, &base, method, &path, &placeholder).await {
+            Outcome::Matched(status) => {
+                if status != 401 {
+                    open.insert(format!("{method} {rel}"));
+                }
+            }
+            Outcome::Unmatched(why) => {
+                unmounted.push(format!("  {method} {raw}  (api: {api:?}; root: {why})"));
+            }
         }
     }
     assert!(
@@ -183,7 +201,76 @@ async fn every_inventoried_route_is_mounted_on_the_daemon_router() {
         cases.len(),
         unmounted.join("\n")
     );
+
+    let pinned: BTreeSet<String> = PUBLIC_ROUTES.iter().map(|s| s.to_string()).collect();
+    let newly_open: Vec<_> = open
+        .difference(&pinned)
+        .map(|l| format!("  + {l}"))
+        .collect();
+    let now_closed: Vec<_> = pinned
+        .difference(&open)
+        .map(|l| format!("  - {l}"))
+        .collect();
+    assert!(
+        newly_open.is_empty() && now_closed.is_empty(),
+        "the set of routes answering WITHOUT credentials (anything but 401) changed vs \
+         PUBLIC_ROUTES ({} newly open, {} no longer open):\n{}\n{}\n\n\
+         `+` is reachable with no token — if that is intended, add it to PUBLIC_ROUTES \
+         (and its contract); `-` now answers 401 — drop it from the list.",
+        newly_open.len(),
+        now_closed.len(),
+        newly_open.join("\n"),
+        now_closed.join("\n"),
+    );
 }
+
+/// Every route that answers a credential-less request with something other
+/// than 401 (its handler ran, or a WS upgrade refused the missing headers):
+/// `METHOD path` with the path as registered — `/api/v1…` for the API, bare
+/// for the root routes. `ANY` is an `any(…)` route probed with GET. Pinned
+/// from the daemon's behaviour; see the module docs.
+const PUBLIC_ROUTES: &[&str] = &[
+    // Liveness, daemon metadata, sign-in and first-run onboarding.
+    "GET /api/v1/health",
+    "GET /api/v1/meta",
+    "POST /api/v1/auth/login",
+    "POST /api/v1/onboarding/root",
+    // OAuth2 redirect target of the API client (state-bound in the handler).
+    "GET /api/v1/api-client/oauth2/callback",
+    // Agent/CLI sidecar ingest — authenticated by its own key, not a bearer.
+    "POST /api/v1/ingest/claude",
+    "POST /api/v1/ingest/codex",
+    "POST /api/v1/ingest/swarm/board",
+    "POST /api/v1/ingest/swarm/discovery-report",
+    "POST /api/v1/ingest/swarm/mockup",
+    "POST /api/v1/ingest/swarm/product",
+    "POST /api/v1/ingest/usage",
+    // DB Assistant `q` tool — per-assist `x-assist-key`.
+    "POST /api/v1/db-assist/{aid}/query",
+    // Share-link guests (email OTP verify / extend).
+    "POST /api/v1/share/extend",
+    "POST /api/v1/share/verify",
+    // Inbound webhooks — per-workspace webhook key.
+    "POST /api/v1/webhooks/{workspace_id}",
+    "POST /api/v1/webhooks/{workspace_id}/run",
+    "POST /api/v1/webhooks/swarm/{workspace_id}/{swarm_id}",
+    // Room / game-room guests join with an invite credential.
+    "POST /api/v1/room-join",
+    "POST /api/v1/game-room-join",
+    // Plugin host API — the plugin's own host token.
+    "GET /api/v1/plugin-host/jira/credentials",
+    "POST /api/v1/plugin-host/agents/run",
+    // Root routes: WS upgrades (authenticated in the upgrade / first frame;
+    // a bare GET is refused for missing upgrade headers) and the browser proxy.
+    "GET /browser/proxy",
+    "GET /ws/api-client/stream",
+    "GET /ws/browser/{tab_id}/live",
+    "GET /ws/events",
+    "GET /ws/game-rooms/{id}",
+    "GET /ws/lsp",
+    "GET /ws/rooms/{id}",
+    "GET /ws/rooms/{id}/terminal",
+];
 
 #[test]
 fn concrete_fills_params_and_wildcards() {

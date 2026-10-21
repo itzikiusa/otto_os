@@ -24,6 +24,23 @@ use serde_json::Value;
 /// unattended-agent resource cost (security review). Enforced by [`validate`].
 pub const MIN_INTERVAL_MIN: i64 = 5;
 
+/// Largest `every_min` [`validate`] accepts (one year). Far beyond it the
+/// chrono arithmetic in [`next_run`] overflowed and panicked the create
+/// handler; the date maths below is checked as well, for rows saved before
+/// this bound existed.
+pub const MAX_INTERVAL_MIN: i64 = 525_600;
+
+/// Most fires [`served_occurrence`] walks for one cron lookback window. A
+/// validated cron fires at most every [`MIN_INTERVAL_MIN`], so the one-day
+/// window needs ≤ 288 steps; this only bounds pre-validation rows.
+const MAX_CRON_CATCH_UP_STEPS: u32 = 2_000;
+
+/// `every_min` minutes after `from`, or `None` when that overflows chrono's
+/// range (a pre-bound row with a huge `every_min`).
+fn add_minutes(from: DateTime<Utc>, minutes: i64) -> Option<DateTime<Utc>> {
+    from.checked_add_signed(Duration::try_minutes(minutes)?)
+}
+
 /// Parse a task's IANA timezone string, defaulting to UTC on empty/unknown.
 pub fn task_tz(timezone: &str) -> Tz {
     let t = timezone.trim();
@@ -200,8 +217,10 @@ pub fn effective_cursor(
 /// The occurrence a run that started at `now` is serving. Settlement writes
 /// this instant, not the completion clock: a `*/5` fire that starts at 09:05
 /// and finishes at 09:12 must leave the cursor at 09:05 so 09:10 stays due.
-/// One slot — the earliest fire strictly after the cursor that is already
-/// `<= now` — matching [`is_due_since`].
+/// It is the LATEST fire strictly after the cursor that is already `<= now`,
+/// so a backlog (an 8 h sleep under `*/5`, a week offline under `daily`)
+/// collapses into ONE catch-up run instead of replaying every missed slot
+/// back to back. [`is_due_since`] then sees the next fire as still ahead.
 pub fn served_occurrence(
     spec: &Value,
     cursor: Option<DateTime<Utc>>,
@@ -210,13 +229,19 @@ pub fn served_occurrence(
     tz: Tz,
 ) -> DateTime<Utc> {
     let due = match cadence(spec) {
-        "interval" => cursor
-            .map(|l| l + Duration::minutes(every_min(spec)))
-            .filter(|t| *t <= now),
+        // cursor + floor((now - cursor) / every) * every.
+        "interval" => cursor.and_then(|l| {
+            let every = every_min(spec);
+            let steps = (now - l).num_minutes() / every;
+            if steps < 1 {
+                return None;
+            }
+            add_minutes(l, steps.checked_mul(every)?).filter(|t| *t <= now)
+        }),
         "daily" => {
             let (h, m) = parse_at(spec);
             match cursor {
-                Some(c) => next_daily_after(c, tz, h, m).filter(|t| *t <= now),
+                Some(c) => latest_daily_at_or_before(now, tz, h, m).filter(|t| c < *t),
                 None => scheduled_today(now, tz, h, m).filter(|t| now >= *t),
             }
         }
@@ -224,7 +249,7 @@ pub fn served_occurrence(
             let wd = spec.get("weekday").and_then(Value::as_i64).unwrap_or(0) as u32;
             let (h, m) = parse_at(spec);
             match cursor {
-                Some(c) => next_weekly_after(c, tz, h, m, wd).filter(|t| *t <= now),
+                Some(c) => latest_weekly_at_or_before(now, tz, h, m, wd).filter(|t| c < *t),
                 None => scheduled_today(now, tz, h, m).filter(|t| now >= *t),
             }
         }
@@ -235,13 +260,75 @@ pub fn served_occurrence(
             });
             cron::Schedule::parse(cron_expr(spec))
                 .ok()
-                .and_then(|sched| sched.next_after(anchor, tz))
-                .filter(|next| *next <= now)
+                .and_then(|sched| latest_cron_fire(&sched, anchor, now, tz))
         }
         "once" => once_at(spec, tz).filter(|t| now >= *t),
         _ => None,
     };
     due.unwrap_or(now)
+}
+
+/// The latest daily `at` that is `<= now` (today's slot once it has passed,
+/// otherwise yesterday's).
+fn latest_daily_at_or_before(now: DateTime<Utc>, tz: Tz, h: u32, m: u32) -> Option<DateTime<Utc>> {
+    let day = now.with_timezone(&tz).date_naive();
+    match scheduled_on(day, tz, h, m) {
+        Some(t) if t <= now => Some(t),
+        _ => scheduled_on(day.pred_opt()?, tz, h, m).filter(|t| *t <= now),
+    }
+}
+
+/// The latest weekly `at` on `weekday` that is `<= now`.
+fn latest_weekly_at_or_before(
+    now: DateTime<Utc>,
+    tz: Tz,
+    h: u32,
+    m: u32,
+    weekday: u32,
+) -> Option<DateTime<Utc>> {
+    let wd = weekday.min(6);
+    let mut day = now.with_timezone(&tz).date_naive();
+    for _ in 0..8 {
+        if day.weekday().num_days_from_monday() == wd {
+            if let Some(slot) = scheduled_on(day, tz, h, m).filter(|t| *t <= now) {
+                return Some(slot);
+            }
+        }
+        day = day.pred_opt()?;
+    }
+    None
+}
+
+/// The latest cron fire strictly after `anchor` and `<= now`. Walks forward
+/// from the most recent lookback window that holds a fire (a day, a month,
+/// then the whole span), so a stale cursor under `*/5` costs a day's worth
+/// of steps, not every slot since the cursor.
+fn latest_cron_fire(
+    sched: &cron::Schedule,
+    anchor: DateTime<Utc>,
+    now: DateTime<Utc>,
+    tz: Tz,
+) -> Option<DateTime<Utc>> {
+    for window_days in [1, 32, 400, i64::MAX] {
+        let start = Duration::try_days(window_days)
+            .and_then(|w| now.checked_sub_signed(w))
+            .map_or(anchor, |floor| anchor.max(floor));
+        let mut last = None;
+        let mut cur = start;
+        for _ in 0..MAX_CRON_CATCH_UP_STEPS {
+            match sched.next_after(cur, tz) {
+                Some(next) if next <= now => {
+                    last = Some(next);
+                    cur = next;
+                }
+                _ => break,
+            }
+        }
+        if last.is_some() || start == anchor {
+            return last;
+        }
+    }
+    None
 }
 
 /// Earliest daily `at` strictly after `cursor` (the slot on the cursor's
@@ -305,7 +392,7 @@ pub fn rearms_once(old_spec: &Value, new_spec: Option<&Value>) -> bool {
 /// The next time the task should fire after `from` (for display in `next_run_at`).
 pub fn next_run(spec: &Value, from: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
     match cadence(spec) {
-        "interval" => Some(from + Duration::minutes(every_min(spec))),
+        "interval" => add_minutes(from, every_min(spec)),
         // Daily/weekly step LOCAL dates (not `+ n days` in UTC), so the shown
         // next run stays at the wall-clock `at` across a DST change.
         "daily" => {
@@ -402,6 +489,11 @@ pub fn validate(spec: &Value) -> Result<()> {
             if raw < MIN_INTERVAL_MIN {
                 return Err(Error::Invalid(format!(
                     "schedule.every_min must be at least {MIN_INTERVAL_MIN} minutes"
+                )));
+            }
+            if raw > MAX_INTERVAL_MIN {
+                return Err(Error::Invalid(format!(
+                    "schedule.every_min must be at most {MAX_INTERVAL_MIN} minutes (one year)"
                 )));
             }
         }
@@ -1241,6 +1333,78 @@ mod tests {
         let resumed = effective_cursor(&daily, sunday, Some(utc(2026, 6, 9, 1, 0)));
         assert!(!is_due(&daily, resumed, tuesday, Tz::UTC));
         assert!(is_due(&daily, resumed, utc(2026, 6, 9, 23, 0), Tz::UTC));
+    }
+
+    #[test]
+    fn a_multi_slot_backlog_collapses_into_one_catch_up_run() {
+        // `*/5` cron last served 01:00, Mac asleep 8 h, wakes 09:02: ONE run
+        // serving 09:00, then nothing due until 09:05 (not 96 back to back).
+        let cron = json!({"cadence":"cron","expr":"*/5 * * * *"});
+        let cursor = Some(utc(2026, 6, 26, 1, 0));
+        let wake = utc(2026, 6, 26, 9, 2);
+        assert!(is_due(&cron, cursor, wake, Tz::UTC));
+        let served = served_occurrence(&cron, cursor, None, wake, Tz::UTC);
+        assert_eq!(served, utc(2026, 6, 26, 9, 0));
+        assert!(!is_due(&cron, Some(served), wake, Tz::UTC));
+        assert!(is_due(&cron, Some(served), utc(2026, 6, 26, 9, 5), Tz::UTC));
+        // Same for a 5-minute interval: the cursor lands on the last grid
+        // slot <= now (cursor + floor(gap / every) * every).
+        let interval = json!({"cadence":"interval","every_min":5});
+        let served = served_occurrence(&interval, cursor, None, wake, Tz::UTC);
+        assert_eq!(served, utc(2026, 6, 26, 9, 0));
+        assert!(!is_due(&interval, Some(served), wake, Tz::UTC));
+        // Not yet a full period since the cursor: the run serves `now`.
+        assert_eq!(
+            served_occurrence(&interval, Some(wake), None, utc(2026, 6, 26, 9, 4), Tz::UTC),
+            utc(2026, 6, 26, 9, 4)
+        );
+        // A daily task offline for a week runs once (the latest slot).
+        let daily = json!({"cadence":"daily","at":"09:00"});
+        let week_ago = Some(utc(2026, 6, 19, 9, 0));
+        let back = utc(2026, 6, 26, 12, 0);
+        let served = served_occurrence(&daily, week_ago, None, back, Tz::UTC);
+        assert_eq!(served, utc(2026, 6, 26, 9, 0));
+        assert!(!is_due(&daily, Some(served), back, Tz::UTC));
+        // Before today's slot the latest one is yesterday's.
+        let early = utc(2026, 6, 26, 8, 0);
+        assert_eq!(
+            served_occurrence(&daily, week_ago, None, early, Tz::UTC),
+            utc(2026, 6, 25, 9, 0)
+        );
+        // Weekly Monday 09:00, three weeks missed: one run for the last Monday.
+        let weekly = json!({"cadence":"weekly","at":"09:00","weekday":0});
+        let old = Some(utc(2026, 6, 1, 9, 0));
+        let thursday = utc(2026, 6, 25, 12, 0);
+        let served = served_occurrence(&weekly, old, None, thursday, Tz::UTC);
+        assert_eq!(served, utc(2026, 6, 22, 9, 0));
+        assert!(!is_due(&weekly, Some(served), thursday, Tz::UTC));
+        // A monthly cron whose cursor is months back serves the latest 1st.
+        let monthly = json!({"cadence":"cron","expr":"0 9 1 * *"});
+        let served = served_occurrence(
+            &monthly,
+            Some(utc(2026, 1, 1, 9, 0)),
+            None,
+            utc(2026, 6, 20, 12, 0),
+            Tz::UTC,
+        );
+        assert_eq!(served, utc(2026, 6, 1, 9, 0));
+    }
+
+    #[test]
+    fn a_huge_every_min_is_rejected_and_never_panics() {
+        let huge = json!({"cadence":"interval","every_min":1_000_000_000_000i64});
+        assert!(validate(&huge).is_err());
+        assert!(validate(&json!({"cadence":"interval","every_min":MAX_INTERVAL_MIN})).is_ok());
+        assert!(validate(&json!({"cadence":"interval","every_min":MAX_INTERVAL_MIN + 1})).is_err());
+        // A row saved before the bound must not panic the date maths.
+        let now = utc(2026, 6, 26, 9, 0);
+        assert_eq!(next_run(&huge, now, Tz::UTC), None);
+        let max = json!({"cadence":"interval","every_min":i64::MAX});
+        assert_eq!(next_run(&max, now, Tz::UTC), None);
+        let cursor = Some(utc(2026, 6, 1, 0, 0));
+        assert_eq!(served_occurrence(&huge, cursor, None, now, Tz::UTC), now);
+        assert_eq!(served_occurrence(&max, cursor, None, now, Tz::UTC), now);
+        assert!(!is_due(&max, cursor, now, Tz::UTC));
     }
 
     #[test]

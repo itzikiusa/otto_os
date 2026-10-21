@@ -107,6 +107,13 @@
   const POLL_INTERVAL_MS = 3000;
   const POLL_MAX_MS = 120_000;
   let pollStartedAt = 0;
+  // Consecutive failed reads while waiting: after POLL_FAIL_SHOWN the waiting
+  // state says why (with Retry), and a timeout after failed reads blames the
+  // read — not the agent, which may well have written the plan.
+  const POLL_FAIL_SHOWN = 2;
+  let pollFailures = $state(0);
+  let lastPollError = $state<string | null>(null);
+  let pollLoadingPlan = false;
 
   function clearPoll(): void {
     if (pollTimer !== null) {
@@ -125,37 +132,57 @@
     return best;
   }
 
-  async function loadPlanBody(v: ProductStoryVersion): Promise<void> {
+  /** True only when the body actually loaded. From the poll a failure is
+   *  recorded as a poll failure (no toast per tick); the poll keeps going. */
+  async function loadPlanBody(v: ProductStoryVersion, fromPoll = false): Promise<boolean> {
     loading = true;
     try {
       const full = await product.getVersion(v.id);
       planVersion = full;
       body = full.body_md ?? '';
+      return true;
     } catch (e) {
       // Nothing on screen yet → inline error with Retry; a refresh of a shown plan → toast.
-      if (planVersion) toastError('Couldn’t load plan', e);
+      if (fromPoll) { pollFailures++; lastPollError = loadErrorText(e); }
+      else if (planVersion) toastError('Couldn’t load plan', e);
       else loadError = loadErrorText(e);
+      return false;
     } finally {
       loading = false;
     }
   }
 
   async function pollForPlan(): Promise<void> {
-    if (Date.now() - pollStartedAt > POLL_MAX_MS) {
+    if (pollLoadingPlan) return;
+    // A `product_changed` nudge also lands here with no poll running (after
+    // "Stop waiting" the plan still appears): no timeout, no failure count then.
+    const polling = pollTimer !== null;
+    if (polling && Date.now() - pollStartedAt > POLL_MAX_MS) {
+      const cause = pollFailures > 0 ? lastPollError : null;
       clearPoll();
-      toasts.warn('Plan timed out', 'No plan appeared within 2 minutes.');
+      if (cause) toasts.warn('Couldn’t check for the plan', cause);
+      else toasts.warn('Plan timed out', 'No plan appeared within 2 minutes.');
       return;
     }
     try {
       await product.loadVersions();
       const plan = latestPlan();
       if (plan && (!planVersion || plan.version_no > planVersion.version_no)) {
+        pollLoadingPlan = true;
+        try {
+          if (!(await loadPlanBody(plan, true))) return; // keep polling; the failure is shown inline
+        } finally {
+          pollLoadingPlan = false;
+        }
         clearPoll();
-        await loadPlanBody(plan);
         toasts.success('Plan ready', 'Implementation plan generated.');
       }
+      pollFailures = 0;
+      lastPollError = null;
     } catch (e) {
-      console.error('[PlanTab] poll error', e);
+      if (!polling) return;
+      pollFailures++;
+      lastPollError = loadErrorText(e);
     }
   }
 
@@ -169,6 +196,8 @@
   function startPolling(): void {
     clearPoll();
     pollStartedAt = Date.now();
+    pollFailures = 0;
+    lastPollError = null;
     // Immediate first poll, then every POLL_INTERVAL_MS after each settles.
     // `product_changed` (onSectionChange, below) settles it; this chain is
     // a 15 s safety net while events flow, POLL_INTERVAL_MS while they cannot.
@@ -492,6 +521,10 @@
                 <Icon name="x" size={12} /> Stop waiting
               </button>
               <span class="polling-indicator">checking every 3s…</span>
+              {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
+                <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+                <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
+              {/if}
             {/if}
             {#if !swarmLink && swarm.swarms.length > 1}
               <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
@@ -559,7 +592,7 @@
                 </span>
               {/if}
               <button class="btn small" onclick={refresh} disabled={generating}>Refresh</button>
-              <button class="btn small" aria-pressed={showRaw} onclick={() => (showRaw = !showRaw)}>
+              <button class="btn small" onclick={() => (showRaw = !showRaw)}>
                 {showRaw ? 'Hide raw' : 'Raw'}
               </button>
               <button class="btn small" onclick={regenerate} disabled={generating || pollTimer !== null}>
@@ -569,6 +602,10 @@
                 <button class="btn small" onclick={stopWaiting} title="Stop waiting for the plan (agents already started keep running)">
                   <Icon name="x" size={12} /> Stop waiting
                 </button>
+                {#if pollFailures >= POLL_FAIL_SHOWN && lastPollError}
+                  <span class="poll-error" role="status">Couldn’t check progress: {lastPollError}</span>
+                  <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
+                {/if}
               {/if}
               {#if !swarmLink && swarm.swarms.length > 1}
                 <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
@@ -729,6 +766,7 @@
   .watching-text { font-size: var(--fs-s); color: var(--text); flex: 1; min-width: 0; }
   .pl-sel { width: auto; font-size: var(--fs-s); }
   .polling-indicator { font-size: var(--fs-xs); color: var(--text-dim); font-style: italic; }
+  .poll-error { font-size: var(--fs-xs); color: var(--warning); overflow-wrap: anywhere; }
 
   /* Plan header */
   .ph-row {

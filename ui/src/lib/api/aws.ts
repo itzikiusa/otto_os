@@ -76,11 +76,6 @@ export function isLoginRequired(e: unknown): boolean {
   return e instanceof Error && /^login required/i.test(e.message);
 }
 
-/** True when the daemon reports the `aws` binary is missing. */
-export function isNotInstalled(e: unknown): boolean {
-  return e instanceof Error && /not installed/i.test(e.message);
-}
-
 export const awsApi = {
   // --- plumbing ---
   status: () => api.get<AwsStatus>('/aws/status'),

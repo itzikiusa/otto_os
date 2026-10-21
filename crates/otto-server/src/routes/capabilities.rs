@@ -103,11 +103,12 @@ pub struct SupportBundle {
     pub settings: serde_json::Value,
     /// The capability snapshot (same as GET /capabilities).
     pub capabilities: Vec<ModuleCapability>,
-    /// The 25 most-recent audit log entries (newest first).
+    /// The 25 most-recent audit log entries (newest first), redacted like
+    /// the settings (targets, details and IPs can carry emails or tokens).
     pub recent_audit: Vec<serde_json::Value>,
     /// Current SQLite migration version (number of applied migrations).
     pub migration_level: i64,
-    /// Number of redaction hits applied to settings.
+    /// Number of redaction hits applied to settings and audit entries.
     pub redaction_hits: usize,
     /// Workflow runs the runtime orphan sweep errored since this daemon
     /// started (driverless `pending`/`running` rows) — non-zero means engine
@@ -639,10 +640,11 @@ pub async fn get_capabilities(
 /// - daemon version + migration level
 /// - all daemon settings with secrets stripped by `redact_json`
 /// - a full capability snapshot (same as GET /capabilities)
-/// - the 25 most-recent audit log entries
+/// - the 25 most-recent audit log entries, redacted the same way
 ///
-/// Everything sensitive is passed through `otto_core::redact::redact_json`
-/// before it leaves the trust boundary.
+/// Settings and audit entries both pass through `otto_core::redact::redact_json`
+/// (sensitive keys, emails, bearer/JWT/AWS/PEM shapes) before they leave the
+/// trust boundary; `tests::support_bundle_redacts_settings_and_audit` pins it.
 pub async fn get_support_bundle(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
@@ -670,10 +672,18 @@ pub async fn get_support_bundle(
         })
         .await
         .unwrap_or_default();
-    let recent_audit: Vec<serde_json::Value> = audit_entries
-        .into_iter()
-        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
-        .collect();
+    let audit_value = serde_json::Value::Array(
+        audit_entries
+            .into_iter()
+            .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+            .collect(),
+    );
+    let audit = redact_json(&audit_value);
+    let redaction_hits = redaction_hits + audit.hits.iter().map(|h| h.count).sum::<usize>();
+    let recent_audit = match audit.value {
+        serde_json::Value::Array(rows) => rows,
+        _ => Vec::new(),
+    };
 
     // ---- migration level ---------------------------------------------------
     // Count of applied migrations as a proxy for schema version.
@@ -704,4 +714,83 @@ pub fn capabilities_routes() -> Router<ServerCtx> {
     Router::new()
         .route("/capabilities", get(get_capabilities))
         .route("/support-bundle", get(get_support_bundle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_state::NewAuditEntry;
+    use serde_json::json;
+
+    /// test-quality-1-09: the support bundle is an export meant to leave the
+    /// machine — no seeded secret or email may survive into it, and only
+    /// root may build it.
+    #[tokio::test]
+    async fn support_bundle_redacts_settings_and_audit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let root = users.create("root", "x", "Root", true).await.unwrap();
+        let member = users.create("member", "x", "Member", false).await.unwrap();
+
+        const PASSWORD: &str = "hunter2-smtp-pass";
+        const BEARER: &str = "sk9f8e7d6c5b4a3f2e1d0c9b8a7";
+        const EMAIL: &str = "alice.leak@example.com";
+        const TOKEN: &str = "detailtok-5a4b3c2d1e0f";
+        let settings = SettingsRepo::new(pool.clone());
+        settings
+            .put(
+                "mailer",
+                &json!({"smtp": {"host": "smtp.example.com", "password": PASSWORD}}),
+            )
+            .await
+            .unwrap();
+        settings
+            .put("webhook_auth", &json!(format!("Bearer {BEARER}")))
+            .await
+            .unwrap();
+        ctx.audit(NewAuditEntry {
+            user_id: Some(root.id.clone()),
+            action: "user.invite".into(),
+            target: Some(EMAIL.into()),
+            detail: Some(json!({"token": TOKEN, "note": "kept"})),
+            ip: None,
+        })
+        .await;
+
+        let Json(bundle) = get_support_bundle(State(ctx.clone()), CurrentUser(root))
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&bundle).unwrap();
+        for raw in [PASSWORD, BEARER, EMAIL, TOKEN] {
+            assert!(!text.contains(raw), "{raw} leaked into the support bundle");
+        }
+        // Redacted, not dropped: the rows and their harmless fields remain.
+        assert_eq!(
+            bundle.settings["mailer"]["smtp"]["host"],
+            "smtp.example.com"
+        );
+        let row = bundle
+            .recent_audit
+            .iter()
+            .find(|r| r["action"] == "user.invite")
+            .expect("the audit row is in the bundle");
+        assert_eq!(row["detail"]["note"], "kept");
+        assert!(
+            bundle.redaction_hits >= 4,
+            "hits: {}",
+            bundle.redaction_hits
+        );
+
+        // Root only.
+        let Err(err) = get_support_bundle(State(ctx), CurrentUser(member)).await else {
+            panic!("a non-root caller must be refused");
+        };
+        assert!(
+            matches!(err.0, otto_core::Error::Forbidden(_)),
+            "{:?}",
+            err.0
+        );
+    }
 }

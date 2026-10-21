@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../lib/metric-format';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import Badge from '../../lib/components/Badge.svelte';
@@ -1241,12 +1242,6 @@
     }
   }
 
-  function fmtBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  }
-
   function relDate(iso: string): string {
     try {
       const diff = Date.now() - new Date(iso).getTime();
@@ -1837,7 +1832,7 @@
                         <div class="attachment-card">
                           <div class="att-header">
                             <span class="att-filename" title={att.filename}>{att.filename}</span>
-                            <span class="att-meta">{fmtBytes(att.size)} · {att.mime}</span>
+                            <span class="att-meta">{formatBytes(att.size)} · {att.mime}</span>
                           </div>
 
                           {#if att.mime.startsWith('image/')}

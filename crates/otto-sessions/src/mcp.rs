@@ -35,11 +35,12 @@ pub fn activation_gate() -> &'static tokio::sync::RwLock<()> {
     GATE.get_or_init(|| tokio::sync::RwLock::new(()))
 }
 
-const SERVER_KEY: &str = "otto-browser";
+/// The launcher key for Otto's browser MCP server (every provider's config).
+pub(crate) const SERVER_KEY: &str = "otto-browser";
 
 /// The `.mcp.json` key for Otto's own first-party read-only tool server
 /// (Task B2b). Opt-in per workspace (`otto_mcp_enabled`); never auto-injected.
-const OTTO_TOOLS_KEY: &str = "otto";
+pub(crate) const OTTO_TOOLS_KEY: &str = "otto";
 
 /// Top-level `.mcp.json` marker listing the `mcpServers` names Otto manages.
 /// Reconciliation removes stale names from this set and never touches names
@@ -151,22 +152,51 @@ pub struct OttoToolsServer {
     pub env: std::collections::BTreeMap<String, String>,
 }
 
+/// Resolves a workspace's *enabled* user-configured MCP servers just before an
+/// agent spawn. Fallible on purpose: "the lookup failed" must stay distinct
+/// from "nothing is enabled" — the latter removes every managed user entry
+/// from the shared launcher files, so a transient DB/Keychain fault mapped to
+/// an empty list would strip the user's servers for every session in that cwd.
+/// Implementations are sync (the spawn path runs them on the blocking pool).
+pub trait McpServerSource: Send + Sync {
+    fn enabled_servers(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<otto_core::hooks::McpServerSpec>, String>;
+}
+
 /// Everything Otto manages in a workspace's `.mcp.json`, resolved once per
 /// spawn. `None`/`false`/empty means "not enabled" — reconciliation then
 /// REMOVES the corresponding managed entries, which is how a disable or delete
-/// propagates to the file.
-#[derive(Debug, Clone, Default)]
+/// propagates to the file. The one exception is `user_servers: None` ("the
+/// enabled set is unknown"), which preserves the managed user entries as-is.
+#[derive(Debug, Clone)]
 pub struct ManagedMcpConfig {
     /// Session opted into browser tools (`meta.browser == true`).
     pub browser: bool,
     /// The workspace's *enabled* user-configured servers. Never auto-enabled —
-    /// callers pass only the rows the user flipped on.
-    pub user_servers: Vec<UserMcpServer>,
+    /// callers pass only the rows the user flipped on. `None` means the lookup
+    /// failed: the previously managed user entries (and their marker names)
+    /// are kept untouched while Otto's own entries are still reconciled.
+    pub user_servers: Option<Vec<UserMcpServer>>,
     /// Otto's first-party tool server, when the workspace has it enabled.
     /// Per-session env is deliberately NOT written to the shared file: several
     /// sessions can share this cwd, and persisting one session's token here
     /// would make the last spawner's capabilities win for every later resume.
     pub otto_tools: Option<OttoToolsServer>,
+}
+
+/// Defaults to "nothing enabled" (`user_servers: Some(vec![])`), not to the
+/// preserve-on-unknown `None`: removal is the normal reconcile, preservation
+/// must be asked for explicitly.
+impl Default for ManagedMcpConfig {
+    fn default() -> Self {
+        Self {
+            browser: false,
+            user_servers: Some(Vec::new()),
+            otto_tools: None,
+        }
+    }
 }
 
 /// Reconcile the workspace `.mcp.json` against `cfg` — the ONE write path for
@@ -219,7 +249,7 @@ fn reconcile_json_launcher(
             json!({ "command": t.command, "args": t.args }),
         ));
     }
-    for s in &cfg.user_servers {
+    for s in cfg.user_servers.iter().flatten() {
         // Reserved for Otto's own entries — a user server named "otto-browser"
         // or "otto" can't clobber them.
         if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
@@ -279,6 +309,18 @@ fn reconcile_json_launcher(
         }
     };
 
+    // Unknown enabled set (lookup failed): every previously managed user entry
+    // stays exactly as it is and keeps its marker slot, so the next healthy
+    // spawn can still reconcile it. Only Otto's reserved entries are managed.
+    let mut managed_names = desired_names.clone();
+    if cfg.user_servers.is_none() {
+        for name in &prior {
+            if name != SERVER_KEY && name != OTTO_TOOLS_KEY && !managed_names.contains(name) {
+                managed_names.push(name.clone());
+            }
+        }
+    }
+
     let servers = doc
         .entry("mcpServers")
         .or_insert_with(|| json!({}))
@@ -286,13 +328,16 @@ fn reconcile_json_launcher(
         .ok_or("mcpServers is not an object")?;
     // Remove what Otto wrote before and no longer wants; upsert the rest.
     for name in &prior {
-        if !desired_names.contains(name) {
+        if !managed_names.contains(name) {
             servers.remove(name);
         }
     }
+    // A preserved name whose entry is gone (hand-deleted) is not managed any more.
+    managed_names.retain(|n| desired_names.contains(n) || servers.contains_key(n));
     for (name, entry) in desired {
         servers.insert(name, entry);
     }
+    let desired_names = managed_names;
     if desired_names.is_empty() {
         doc.remove(MANAGED_KEY);
     } else {
@@ -341,42 +386,155 @@ pub fn codex_mcp_inject_args(ottod: &str, creds_path: &str) -> Vec<String> {
     ]
 }
 
+/// The Codex `-c` overrides that attach Otto's browser MCP server — the codex
+/// counterpart of the `otto-browser` entry the JSON launchers get. Emitted only
+/// for a session that opted in (`meta.browser`); per-spawn, so nothing to undo.
+pub fn codex_browser_args() -> Vec<String> {
+    let (command, args) = browser_command();
+    let args: Vec<String> = args.iter().map(|a| toml_str(a)).collect();
+    vec![
+        "-c".to_string(),
+        format!("mcp_servers.{SERVER_KEY}.command={}", toml_str(&command)),
+        "-c".to_string(),
+        format!("mcp_servers.{SERVER_KEY}.args=[{}]", args.join(",")),
+    ]
+}
+
+/// What [`codex_user_server_args`] attached: the `-c` overrides plus the names
+/// of the servers they actually carry (the session's MCP snapshot must list
+/// only what the agent really gets, never a server codex silently skipped).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CodexUserServers {
+    pub args: Vec<String>,
+    pub delivered: Vec<String>,
+}
+
+/// `sh -c` program that loads a server's env file and execs the real server:
+/// `$0` is the env file, `"$@"` the server's command and args. `set -a` exports
+/// every assignment the file makes; a missing/unreadable file is a fatal `.`
+/// error, so the server never starts without its configured environment.
+const ENV_EXEC_SCRIPT: &str = "set -a; . \"$0\"; set +a; exec \"$@\"";
+
+/// A POSIX shell variable name — the only env keys an `sh`-sourced env file can
+/// assign.
+fn is_shell_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// The Codex `-c` overrides that attach the user's enabled MCP servers to a
 /// Codex session — the codex counterpart of the `.mcp.json` user entries, using
 /// the same per-spawn mechanism as [`codex_mcp_inject_args`]. Per-spawn, so
 /// disables propagate for free (a disabled server simply isn't emitted).
-/// Servers whose name can't be spliced into a bare TOML key path are skipped
-/// with a debug log rather than failing the spawn.
-pub fn codex_user_server_args(servers: &[UserMcpServer]) -> Vec<String> {
-    let mut out = Vec::new();
+///
+/// A server's `env` (Keychain-resolved secrets included) never touches argv:
+/// `env_file` writes it to a per-session 0600 file and the server is launched
+/// as `/bin/sh -c ENV_EXEC_SCRIPT <file> <command> <args…>`, the same
+/// "secrets live in a private file" rule as the `otto` creds file.
+///
+/// Servers that can't be delivered — a name that isn't a bare TOML key, an env
+/// key that isn't a shell name, an env file that couldn't be written — are
+/// skipped with a warning rather than failing the spawn, and are left out of
+/// [`CodexUserServers::delivered`].
+pub fn codex_user_server_args(
+    servers: &[UserMcpServer],
+    mut env_file: impl FnMut(&UserMcpServer) -> Result<PathBuf, String>,
+) -> CodexUserServers {
+    let mut out = CodexUserServers::default();
     for s in servers {
         if s.name == SERVER_KEY || s.name == OTTO_TOOLS_KEY {
             continue; // reserved for Otto's managed entries
         }
         if !is_bare_toml_key(&s.name) {
-            tracing::debug!(server = %s.name, "codex MCP: name not a bare TOML key, skipping");
+            tracing::warn!(
+                server = %s.name,
+                "codex MCP: server name is not a bare TOML key (letters, digits, '_' and '-' only); \
+                 not attached to this codex session"
+            );
             continue;
         }
-        out.push("-c".to_string());
-        out.push(format!(
+        let (command, args) = if s.env.is_empty() {
+            (s.command.clone(), s.args.clone())
+        } else {
+            if let Some(bad) = s.env.keys().find(|k| !is_shell_name(k)) {
+                tracing::warn!(
+                    server = %s.name,
+                    key = %bad,
+                    "codex MCP: env key is not a shell variable name; not attached to this codex session"
+                );
+                continue;
+            }
+            let path = match env_file(s) {
+                Ok(path) => path,
+                Err(e) => {
+                    tracing::warn!(server = %s.name, "codex MCP: write env file failed: {e}");
+                    continue;
+                }
+            };
+            let mut args = vec![
+                "-c".to_string(),
+                ENV_EXEC_SCRIPT.to_string(),
+                path.to_string_lossy().into_owned(),
+                s.command.clone(),
+            ];
+            args.extend(s.args.iter().cloned());
+            ("/bin/sh".to_string(), args)
+        };
+        out.args.push("-c".to_string());
+        out.args.push(format!(
             "mcp_servers.{}.command={}",
             s.name,
-            toml_str(&s.command)
+            toml_str(&command)
         ));
-        out.push("-c".to_string());
-        let args: Vec<String> = s.args.iter().map(|a| toml_str(a)).collect();
-        out.push(format!("mcp_servers.{}.args=[{}]", s.name, args.join(",")));
-        if !s.env.is_empty() {
-            let env: Vec<String> = s
-                .env
-                .iter()
-                .map(|(k, v)| format!("{}={}", toml_str(k), toml_str(v)))
-                .collect();
-            out.push("-c".to_string());
-            out.push(format!("mcp_servers.{}.env={{{}}}", s.name, env.join(",")));
-        }
+        out.args.push("-c".to_string());
+        let args: Vec<String> = args.iter().map(|a| toml_str(a)).collect();
+        out.args
+            .push(format!("mcp_servers.{}.args=[{}]", s.name, args.join(",")));
+        out.delivered.push(s.name.clone());
     }
     out
+}
+
+/// Single-quote `v` for a POSIX shell assignment (`'` becomes `'\''`).
+fn shell_quote(v: &str) -> String {
+    format!("'{}'", v.replace('\'', "'\\''"))
+}
+
+/// Write a server's env as `KEY='value'` lines to `path`, owner-only (0600)
+/// before any byte lands — it carries Keychain-resolved secrets. Keys must
+/// already be shell names ([`codex_user_server_args`] checks).
+pub fn write_env_file(
+    path: &Path,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let mut body = String::new();
+    for (k, v) in env {
+        body.push_str(k);
+        body.push('=');
+        body.push_str(&shell_quote(v));
+        body.push('\n');
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    // `mode` only applies on create: tighten a pre-existing file too, before
+    // the secrets are written into it.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Add (or refresh) Otto's `otto` MCP server in grok's PROJECT-scoped config
@@ -508,11 +666,12 @@ fn read_grok_doc(
 ) -> Result<(PathBuf, PathBuf, toml_edit::DocumentMut), String> {
     let dir = Path::new(workspace_root).join(".grok");
     let path = dir.join("config.toml");
-    let doc = match std::fs::read_to_string(&path) {
-        Ok(s) => s
+    // Same rule as `read_doc`: only a missing/blank file starts fresh.
+    let doc = match read_launcher(&path)? {
+        Some(s) => s
             .parse()
             .map_err(|e| format!("parse {}: {e}", path.display()))?,
-        Err(_) => toml_edit::DocumentMut::new(),
+        None => toml_edit::DocumentMut::new(),
     };
     Ok((dir, path, doc))
 }
@@ -522,12 +681,25 @@ fn write_grok_doc(dir: &Path, path: &Path, doc: &toml_edit::DocumentMut) -> Resu
     atomic_write(path, doc.to_string().as_bytes())
 }
 
+/// Read a launcher file for a read→reconcile→write. Only a missing or blank
+/// file reads as empty: any other read failure (EACCES, non-UTF-8 such as a
+/// UTF-16 save, an I/O error) is propagated exactly like a parse error, so the
+/// reconcile is skipped and logged instead of atomically writing a fresh
+/// document over the user's hand-added servers.
 fn read_doc(path: &Path) -> Result<Map<String, Value>, String> {
+    match read_launcher(path)? {
+        Some(s) => serde_json::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display())),
+        None => Ok(Map::new()),
+    }
+}
+
+/// The launcher file's text, `None` when it is absent or whitespace-only.
+fn read_launcher(path: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
-        Ok(s) if !s.trim().is_empty() => {
-            serde_json::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display()))
-        }
-        _ => Ok(Map::new()),
+        Ok(s) if s.trim().is_empty() => Ok(None),
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
     }
 }
 
@@ -555,6 +727,89 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         format!("rename {} -> {}: {e}", tmp.display(), path.display())
     })
+}
+
+/// Retire a formerly direct server without disturbing other launcher entries.
+/// A preview is read-only. Untracked entries require an explicit manual cleanup
+/// because Otto cannot claim ownership of somebody else's launcher config.
+/// Every launcher (`.mcp.json`, agy's `.agents/mcp_config.json`, grok's
+/// `.grok/config.toml`) is checked BEFORE any is written, so a refusal in one
+/// never leaves the server half-retired in another.
+pub fn retire_user_server(workspace_root: &str, name: &str, apply: bool) -> Result<(), String> {
+    let lock = cwd_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    let untracked = |path: &Path| {
+        format!(
+            "remove the untracked direct MCP entry '{name}' from {} before enforcement",
+            path.display()
+        )
+    };
+    let mut json_docs: Vec<(PathBuf, Map<String, Value>)> = Vec::new();
+    for path in [mcp_path(workspace_root), agy_mcp_path(workspace_root)] {
+        if !path.exists() {
+            continue;
+        }
+        let doc = read_doc(&path)?;
+        if doc
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .is_some_and(|s| s.contains_key(name))
+        {
+            let tracked = doc
+                .get(MANAGED_KEY)
+                .and_then(Value::as_array)
+                .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)));
+            if !tracked {
+                return Err(untracked(&path));
+            }
+            json_docs.push((path, doc));
+        }
+    }
+    let (dir, grok_path, mut grok_doc) = read_grok_doc(workspace_root)?;
+    let grok_has = grok_path.exists()
+        && grok_doc
+            .get("mcp_servers")
+            .and_then(toml_edit::Item::as_table)
+            .is_some_and(|s| s.contains_key(name));
+    if grok_has {
+        let tracked = grok_doc
+            .get(MANAGED_KEY_TOML)
+            .and_then(toml_edit::Item::as_array)
+            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)));
+        if !tracked {
+            return Err(untracked(&grok_path));
+        }
+    }
+    if !apply {
+        return Ok(());
+    }
+
+    for (path, mut doc) in json_docs {
+        if let Some(servers) = doc.get_mut("mcpServers").and_then(Value::as_object_mut) {
+            servers.remove(name);
+        }
+        if let Some(names) = doc.get_mut(MANAGED_KEY).and_then(Value::as_array_mut) {
+            names.retain(|n| n.as_str() != Some(name));
+        }
+        write_doc(&path, &doc)?;
+    }
+    if grok_has {
+        if let Some(servers) = grok_doc
+            .get_mut("mcp_servers")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            servers.remove(name);
+        }
+        if let Some(names) = grok_doc
+            .get_mut(MANAGED_KEY_TOML)
+            .and_then(toml_edit::Item::as_array_mut)
+        {
+            names.retain(|n| n.as_str() != Some(name));
+        }
+        write_grok_doc(&dir, &grok_path, &grok_doc)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -614,7 +869,7 @@ mod tests {
             root,
             &ManagedMcpConfig {
                 browser: true,
-                user_servers: vec![user("myserver")],
+                user_servers: Some(vec![user("myserver")]),
                 otto_tools: Some(otto_tools()),
             },
         )
@@ -642,7 +897,7 @@ mod tests {
         let root = dir.path().to_str().unwrap();
         let cfg = ManagedMcpConfig {
             browser: false,
-            user_servers: vec![user("jira"), user("linear")],
+            user_servers: Some(vec![user("jira"), user("linear")]),
             otto_tools: Some(otto_tools()),
         };
         reconcile_managed_servers(root, &cfg).unwrap();
@@ -652,7 +907,7 @@ mod tests {
         reconcile_managed_servers(
             root,
             &ManagedMcpConfig {
-                user_servers: vec![user("linear")],
+                user_servers: Some(vec![user("linear")]),
                 ..cfg
             },
         )
@@ -677,7 +932,7 @@ mod tests {
             root,
             &ManagedMcpConfig {
                 browser: true,
-                user_servers: vec![user("jira")],
+                user_servers: Some(vec![user("jira")]),
                 otto_tools: Some(otto_tools()),
             },
         )
@@ -729,7 +984,7 @@ mod tests {
         reconcile_managed_servers(
             root,
             &ManagedMcpConfig {
-                user_servers: vec![user("jira")],
+                user_servers: Some(vec![user("jira")]),
                 ..Default::default()
             },
         )
@@ -773,7 +1028,7 @@ mod tests {
 
         let cfg = ManagedMcpConfig {
             browser: true,
-            user_servers: vec![user("jira")],
+            user_servers: Some(vec![user("jira")]),
             otto_tools: Some(otto_tools()),
         };
         std::thread::scope(|s| {
@@ -803,12 +1058,12 @@ mod tests {
         reconcile_managed_servers(
             root,
             &ManagedMcpConfig {
-                user_servers: vec![UserMcpServer {
+                user_servers: Some(vec![UserMcpServer {
                     name: "otto".into(),
                     command: "evil".into(),
                     args: vec![],
                     env: BTreeMap::new(),
-                }],
+                }]),
                 ..Default::default()
             },
         )
@@ -834,7 +1089,7 @@ mod tests {
             root,
             &ManagedMcpConfig {
                 browser: false,
-                user_servers: vec![user("jira")],
+                user_servers: Some(vec![user("jira")]),
                 otto_tools: Some(otto_tools()),
             },
         )
@@ -968,132 +1223,238 @@ mod tests {
     }
 
     /// codex user overrides mirror the .mcp.json entries; reserved and
-    /// non-bare-key names are skipped rather than failing the spawn.
+    /// non-bare-key names are skipped rather than failing the spawn, and only
+    /// the servers actually emitted are reported as delivered.
     #[test]
     fn codex_user_server_args_builds_and_skips() {
-        let mut jira = user("jira");
-        jira.env.insert("TOKEN".into(), "t\"1".into());
         let mut weird = user("has space");
         weird.command = "x".into();
-        let args = codex_user_server_args(&[jira, weird, user("otto")]);
+        let out = codex_user_server_args(&[user("jira"), weird, user("otto")], |_| {
+            panic!("no env, no env file")
+        });
         assert_eq!(
-            args,
+            out.args,
             vec![
                 "-c".to_string(),
                 "mcp_servers.jira.command=\"node\"".to_string(),
                 "-c".to_string(),
                 "mcp_servers.jira.args=[\"x.js\"]".to_string(),
-                "-c".to_string(),
-                "mcp_servers.jira.env={\"TOKEN\"=\"t\\\"1\"}".to_string(),
             ]
         );
+        assert_eq!(out.delivered, vec!["jira"]);
     }
-}
 
-/// Retire a formerly direct server without disturbing other launcher entries.
-/// A preview is read-only. Untracked entries require an explicit manual cleanup
-/// because Otto cannot claim ownership of somebody else's launcher config.
-pub fn retire_user_server(workspace_root: &str, name: &str, apply: bool) -> Result<(), String> {
-    let lock = cwd_lock(workspace_root);
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    for path in [mcp_path(workspace_root), agy_mcp_path(workspace_root)] {
-        if !path.exists() {
-            continue;
+    /// A user server's env (Keychain secrets included) never reaches codex's
+    /// argv: it lands in a 0600 env file the server is exec'd through, and the
+    /// file round-trips every value — quotes, spaces, `$`, newlines — exactly.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // sync test: runs the wrapper shell to completion
+    fn codex_user_server_env_stays_off_argv() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "s3cr'et $HOME \"q\"\nline2";
+        let mut jira = user("jira");
+        jira.env.insert("API_TOKEN".into(), secret.into());
+        jira.env.insert("BASE".into(), "https://x".into());
+        let mut bad_key = user("badkey");
+        bad_key.env.insert("NOT-A-NAME".into(), "v".into());
+        let env_path = dir.path().join("jira.env");
+        let out = codex_user_server_args(&[jira, bad_key], |s| {
+            assert_eq!(s.name, "jira", "env file only for deliverable servers");
+            write_env_file(&env_path, &s.env)?;
+            Ok(env_path.clone())
+        });
+        assert_eq!(out.delivered, vec!["jira"]);
+        for arg in &out.args {
+            assert!(!arg.contains("s3cr"), "secret on argv: {arg}");
+            assert!(!arg.contains("https://x"), "env value on argv: {arg}");
+            assert!(!arg.contains(".env="), "literal env override: {arg}");
         }
-        let mut doc = read_doc(&path)?;
-        if doc
-            .get("mcpServers")
-            .and_then(Value::as_object)
-            .is_some_and(|s| s.contains_key(name))
-        {
-            let tracked = doc
-                .get(MANAGED_KEY)
-                .and_then(Value::as_array)
-                .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)));
-            if !tracked {
-                return Err(format!(
-                    "remove the untracked direct MCP entry '{name}' from {} before enforcement",
-                    path.display()
-                ));
-            }
-            if apply {
-                doc.get_mut("mcpServers")
-                    .and_then(Value::as_object_mut)
-                    .unwrap()
-                    .remove(name);
-                if let Some(names) = doc.get_mut(MANAGED_KEY).and_then(Value::as_array_mut) {
-                    names.retain(|n| n.as_str() != Some(name));
-                }
-                write_doc(&path, &doc)?;
-            }
-        }
-    }
-    let (dir, path, mut doc) = read_grok_doc(workspace_root)?;
-    if path.exists()
-        && doc
-            .get("mcp_servers")
-            .and_then(toml_edit::Item::as_table)
-            .is_some_and(|s| s.contains_key(name))
-    {
-        let tracked = doc
-            .get(MANAGED_KEY_TOML)
-            .and_then(toml_edit::Item::as_array)
-            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)));
-        if !tracked {
-            return Err(format!(
-                "remove the untracked direct MCP entry '{name}' from {} before enforcement",
-                path.display()
-            ));
-        }
-        if apply {
-            doc.get_mut("mcp_servers")
-                .and_then(toml_edit::Item::as_table_mut)
-                .unwrap()
-                .remove(name);
-            if let Some(names) = doc
-                .get_mut(MANAGED_KEY_TOML)
-                .and_then(toml_edit::Item::as_array_mut)
-            {
-                names.retain(|n| n.as_str() != Some(name));
-            }
-            write_grok_doc(&dir, &path, &doc)?;
-        }
-    }
-    Ok(())
-}
+        assert_eq!(out.args[1], "mcp_servers.jira.command=\"/bin/sh\"");
+        assert!(out.args[3].contains(&env_path.to_string_lossy().into_owned()));
+        let mode = std::fs::metadata(&env_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "env file must be owner-only");
 
-#[cfg(test)]
-mod retirement_tests {
-    use super::*;
+        // Run the exact wrapper codex would: the server sees the env verbatim.
+        let output = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                ENV_EXEC_SCRIPT,
+                &env_path.to_string_lossy(),
+                "/usr/bin/printenv",
+                "API_TOKEN",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{secret}\n")
+        );
+    }
+
+    /// The browser toggle reaches codex as `-c mcp_servers.otto-browser.*`
+    /// (codex never reads `.mcp.json`).
+    #[test]
+    fn codex_browser_args_attach_otto_browser() {
+        let args = codex_browser_args();
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], "-c");
+        assert!(
+            args[1].starts_with("mcp_servers.otto-browser.command=\""),
+            "{args:?}"
+        );
+        assert!(
+            args[3].starts_with("mcp_servers.otto-browser.args=["),
+            "{args:?}"
+        );
+    }
+
+    /// A failed server lookup (`user_servers: None`) still reconciles Otto's own
+    /// entries but keeps every previously managed user entry, and its marker
+    /// slot, so the next healthy spawn can reconcile it normally.
+    #[test]
+    fn unknown_user_set_preserves_managed_user_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        reconcile_managed_servers(
+            root,
+            &ManagedMcpConfig {
+                browser: true,
+                user_servers: Some(vec![user("jira"), user("linear")]),
+                otto_tools: Some(otto_tools()),
+            },
+        )
+        .unwrap();
+        let names = reconcile_managed_servers(
+            root,
+            &ManagedMcpConfig {
+                browser: false,
+                user_servers: None,
+                otto_tools: Some(otto_tools()),
+            },
+        )
+        .unwrap();
+        let servers = read_servers(root);
+        assert!(servers.contains_key("jira") && servers.contains_key("linear"));
+        assert!(
+            !servers.contains_key("otto-browser"),
+            "Otto's own entries still reconcile"
+        );
+        assert_eq!(names, vec!["otto", "jira", "linear"]);
+        assert_eq!(marker(root), names);
+
+        // The next healthy spawn with only "linear" enabled removes "jira".
+        reconcile_managed_servers(
+            root,
+            &ManagedMcpConfig {
+                user_servers: Some(vec![user("linear")]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!read_servers(root).contains_key("jira"));
+    }
+
+    /// Only a missing or blank launcher reads as empty: an unreadable one
+    /// (here: not UTF-8, e.g. a UTF-16 save) fails the reconcile and leaves the
+    /// user's file byte-identical instead of being replaced by a fresh doc.
+    #[test]
+    fn unreadable_launcher_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let path = mcp_path(root);
+        let utf16: Vec<u8> = [0xFF, 0xFE, b'{', 0, b'}', 0].to_vec();
+        std::fs::write(&path, &utf16).unwrap();
+        let err = reconcile_managed_servers(
+            root,
+            &ManagedMcpConfig {
+                user_servers: Some(vec![user("jira")]),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.starts_with("read "), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), utf16);
+
+        let grok = dir.path().join(".grok").join("config.toml");
+        std::fs::create_dir_all(grok.parent().unwrap()).unwrap();
+        std::fs::write(&grok, &utf16).unwrap();
+        assert!(reconcile_user_servers_grok(root, &[user("jira")]).is_err());
+        assert_eq!(std::fs::read(&grok).unwrap(), utf16);
+
+        // Blank still reads as empty.
+        std::fs::write(&path, "  \n").unwrap();
+        assert!(read_doc(&path).unwrap().is_empty());
+    }
+
+    fn retirement_config() -> ManagedMcpConfig {
+        let named = |name: &str, command: &str| UserMcpServer {
+            name: name.into(),
+            command: command.into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        ManagedMcpConfig {
+            user_servers: Some(vec![named("private", "server"), named("keep", "other")]),
+            ..Default::default()
+        }
+    }
+
+    /// Retirement walks every JSON launcher (`.mcp.json` AND agy's
+    /// `.agents/mcp_config.json`): a preview leaves both byte-identical, apply
+    /// removes the retired server from both and keeps the others.
     #[test]
     fn retiring_direct_credentials_preserves_other_servers_and_preview_is_readonly() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_str().unwrap();
-        let config = ManagedMcpConfig {
-            user_servers: vec![
-                UserMcpServer {
-                    name: "private".into(),
-                    command: "server".into(),
-                    args: vec![],
-                    env: Default::default(),
-                },
-                UserMcpServer {
-                    name: "keep".into(),
-                    command: "other".into(),
-                    args: vec![],
-                    env: Default::default(),
-                },
-            ],
-            ..Default::default()
-        };
+        let config = retirement_config();
         reconcile_managed_servers(root, &config).unwrap();
+        reconcile_managed_servers_agy(root, &config).unwrap();
+        let before_json = std::fs::read(mcp_path(root)).unwrap();
+        let before_agy = std::fs::read(agy_mcp_path(root)).unwrap();
+
         retire_user_server(root, "private", false).unwrap();
-        assert!(read_doc(&mcp_path(root)).unwrap()["mcpServers"]
-            .get("private")
-            .is_some());
+        assert_eq!(std::fs::read(mcp_path(root)).unwrap(), before_json);
+        assert_eq!(std::fs::read(agy_mcp_path(root)).unwrap(), before_agy);
+
         retire_user_server(root, "private", true).unwrap();
-        let doc = read_doc(&mcp_path(root)).unwrap();
-        assert!(doc["mcpServers"].get("private").is_none());
-        assert!(doc["mcpServers"].get("keep").is_some());
+        for path in [mcp_path(root), agy_mcp_path(root)] {
+            let doc = read_doc(&path).unwrap();
+            assert!(
+                doc["mcpServers"].get("private").is_none(),
+                "{}",
+                path.display()
+            );
+            assert!(
+                doc["mcpServers"].get("keep").is_some(),
+                "{}",
+                path.display()
+            );
+            assert_eq!(doc[MANAGED_KEY], json!(["keep"]), "{}", path.display());
+        }
+    }
+
+    /// A hand-added (untracked) entry with the retired name in agy's launcher
+    /// is refused — Otto can't claim it — and nothing is written anywhere, not
+    /// even the tracked `.mcp.json` entry that would otherwise be removable.
+    #[test]
+    fn retiring_refuses_untracked_agy_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        reconcile_managed_servers(root, &retirement_config()).unwrap();
+        let agy = agy_mcp_path(root);
+        std::fs::create_dir_all(agy.parent().unwrap()).unwrap();
+        std::fs::write(&agy, r#"{"mcpServers":{"private":{"command":"mine"}}}"#).unwrap();
+        let before_json = std::fs::read(mcp_path(root)).unwrap();
+
+        for apply in [false, true] {
+            let err = retire_user_server(root, "private", apply).unwrap_err();
+            assert!(err.contains("mcp_config.json"), "{err}");
+            assert_eq!(std::fs::read(mcp_path(root)).unwrap(), before_json);
+            assert!(read_doc(&agy).unwrap()["mcpServers"]
+                .get("private")
+                .is_some());
+        }
     }
 }

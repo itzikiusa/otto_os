@@ -246,11 +246,6 @@ pub async fn describe_cluster(
     })
 }
 
-/// `aws eks update-kubeconfig` into an Otto-owned file + a `k8s_clusters`
-/// row. `pool` is the daemon DB (the row insert is a small local statement
-/// matching migration 0114).
-// TODO(k8s): switch the insert to `otto_state::K8sClustersRepo` once it lands
-// (it is being built in parallel by the Kubernetes console work).
 /// The S11-303 exec-plugin allow-list over a generated kubeconfig file,
 /// for the context `alias` it was written under.
 fn check_generated_kubeconfig(path: &std::path::Path, alias: &str) -> Result<()> {
@@ -261,6 +256,9 @@ fn check_generated_kubeconfig(path: &std::path::Path, alias: &str) -> Result<()>
     otto_core::kubeconfig_policy::check_kubeconfig(&cfg, Some(alias)).map_err(Error::Invalid)
 }
 
+/// `aws eks update-kubeconfig` into an Otto-owned file + a `k8s_clusters`
+/// row (via [`otto_state::K8sClustersRepo::create`]). `pool` is the daemon DB.
+/// The file is removed again when any step before the row insert fails.
 pub async fn import_kubeconfig(
     svc: &AwsService,
     pool: &DbPool,
@@ -339,35 +337,26 @@ pub async fn import_kubeconfig(
         return Err(e);
     }
 
-    let now = Utc::now();
     let params = serde_json::json!({ "eks_region": region_str, "eks_cluster": name });
-    let env = a.environment;
-    sqlx::query(
-        "INSERT INTO k8s_clusters (id, name, source, kubeconfig_path, context_name, default_namespace,
-                                   aws_account_id, params_json, environment, created_by, created_at, updated_at)
-         VALUES (?, ?, 'eks', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&alias)
-    .bind(&path_s)
-    .bind(&alias)
-    .bind(&default_namespace)
-    .bind(&a.id)
-    .bind(params.to_string())
-    .bind(env.as_str())
-    .bind(creator)
-    .bind(now.to_rfc3339())
-    .bind(now.to_rfc3339())
-    .execute(pool)
-    .await
-    .map_err(|e| {
-        let _ = std::fs::remove_file(&path);
-        Error::Internal(format!("insert k8s cluster: {e}"))
-    })?;
+    let row = otto_state::K8sClustersRepo::new(pool.clone())
+        .create(otto_state::NewK8sCluster {
+            id: id.clone(),
+            name: alias.clone(),
+            source: otto_state::K8sClusterSource::Eks,
+            kubeconfig_path: Some(path_s),
+            context_name: alias,
+            default_namespace,
+            aws_account_id: Some(a.id.clone()),
+            environment: a.environment,
+            color: None,
+            params,
+            created_by: Some(creator.clone()),
+        })
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&path);
+        })?;
 
-    let user = otto_state::UsersRepo::new(pool.clone())
-        .get(creator)
-        .await?;
     let capability = otto_state::GrantsRepo::new(pool.clone())
         .capability_of(&user, otto_core::domain::Feature::Kubernetes)
         .await?;
@@ -390,22 +379,28 @@ pub async fn import_kubeconfig(
             },
         )
         .await?;
-    Ok(K8sCluster {
-        id,
-        name: alias.clone(),
-        source: "eks".into(),
-        kubeconfig_path: Some(path_s),
-        context_name: alias,
-        default_namespace,
-        aws_account_id: Some(a.id.clone()),
-        environment: env,
-        color: None,
-        capabilities: None,
-        created_by: Some(creator.clone()),
-        created_at: now,
-        updated_at: now,
-        last_used_at: None,
-    })
+    Ok(K8sCluster::from(row))
+}
+
+impl From<otto_state::K8sCluster> for K8sCluster {
+    fn from(c: otto_state::K8sCluster) -> Self {
+        Self {
+            id: c.id,
+            name: c.name,
+            source: c.source.as_str().to_string(),
+            kubeconfig_path: c.kubeconfig_path,
+            context_name: c.context_name,
+            default_namespace: c.default_namespace,
+            aws_account_id: c.aws_account_id,
+            environment: c.environment,
+            color: c.color,
+            capabilities: c.capabilities,
+            created_by: c.created_by,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+            last_used_at: c.last_used_at,
+        }
+    }
 }
 
 #[cfg(test)]

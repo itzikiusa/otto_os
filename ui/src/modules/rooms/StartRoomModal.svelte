@@ -1,6 +1,7 @@
 <script lang="ts">
   import Modal from '../../lib/components/Modal.svelte';
   import { api, baseUrl } from '../../lib/api/client';
+  import { loadErrorText } from '../../lib/loadError';
   import type { RoomCredential } from '../../lib/api/room-types';
   import { rememberRoom } from './room-access';
   import { openHostedRoom } from './room-window';
@@ -20,7 +21,7 @@
       }
       await openHostedRoom(created.room_id);
       onclose();
-    } catch (e) { error = e instanceof Error ? e.message : 'Could not start this room. Try again.'; }
+    } catch (e) { error = e instanceof TypeError ? loadErrorText(e) : e instanceof Error ? e.message : 'Could not start this room. Try again.'; }
     finally { busy = false; }
   }
 </script>

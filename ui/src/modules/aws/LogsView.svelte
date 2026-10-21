@@ -399,10 +399,23 @@
     iPoll = null;
   }
 
+  // Set on unmount: a poll already awaiting its result must not re-arm
+  // (`stopPolling` only clears a timer that is pending, not one in flight).
+  let disposed = false;
+
+  /** Close the event detail from its ✕ and return focus to the selected
+   *  row: the ✕ unmounts with the pane, which otherwise dropped keyboard
+   *  focus to <body> and lost the user's place in the table (WCAG 2.4.3). */
+  function closeDetail(from: HTMLElement): void {
+    const row = from.closest('.detail')?.parentElement?.querySelector<HTMLElement>('tr.trow.sel');
+    detail = null;
+    if (row?.isConnected) row.focus();
+  }
+
   async function pollResults(id: string): Promise<void> {
     try {
       const r = await awsApi.logsInsightsResults(account.id, id, iRegion);
-      if (qid !== id) return;
+      if (disposed || qid !== id) return;
       iResult = r;
       if (r.done) {
         iRunning = false;
@@ -410,11 +423,12 @@
         return;
       }
     } catch (e) {
-      if (qid !== id) return;
+      if (disposed || qid !== id) return;
       iError = e instanceof Error ? e.message : String(e);
       iRunning = false;
       return;
     }
+    if (disposed) return;
     // Same backoff as Athena: 1,1,2,2,3,5 s…, 15 s while the window is hidden
     // (was a fixed 1.5 s — a long query burned a core in `aws` processes).
     iPoll = setTimeout(() => void pollResults(id), statusPollMs(iPollN++, document.visibilityState === 'hidden'));
@@ -483,6 +497,7 @@
   }
 
   onDestroy(() => {
+    disposed = true;
     // Leaving the view stops a still-running Insights query (it would keep
     // scanning — and billing — with nobody polling it).
     if (iRunning && qid) void awsApi.logsInsightsStop(account.id, qid, iRegion).catch(() => {});
@@ -649,7 +664,7 @@
                 <span class="mono dim d-stream" title={detail.stream}>{detail.stream}</span>
                 <span class="spacer"></span>
                 <button class="icon-btn" onclick={() => void copy(detail?.message ?? '', 'message')} aria-label="Copy message" title="Copy message"><Icon name="copy" size={13} /></button>
-                <button class="icon-btn" onclick={() => (detail = null)} aria-label="Close event detail" title="Close"><Icon name="x" size={13} /></button>
+                <button class="icon-btn" onclick={(ev) => closeDetail(ev.currentTarget)} aria-label="Close event detail" title="Close"><Icon name="x" size={13} /></button>
               </div>
               <pre class="mono d-body" class:json={p.json}>{p.text}</pre>
             </div>

@@ -4,7 +4,13 @@
 // crates/otto-server/src/routes/workflows.rs.)
 
 import { api } from './client';
-import type { ActiveWorkflowRun, Workflow, WorkflowRun, WorkflowVersion, WorkflowVersionSummary } from './types';
+import type { ActiveWorkflowRun, UpdateWorkflowReq, Workflow, WorkflowRun, WorkflowVersion, WorkflowVersionSummary } from './types';
+
+/** Partial update (`PATCH /workflows/{id}`): only the fields present change; an unknown
+ *  `on_restart` value answers 400. Returns the saved workflow. */
+export function patchWorkflow(id: string, body: UpdateWorkflowReq): Promise<Workflow> {
+  return api.patch<Workflow>(`/workflows/${encodeURIComponent(id)}`, body);
+}
 
 /** In-flight workflow runs (pending|running) across a workspace, newest first.
  *  Backs the "Running" sidebar list. */

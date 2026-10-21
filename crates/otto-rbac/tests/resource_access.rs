@@ -3,7 +3,7 @@ use otto_core::access::{
     RuleEffect, SubjectKind,
 };
 use otto_core::domain::User;
-use otto_core::{Error, Id};
+use otto_core::Error;
 use otto_rbac::ResourceAccess;
 use otto_state::{ResourceAccessRepo, UsersRepo};
 
@@ -938,9 +938,4 @@ async fn non_discover_operations_require_discovery_at_the_same_effective_scope()
             .unwrap()
             .allowed
     );
-}
-
-#[allow(dead_code)]
-fn _ids_are_strings(id: Id) -> String {
-    id
 }

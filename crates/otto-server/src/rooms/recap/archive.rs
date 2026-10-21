@@ -121,22 +121,34 @@ impl Store {
             if valid_id(&id).is_err() {
                 continue;
             }
-            if let Ok(a) = store.load(&id) {
-                let mut s = a.state.lock().unwrap();
-                if s.metadata.status != RecapState::Stopped {
-                    s.metadata.status = RecapState::Stopped;
-                    s.metadata.capture_epoch += 1;
+            // One unreadable or unwritable archive must not take down every
+            // recap of every user (`store()` would re-fail on each request):
+            // skip it with a warning instead of failing the whole open.
+            let a = match store.load(&id) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(archive = %id, "recap archive skipped on load: {e}");
+                    continue;
                 }
-                if matches!(
-                    s.metadata.summary_status,
-                    RecapSummaryStatus::Running | RecapSummaryStatus::Queued
-                ) {
-                    s.metadata.summary_status = RecapSummaryStatus::Error;
-                    s.metadata.summary_error =
-                        Some("Daemon restarted; generate the draft again".into());
-                }
-                a.set_capture(s.metadata.capture_epoch, false);
-                a.save(&s)?;
+            };
+            let mut s = a.state.lock().unwrap();
+            if s.metadata.status != RecapState::Stopped {
+                s.metadata.status = RecapState::Stopped;
+                s.metadata.capture_epoch += 1;
+            }
+            if matches!(
+                s.metadata.summary_status,
+                RecapSummaryStatus::Running | RecapSummaryStatus::Queued
+            ) {
+                s.metadata.summary_status = RecapSummaryStatus::Error;
+                s.metadata.summary_error =
+                    Some("Daemon restarted; generate the draft again".into());
+            }
+            a.set_capture(s.metadata.capture_epoch, false);
+            // The normalised state stays in memory either way; a failed
+            // write (ENOSPC, read-only dir) is retried by the next save.
+            if let Err(e) = a.save(&s) {
+                tracing::warn!(archive = %id, "recap archive restart normalisation not saved: {e}");
             }
         }
         Ok(store)
@@ -666,6 +678,33 @@ mod tests {
             source_id: None,
             reason: "Recognizer unavailable".into(),
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn one_unwritable_archive_does_not_fail_the_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("archives");
+        let store = Store::open(root.clone()).unwrap();
+        let stuck = store.create(metadata("alice")).unwrap();
+        let healthy = store.create(metadata("alice")).unwrap();
+        let stuck_id = stuck.metadata().id;
+        let stuck_path = stuck.path.clone();
+        drop((store, stuck, healthy));
+        // The restart normalisation cannot write this archive's metadata.
+        fs::set_permissions(&stuck_path, fs::Permissions::from_mode(0o500)).unwrap();
+        // A corrupt archive is skipped on load, as before.
+        let corrupt = root.join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(&corrupt).unwrap();
+        fs::write(corrupt.join("metadata.json"), b"{not json").unwrap();
+        let reopened = Store::open(root);
+        fs::set_permissions(&stuck_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let listed = reopened
+            .expect("store opens despite one bad archive")
+            .list("alice");
+        assert_eq!(listed.len(), 2);
+        let stuck = listed.iter().find(|m| m.id == stuck_id).unwrap();
+        assert_eq!(stuck.status, RecapState::Stopped, "normalised in memory");
     }
     #[test]
     fn full_detail_polling_cost_reads_unchanged_bodies_on_every_tick() {

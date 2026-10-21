@@ -60,11 +60,6 @@ pub fn parse_request_ref(r: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// The entity id inside an environment ref, if `r` is one.
-pub fn parse_env_ref(r: &str) -> Option<&str> {
-    r.strip_prefix("otto.api.env.").filter(|s| !s.is_empty())
-}
-
 /// Which members of an `auth` object are secrets, per auth type.
 pub fn secret_members(auth_type: &str) -> &'static [&'static str] {
     match auth_type {

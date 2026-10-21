@@ -3,7 +3,7 @@
 // driving bar shows. No Svelte, no DOM, no runtime imports, so it runs under
 // `node --test` (unit/uiCommands.test.ts). The runtime is lib/uiCommands.ts.
 
-import type { UiAgentRef, UiCommandErrorCode, UiServerFrame } from '../api/types';
+import type { UiAgentRef, UiServerFrame } from '../api/types';
 
 /** Largest result body the runtime posts back (the daemon caps it at 1 MiB). */
 export const RESULT_MAX_BYTES = 1024 * 1024;
@@ -15,14 +15,6 @@ export const HUMAN_WAIT_MS = 120_000;
 export const DRIVING_LINGER_MS = 60_000;
 /** Recent actions kept for the bar's "Recent actions" menu. */
 export const RECENT_MAX = 20;
-
-export const ERROR_CODES: readonly UiCommandErrorCode[] = [
-  'cancelled_by_user',
-  'invalid_args',
-  'not_found',
-  'forbidden',
-  'failed',
-];
 
 /** `otto.ui_db_run_query` / `otto_ui_db_run_query` / `ui_db_run_query` → `db_run_query`. */
 export function normalizeCommand(name: string): string {

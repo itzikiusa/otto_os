@@ -41,8 +41,9 @@ use tempfile::TempDir;
 use crate::auth::{require_ws_role, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::review_session::submit_prompt;
-use crate::skill_eval::CancelRegistry;
+use crate::skill_eval::signal_cancel;
 use crate::state::ServerCtx;
+use otto_core::cancel::{CancelGuard, CancelRegistryExt};
 
 // ---------------------------------------------------------------------------
 // Timeouts
@@ -55,31 +56,10 @@ const OUTPUT_POLL: Duration = Duration::from_millis(1000);
 const WAITING_IDLE: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
-// Cancel registry helpers (re-declared; skill_eval's are private)
+// Cancellation (the shared `otto_core::cancel` registry; same `{id}` /
+// `{id}:retry:{slot}` keys as skill evals)
 // ---------------------------------------------------------------------------
 
-fn register_cancel(reg: &CancelRegistry, id: &str) -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    if let Ok(mut map) = reg.lock() {
-        map.insert(id.to_string(), Arc::clone(&flag));
-    }
-    flag
-}
-fn signal_cancel(reg: &CancelRegistry, id: &str) {
-    if let Ok(map) = reg.lock() {
-        let retries = format!("{id}:retry:");
-        for (key, flag) in map.iter() {
-            if key == id || key.starts_with(&retries) {
-                flag.store(true, Ordering::SeqCst);
-            }
-        }
-    }
-}
-fn unregister_cancel(reg: &CancelRegistry, id: &str) {
-    if let Ok(mut map) = reg.lock() {
-        map.remove(id);
-    }
-}
 fn is_cancelled(flag: &Arc<AtomicBool>) -> bool {
     flag.load(Ordering::SeqCst)
 }
@@ -298,7 +278,7 @@ async fn start_review(
     let review_id = review.id.clone();
     let skill_name = req.skill_name.clone();
     let source_s = source.to_string();
-    let cancel = register_cancel(&ctx.skill_review_cancels, &review_id);
+    let cancel = ctx.skill_review_cancels.register(&review_id);
     tokio::spawn(async move {
         run_review(
             ctx_bg,
@@ -655,8 +635,9 @@ async fn run_review(
     source: String,
     providers: Vec<String>,
     instructions: String,
-    cancel: Arc<AtomicBool>,
+    registration: CancelGuard,
 ) {
+    let cancel = Arc::clone(registration.flag());
     let result = run_review_inner(
         &ctx,
         &review_id,
@@ -687,7 +668,7 @@ async fn run_review(
             .set_status(&review_id, status, None)
             .await;
     }
-    unregister_cancel(&ctx.skill_review_cancels, &review_id);
+    drop(registration);
     emit(&ctx, &ws.id, &review_id, status);
 }
 

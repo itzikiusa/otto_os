@@ -167,16 +167,6 @@ pub fn otto_data_dirs() -> Vec<PathBuf> {
     out
 }
 
-/// Every protected directory: Otto's data + log dirs, the home credential
-/// dirs and the absolute system prefixes.
-pub fn protected_dirs() -> Vec<PathBuf> {
-    protected_set()
-        .entries
-        .iter()
-        .map(|e| e.path.clone())
-        .collect()
-}
-
 /// A file's identity: `(st_dev, st_ino)`. Two spellings of one directory
 /// (firmlink, case variant on case-insensitive APFS, a mount alias) share it.
 pub type FileId = (u64, u64);
@@ -395,11 +385,6 @@ pub fn protected_set() -> std::sync::Arc<ProtectedSet> {
     let set = Arc::new(ProtectedSet::build());
     *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, Instant::now(), set.clone()));
     set
-}
-
-/// True when the canonical `path` is (inside) one of Otto's data / log dirs.
-pub fn in_otto_data_dir(canonical: &Path) -> bool {
-    protected_set().inside(canonical, Some(Kind::Otto))
 }
 
 /// True when `canonical` is inside a home credential dir or a system secret

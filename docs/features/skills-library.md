@@ -292,7 +292,8 @@ so your edits are never clobbered on routine restart:
 - **`otto-product`** seeds 7 product skills (`po-story-overview`,
   `story-clarifying-questions`, `story-architecture-overview`, `story-test-cases`,
   `jira-story-writer`, `rfc-writer`, `story-task-breakdown`), gated by a
-  `.product-skills-version` marker (`crates/otto-product/src/skills.rs`).
+  `.product-skills-version` marker (`crates/otto-skills/src/product.rs`, re-exported as
+  `otto_product::skills`).
 - **`otto-swarm`** seeds role skills + preset souls.
 
 These appear in your Context Library (editable, self-improvable) but **not** in the

@@ -447,72 +447,47 @@ impl McpRegistryRepo {
         default_tool_access: Option<&str>,
         enabled: Option<bool>,
     ) -> Result<McpServerDetail> {
-        macro_rules! set_str {
-            ($col:literal, $val:expr) => {
-                if let Some(v) = $val {
-                    sqlx::query(concat!(
-                        "UPDATE mcp_servers SET ",
-                        $col,
-                        " = ? WHERE id = ?"
-                    ))
-                    .bind(v)
-                    .bind(id)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(dberr_unique(
-                        "update mcp server",
-                        "an MCP server with this name already exists in the workspace",
-                    ))?;
-                }
-            };
-        }
-        set_str!("name", name);
-        set_str!("description", description);
-        set_str!("command", command);
-        set_str!("url", url);
-        set_str!("injection_risk", injection_risk);
-        set_str!("default_tool_access", default_tool_access);
-        if let Some(v) = args {
-            let s = serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
-            sqlx::query("UPDATE mcp_servers SET args_json = ? WHERE id = ?")
-                .bind(&s)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        if let Some(v) = env {
-            let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
-            sqlx::query("UPDATE mcp_servers SET env_json = ? WHERE id = ?")
-                .bind(&s)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        if let Some(v) = headers {
-            let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
-            sqlx::query("UPDATE mcp_servers SET headers_json = ? WHERE id = ?")
-                .bind(&s)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        if let Some(v) = enabled {
-            sqlx::query("UPDATE mcp_servers SET enabled = ? WHERE id = ?")
-                .bind(v as i64)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update mcp server"))?;
-        }
-        sqlx::query("UPDATE mcp_servers SET updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now()))
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update mcp server"))?;
+        // ONE statement (`COALESCE(?, col)` keeps an omitted field): the
+        // per-column autocommits used to leave a half-applied server behind
+        // when a later write failed, and a concurrent reader (the WAL read
+        // pool) could see the new command with the old env.
+        let args_json = args.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()));
+        let env_json = env.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into()));
+        let headers_json =
+            headers.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into()));
+        sqlx::query(
+            "UPDATE mcp_servers SET
+                name = COALESCE(?, name),
+                description = COALESCE(?, description),
+                command = COALESCE(?, command),
+                url = COALESCE(?, url),
+                injection_risk = COALESCE(?, injection_risk),
+                default_tool_access = COALESCE(?, default_tool_access),
+                args_json = COALESCE(?, args_json),
+                env_json = COALESCE(?, env_json),
+                headers_json = COALESCE(?, headers_json),
+                enabled = COALESCE(?, enabled),
+                updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(description)
+        .bind(command)
+        .bind(url)
+        .bind(injection_risk)
+        .bind(default_tool_access)
+        .bind(args_json)
+        .bind(env_json)
+        .bind(headers_json)
+        .bind(enabled.map(i64::from))
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr_unique(
+            "update mcp server",
+            "an MCP server with this name already exists in the workspace",
+        ))?;
         self.get(id).await
     }
 
@@ -699,48 +674,30 @@ impl McpToolsRepo {
         risk_label: Option<&str>,
         injection_risk: Option<&str>,
     ) -> Result<McpTool> {
-        if let Some(v) = enabled {
-            sqlx::query("UPDATE mcp_tools SET enabled = ? WHERE id = ?")
-                .bind(v as i64)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("patch mcp tool"))?;
-        }
-        if let Some(v) = require_approval {
-            sqlx::query("UPDATE mcp_tools SET require_approval = ? WHERE id = ?")
-                .bind(v as i64)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("patch mcp tool"))?;
-        }
-        // A human setting risk/injection pins it (risk_overridden=1) so rediscovery
-        // never lowers it.
-        if let Some(v) = risk_label {
-            sqlx::query("UPDATE mcp_tools SET risk_label = ?, risk_overridden = 1 WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("patch mcp tool"))?;
-        }
-        if let Some(v) = injection_risk {
-            sqlx::query(
-                "UPDATE mcp_tools SET injection_risk = ?, risk_overridden = 1 WHERE id = ?",
-            )
-            .bind(v)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("patch mcp tool"))?;
-        }
-        sqlx::query("UPDATE mcp_tools SET updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now()))
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("patch mcp tool"))?;
+        // ONE statement, so a failure never leaves the tool half-patched. A
+        // human setting risk/injection pins it (risk_overridden=1) so
+        // rediscovery never lowers it.
+        sqlx::query(
+            "UPDATE mcp_tools SET
+                enabled = COALESCE(?, enabled),
+                require_approval = COALESCE(?, require_approval),
+                risk_label = COALESCE(?, risk_label),
+                injection_risk = COALESCE(?, injection_risk),
+                risk_overridden = CASE WHEN ? OR ? THEN 1 ELSE risk_overridden END,
+                updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(enabled.map(i64::from))
+        .bind(require_approval.map(i64::from))
+        .bind(risk_label)
+        .bind(injection_risk)
+        .bind(risk_label.is_some())
+        .bind(injection_risk.is_some())
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("patch mcp tool"))?;
         self.get(id).await
     }
 }
@@ -935,61 +892,32 @@ impl McpPolicyRepo {
         effect: Option<&str>,
         reason: Option<&str>,
     ) -> Result<McpPolicy> {
-        if let Some(v) = name {
-            sqlx::query("UPDATE mcp_policies SET name = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update policy"))?;
-        }
-        if let Some(v) = enabled {
-            sqlx::query("UPDATE mcp_policies SET enabled = ? WHERE id = ?")
-                .bind(v as i64)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update policy"))?;
-        }
-        if let Some(v) = priority {
-            sqlx::query("UPDATE mcp_policies SET priority = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update policy"))?;
-        }
-        if let Some(v) = match_json {
-            let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
-            sqlx::query("UPDATE mcp_policies SET match_json = ? WHERE id = ?")
-                .bind(&s)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update policy"))?;
-        }
-        if let Some(v) = effect {
-            sqlx::query("UPDATE mcp_policies SET effect = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update policy"))?;
-        }
-        if let Some(v) = reason {
-            sqlx::query("UPDATE mcp_policies SET reason = ? WHERE id = ?")
-                .bind(v)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update policy"))?;
-        }
-        sqlx::query("UPDATE mcp_policies SET updated_at = ? WHERE id = ?")
-            .bind(fmt(Utc::now()))
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("update policy"))?;
+        // ONE statement: a reader must never see the new `enabled`/`match_json`
+        // with the old `effect` mid-PATCH, nor a failure leave it half-applied.
+        let match_json =
+            match_json.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into()));
+        sqlx::query(
+            "UPDATE mcp_policies SET
+                name = COALESCE(?, name),
+                enabled = COALESCE(?, enabled),
+                priority = COALESCE(?, priority),
+                match_json = COALESCE(?, match_json),
+                effect = COALESCE(?, effect),
+                reason = COALESCE(?, reason),
+                updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(enabled.map(i64::from))
+        .bind(priority)
+        .bind(match_json)
+        .bind(effect)
+        .bind(reason)
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update policy"))?;
         self.get(id).await
     }
 
@@ -2147,5 +2075,77 @@ mod tests {
         assert_eq!(stats, ["managed", "otto.mine", "otto.shared"]);
         // Root (no restriction) sees everything.
         assert_eq!(log.stats(None, None).await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn server_update_is_one_statement_that_keeps_omitted_fields() {
+        let pool = mem_pool().await;
+        let (ws, user) = seed(&pool).await;
+        let repo = McpRegistryRepo::new(pool.clone());
+        let s = mk_server(&pool, &ws, &user).await;
+        let mut env = BTreeMap::new();
+        env.insert("K".to_string(), "v".to_string());
+        let u = repo
+            .update(
+                &s.id,
+                None,
+                Some("desc"),
+                None,
+                None,
+                Some(&env),
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+            )
+            .await
+            .unwrap();
+        assert_eq!(u.description.as_deref(), Some("desc"));
+        assert_eq!(u.env, env);
+        assert!(!u.enabled);
+        // Omitted fields are untouched.
+        assert_eq!((u.name.as_str(), u.command.as_str()), ("test", "echo"));
+        assert_eq!(u.args, vec!["hi".to_string()]);
+        assert_eq!(u.url, None);
+
+        // A rejected PATCH applies NOTHING (no half-written server).
+        repo.update(
+            &s.id,
+            Some("first"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let other = mk_server(&pool, &ws, &user).await;
+        let err = repo
+            .update(
+                &other.id,
+                Some("first"),
+                None,
+                Some("rm"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(err.is_err(), "duplicate name rejected");
+        let after = repo.get(&other.id).await.unwrap();
+        assert_eq!(
+            (after.name.as_str(), after.command.as_str()),
+            ("test", "echo")
+        );
     }
 }

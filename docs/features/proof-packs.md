@@ -621,7 +621,7 @@ workspace role.
 | 119 | `PATCH /proof-packs/{id}` | ws editor · ProofPack Edit | `{title?, summary?}` | `ProofPackResp` |
 | 120 | `DELETE /proof-packs/{id}` | ws editor · ProofPack Edit | — | `{ok:true}` (cascades artifacts, snapshots, blobs) |
 | 121 | `POST /proof-packs/{id}/artifacts` | ws editor · ProofPack Edit | `AddArtifactReq {kind, title, content?, content_url?, status?, metadata?}` | `ProofPackResp` |
-| 122 | `POST /proof-packs/{id}/assemble` | ws editor · ProofPack Edit; non-empty `commands` need a person's credential (agent/MCP/share → 403: they run unsandboxed in the daemon) | `AssembleReq {cwd?, base?, commands?:[{cmd, kind?}]}` | `ProofPackResp` |
+| 122 | `POST /proof-packs/{id}/assemble` | ws editor · ProofPack Edit; non-empty `commands` need a person's credential (agent/MCP/share → 403: they run unsandboxed in the daemon); `cwd` outside the pack workspace root, its registered repos, the calling agent session cwd and the pack session cwd → 403 unless the caller is the root owner on their own credential | `AssembleReq {cwd?, base?, commands?:[{cmd, kind?}]}` | `ProofPackResp` |
 | 123 | `POST /proof-packs/{id}/waive` | ws editor (or Admin if `OTTO_PROOF_WAIVER_MIN_ROLE=admin`) · ProofPack Edit | `WaiveReq {reason}` (≥10 chars) | `ProofPackResp` |
 | 124 | `DELETE /proof-artifacts/{id}` | ws editor · ProofPack Edit | — | `{ok:true}` |
 | 125 | `GET /proof-artifacts/{id}/content` | ws viewer · ProofPack View | — | `{content, ref_kind, kind, status, metadata}` (full stored content) |
@@ -784,6 +784,11 @@ Repo: `otto_state::ProofRepo`. Engine + gates: `otto_server::proof`.
   raises the bar to workspace Admin (closes the service-principal self-waive
   path). The PR `allow_unproven` override is likewise recorded as an audit
   `approval` artifact rather than silently bypassing the gate.
+- **Assemble is confined.** `/assemble` reads a diff from `cwd` and may run
+  `commands` there, so the `cwd` must sit inside the pack's workspace root, one of
+  its registered repos, the calling agent session's cwd or the pack's session cwd
+  (`403` otherwise; the root owner on their own credential is exempt). Non-empty
+  `commands` also need a person's credential (agent/MCP/share → `403`).
 - **Loopback by default.** Like the rest of the daemon, these endpoints are only
   reachable over loopback unless you explicitly enable remote access.
 
@@ -800,6 +805,7 @@ Repo: `otto_state::ProofRepo`. Engine + gates: `otto_server::proof`.
 | `pr_inconsistent` badge / pack `failed` after opening a PR | The auto PR-consistency check hard-failed — the description claims "tests pass"/"CI green" while the pack's tests fail or are absent. Fix the description (or add the passing tests) and re-run `/pr-check`. |
 | CI badge looks stale | CI is captured at PR-open time. Hit **Refresh CI** (`/ci-refresh`) to re-fetch live status. |
 | Adding media returns `415` / `413` | `415` = the MIME isn't in the allow-list (png/jpeg/gif/webp/svg, mp4/webm); `413` = the decoded blob exceeds 25 MiB. Trim it or reference it by URL via a `screenshot` artifact's `content_url`. |
+| `/assemble` returns `403 cwd must be inside this pack's workspace, one of its repos or its session` | The `cwd` you passed is outside the pack's workspace root, its registered repos, your agent session's cwd and the pack's session cwd. Point `cwd` at the repo the pack covers (the Proof page defaults to the pack's repo). Only the root owner on their own credential may assemble from an arbitrary folder. |
 | Session all-done didn't run tests | Expected — auto-test is off. Set `OTTO_PROOF_AUTO_TEST=1`, or add the test `command` via `/assemble`. The diff is always packaged. |
 | Goal loop finalized "achieved" with no test | The hard block is opt-in — set `OTTO_PROOF_REQUIRE_GOAL_LOOP=1` (bounded by the iteration cap). |
 | `risky_change` badge on a benign change | A risky **path** was touched (`migrations/`, `.github/`, a lockfile, `*.sql`, or a security-word basename) **or** `risk_score ≥ 50`. Inspect the diff artifact's `risky_files`. |

@@ -10,6 +10,7 @@
   import Drawer from '../../shell/Drawer.svelte';
   import Icon from './Icon.svelte';
   import { viewport } from '../stores/viewport.svelte';
+  import { dialogReturnTarget } from '../dialogFocus';
 
   interface Props {
     open: boolean;
@@ -29,6 +30,31 @@
 
   const sheet = $derived(modal ?? viewport.isPhone);
 
+  // Desktop column focus return (the sheet's Drawer owns its own). Closing
+  // from the ✕ or Esc unmounts the column with the focused control, which
+  // dropped keyboard focus to <body> and lost the user's place in the list
+  // (WCAG 2.4.3). Remember the control that opened the column — then the last
+  // one focused outside it, so picking another row updates the target — and
+  // hand focus back on close, only when focus was lost with the column.
+  let column = $state<HTMLElement | null>(null);
+  $effect(() => {
+    if (!open || sheet) return;
+    let opener = dialogReturnTarget();
+    const onFocusIn = (e: FocusEvent): void => {
+      const t = e.target;
+      if (t instanceof HTMLElement && t !== document.body && !column?.contains(t)) opener = t;
+    };
+    document.addEventListener('focusin', onFocusIn);
+    return () => {
+      document.removeEventListener('focusin', onFocusIn);
+      const target = opener;
+      queueMicrotask(() => {
+        const now = document.activeElement;
+        if (target?.isConnected && (!now || now === document.body)) target.focus();
+      });
+    };
+  });
+
   function onKey(e: KeyboardEvent): void {
     if (!open || sheet || e.key !== 'Escape' || e.defaultPrevented) return;
     const t = e.target as HTMLElement | null;
@@ -47,7 +73,7 @@
     <div class="dd-body" data-testid={testid}>{@render children()}</div>
   </Drawer>
 {:else if open}
-  <aside class="docked" style:--dd-width={width} aria-label={title} data-testid={testid}>
+  <aside bind:this={column} class="docked" style:--dd-width={width} aria-label={title} data-testid={testid}>
     <header class="dd-head">
       {#if head}<div class="dd-head-main">{@render head()}</div>{:else}<h2>{title}</h2>{/if}
       <button class="icon-btn" onclick={onclose} aria-label="Close {title}" title="Close {title}" aria-keyshortcuts="Escape">

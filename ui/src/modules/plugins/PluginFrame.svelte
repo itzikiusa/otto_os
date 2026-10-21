@@ -25,6 +25,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { pluginFrameAction, pluginSlugOk, postPluginInit } from './pluginFrame';
 
   let { slug }: { slug: string } = $props();
 
@@ -32,10 +33,8 @@
   /** Display name: the manifest name once the nav list has it, else the slug. */
   const name = $derived(plugins.get(slug)?.name ?? slug);
   /** Plugin slugs are plain identifiers. Anything else (`..`, `/`, `%2e`) is
-   *  never interpolated into a URL: `/plugins/../ui/` resolves to Otto's own
-   *  SPA (served 200), which would then load inside the frame and receive
-   *  `otto:init` with the viewer's token. */
-  const slugOk = $derived(/^[a-z][a-z0-9-]{0,63}$/.test(slug)); // = plugins.rs `valid_slug`
+   *  never interpolated into a URL nor sent `otto:init` (pluginFrame.ts). */
+  const slugOk = $derived(pluginSlugOk(slug));
   const src = $derived(`${origin}/plugins/${encodeURIComponent(slug)}/ui/`);
   let frame = $state<HTMLIFrameElement | undefined>();
 
@@ -129,9 +128,8 @@
         if (e.key === 'Escape' && !e.defaultPrevented) relayKey({ key: 'Escape' });
       });
     } catch { /* cross-origin */ }
-    postTheme('otto:init', {
-      slug,
-      apiBase: `${baseUrl()}/api/v1/plugins/${encodeURIComponent(slug)}`,
+    postPluginInit(slug, (extra) => postTheme('otto:init', extra), {
+      baseUrl: baseUrl(),
       token: getToken(),
       providers: agentProviders(),
     });
@@ -147,12 +145,11 @@
   });
 
   function onMessage(ev: MessageEvent) {
-    const m = ev.data;
-    if (!m || !frame || ev.source == null || ev.source !== frame.contentWindow) return;
-    if (m.type === 'otto:focus-leave') {
+    const action = pluginFrameAction(ev, frame?.contentWindow);
+    if (action?.kind === 'focus-leave') {
       document.querySelector<HTMLElement>('.plugin-page .icon-btn')?.focus();
-    } else if (m.type === 'otto:keydown' && typeof m.key === 'string') {
-      relayKey(m);
+    } else if (action?.kind === 'keydown') {
+      relayKey(action.init);
     }
   }
 </script>

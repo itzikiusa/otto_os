@@ -722,9 +722,15 @@ impl ImprovementEngine {
         let written = if edit.kind == ImprovementEditKind::Remove {
             remove_edit_target(Path::new(&edit.target_path)).await
         } else {
-            tokio::fs::write(&edit.target_path, &edit.after_content)
-                .await
-                .map_err(|e| Error::Internal(format!("write {}: {e}", edit.target_path)))
+            // Backup + temp + rename, like auto-apply: an in-place write
+            // interrupted by a crash or a full disk truncated the user's file
+            // after the row already said `Applied`.
+            backup_and_replace(
+                Path::new(&edit.target_path),
+                current.as_deref(),
+                &edit.after_content,
+            )
+            .await
         };
         if let Err(e) = written {
             let _ = self
@@ -822,9 +828,8 @@ impl ImprovementEngine {
                 }
             }
             Some(before) => {
-                tokio::fs::write(&edit.target_path, before)
-                    .await
-                    .map_err(|e| Error::Internal(format!("write {}: {e}", edit.target_path)))?;
+                backup_and_replace(Path::new(&edit.target_path), current.as_deref(), before)
+                    .await?;
             }
             None => {
                 // File was created by the edit → rollback deletes it.
@@ -1303,7 +1308,6 @@ async fn safe_auto_apply(
     expected: Option<&str>,
 ) -> Result<ApplyOutcome> {
     let target = canonicalize_within(path, allowed_root_for(path))?;
-    let target_str = target.to_string_lossy().to_string();
 
     // (2) Conflict check against the snapshot the decision was based on. Reading
     // here catches changes since the proposal was evaluated. External writers
@@ -1322,12 +1326,26 @@ async fn safe_auto_apply(
         return Ok(ApplyOutcome::Applied);
     }
 
-    // (3) Back up the previous content (if the file existed) before overwriting.
-    if let Some(prev) = now_on_disk.as_deref() {
+    // (3)–(4) Back up the previous content, then temp-write + rename.
+    backup_and_replace(&target, now_on_disk.as_deref(), &edit.patch.after).await?;
+    Ok(ApplyOutcome::Applied)
+}
+
+/// Replace `target` with `content` without ever leaving it half-written:
+/// back up `prev` (the content being replaced, if the file existed) to a
+/// timestamped sibling `.bak`, write `content` to a temp file in the same
+/// directory, then `rename` it over the target (atomic on one filesystem). A
+/// crash or a full disk leaves the old file or the new one, never a
+/// truncated mix. A symlinked target (e.g. a dotfiles-managed CLAUDE.md) is
+/// resolved first, so the rename replaces the real file, not the link.
+async fn backup_and_replace(target: &Path, prev: Option<&str>, content: &str) -> Result<()> {
+    let target = tokio::fs::canonicalize(target)
+        .await
+        .unwrap_or_else(|_| target.to_path_buf());
+    let target_str = target.to_string_lossy().to_string();
+    if let Some(prev) = prev {
         write_backup(&target, prev).await?;
     }
-
-    // (4) Atomic write: temp file in the same dir, then rename over the target.
     let parent = target
         .parent()
         .ok_or_else(|| Error::Internal(format!("no parent dir for {target_str}")))?;
@@ -1339,7 +1357,7 @@ async fn safe_auto_apply(
             .unwrap_or("edit"),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
-    tokio::fs::write(&tmp, &edit.patch.after)
+    tokio::fs::write(&tmp, content)
         .await
         .map_err(|e| Error::Internal(format!("write temp {}: {e}", tmp.display())))?;
     if let Err(e) = tokio::fs::rename(&tmp, &target).await {
@@ -1347,7 +1365,7 @@ async fn safe_auto_apply(
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(Error::Internal(format!("rename into {target_str}: {e}")));
     }
-    Ok(ApplyOutcome::Applied)
+    Ok(())
 }
 
 /// Write a timestamped backup of `prev` content next to `target`, consistent
@@ -1921,6 +1939,68 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    /// Manual approve and rollback replace the file the way auto-apply does:
+    /// a `.bak` of the replaced content, an atomic rename (no in-place
+    /// truncation), and a symlinked target keeps its link.
+    #[tokio::test]
+    async fn approve_and_rollback_back_up_and_replace_atomically() {
+        let (engine, ws, _, dir) = harness().await;
+        let real = dir.path().join("real.md");
+        let link = dir.path().join("MEMORY.md");
+        tokio::fs::write(&real, "original").await.unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let run = engine
+            .improvements
+            .create_run(&ws, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
+        let edit = engine
+            .improvements
+            .create_edit(NewEdit {
+                run_id: run.id,
+                workspace_id: ws.clone(),
+                target: ImprovementTarget::Memory,
+                target_ref: "MEMORY.md".into(),
+                target_path: link.to_string_lossy().into_owned(),
+                kind: ImprovementEditKind::Modify,
+                risk: ImprovementRisk::Low,
+                status: ImprovementEditStatus::Pending,
+                rationale: "fixture".into(),
+                evidence: vec![],
+                before_content: Some("original".into()),
+                after_content: "improved".into(),
+                actor: None,
+            })
+            .await
+            .unwrap();
+        let backups = |content: &str| {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+                .filter(|e| std::fs::read_to_string(e.path()).unwrap() == content)
+                .count()
+        };
+
+        let applied = engine.approve_edit(&edit.id, "fixture").await.unwrap();
+        assert_eq!(applied.status, ImprovementEditStatus::Applied);
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "improved");
+        assert_eq!(backups("original"), 1, "approve backed up the original");
+
+        let rolled = engine.rollback_edit(&edit.id, "fixture").await.unwrap();
+        assert_eq!(rolled.status, ImprovementEditStatus::RolledBack);
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "original");
+        assert_eq!(backups("improved"), 1, "rollback backed up the edit");
+        let stray_temps = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".otto-tmp-"))
+            .count();
+        assert_eq!(stray_temps, 0);
     }
 
     #[tokio::test]

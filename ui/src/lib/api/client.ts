@@ -4,8 +4,6 @@ import type {
   Problem,
   ImportReq,
   ImportResult,
-  NlToSqlReq,
-  NlToSqlOutcome,
   DbAssistReq,
   DbAssistResp,
   DbAssistSummaryResp,
@@ -424,15 +422,34 @@ async function rawRequest(
   return resp;
 }
 
-/** The `ApiError` for a non-OK response (JSON Problem body, else statusText). */
+/** Longest plain-text error body kept as the message — an Axum extractor
+ *  rejection is one line; anything longer is a page, not a reason. */
+const PLAIN_ERROR_MAX = 300;
+
+/** The `ApiError` for a non-OK response: the JSON Problem body; else the
+ *  body's own text (Axum answers an extractor rejection — "Failed to
+ *  deserialize the JSON body into the target type: unknown variant …" — as
+ *  text/plain, and that reason is what the person needs after a UI/daemon
+ *  version skew); else statusText. The body is read ONCE. */
 async function problemOf(resp: Response): Promise<ApiError> {
-  let problem: Problem = { code: 'internal', message: resp.statusText };
+  let text = '';
   try {
-    problem = await resp.json();
+    text = await resp.text();
   } catch {
-    // non-JSON error body — keep statusText
+    // unreadable body — fall through to statusText
   }
-  return new ApiError(resp.status, problem);
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') return new ApiError(resp.status, parsed as Problem);
+  } catch {
+    // not JSON — use the text itself
+  }
+  const plain = text.trim();
+  if (plain && !/^<(?:!doctype|html)\b/i.test(plain)) {
+    const message = plain.length > PLAIN_ERROR_MAX ? `${plain.slice(0, PLAIN_ERROR_MAX)}…` : plain;
+    return new ApiError(resp.status, { code: resp.status >= 500 ? 'internal' : 'invalid', message });
+  }
+  return new ApiError(resp.status, { code: 'internal', message: resp.statusText });
 }
 
 async function requestOnce<T>(
@@ -705,6 +722,20 @@ export function isAbortError(e: unknown): boolean {
 }
 
 /**
+ * `fetch(/api/v1<path>)` with the stored Bearer token for callers that need the
+ * raw `Response` (a binary body, a multipart upload, custom headers). Rides the
+ * same path as every `api.*` call — lane fallback, provider health, the 401 →
+ * re-auth event — and throws a typed `ApiError` on a non-2xx, so a call site
+ * never hand-rolls `Authorization` + `fetch` + Problem parsing.
+ */
+export function authedResponse(
+  path: string,
+  init: { method?: string; body?: BodyInit | null; contentType?: string; accept?: string; signal?: AbortSignal; headers?: Record<string, string> } = {},
+): Promise<Response> {
+  return rawRequest('int', path, init);
+}
+
+/**
  * Fetch a text resource (e.g. a `text/markdown` report) from /api/v1<path> with
  * the stored Bearer token. Throws `ApiError` on a non-2xx response; a 401
  * sends the user back to login like any `api.*` call (via `rawRequest`).
@@ -730,26 +761,6 @@ export async function authedBlobUrl(path: string): Promise<string> {
 export async function postBlob<T>(path: string, body: Blob, contentType: string): Promise<T> {
   const resp = await rawRequest('int', path, { method: 'POST', body, contentType });
   return (await resp.json()) as T;
-}
-
-/**
- * POST a JSON body to /api/v1<path> with the bearer token and return the RAW
- * response body as text. For download/export endpoints that reply with a
- * non-JSON body (e.g. `text/csv`) — which the JSON-parsing `request()` helper
- * cannot read (it would `resp.json()` the CSV and throw a SyntaxError).
- */
-export async function postForText(
-  path: string,
-  body: unknown,
-  signal?: AbortSignal,
-): Promise<string> {
-  const resp = await rawRequest('int', path, {
-    method: 'POST',
-    body: JSON.stringify(body),
-    contentType: 'application/json',
-    signal,
-  });
-  return resp.text();
 }
 
 /**
@@ -813,17 +824,6 @@ export async function dbImport(
     onLine?.(line);
   });
   return last;
-}
-
-/**
- * Draft a verified read query from natural language (`POST …/db/nl-to-sql`).
- * Plain JSON in/out; the server returns only an `EXPLAIN`-validated read. A 400
- * Problem surfaces as an {@link ApiError} the caller inspects (`.message` starts
- * with "NL-to-SQL is not configured" when no drafter is wired, or "could not
- * produce a valid read query" when the loop was exhausted).
- */
-export function dbNlToSql(connId: string, body: NlToSqlReq): Promise<NlToSqlOutcome> {
-  return api.post<NlToSqlOutcome>(`/connections/${connId}/db/nl-to-sql`, body);
 }
 
 // --- DB Assistant (file-backed, embedded agent panel) -----------------------
@@ -960,21 +960,6 @@ export function verifyFinding(id: string): Promise<FindingActionResp> {
 /** Spawn an agent to add a regression test (sets `linked_test`). */
 export function regressionTestFinding(id: string): Promise<FindingActionResp> {
   return api.post<FindingActionResp>(`/findings/${id}/regression-test`);
-}
-
-/** List the workspace's repo rules. */
-export function listRepoRules(wsId: string): Promise<RepoRule[]> {
-  return api.get<RepoRule[]>(`/workspaces/${wsId}/repo-rules`);
-}
-
-/** Enable/disable a repo rule (re-materializes the workspace's rules block). */
-export function toggleRepoRule(id: string, enabled: boolean): Promise<RepoRule> {
-  return api.post<RepoRule>(`/repo-rules/${id}/toggle`, { enabled });
-}
-
-/** Delete a repo rule. */
-export function deleteRepoRule(id: string): Promise<void> {
-  return api.del<void>(`/repo-rules/${id}`);
 }
 
 /** Assemble the live Proof Pack for a review (summary + per-finding evidence). */

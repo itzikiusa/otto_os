@@ -51,7 +51,7 @@
   import { plural, pluralNoun } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import { copyText } from './results-format';
+  import { copyWithToast } from './results-format';
 
   interface Props {
     left: Record<string, unknown>;
@@ -75,7 +75,7 @@
 
   function copyPatch(): void {
     const ops = recordPatch(rows);
-    void copyText(JSON.stringify(ops, null, 2), ['Copied', `JSON patch with ${plural(ops.length, 'op')}`]);
+    void copyWithToast(JSON.stringify(ops, null, 2), ['Copied', `JSON patch with ${plural(ops.length, 'op')}`]);
   }
 </script>
 

@@ -33,35 +33,61 @@ use serde_json::Value;
 use crate::auth::{CurrentAuthContext, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
+use otto_core::cancel::{CancelGuard, CancelRegistryExt};
 // The review engine's pure core lives in otto-review; re-exported so the
 // `crate::modules::…` paths other engines use keep resolving.
 pub use otto_review::engine::*;
 use otto_review::worktree::{teardown_pr_worktree, PrWorktree};
 
+/// The typist's freshly reloaded identity and workspace role — the part of
+/// [`input_user`] that is the same for every session of one workspace, so a
+/// fan-out (broadcast / relay) loads it ONCE per request instead of per target.
+struct InputAuthority {
+    user: User,
+    role: Option<WorkspaceRole>,
+}
+
+impl InputAuthority {
+    /// Reload `user_id` and require Editor+ in `ws_id`.
+    async fn load(pool: &otto_state::DbPool, user_id: &Id, ws_id: &Id) -> Result<Self> {
+        let user = otto_state::UsersRepo::new(pool.clone())
+            .get(user_id)
+            .await?;
+        if user.disabled {
+            return Err(Error::Forbidden("account disabled".into()));
+        }
+        let role = WorkspacesRepo::new(pool.clone())
+            .role_of(&user, ws_id)
+            .await?;
+        if !matches!(role, Some(WorkspaceRole::Editor | WorkspaceRole::Admin)) {
+            return Err(Error::Forbidden(
+                "workspace Editor access is required for session input".into(),
+            ));
+        }
+        Ok(Self { user, role })
+    }
+
+    /// A session owner — or root, or a workspace admin — may type into it.
+    fn owner_or_admin(&self, session: &Session) -> Result<()> {
+        if !self.user.is_root
+            && self.user.id != session.created_by
+            && self.role != Some(WorkspaceRole::Admin)
+        {
+            return Err(Error::Forbidden(
+                "not the session owner or a workspace admin".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Reload identity and workspace authority at the actual input boundary. A
 /// session owner still needs Editor membership to type into that workspace.
 async fn input_user(pool: &otto_state::DbPool, user_id: &Id, session: &Session) -> Result<User> {
-    let user = otto_state::UsersRepo::new(pool.clone())
-        .get(user_id)
-        .await?;
-    if user.disabled {
-        return Err(Error::Forbidden("account disabled".into()));
-    }
-    let role = WorkspacesRepo::new(pool.clone())
-        .role_of(&user, &session.workspace_id)
-        .await?;
-    if !matches!(role, Some(WorkspaceRole::Editor | WorkspaceRole::Admin)) {
-        return Err(Error::Forbidden(
-            "workspace Editor access is required for session input".into(),
-        ));
-    }
-    if !user.is_root && user.id != session.created_by && role != Some(WorkspaceRole::Admin) {
-        return Err(Error::Forbidden(
-            "not the session owner or a workspace admin".into(),
-        ));
-    }
-    crate::resource_sessions::check_with_pool(pool, &user, session).await?;
-    Ok(user)
+    let authority = InputAuthority::load(pool, user_id, &session.workspace_id).await?;
+    authority.owner_or_admin(session)?;
+    crate::resource_sessions::check_with_pool(pool, &authority.user, session).await?;
+    Ok(authority.user)
 }
 
 async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Result<Session> {
@@ -92,10 +118,19 @@ impl<'a> Typist<'a> {
 }
 
 /// Send both the paste and its delayed submit through current authorization.
-async fn submit_session_text(ctx: &ServerCtx, who: Typist<'_>, id: &Id, text: &str) -> Result<()> {
+/// `session` is the row the caller already authorized for `who` (via
+/// [`input_session`] or [`input_agents`]); the paste itself still re-checks
+/// current authority inside `human_submit_text_checked`, so a grant revoked
+/// in between is honoured.
+async fn submit_session_text(
+    ctx: &ServerCtx,
+    who: Typist<'_>,
+    session: &Session,
+    text: &str,
+) -> Result<()> {
     let user_id = who.user_id;
-    let session = input_session(ctx, user_id, id).await?;
-    agent_message_rule(who.agent, &session)?;
+    let id = &session.id;
+    agent_message_rule(who.agent, session)?;
     ctx.manager
         .human_submit_text_checked(id, user_id, false, text, || async {
             input_session(ctx, user_id, id).await.map(|_| ())
@@ -108,23 +143,44 @@ async fn submit_session_text(ctx: &ServerCtx, who: Typist<'_>, id: &Id, text: &s
     Ok(())
 }
 
+/// The workspace's live agent sessions `who` may type into — the same rules
+/// as [`input_session`] per row, with the user + role loaded once and the
+/// resource-bound rows decided in one batch. Archived rows and connection
+/// sessions are filtered in SQL (it used to decode the workspace's whole
+/// session history, then re-authorize each live agent from scratch).
 async fn input_agents(ctx: &ServerCtx, who: Typist<'_>, ws_id: &Id) -> Result<Vec<Session>> {
-    let mut allowed = Vec::new();
-    for session in ctx.manager.list_by_workspace(ws_id).await? {
-        if session.kind == SessionKind::Agent
-            && matches!(
-                session.status,
-                otto_core::domain::SessionStatus::Running
-                    | otto_core::domain::SessionStatus::Working
-                    | otto_core::domain::SessionStatus::Idle
-            )
-            && agent_message_rule(who.agent, &session).is_ok()
-            && input_session(ctx, who.user_id, &session.id).await.is_ok()
-        {
-            allowed.push(session);
-        }
-    }
-    Ok(allowed)
+    let Ok(authority) = InputAuthority::load(&ctx.pool, who.user_id, ws_id).await else {
+        // Not an Editor here (or disabled): no target is reachable.
+        return Ok(Vec::new());
+    };
+    let live: Vec<Session> = ctx
+        .manager
+        .list_filtered(
+            &[otto_state::SessionScope {
+                workspace_id: ws_id.clone(),
+                owner: None,
+            }],
+            &otto_state::SessionListFilter {
+                archived: Some(false),
+                kind: Some("agent".into()),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .filter(|session| {
+            session.kind == SessionKind::Agent
+                && matches!(
+                    session.status,
+                    otto_core::domain::SessionStatus::Running
+                        | otto_core::domain::SessionStatus::Working
+                        | otto_core::domain::SessionStatus::Idle
+                )
+                && agent_message_rule(who.agent, session).is_ok()
+                && authority.owner_or_admin(session).is_ok()
+        })
+        .collect();
+    Ok(crate::resource_sessions::check_many(ctx, &authority.user, live).await)
 }
 
 async fn broadcast_sessions(
@@ -137,9 +193,7 @@ async fn broadcast_sessions(
     let mut sent = Vec::new();
     for session in input_agents(ctx, who, ws_id).await? {
         if targets.is_none_or(|ids| ids.contains(&session.id))
-            && submit_session_text(ctx, who, &session.id, text)
-                .await
-                .is_ok()
+            && submit_session_text(ctx, who, &session, text).await.is_ok()
         {
             sent.push(session.id);
         }
@@ -1336,7 +1390,11 @@ async fn workspace_relay(
     let resolved = otto_sessions::names::resolve_address(text, &addressable);
     let mut session_ids = Vec::new();
     for id in &resolved.targets {
-        if submit_session_text(&ctx, who, id, resolved.text.trim())
+        // Targets resolve only against the already-authorized candidates.
+        let Some(session) = candidates.iter().find(|s| s.id == *id) else {
+            continue;
+        };
+        if submit_session_text(&ctx, who, session, resolved.text.trim())
             .await
             .is_ok()
         {
@@ -1429,7 +1487,7 @@ impl PlanIo for ExecHelper {
 
     fn run_command<'a>(&'a self, session_id: &'a Id, text: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let session = self.ctx.manager.get(session_id).await?;
+            let session = input_session(&self.ctx, &self.user.id, session_id).await?;
             if session.workspace_id != self.ws_id {
                 return Err(Error::Forbidden(
                     "session belongs to another workspace".into(),
@@ -1437,7 +1495,7 @@ impl PlanIo for ExecHelper {
             }
             // Submit as a real keypress (paste + Enter), not "{text}\n" in one
             // burst — otherwise bracketed-paste TUIs paste the text but never send.
-            submit_session_text(&self.ctx, self.typist(), session_id, text).await?;
+            submit_session_text(&self.ctx, self.typist(), &session, text).await?;
             Ok(())
         })
     }
@@ -1627,19 +1685,17 @@ async fn stage_all_review_skills(library: &otto_context::Library) -> Option<Stri
     .flatten()
 }
 
-/// Register (or replace) the cancel flag for one review agent. Returns the
-/// fresh, un-tripped flag — replacing matters on retry, where a stale tripped
-/// flag would short-circuit the new run instantly.
+/// Register (or replace) the cancel flag for one review agent. The guard
+/// holds a fresh, un-tripped flag — replacing matters on retry, where a stale
+/// tripped flag would short-circuit the new run instantly — and unregisters it
+/// on drop only while the registry still holds it (a newer retry's flag of the
+/// same agent survives).
 fn register_review_agent_cancel(
     reg: &crate::skill_eval::CancelRegistry,
     review_id: &str,
     index: usize,
-) -> Arc<std::sync::atomic::AtomicBool> {
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    if let Ok(mut m) = reg.lock() {
-        m.insert(review_agent_cancel_key(review_id, index), flag.clone());
-    }
-    flag
+) -> CancelGuard {
+    reg.register(&review_agent_cancel_key(review_id, index))
 }
 
 /// Trip one review agent's cancel flag, if registered (no-op otherwise — e.g.
@@ -1649,22 +1705,7 @@ fn signal_review_agent_cancel(
     review_id: &str,
     index: usize,
 ) {
-    if let Ok(m) = reg.lock() {
-        if let Some(f) = m.get(&review_agent_cancel_key(review_id, index)) {
-            f.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-}
-
-/// Drop one review agent's cancel flag from the registry (run is over).
-fn unregister_review_agent_cancel(
-    reg: &crate::skill_eval::CancelRegistry,
-    review_id: &str,
-    index: usize,
-) {
-    if let Ok(mut m) = reg.lock() {
-        m.remove(&review_agent_cancel_key(review_id, index));
-    }
+    reg.signal(&review_agent_cancel_key(review_id, index));
 }
 
 /// Remove the review's `otto-review-<id>*` temp files when NO agent of it is
@@ -1673,11 +1714,9 @@ fn unregister_review_agent_cancel(
 /// either sees its files kept or writes them after the sweep. Sync: run it on
 /// the blocking pool (the temp-dir walk blocks).
 fn sweep_review_temp_files_if_idle(reg: &crate::skill_eval::CancelRegistry, review_id: &str) {
-    let Ok(m) = reg.lock() else {
-        return;
-    };
+    let map = reg.lock_map();
     let mine = format!("{review_id}:");
-    if m.keys().any(|k| k.starts_with(&mine)) {
+    if map.keys().any(|k| k.starts_with(&mine)) {
         return;
     }
     remove_review_temp_files_in(&std::env::temp_dir(), &format!("otto-review-{review_id}"));
@@ -1794,15 +1833,13 @@ async fn run_review(
     // config decides, then `FanOut`.
     mode_override: Option<otto_core::domain::ReviewMode>,
 ) {
-    let attempt_cancel = ctx.review_cancels.lock().ok().map(|mut map| {
-        map.entry(review_id.clone())
-            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-            .clone()
-    });
-    // Unregister this run's flag on every exit path (incl. the early return).
-    let _cancel_guard = attempt_cancel
-        .as_ref()
-        .map(|f| ReviewCancelGuard::new(&ctx.review_cancels, &review_id, f));
+    // Join the launch-registered flag (or register one). The guard unregisters
+    // it on every exit path (incl. the early return) — but only while the
+    // registry still holds THAT flag, so an unwinding (cancelled) attempt never
+    // removes a newer retry's entry. Without it every branch/local review
+    // leaked an entry, and a tripped flag left behind could cancel a later
+    // rerun of the same id.
+    let attempt = ctx.review_cancels.join(&review_id);
     // Cancellation can commit between launch admission and this task being
     // polled. Register first so later cancellations also reach this attempt.
     if review_is_cancelled(&ctx, &review_id).await {
@@ -1823,11 +1860,7 @@ async fn run_review(
         mode_override,
     )
     .await;
-    if attempt_cancel
-        .as_ref()
-        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
-        || review_is_cancelled(&ctx, &review_id).await
-    {
+    if attempt.is_cancelled() || review_is_cancelled(&ctx, &review_id).await {
         return;
     }
     // The run is over (done or error): its temp artifacts are spent.
@@ -2111,11 +2144,8 @@ async fn run_review_core(
         Arc::new(tokio::sync::Mutex::new(agent_states));
     // Per-review cancel flag (set by POST /reviews/{id}/cancel). Threaded into
     // each agent's recovery loop so a Cancel short-circuits in-flight retries.
-    let cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>> = ctx
-        .review_cancels
-        .lock()
-        .ok()
-        .and_then(|m| m.get(&review_id.to_string()).cloned());
+    let cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>> =
+        ctx.review_cancels.flag(review_id.as_str());
     // Make the FULL skill library available to CLAUDE review agents as first-class
     // skills (`Skill(<name>)`), staged into a shared out-of-tree bundle wired in
     // below via `meta.extra_dirs` → `--add-dir` (claude-only — see
@@ -2135,16 +2165,18 @@ async fn run_review_core(
     // lands between set_agents and this registration. EVERY flag is registered
     // before the first spawn (R3): the spawns are staggered below, and a Stop
     // during the stagger must still reach the reviewers not started yet.
-    let agent_cancels: Vec<Arc<std::sync::atomic::AtomicBool>> = (0..run_count)
+    let agent_cancels: Vec<CancelGuard> = (0..run_count)
         .map(|i| {
-            let flag = register_review_agent_cancel(&ctx.review_agent_cancels, review_id, i);
+            let guard = register_review_agent_cancel(&ctx.review_agent_cancels, review_id, i);
             if cancel_flag
                 .as_ref()
                 .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
             {
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                guard
+                    .flag()
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            flag
+            guard
         })
         .collect();
 
@@ -2157,7 +2189,7 @@ async fn run_review_core(
             tokio::time::sleep(REVIEW_SPAWN_STAGGER).await;
         }
         let manager = Arc::clone(&ctx.manager);
-        let agent_cancel = agent_cancels[i].clone();
+        let agent_cancel = Arc::clone(agent_cancels[i].flag());
         let reviews = ctx.reviews_store.clone();
         let states = Arc::clone(&states);
         let ws = workspace.clone();
@@ -2280,9 +2312,7 @@ async fn run_review_core(
         }
     }
     // Every reviewer has finished (stopped ones included) — drop their flags.
-    for i in 0..run_count {
-        unregister_review_agent_cancel(&ctx.review_agent_cancels, review_id, i);
-    }
+    drop(agent_cancels);
 
     // If the review was cancelled while the agents ran, stop here: skip the
     // (expensive) summarizer and do NOT persist findings. The cancel handler
@@ -2329,54 +2359,10 @@ async fn run_review_core(
     result
 }
 
-/// Drops a review's cancel flag from `review_cancels` when the attempt that
-/// registered it ends — but only while the registry still holds THAT flag, so
-/// an unwinding (cancelled) attempt never removes a newer retry's entry.
-/// Without it every branch/local review and summarizer retry leaked an entry,
-/// and a tripped flag left behind could cancel a later rerun of the same id.
-pub(crate) struct ReviewCancelGuard {
-    reg: crate::skill_eval::CancelRegistry,
-    id: String,
-    flag: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl ReviewCancelGuard {
-    pub(crate) fn new(
-        reg: &crate::skill_eval::CancelRegistry,
-        id: &str,
-        flag: &Arc<std::sync::atomic::AtomicBool>,
-    ) -> Self {
-        Self {
-            reg: reg.clone(),
-            id: id.to_string(),
-            flag: flag.clone(),
-        }
-    }
-}
-
-impl Drop for ReviewCancelGuard {
-    fn drop(&mut self) {
-        if let Ok(mut map) = self.reg.lock() {
-            if map
-                .get(&self.id)
-                .is_some_and(|f| Arc::ptr_eq(f, &self.flag))
-            {
-                map.remove(&self.id);
-            }
-        }
-    }
-}
-
 /// Flags stop work immediately; the durable status covers daemon/retry paths
 /// that do not have a registered flag.
 async fn review_is_cancelled(ctx: &ServerCtx, review_id: &Id) -> bool {
-    let flagged = ctx
-        .review_cancels
-        .lock()
-        .ok()
-        .and_then(|m| m.get(review_id.as_str()).cloned())
-        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst));
-    flagged
+    ctx.review_cancels.is_signalled(review_id.as_str())
         || ctx
             .reviews_store
             .get_review(review_id)
@@ -4498,7 +4484,9 @@ async fn retry_review_agent(
     // Registered BEFORE the diff is re-materialised: a sibling retry's
     // end-of-retry temp sweep (below) skips while any agent of this review is
     // registered, so it can never delete the file this retry is about to use.
-    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
+    let agent_registration =
+        register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
+    let agent_cancel = Arc::clone(agent_registration.flag());
     let diff_file = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
     let mut diff_len = std::fs::metadata(&diff_file)
         .map(|m| m.len() as usize)
@@ -4540,7 +4528,7 @@ async fn retry_review_agent(
                         row.status = "error".into();
                         row.note = error.to_string();
                         let _ = reviews.set_agent_at(&review_id_bg, index, &row).await;
-                        unregister_review_agent_cancel(&agent_cancels_reg, &review_id_bg, index);
+                        drop(agent_registration);
                         return;
                     }
                 };
@@ -4572,7 +4560,7 @@ async fn retry_review_agent(
         if let Some(wt) = pr_wt {
             teardown_pr_worktree(&repo.path, wt).await;
         }
-        unregister_review_agent_cancel(&agent_cancels_reg, &review_id_bg, index);
+        drop(agent_registration);
         // The last retry of this (settled) review out sweeps the temp files it
         // re-materialised — only `run_review` swept them before (S2-310).
         let () = crate::offload::blocking(move || {
@@ -4678,10 +4666,8 @@ async fn retry_summarizer(
     // Each retry has its own cancellation flag; a cancelled earlier attempt
     // must not poison the new session, and Cancel must cover this task too
     // (registered only once this attempt owns the review).
-    let attempt_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    if let Ok(mut map) = ctx.review_cancels.lock() {
-        map.insert(review_id.clone(), attempt_cancel.clone());
-    }
+    let attempt_registration = ctx.review_cancels.register(&review_id);
+    let attempt_cancel = Arc::clone(attempt_registration.flag());
     let _ = ctx.events.send(Event::ReviewChanged {
         workspace_id: workspace.id.clone(),
         session_id: None,
@@ -4694,8 +4680,7 @@ async fn retry_summarizer(
     let repo_id = review.repo_id.clone();
     let pr_number = review.pr_number;
     tokio::spawn(async move {
-        let _cancel_guard =
-            ReviewCancelGuard::new(&ctx_bg.review_cancels, &review_id_bg, &attempt_cancel);
+        let _cancel_guard = attempt_registration;
         // Fingerprints anchor on the flagged line's TEXT; a PR review's lines
         // are in the PR head, not the user's checkout. Rebuild a head worktree
         // for anchoring so the retry re-keys onto the original findings.
@@ -4958,12 +4943,7 @@ async fn start_review(
     // Register a cancel flag for this run so POST /reviews/{id}/cancel can stop
     // it. run_review_core looks this up by review_id and threads it into each
     // agent's recovery loop.
-    if let Ok(mut map) = ctx.review_cancels.lock() {
-        map.insert(
-            review.id.to_string(),
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        );
-    }
+    let registration = ctx.review_cancels.register(&review.id);
 
     // Spawn the background runner.
     let review_id = review.id.clone();
@@ -4998,12 +4978,7 @@ async fn start_review(
         .await;
         // If a Cancel landed while we ran, the cancel handler already set the
         // terminal `cancelled` status + tore everything down — don't overwrite it.
-        let was_cancelled = ctx_bg
-            .review_cancels
-            .lock()
-            .ok()
-            .and_then(|m| m.get(review_id.as_str()).cloned())
-            .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst));
+        let was_cancelled = registration.is_cancelled();
         if was_cancelled {
             tracing::info!(review = %review_id, "PR review ended after cancel — leaving cancelled status");
         } else {
@@ -5041,9 +5016,7 @@ async fn start_review(
             }
         }
         // Drop the cancel flag from the registry now the run is over.
-        if let Ok(mut map) = ctx_bg.review_cancels.lock() {
-            map.remove(review_id.as_str());
-        }
+        drop(registration);
         drop(repo_path); // keep bound
     });
 
@@ -5101,11 +5074,7 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
     //    Only an attempt that is actually running has a flag; trip it, never
     //    insert one — a tripped orphan would cancel a later rerun of this id
     //    (the durable `cancelled` status below covers flagless paths).
-    if let Ok(map) = ctx.review_cancels.lock() {
-        if let Some(flag) = map.get(review_id.as_str()) {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
+    ctx.review_cancels.signal(review_id.as_str());
     for i in 0..review.agents.len() {
         signal_review_agent_cancel(&ctx.review_agent_cancels, &review_id, i);
     }
@@ -6207,7 +6176,7 @@ async fn session_message(
             session.status.as_str()
         ))));
     }
-    submit_session_text(&ctx, Typist::new(&user.id, &auth), &session_id, text)
+    submit_session_text(&ctx, Typist::new(&user.id, &auth), &session, text)
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::SessionMessageResp {
@@ -6234,6 +6203,13 @@ async fn wait_session(
     CurrentUser(user): CurrentUser,
     Query(q): Query<WaitSessionQuery>,
 ) -> ApiResult<Json<otto_core::api::WaitSessionResp>> {
+    // Event-driven: subscribe BEFORE the first read so a transition between
+    // the read and the wait is never missed, then re-read the row only when
+    // THIS session's status event arrives (or every
+    // [`WAIT_SESSION_SAFETY_RECHECK`], or after a lagged bus). It used to
+    // re-read and decode the full row every 500 ms per waiter — orchestrators
+    // long-poll this for every worker they supervise.
+    let mut rx = ctx.events.subscribe();
     let mut session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
     let wanted: Vec<String> = q
@@ -6265,12 +6241,36 @@ async fn wait_session(
                 reached: false,
             }));
         }
+        let wake_at = (tokio::time::Instant::now() + WAIT_SESSION_SAFETY_RECHECK).min(deadline);
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            () = wait_for_session_event(&mut rx, &session_id, wake_at) => {}
             _ = crate::shutdown::cancelled() => {}
         }
         session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     }
+}
+
+/// Slowest re-read of a waited-on session when no event for it arrives (the
+/// bus is best-effort: a missed send must not strand a waiter until timeout).
+const WAIT_SESSION_SAFETY_RECHECK: Duration = Duration::from_secs(5);
+
+/// Block until `session_id`'s status changes or it is removed (the manager
+/// writes the row BEFORE it broadcasts), the bus lags (ours may have been
+/// dropped), or `wake_at` passes. Other sessions' events are skipped.
+async fn wait_for_session_event(
+    rx: &mut tokio::sync::broadcast::Receiver<Event>,
+    session_id: &Id,
+    wake_at: tokio::time::Instant,
+) {
+    crate::workflow_engine::wake_on_event(rx, |ev| is_session_change(ev, session_id), wake_at)
+        .await;
+}
+
+/// Whether `ev` is a status change or removal of `session_id`.
+fn is_session_change(ev: &Event, session_id: &Id) -> bool {
+    matches!(ev,
+        Event::SessionStatus { session_id: id, .. } | Event::SessionRemoved { session_id: id, .. }
+            if id == session_id)
 }
 
 async fn send_input(
@@ -7509,36 +7509,63 @@ mod readiness_tests {
 }
 
 #[cfg(test)]
-mod review_cancel_guard_tests {
-    use super::ReviewCancelGuard;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
+mod wait_session_tests {
+    use super::{wait_for_session_event, Event};
+    use otto_core::domain::SessionStatus;
+    use otto_core::Id;
+    use std::time::Duration;
 
-    fn flag() -> Arc<AtomicBool> {
-        Arc::new(AtomicBool::new(false))
+    fn status(id: &str) -> Event {
+        Event::SessionStatus {
+            session_id: Id::from(id),
+            workspace_id: Id::from("ws"),
+            status: SessionStatus::Idle,
+        }
     }
 
-    #[test]
-    fn guard_unregisters_its_own_flag_on_drop() {
-        let reg: crate::skill_eval::CancelRegistry = Default::default();
-        let f = flag();
-        reg.lock().unwrap().insert("r1".into(), f.clone());
-        drop(ReviewCancelGuard::new(&reg, "r1", &f));
-        assert!(reg.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn guard_keeps_a_newer_attempts_flag() {
-        let reg: crate::skill_eval::CancelRegistry = Default::default();
-        let old = flag();
-        reg.lock().unwrap().insert("r1".into(), old.clone());
-        let guard = ReviewCancelGuard::new(&reg, "r1", &old);
-        // A retry replaces the entry while the old attempt is unwinding.
-        let newer = flag();
-        reg.lock().unwrap().insert("r1".into(), newer.clone());
-        drop(guard);
-        let map = reg.lock().unwrap();
-        assert!(Arc::ptr_eq(map.get("r1").unwrap(), &newer));
+    /// The long-poll wakes on ITS session's status change (not another's)
+    /// well before the safety re-read, and on a lagged bus.
+    #[tokio::test]
+    async fn wakes_only_for_its_own_session() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+        let me = Id::from("me");
+        let far = tokio::time::Instant::now() + Duration::from_secs(30);
+        tx.send(status("other")).unwrap();
+        tx.send(status("me")).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_session_event(&mut rx, &me, far),
+        )
+        .await
+        .expect("woke on its own status event");
+        // Only someone else's event: sleeps until the safety deadline.
+        tx.send(status("other")).unwrap();
+        let soon = tokio::time::Instant::now() + Duration::from_millis(50);
+        let started = tokio::time::Instant::now();
+        wait_for_session_event(&mut rx, &me, soon).await;
+        assert!(started.elapsed() >= Duration::from_millis(45));
+        // A removal wakes too.
+        tx.send(Event::SessionRemoved {
+            session_id: me.clone(),
+            workspace_id: Id::from("ws"),
+        })
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_session_event(&mut rx, &me, far),
+        )
+        .await
+        .expect("woke on removal");
+        // A lagged receiver re-reads (ours may have been dropped).
+        for _ in 0..6 {
+            tx.send(status("other")).unwrap();
+        }
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_session_event(&mut rx, &me, far),
+        )
+        .await
+        .expect("woke on lag");
     }
 }
 
@@ -7649,10 +7676,10 @@ mod review_retry_tests {
         let rid = format!("t{}", otto_core::new_id());
         let diff = std::env::temp_dir().join(format!("otto-review-{rid}.diff"));
         std::fs::write(&diff, "d").unwrap();
-        let _flag = super::register_review_agent_cancel(&reg, &rid, 1);
+        let registration = super::register_review_agent_cancel(&reg, &rid, 1);
         sweep_review_temp_files_if_idle(&reg, &rid);
         assert!(diff.exists(), "a sibling retry is still registered");
-        super::unregister_review_agent_cancel(&reg, &rid, 1);
+        drop(registration);
         sweep_review_temp_files_if_idle(&reg, &rid);
         assert!(!diff.exists(), "the last retry out sweeps");
     }

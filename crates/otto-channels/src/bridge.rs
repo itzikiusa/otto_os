@@ -526,24 +526,37 @@ async fn submit_to_agent(
     }
 
     // 2. Paste the prompt (bracketed paste keeps multi-line text as one message).
-    if let Err(e) = manager.input(&session_id, &input).await {
-        warn!(channel = %label, session = %session_id, "bridge: paste input failed: {e}");
-        mirror.cancel(&session_id).await;
-        reply.say(DELIVERY_FAILED_REPLY).await;
-        return;
-    }
-    tokio::time::sleep(PASTE_TO_ENTER).await;
-
-    // Snapshot output activity right before submit so we can detect dispatch.
-    let before = manager.live_handle(&session_id).map(|h| h.last_output_at());
-
-    // 3. Submit with Enter (from INSERT mode, where the paste left the cursor).
-    if let Err(e) = manager.input(&session_id, AGENT_SUBMIT_KEY).await {
-        warn!(channel = %label, session = %session_id, "bridge: submit key failed: {e}");
-        mirror.cancel(&session_id).await;
-        reply.say(DELIVERY_FAILED_REPLY).await;
-        return;
-    }
+    //    The session's submit lock spans paste → Enter: `_turn` only orders
+    //    this thread's own turns, while agent→agent messages, broadcasts,
+    //    nudges and humans submit into the same PTY through the manager.
+    let submit_lock = manager.submit_lock(&session_id);
+    let submitted = {
+        let _submit = submit_lock.lock().await;
+        match manager.input(&session_id, &input).await {
+            Err(e) => Err(("paste input", e)),
+            Ok(()) => {
+                tokio::time::sleep(PASTE_TO_ENTER).await;
+                // Snapshot output activity right before submit so we can
+                // detect dispatch.
+                let before = manager.live_handle(&session_id).map(|h| h.last_output_at());
+                // 3. Submit with Enter (from INSERT mode, where the paste left
+                //    the cursor).
+                match manager.input(&session_id, AGENT_SUBMIT_KEY).await {
+                    Ok(()) => Ok(before),
+                    Err(e) => Err(("submit key", e)),
+                }
+            }
+        }
+    };
+    let before = match submitted {
+        Ok(before) => before,
+        Err((step, e)) => {
+            warn!(channel = %label, session = %session_id, "bridge: {step} failed: {e}");
+            mirror.cancel(&session_id).await;
+            reply.say(DELIVERY_FAILED_REPLY).await;
+            return;
+        }
+    };
     info!(
         channel = %label,
         session = %session_id,
@@ -561,7 +574,13 @@ async fn submit_to_agent(
         return;
     }
     warn!(channel = %label, session = %session_id, "bridge: agent did not start within {DISPATCH_WAIT:?}; re-sending Enter");
-    if let Err(e) = manager.input(&session_id, b"\r").await {
+    // Under the submit lock too, so the retry can't submit another sender's
+    // half-finished paste.
+    let retried = {
+        let _submit = submit_lock.lock().await;
+        manager.input(&session_id, b"\r").await
+    };
+    if let Err(e) = retried {
         warn!(channel = %label, session = %session_id, "bridge: retry Enter failed: {e}");
         return;
     }

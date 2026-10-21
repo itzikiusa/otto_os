@@ -466,14 +466,6 @@ impl RunContextFiles {
         self.dir.as_ref().map(|d| d.to_string_lossy().into_owned())
     }
 
-    /// Name of the auto-generated run brief — always `RUN_BRIEF_FILE`.
-    // TODO(task 5): unused until an API/UI surface wants to name this file
-    // without reaching for the constant directly.
-    #[allow(dead_code)]
-    pub fn brief_name(&self) -> String {
-        RUN_BRIEF_FILE.to_string()
-    }
-
     pub fn write_brief(&self, content: &str) {
         self.write_file(RUN_BRIEF_FILE, content);
     }
@@ -1044,7 +1036,7 @@ mod tests {
     fn named_writes_and_has_file() {
         let td = tempfile::tempdir().unwrap();
         let f = RunContextFiles::create(td.path(), "r6");
-        assert_eq!(f.brief_name(), "run-brief.md");
+        assert_eq!(RUN_BRIEF_FILE, "run-brief.md");
         assert!(!f.has_file("instructions.md"));
         f.write_instructions_md("standing rules");
         assert!(f.has_file("instructions.md"));

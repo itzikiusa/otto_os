@@ -141,12 +141,6 @@ export const SOURCE_KINDS: readonly SourceMeta[] = [
   { kind: 'scheduled_report', label: 'Report', icon: 'clock', template: 'report:', example: 'report:<id> (scheduled-task report)' },
 ] as const;
 
-/** Tint for a SourceKind badge: neutral for every kind (icon + label carry
- *  the kind). Kept as a function so call sites stay put. */
-export function sourceColor(_kind: string): string {
-  return 'var(--text-dim)';
-}
-
 /** Short label for a SourceKind (falls back to humanized snake_case). */
 export function sourceLabel(kind: string): string {
   if (kind === 'channel') return 'Chat / free text';

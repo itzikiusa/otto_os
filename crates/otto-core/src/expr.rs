@@ -81,12 +81,6 @@ pub fn eval_bool(src: &str, ctx: &Value) -> bool {
     }
 }
 
-/// Like [`eval_bool`] but surfaces the error (for nodes that want to log why a
-/// condition failed to parse). `Ok(bool)` on success.
-pub fn try_eval_bool(src: &str, ctx: &Value) -> Result<bool, ExprError> {
-    eval(src, ctx).map(|v| truthy(&v))
-}
-
 /// Render a template, replacing every `{{ expr }}` with the stringified result of
 /// evaluating `expr` against `ctx`. Text outside `{{ … }}` is copied verbatim, so
 /// the legacy `{key}` substitution can run first/independently. An expression that

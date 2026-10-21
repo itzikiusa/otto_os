@@ -90,10 +90,22 @@ fn load_manifest(dir: &Path) -> Result<PluginManifestFile, String> {
 // Supervisor
 // ===========================================================================
 
+/// A live sidecar. Its `Child` is owned by a per-plugin watcher task (see
+/// [`PluginManager::adopt`]), which reaps it the moment it exits — a crashed
+/// sidecar must not linger as a zombie with its port still published to the
+/// proxy (a later process binding that freed port would then receive plugin
+/// traffic, `x-otto-user` headers included).
 struct RunningPlugin {
     port: u16,
-    child: Child,
+    /// Which spawn this entry belongs to: the watcher of an older spawn must
+    /// never remove a newer one's entry.
+    generation: u64,
+    /// Asks the watcher to kill + reap the child (dropping it does the same).
+    stop: tokio::sync::oneshot::Sender<()>,
+    watcher: tokio::task::JoinHandle<()>,
 }
+
+type RunningMap = std::sync::Arc<Mutex<HashMap<String, RunningPlugin>>>;
 
 /// Supervises enabled plugin sidecars (spawn/stop) and tracks their ports for the
 /// reverse proxy.
@@ -103,7 +115,9 @@ pub struct PluginManager {
     data_dir: PathBuf,
     /// Base URL the sidecar uses to call back (`…/api/v1/plugin-host`).
     host_api_base: String,
-    running: Mutex<HashMap<String, RunningPlugin>>,
+    running: RunningMap,
+    /// Source of [`RunningPlugin::generation`].
+    generations: std::sync::atomic::AtomicU64,
     /// Serialize management transitions, including copying replacement files.
     lifecycle: tokio::sync::Mutex<()>,
     http: reqwest::Client,
@@ -121,7 +135,8 @@ impl PluginManager {
             plugins_home,
             data_dir,
             host_api_base,
-            running: Mutex::new(HashMap::new()),
+            running: RunningMap::default(),
+            generations: std::sync::atomic::AtomicU64::new(0),
             lifecycle: tokio::sync::Mutex::new(()),
             http: proxy_client(PROXY_CONNECT_TIMEOUT, PROXY_TIMEOUT),
         }
@@ -226,12 +241,58 @@ impl PluginManager {
         }
         // Keep ownership local during readiness: cancellation or failure kills
         // the child and cannot leave a stale published port.
-        self.running
-            .lock()
-            .unwrap()
-            .insert(p.slug.clone(), RunningPlugin { port, child });
+        self.adopt(&p.slug, port, child);
         tracing::info!(plugin = %p.slug, port, "plugins: sidecar started");
         Ok(port)
+    }
+
+    /// Publish `child` on `port` and hand it to a watcher task that awaits its
+    /// exit. An unexpected exit un-publishes the port at once (generation-
+    /// checked) so the proxy answers "plugin not running" instead of
+    /// forwarding to whatever binds the freed port next; [`Self::stop`]
+    /// signals the watcher instead of waiting on the child itself. No
+    /// auto-restart: a crashing sidecar stays down until re-enabled.
+    fn adopt(&self, slug: &str, port: u16, mut child: Child) {
+        let generation = self
+            .generations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let running = std::sync::Arc::clone(&self.running);
+        let owner = slug.to_string();
+        // Publish under the lock the watcher takes: a child that dies at once
+        // cannot be reaped before its entry exists (and so stay published).
+        let mut map = self.running.lock().unwrap();
+        let watcher = tokio::spawn(async move {
+            tokio::select! {
+                status = child.wait() => {
+                    let mut map = running.lock().unwrap();
+                    if map.get(&owner).is_some_and(|r| r.generation == generation) {
+                        map.remove(&owner);
+                    }
+                    drop(map);
+                    match status {
+                        Ok(status) => tracing::warn!(plugin = %owner, port, %status, "plugins: sidecar exited unexpectedly; down until re-enabled or the daemon restarts"),
+                        Err(e) => tracing::warn!(plugin = %owner, port, "plugins: sidecar wait failed: {e}"),
+                    }
+                }
+                // A stop request, or the manager (the sender) went away.
+                _ = stop_rx => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                }
+            }
+        });
+        // A previous entry (spawn() stops it first, so only a racing caller)
+        // is stopped by dropping its sender; its watcher reaps the child.
+        map.insert(
+            slug.to_string(),
+            RunningPlugin {
+                port,
+                generation,
+                stop,
+                watcher,
+            },
+        );
     }
 
     /// Caller holds the lifecycle lock. Enable only survives a viable startup.
@@ -256,9 +317,11 @@ impl PluginManager {
     /// Stop a running plugin (kills the child). No-op if not running.
     pub async fn stop(&self, slug: &str) {
         let running = self.running.lock().unwrap().remove(slug);
-        if let Some(mut rp) = running {
-            let _ = rp.child.start_kill();
-            let _ = rp.child.wait().await;
+        if let Some(rp) = running {
+            // The watcher kills and reaps the child; awaiting it keeps `stop`
+            // synchronous (the port is free when this returns).
+            let _ = rp.stop.send(());
+            let _ = rp.watcher.await;
             tracing::info!(plugin = %slug, "plugins: sidecar stopped");
         }
     }
@@ -268,6 +331,13 @@ impl PluginManager {
     }
 }
 
+/// A free loopback port for the sidecar to bind. Residual race (bind, read,
+/// release, then the child binds later): another local process can take the
+/// port in that gap and answer the readiness probe. The plugin protocol has
+/// no identity handshake to close it — `/health` does not echo
+/// `OTTO_PLUGIN_TOKEN` and plugins report no port of their own — so this
+/// stays best-effort until the protocol grows one. The watcher in
+/// [`PluginManager::adopt`] at least un-publishes a port whose sidecar died.
 fn free_port() -> Option<u16> {
     let l = TcpListener::bind("127.0.0.1:0").ok()?;
     l.local_addr().ok().map(|a| a.port())
@@ -1078,11 +1148,7 @@ mod proxy_timeout_tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        manager
-            .running
-            .lock()
-            .unwrap()
-            .insert("fixture".into(), RunningPlugin { port: 1, child });
+        manager.adopt("fixture", 1, child);
         let _guard = manager.lifecycle.lock().await;
         let updated = manager
             .replace(record("new", "/missing/new-executable"))
@@ -1139,6 +1205,58 @@ mod proxy_timeout_tests {
         assert!(manager.port_of("slow").is_some());
         manager.stop("slow").await;
         assert!(manager.port_of("slow").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_crashed_sidecar_is_reaped_and_unpublished() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PluginManager::new(
+            PluginsRepo::new(pool),
+            tmp.path().join("plugins"),
+            tmp.path().into(),
+            "http://127.0.0.1:1".into(),
+        );
+        let crashing = Command::new("/bin/sh")
+            .args(["-c", "sleep 0.2; exit 3"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager.adopt("crashy", 41_000, crashing);
+        assert_eq!(manager.port_of("crashy"), Some(41_000));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while manager.port_of("crashy").is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a dead sidecar's port must stop being proxied"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // A newer spawn's entry survives an older watcher's exit.
+        let old = Command::new("/bin/sh")
+            .args(["-c", "sleep 0.2; exit 3"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager.adopt("again", 1, old);
+        let fresh = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager.adopt("again", 2, fresh);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(manager.port_of("again"), Some(2));
+        manager.stop("again").await;
+        assert!(manager.port_of("again").is_none());
     }
 
     /// A sidecar that accepts and then never answers (the SI-08 hang).

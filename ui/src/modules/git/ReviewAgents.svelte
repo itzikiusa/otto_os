@@ -13,7 +13,7 @@
   import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, type BadgeTone } from '../../lib/status';
-  import { sentenceCase, severityLabel } from '../../lib/labels';
+  import { severityLabel } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
 
   interface Props {
@@ -100,9 +100,8 @@
     }
   }
 
-  /** Agent finding severity / lifecycle state → the shared Badge tone. */
+  /** Agent finding severity → the shared Badge tone. */
   const SEV_TONE: Record<string, BadgeTone> = { info: 'info', warn: 'warn', bug: 'bad' };
-  const STATE_TONE: Record<string, BadgeTone> = { fixing: 'warn', resolved: 'ok', regressed: 'bad' };
 </script>
 
 <div class="rp-agents" class:rp-agents-done={view === 'done'}>
@@ -195,14 +194,13 @@
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}
         <ul class="rp-agent-findings">
-          {#each agent.findings as f (f.fingerprint ?? f.body)}
+          <!-- Keyed by location + index: an agent's raw findings carry no stable id (the
+               fingerprint lives on the persisted ReviewFindingRow), and one agent can report
+               the same text at two lines, so the body alone is not a unique key. -->
+          {#each agent.findings as f, i (`${f.path ?? ''}:${f.line ?? ''}:${i}`)}
             <li class="rp-finding">
               <Badge tone={SEV_TONE[f.severity] ?? 'neutral'} label={severityLabel(f.severity)} />
               {#if f.path}<span class="mono rp-loc">{f.path}{f.line ? ':' + f.line : ''}</span>{/if}
-              <!-- Lifecycle state chip (A1): shown when a persisted state is available. -->
-              {#if f.state && f.state !== 'open'}
-                <Badge tone={STATE_TONE[f.state] ?? 'neutral'} label={sentenceCase(f.state)} title="Finding state" />
-              {/if}
               <span class="rp-finding-body">{f.body}</span>
             </li>
           {/each}

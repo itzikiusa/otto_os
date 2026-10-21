@@ -59,8 +59,3 @@ export function fetchToolResult(
   }
   return p;
 }
-
-/** Test hook: forget every cached detail. */
-export function clearToolDetailCache(): void {
-  cache.clear();
-}

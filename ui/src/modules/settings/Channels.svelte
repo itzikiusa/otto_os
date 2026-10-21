@@ -151,7 +151,7 @@
     showWebhookKey = true;
   }
 
-  async function copyText(text: string): Promise<void> {
+  async function copyNotify(text: string): Promise<void> {
     if (!text) return;
     try {
       await copyTextOrThrow(text);
@@ -669,7 +669,7 @@
         <label for="ch-url">Inbound URL</label>
         <div class="row-inline">
           <input dir="ltr" id="ch-url" class="input mono inline-field" value={webhookUrl} readonly spellcheck="false" />
-          <button class="btn small inline-btn" type="button" onclick={() => void copyText(webhookUrl)}>Copy</button>
+          <button class="btn small inline-btn" type="button" onclick={() => void copyNotify(webhookUrl)}>Copy</button>
         </div>
         <span class="hint">
           <code>POST</code> here with header <code>X-Otto-Webhook-Key: &lt;key&gt;</code> and a JSON
@@ -701,7 +701,7 @@
         {#if editChannel === 'webhook'}
           <button class="btn small inline-btn" type="button" onclick={() => (showWebhookKey = !showWebhookKey)}>{showWebhookKey ? 'Hide' : 'Show'}</button>
           <button class="btn small inline-btn" type="button" onclick={generateKey}>Generate</button>
-          <button class="btn small inline-btn" type="button" disabled={!fBotToken} onclick={() => void copyText(fBotToken)}>Copy</button>
+          <button class="btn small inline-btn" type="button" disabled={!fBotToken} onclick={() => void copyNotify(fBotToken)}>Copy</button>
         {/if}
       </div>
       {#if editChannel === 'webhook'}

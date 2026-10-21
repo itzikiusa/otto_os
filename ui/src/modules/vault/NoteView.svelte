@@ -440,7 +440,6 @@
         <button
           class="mode-btn labelled"
           title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'}
-          aria-pressed={vault.editing}
           onclick={() => vault.setView(!vault.editing)}
         >
           <Icon name={vault.editing ? 'eye' : 'edit'} size={13} />

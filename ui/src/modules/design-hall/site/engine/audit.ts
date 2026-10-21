@@ -68,11 +68,3 @@ export function auditPage(doc: SiteDoc, page: SitePage, t: Theme): AuditFinding[
   void doc;
   return out;
 }
-
-/** Findings for every page, errors first. */
-export function auditSite(doc: SiteDoc, t: Theme): (AuditFinding & { pageId: string })[] {
-  const rank: Record<AuditLevel, number> = { error: 0, warn: 1, info: 2 };
-  return doc.pages
-    .flatMap((p) => auditPage(doc, p, t).map((f) => ({ ...f, pageId: p.id })))
-    .sort((a, b) => rank[a.level] - rank[b.level]);
-}

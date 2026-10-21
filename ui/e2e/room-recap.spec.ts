@@ -19,7 +19,7 @@ test('local recap transcript preserves gaps and summary failure remains retryabl
   });
   await page.goto('/#/room/recap-fixture');
   await page.evaluate(async () => { const path = '/e2e/fixtures/room-recap.svelte.ts'; const {mountRecapPanel} = await import(path); mountRecapPanel(); });
-  await expect(page.getByRole('heading', {name: 'Room recaps', exact: true})).toBeVisible();
+  await expect(page.getByRole('heading', {name: /Room recaps$/})).toBeVisible();
   await expect(page.getByText('Ship only after the regression passes.')).toBeVisible();
   await expect(page.getByText('A hidden screen had no available frame.', {exact: false})).toBeVisible();
   await expect(page.getByText('<script>untrusted terminal text</script>', {exact: true})).toBeVisible();

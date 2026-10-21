@@ -32,9 +32,19 @@ fn to_input(req: &GoldenTaskReq) -> GoldenTaskInput {
         lint_cmd: req.lint_cmd.clone(),
         build_cmd: req.build_cmd.clone(),
         rubric: req.rubric.clone(),
-        tags: req.tags.clone(),
+        tags: dedupe_tags(&req.tags),
         enabled: req.enabled,
     }
+}
+
+/// Tags in first-seen order without repeats: the Golden tasks list keys its
+/// chips by tag, so a stored duplicate (`auth, auth`) broke every render.
+fn dedupe_tags(tags: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    tags.iter()
+        .filter(|t| seen.insert(t.as_str()))
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +463,12 @@ mod tests {
             "name":"fixture", "mode":"score_only", "providers":(0..n).map(|i|format!("p{i}")).collect::<Vec<_>>(),
             "skills":[{"kind":"library","reference":"skill"}], "prompts":[{"label":"task","task":"fixture"}]
         })).unwrap()
+    }
+
+    #[test]
+    fn golden_task_tags_are_deduped_in_order() {
+        let tags = ["go", "auth", "go", "auth", "db"].map(String::from);
+        assert_eq!(dedupe_tags(&tags), ["go", "auth", "db"]);
     }
 
     #[test]

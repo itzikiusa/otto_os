@@ -19,12 +19,6 @@ export function fmtDuration(ms: number | null | undefined): string {
   return rm ? `${h}h ${rm}m` : `${h}h`;
 }
 
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
 export function fmtCost(usd: number | null | undefined): string {
   if (usd == null) return '';
   return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
@@ -60,36 +54,6 @@ export const TOOL_CHROME: Record<ToolKind, { icon: IconName; label: string }> = 
   task: { icon: 'check', label: 'Planned' },
   other: { icon: 'box', label: 'Used' },
 };
-
-/** Short command/path preview for a tool row when the parser's `title` is bare. */
-export function toolSubtitle(b: Extract<Block, { kind: 'tool_call' }>): string {
-  const inp = (b.input ?? {}) as Record<string, unknown>;
-  const pick = (...keys: string[]): string => {
-    for (const k of keys) {
-      const v = inp[k];
-      if (typeof v === 'string' && v.trim()) return v.trim();
-    }
-    return '';
-  };
-  switch (b.tool) {
-    case 'shell':
-      return pick('command', 'cmd');
-    case 'read':
-    case 'edit':
-    case 'write':
-      return pick('file_path', 'path', 'notebook_path');
-    case 'search':
-      return pick('pattern', 'query', 'glob');
-    case 'web':
-      return pick('url', 'query');
-    case 'agent':
-      return pick('description', 'prompt');
-    case 'skill':
-      return pick('skill', 'name');
-    default:
-      return '';
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Unified patch → DiffResp

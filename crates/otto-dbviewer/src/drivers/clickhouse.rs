@@ -481,7 +481,6 @@ impl ClickhouseDriver {
     /// `KILL QUERY WHERE query_id = '<id>'`; `None` for introspection/completion),
     /// and an optional per-statement timeout in seconds (`max_execution_time`).
     /// All derived cheaply from `cfg`.
-    #[allow(dead_code)]
     async fn connect_id(
         &self,
         cfg: &ResolvedConfig,

@@ -1,8 +1,9 @@
 // Pure cell/value formatting helpers shared by the results components
 // (ResultsGrid, GridView, VerticalView, JsonView, CellViewer). No Svelte
-// components or runes here — `copyText` is the one impure helper, and it only
-// touches the clipboard + the toast store.
+// components or runes here — `copyWithToast` is the one impure helper, and it
+// only touches the clipboard + the toast store.
 import { toasts } from '../../lib/toast.svelte';
+import { copyText } from '../../lib/clipboard';
 import { clipHistory } from '../../lib/stores/clipHistory.svelte';
 import { bsonScalar } from './bson';
 import { CELL_MAX, previewJson } from './json-preview';
@@ -63,13 +64,6 @@ export function clip(s: string): string {
 }
 export function cellDisplay(v: unknown): string {
   return isComplex(v) ? clip(previewJson(v)) : clip(cellText(v));
-}
-
-/** Vertical view: render as a collapsible tree rather than raw text when the
- *  value is structured, or a scalar too long to sit inline. */
-export function vvTree(v: unknown): boolean {
-  if (isComplex(v)) return true;
-  return typeof v === 'string' && v.length > 400;
 }
 
 /** Lightweight SQL pretty-printer: newlines before major clauses and one
@@ -150,20 +144,19 @@ export function formatSql(sql: string): string {
   }
 }
 
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
+/** Kept for ExportDialog; new code imports `formatBytes` from lib/metric-format. */
+export { formatBytes as fmtBytes } from '../../lib/metric-format';
 
-/** Clipboard write with a failure toast; pass `successToast` to also confirm
- *  (the cell viewer's Copy does, the silent "copy value" menu items don't). */
-export async function copyText(s: string, successToast?: [title: string, body?: string]): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(s);
-    clipHistory.record(s, 'Results');
-    if (successToast) toasts.success(successToast[0], successToast[1]);
-  } catch {
-    toasts.error('Couldn’t copy');
+/** Clipboard write (lib/clipboard, so it also works on insecure origins) with
+ *  a failure toast; pass `successToast` to also confirm (the cell viewer's Copy
+ *  does, the silent "copy value" menu items don't). Resolves whether the copy
+ *  landed, so a caller with its own success copy can stay honest. */
+export async function copyWithToast(s: string, successToast?: [title: string, body?: string]): Promise<boolean> {
+  if (!(await copyText(s))) {
+    toasts.error('Couldn’t copy', 'Select the text and copy it manually.');
+    return false;
   }
+  clipHistory.record(s, 'Results');
+  if (successToast) toasts.success(successToast[0], successToast[1]);
+  return true;
 }

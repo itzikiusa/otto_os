@@ -828,7 +828,7 @@
       ...(isAgent
         ? [{ id: 'focus.handover', title: 'Hand over focused session…', group: 'Session', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]
         : []),
-      { id: 'focus.attach-issue', title: 'Attach Jira issue to focused session…', group: 'Session', keywords: 'jira ticket link story active current', run: () => openSessionAction('attach-issue') },
+      { id: 'focus.attach-issue', title: 'Attach issue to focused session…', group: 'Session', keywords: 'jira linear issue ticket link story active current', run: () => openSessionAction('attach-issue') },
       { id: 'focus.attach-product', title: 'Attach product story to focused session…', group: 'Session', keywords: 'product story link context active current', run: () => openSessionAction('attach-product') },
     ];
     return registry.register('focused-session', cmds);

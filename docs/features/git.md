@@ -291,6 +291,39 @@ write to the repo drops it).
 - The **WORKTREES** section lists `git worktree list` entries; click opens,
   right-click removes/prunes.
 
+### Merged branches ("landed" marks)
+
+Each branch row in the sidebar can carry a small check mark followed by the
+integration branches that already hold its tip — for example `develop · main`.
+It answers "has this work landed anywhere yet?", so you can tell which branches
+are safe to delete. Hover it for "Already in develop, main — safe to delete".
+
+- **What is checked.** The **cleanup base** first, then whichever of
+  `develop`, `main` and `master` exist — the local branch when there is one (a
+  merge you have not pushed yet still counts), else `origin/<name>`. A git-flow
+  release merged into `develop` therefore shows `develop` long before `main`
+  holds it.
+- **How it is computed.** A branch is "in" an integration branch when that
+  branch's history already contains the tip. Otto runs two bulk
+  `git branch --merged <base>` calls (local + remote) per integration branch,
+  never one process per branch, and memoises the result per repo until a tip or
+  the base moves (a fetch, commit or checkout). The marks refresh with the
+  branch list.
+- **What is never marked.** The integration branches themselves and their
+  remote twins, and the base branch (it always "contains" itself).
+- **Choosing the base.** By default the base is the repo's detected default
+  branch: `origin/HEAD`, else the first local `main`/`master`/`develop`/`trunk`,
+  else `origin/main`/`origin/master`. Right-click a branch → **Set "x" as
+  cleanup base** to override it per repo, or right-click the current base →
+  **Clear cleanup base (use default)**. The override is stored per repo
+  (`PUT /repos/{id}/cleanup-base`, ws editor); an override that no longer
+  resolves to a branch or commit silently falls back to the detected default.
+  `GET /repos/{id}/cleanup-base` shows both the stored override and what it
+  resolves to now.
+- **Indicator only.** Nothing is deleted or moved. Deleting a branch is still
+  your own right-click → Delete, which uses `git branch -d` first and asks
+  separately before force-deleting a branch with unmerged commits.
+
 ### Searching the graph
 
 Above the graph sits a **search box** (⌘F / Ctrl+F focuses it). Typing runs the
@@ -602,6 +635,8 @@ distinction from the **"Draft message with agent"** button, which drafts the
 |---|---|---|
 | `GET /repos/{id}/status` | ws viewer | `RepoStatusResp` |
 | `GET /repos/{id}/branches` · `/refs` · `/log` | ws viewer | Branches, refs, commit log |
+| `GET /repos/{id}/cleanup-base` | ws viewer | `CleanupBaseResp {base_branch, resolved}` — the per-repo override (`null` = follow the detected default) and what it resolves to now |
+| `PUT /repos/{id}/cleanup-base` | ws editor | `SetCleanupBaseReq {base_branch?}` (empty/null clears) → `CleanupBaseResp`. Indicator-only: never deletes or moves a branch. `/refs` echoes the resolved base as `base_branch` and marks each `RefBranch` with `merged_into_base` and `merged_into: string[]` (see [Merged branches](#merged-branches-landed-marks)) |
 | `GET /repos/{id}/diff?target=worktree\|staged\|commit:<sha>\|range:<a>..<b>` | ws viewer | `DiffResp` |
 | `POST /repos/{id}/stage` · `/unstage` · `/discard` | ws editor | `StagePathsReq` → `RepoStatusResp` |
 | `POST /repos/{id}/commit` | ws editor | `CommitReq` (`amend`) → `{sha}` |

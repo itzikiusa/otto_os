@@ -909,10 +909,9 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     let mut list_stack: Vec<ListKind> = Vec::new();
     let mut ol_counters: Vec<usize> = Vec::new();
 
-    // ── Inline-code state ──────────────────────────────────────────────────
+    // ── Code-block state ───────────────────────────────────────────────────
+    // Inside `<pre>` the inner `<code>` is not re-emitted as inline backticks.
     let mut in_pre = false;
-    let mut in_code = false;
-    let mut pending_newline = false;
 
     // ── Table state ────────────────────────────────────────────────────────
     // We parse each table completely with a look-ahead before emitting GFM.
@@ -1228,7 +1227,6 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 let (gfm, consumed) = convert_table(input, &input_lc, pos);
                 out.push_str(&gfm);
                 pos += consumed;
-                pending_newline = true;
                 continue;
             }
 
@@ -1238,7 +1236,6 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 let (md, consumed) = convert_ac_macro(input, &input_lc, pos);
                 out.push_str(&md);
                 pos += consumed;
-                pending_newline = true;
                 continue;
             }
 
@@ -1275,9 +1272,6 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             let tag_name = &inner[..tag_name_end];
             let tag_name_lower = tag_name.to_ascii_lowercase();
 
-            // Handle self-closing (e.g. `<br />`, `<br/>`).
-            let is_self_close = inner.ends_with('/') || tag_name_lower == "br";
-
             match tag_name_lower.as_str() {
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     if !is_close {
@@ -1286,10 +1280,8 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                         let hashes = "#".repeat(level);
                         out.push_str(&hashes);
                         out.push(' ');
-                        pending_newline = false;
                     } else {
                         out.push('\n');
-                        pending_newline = true;
                     }
                 }
                 "p" => {
@@ -1297,13 +1289,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                         if !out.is_empty() {
                             push_block_sep!();
                         }
-                        pending_newline = false;
-                    } else {
-                        // End of paragraph: ensure blank line follows.
-                        if !out.ends_with('\n') {
-                            out.push('\n');
-                        }
-                        pending_newline = true;
+                    } else if !out.ends_with('\n') {
+                        // End of paragraph: terminate the line (the next
+                        // block's separator adds the blank line).
+                        out.push('\n');
                     }
                 }
                 "br" => {
@@ -1320,18 +1309,12 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                         }
                         out.push_str("```\n");
                         in_pre = false;
-                        pending_newline = true;
                     }
                 }
                 "code" => {
-                    if in_pre {
-                        // Inside <pre><code>: ignore the inner <code> tag.
-                    } else if !is_close {
+                    // Inside <pre><code>: ignore the inner <code> tag.
+                    if !in_pre {
                         out.push('`');
-                        in_code = true;
-                    } else {
-                        out.push('`');
-                        in_code = false;
                     }
                 }
                 "strong" | "b" => {
@@ -1418,7 +1401,6 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 // Strip them as a no-op if they somehow arrive.
                 _ => {}
             }
-            let _ = (is_self_close, in_code, pending_newline); // suppress unused warnings
         } else {
             // Text node.
             let next_tag = input[pos..]

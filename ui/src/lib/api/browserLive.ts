@@ -8,9 +8,7 @@ import { api, wsConnect } from './client';
 import type {
   BrowserChromeBuild,
   BrowserEngineInstallJob,
-  BrowserLiveControlReq,
   BrowserLiveCreateReq,
-  BrowserLiveNavReq,
   BrowserLiveSession,
   BrowserLiveSettings,
   BrowserLiveStatus,
@@ -36,20 +34,8 @@ export function openLive(tabId: string, body: BrowserLiveCreateReq) {
   return api.post<BrowserLiveSession>(`/browser/tabs/${tabId}/live`, { engine: 'remote', ...body });
 }
 
-export function getLive(tabId: string) {
-  return api.get<BrowserLiveSession>(`/browser/tabs/${tabId}/live`);
-}
-
 export function closeLive(tabId: string) {
   return api.del<void>(`/browser/tabs/${tabId}/live`);
-}
-
-export function liveNav(tabId: string, body: BrowserLiveNavReq) {
-  return api.post<BrowserLiveSession>(`/browser/tabs/${tabId}/live/nav`, body);
-}
-
-export function liveControl(tabId: string, body: BrowserLiveControlReq) {
-  return api.post<BrowserLiveSession>(`/browser/tabs/${tabId}/live/control`, body);
 }
 
 /** The screencast + input socket (bearer via the subprotocol, never the URL). */

@@ -167,7 +167,7 @@
   <div class="pv-body mono"><JsonTree value={json} /></div>
 {:else if kind === 'csv' && csv.length}
   <div class="pv-tools">
-    <button class="btn small" aria-pressed={csvRaw} onclick={() => (csvRaw = !csvRaw)}>{csvRaw ? 'Table' : 'Raw'}</button>
+    <button class="btn small" onclick={() => (csvRaw = !csvRaw)}>{csvRaw ? 'Table' : 'Raw'}</button>
     <span class="pv-dim">{csv.length >= 200 ? 'First 200 rows' : `${csv.length} rows`}</span>
   </div>
   {#if csvRaw}

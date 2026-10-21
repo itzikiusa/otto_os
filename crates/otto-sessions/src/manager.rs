@@ -11,7 +11,7 @@ use otto_core::domain::{
     Session, SessionKind, SessionStatus, TrailKind, TrailLevel, TrailSource, Workspace,
 };
 use otto_core::event::Event;
-use otto_core::hooks::{McpServerProvider, PreSpawnHook};
+use otto_core::hooks::PreSpawnHook;
 use otto_core::{Error, Id, Result};
 use otto_pty::{resolve_grid, CommandSpec, PtyHandle};
 use otto_rbac::AuthRepo;
@@ -170,6 +170,34 @@ fn codex_creds_path(session_id: &Id) -> std::path::PathBuf {
     std::env::temp_dir()
         .join("otto-mcp")
         .join(format!("{session_id}.json"))
+}
+
+/// Per-session env file for one of the user's MCP servers on a Codex session
+/// (`<tmp>/otto-mcp/<session_id>.<server>.env`, mode 0600): its env values —
+/// Keychain secrets included — reach the server through this file instead of
+/// codex's argv. Server names are bare TOML keys, so the path segment is safe.
+/// Removed with the session's other credentials.
+fn codex_server_env_path(session_id: &Id, server: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-mcp")
+        .join(format!("{session_id}.{server}.env"))
+}
+
+/// Delete every per-server env file written for `session_id`
+/// ([`codex_server_env_path`]). Best-effort.
+async fn remove_codex_server_env_files(session_id: &Id) {
+    let dir = std::env::temp_dir().join("otto-mcp");
+    let prefix = format!("{session_id}.");
+    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".env") {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
 }
 
 /// Write the per-session Codex creds file (0600) carrying the token + routing the
@@ -1680,7 +1708,7 @@ pub struct SessionManager {
     pre_spawn_hook: Option<Arc<dyn PreSpawnHook>>,
     /// Optional resolver for the workspace's enabled user-configured MCP servers,
     /// merged into `.mcp.json` on agent spawn (alongside Otto's browser entry).
-    mcp_servers: Option<Arc<dyn McpServerProvider>>,
+    mcp_servers: Option<Arc<dyn crate::mcp::McpServerSource>>,
     /// Optional live-output scanner (credential monitor's mid-session auth
     /// detection). When set, each session's status task subscribes to its PTY
     /// output and forwards chunks here.
@@ -1762,6 +1790,13 @@ pub struct SessionManager {
     /// 2026-07-21 fork incident). All resume paths take this lock and re-check
     /// `is_live` under it.
     resume_locks: Arc<DashMap<Id, Arc<Mutex<()>>>>,
+    /// Per-session submit mutex ([`Self::submit_lock`]): every "paste, wait,
+    /// Enter" submitter — automation (`submit_text`: agent→agent messages,
+    /// broadcast, relay, nudges), humans (`human_submit_text_checked`) and the
+    /// channel bridge — holds it across the whole pair, so two submissions
+    /// within the paste delay can't land as paste A, paste B, Enter, Enter
+    /// (one merged prompt plus an empty submit). Evicted in `remove`.
+    submit_locks: Arc<DashMap<Id, Arc<Mutex<()>>>>,
     /// Where user-started sessions' PTY holders live and how to launch one
     /// (see [`SESSION_PERSISTENCE_SETTING`]). `None` = every PTY is local (the
     /// pre-holder behaviour; bare test harnesses).
@@ -1822,6 +1857,7 @@ impl SessionManager {
             name_themes: None,
             title_probe: Arc::new(DashMap::new()),
             resume_locks: Arc::new(DashMap::new()),
+            submit_locks: Arc::new(DashMap::new()),
             holders: None,
         }
     }
@@ -2013,13 +2049,6 @@ impl SessionManager {
         Ok(Some((account, home)))
     }
 
-    /// Override the `ottod` binary path that backs the `otto` MCP tool server
-    /// (`<path> mcp-tools`). Defaults to the running executable. Builder-style.
-    pub fn with_mcp_tools_bin(mut self, bin: impl Into<String>) -> Self {
-        self.mcp_tools_bin = bin.into();
-        self
-    }
-
     /// Best-effort: persist a trail entry and broadcast it. Fire-and-forget so
     /// callers (lifecycle methods) never block on the DB. No-op without an
     /// activity store.
@@ -2172,6 +2201,9 @@ impl SessionManager {
     /// newline as pasted content — it inserts a newline instead of submitting,
     /// so the message is pasted but never sent. Mirrors the handover injector.
     pub async fn submit_text(&self, id: &Id, text: &str) -> Result<()> {
+        // One submission at a time per session (see `submit_locks`).
+        let lock = self.submit_lock(id);
+        let _submit = lock.lock().await;
         // Defensive: a control byte inside the pasted text (an `ESC [ 2 0 1 ~`
         // in a task title, say) would END the bracketed paste and turn the rest
         // into keystrokes. Newlines/tabs are legitimate paste content.
@@ -2334,7 +2366,7 @@ impl SessionManager {
 
     /// Attach the user-configured MCP-server resolver, merged into `.mcp.json`
     /// on agent spawn. Builder-style; without it no user servers are written.
-    pub fn with_mcp_servers(mut self, provider: Arc<dyn McpServerProvider>) -> Self {
+    pub fn with_mcp_servers(mut self, provider: Arc<dyn crate::mcp::McpServerSource>) -> Self {
         self.mcp_servers = Some(provider);
         self
     }
@@ -2644,47 +2676,67 @@ impl SessionManager {
     /// and the `otto` first-party entry — as ONE reconcile per file (see
     /// `crate::mcp`): stale managed entries are removed, so a disable/delete
     /// finally propagates, and concurrent spawns sharing a cwd can't lose each
-    /// other's updates. Also snapshots the resolved managed server names into
-    /// the session meta (`mcp_servers`) so the session records what this spawn
-    /// actually wired up. Best-effort throughout — never blocks the spawn.
+    /// other's updates. Also snapshots the server names THIS provider was
+    /// actually given into the session meta (`mcp_servers`) — codex's `-c`
+    /// overrides, agy's `.agents/mcp_config.json`, grok's `.grok/config.toml`,
+    /// `.mcp.json` for everyone else — plus `mcp_servers_error` when the
+    /// user-server lookup failed. Best-effort throughout — never blocks the spawn.
     ///
-    /// Returns the codex `-c` overrides for the user's servers (codex doesn't
-    /// read `.mcp.json`; grok gets its `.grok/config.toml` tables and agy its
-    /// `.agents/mcp_config.json` here too).
+    /// A failed lookup is NOT "nothing enabled": the previously managed user
+    /// entries in the shared files are preserved (only Otto's own entries are
+    /// reconciled) so one transient fault can't strip every session's servers.
+    ///
+    /// Returns the codex `-c` overrides for the browser and the user's servers
+    /// (`codex_otto`: whether the caller already attached `otto` to codex).
     async fn sync_workspace_mcp(
         &self,
         session: &Session,
         otto_tools: Option<crate::mcp::OttoToolsServer>,
+        codex_otto: bool,
     ) -> Vec<String> {
-        let user_servers: Vec<crate::mcp::UserMcpServer> = match &self.mcp_servers {
+        let (user_servers, lookup_error) = match &self.mcp_servers {
             Some(provider) => {
-                // The provider trait is sync (its Db impl blocks on a bridge
-                // thread for the query + Keychain reads) — run it on the
-                // blocking pool so a spawn/restart never parks a tokio worker.
+                // The provider is sync (its Db impl blocks on a bridge thread
+                // for the query + Keychain reads) — run it on the blocking pool
+                // so a spawn/restart never parks a tokio worker.
                 let provider = Arc::clone(provider);
                 let ws = session.workspace_id.clone();
-                tokio::task::spawn_blocking(move || provider.enabled_servers(&ws))
+                let resolved = tokio::task::spawn_blocking(move || provider.enabled_servers(&ws))
                     .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("mcp enabled_servers task failed: {e}");
-                        Vec::new()
-                    })
-                    .into_iter()
-                    .map(|s| crate::mcp::UserMcpServer {
-                        name: s.name,
-                        command: s.command,
-                        args: s.args,
-                        env: s.env,
-                    })
-                    .collect()
+                    .unwrap_or_else(|e| Err(format!("mcp server lookup task failed: {e}")));
+                match resolved {
+                    Ok(specs) => (
+                        Some(
+                            specs
+                                .into_iter()
+                                .map(|s| crate::mcp::UserMcpServer {
+                                    name: s.name,
+                                    command: s.command,
+                                    args: s.args,
+                                    env: s.env,
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        None,
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            workspace = %session.workspace_id,
+                            "enabled MCP servers unavailable; keeping the previously managed user entries: {e}"
+                        );
+                        (None, Some(e))
+                    }
+                }
             }
-            None => Vec::new(),
+            None => (Some(Vec::new()), None),
         };
-        let mut browser = session
+        let session_browser = session
             .meta
             .get("browser")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let mut browser = session_browser;
         // Union semantics for the browser entry: `browser` is per-SESSION meta
         // but the reconcile is per-CWD — without this, a non-browser spawn in a
         // shared cwd would strip `otto-browser` from `.mcp.json` while a
@@ -2718,44 +2770,98 @@ impl SessionManager {
                 }
             }
         }
+        let has_otto = otto_tools.is_some();
         let cfg = crate::mcp::ManagedMcpConfig {
             browser,
             user_servers: user_servers.clone(),
             otto_tools,
         };
-        let names = match crate::mcp::reconcile_managed_servers(&session.cwd, &cfg) {
+        let mcp_json_names = match crate::mcp::reconcile_managed_servers(&session.cwd, &cfg) {
             Ok(names) => names,
             Err(e) => {
                 tracing::warn!(session = %session.id, cwd = %session.cwd, "reconcile workspace MCP config: {e}");
                 Vec::new()
             }
         };
-        // Snapshot-at-spawn: the managed name set this session resolved
-        // (browser + otto + user servers — the same set every provider's
-        // surface is derived from), atomically merged into the meta.
+        let mut codex_args = Vec::new();
+        let delivered: Vec<String> = match session.provider.as_str() {
+            // agy never reads `.mcp.json` — same managed set, its own file.
+            "agy" => match crate::mcp::reconcile_managed_servers_agy(&session.cwd, &cfg) {
+                Ok(names) => names,
+                Err(e) => {
+                    tracing::warn!(session = %session.id, cwd = %session.cwd, "reconcile agy MCP config: {e}");
+                    Vec::new()
+                }
+            },
+            // grok: `otto` via `enable_otto_tools_grok` (at token mint), user
+            // tables here; no browser entry. Unknown user set → leave its
+            // tables alone (preserved, but not claimed in the snapshot).
+            "grok" => {
+                let mut names = Vec::new();
+                if has_otto {
+                    names.push(crate::mcp::OTTO_TOOLS_KEY.to_string());
+                }
+                if let Some(users) = &user_servers {
+                    match crate::mcp::reconcile_user_servers_grok(&session.cwd, users) {
+                        Ok(()) => names.extend(
+                            users
+                                .iter()
+                                .filter(|s| {
+                                    s.name != crate::mcp::SERVER_KEY
+                                        && s.name != crate::mcp::OTTO_TOOLS_KEY
+                                })
+                                .map(|s| s.name.clone()),
+                        ),
+                        Err(e) => {
+                            tracing::warn!(session = %session.id, "reconcile grok MCP config: {e}")
+                        }
+                    }
+                }
+                names
+            }
+            // codex doesn't read any launcher file: per-spawn `-c` overrides
+            // for the browser (this session's own opt-in, not the cwd union)
+            // and the user servers; `otto` was attached by the caller.
+            "codex" => {
+                let mut names = Vec::new();
+                if session_browser {
+                    codex_args.extend(crate::mcp::codex_browser_args());
+                    names.push(crate::mcp::SERVER_KEY.to_string());
+                }
+                if codex_otto {
+                    names.push(crate::mcp::OTTO_TOOLS_KEY.to_string());
+                }
+                if let Some(users) = &user_servers {
+                    // A server disabled since the last spawn must not leave
+                    // its secrets on disk until the session is removed.
+                    remove_codex_server_env_files(&session.id).await;
+                    let out = crate::mcp::codex_user_server_args(users, |s| {
+                        let path = codex_server_env_path(&session.id, &s.name);
+                        crate::mcp::write_env_file(&path, &s.env).map(|()| path)
+                    });
+                    codex_args.extend(out.args);
+                    names.extend(out.delivered);
+                }
+                names
+            }
+            _ => mcp_json_names,
+        };
+        // Snapshot-at-spawn: what this provider was actually given, plus the
+        // lookup fault if any (json_patch: a null clears a stale error).
         if let Err(e) = self
             .repo
-            .merge_meta(&session.id, &serde_json::json!({ "mcp_servers": names }))
+            .merge_meta(
+                &session.id,
+                &serde_json::json!({
+                    "mcp_servers": delivered,
+                    "mcp_servers_error": lookup_error,
+                }),
+            )
             .await
         {
             tracing::warn!(session = %session.id, "record MCP server snapshot: {e}");
         }
-        // agy never reads `.mcp.json` — same managed set, its own file.
-        if session.provider == "agy" {
-            if let Err(e) = crate::mcp::reconcile_managed_servers_agy(&session.cwd, &cfg) {
-                tracing::warn!(session = %session.id, cwd = %session.cwd, "reconcile agy MCP config: {e}");
-            }
-        }
-        if session.provider == "grok" {
-            if let Err(e) = crate::mcp::reconcile_user_servers_grok(&session.cwd, &user_servers) {
-                tracing::warn!(session = %session.id, "reconcile grok MCP config: {e}");
-            }
-        }
-        if session.provider == "codex" {
-            crate::mcp::codex_user_server_args(&user_servers)
-        } else {
-            Vec::new()
-        }
+        codex_args
     }
 
     /// Revoke the per-session MCP token minted for `session_id` (if any), and
@@ -3076,6 +3182,7 @@ impl SessionManager {
             // launcher entry itself lands via the reconcile below. Opt-in,
             // best-effort — never blocks spawn.
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
+            let codex_otto = !otto_tools.args.is_empty();
             spec.args.extend(otto_tools.args);
             spec.env.extend(otto_tools.env);
             // Everything MCP in the shared cwd — the browser opt-in
@@ -3084,7 +3191,9 @@ impl SessionManager {
             // file, so disables propagate as removals and concurrent spawns
             // sharing a cwd can't lose each other's updates. Codex doesn't
             // read `.mcp.json`; its user servers ride per-spawn `-c` overrides.
-            let codex_user_args = self.sync_workspace_mcp(&session, otto_tools.server).await;
+            let codex_user_args = self
+                .sync_workspace_mcp(&session, otto_tools.server, codex_otto)
+                .await;
             spec.args.extend(codex_user_args);
             // Otto context provisioning: materialize the workspace's active
             // skills + soul + context into this CLI's native form. Best-effort —
@@ -4142,6 +4251,17 @@ impl SessionManager {
         captured
     }
 
+    /// The per-session submit mutex (created lazily; see `submit_locks`). Any
+    /// caller that writes a paste and then a separate submit key into the
+    /// session's PTY — the channel bridge included — must hold it across both
+    /// writes. The entry ref is dropped before the caller awaits the lock.
+    pub fn submit_lock(&self, id: &Id) -> Arc<Mutex<()>> {
+        self.submit_locks
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     /// The per-session resume mutex (created lazily). The map entry ref is
     /// dropped before the caller awaits the lock, so no shard lock outlives
     /// this call. Entries are tiny and evicted with the session in `remove`.
@@ -4426,6 +4546,10 @@ impl SessionManager {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
+        // Serialize with every other paste+Enter submitter (`submit_locks`).
+        // Taken before the authority permit, which is never held across it.
+        let lock = self.submit_lock(id);
+        let _submit = lock.lock().await;
         let mut permit = self.room_authority.entry(id).lock_owned().await;
         let handle = self
             .live_handle(id)
@@ -5682,6 +5806,8 @@ impl SessionManager {
         if Arc::strong_count(&lock) == 2 {
             self.resume_locks.remove(id);
         }
+        // An in-flight submitter keeps its Arc; it fails on the missing PTY.
+        self.submit_locks.remove(id);
         let _ = self.events.send(Event::SessionRemoved {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -5836,12 +5962,15 @@ impl SessionManager {
                 crate::trust::ensure_trusted_async(&session.provider, &session.cwd).await;
             }
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
+            let codex_otto = !otto_tools.args.is_empty();
             spec.args.extend(otto_tools.args);
             spec.env.extend(otto_tools.env);
             // Re-run the same MCP reconcile as create(): a resumed session
             // picks up server enable/disable changes made since its original
             // spawn instead of keeping the stale `.mcp.json` forever.
-            let codex_user_args = self.sync_workspace_mcp(&session, otto_tools.server).await;
+            let codex_user_args = self
+                .sync_workspace_mcp(&session, otto_tools.server, codex_otto)
+                .await;
             spec.args.extend(codex_user_args);
             // Re-wire the per-session ingest env (the hooks config persists in
             // the workspace from the initial spawn).
@@ -6574,7 +6703,7 @@ fn legacy_session_token_cutover() -> chrono::DateTime<chrono::Utc> {
 
 /// Revoke the per-session MCP credentials minted for `session_id` (managed
 /// rows by durable `session_scope`, plus the row id this daemon recorded in
-/// `mcp_tokens`) and delete the Codex creds file if one was written.
+/// `mcp_tokens`) and delete the Codex creds and server env files if written.
 /// Free-standing so the status task can call it without `&self`.
 async fn revoke_session_credentials(
     auth: Option<&AuthRepo>,
@@ -6583,6 +6712,7 @@ async fn revoke_session_credentials(
     session_id: &Id,
 ) -> Result<()> {
     let _ = std::fs::remove_file(codex_creds_path(session_id));
+    remove_codex_server_env_files(session_id).await;
     if let Some(auth) = auth {
         auth.revoke_session_tokens(owner, session_id).await?;
     }

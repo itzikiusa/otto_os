@@ -15,7 +15,11 @@ for root. Existing session input routes enforce the room's driver authority.
 
 Room route index (HTTP paths below are relative to `/api/v1`; WebSocket paths
 are absolute). Detailed bodies, permissions and limits are in
-[rooms](./rooms.md) and [room recaps](./room-recaps.md).
+[rooms](./rooms.md) and [room recaps](./room-recaps.md). Feature gate: the owner's
+own reads (`GET /rooms`, `GET /room-recaps…`, `GET /room-recap-capabilities`) and
+`POST /game-rooms` need `Agents:View`; starting/ending a session room, invites and
+recap writes need `Agents:Edit`; `/room-settings` and `/room-recap-settings` are
+`Settings:Admin`. Every handler is additionally owner-scoped.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -73,13 +77,13 @@ connection library unusable for every non-root account.)
 | 14 | DELETE /api/v1/workspaces/{id} | ws admin | — | 204 (archives) |
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` — atomic full replacement; invalid or duplicate users return 400 without changing existing membership |
-| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
+| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above), **plus Workbench** (`…/workbench…`, owner-scoped — every query binds the caller, so the implicit Editor shares nothing; see the Workbench section): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
 | 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number` + `held: bool` (the live PTY runs in a PTY holder AND `session_persistence` is on, so a daemon restart leaves it running; `false` otherwise). Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session — an agent session's `cwd` may not be `/`, `$HOME` or a parent of it (except a workspace rooted at `$HOME`, at that root), nor Otto's data dir or a non-work-area path inside it (400). An agent session's own credential may only use a `cwd` inside the workspace root, its own folder, a repo registered in this workspace, or a worktree of the same repo as any of those (403). `meta.delegated_by` is server-stamped: the creating agent session for an agent credential (so it may message and stop that session, as with `/sessions/open`), removed for a person's |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers` + `held`) |
-| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id`, `meta.delegated_by`, the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` and the confinement keys `meta.read_only` / `project_settings` / `allow_subagents` / `personal_agent` / `account_id` are **server-owned** (create-only): a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). An agent session's own credential may PATCH, DELETE, restart, resume, kill, archive or unarchive (and bulk-act on) only its own session or a worker whose `meta.delegated_by` is that session — `403` otherwise (bulk: `ok:false`). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
+| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id`, `meta.delegated_by`, the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` and the confinement keys `meta.read_only` / `project_settings` / `allow_subagents` / `personal_agent` / `account_id` are **server-owned** (create-only): a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). An agent session's own credential may PATCH, DELETE, restart, resume, kill, archive or unarchive (and bulk-act on) only its own session or a worker whose `meta.delegated_by` is that session — `403` otherwise (bulk: `ok:false`). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control`. `meta.issue` is **client-owned** (the Attach issue flow): `AttachedIssue {provider: "jira"\|"linear", account_id, key, summary, url, status}` — `url`/`status` are copied from the tracker's `IssueSummary` at attach time (empty on sessions attached before that; the UI then renders the key as plain text and no status chip); `{meta:{issue:null}}` detaches. The daemon stores it verbatim and never enriches it |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, when the provider's active-conversation guard refuses a fork, or when an agent's folder no longer exists (`folder X no longer exists — restore it…`; every resume/restart path refuses rather than recreating it empty — the scratch home and Otto-managed folders under its data dir are still recreated). Resume errors propagate; this never falls back to an unconditional restart. |
@@ -357,7 +361,7 @@ workspace from the row.
 | 80 | GET /api/v1/workspaces/{id}/swarm/runs?swarm_id=&project_id=&agent_id=&status=&lite= | ws viewer | — | `SwarmRun[]` — this workspace's runs only (newest first, ≤ 500). `lite=true` (additive): each run's `result` is omitted (`null`) except `kind='recruit'` runs (the Runs-list "Hire" reads the proposal) — read one run's result via `GET /swarm/runs/{rid}` |
 | 81 | GET /api/v1/swarm/runs/{rid} | ws viewer | — | SwarmRun |
 | 82 | POST /api/v1/swarm/runs/{rid}/stop | ws editor | — | SwarmRun — stops an in-flight run (conditional: a finished run is left as is) AND kills its agent session; the task is parked as `blocked` |
-| 83 | GET /api/v1/swarm/swarms/{sid}/graph | ws viewer | — | SwarmGraph |
+| 83 | GET /api/v1/swarm/swarms/{sid}/graph | ws viewer | — | SwarmGraph `{nodes, edges}` (task/run dependency DAG). **API-only:** no Otto view reads it since the Swarm Graph tab became the agent-centric org view |
 | 84 | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/start\|pause\|abort\|resume | ws editor | — | Swarm |
 | 85 | GET /api/v1/swarm/swarms/{sid}/board?project_id=&task_id= | ws viewer | — | `SwarmMessage[]` |
 | 86 | POST /api/v1/swarm/swarms/{sid}/board | ws editor | PostMessageReq | SwarmMessage |
@@ -585,7 +589,7 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 | POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo, reachable_remotely, reach}` (token shown once). Origin: `share_base_url` setting → non-loopback request Host → `https://<lan-ip>:<port>` when the network listener is actually serving (the port `ottod` bound — not the saved setting, which applies only after a restart and is ignored when TLS setup/bind failed) → the request Host. `reach`: `"remote"` (routable), `"lan"` (RFC 1918 / link-local / ULA / `.local` — same network only, self-signed cert) or `"local"` (loopback/empty); `reachable_remotely = reach != "local"`. With `recipient_email` → 409 unless `reach == "remote"` or a Public link domain is configured (set a Public link domain first) |
 | GET /api/v1/sessions/{id}/shares | session owner / ws admin | — | `ListSharesResp {shares: ShareInfo[]}` (live, non-revoked) |
 | GET /api/v1/auth/shares | member (self-owned) | — | `MyShare[]` = `ShareInfo` fields + `session_title: string \| null` (null when the session is gone) — the caller's live (non-revoked, non-expired) links across ALL sessions, newest first, capped at 500. Never another user's links, never the secret |
-| DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
+| DELETE /api/v1/auth/shares/{share_id} | member — the link's minter, or the session's owner / a workspace Admin (`require_session_owner_or_admin`, the authority `GET /sessions/{id}/shares` and minting use) | — | 204 (revokes + evicts; idempotent — revoking a revoked link is still 204). **404** when no share has that id (or, for a non-minter, its session is gone); **403** for anyone else. Audited `share.revoke` with the caller and `minted_by` |
 | POST /api/v1/auth/shares/revoke-all | member (self-owned) | — | 204 (revokes all caller's shares + evicts) |
 
 `ShareInfo` = `{id, session_id, role, token_prefix, label?, created_at, expires_at, dormant}`.
@@ -839,9 +843,9 @@ its list holds only user-added tasks.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/connection-sections | ws viewer | — | `ConnectionSection[]` |
-| POST /workspaces/{id}/connection-sections | ws editor | CreateSectionReq | ConnectionSection |
+| POST /workspaces/{id}/connection-sections | ws editor | `UpsertSectionReq {name, parent_id?, scope?}` | ConnectionSection |
 | POST /workspaces/{id}/connection-sections/reorder | ws editor | `{order:[id,…]}` | 204 |
-| PATCH /connection-sections/{id} | ws editor | RenameSectionReq | ConnectionSection |
+| PATCH /connection-sections/{id} | ws editor | `UpsertSectionReq` (only `name` is read; blank → 400) | ConnectionSection |
 | DELETE /connection-sections/{id} | ws editor | — | 204 |
 | POST /connection-sections/{id}/move | ws editor | MoveSectionReq | 204 |
 
@@ -1327,7 +1331,7 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{wid}/db/saved-queries | ws viewer | — | `SavedQuery[]` |
-| POST /workspaces/{wid}/db/saved-queries | ws editor | CreateSavedQueryReq | SavedQuery |
+| POST /workspaces/{wid}/db/saved-queries | ws editor | `NewSavedQueryReq {name, statement, connection_id?}` | SavedQuery |
 | PATCH /db/saved-queries/{qid} | ws editor **+ owner/ws-Admin/root** | UpdateSavedQueryReq `{name?, statement?}` | updated `SavedQuery` |
 | DELETE /db/saved-queries/{qid} | ws editor **+ owner/ws-Admin/root** | — | 204 |
 | GET /workspaces/{wid}/db/dashboards | ws viewer | — | `Dashboard[]` |
@@ -1635,7 +1639,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | GET /workspaces/{ws}/product/stories | ws viewer | — | `Story[]` (flat; the UI derives the tree from `parent_id` → `folder`) |
 | POST /workspaces/{ws}/product/stories | ws editor | ImportStoryReq | Story |
 | GET /product/stories/{sid} | ws viewer | — | `ProductStoryDetail`: `source` contains the latest `draft` revision for local draft stories, or the latest imported `source` revision otherwise, including its full editable `body_md`. It is null only when that revision does not exist; an unapplied suggested rewrite does not replace it. |
-| PATCH /product/stories/{sid} | ws editor | PatchStoryReq (`+ parent_id?, tree_kind?, folder?`) | Story |
+| PATCH /product/stories/{sid} | ws editor | `UpdateStoryReq {cwd?, stage?, watch_enabled?, watch_cadence_min?, tags?, parent_id?, tree_kind?, folder?}` (`parent_id: null` detaches) | Story |
 | DELETE /product/stories/{sid} | ws editor | — | 204 (re-parents children; removes attachment/annotation rows + `product/attachments/<sid>/` + each artifact's `product/mockup_assist/<aid>/` scratch dir, best effort) |
 | POST /product/stories/{sid}/children | ws editor | CreateChildReq `{ title?, tree_kind?: 'story'\|'doc' (default doc), folder? }` | ProductStoryDetail — a draft child filed under the epic `sid` (400 if `sid` is itself a child or `tree_kind` is `epic`) |
 | POST /product/stories/{sid}/refresh | ws editor | — | re-pull the source story |
@@ -1647,12 +1651,12 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | GET /product/analyses/{aid} | ws viewer | — | Analysis (with per-agent state) |
 | GET /workspaces/{id}/product/lenses | ws viewer | — | `ProductLens[]` (curated analysis-lens catalog: `{skill,label,description,default_on}`) |
 | GET /product/stories/{sid}/questions | ws viewer | — | `Question[]` |
-| POST /product/stories/{sid}/questions | ws editor | CreateQuestionReq | Question |
+| POST /product/stories/{sid}/questions | ws editor | `NewQuestionReq {text, rationale?, category?}` | Question |
 | POST /product/stories/{sid}/questions/post | ws editor | — | post questions back to the source story |
 | PATCH /product/questions/{qid} | ws editor | UpdateQuestionReq | Question |
 | DELETE /product/questions/{qid} | ws editor | — | 204 |
 | GET /product/stories/{sid}/notes | ws viewer | — | `Note[]` |
-| POST /product/stories/{sid}/notes | ws editor | CreateNoteReq | Note |
+| POST /product/stories/{sid}/notes | ws editor | `NewNoteReq {body, section?}` | Note |
 | PATCH /product/notes/{nid} | ws editor | UpdateNoteReq | Note |
 | DELETE /product/notes/{nid} | ws editor | — | 204 |
 | GET /product/stories/{sid}/events | ws viewer | — | story event log |
@@ -1665,13 +1669,13 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | GET /product/stories/{sid}/transcripts | ws viewer | optional `summary=true&limit=50&cursor=` | Legacy `Transcript[]` with full bodies; summary mode returns `ProductTranscriptPage` without bodies |
 | GET /product/stories/{sid}/transcripts/search | ws viewer | `q`, optional `limit=100&max_matches=5000&cursor=` | Bounded scan page `{items:(ProductTranscriptSummary & {match_count:number})[],next_cursor:string|null}` |
 | GET /product/transcripts/{trid} | owning story ws viewer | — | Full `Transcript` (authorization precedes body read) |
-| POST /product/stories/{sid}/transcripts | ws editor | CreateTranscriptReq | Transcript |
+| POST /product/stories/{sid}/transcripts | ws editor | `NewTranscriptReq {body, title?}` | Transcript |
 | DELETE /product/transcripts/{trid} | ws editor | — | 204 |
 | PATCH /product/stories/{sid}/draft | ws editor | — | create/update the working RFC draft |
 | POST /product/stories/{sid}/publish-as-rfc | ws editor + account owner/root | `PublishAsRfcReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | POST /product/stories/{sid}/publish-as-story | ws editor + account owner/root | `PublishAsStoryReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | GET /workspaces/{ws}/product/learnings | ws viewer | — | `Learning[]` |
-| POST /workspaces/{ws}/product/learnings | ws editor | CreateLearningReq | Learning |
+| POST /workspaces/{ws}/product/learnings | ws editor | `NewLearningReq {kind, title, body, tags?, refs?, source_story_id?}` | Learning |
 | PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | Learning |
 | DELETE /product/learnings/{lid} | ws editor | — | 204 |
 | POST /product/learnings/{lid}/accept | ws editor | — | accept a proposed learning |
@@ -1866,11 +1870,11 @@ Jira-only operations on a Linear account answer **400** naming the provider
 | GET /issue/{account_id}/{key}/full | member | — | full issue detail |
 | GET /issue/{account_id}/{key}/devstatus?issueId=<id> | member | — | `DevStatus` (branches/commits/PRs; best-effort, empty if no dev tool connected); `issueId` optional (Jira) — when present skips a round-trip to resolve the numeric id. Linear: `pull_requests` from the issue's GitHub / GitLab / Bitbucket PR attachments; no branches or commits |
 | GET /issue/{account_id}/{key}/transitions | member | — | available transitions (Linear: the team's other workflow states, board order) |
-| POST /issue/{account_id}/{key}/transitions | member | DoTransitionReq | apply a transition |
+| POST /issue/{account_id}/{key}/transitions | member | `{transition_id}` (from the GET above) | `204` — apply a transition |
 | GET /issue/{account_id}/{key}/assignable | member | — | assignable users |
-| PUT /issue/{account_id}/{key}/assignee | member | AssignReq | assign the issue |
+| PUT /issue/{account_id}/{key}/assignee | member | `{account_id}` (the tracker's assignee id; `"-1"` unassigns) | `204` — assign the issue |
 | GET /issue/{account_id}/{key}/attachment/{attachment_id} | member | — | attachment bytes |
-| POST /issue/{account_id}/{key}/comment | member | AddCommentReq | add a comment |
+| POST /issue/{account_id}/{key}/comment | member | `{body}` | `CommentRef {id, url?}` — add a comment |
 | GET /issue/{account_id}/{key}/editmeta | member | — | editable fields (`EditableField[]`) |
 | PUT /issue/{account_id}/{key}/fields | member | `{ "fields": { "<fieldId>": <value>, ... } }` | full issue detail (re-fetched after update) |
 | PUT /issue/{account_id}/{key}/description | member | `{ "body_md": "…markdown…" }` | full issue detail (re-fetched after update). **409** when the current description holds content the Markdown round-trip can't carry (media/screenshots, mentions, smart links, status, dates, emoji, extensions) — the save would delete it, so it is refused. |
@@ -2328,7 +2332,7 @@ workspace from the workflow/run row.
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
 | POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
-| POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). A single-step retry whose target has a descendant that never succeeded (skipped because the target failed) re-runs those descendants too, as if `include_downstream` were set — otherwise the run would finish `success` with its later steps never run. Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active — including a just-canceled run whose engine driver has not stopped yet ("still stopping"; retry in a few seconds); `400` on a bad target. A retry starts a fresh restart-resume budget |
+| POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). A single-step retry whose target has a descendant that never succeeded (skipped because the target failed) re-runs those descendants too, as if `include_downstream` were set — otherwise the run would finish `success` with its later steps never run. `409` while the run is still active — including a just-canceled run whose engine driver has not stopped yet ("still stopping"; retry in a few seconds); `400` on a bad target. A retry starts a fresh restart-resume budget |
 | GET /workflows/{id}/versions | ws viewer | `?summary=true&limit=50&before_version=N` | Array, newest first. Default `limit=50`, clamped to 1–100; `before_version` is exclusive. `summary=true` returns `WorkflowVersionSummary[]` without definition bodies; otherwise returns full `WorkflowVersion[]` with the same page bound. Continue from the last version of a full page; an empty page ends history. |
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
 | POST /workflows/{id}/versions/{v}/restore | ws editor | `RestoreVersionReq {note?}` | Workflow — copies `v`'s graph back in as a **new** version (append-only history) |
@@ -2622,26 +2626,26 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 |---|---|---|---|
 | GET /workspaces/{wid}/api-client/overview?q=&collection_id=&kind=all\|requests\|environments\|automations | ws viewer | — | `ApiOverview` — compact collections, saved requests, masked environments, and automation step counts |
 | GET /workspaces/{wid}/api-client/collections | ws viewer | — | `Collection[]` |
-| POST /workspaces/{wid}/api-client/collections | ws editor | CreateCollectionReq | Collection |
-| PATCH /workspaces/{wid}/api-client/collections/{id} | ws editor | UpdateCollectionReq | Collection |
+| POST /workspaces/{wid}/api-client/collections | ws editor | `UpsertApiCollectionReq` | `ApiCollection` |
+| PATCH /workspaces/{wid}/api-client/collections/{id} | ws editor | `UpsertApiCollectionReq` | `ApiCollection` |
 | DELETE /workspaces/{wid}/api-client/collections/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/collections/{id}/openapi | ws viewer | — | export the collection as OpenAPI |
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
 | GET /workspaces/{wid}/api-client/requests/summaries?collection_id= | ws viewer | — | `ApiOverviewRequest[]` (`{id, name, method, url, collection_id, auth_type, has_ssh, agent_authored, updated_at, position}`), same order as `/requests`; `position` is the row's sort position in its collection, so the UI tree builds from this projection alone and fetches `GET …/requests/{id}` only when a request is opened — a scalar projection: never the body, headers, query, auth values, scripts, docs or multipart files. `/overview` reads it too |
-| POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
+| POST /workspaces/{wid}/api-client/requests | ws editor | `UpsertApiRequestReq` | `ApiRequest` |
 | GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
-| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
+| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | `UpsertApiRequestReq` | `ApiRequest`. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, tls_verify?}`), `docs?`, `graphql_variables?` |
 | POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. GraphQL variables must be blank/absent or a JSON object; malformed/non-object JSON returns 400 before scripts or sending. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`, or the **Secret host binding** 409 (`needs_confirm=new_host: a stored secret would be sent to host '<host>' …`) when — after `vars` overrides and the pre-request script — a stored secret would leave its bound host (agents can never confirm that one). Network/send failure is 502 and still writes history |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
-| POST /workspaces/{wid}/api-client/environments | ws editor | CreateEnvironmentReq | Environment |
-| PATCH /workspaces/{wid}/api-client/environments/{id} | ws editor | UpdateEnvironmentReq | Environment |
+| POST /workspaces/{wid}/api-client/environments | ws editor | `UpsertApiEnvironmentReq` | `ApiEnvironment` |
+| PATCH /workspaces/{wid}/api-client/environments/{id} | ws editor | `UpsertApiEnvironmentReq` | `ApiEnvironment` |
 | DELETE /workspaces/{wid}/api-client/environments/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/environments/{id}/activate | ws editor | — | set the active environment |
 | GET /workspaces/{wid}/api-client/history?limit=&q=&status=&request_id=&source=agent\|human | ws viewer | — | filtered request history; `source=human` includes legacy rows with no source field |
 | GET /workspaces/{wid}/api-client/history/{id} | ws viewer | — | one history entry; cross-workspace ids return 404 |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
-| POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm. For an agent caller the returned response is also secret-scrubbed (like history) and carries no raw bytes (`body_base64` empty, no `body_id`) |
+| POST /workspaces/{wid}/api-client/execute | ws editor | `ExecuteApiReq` | execute an HTTP request. 409 `needs_confirm=new_host: a stored secret would be sent to host '<host>', which it is not bound to; …` when a `$secret` marker or Keychain env variable would leave its bound host (see **Secret host binding**) — a person re-sends with `confirm_new_host:true`; agent callers can never confirm. For an agent caller the returned response is also secret-scrubbed (like history) and carries no raw bytes (`body_base64` empty, no `body_id`) |
 | GET /workspaces/{wid}/api-client/responses/{id}/raw | ws editor | — | the full bytes (`{id}` = `ApiResponse.body_id`) of a recent `execute` response whose `body_id` was set (truncated or non-UTF-8 body), `Content-Type` = the upstream one, `Content-Disposition: attachment`. Held in a daemon-memory cache for 10 min, ≤ 128 MiB total (oldest evicted first), served only to the user + workspace that executed it; 404 once gone |
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
@@ -2651,8 +2655,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/cookies | ws editor | — | the CALLER's cookie jar in this workspace (jars are per (workspace, user) — never shared across workspaces or users; automation runs use their actor's jar; values are live credentials — editor-gated) |
 | DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear the caller's jar in this workspace |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
-| POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
-| PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |
+| POST /workspaces/{wid}/api-client/automations | ws editor | `UpsertApiAutomationReq` | `ApiAutomation` |
+| PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | `UpsertApiAutomationReq` | `ApiAutomation` |
 | DELETE /workspaces/{wid}/api-client/automations/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | `StartApiAutomationRunReq?` | synchronous `ApiRunResult`; execution also persists a durable report |
 | POST /workspaces/{wid}/api-client/automations/{id}/runs | ws editor | `StartApiAutomationRunReq` | `ApiAutomationRun` immediately; runs in background. When an AGENT starts the run (this route or `…/run`), every step enforces the **Secret host binding** after its pre-request script: a step whose stored secret would leave its bound host fails with the `needs_confirm=new_host` message instead of sending |
@@ -2677,7 +2681,7 @@ snapshot carries `request_id`, `name`, and `source: {kind: "agent"|"human",
 session_id}`; response bodies, history, and `api_history_appended` events never
 carry resolved secret values.
 
-**Durable request extras.** `CreateRequestReq` / `UpdateRequestReq` → `Request` carry an
+**Durable request extras.** `UpsertApiRequestReq` → `ApiRequest` (create and update) carry an
 optional `extras` object persisting the once-draft-only fields:
 `{v, transport?, graphql_variables?, docs_md?, scripts:{pre?,post?}?, settings:{timeout_ms?,
 follow_redirects?, tls_verify?}?, grpc:{proto,method}?}`. The UI owns the inner shape (like `auth`); the server
@@ -2696,11 +2700,11 @@ SQLite: on save the daemon moves a plaintext member to the macOS Keychain
 (`otto.api.request.<request_id>`, one JSON blob per request) and stores a
 `{"$secret": "<ref>"}` marker in its place (lazy migration — old rows stay valid until
 touched, or swept via `POST …/secure-all`). Environments mirror this: `Environment` gains
-`secret_keys:[string]`; `CreateEnvironmentReq`/`UpdateEnvironmentReq` accept `secret_keys` +
+`secret_keys:[string]`; `UpsertApiEnvironmentReq` (create and update) accepts `secret_keys` +
 write-only `secret_values:{k:v}` (absent keys keep stored values); the row's `variables`
 holds non-secret pairs only and GET never returns a secret value. On update an OMITTED
 (`null`/absent) `secret_keys` keeps the stored set and values — only an explicit list
-replaces it (a key dropped from the list loses its Keychain value). `UpdateEnvironmentReq`
+replaces it (a key dropped from the list loses its Keychain value). An update
 also accepts `secret_renames:{old_name:new_name}`: a renamed secret's stored value moves to
 the new name (a `secret_values` entry for the new name still wins). Markers resolve in-memory
 only at execute/automation time — the ref must point at a request in the same workspace
@@ -2721,7 +2725,7 @@ requests. The binding side is resolved with the environment's OWN variables — 
 `vars` override, dataset row or chained value can retarget the send but never moves the
 binding with it. Anything else is refused with `409 needs_confirm=new_host` before any
 secret is resolved. The same check runs on saved-request `execute` (after `vars` and the
-pre-request script) and on every step of an agent-started automation run. `ExecuteRequestReq.confirm_new_host` / `OAuth2TokenReq.confirm_new_host`
+pre-request script) and on every step of an agent-started automation run. `ExecuteApiReq.confirm_new_host` / `OAuth2TokenReq.confirm_new_host`
 (boolean, default false) confirm it, and are honoured only for a person's credential —
 never for an agent (bridge/MCP headers, a managed-session token or an MCP token).
 
@@ -2748,8 +2752,8 @@ when a run ends; a running run is never pruned.
 captured executing in one workspace are never replayed for another. The cookies endpoints
 above operate on the caller's workspace jar.
 
-**SSH tunnel (IP whitelisting).** Both the saved request (`CreateRequestReq` /
-`UpdateRequestReq` → `Request`) and `ExecuteRequestReq` accept an optional
+**SSH tunnel (IP whitelisting).** Both the saved request (`UpsertApiRequestReq`
+→ `ApiRequest`) and `ExecuteApiReq` accept an optional
 `ssh_connection_id` (nullable). When set, the daemon routes the outbound HTTP
 request through a SOCKS5 proxy over that `ssh`-kind connection (a `ssh -N -D`
 tunnel, reused/cached per bastion), so it egresses from the bastion's
@@ -3040,7 +3044,7 @@ artifacts. The final manifest is published by atomic rename as the last action.
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /lsp/capabilities | member | — | supported languages/servers |
-| POST /workspaces/{id}/lsp/install | ws editor | InstallServersReq | install language servers |
+| POST /workspaces/{id}/lsp/install | ws editor | optional `InstallLspReq {langs?: string[]}` (absent → every unavailable server that has an install command) | `Session` — one shell session running the install commands in sequence |
 
 ## Provider registry update
 
@@ -3067,8 +3071,8 @@ Filesystem paths are on the **daemon host**, including when the caller uses a re
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /settings/pr-review | root | — | ReviewConfig |
-| PUT /settings/pr-review | root | ReviewConfig | config |
+| GET /settings/pr-review | member (Git View) | — | ReviewConfig |
+| PUT /settings/pr-review | root (person credential — `require_human`) | ReviewConfig | config |
 | GET /settings/pr-review/presets | member (Git View) | — | ReviewConfigPreset[] |
 | PUT /settings/pr-review/presets | root | ReviewConfigPreset[] | ReviewConfigPreset[] (full replace; ids must be unique + non-empty) |
 | GET /repos/{id}/review-config | ws viewer | — | RepoReviewConfigResp |
@@ -3559,7 +3563,7 @@ policy prefixes (`/usage/`→Usage, `/brokers/cluster`→Database, `/product/`�
 | GET /brokers/clusters/{id}/schema-registry/subjects/{subject}/versions/{version} | ws viewer | — | `SchemaVersionDetail` |
 | POST /brokers/clusters/{id}/schema-registry/subjects/{subject}/compatibility | ws editor | `{schema}` | `CompatibilityResult {compatible, messages}` |
 | GET /brokers/clusters/{id}/lag-alerts | ws viewer | — | `LagAlert[]` |
-| POST /brokers/clusters/{id}/lag-alerts | ws editor | `UpsertLagAlertReq` | `LagAlert` |
+| POST /brokers/clusters/{id}/lag-alerts | ws editor | `NewLagAlertReq {topic, group_name, threshold}` | `LagAlert` |
 | DELETE /brokers/clusters/{id}/lag-alerts/{alert_id} | ws editor | — | 204 |
 
 Replay returns HTTP 201 after processing, including when a later publish fails: `count` and `evidence` describe only acknowledged writes (`partition`, `offset`, `key_preview`, `target_partition`, `target_offset`). An `error` means the run stopped or its evidence could not be saved; clients must show this as partial/failed, retain the evidence, and warn before a retry that prior writes can be duplicated. A failed send can have an unknown broker outcome. `evidence_saved` confirms that the acknowledged prefix was persisted in `broker_replays`; false means keep the returned evidence. `broker_write_audit` includes `replay_id`, `count`, `error` and `evidence_saved` for completed and stopped runs. This is not an exactly-once or resumable job: daemon termination or request cancellation during publication is not transactionally coupled to Kafka or SQLite. An `offset_range` is inclusive and never publishes outside its partition and offset bounds, including compacted/retained gaps. Selections must request 1–5000 messages (or at most 5000 inclusive non-negative offsets); invalid selections return 400 instead of silently clamping. Reads share a 16 MiB raw key/value/header budget. A read that exceeds it or reaches its deadline before completing the selection returns 400 before any target publication; narrow the selection and retry.
@@ -3600,8 +3604,8 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level, `orphaned_workflow_runs_swept` — runs the workflow orphan sweep errored since daemon start) |
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `WorkflowRun` (token validated against workflow_triggers). Reserved run-input keys in the body are dropped (see **Reserved run-input keys**); a non-object body becomes `input.payload`. **409** while the workflow already has a `pending`/`running` run (one-at-a-time admission, atomic with the insert — same as schedule/event triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
-| POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
-| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151 |
+| POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `CreateTriggerReq {kind, spec?, enabled?}` (`enabled` defaults to true) | `WorkflowTrigger` |
+| PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpdateTriggerReq {spec?, enabled?}` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151 |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
 | POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id,approved,note?,expected_detail_version?}` | decision result. Product preview gates require the `detail_version` of the full node body actually displayed, on approve **and deny**. `409` for missing/stale Product identity, a changed pending snapshot, non-running run or concurrent decision; `400` when not waiting at `node_id`. Ordinary non-Product gates retain the request without identity. |
 
@@ -3708,7 +3712,7 @@ routes via request flags (`timeout_ms` / `filter` / `mask`) — no new route.
 | GET /settings/export | root | — | redacted settings JSON + `excluded_keys` |
 | POST /settings/import | root | settings JSON (secret-keyed entries rejected) | `{accepted, rejected}` |
 | GET /state/backup | root | — | non-secret state snapshot (settings + manifest + migration level) |
-| POST /state/restore | root | `{backup, confirm:true}` | `{restored}` |
+| POST /state/restore | root (person credential — `require_human`) | `{backup, confirm:true}` | `204` (no body; merges `backup.settings` like `/settings/import`, secret-keyed entries skipped — the accepted keys are recorded only in the `state.restore` audit row). `400` without `confirm:true` |
 
 DB Explorer query/peek now honor `timeout_ms` on all engines (ClickHouse/Mongo/Redis, not
 just MySQL), a server-side schema-children `filter`, and a `mask` flag that redacts result
@@ -5652,7 +5656,7 @@ state: "idle"|"running"|"done"|"failed", log_tail, started_at?, finished_at?, er
 
 `K8sCluster { id, name, source: "kubeconfig"|"imported"|"eks", kubeconfig_path?,
 context_name, default_namespace?, aws_account_id?, environment: "dev"|"staging"|"prod",
-color?, params, capabilities?: K8sCapabilities, created_by, created_at, updated_at,
+color?, known_namespaces: string[], params, capabilities?: K8sCapabilities, created_by: Id|null, created_at, updated_at,
 last_used_at? }` — `params` holds non-secret extras (`eks_region`, `eks_cluster`);
 no route ever returns kubeconfig contents.
 

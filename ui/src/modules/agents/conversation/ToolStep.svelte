@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { copyTextOrThrow } from '../../../lib/clipboard';
+  import { formatBytes } from '../../../lib/metric-format';
   // One tool call inside a response's step group, as ONE scannable line —
   // kind icon · verb · target (command / file / pattern) · dim detail — with a
   // status mark at the end (spinner while running, ✓, ✕, or "no result") and,
@@ -21,7 +23,7 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { linkifyOutput } from './chatMarkdown';
   import { openExternal } from '../../../lib/external';
-  import { TOOL_CHROME, editInputPatch, relPath, fmtBytes, lastLine, patchToDiff, toolLine, toolStatus } from './format';
+  import { TOOL_CHROME, editInputPatch, relPath, lastLine, patchToDiff, toolLine, toolStatus } from './format';
   import { autoLang, ensureHljs, highlightBlock, highlightLine, langFromPath } from '../../../lib/hl';
   import type { Block } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
@@ -211,7 +213,7 @@
   }
   async function copyCommand(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(command);
+      await copyTextOrThrow(command);
       toasts.info('Copied', 'The command');
     } catch (e) {
       toastError('Couldn’t copy to the clipboard', e);
@@ -238,7 +240,7 @@
       <span class="step-stats mono" title="Lines added / removed"><span class="add">+{diffStats.add}</span> <span class="del">−{diffStats.del}</span></span>
     {/if}
     {#if result?.truncated || previewOnly}
-      <span class="chip step-trunc" title={previewOnly ? 'Preview — expand to load the full output' : 'Output capped at 64 KB'}>{fmtBytes(result?.bytes ?? 0)}</span>
+      <span class="chip step-trunc" title={previewOnly ? 'Preview — expand to load the full output' : 'Output capped at 64 KB'}>{formatBytes(result?.bytes ?? 0)}</span>
     {/if}
     <span class="step-status {status}" class:blocked role="img" aria-label={blocked ? 'Waiting for you' : STATUS_LABEL[status]} title={blocked ? 'Waiting for you' : STATUS_LABEL[status]}>
       {#if blocked}<Icon name="warning" size={12} />
@@ -295,10 +297,10 @@
         {#if fullState === 'error'}
           <LoadState variant="compact" what="the full output" error={fullError} empty onretry={loadFull} />
         {:else if fullState === 'loading' || !ctx.sessionId}
-          <div class="trunc-note" aria-live="polite">{ctx.sessionId ? 'Loading the full output…' : `Preview of ${fmtBytes(result?.bytes ?? 0)}.`}</div>
+          <div class="trunc-note" aria-live="polite">{ctx.sessionId ? 'Loading the full output…' : `Preview of ${formatBytes(result?.bytes ?? 0)}.`}</div>
         {/if}
       {:else if result?.truncated}
-        <div class="trunc-note">Output truncated to 64 KB ({fmtBytes(result.bytes)} total).</div>
+        <div class="trunc-note">Output truncated to 64 KB ({formatBytes(result.bytes)} total).</div>
       {/if}
       {#if result?.image_ids.length}
         <div class="imgs">

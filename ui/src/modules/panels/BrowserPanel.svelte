@@ -575,7 +575,7 @@
       title={takeover
         ? 'Release (Esc)'
         : 'Take over — click elements to comment & send to the agent'}
-      aria-label={takeover ? 'Release take-over' : 'Take over'}
+      aria-label="Take over"
       aria-pressed={takeover}
       disabled={!current}
       onclick={toggleTakeover}

@@ -1271,7 +1271,7 @@
       class="diff-nav"
       class:nav-collapsed={navCollapsed}
       class:nav-resizing={navResizing}
-      style={navCollapsed ? '' : `--navw:${navW}px`}
+      style={`--nav-max:${Math.max(160, view.h)}px;${navCollapsed ? '' : `--navw:${navW}px`}`}
     >
       <div class="nav-header">
         {#if !navCollapsed}
@@ -1625,7 +1625,11 @@
     flex-direction: column;
     position: sticky;
     top: 0;
-    max-height: 100vh;
+    /* Capped at the visible height of the diff's scroll container (measured
+       in `readView`), not 100vh: in WKWebView 100vh is the SCREEN height, so
+       the rail ran past the scrollport and its last files were unreachable
+       until the diff itself was scrolled to the end. */
+    max-height: var(--nav-max, 480px);
     overflow: hidden;
     /* Let the inner .nav-files (flex:1, overflow-y:auto) own the scroll: a flex
        column child can't scroll unless the column allows itself to shrink. */

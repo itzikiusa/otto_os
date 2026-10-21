@@ -35,6 +35,44 @@ use crate::state::ServerCtx;
 /// on a successful upgrade so the handshake completes.
 pub(crate) const BEARER_SUBPROTOCOL: &str = "otto-bearer";
 
+/// Server→client Ping cadence.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// No client frame at all for this long = a half-open peer (a remote client
+/// that lost its network without a FIN): close it, which also drops its
+/// `ui_bridge` registration so `ui_command`s stop routing to a ghost. Every
+/// browser answers each Ping with a Pong on its own (no JS involved), so a
+/// healthy idle client always counts as inbound within one ping interval.
+const INBOUND_DEADLINE: Duration = Duration::from_secs(2 * PING_INTERVAL.as_secs());
+/// Longest one frame may wait in the send path. A frame "sent" into a dead
+/// peer's full kernel buffer would otherwise block this loop — and with it
+/// the re-auth beat and the liveness check above — until TCP gives up.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `sink.send` bounded by [`SEND_TIMEOUT`]; `false` = failed or timed out (the
+/// caller closes the socket either way).
+async fn send_bounded<S>(sink: &mut S, frame: Message) -> bool
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    send_within(sink, frame, SEND_TIMEOUT).await
+}
+
+async fn send_within<S>(sink: &mut S, frame: Message, budget: Duration) -> bool
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    matches!(
+        tokio::time::timeout(budget, sink.send(frame)).await,
+        Ok(Ok(()))
+    )
+}
+
+/// Whether a socket whose last client frame arrived `since_inbound` ago is
+/// past [`INBOUND_DEADLINE`] (checked on each ping tick).
+fn inbound_expired(since_inbound: Duration) -> bool {
+    since_inbound > INBOUND_DEADLINE
+}
+
 pub async fn events_ws(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
@@ -173,11 +211,12 @@ async fn handle_events(
         (None, None)
     };
     let (mut sink, mut stream) = socket.split();
-    let mut ping = tokio::time::interval(Duration::from_secs(30));
+    let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.tick().await; // consume the immediate first tick
-                       // Optional per-connection topic filter (`subscribe` frame): a socket that
-                       // only needs a few event types (the menu-bar tray) never pays for the
-                       // rest — they are dropped before the authorization check and serializing.
+    let mut last_inbound = std::time::Instant::now();
+    // Optional per-connection topic filter (`subscribe` frame): a socket that
+    // only needs a few event types (the menu-bar tray) never pays for the
+    // rest — they are dropped before the authorization check and serializing.
     let mut topics: Option<std::collections::HashSet<String>> = None;
 
     // Per-connection authorization caches (role / session owner / admin);
@@ -211,12 +250,14 @@ async fn handle_events(
                 seen_generation = generation;
                 last_check = std::time::Instant::now();
                 if !authorized {
-                    let _ = sink
-                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    let _ = send_bounded(
+                        &mut sink,
+                        Message::Close(Some(axum::extract::ws::CloseFrame {
                             code: CLOSE_AUTH_REVOKED,
                             reason: "credential revoked".into(),
-                        })))
-                        .await;
+                        })),
+                    )
+                    .await;
                     break;
                 }
             }
@@ -236,7 +277,7 @@ async fn handle_events(
                     }
                     let Some(text) = frame.text() else { continue };
                     let len = text.len();
-                    if sink.send(Message::Text(text)).await.is_err() {
+                    if !send_bounded(&mut sink, Message::Text(text)).await {
                         break;
                     }
                     pacer.sent(len).await;
@@ -251,14 +292,18 @@ async fn handle_events(
                     // its next reconnect; tell it to refetch instead (it reuses
                     // its reconnect resync). See docs/contracts/ws.md.
                     tracing::warn!("events ws lagged, skipped {skipped} events — sent resync");
-                    if sink.send(Message::Text(resync_frame(skipped).into())).await.is_err() {
+                    if !send_bounded(&mut sink, Message::Text(resync_frame(skipped).into())).await {
                         break;
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _ = ping.tick() => {
-                if sink.send(Message::Ping(Bytes::new())).await.is_err() {
+                if inbound_expired(last_inbound.elapsed()) {
+                    tracing::debug!("events ws: no client frame within the liveness deadline — closing");
+                    break;
+                }
+                if !send_bounded(&mut sink, Message::Ping(Bytes::new())).await {
                     break;
                 }
             }
@@ -269,7 +314,7 @@ async fn handle_events(
                 }
             } => match frame {
                 Some(text) => {
-                    if sink.send(Message::Text(text.into())).await.is_err() {
+                    if !send_bounded(&mut sink, Message::Text(text.into())).await {
                         break;
                     }
                 }
@@ -278,14 +323,16 @@ async fn handle_events(
             incoming = stream.next() => match incoming {
                 // Client→server: only the UI-control `hello` / `presence`
                 // frames (parsed strictly, ≤ 64 KiB); everything else, and
-                // anything from a non-human socket, is ignored.
+                // anything from a non-human socket, is ignored — but every
+                // frame (Pong included) proves the peer is alive.
                 Some(Ok(Message::Text(text))) => {
+                    last_inbound = std::time::Instant::now();
                     // `subscribe` (any socket, see ws.md): set/clear the topic
                     // filter and acknowledge with this daemon's boot id.
                     if let Some(filter) = parse_subscribe(text.as_str()) {
                         let ack = subscribe_ack(filter.as_ref());
                         topics = filter;
-                        if sink.send(Message::Text(ack.into())).await.is_err() {
+                        if !send_bounded(&mut sink, Message::Text(ack.into())).await {
                             break;
                         }
                         continue;
@@ -294,7 +341,10 @@ async fn handle_events(
                         ctx.ui_bridge.on_client_frame(conn, text.as_str());
                     }
                 }
-                Some(Ok(_)) => continue,
+                Some(Ok(_)) => {
+                    last_inbound = std::time::Instant::now();
+                    continue;
+                }
                 _ => break,
             },
         }
@@ -1320,5 +1370,54 @@ mod tests {
         }
         c.expire(t0 + AUTH_CACHE_TTL);
         assert!(c.owner.is_empty(), "owner cache is bounded");
+    }
+
+    /// A sink that never becomes ready — a dead peer's full send buffer.
+    struct StuckSink;
+    impl futures_util::Sink<Message> for StuckSink {
+        type Error = ();
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), ()>> {
+            std::task::Poll::Pending
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> std::result::Result<(), ()> {
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), ()>> {
+            std::task::Poll::Pending
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), ()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stuck_send_gives_up_instead_of_blocking_the_loop() {
+        let started = std::time::Instant::now();
+        let sent = send_within(
+            &mut StuckSink,
+            Message::Ping(Bytes::new()),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(!sent);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_pong_every_ping_interval_keeps_an_idle_socket_open() {
+        // A browser auto-answers each Ping, so the gap seen at a tick is about
+        // one interval: never closed. Two silent intervals is a dead peer.
+        assert!(!inbound_expired(PING_INTERVAL));
+        assert!(!inbound_expired(INBOUND_DEADLINE));
+        assert!(inbound_expired(INBOUND_DEADLINE + Duration::from_secs(1)));
     }
 }

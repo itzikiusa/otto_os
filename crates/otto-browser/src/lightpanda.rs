@@ -153,9 +153,33 @@ impl Drop for Lightpanda {
     }
 }
 
+/// `lightpanda.log` past this size is rotated to `lightpanda.log.1` on the
+/// next (re)spawn, so appending across restarts stays bounded.
+const LOG_CAP_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Open the sidecar log for APPEND: a respawn after a crash must not truncate
+/// the dead instance's output — the only record of why it died. One previous
+/// generation is kept once the log passes [`LOG_CAP_BYTES`].
+fn open_log(log_path: &Path) -> std::io::Result<std::fs::File> {
+    if std::fs::metadata(log_path).is_ok_and(|m| m.len() > LOG_CAP_BYTES) {
+        let _ = std::fs::rename(log_path, log_path.with_extension("log.1"));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    use std::io::Write;
+    let _ = writeln!(
+        file,
+        "--- otto: lightpanda starting at {} ---",
+        chrono::Utc::now().to_rfc3339()
+    );
+    Ok(file)
+}
+
 fn spawn_lightpanda(bin: &Path, data_dir: &Path, port: u16) -> Result<Child, EngineError> {
     let log_path = data_dir.join("lightpanda.log");
-    let stdout = std::fs::File::create(&log_path)
+    let stdout = open_log(&log_path)
         .map_err(|e| EngineError::Unavailable(format!("open lightpanda log: {e}")))?;
     let stderr = stdout
         .try_clone()
@@ -243,7 +267,17 @@ fn spawn_supervisor(
                     if wait_ready(port, Duration::from_secs(20)).await {
                         backoff = Duration::from_millis(500);
                     } else {
+                        // Alive but never serving CDP: waiting on it would
+                        // park the supervisor forever. Kill it and retry.
                         backoff = (backoff * 2).min(Duration::from_secs(30));
+                        tracing::warn!(
+                            "browser: restarted lightpanda never became ready; retrying in {backoff:?}"
+                        );
+                        if let Some(mut c) = child.lock().await.take() {
+                            let _ = c.start_kill();
+                            let _ = c.wait().await;
+                        }
+                        tokio::time::sleep(backoff).await;
                     }
                 }
                 Err(e) => {
@@ -273,6 +307,21 @@ fn free_loopback_port() -> std::io::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_respawn_appends_to_the_log_and_rotates_past_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("lightpanda.log");
+        std::fs::write(&log, "panic: the crash we need\n").unwrap();
+        drop(open_log(&log).unwrap());
+        let kept = std::fs::read_to_string(&log).unwrap();
+        assert!(kept.starts_with("panic: the crash we need"), "{kept}");
+        let file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        file.set_len(LOG_CAP_BYTES + 1).unwrap();
+        drop(open_log(&log).unwrap());
+        assert!(dir.path().join("lightpanda.log.1").exists());
+        assert!(std::fs::metadata(&log).unwrap().len() < 1024);
+    }
 
     #[test]
     fn locate_rejects_missing_configured_path() {

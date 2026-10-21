@@ -166,34 +166,6 @@ impl ProductAttachmentRepo {
         self.get_required(id).await
     }
 
-    /// Commit an agent-assist result onto a mockup attachment: replace its
-    /// content fingerprint (`size_bytes`, `sha256`) and `meta_json` (which carries
-    /// the resumable assist session id + format), bumping `updated_at`. The stored
-    /// bytes themselves are written to `storage_path` by the caller; this records
-    /// the new size/hash + assist state. Kept separate from `AttachmentPatch` so
-    /// the public PATCH endpoint stays `{kind?, filename?}` only.
-    pub async fn set_assist_result(
-        &self,
-        id: &Id,
-        size_bytes: i64,
-        sha256: Option<String>,
-        meta_json: Option<String>,
-    ) -> Result<ProductAttachment> {
-        let now = fmt(Utc::now());
-        sqlx::query(
-            "UPDATE product_attachments SET size_bytes = ?, sha256 = ?, meta_json = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(size_bytes)
-        .bind(&sha256)
-        .bind(&meta_json)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("set attachment assist result"))?;
-        self.get_required(id).await
-    }
-
     /// Publish a fully written immutable file. Conditional saves compare both
     /// revision and prior path; returning the row from this statement avoids a
     /// later writer changing the response's revision underneath this save.

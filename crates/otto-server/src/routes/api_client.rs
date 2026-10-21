@@ -3007,7 +3007,7 @@ async fn prepare_request(
     allow_local: bool,
     whole_body_timeout: bool,
 ) -> Result<(reqwest::RequestBuilder, String, usize), String> {
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 
     // --- method ---
     let url = substitute(&req.url, vars);
@@ -3114,9 +3114,6 @@ async fn prepare_request(
             builder = builder.body(body);
         }
     }
-
-    // Silence unused import when AUTHORIZATION is only referenced inside apply_auth.
-    let _ = AUTHORIZATION;
 
     if !query.is_empty() {
         builder = builder.query(&query);

@@ -675,7 +675,7 @@
   let codeOpen = $state(false);
   let codeLang = $state<CodeLang>('curl');
   const codeSnippet = $derived(codeOpen ? generateCode(draft, codeLang) : '');
-  async function copyText(text: string, what: string): Promise<void> {
+  async function copyNotify(text: string, what: string): Promise<void> {
     try {
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
@@ -723,7 +723,7 @@
       { label: 'Duplicate  ⌘D', icon: 'copy', action: () => apiClient.duplicateDraft() },
       ...(saved && canEdit ? [{ label: 'Save as a copy…', icon: 'plus', action: saveAsCopy }] : []),
       { separator: true },
-      { label: 'Copy as curl', icon: 'terminal', action: () => void copyText(apiClient.toCurl(), 'as curl') },
+      { label: 'Copy as curl', icon: 'terminal', action: () => void copyNotify(apiClient.toCurl(), 'as curl') },
       { label: 'Generate code…', icon: 'function', action: () => (codeOpen = true) },
       { label: 'Import from curl…', icon: 'download', action: () => (importOpen = true) },
       { separator: true },
@@ -874,7 +874,7 @@
         <div class="full-url">
           <div class="full-url-head">
             <span class="full-url-label" id="api-full-url-label">Full URL</span>
-            <button class="icon-btn" title="Copy the full URL" aria-label="Copy the full URL" onclick={() => void copyText(sentUrl, 'URL')}><Icon name="copy" size={12} /></button>
+            <button class="icon-btn" title="Copy the full URL" aria-label="Copy the full URL" onclick={() => void copyNotify(sentUrl, 'URL')}><Icon name="copy" size={12} /></button>
           </div>
           <!-- Not an <output>: that is an implicit live region and would
                re-announce the whole URL on every keystroke. -->
@@ -1220,7 +1220,7 @@
     <pre class="code-snippet mono" dir="ltr">{codeSnippet}</pre>
     {#snippet footer()}
       <button class="btn" onclick={() => (codeOpen = false)}>Close</button>
-      <button class="btn primary" onclick={() => void copyText(codeSnippet, 'code')}><Icon name="copy" size={13} />Copy code</button>
+      <button class="btn primary" onclick={() => void copyNotify(codeSnippet, 'code')}><Icon name="copy" size={13} />Copy code</button>
     {/snippet}
   </Modal>
 {/if}

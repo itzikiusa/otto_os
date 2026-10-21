@@ -2,6 +2,7 @@
   // Per-tool aggregates derived from the audit ledger: call count, error count +
   // rate, average / max latency, total bytes (the cost proxy — true USD is not
   // metered), and the last-called time. Read-only.
+  import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -31,11 +32,6 @@
     void load();
   });
 
-  function fmtBytes(b: number): string {
-    if (b < 1024) return `${b} B`;
-    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-    return `${(b / 1024 / 1024).toFixed(1)} MB`;
-  }
   function errClass(rate: number): string {
     return rate >= 0.25 ? 'bad' : rate > 0 ? 'warn' : 'ok';
   }
@@ -77,8 +73,8 @@
           <span class="cell num {errClass(s.error_rate)}"><span class="cl">Err rate</span>{(s.error_rate * 100).toFixed(1)}%</span>
           <span class="cell num"><span class="cl">Avg lat</span>{Math.round(s.avg_latency_ms)}ms</span>
           <span class="cell num"><span class="cl">Max lat</span>{s.max_latency_ms}ms</span>
-          <span class="cell num"><span class="cl">Avg bytes</span>{fmtBytes(Math.round(s.avg_bytes))}</span>
-          <span class="cell num"><span class="cl">Total bytes</span>{fmtBytes(s.total_bytes)}</span>
+          <span class="cell num"><span class="cl">Avg bytes</span>{formatBytes(Math.round(s.avg_bytes))}</span>
+          <span class="cell num"><span class="cl">Total bytes</span>{formatBytes(s.total_bytes)}</span>
           <span class="cell when"><span class="cl">Last called</span>{s.last_called_at ? new Date(s.last_called_at).toLocaleString() : '—'}</span>
         </div>
       {/each}

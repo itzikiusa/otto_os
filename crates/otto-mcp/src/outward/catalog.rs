@@ -449,7 +449,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "summary":{"type":"boolean","description":"Default true."}}}}),
         json!({"name":"otto.get_workflow_run","mutating":false,"category":"Workflows",
             "description":"Get one workflow run's status, per-node step states and outputs by run id. Read-only.",
-            "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string","description":"Workflow run id."}}}}),
         json!({"name":"otto.run_workflow","mutating":true,"category":"Workflows",
             "description":"Execute a workflow now; returns the new run (poll otto.get_workflow_run). Optionally pass `input` (seed JSON) and `start_node` (run that node + downstream). Optional `review_mode` (\"fan_out\" | \"orchestrator\") overrides every review step's execution mode for this run. DANGEROUS: spawns agents / external effects — approval-gated.",
             "inputSchema":{"type":"object","required":["workflow_id"],"properties":{
@@ -548,8 +548,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Post a comment on a pull request — general, inline when `path` (and optionally `line`) anchor it to a file in the diff, or a threaded reply when `in_reply_to` names an existing comment id. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["body"],"properties":{
                 "repo_id":{"type":"string","description":REPO_REF_DESC},"number":{"type":"integer","description":PR_NUMBER_DESC},
-                "pr_number":{"type":"integer","description":"Alias of `number`."},"body":{"type":"string"},
-                "path":{"type":"string"},"line":{"type":"integer"},"in_reply_to":{"type":"string"}}}}),
+                "pr_number":{"type":"integer","description":"Alias of `number`."},"body":{"type":"string","description":"Markdown comment body."},
+                "path":{"type":"string","description":"Repo-relative file path to anchor the comment to."},
+                "line":{"type":"integer","description":"1-indexed line in `path` to anchor to."},
+                "in_reply_to":{"type":"string","description":"Existing comment id to reply to."}}}}),
         json!({"name":"otto.start_pr_review","mutating":true,"category":"Code Review",
             "description":"Start Otto's multi-agent review of a pull request (fan-out); returns the review (its `id` feeds otto.list_findings). Optional `context` (extra reviewer instructions) and a linked Jira story (`issue_key` + `issue_account_id`). DANGEROUS: spawns agents — approval-gated.",
             "inputSchema":{"type":"object","properties":{
@@ -668,11 +670,11 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.vault_dir","mutating":false,"category":"Vault",
             "description":"One level of a vault's folder tree (folders, notes, attachments). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string","description":"Vault-relative folder path; empty for root."}}}}),
         json!({"name":"otto.vault_read","mutating":false,"category":"Vault",
             "description":"A note's raw markdown + metadata + outgoing links. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string","description":"Vault-relative note path incl. .md"}}}}),
         json!({"name":"otto.vault_search","mutating":false,"category":"Vault",
             "description":"Full-text (FTS5) search over a vault's notes with snippets; tag:/path:/type: operators. Read-only.",
             "inputSchema":{"type":"object","required":["vault_id","query"],"properties":{
@@ -688,7 +690,7 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.vault_graph","mutating":false,"category":"Vault",
             "description":"The vault link graph (compact arrays; local neighborhood when `path` given). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"mode":{"type":"string"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"mode":{"type":"string","description":"local (default when path given) | full"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
         json!({"name":"otto.vault_okf_validate","mutating":false,"category":"Vault",
             "description":"Deterministic OKF v0.1 conformance report (E1-E3 errors, W1-W5 warnings). Read-only.",
             "inputSchema":{"type":"object","required":["vault_id"],"properties":{
@@ -696,12 +698,12 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.vault_write","mutating":true,"category":"Vault",
             "description":"Create/update a markdown note in a doc vault (OKF preferred). DANGEROUS: writes files — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path","content"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string","description":"Vault-relative note path incl. .md"},
                 "content":{"type":"string"},"if_hash":{"type":"string"}}}}),
         json!({"name":"otto.vault_write_file","mutating":true,"category":"Vault",
             "description":"Create/update a guarded UTF-8 documentation artifact in a vault — OpenAPI YAML, JSON, D2, Mermaid, text or CSV (`path` ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv; markdown notes use otto.vault_write). Pass `if_hash` for optimistic concurrency. DANGEROUS: writes files — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path","content"],"properties":{
-                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string"},
+                "workspace_id":{"type":"string","description":"Optional; vaults are global."},"vault_id":{"type":["integer","string"],"description":VAULT_REF_DESC},"path":{"type":"string","description":"Vault-relative path ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv"},
                 "content":{"type":"string"},"if_hash":{"type":"string"}}}}),
         json!({"name":"otto.vault_rename","mutating":true,"category":"Vault",
             "description":"Rename/move a note or folder; rewrites every referencing link across the vault. DANGEROUS — approval-gated.",

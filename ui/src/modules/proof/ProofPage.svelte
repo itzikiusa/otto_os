@@ -49,7 +49,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { router } from '../../lib/router.svelte';
-  import type { ProofArtifactView } from '../../lib/api/types';
+  import type { ProofArtifactView, Repo } from '../../lib/api/types';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { sentenceCase } from '../../lib/status';
@@ -372,7 +372,7 @@
       { label: 'Add artifact…', icon: 'plus', action: () => { resetAdd(); addOpen = true; } },
       { label: 'Add media…', icon: 'file', action: () => { resetMedia(); mediaOpen = true; } },
       { label: 'Add evidence…', icon: 'db', action: () => { resetEvidence(); evidenceOpen = true; } },
-      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; void packRepoPath().then((p) => { if (prOpen && !prCwd) prCwd = p; }); } },
+      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; void packRepoPath().then(({ path, error }) => { if (!prOpen) return; if (!prCwd) prCwd = path; prRepoError = error; }); } },
     ]);
   }
 
@@ -398,22 +398,32 @@
   let prRunning = $state(false);
   let evidenceSaving = $state(false);
 
-  /** The pack's repository folder — the folder prompts default to it. */
-  async function packRepoPath(): Promise<string> {
-    const rid = detail?.pack.repo_id;
-    if (!rid) return '';
+  /** The pack's repository folder — the folder prompts default to it. There is
+   *  no `GET /repos/{id}`: the path comes from the pack workspace's repo list
+   *  (`GET /workspaces/{id}/repos`, ws viewer). A failed lookup is returned as
+   *  `error`, so the dialog says why the folder is empty instead of hiding it. */
+  async function packRepoPath(): Promise<{ path: string; error: string | null }> {
+    const pack = detail?.pack;
+    const rid = pack?.repo_id;
+    if (!pack || !rid) return { path: '', error: null };
     try {
-      return (await api.get<{ path: string }>(`/repos/${encodeURIComponent(rid)}`)).path ?? '';
-    } catch {
-      return '';
+      const repos = await api.get<Repo[]>(`/workspaces/${encodeURIComponent(pack.workspace_id)}/repos`);
+      const repo = repos.find((r) => r.id === rid);
+      if (!repo) return { path: '', error: 'The pack’s repository is no longer registered in its workspace.' };
+      return { path: repo.path ?? '', error: null };
+    } catch (e) {
+      return { path: '', error: loadErrorText(e) };
     }
   }
 
   async function assemble(): Promise<void> {
     if (!detail || assembling) return;
     const packId = detail.pack.id;
-    const initial = await packRepoPath();
-    const cwd = await confirmer.promptText('Working folder to assemble proof from:', {
+    const { path: initial, error: repoError } = await packRepoPath();
+    const prompt = repoError
+      ? `Working folder to assemble proof from. Couldn’t prefill the pack’s repository folder: ${repoError}`
+      : 'Working folder to assemble proof from:';
+    const cwd = await confirmer.promptText(prompt, {
       title: 'Assemble proof',
       browseFolder: true,
       confirmLabel: 'Assemble',
@@ -593,12 +603,15 @@
   let prDesc = $state('');
   let prBase = $state('');
   let prCwd = $state('');
+  /** Why the working dir could not be prefilled from the pack's repo. */
+  let prRepoError = $state<string | null>(null);
 
   function resetPr(): void {
     prTitle = '';
     prDesc = '';
     prBase = '';
     prCwd = '';
+    prRepoError = null;
   }
 
   async function submitPr(): Promise<void> {
@@ -1023,7 +1036,7 @@
                         <ul class="pr-checks">
                           {#each rep.checks as c (c.label)}
                             <li class={c.passed ? 'ok' : 'miss'}>
-                              <span class="tick" aria-label={c.passed ? 'Passed' : 'Missing'}><Icon name={c.passed ? 'check' : 'x'} size={12} /></span>
+                              <span class="tick" role="img" aria-label={c.passed ? 'Passed' : 'Missing'}><Icon name={c.passed ? 'check' : 'x'} size={12} /></span>
                               <span class="lbl">{c.label}</span>
                               <span class="dim">— {c.detail}</span>
                             </li>
@@ -1246,7 +1259,8 @@
       </div>
       <div class="field">
         <label for="pr-cwd">Working dir (optional)</label>
-        <PathField bind:value={prCwd}><input dir="ltr" id="pr-cwd" class="input" bind:value={prCwd} placeholder="e.g. ~/code/my-repo" /></PathField>
+        <PathField bind:value={prCwd}><input dir="ltr" id="pr-cwd" class="input" bind:value={prCwd} placeholder="e.g. ~/code/my-repo" aria-describedby={prRepoError ? 'pr-cwd-note' : undefined} /></PathField>
+        {#if prRepoError}<p id="pr-cwd-note" class="pr-cwd-note" role="status">Couldn’t prefill the pack’s repository folder: {prRepoError}</p>{/if}
       </div>
     </div>
     {#snippet footer()}
@@ -1645,6 +1659,12 @@
   }
   .media-load {
     margin-block-start: 8px;
+  }
+  .pr-cwd-note {
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+    overflow-wrap: anywhere;
   }
   .modal-hint {
     font-size: var(--fs-s);

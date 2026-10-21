@@ -234,7 +234,6 @@
         class:mark-on={markMode}
         bind:this={markButton}
         onclick={toggleMark}
-        aria-pressed={markMode}
         title={markMode ? 'Stop marking' : 'Mark a passage to hand to an agent'}
       >
         <Icon name="target" size={12} />

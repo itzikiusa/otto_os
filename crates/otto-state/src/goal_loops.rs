@@ -379,17 +379,6 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
-    pub async fn set_run_started_at(&self, id: &Id, at: Option<DateTime<Utc>>) -> Result<()> {
-        sqlx::query("UPDATE goal_loops SET run_started_at = ?, updated_at = ? WHERE id = ?")
-            .bind(at.map(fmt))
-            .bind(self.touch())
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set run_started_at"))?;
-        Ok(())
-    }
-
     pub async fn add_elapsed(&self, id: &Id, secs: u64) -> Result<()> {
         sqlx::query(
             "UPDATE goal_loops SET elapsed_secs = elapsed_secs + ?, updated_at = ? WHERE id = ?",
@@ -400,17 +389,6 @@ impl GoalLoopsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("add elapsed"))?;
-        Ok(())
-    }
-
-    pub async fn add_cost(&self, id: &Id, usd: f64) -> Result<()> {
-        sqlx::query("UPDATE goal_loops SET cost_usd = cost_usd + ?, updated_at = ? WHERE id = ?")
-            .bind(usd)
-            .bind(self.touch())
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("add cost"))?;
         Ok(())
     }
 
@@ -434,17 +412,6 @@ impl GoalLoopsRepo {
         sqlx::query("UPDATE goal_loops SET name = COALESCE(?, name), limits_json = COALESCE(?, limits_json), config_json = COALESCE(?, config_json), updated_at = ? WHERE id = ?")
             .bind(name).bind(limits).bind(config).bind(self.touch()).bind(id)
             .execute(&self.pool).await.map_err(dberr("update goal-loop settings"))?;
-        Ok(())
-    }
-
-    pub async fn set_name(&self, id: &Id, name: &str) -> Result<()> {
-        sqlx::query("UPDATE goal_loops SET name = ?, updated_at = ? WHERE id = ?")
-            .bind(name)
-            .bind(self.touch())
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set goal-loop name"))?;
         Ok(())
     }
 

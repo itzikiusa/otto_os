@@ -53,6 +53,11 @@
     input?.focus();
   });
 
+  // Keep the active option visible as the arrows move it through a long list.
+  $effect(() => {
+    document.getElementById(`wb-qo-${index}`)?.scrollIntoView({ block: 'nearest' });
+  });
+
   function pick(d: WorkbenchDoc | undefined): void {
     if (!d) return;
     onopen(d.id);
@@ -74,29 +79,44 @@
 </script>
 
 <Modal title="Open file" {onclose}>
+  <!-- Combobox + listbox, as the ⌘K palette: focus stays in the input and
+       aria-activedescendant names the arrowed option, so a screen reader
+       hears the selection move. Options are kept out of the tab order. -->
   <input dir="ltr"
     bind:this={input}
     class="wb-qo-input"
     type="search"
     placeholder="e.g. deploy.sh"
     aria-label="File name"
+    role="combobox"
+    aria-expanded="true"
+    aria-autocomplete="list"
     aria-controls="wb-qo-list"
+    aria-activedescendant={results.length > 0 ? `wb-qo-${index}` : undefined}
     bind:value={query}
     onkeydown={onKey}
     data-testid="wb-quickopen-input"
   />
-  <ul class="wb-qo-list" id="wb-qo-list" role="listbox" aria-label="Files">
+  <div class="wb-qo-list" id="wb-qo-list" role="listbox" aria-label="Files">
     {#each results as d, i (d.id)}
-      <li role="option" aria-selected={i === index}>
-        <button class="wb-qo-row" class:sel={i === index} onclick={() => pick(d)} onmouseenter={() => (index = i)}>
-          <span class="wb-qo-name">{d.name}</span>
-          <span class="wb-qo-lang">{d.language === 'auto' ? '' : d.language}</span>
-        </button>
-      </li>
+      <button
+        id="wb-qo-{i}"
+        tabindex="-1"
+        role="option"
+        aria-selected={i === index}
+        class="wb-qo-row"
+        class:sel={i === index}
+        onmousedown={(e) => e.preventDefault()}
+        onclick={() => pick(d)}
+        onmouseenter={() => (index = i)}
+      >
+        <span class="wb-qo-name">{d.name}</span>
+        <span class="wb-qo-lang">{d.language === 'auto' ? '' : d.language}</span>
+      </button>
     {:else}
-      <li class="wb-qo-empty">No files match.</li>
+      <div class="wb-qo-empty">No files match.</div>
     {/each}
-  </ul>
+  </div>
 </Modal>
 
 <style>
@@ -111,7 +131,6 @@
     font-size: var(--fs-m);
   }
   .wb-qo-list {
-    list-style: none;
     margin: 8px 0 0;
     padding: 0;
     max-height: min(50vh, 360px);

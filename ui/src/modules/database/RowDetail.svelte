@@ -6,7 +6,7 @@
   // review-gated. ‹ › step through the rows in view.
   import Icon from '../../lib/components/Icon.svelte';
   import type { QueryResult } from '../../lib/api/types';
-  import { cellStr, copyText, isComplex, prettyJson } from './results-format';
+  import { cellStr, copyWithToast, isComplex, prettyJson } from './results-format';
   import { columnKind } from './grid-format';
 
   interface Props {
@@ -85,7 +85,7 @@
             <span class="grow"></span>
             <button
               class="icon-btn rd-act"
-              onclick={() => copyText(v === null || v === undefined ? '' : cellStr(v))}
+              onclick={() => copyWithToast(v === null || v === undefined ? '' : cellStr(v))}
               aria-label="Copy {c.name}"
               title="Copy value"
             ><Icon name="copy" size={12} /></button>

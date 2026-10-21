@@ -42,6 +42,7 @@ import {
   nearestDelta,
   readServerFrame,
 } from './uiCommands/frames';
+import { writeScope } from './uiCommands/writeMemory';
 
 // ─── Handler API ────────────────────────────────────────────────────────────
 
@@ -307,11 +308,6 @@ export function presenceFrame(): UiPresenceFrame {
 
 let connId: string | null = null;
 
-/** The socket's `conn_id` (from `hello_ack`); null while disconnected. */
-export function uiConnId(): string | null {
-  return connId;
-}
-
 interface Running {
   id: string;
   sessionId: Id;
@@ -522,9 +518,9 @@ function makeCtx(frame: UiCommandFrame, r: Running): UiCommandCtx {
       highlightTarget(el);
     },
     async confirmWrite(opts) {
-      const scope = opts.connId?.trim() || '';
-      const rememberable = !!scope && !opts.guarded && !opts.outward;
-      if (rememberable && uiControl.writesAllowed(agent.session_id, scope)) return true;
+      // Only an unguarded, non-outward write is ever remembered (writeMemory.ts).
+      const scope = writeScope(opts);
+      if (scope && uiControl.writesAllowed(agent.session_id, scope)) return true;
       if (signal.aborted) return false;
       const who = agentName(agent);
       const verb = opts.verb?.trim() || 'Run';
@@ -534,7 +530,7 @@ function makeCtx(frame: UiCommandFrame, r: Running): UiCommandCtx {
         .choose(`${who} wants to ${verb.toLowerCase()} this on ${opts.where}:\n\n${opts.what}`, {
           title: `Allow ${verb.toLowerCase()} on ${opts.where}?`,
           options: [{ label: verb, value: 'run', kind: opts.guarded ? 'danger' : 'primary' }],
-          checkboxLabel: rememberable ? `Allow writes on ${opts.where} for this session` : undefined,
+          checkboxLabel: scope ? `Allow writes on ${opts.where} for this session` : undefined,
         })
         .finally(() => (settled = true));
       // Stop / deadline while the dialog is up: close it (if it's still ours).
@@ -545,7 +541,7 @@ function makeCtx(frame: UiCommandFrame, r: Running): UiCommandCtx {
       try {
         const { value, remember } = await asked;
         if (value !== 'run' || signal.aborted) return false;
-        if (remember && rememberable) uiControl.rememberWrites(agent.session_id, scope);
+        if (remember && scope) uiControl.rememberWrites(agent.session_id, scope);
         progress(`${verb} confirmed`);
         return true;
       } finally {

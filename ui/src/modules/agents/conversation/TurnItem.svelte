@@ -11,6 +11,7 @@
   //     where the tokens went (in · thinking · out · cache).
   // Thinking is its own violet, italic marker — never mistaken for the answer.
   // Per-turn system notes stay a chip that expands in place.
+  import { copyTextOrThrow } from '../../../lib/clipboard';
   import { getContext } from 'svelte';
   import { toastError } from '../../../lib/toastError';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
@@ -74,7 +75,7 @@
   }
   async function copyPath(path: string): Promise<void> {
     try {
-      await navigator.clipboard.writeText(path);
+      await copyTextOrThrow(path);
       toasts.info('Path copied', path);
     } catch (e) {
       toastError('Couldn’t copy to the clipboard', e);
@@ -82,7 +83,7 @@
   }
   async function copyTurn(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(copyText);
+      await copyTextOrThrow(copyText);
       toasts.info('Copied', item.role === 'user' ? 'Your message' : 'The response');
     } catch (e) {
       toastError('Couldn’t copy to the clipboard', e);

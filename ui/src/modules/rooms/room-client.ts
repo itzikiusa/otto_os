@@ -1,12 +1,20 @@
 import type { RoomAction, RoomCredential, RoomEvent } from '../../lib/api/room-types';
 import { roomSocketAddress } from './room-state.ts';
 export type RoomConnection = 'connecting' | 'connected' | 'disconnected' | 'ended';
+export const JOIN_UNREACHABLE = 'Couldn’t reach the host. Check the link or ask the host to keep Otto open, then try again.';
 /** Intentionally independent of api/client: a remote guest must never read owner auth. */
 export async function joinRoom(origin: string, roomId: string, invite: string, name: string): Promise<RoomCredential> {
-  const response = await fetch(new URL('/api/v1/room-join', origin), {
-    method: 'POST', credentials: 'omit', referrerPolicy: 'no-referrer',
-    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({room_id: roomId, invite, name}),
-  });
+  let response: Response;
+  try {
+    response = await fetch(new URL('/api/v1/room-join', origin), {
+      method: 'POST', credentials: 'omit', referrerPolicy: 'no-referrer',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({room_id: roomId, invite, name}),
+    });
+  } catch {
+    // fetch rejects (TypeError "Load failed") only when the host is unreachable;
+    // the guest must never see that raw engine text.
+    throw new Error(JOIN_UNREACHABLE);
+  }
   if (!response.ok) {
     const problem = await response.json().catch(() => ({})) as {message?: string};
     throw new Error(problem.message ?? 'Could not join this room. Ask the host for a fresh invitation.');

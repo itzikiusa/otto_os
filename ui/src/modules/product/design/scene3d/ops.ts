@@ -17,10 +17,8 @@ import type {
   Scene3dGroup,
   Scene3dLight,
   Scene3dMaterial,
-  Scene3dNodeKind,
   Scene3dObject,
   Scene3dStateOverride,
-  Scene3dTurntable,
   Vec3,
 } from './types';
 import { applyMaterialPreset } from './presets';
@@ -50,10 +48,6 @@ export function findNode(doc: Scene3dDoc, id: string | null | undefined): Scene3
   const g = doc.groups.find((x) => x.id === id);
   if (g) return { kind: 'group', node: g };
   return null;
-}
-
-export function nodeKind(doc: Scene3dDoc, id: string | null | undefined): Scene3dNodeKind | null {
-  return findNode(doc, id)?.kind ?? null;
 }
 
 /** Display name for any node (lights may omit `name`). */
@@ -529,14 +523,6 @@ export function setBrand(doc: Scene3dDoc, uri: string | null): Scene3dDoc {
   return next;
 }
 
-export function setTurntable(doc: Scene3dDoc, patch: Partial<Scene3dTurntable>): Scene3dDoc {
-  const next = cloneDoc(doc);
-  const tt: Scene3dTurntable = { ...(next.turntable ?? {}), ...patch };
-  if (tt.speed !== undefined) tt.speed = Math.min(360, Math.max(-360, round(tt.speed, 2)));
-  next.turntable = tt;
-  return next;
-}
-
 /** Add a `gltf` object that points at a Design Hall model (`otto://design/<id>@approved`). */
 export function addGltfSrc(doc: Scene3dDoc, src: string, opts: AddOptions = {}): { doc: Scene3dDoc; id: string } {
   const next = cloneDoc(doc);
@@ -666,9 +652,4 @@ export function clearStateOverride(doc: Scene3dDoc, stateId: string, objectId: s
   if (!st?.overrides?.[objectId]) return doc;
   delete st.overrides[objectId];
   return next;
-}
-
-/** Objects + lights + (v2) states line for the viewport stats pill. */
-export function sceneStats(doc: Scene3dDoc): { objects: number; lights: number; states: number; cameras: number } {
-  return { objects: doc.objects.length, lights: doc.lights.length, states: doc.states?.length ?? 0, cameras: doc.cameras?.length ?? 0 };
 }

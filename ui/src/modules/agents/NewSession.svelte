@@ -287,9 +287,11 @@
     selectProvider(nextProvider, true);
   }
 
-  // Browser tools wire an MCP server into the workspace .mcp.json; only
-  // claude/codex load MCP servers, so the toggle is hidden for plain shells.
-  const supportsBrowser = $derived(provider === 'claude' || provider === 'codex');
+  // Browser tools attach the `otto-browser` MCP server through each CLI's own
+  // config (claude: .mcp.json, agy: .agents/mcp_config.json, codex: per-spawn
+  // `-c` overrides). Other providers don't load it, so the toggle is hidden.
+  const BROWSER_PROVIDERS = ['claude', 'codex', 'agy'];
+  const supportsBrowser = $derived(BROWSER_PROVIDERS.includes(provider));
   /** A pinned model is provider-specific, so it only applies to a batch that
    *  targets ONE provider (any number of sessions of it). */
   const supportsModel = $derived(chosen.length <= 1);
@@ -353,7 +355,7 @@
       const meta: Record<string, unknown> = {};
       if (accountIds[p]) meta.account_id = accountIds[p];
       if (networkProfileId) meta.network_profile_id = networkProfileId;
-      if (browser && (p === 'claude' || p === 'codex')) meta.browser = true;
+      if (browser && BROWSER_PROVIDERS.includes(p)) meta.browser = true;
       if (dirs.length > 0) meta.extra_dirs = [...dirs];
       const sessionTitle = base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base;
       const request = {provider: p, title: sessionTitle, cwd: dir === '' ? null : dir, model: sessionModel};

@@ -158,6 +158,8 @@ impl SwarmService {
             .await
     }
 
+    /// Rows only. The HTTP route (`runtime::engine::delete_swarm_h`) also
+    /// stops the coordinator and halts live runs/sessions before calling this.
     pub async fn delete_swarm(&self, id: &Id) -> Result<()> {
         self.repo.delete_swarm(id).await
     }

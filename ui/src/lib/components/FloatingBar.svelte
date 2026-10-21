@@ -80,6 +80,8 @@
   let editing = $state(false);
   /** A reply landed while the in-app bar was closed. */
   let unread = $state(false);
+  // The unread dot is decorative; its meaning reaches AT as the buttons' description.
+  const uid = $props.id();
   /** Turn ids with a request in flight (Run plan / Delete / Ask). */
   let busy: Record<string, boolean> = $state({});
 
@@ -703,6 +705,7 @@
     onfocusout={onFocusOut}
     inert={presence === 'away' ? true : undefined}
   >
+    <span id="{uid}-unread" class="sr-only">New reply</span>
     {#if presence === 'dock'}
       <!-- Docked in the status bar: covers no content. -->
       <button
@@ -710,12 +713,13 @@
         onclick={() => void openBar()}
         title="Ask Otto or run a command"
         aria-label="Open the Otto bar"
+        aria-describedby={unread ? `${uid}-unread` : undefined}
         aria-keyshortcuts="Meta+K"
       >
         <Icon name="sparkle" size={12} />
         <span>Ask Otto</span>
         <kbd>⌘K</kbd>
-        {#if unread}<span class="unread" aria-label="New reply"></span>{/if}
+        {#if unread}<span class="unread" aria-hidden="true"></span>{/if}
       </button>
     {/if}
 
@@ -922,11 +926,12 @@
           class="spark"
           tabindex="-1"
           aria-label="Ask Otto"
+          aria-describedby={unread ? `${uid}-unread` : undefined}
           title="Ask Otto"
           onclick={() => void openBar()}
         >
           <Icon name="sparkle" size={inApp ? 14 : 16} />
-          {#if unread}<span class="unread" aria-label="New reply"></span>{/if}
+          {#if unread}<span class="unread" aria-hidden="true"></span>{/if}
         </button>
         <input dir="ltr"
           bind:this={inputEl}

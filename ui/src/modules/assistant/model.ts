@@ -121,11 +121,6 @@ export function memoryChipOf(turn: Pick<AssistantTurn, 'kind' | 'data'>): Assist
   return { action: d.action, memory_ids: Array.isArray(d.memory_ids) ? d.memory_ids : [], undo: d.undo ?? null };
 }
 
-/** Message turns (bubbles) — the thread index used until the CLI transcript exists. */
-export function messageTurns(turns: AssistantTurn[]): AssistantTurn[] {
-  return turns.filter((t) => t.kind === 'message' && t.role !== 'system');
-}
-
 /**
  * Map a thread's non-message turns and its tasks to cards. A task referenced
  * by a turn renders at that turn; a task of this thread no turn mentions yet

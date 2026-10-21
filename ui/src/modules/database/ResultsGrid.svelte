@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../lib/metric-format';
   import { pluralNoun } from '../../lib/plural';
   // Result view orchestrator: sticky-header grid (GridView), a JSON array view
   // (JsonView) or a vertical row-per-record layout (VerticalView) over the same
@@ -19,6 +20,7 @@
   import { isReleased, releasedRows, resultBudget } from '../../lib/stores/db-result-budget';
   import { findInPage } from '../../lib/findinpage.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
   import {
     database,
     effectiveViewMode,
@@ -46,7 +48,7 @@
   import MongoFilterBar from './MongoFilterBar.svelte';
   import { EditFlow, SET_EMPTY, SET_NULL, type RowPatch } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
-  import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
+  import { ALT_BATCH, cellStr, copyWithToast, isComplex } from './results-format';
   import { newExpansionState } from './expansion-plan';
   import { cellMatchesFilter } from './grid-format';
   import {
@@ -864,10 +866,11 @@
     // Sets the editor statement AND clears any quick-filter chips (the rewritten
     // query now owns the WHERE) so the chip bar can't later discard the splice.
     database.setStatementFromCellFilter(query); // reflects in the editor (CodeEditor rebuilds)
-    void copyText(query); // clipboard parity with the editor
-    toasts.success(
-      mode === 'set' ? 'Query by value' : 'Added to query',
-      'Query updated & copied — press Run to execute',
+    // Clipboard parity with the editor; a failed copy toasts its own error, so
+    // the confirmation only claims "copied" when the copy landed.
+    const title = mode === 'set' ? 'Query by value' : 'Added to query';
+    void copyWithToast(query).then((ok) =>
+      toasts.success(title, ok ? 'Query updated & copied — press Run to execute' : 'Query updated — press Run to execute'),
     );
   }
 
@@ -962,7 +965,7 @@
     if (items.length > 0) items.push({ separator: true });
     items.push(
       { label: 'Expand value', icon: 'maximize', action: () => flow.openCell(v, rowIdx, ci) },
-      { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : cellStr(v)) },
+      { label: 'Copy value', icon: 'file', action: () => copyWithToast(v === null || v === undefined ? '' : cellStr(v)) },
       { label: flow.rawDocLabel, icon: 'eye', action: () => flow.openRawDoc(rowIdx) },
     );
     // Explicit NULL / '' — the typed editor can't express the difference (an
@@ -1008,7 +1011,7 @@
       { label: 'Clear sort', disabled: sortCol !== ci, action: () => { sortCol = null; sortDir = null; } },
       { separator: true },
       ...(hosted ? [{ label: `Filter by ${col}…`, icon: 'search', action: () => database.addColumnFilter(col) }] : []),
-      { label: 'Copy column name', icon: 'file', action: () => copyText(col) },
+      { label: 'Copy column name', icon: 'file', action: () => copyWithToast(col) },
     ]);
   }
 
@@ -1102,10 +1105,10 @@
         await navigator.clipboard.write([new CI({ 'text/plain': text.then((t) => new Blob([t], { type: 'text/plain' })) })]);
         return;
       } catch {
-        /* fall through to writeText */
+        /* fall through to the shared copy (legacy path on insecure origins) */
       }
     }
-    await navigator.clipboard.writeText(await text);
+    await copyTextOrThrow(await text);
   }
   function csvCell(v: unknown): string {
     let s = exportText(v);
@@ -1152,7 +1155,7 @@
   }
   async function copyAs(kind: 'csv' | 'json' | 'columns'): Promise<void> {
     try {
-      if (kind === 'columns') await navigator.clipboard.writeText((result?.columns ?? []).map((c) => c.name).join(', '));
+      if (kind === 'columns') await copyTextOrThrow((result?.columns ?? []).map((c) => c.name).join(', '));
       else await withProgress(kind.toUpperCase(), () => copyBuilt(kind === 'csv' ? csvParts : jsonParts));
       const what = kind === 'columns' ? 'Column names copied' : `Result copied as ${kind.toUpperCase()}${exportScope}`;
       toasts.success('Copied', what);
@@ -1695,7 +1698,7 @@
         <span>{result.stats.duration_ms.toLocaleString()} ms</span>
         {#if result.stats.bytes_read != null}
           <span class="dot">·</span>
-          <span>{fmtBytes(result.stats.bytes_read)} read</span>
+          <span>{formatBytes(result.stats.bytes_read)} read</span>
         {/if}
         {#if result.rows_affected != null}
           <span class="dot">·</span>

@@ -41,6 +41,7 @@
   import type { InsightReport } from '../../lib/api/types';
   import { insightsApi } from '../../lib/api/insights';
   import { openExternal } from '../../lib/external';
+  import { reportLinkBridge } from './reportFrame';
   import { renderMarkdownGfm } from '../../lib/md';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -91,23 +92,13 @@
   }
   let frameEl = $state<HTMLIFrameElement | null>(null);
   // The report's JS is agent-written (possibly prompt-injected): it may post
-  // `otto-insights-open` itself, without a click. Only open on a real user
-  // gesture (a click inside the frame activates its ancestors too) and at most
-  // one tab per OPEN_GAP_MS, so a script can't spray system-browser tabs.
-  const OPEN_GAP_MS = 1_000;
-  let lastOpenAt = 0;
-  function onFrameMessage(ev: MessageEvent): void {
-    if (!frameEl || ev.source == null || ev.source !== frameEl.contentWindow) return;
-    const m = ev.data as { type?: unknown; url?: unknown } | null;
-    if (!m || m.type !== 'otto-insights-open' || typeof m.url !== 'string') return;
-    if (!/^https?:\/\//i.test(m.url)) return;
-    const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
-    if (activation && !activation.isActive) return;
-    const now = Date.now();
-    if (now - lastOpenAt < OPEN_GAP_MS) return;
-    lastOpenAt = now;
-    void openExternal(m.url);
-  }
+  // `otto-insights-open` itself, without a click. The bridge (reportFrame.ts)
+  // opens only this frame's http(s) links, on a real user gesture, at most one
+  // per OPEN_GAP_MS, so a script can't spray system-browser tabs.
+  const onFrameMessage = reportLinkBridge({
+    frameWindow: () => frameEl?.contentWindow,
+    open: (url) => void openExternal(url),
+  });
 
   let html = $state<string | null>(null);
   let htmlFor = $state<string | null>(null);

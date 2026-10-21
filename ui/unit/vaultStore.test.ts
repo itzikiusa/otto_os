@@ -238,7 +238,14 @@ test('reopening a still-loading branch ignores the older directory response', as
   assert.equal(node.children[0].entry.path, 'folder/new.md');
 });
 
-test('transient busy 409 keeps the draft, raises no conflict banner and retries', async () => {
+/** Let the store's promise chains settle without advancing the (mocked) clock. */
+const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+
+test('transient busy 409 keeps the draft, raises no conflict banner and retries', async (t) => {
+  // Mocked clock (enabled BEFORE setup so the store's sandbox gets the fake
+  // setTimeout): the retry fires exactly at its 500 ms backoff, not "somewhere
+  // inside a 700 ms wall-clock wait" that a loaded runner can miss.
+  t.mock.timers.enable({apis: ['setTimeout']});
   let calls = 0;
   const v = setup({writeVaultNote: async (_ws: string, _id: number, body: {path: string; content: string}) => {
     calls += 1;
@@ -247,7 +254,9 @@ test('transient busy 409 keeps the draft, raises no conflict banner and retries'
   }});
   assert.equal(await v.saveNow(), false);
   assert.equal(v.conflict, false); assert.equal(v.draft, 'local edit'); assert.equal(v.dirty, true);
-  await new Promise((r) => setTimeout(r, 700));
+  t.mock.timers.tick(499); await settle();
+  assert.equal(calls, 1, 'no retry before the 500 ms backoff');
+  t.mock.timers.tick(1); await settle();
   assert.equal(calls, 2); assert.equal(v.dirty, false); assert.equal(v.conflict, false);
 });
 
@@ -302,11 +311,23 @@ test('S18-21: navigation blocked by a conflict says why', async () => {
   assert.match(warned[0], /Resolve the conflict on a\.md/);
 });
 
-test('S18-22: agent-staged text is never written as a recovery draft', async () => {
+test('S18-22: agent-staged text is never written as a recovery draft', async (t) => {
+  t.mock.timers.enable({apis: ['setTimeout']});
   const v = setup(); v.dirty = false; v.draft = v.note.raw;
+  // Positive control: under this clock a user's edit IS flushed once the 400 ms
+  // draft debounce elapses — so the negative check below cannot pass merely
+  // because the debounce had not fired yet.
+  v.onDraftChange('user typed');
+  t.mock.timers.tick(400);
+  assert.ok(stored.some(([, val]) => val.includes('user typed')), `debounced flush never ran: ${JSON.stringify(stored)}`);
+  // Back to a clean buffer (staging requires one), then stage an agent proposal.
+  v.onDraftChange(v.note.raw);
+  t.mock.timers.tick(400);
+  const before = stored.length;
   v.holdAutosave = true;
   v.onDraftChange('agent proposal');
-  await new Promise((r) => setTimeout(r, 450)); // past the 400 ms draft debounce
+  t.mock.timers.tick(400);
+  assert.equal(stored.length, before, `a held draft wrote to storage: ${JSON.stringify(stored.slice(before))}`);
   assert.ok(!stored.some(([, val]) => val.includes('agent proposal')), JSON.stringify(stored));
   v.holdAutosave = false;
 });

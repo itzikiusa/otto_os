@@ -307,7 +307,9 @@ The modal lists active (live, non-revoked) shares for the session via
 `GET /api/v1/sessions/{id}/shares`, each showing its `token_prefix`, label, role,
 and relative expiry.
 
-- **Revoke one** — `DELETE /api/v1/auth/shares/{share_id}` (204, idempotent).
+- **Revoke one** — `DELETE /api/v1/auth/shares/{share_id}` (204, idempotent; 404 for an
+  unknown id). Any link the modal lists can be revoked from it: the minter, the session
+  owner and a workspace Admin may all revoke it.
 - **Revoke all** — `POST /api/v1/auth/shares/revoke-all` (revokes every share the
   caller owns).
 
@@ -446,7 +448,7 @@ Authoritative contract: `docs/contracts/api.md` — *Share-link tokens* /
 |---|---|---|---|
 | `POST /api/v1/sessions/{id}/share` | session owner / ws admin | `CreateShareReq { role, ttl_secs?, label?, recipient_email?, duration_secs? }` | `CreateShareResp { token, url, info }` — **token shown once** |
 | `GET /api/v1/sessions/{id}/shares` | session owner / ws admin | — | `ListSharesResp { shares: ShareInfo[] }` (live, non-revoked) |
-| `DELETE /api/v1/auth/shares/{share_id}` | member (self-owned) | — | `204` — revokes + evicts; idempotent |
+| `DELETE /api/v1/auth/shares/{share_id}` | the link's minter, or the session owner / a workspace Admin | — | `204` — revokes + evicts; idempotent. `404` when no share has that id |
 | `POST /api/v1/auth/shares/revoke-all` | member (self-owned) | — | `204` — revokes all caller's shares + evicts |
 | `POST /api/v1/share/verify` | **public** (share token *is* the auth) | `VerifyShareReq { token, otp }` | `VerifyShareResp { verified: true }` (`401` bad/expired/reused; `429` throttled) |
 | `POST /api/v1/share/extend` | **public** (share token *is* the auth) | `ExtendShareReq { token }` | `{ "ok": true }` (`400` non-OTP/missing/revoked or no verified sender; `429` throttled) |

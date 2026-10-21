@@ -13,7 +13,7 @@
 // The pure helpers here are unit-tested (ui/unit/canvasFiles.test.ts, via
 // canvasFileRefs.ts + canvasFileCache.ts); the fetch/digest ones are thin wrappers.
 
-import { baseUrl, getToken } from '../../lib/api/client';
+import { authedText } from '../../lib/api/client';
 import { FileCache } from './canvasFileCache';
 import { refSha, type ExFile } from './canvasFileRefs';
 
@@ -21,13 +21,7 @@ export { FILE_REF_PREFIX, refSha, filesForSave, sha256Hex } from './canvasFileRe
 
 // One fetch per sha while a board uses it, bounded to 64 MB (LRU) and released
 // when the last board using it unmounts (the HTTP cache covers a reopen).
-const cache = new FileCache(async (sha) => {
-  const token = getToken();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1/canvas/files/${sha}`, { headers });
-  if (!resp.ok) throw new Error(`canvas file ${sha.slice(0, 8)}: ${resp.status}`);
-  return resp.text();
-});
+const cache = new FileCache((sha) => authedText(`/canvas/files/${sha}`));
 
 /** A file's data URL by sha for `owner` (authed; cached; a failure is not cached). */
 export function fetchFile(sha: string, owner: unknown): Promise<string> {

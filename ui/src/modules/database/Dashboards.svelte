@@ -90,6 +90,10 @@
   const VIZ: DbViz[] = ['table', 'number', 'line', 'bar', 'area', 'pie'];
   const needsAxes = $derived(wViz === 'line' || wViz === 'bar' || wViz === 'area');
   const resultCols = $derived(database.tab.result?.columns ?? []);
+  // A widget maps axes by column NAME, so the option set is the distinct names —
+  // a join result (`SELECT * … JOIN …`) repeats `id`, and a duplicate would
+  // also be a duplicate `{#each}` key, which throws and blanks the sheet.
+  const resultColNames = $derived([...new Set(resultCols.map((c) => c.name))]);
 
   async function saveWidget(): Promise<void> {
     if (!dashboard || !wTitle.trim() || !wStatement.trim()) return;
@@ -100,29 +104,35 @@
       category: wViz === 'pie' ? wX || undefined : undefined,
       value: wViz === 'number' ? wY || undefined : undefined,
     };
-    if (editing) {
-      // updateWidget swaps the store's widget object, which re-runs the tile's
-      // query via WidgetCard's $effect — no explicit refresh needed here.
-      await database.updateWidget(editing.id, {
+    try {
+      if (editing) {
+        // updateWidget swaps the store's widget object, which re-runs the tile's
+        // query via WidgetCard's $effect — no explicit refresh needed here. A
+        // rejected (write verb) or failed save returns null and has already
+        // toasted: keep the sheet open so the edit isn't lost.
+        const w = await database.updateWidget(editing.id, {
+          title: wTitle.trim(),
+          statement: wStatement.trim(),
+          viz: wViz,
+          mapping,
+        });
+        if (w) {
+          adding = false;
+          editing = null;
+        }
+        return;
+      }
+      const w = await database.createWidget({
         title: wTitle.trim(),
         statement: wStatement.trim(),
         viz: wViz,
         mapping,
+        dashboard_id: dashboard.id,
       });
+      if (w) adding = false;
+    } finally {
       saving = false;
-      adding = false;
-      editing = null;
-      return;
     }
-    const w = await database.createWidget({
-      title: wTitle.trim(),
-      statement: wStatement.trim(),
-      viz: wViz,
-      mapping,
-      dashboard_id: dashboard.id,
-    });
-    saving = false;
-    if (w) adding = false;
   }
 </script>
 
@@ -241,8 +251,8 @@
             <label for="w-x">{wViz === 'pie' ? 'Category' : 'X axis'}</label>
             <select id="w-x" class="input" bind:value={wX}>
               <option value="">(auto)</option>
-              {#if wX && !resultCols.some((c) => c.name === wX)}<option value={wX}>{wX}</option>{/if}
-              {#each resultCols as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+              {#if wX && !resultColNames.includes(wX)}<option value={wX}>{wX}</option>{/if}
+              {#each resultColNames as name (name)}<option value={name}>{name}</option>{/each}
             </select>
           </div>
         {/if}
@@ -250,8 +260,8 @@
           <label for="w-y">{wViz === 'number' ? 'Value' : wViz === 'pie' ? 'Value' : 'Y series'}</label>
           <select id="w-y" class="input" bind:value={wY}>
             <option value="">(auto)</option>
-            {#if wY && !resultCols.some((c) => c.name === wY)}<option value={wY}>{wY}</option>{/if}
-            {#each resultCols as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+            {#if wY && !resultColNames.includes(wY)}<option value={wY}>{wY}</option>{/if}
+            {#each resultColNames as name (name)}<option value={name}>{name}</option>{/each}
           </select>
         </div>
       </div>

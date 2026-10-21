@@ -4,7 +4,7 @@
 // themes it, the 3D artifacts it embeds, the images it shows).
 // Contract: docs/contracts/api.md § "Site Studio".
 
-import { api, ApiError, authedText, baseUrl, getToken } from '../../../lib/api/client';
+import { api, authedResponse, authedText } from '../../../lib/api/client';
 import * as design from '../../../lib/api/design';
 import type {
   DesignArtifact,
@@ -12,7 +12,6 @@ import type {
   DesignPublish,
   DesignSiteExportReq,
   DesignSiteLocalResp,
-  Problem,
 } from '../../../lib/api/types';
 import { buildTheme, type Theme } from './engine/theme';
 import type { EmbedInfo } from './engine/render';
@@ -21,20 +20,12 @@ const enc = encodeURIComponent;
 
 /** `POST …/export {target:"zip"}` → the archive as a Blob + its file name. */
 export async function exportZip(id: string, version?: string): Promise<{ blob: Blob; filename: string; publishId: string | null; seq: number | null }> {
-  const token = getToken();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
   const body: DesignSiteExportReq = { target: 'zip', ...(version ? { version } : {}) };
-  const resp = await fetch(`${baseUrl()}/api/v1/design/artifacts/${enc(id)}/export`, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  const resp = await authedResponse(`/design/artifacts/${enc(id)}/export`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    contentType: 'application/json',
+  });
   const cd = resp.headers.get('Content-Disposition') ?? '';
   const m = /filename="([^"]+)"/.exec(cd);
   const seqRaw = resp.headers.get('X-Design-Seq');

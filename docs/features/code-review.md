@@ -385,8 +385,8 @@ Stored in the `settings` table under key `pr_review`; read/written via:
 
 | Method & path | Auth | Body | Response |
 |---|---|---|---|
-| `GET /settings/pr-review` | root | — | `ReviewConfig` (stored, else default) |
-| `PUT /settings/pr-review` | root | `ReviewConfig` | the saved config |
+| `GET /settings/pr-review` | member (Git View) | — | `ReviewConfig` (stored, else default) |
+| `PUT /settings/pr-review` | root (person credential) | `ReviewConfig` | the saved config |
 
 > Editing happens **in the Configure-agents modal** inside the Review panel
 > (which calls these endpoints), not in a standalone settings page. `GET` is
@@ -444,8 +444,8 @@ under `/api/v1`.
 | `GET /reviews/{review_id}/findings` | ws viewer | — | `ReviewFindingRow[]` (fingerprinted, with state) |
 | `POST /reviews/{review_id}/findings/{fingerprint}/state` | ws editor | `{ state, fix_session_id? }` | updated `ReviewFindingRow` |
 | `GET /reviews/{review_id}/merge-readiness` | ws viewer | — | merge-readiness object (findings + CI + approvals + mergeable) |
-| `GET /settings/pr-review` | root | — | `ReviewConfig` |
-| `PUT /settings/pr-review` | root | `ReviewConfig` | saved config |
+| `GET /settings/pr-review` | member (Git View) | — | `ReviewConfig` |
+| `PUT /settings/pr-review` | root (person credential) | `ReviewConfig` | saved config |
 
 ### WebSocket event
 

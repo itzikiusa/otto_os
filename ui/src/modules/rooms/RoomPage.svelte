@@ -16,7 +16,7 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import { applyRoomEvent } from './room-state';
+  import { applyRoomEvent, hostRequests } from './room-state';
   import { RoomClient, joinRoom, type RoomConnection } from './room-client';
   import { recallRoom, rememberRoom, forgetRoom, roomInvite } from './room-access';
   import type { RoomSnapshot, RoomAction, RoomEvent, RoomInvite } from '../../lib/api/room-types';
@@ -39,6 +39,18 @@
   const origin = $derived(recallRoom(roomId)?.origin ?? location.origin);
   const narrowRoom = $derived(viewport.isPhone || viewport.isTablet);
   $effect(() => { peopleOpen = !narrowRoom; });
+  // Host-only: knocks and requests must reach the host on every layout, not only
+  // inside the (collapsed / hidden on narrow windows) People list.
+  const requests = $derived(hostRequests(room));
+  let announcement = $state('');
+  let announced = new Set<string>();
+  $effect(() => {
+    const items = requests.items;
+    const fresh = items.filter(item => !announced.has(item.key));
+    announced = new Set(items.map(item => item.key));
+    if (fresh.length) announcement = fresh.map(item => item.text).join(' ');
+  });
+  function reviewRequests() { tab = 'conversation'; peopleOpen = true; }
   function endLabel(): string {
     if (!finishing) return host ? 'End room…' : 'Leave room…';
     if (waitingForRecap) return 'Finishing recap…';
@@ -119,6 +131,8 @@
   }
 </script>
 <div class="room-page">
+  <!-- Always mounted so a screen reader hears each new knock or request once. -->
+  <div class="sr-only" aria-live="polite">{host ? announcement : ''}</div>
   <PageHeader title={room?.session_title ?? 'Session room'} subtitle={room ? `${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
     {#snippet actions()}{#if room?.admission === 'admitted'}
       {#if host}
@@ -135,18 +149,22 @@
         {#if error}<p role="alert">{error}</p>{/if}<button class="btn primary" disabled={joining || !name.trim()}>{joining ? 'Requesting entry…' : 'Request entry'}</button>
       </form></div>
     {:else if ended}<EmptyState variant="page" icon="people" title="Room closed" body={ended} />
-    {:else if !room}{#if error}<p class="error" role="alert">{error}</p>{/if}<EmptyState variant="page" icon="people" title={connection === 'connecting' ? 'Connecting to the room…' : 'Connection interrupted'} body="Terminal access is paused until your room connection is restored." actionLabel="Retry" onaction={() => client?.connect()} />
+    {:else if !room}{#if error}<p class="error" role="alert">{error}</p>{/if}
+      {#if connection === 'connecting'}<div role="status"><EmptyState variant="page" icon="people" title="Connecting to the room…" body="Joining the host’s session. This usually takes a few seconds." /></div>
+      {:else}<EmptyState variant="page" icon="people" tone="error" title="Connection interrupted" body="Terminal access is paused until your room connection is restored." actionLabel="Retry" onaction={() => client?.connect()} />{/if}
     {:else if room.admission === 'pending'}<EmptyState variant="page" icon="people" title="Waiting for the host" body="Your request has been sent. Terminal content, people and messages remain private until you are admitted." actionLabel="Cancel request" onaction={leave} />
     {:else}
-      {#if !connected}<div class="error" role="status">Connection interrupted. Terminal access is paused.<button class="btn small" onclick={() => client?.connect()}>Retry</button></div>{/if}
+      {#if connection === 'connecting'}<div class="room-status" role="status">Reconnecting… Terminal access is paused.</div>
+      {:else if !connected}<div class="error" role="status">Connection interrupted. Terminal access is paused.<button class="btn small" onclick={() => client?.connect()}>Retry</button></div>{/if}
       <div class="room-status" role="status"><span>{self?.role === 'host' ? 'Host' : self?.role === 'editor' ? 'May be granted control' : 'View only'} · {driver?.name ?? 'Host'} controls the terminal</span>
+        {#if host && requests.total}<span class="requests"><strong>{requests.summary}</strong><button class="btn small" onclick={reviewRequests}>Review</button></span>{/if}
         {#if host && !canType}<button class="btn small" onclick={() => send({type: 'grant_control', member_id: room!.member_id})}>Take back control</button>
         {:else if !host && canType}<button class="btn small" onclick={() => send({type: 'release_control'})}>Release control</button>
         {:else if self?.role === 'editor'}<button class="btn small" disabled={self.control_requested} onclick={() => send({type: 'request_control'})}>{self.control_requested ? 'Control requested' : 'Request control'}</button>{/if}
       </div>
       {#if error}<div class="error" role="alert">{error}<button class="btn small" onclick={() => error = ''}>Dismiss</button></div>{/if}
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />
-      <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} onclick={() => tab = 'conversation'}>People & chat</button></nav>
+      <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} aria-label={host && requests.total ? `People & chat, ${requests.total} ${requests.total === 1 ? 'request' : 'requests'}` : undefined} onclick={() => tab = 'conversation'}>People & chat{#if host && requests.total}<span class="count" aria-hidden="true">{requests.total}</span>{/if}</button></nav>
       <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} /><div class="terminal-pane">{#if room.session_id && client && connected}<Terminal sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} scrollback={PRIMARY_SCROLLBACK} preferDom />{/if}</div></main>
         <aside class:mobile-hidden={tab !== 'conversation'}>
           <details class="people" bind:open={peopleOpen}>
@@ -171,7 +189,9 @@
   .join-form { padding: 24px; max-width: 680px; overflow: auto; } h2 { font-size: var(--fs-l); } p { line-height: 1.5; }
   form, label { display: grid; gap: 8px; } form { gap: 16px; } form button { justify-self: start; } input { width: 100%; }
   .room-status, .error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: var(--fs-s); }
-  .room-status { background: var(--surface); } .error, [role='alert'] { color: var(--danger); }
+  .room-status { background: var(--surface); }
+  .requests { display: inline-flex; align-items: center; gap: 8px; color: var(--warning); }
+  .count { display: inline-block; margin-inline-start: 6px; min-width: 18px; padding-inline: 4px; border-radius: var(--radius-l); background: var(--warning-soft); color: var(--text); font-size: var(--fs-xs); } .error, [role='alert'] { color: var(--danger); }
   .room-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); }
   main { min-width: 0; min-height: 0; display: flex; flex-direction: column; } .terminal-pane { flex: 1; min-height: 160px; }
   aside { min-width: 0; min-height: 0; overflow: hidden; border-inline-start: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }

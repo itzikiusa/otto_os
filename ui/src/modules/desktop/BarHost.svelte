@@ -2,10 +2,11 @@
   // Host for the assistant bar panel (`#/bar`, the desktop shell's `otto-bar`
   // window: transparent, non-activating, native HUD vibrancy behind the page).
   //
-  // The bar itself is the shared FloatingBar.svelte (layout.md §7). It is
-  // resolved lazily through import.meta.glob so this route builds with or
-  // without it; until it exists, a minimal pill keeps ⌥Space useful (Esc
-  // hides, "Open Otto" jumps to the full window).
+  // The bar itself is the shared FloatingBar.svelte (layout.md §7), pulled in
+  // with a dynamic import so the main window's bundle doesn't carry it. If that
+  // chunk fails to load (an update replaced the assets under a long-lived
+  // window), the pill says so inline with Retry and "Open Otto" — Esc still
+  // hides it.
   //
   // Contract with FloatingBar (ui/src/lib/desktop.ts):
   //   • size the window with `bar.resize(contentHeight, {radius?})` — it grows
@@ -14,36 +15,37 @@
   //   • focus the input on `onDesktopEvent('otto://bar-shown', …)`;
   //   • hold-to-talk arrives as `otto://assistant-voice` `{pressed}`.
   import { onMount, type Component } from 'svelte';
-  import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { bar, onDesktopEvent, openInOtto, useGlassWindow } from '../../lib/desktop';
 
-  const candidates = import.meta.glob<{ default: Component }>(
-    '../../lib/components/FloatingBar.svelte',
-  );
-
   let Bar: Component | null = $state(null);
-  let resolved = $state(false);
-  let openBtn: HTMLButtonElement | undefined = $state();
+  let loading = $state(false);
+  let loadError: string | null = $state(null);
+  let pillEl: HTMLDivElement | undefined = $state();
+
+  async function load(): Promise<void> {
+    loading = true;
+    try {
+      Bar = (await import('../../lib/components/FloatingBar.svelte')).default as Component;
+      loadError = null;
+    } catch {
+      loadError = 'Otto may have updated while this window was open.';
+    } finally {
+      loading = false;
+    }
+  }
 
   onMount(() => {
     useGlassWindow();
-    const load = Object.values(candidates)[0];
-    if (load) {
-      void load()
-        .then((m) => (Bar = m.default))
-        .catch(() => {})
-        .finally(() => (resolved = true));
-    } else {
-      resolved = true;
-    }
+    void load();
   });
 
-  // Fallback pill only: size + focus + Esc. FloatingBar owns all of this.
+  // Error pill only: size + focus + Esc. FloatingBar owns all of this once loaded.
   $effect(() => {
-    if (!resolved || Bar) return;
+    if (!loadError || Bar) return;
     void bar.resize(56).catch(() => {});
     let unlisten: (() => void) | null = null;
-    void onDesktopEvent('otto://bar-shown', () => openBtn?.focus()).then((fn) => (unlisten = fn));
+    void onDesktopEvent('otto://bar-shown', () => pillEl?.querySelector('button')?.focus()).then((fn) => (unlisten = fn));
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') void bar.hide().catch(() => {});
     };
@@ -57,13 +59,13 @@
 
 {#if Bar}
   <Bar />
-{:else if resolved}
-  <div class="bar-fallback" role="dialog" aria-label="Otto assistant">
-    <Icon name="sparkle" size={16} />
-    <span class="msg">The assistant bar arrives with the next Otto update.</span>
-    <button class="btn small primary" bind:this={openBtn} onclick={() => void openInOtto().catch(() => {})}>
-      Open Otto
-    </button>
+{:else if loadError}
+  <div class="bar-fallback" role="dialog" aria-label="Otto assistant" bind:this={pillEl}>
+    <LoadState what="the assistant bar" error={loadError} empty variant="compact" {loading} onretry={() => void load()}>
+      {#snippet errorActions()}
+        <button class="btn small primary" onclick={() => void openInOtto().catch(() => {})}>Open Otto</button>
+      {/snippet}
+    </LoadState>
   </div>
 {/if}
 
@@ -85,16 +87,8 @@
       background: var(--bg-sidebar);
     }
   }
-  .bar-fallback :global(svg) {
-    color: var(--accent-text);
-    flex-shrink: 0;
-  }
-  .msg {
+  .bar-fallback > :global(*) {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-dim);
   }
 </style>

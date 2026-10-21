@@ -101,11 +101,23 @@
   // ── Polling ────────────────────────────────────────────────────────────────────
   let pollTimer: Poller | null = null;
   const POLL_INTERVAL_MS = 3000;
+  // Overall bound: lenses and the summarizer each time out server-side after
+  // 10 min, so 30 min of "running" means Otto can no longer tell — say so.
+  const POLL_MAX_MS = 30 * 60_000;
+  // Consecutive failed reads before the waiting state names the cause.
+  const POLL_FAIL_SHOWN = 2;
   let viewGeneration = 0;
   let readSequence = 0;
+  let pollStartedAt = 0;
+  let polling = $state(false);
+  let pollFailures = $state(0);
+  let lastPollError = $state<string | null>(null);
+  /** Why polling stopped for analysis `id` (403/404, or the overall bound). */
+  let pollStopped = $state<{ id: string; text: string } | null>(null);
 
   function clearPoll(): void {
     ++viewGeneration;
+    polling = false;
     if (pollTimer !== null) {
       pollTimer.stop();
       pollTimer = null;
@@ -119,6 +131,12 @@
   async function pollOnce(): Promise<void> {
     if (!activeId) return;
     const id = activeId;
+    if (polling && Date.now() - pollStartedAt > POLL_MAX_MS) {
+      const cause = pollFailures > 0 ? lastPollError : null;
+      clearPoll();
+      pollStopped = { id, text: cause ? `Couldn’t check for the analysis results: ${cause}` : 'Stopped checking after 30 minutes. The analysis may still be running.' };
+      return;
+    }
     const generation = viewGeneration;
     const request = ++readSequence;
     const owned = product.captureSelection();
@@ -126,15 +144,31 @@
       const detail = await product.getAnalysis(id);
       if (!owned() || generation !== viewGeneration || id !== activeId || request !== readSequence) return;
       activeDetail = detail;
+      pollFailures = 0;
+      lastPollError = null;
       if (isTerminal(detail.analysis.status)) clearPoll();
     } catch (e) {
-      console.error('[AnalysisTab] poll error', e);
+      if (!owned() || generation !== viewGeneration || id !== activeId || !polling) return;
+      pollFailures++;
+      lastPollError = loadErrorText(e);
+      // Gone (404) or no longer readable (403): re-polling can't recover — stop
+      // and say why, instead of leaving "running" on screen forever.
+      const status = (e as { status?: unknown } | null)?.status;
+      if (status === 403 || status === 404) {
+        clearPoll();
+        pollStopped = { id, text: `Couldn’t check progress: ${lastPollError}` };
+      }
     }
   }
 
   function startPolling(id: string): void {
     clearPoll();
     activeId = id;
+    polling = true;
+    pollStartedAt = Date.now();
+    pollFailures = 0;
+    lastPollError = null;
+    pollStopped = null;
     // Immediate first poll, then a settle-then-schedule chain: `product_changed`
     // (onSectionChange, below) settles it; 15 s safety net while events flow,
     // POLL_INTERVAL_MS while the event socket is down.
@@ -495,6 +529,19 @@
       {/if}
     </section>
 
+    <!-- ── Poll health: a failing or abandoned check says why, with a way back. -->
+    {#if pollStopped && pollStopped.id === activeId}
+      <div class="poll-note" role="status">
+        <Icon name="warning" size={12} /> {pollStopped.text}
+        <button class="btn small" onclick={() => { if (activeId) startPolling(activeId); }}>Check again</button>
+      </div>
+    {:else if polling && pollFailures >= POLL_FAIL_SHOWN && lastPollError}
+      <div class="poll-note" role="status">
+        <Icon name="warning" size={12} /> Couldn’t check progress: {lastPollError}
+        <button class="btn small" onclick={() => pollTimer?.now()}>Check again</button>
+      </div>
+    {/if}
+
     <!-- ── Active run area ──────────────────────────────────────────────────── -->
     {#if activeDetail}
 
@@ -820,6 +867,15 @@
 {/if}
 
 <style>
+  .poll-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--fs-s);
+    color: var(--warning);
+    overflow-wrap: anywhere;
+  }
   .muted {
     padding: 24px 0;
     font-size: var(--fs-m);

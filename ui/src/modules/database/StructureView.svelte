@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatBytes } from '../../lib/metric-format';
   import Badge from '../../lib/components/Badge.svelte';
   // Object structure: a columns table (name/type/nullable/default/key), primary
   // key, indexes, foreign keys, and a collapsible DDL block. For Redis keys /
@@ -153,7 +154,7 @@
     const optsStr = Object.keys(opts).length > 0 ? `, ${JSON.stringify(opts, null, 2)}` : '';
     return `db.${detail.name}.createIndex(${JSON.stringify(rec.key, null, 2)}${optsStr})`;
   }
-  async function copyText(text: string, label: string): Promise<void> {
+  async function copyNotify(text: string, label: string): Promise<void> {
     try {
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
@@ -617,17 +618,6 @@
 
   // ── Stats (Mongo collStats) ─────────────────────────────────────────────────
   const SIZE_KEYS = new Set(['size', 'storageSize', 'avgObjSize', 'totalIndexSize', 'totalSize']);
-  function fmtBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    const u = ['KB', 'MB', 'GB', 'TB'];
-    let v = n / 1024;
-    let i = 0;
-    while (v >= 1024 && i < u.length - 1) {
-      v /= 1024;
-      i++;
-    }
-    return `${v.toFixed(1)} ${u[i]}`;
-  }
   const mongoStats = $derived.by(() => {
     const s = (detail?.extra as Record<string, unknown> | null)?.stats as
       | Record<string, unknown>
@@ -635,7 +625,7 @@
     if (!s) return null;
     return Object.entries(s).map(
       ([k, v]) =>
-        [k, SIZE_KEYS.has(k) && typeof v === 'number' ? fmtBytes(v) : String(v)] as [string, string],
+        [k, SIZE_KEYS.has(k) && typeof v === 'number' ? formatBytes(v) : String(v)] as [string, string],
     );
   });
 </script>
@@ -851,11 +841,11 @@
                   <div class="idx-def">
                     <div class="idx-def-actions">
                       {#if snippet}
-                        <button class="copy-ddl" onclick={() => copyText(snippet, 'createIndex')}>
+                        <button class="copy-ddl" onclick={() => copyNotify(snippet, 'createIndex')}>
                           <Icon name="file" size={12} />Copy createIndex
                         </button>
                       {/if}
-                      <button class="copy-ddl" onclick={() => copyText(defText, 'definition')}>
+                      <button class="copy-ddl" onclick={() => copyNotify(defText, 'definition')}>
                         <Icon name="file" size={12} />Copy
                       </button>
                     </div>
@@ -1082,7 +1072,7 @@
         <div class="block-title">
           Details
           <span class="grow"></span>
-          <button class="copy-ddl" onclick={() => copyText(prettyExtra(detail.extra), 'details')}>
+          <button class="copy-ddl" onclick={() => copyNotify(prettyExtra(detail.extra), 'details')}>
             <Icon name="file" size={12} />Copy
           </button>
         </div>

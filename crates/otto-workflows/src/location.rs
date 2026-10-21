@@ -7,20 +7,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// Expand a leading `~` / `~/` the same way the engine does (`dirs::home_dir`).
-fn expand_tilde(p: &str) -> String {
-    if p == "~" {
-        return dirs::home_dir()
-            .map(|h| h.to_string_lossy().into_owned())
-            .unwrap_or_else(|| p.to_string());
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
-    }
-    p.to_string()
-}
+use otto_core::paths::expand_tilde;
 
 /// Whether a `repos[]` entry is written as a path (`/…`, `~…`, `./…`, `../…`)
 /// rather than a repo name or id.

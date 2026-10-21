@@ -1140,19 +1140,22 @@
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
           {@const on = database.activePane === null && database.selectedConnId === c.id}
+          {@const stText = st?.phase === 'connecting' ? 'Connecting…' : st?.phase === 'error' ? `Connection failed: ${st.error ?? 'unknown error'}` : st?.phase === 'idle' ? 'Not connected yet' : ''}
           <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
-            <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
+            <!-- The status glyphs below are decorative; the tab carries their state as its description. -->
+            <button class="conn-tab-main" role="tab" aria-selected={on} aria-describedby={stText ? `conn-st-${c.id}` : undefined} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
               <span class="conn-tab-name ellipsis">{c.name}</span>
               {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
             </button>
+            {#if stText}<span id="conn-st-{c.id}" class="sr-only">{stText}</span>{/if}
             {#if st?.phase === 'connecting'}
-              <span class="conn-tab-spin spinner" style="--spinner-size: 10px" title={database.isWarming(c.id) ? 'Connecting in the background… (right-click to stop)' : 'Connecting…'} data-testid="conn-tab-connecting"></span>
+              <span class="conn-tab-spin spinner" style="--spinner-size: 10px" aria-hidden="true" title={database.isWarming(c.id) ? 'Connecting in the background… (right-click to stop)' : 'Connecting…'} data-testid="conn-tab-connecting"></span>
             {:else if st?.phase === 'error'}
-              <span class="conn-tab-dot" title={st.error}></span>
+              <span class="conn-tab-dot" aria-hidden="true" title={st.error}></span>
             {:else if st?.phase === 'idle'}
-              <span class="conn-tab-idle" title="Not connected yet — opens on click" aria-label="Not connected yet" data-testid="conn-tab-idle"></span>
+              <span class="conn-tab-idle" aria-hidden="true" title="Not connected yet — opens on click" data-testid="conn-tab-idle"></span>
             {/if}
             <button class="conn-tab-more" onclick={(e) => connMenu(e, c)} aria-haspopup="menu" aria-label="More actions for {c.name}" title="More actions for {c.name}">
               <Icon name="more" size={12} />

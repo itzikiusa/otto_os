@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyTextOrThrow } from '../../../lib/clipboard';
   import { plural } from '../../../lib/plural';
   // Publish sheets for a site. Both targets stay on this Mac:
   //   zip   — the static site (HTML per page + ONE site.css whose first block is
@@ -123,7 +124,7 @@
   async function copyUrl(): Promise<void> {
     if (!local) return;
     try {
-      await navigator.clipboard.writeText(local.url);
+      await copyTextOrThrow(local.url);
       toasts.success('Preview address copied', onNetwork ? 'It needs your Otto sign-in and design access; devices on your network can reach it.' : 'It needs your Otto sign-in and only works on this Mac.');
     } catch {
       toasts.warn('Couldn’t copy the address', local.url);

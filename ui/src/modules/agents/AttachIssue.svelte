@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Modal to search and attach a Jira issue to a session.
-  import type { IssueSummary } from '../../lib/api/types';
+  // Modal to search and attach a tracker issue (Jira or Linear, per account) to a session.
+  import type { IssueProviderKind } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -15,16 +15,25 @@
 
   let attaching = $state(false);
 
-  async function attach(issue: { account_id: string; key: string; summary: string }): Promise<void> {
+  async function attach(issue: {
+    account_id: string;
+    provider: IssueProviderKind;
+    key: string;
+    summary: string;
+    url: string;
+    status: string;
+  }): Promise<void> {
     attaching = true;
     try {
+      // Store the tracker link + status the search returned, and the account's real provider,
+      // so the Info panel's "Open in browser" works and a Linear issue isn't labelled Jira.
       await ws.attachIssue(sessionId, {
-        provider: 'jira',
+        provider: issue.provider,
         account_id: issue.account_id,
         key: issue.key,
         summary: issue.summary,
-        url: '',
-        status: '',
+        url: issue.url,
+        status: issue.status,
       });
       toasts.success('Issue attached', `${issue.key}: ${issue.summary}`);
       onclose();
@@ -36,7 +45,7 @@
   }
 </script>
 
-<Modal title="Attach Jira issue" width={520} {onclose}>
+<Modal title="Attach issue" width={520} {onclose}>
   <JiraIssuePicker onpick={(iss) => { void attach(iss); }} />
 
   {#snippet footer()}

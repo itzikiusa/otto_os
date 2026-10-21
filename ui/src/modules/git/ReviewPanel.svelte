@@ -956,6 +956,9 @@
       providers: effectiveProviders,
       model: agent.model,
       prompt: agent.prompt,
+      // Keep the inlined Library skill (the default correctness/security agents carry one):
+      // dropping it would make the preset run the bare prompt without the skill's method.
+      ...(agent.skill ? { skill: agent.skill } : {}),
     };
     const existing = editPresets.findIndex((p) => p.name === copy.name);
     let next: ReviewAgentCfg[];
@@ -1162,10 +1165,10 @@
           <span class="chip rp-jira-chip">
             <Icon name="ticket" size={12} />
             <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
-            <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
+            <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove story {attachedIssue.key}" title="Remove story"><Icon name="x" size={12} /></button>
           </span>
         {:else}
-          <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
+          <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach story…</button>
         {/if}
       </div>
       <div class="rp-context-row">
@@ -1299,10 +1302,10 @@
         <span class="chip rp-jira-chip">
           <Icon name="ticket" size={12} />
           <span class="rp-jira-text" title="{attachedIssue.key} — {attachedIssue.summary}">{attachedIssue.key} — {attachedIssue.summary}</span>
-          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove Jira story {attachedIssue.key}" title="Remove Jira story"><Icon name="x" size={12} /></button>
+          <button class="rp-jira-remove" onclick={removeAttachedIssue} aria-label="Remove story {attachedIssue.key}" title="Remove story"><Icon name="x" size={12} /></button>
         </span>
       {:else}
-        <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach Jira story…</button>
+        <button class="btn small ghost" onclick={openJiraPicker}><Icon name="ticket" size={12} /> Attach story…</button>
       {/if}
     </div>
     <div class="rp-context-row">
@@ -1772,7 +1775,7 @@
 
 <!-- Jira story picker modal -->
 {#if showJiraPicker}
-  <Modal title="Attach Jira story" width={520} onclose={closeJiraPicker}>
+  <Modal title="Attach story" width={520} onclose={closeJiraPicker}>
     {#snippet children()}
       <JiraIssuePicker onpick={(iss) => { attachedIssue = iss; closeJiraPicker(); }} />
     {/snippet}

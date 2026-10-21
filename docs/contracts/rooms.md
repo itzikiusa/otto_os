@@ -6,8 +6,11 @@ RFC3339. State is ephemeral; daemon restart ends every room.
 
 ## HTTP
 
-Owner bearer authentication, Sessions feature edit permission, session ownership
-and workspace editor permission are required for management. Scoped, MCP,
+Owner bearer authentication, `Agents:Edit`, session ownership and workspace
+editor permission are required for management (`POST /sessions/{id}/room`,
+`DELETE /rooms/{id}`, `POST /rooms/{id}/invites`). Listing your own rooms
+(`GET /rooms`) needs only `Agents:View` — the level the Rooms module is shown at —
+because the handler returns rooms whose owner is the caller and nothing else. Scoped, MCP,
 managed-agent and impersonation credentials cannot manage rooms. Root does not
 bypass ownership. Only an already-live, local agent/shell session is eligible.
 No room route starts or resumes a process.

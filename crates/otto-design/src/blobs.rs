@@ -3,8 +3,10 @@
 //! Every committed version (and every thumbnail) is one immutable blob named by
 //! the lowercase hex SHA-256 of its bytes, so an unchanged save costs nothing
 //! and identical content across artifacts is stored once. Writes go to a
-//! sibling temp file and are `rename`d into place (atomic on one filesystem),
-//! so a crash never leaves a truncated blob under a valid name. Nothing here
+//! sibling temp file, are fsynced, and are `rename`d into place (atomic on one
+//! filesystem; the directory is fsynced after), so a crash never leaves a
+//! truncated blob under a valid name — and a torn one left by an older build
+//! is republished on the next `put` of its content. Nothing here
 //! deletes a blob on its own — removal is only the prune's GC step (opt-in
 //! admin route, or the scheduled retention job — see `retention`).
 //!
@@ -72,8 +74,19 @@ impl BlobStore {
     pub(crate) async fn put_hashed(&self, bytes: &[u8], sha: String) -> Result<String> {
         debug_assert_eq!(sha, sha256_hex(bytes));
         let dest = self.path(&sha)?;
-        if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
-            return Ok(sha);
+        // An existing name is identical content by definition — unless a
+        // power loss left it torn (empty / short). A size mismatch is treated
+        // as corrupt and republished, so the next save of the same content
+        // heals the blob instead of trusting it forever.
+        match tokio::fs::metadata(&dest).await {
+            Ok(m) if m.len() == bytes.len() as u64 => return Ok(sha),
+            Ok(m) => tracing::warn!(
+                blob = %sha,
+                on_disk = m.len(),
+                expected = bytes.len(),
+                "design blob is torn; republishing"
+            ),
+            Err(_) => {}
         }
         tokio::fs::create_dir_all(&self.root)
             .await
@@ -81,12 +94,19 @@ impl BlobStore {
         let tmp = self
             .root
             .join(format!(".tmp-{}-{}", &sha[..16], otto_core::new_id()));
-        tokio::fs::write(&tmp, bytes)
-            .await
-            .map_err(|e| Error::Internal(format!("write blob: {e}")))?;
+        // Durable before visible: fsync the bytes, rename, then fsync the
+        // directory so the new name survives a crash too. The version row
+        // that references this sha commits right after `put` returns.
+        if let Err(e) = write_synced(&tmp, bytes).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(Error::Internal(format!("write blob: {e}")));
+        }
         if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(Error::Internal(format!("publish blob: {e}")));
+        }
+        if let Ok(dir) = tokio::fs::File::open(&self.root).await {
+            let _ = dir.sync_all().await;
         }
         Ok(sha)
     }
@@ -236,9 +256,38 @@ impl BlobStore {
     }
 }
 
+/// Write `bytes` to `path` and fsync them before returning.
+async fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut f = tokio::fs::File::create(path).await?;
+    f.write_all(bytes).await?;
+    f.sync_all().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blob torn by a crash (right name, short content) is republished by
+    /// the next `put` of the same bytes instead of being trusted forever.
+    #[tokio::test]
+    async fn put_heals_a_torn_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path().join("blobs"));
+        let sha = sha256_hex(b"hello world");
+        tokio::fs::create_dir_all(store.root()).await.unwrap();
+        tokio::fs::write(store.root().join(&sha), b"hel")
+            .await
+            .unwrap();
+        assert_eq!(store.put(b"hello world").await.unwrap(), sha);
+        assert_eq!(store.get(&sha).await.unwrap(), b"hello world");
+        let leftovers = std::fs::read_dir(store.root())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
 
     #[tokio::test]
     async fn put_is_content_addressed_and_idempotent() {

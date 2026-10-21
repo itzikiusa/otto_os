@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::usage::{ClaudeLine, ParsedUsage};
+use crate::util::format_rfc3339_millis;
 
 /// Standard Antigravity conversation database subdirectories under `$HOME`,
 /// matching `ccusage v20.0.36` discovery order.
@@ -219,6 +220,35 @@ pub fn parse_agy_conversation_blobs(
     gen_metadata_blobs: &[(i64, Vec<u8>)],
     step_metadata_blobs: &[(i64, Vec<u8>)],
 ) -> Vec<AgyUsageRecord> {
+    parse_agy_conversation_blobs_from(
+        session_id,
+        trajectory_blobs,
+        gen_metadata_blobs,
+        step_metadata_blobs,
+        &mut AgyParseSeed::default(),
+    )
+}
+
+/// The conversation-wide "first seen" values a parse derives from EARLIER
+/// rows: the fallback model (first `gen_metadata` row naming one) and the
+/// fallback timestamp (first step carrying one). An incremental reader that
+/// only hands over rows past its high-water mark carries them across reads,
+/// so the newer rows resolve exactly as they would in a full parse.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgyParseSeed {
+    pub fallback_model: Option<String>,
+    pub first_step_ts_ms: Option<i64>,
+}
+
+/// [`parse_agy_conversation_blobs`] over a SUFFIX of the rows: `seed` holds
+/// what the earlier rows established and is updated with this batch.
+pub fn parse_agy_conversation_blobs_from(
+    session_id: &str,
+    trajectory_blobs: &[Vec<u8>],
+    gen_metadata_blobs: &[(i64, Vec<u8>)],
+    step_metadata_blobs: &[(i64, Vec<u8>)],
+    seed: &mut AgyParseSeed,
+) -> Vec<AgyUsageRecord> {
     if gen_metadata_blobs.is_empty() && step_metadata_blobs.is_empty() {
         return Vec::new();
     }
@@ -230,7 +260,7 @@ pub fn parse_agy_conversation_blobs(
     let workspace_cwd = traj_meta.workspace_cwd;
 
     let mut candidates: Vec<UsageCandidate> = Vec::new();
-    let mut fallback_model: Option<String> = None;
+    let mut fallback_model: Option<String> = seed.fallback_model.clone();
 
     // 1. Parse `gen_metadata` rows in ascending `idx` order.
     for (idx, blob) in gen_metadata_blobs {
@@ -242,7 +272,7 @@ pub fn parse_agy_conversation_blobs(
     }
 
     // 2. Parse `steps` metadata rows in ascending `idx` order.
-    let mut first_step_ts_ms: Option<i64> = None;
+    let mut first_step_ts_ms: Option<i64> = seed.first_step_ts_ms;
     for (idx, blob) in step_metadata_blobs {
         parse_step_metadata(
             *idx,
@@ -253,6 +283,8 @@ pub fn parse_agy_conversation_blobs(
         );
     }
 
+    seed.fallback_model.clone_from(&fallback_model);
+    seed.first_step_ts_ms = first_step_ts_ms;
     let fallback_ts_ms = first_step_ts_ms.or(traj_ts_ms);
 
     // 3. Merge/deduplicate candidates sharing any identifier key (`response_id`,
@@ -672,35 +704,6 @@ fn parse_proto_timestamp_ms(bytes: &[u8]) -> Option<i64> {
     let clamped_nanos = nanos.clamp(0, 999_999_999);
     secs.checked_mul(1000)
         .and_then(|ms| ms.checked_add(clamped_nanos / 1_000_000))
-}
-
-fn format_rfc3339_millis(ms: i64) -> String {
-    let secs = ms.div_euclid(1000);
-    let millis = ms.rem_euclid(1000) as u32;
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400) as u32;
-    let (year, month, day) = civil_from_days(days);
-    let hour = tod / 3600;
-    let minute = (tod % 3600) / 60;
-    let second = tod % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
-}
-
-/// Howard Hinnant's `civil_from_days`. `days` is Unix epoch days.
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let mut year = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    if month <= 2 {
-        year += 1;
-    }
-    (year as i32, month as u32, day as u32)
 }
 
 fn parse_chat_model_metadata(

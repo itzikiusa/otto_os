@@ -28,6 +28,7 @@ import { ui, isTauri } from './ui.svelte';
 import type { MenuItem } from '../contextmenu.svelte';
 import {
   SIDE_NS,
+  SIDE_PANE_KEY,
   SPLIT_DEFAULT,
   clampShare,
   embedSrc,
@@ -90,7 +91,7 @@ class SidePaneStore {
 
   constructor() {
     if (isEmbedded || isPopout || typeof window === 'undefined') return;
-    const saved = parseSaved(lsGet(winKey('otto_side_pane')));
+    const saved = parseSaved(lsGet(winKey(SIDE_PANE_KEY)));
     this.route = saved.route;
     this.share = saved.share;
     this.placement = saved.placement;
@@ -142,7 +143,7 @@ class SidePaneStore {
 
   private persist(): void {
     lsSet(
-      winKey('otto_side_pane'),
+      winKey(SIDE_PANE_KEY),
       serializeSaved({ route: this.route, share: this.share, placement: this.placement }),
     );
   }

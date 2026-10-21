@@ -19,7 +19,6 @@ import type {
   SwarmChannelTrigger,
   SwarmDetail,
   SwarmGoal,
-  SwarmGraph,
   SwarmMessage,
   SwarmPreset,
   SwarmProject,
@@ -41,12 +40,6 @@ type Lifecycle = 'start' | 'pause' | 'abort' | 'resume';
  *  falls off is the oldest. */
 const MAX_RUNS = 500;
 const MAX_POSTS = 300;
-/** Graph refresh: trailing debounce, but never starve past MAX_WAIT under a
- *  steady event stream. */
-const GRAPH_DEBOUNCE_MS = 800;
-const GRAPH_MAX_WAIT_MS = 3000;
-
-
 
 /** What a bulk task operation left undone: the tasks whose request failed and
  *  the first failure's reason (null when every task went through). */
@@ -89,11 +82,6 @@ class SwarmStore {
   presetsError: string | null = $state(null);
   presetsLoading = $state(false);
   private presetsInflight: Promise<void> | null = null;
-  graph: SwarmGraph | null = $state(null);
-  /** Last failed graph load. A refresh failure keeps the previous graph. */
-  graphError: string | null = $state(null);
-  graphLoading = $state(false);
-  private graphSeq = 0;
   /** Failed task-list loads by project id. A missing key means that list is trusted. */
   tasksError: Record<string, string> = $state({});
   /** In-flight goal loads by task id. Unset means that task is not loading. */
@@ -152,16 +140,11 @@ class SwarmStore {
    *  subscribing it to anything. */
   private swarmsFor: string | null = null;
   private swarmsInflight: Promise<void> | null = null;
-  private graphDebounce: ReturnType<typeof setTimeout> | null = null;
-  private graphFirstPending = 0;
   /** Mounted Swarm pages. While none is, live run/task/feed events for the
    *  open swarm are NOT applied (they used to be processed for the app's
    *  lifetime after one visit); the page resyncs when it mounts again. */
   private viewers = 0;
   private stale = false;
-  /** Mounted consumers of {@link graph}. `/graph` is fetched only for them. */
-  private graphViewers = 0;
-  private graphStale = true;
 
   /** Register a mounted Swarm page; call the returned fn on unmount. */
   watch(): () => void {
@@ -175,18 +158,6 @@ class SwarmStore {
       if (released) return;
       released = true;
       this.viewers = Math.max(0, this.viewers - 1);
-    };
-  }
-
-  /** Register a mounted graph view; loads the graph if it is stale. */
-  watchGraph(): () => void {
-    this.graphViewers += 1;
-    if (this.graphStale && this.detail) void this.loadGraph(this.detail.id);
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.graphViewers = Math.max(0, this.graphViewers - 1);
     };
   }
 
@@ -303,8 +274,6 @@ class SwarmStore {
       this.runsError = null;
       this.board = [];
       this.boardError = null;
-      this.graph = null;
-      this.graphError = null;
       this.tasksError = {};
       this.selectedProjectId = null;
       this.selectedSessionId = null;
@@ -326,7 +295,6 @@ class SwarmStore {
         this.loadAllTasks(),
         this.loadRuns({ swarm_id: sid }),
         this.loadBoard(),
-        this.maybeLoadGraph(sid),
       ]);
       if (!t.current || !this.detail) return;
       // Projects[0] can be an empty shell (e.g. a Discovery project) while all
@@ -348,7 +316,7 @@ class SwarmStore {
   /**
    * Refetch the open swarm's live surfaces after a WS reconnect: any
    * swarm_task/run events that fired while the socket was down are gone for
-   * good, so pull detail (counts), tasks, runs, board and graph fresh — in
+   * good, so pull detail (counts), tasks, runs and board fresh — in
    * place, without touching the user's project selection or the loading flag.
    */
   async resync(): Promise<void> {
@@ -367,7 +335,6 @@ class SwarmStore {
         this.loadAllTasks(),
         this.loadRuns({ swarm_id: sid }),
         this.loadBoard(),
-        this.maybeLoadGraph(sid),
       ]);
     } catch {
       /* best-effort */
@@ -397,8 +364,6 @@ class SwarmStore {
     this.runs = [];
     this.runsError = null;
     this.board = [];
-    this.graph = null;
-    this.graphError = null;
     this.tasksError = {};
     this.selectedProjectId = null;
     this.selectedSessionId = null;
@@ -674,20 +639,17 @@ class SwarmStore {
     const created = await api.post<SwarmTask>(`/swarm/projects/${pid}/tasks`, body);
     await this.loadTasks(pid);
     if (this.tasksError[pid]) this.insertTask(created);
-    await this.refreshGraph();
     return created;
   }
 
   async updateTask(task: SwarmTask, patch: Partial<SwarmTask>): Promise<void> {
     await api.patch<SwarmTask>(`/swarm/tasks/${task.id}`, patch);
     await this.loadTasks(task.project_id);
-    await this.refreshGraph();
   }
 
   async deleteTask(task: SwarmTask): Promise<void> {
     await api.del(`/swarm/tasks/${task.id}`);
     await this.loadTasks(task.project_id);
-    await this.refreshGraph();
   }
 
   /** Clear a project's board server-side: stops the project's in-flight runs,
@@ -701,7 +663,6 @@ class SwarmStore {
       this.loadBoard(),
       this.detail ? this.loadRuns({ swarm_id: this.detail.id }) : Promise.resolve(),
     ]);
-    await this.refreshGraph();
   }
 
   /** Apply the same patch to many tasks (bulk move/assign), reloading once.
@@ -712,7 +673,6 @@ class SwarmStore {
     if (!tasks.length) return { failed: [], error: null };
     const results = await Promise.allSettled(tasks.map((t) => api.patch<SwarmTask>(`/swarm/tasks/${t.id}`, patch)));
     await this.loadTasks(tasks[0].project_id);
-    await this.refreshGraph();
     return bulkResult(tasks, results);
   }
 
@@ -722,20 +682,7 @@ class SwarmStore {
     if (!tasks.length) return { failed: [], error: null };
     const results = await Promise.allSettled(tasks.map((t) => api.del(`/swarm/tasks/${t.id}`)));
     await this.loadTasks(tasks[0].project_id);
-    await this.refreshGraph();
     return bulkResult(tasks, results);
-  }
-
-  /** Reload the dependency graph for the open swarm (the Graph tab reads it, so
-   *  task mutations must refresh it or deleted/moved tasks linger in the graph). */
-  private async refreshGraph(): Promise<void> {
-    if (this.detail) await this.maybeLoadGraph(this.detail.id);
-  }
-
-  /** Load the graph only when a graph view is mounted; else mark it stale. */
-  private async maybeLoadGraph(sid: string): Promise<void> {
-    if (this.graphViewers > 0) await this.loadGraph(sid);
-    else this.graphStale = true;
   }
 
   async runTask(task: SwarmTask): Promise<void> {
@@ -821,29 +768,9 @@ class SwarmStore {
     // The WS echoes it back; no optimistic insert.
   }
 
-  // -- Graph ----------------------------------------------------------------
-
   /** Fetch one run in full (with `result`) — the list is `lite`. */
   async getRun(rid: string, signal?: AbortSignal): Promise<SwarmRun> {
     return api.get<SwarmRun>(`/swarm/runs/${rid}`, signal);
-  }
-
-  async loadGraph(sid: string): Promise<void> {
-    const seq = ++this.graphSeq;
-    this.graphStale = false;
-    this.graphLoading = true;
-    const current = () => this.detail?.id === sid && seq === this.graphSeq;
-    try {
-      const g = await api.get<SwarmGraph>(`/swarm/swarms/${sid}/graph`);
-      if (!current()) return;
-      this.graph = g;
-      this.graphError = null;
-    } catch (e) {
-      // Keep a graph we already have: a failed refresh is not "No work yet".
-      if (current()) this.graphError = loadErrorText(e);
-    } finally {
-      if (seq === this.graphSeq) this.graphLoading = false;
-    }
   }
 
   // -- Goals ----------------------------------------------------------------
@@ -1089,7 +1016,6 @@ class SwarmStore {
         const next = idx >= 0 ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
         this.tasksByProject[ev.project_id] = next;
         this.tasksByProject = { ...this.tasksByProject };
-        this.scheduleGraphRefresh();
         return true;
       }
       case 'swarm_project_cleared': {
@@ -1100,7 +1026,6 @@ class SwarmStore {
         this.tasksByProject[ev.project_id] = [];
         this.tasksByProject = { ...this.tasksByProject };
         void this.loadBoard();
-        this.scheduleGraphRefresh();
         return true;
       }
       case 'swarm_run_updated': {
@@ -1125,7 +1050,6 @@ class SwarmStore {
           if (next.length > MAX_RUNS) next.length = MAX_RUNS;
           this.runs = next;
         }
-        this.scheduleGraphRefresh();
         return true;
       }
       case 'swarm_message_posted': {
@@ -1165,23 +1089,6 @@ class SwarmStore {
     if (this.viewers > 0) return false;
     this.stale = true;
     return true;
-  }
-
-  private scheduleGraphRefresh(): void {
-    if (!this.detail) return;
-    if (this.graphViewers === 0) {
-      this.graphStale = true;
-      return;
-    }
-    const now = Date.now();
-    if (this.graphDebounce) clearTimeout(this.graphDebounce);
-    else this.graphFirstPending = now;
-    const sid = this.detail.id;
-    const wait = Math.max(0, Math.min(GRAPH_DEBOUNCE_MS, this.graphFirstPending + GRAPH_MAX_WAIT_MS - now));
-    this.graphDebounce = setTimeout(() => {
-      this.graphDebounce = null;
-      void this.loadGraph(sid);
-    }, wait);
   }
 
   private async refreshDetail(): Promise<void> {

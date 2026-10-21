@@ -39,82 +39,43 @@ use crate::state::ServerCtx;
 /// Per-run cancellation flags, keyed by eval id. A running eval checks its flag
 /// between/within agent steps; cancel/delete set it and kill live sessions.
 pub use otto_core::cancel::CancelRegistry;
+use otto_core::cancel::{CancelGuard, CancelRegistryExt};
 
-fn register_cancel(reg: &CancelRegistry, eval_id: &str) -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    if let Ok(mut map) = reg.lock() {
-        map.insert(eval_id.to_string(), Arc::clone(&flag));
-    }
-    flag
+/// Registry-key prefix of `eval_id`'s validation / per-iteration retries.
+fn retry_prefix(eval_id: &str) -> String {
+    format!("{eval_id}:retry:")
 }
 
 /// Whether a worker or a validation retry of `eval_id` is registered.
 fn has_live_work(reg: &CancelRegistry, eval_id: &str) -> bool {
-    let retries = format!("{eval_id}:retry:");
-    reg.lock()
-        .map(|map| {
-            map.keys()
-                .any(|key| key == eval_id || key.starts_with(&retries))
-        })
-        .unwrap_or(true)
+    reg.is_live(eval_id) || reg.is_live_prefix(&retry_prefix(eval_id))
 }
 
-fn signal_cancel(reg: &CancelRegistry, eval_id: &str) {
-    if let Ok(map) = reg.lock() {
-        let retries = format!("{eval_id}:retry:");
-        for (key, flag) in map.iter() {
-            if key == eval_id || key.starts_with(&retries) {
-                flag.store(true, Ordering::SeqCst);
-            }
-        }
-    }
+/// Trip a run's worker flag and every one of its retries' flags (skill evals
+/// and skill reviews share the `{id}` / `{id}:retry:{slot}` key scheme).
+pub(crate) fn signal_cancel(reg: &CancelRegistry, eval_id: &str) {
+    reg.signal(eval_id);
+    reg.signal_prefix(&retry_prefix(eval_id));
 }
 
 /// One retry per slot, registered before asynchronous preparation. Drop only
-/// removes this attempt, including on request errors or task cancellation.
+/// removes this attempt (the shared [`CancelGuard`] rule), including on
+/// request errors or task cancellation.
 pub(crate) struct RetryLease {
-    registry: CancelRegistry,
-    key: String,
+    _guard: CancelGuard,
     pub(crate) flag: Arc<AtomicBool>,
 }
 
 impl RetryLease {
     pub(crate) fn claim(registry: &CancelRegistry, run: &str, slot: &str) -> Result<Self> {
-        let key = format!("{run}:retry:{slot}");
-        let flag = Arc::new(AtomicBool::new(false));
-        let mut map = registry
-            .lock()
-            .map_err(|_| Error::Internal("retry registry unavailable".into()))?;
-        if map.contains_key(&key) {
-            return Err(Error::Conflict(
-                "this agent retry is already running".into(),
-            ));
-        }
-        map.insert(key.clone(), Arc::clone(&flag));
+        let guard = registry
+            .claim(&format!("{}{slot}", retry_prefix(run)))
+            .ok_or_else(|| Error::Conflict("this agent retry is already running".into()))?;
+        let flag = Arc::clone(guard.flag());
         Ok(Self {
-            registry: Arc::clone(registry),
-            key,
+            _guard: guard,
             flag,
         })
-    }
-}
-
-impl Drop for RetryLease {
-    fn drop(&mut self) {
-        if let Ok(mut map) = self.registry.lock() {
-            if map
-                .get(&self.key)
-                .is_some_and(|flag| Arc::ptr_eq(flag, &self.flag))
-            {
-                map.remove(&self.key);
-            }
-        }
-    }
-}
-
-fn unregister_cancel(reg: &CancelRegistry, eval_id: &str) {
-    if let Ok(mut map) = reg.lock() {
-        map.remove(eval_id);
     }
 }
 
@@ -1218,10 +1179,11 @@ async fn run_skill_eval(
     ws: Workspace,
     user: User,
     req: StartSkillEvalReq,
-    cancel: Arc<AtomicBool>,
+    registration: CancelGuard,
 ) {
+    let cancel = Arc::clone(registration.flag());
     let result = run_skill_eval_core(&ctx, &eval_id, &ws, &user, &req, &cancel).await;
-    unregister_cancel(&ctx.skill_eval_cancels, &eval_id);
+    drop(registration);
 
     let cancelled = is_cancelled(&cancel);
     let (status, error): (SkillEvalStatus, Option<String>) = if cancelled {
@@ -2274,7 +2236,7 @@ pub(crate) async fn launch_eval(
 
     let ctx_bg = ctx.clone();
     let eval_id = eval.id.clone();
-    let cancel = register_cancel(&ctx.skill_eval_cancels, &eval_id);
+    let cancel = ctx.skill_eval_cancels.register(&eval_id);
     tokio::spawn(async move {
         run_skill_eval(ctx_bg, eval_id, ws, run_user, req, cancel).await;
     });
@@ -3419,11 +3381,11 @@ mod tests {
         assert!(!is_cancelled(&other.flag));
         // A replaced registry entry must survive an older attempt dropping.
         let replacement = Arc::new(AtomicBool::new(false));
+        let key = "eval:retry:iteration:0".to_string();
         registry
             .lock()
             .unwrap()
-            .insert(first.key.clone(), replacement.clone());
-        let key = first.key.clone();
+            .insert(key.clone(), replacement.clone());
         drop(first);
         assert!(Arc::ptr_eq(
             registry.lock().unwrap().get(&key).unwrap(),

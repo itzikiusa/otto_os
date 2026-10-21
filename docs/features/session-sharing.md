@@ -141,7 +141,7 @@ Authoritative: `docs/contracts/api.md` — *Share-link tokens* / *Email-OTP gate
 |---|---|---|
 | `POST /api/v1/sessions/{id}/share` | session owner / ws admin | Mint a link → `{ token, url, info }` (**token shown once**). |
 | `GET /api/v1/sessions/{id}/shares` | session owner / ws admin | List live shares for the session. |
-| `DELETE /api/v1/auth/shares/{share_id}` | member (self-owned) | Revoke one (204, idempotent, evicts). |
+| `DELETE /api/v1/auth/shares/{share_id}` | the link's minter, or the session owner / a workspace Admin | Revoke one (204, idempotent, evicts; 404 for an unknown id). |
 | `POST /api/v1/auth/shares/revoke-all` | member (self-owned) | Revoke all your shares (evicts). |
 | `POST /api/v1/share/verify` | **public** (token *is* the auth) | Redeem the 6-digit OTP (`401` bad, `429` throttled). |
 | `POST /api/v1/share/extend` | **public** (token *is* the auth) | Re-send a fresh code to the locked recipient; open a new ≤12h window. |

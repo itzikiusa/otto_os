@@ -207,6 +207,15 @@
     }, 50);
   }
 
+  /** Close the side column from its own ✕ and hand focus back to the toolbar
+   *  toggle that opens it — the ✕ unmounts with the column, which otherwise
+   *  dropped keyboard focus to <body> (WCAG 2.4.3). */
+  function closeSidePanel(kind: 'history' | 'placeholders'): void {
+    if (workbench.panel === kind) workbench.setPanel(kind);
+    const toggle = document.querySelector<HTMLElement>(`[data-testid="wb-${kind}-toggle"]`);
+    if (toggle?.isConnected && toggle.getClientRects().length > 0) toggle.focus();
+  }
+
   function open(id: string): void {
     workbench.openDoc(id);
     mobilePane = 'editor';
@@ -610,7 +619,7 @@
                 {#if wsId}
                   <SendToButton ws={wsId} {doc} content={active.buffer} {lang} {values} />
                 {/if}
-                <span class="wb-save" class:err={!!active.saveError} class:dirty={active.buffer !== active.saved} data-testid="wb-save-state" aria-live="polite">
+                <span class="wb-save" class:err={!!active.saveError} class:dirty={active.buffer !== active.saved} data-testid="wb-save-state">
                   {saveLabel()}
                   {#if active.saveError}
                     <button class="btn small" onclick={() => void workbench.save(active.id, false)} title={active.saveError}>Retry</button>
@@ -634,7 +643,13 @@
                 </div>
               {/if}
               {#if issue}
-                <div class="wb-issue" role="alert" data-testid="wb-issue">
+                <!-- Live validation re-runs 400 ms after every keystroke, so it is
+                     plain text (an assertive alert read each intermediate parse
+                     error over the user's typing). Only an explicit Format's
+                     result is announced, politely. The save state is not a live
+                     region either: it cycles on every 800 ms autosave; a save
+                     FAILURE is announced by .wb-inline-err above. -->
+                <div class="wb-issue" role={issueFromFormat ? 'status' : undefined} data-testid="wb-issue">
                   <Icon name="warning" size={13} />
                   {#if issue.line}
                     <button class="wb-issue-pos" onclick={jumpToIssue} title="Go to the error">Line {issue.line}{issue.col ? `:${issue.col}` : ''}</button>
@@ -680,13 +695,13 @@
                   rev={doc.rev}
                   current={active?.buffer ?? ''}
                   onrestored={(d) => workbench.applyDoc(d)}
-                  onclose={() => workbench.setPanel('history')}
+                  onclose={() => closeSidePanel('history')}
                 />
               {:else}
                 <div class="wb-side-scroll">
                   <div class="wb-side-head">
                     <h3>Placeholders</h3>
-                    <button class="icon-btn" onclick={() => workbench.setPanel('placeholders')} aria-label="Close placeholders" title="Close placeholders">
+                    <button class="icon-btn" onclick={() => closeSidePanel('placeholders')} aria-label="Close placeholders" title="Close placeholders">
                       <Icon name="x" size={12} />
                     </button>
                   </div>

@@ -124,6 +124,21 @@
       if (my === searchSeq) hits = [];
     }
   }
+  // The result list is one Tab stop (roving tabindex): ↑/↓/Home/End move
+  // focus and the pick together, like the Outputs panel's artifact list.
+  const pickedIndex = $derived(hits.findIndex((h) => h.artifact.id === picked?.id));
+  function onHitKey(e: KeyboardEvent, index: number): void {
+    let next: number;
+    if (e.key === 'ArrowDown') next = Math.min(index + 1, hits.length - 1);
+    else if (e.key === 'ArrowUp') next = Math.max(index - 1, 0);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = hits.length - 1;
+    else return;
+    e.preventDefault();
+    const row = e.currentTarget as HTMLButtonElement;
+    row.closest('ul')?.querySelectorAll<HTMLButtonElement>('[role="option"]')[next]?.focus();
+    picked = hits[next].artifact;
+  }
   let t: ReturnType<typeof setTimeout> | null = null;
   function onQuery(): void {
     if (t) clearTimeout(t);
@@ -267,9 +282,11 @@
           <label for="dh-link-q">Find a design</label>
           <input dir="auto" id="dh-link-q" class="input" bind:value={q} oninput={onQuery} placeholder="Tier card" data-testid="design-link-search" />
           <ul class="pick" role="listbox" aria-label="Designs">
-            {#each hits as h (h.artifact.id)}
-              <li>
+            {#each hits as h, index (h.artifact.id)}
+              <li role="none">
                 <button type="button" role="option" aria-selected={picked?.id === h.artifact.id} class:on={picked?.id === h.artifact.id}
+                  tabindex={index === (pickedIndex >= 0 ? pickedIndex : 0) ? 0 : -1}
+                  onkeydown={(e) => onHitKey(e, index)}
                   onclick={() => (picked = h.artifact)}>
                   <StudioBadge studio={h.artifact.studio} />
                   <span class="name">{h.artifact.title}</span>
@@ -277,7 +294,7 @@
                 </button>
               </li>
             {:else}
-              <li class="dim">No designs match.</li>
+              <li class="dim" role="option" aria-disabled="true" aria-selected="false">No designs match.</li>
             {/each}
           </ul>
         </div>

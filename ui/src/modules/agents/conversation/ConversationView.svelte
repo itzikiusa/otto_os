@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { Repo } from '../../../lib/api/types';
+  import { appLive } from '../../../lib/live';
   /** Exactly one of `sessionId` / `transcriptPath`; the latter reads the
    *  workspace history route (read-only, `on_disk` entries). */
   export interface ConversationViewProps {
@@ -12,7 +13,15 @@
   }
   // Workspace repos (for `#123` → the GitHub PR / issue URL), fetched once per
   // workspace per app run — a light GET, never the git store's heavier load.
+  // A FAILED lookup is not cached (see the effect), and an events reconnect /
+  // resync drops the cache and bumps `reposEpoch` so open views refetch —
+  // repos added meanwhile, or a lookup that failed during a daemon restart.
   const reposByWs = new Map<string, Promise<Repo[]>>();
+  let reposEpoch = $state(0);
+  appLive.onResync(() => {
+    reposByWs.clear();
+    reposEpoch += 1;
+  });
 </script>
 
 <script lang="ts">
@@ -273,10 +282,19 @@
   let repos = $state<Repo[]>([]);
   $effect(() => {
     const id = workspaceId;
+    void reposEpoch;
     if (!id) return;
     let p = reposByWs.get(id);
     if (!p) {
-      p = api.get<Repo[]>(`/workspaces/${encodeURIComponent(id)}/repos`).catch(() => [] as Repo[]);
+      const fetched: Promise<Repo[]> = api
+        .get<Repo[]>(`/workspaces/${encodeURIComponent(id)}/repos`)
+        .catch(() => {
+          // Best-effort (only `#123` links need it): render without links now,
+          // but never memoize the failure — the next view retries.
+          if (reposByWs.get(id) === fetched) reposByWs.delete(id);
+          return [] as Repo[];
+        });
+      p = fetched;
       reposByWs.set(id, p);
     }
     let alive = true;

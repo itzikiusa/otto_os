@@ -550,6 +550,19 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
     Ok(pr)
 }
 
+/// Untracked runtime files the workflow auto-commit excludes and that never
+/// belong to diff evidence: Otto's launcher artifacts (every provider's — an
+/// agy run worktree always holds `.agents/mcp_config.json`, which made Open PR
+/// permanently unavailable), `.env*` and `.DS_Store`. Tracked edits to the
+/// same names still block publication.
+fn is_untracked_runtime_file(kind: &str, path: &str) -> bool {
+    kind == "untracked"
+        && (otto_core::paths::LAUNCHER_ARTIFACTS.contains(&path)
+            || path == ".env"
+            || path.starts_with(".env.")
+            || path.rsplit('/').next() == Some(".DS_Store"))
+}
+
 /// Publication cannot add or substitute code after the captured proof revision.
 async fn check_proof_revision(ctx: &ServerCtx, run: &OttoRun) -> Result<(String, String)> {
     let conflict = || {
@@ -559,15 +572,10 @@ async fn check_proof_revision(ctx: &ServerCtx, run: &OttoRun) -> Result<(String,
     let pack_id = run.proof_pack_id.as_deref().ok_or_else(conflict)?;
     let git = otto_git::LocalGit::new(cwd);
     let status = git.status().await?;
-    // These untracked runtime files were excluded from the old auto-commit and
-    // never belong to diff evidence. Tracked edits to the same names still block.
-    let changes = status.changes.iter().any(|change| {
-        !(change.kind == "untracked"
-            && (change.path == ".mcp.json"
-                || change.path == ".env"
-                || change.path.starts_with(".env.")
-                || change.path.rsplit('/').next() == Some(".DS_Store")))
-    });
+    let changes = status
+        .changes
+        .iter()
+        .any(|change| !is_untracked_runtime_file(&change.kind, &change.path));
     if status.branch == "HEAD"
         || changes
         || status.untracked_truncated
@@ -664,6 +672,75 @@ mod tests {
         assert_ne!(status(other_run.id).await, SessionStatus::Exited);
         assert_ne!(status(workflow.id).await, SessionStatus::Exited);
         assert_ne!(status(interactive.id).await, SessionStatus::Exited);
+    }
+
+    /// Every provider's launcher file is ignored while untracked (an agy run
+    /// worktree always has `.agents/mcp_config.json`), but a TRACKED edit to
+    /// the same path, or any other untracked file, still blocks the PR.
+    #[test]
+    fn proof_gate_ignores_only_untracked_launcher_and_runtime_files() {
+        for path in [
+            ".mcp.json",
+            ".agents/mcp_config.json",
+            ".grok/config.toml",
+            ".env",
+            ".env.local",
+            "src/.DS_Store",
+        ] {
+            assert!(is_untracked_runtime_file("untracked", path), "{path}");
+            assert!(!is_untracked_runtime_file("modified", path), "{path}");
+        }
+        for path in [
+            ".agents/other.json",
+            "app.txt",
+            "x/.mcp.json",
+            ".grok/notes.md",
+        ] {
+            assert!(!is_untracked_runtime_file("untracked", path), "{path}");
+        }
+    }
+
+    /// End to end on a real repo: an untracked agy launcher file leaves the
+    /// worktree publishable; a tracked edit to it does not.
+    #[tokio::test]
+    async fn untracked_agy_launcher_file_does_not_block_proof_but_a_tracked_edit_does() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path();
+        let git = otto_git::LocalGit::new(repo);
+        // Synchronous fixture setup; never called by production handlers.
+        #[allow(clippy::disallowed_methods)]
+        let sh = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        sh(&["init", "-q"]);
+        sh(&["config", "user.name", "Fixture"]);
+        sh(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join("app.txt"), "x\n").unwrap();
+        sh(&["add", "app.txt"]);
+        sh(&["commit", "-qm", "init"]);
+        std::fs::create_dir_all(repo.join(".agents")).unwrap();
+        std::fs::write(repo.join(".agents/mcp_config.json"), "{}").unwrap();
+        let blocks = |status: &otto_core::api::RepoStatusResp| {
+            status
+                .changes
+                .iter()
+                .any(|c| !is_untracked_runtime_file(&c.kind, &c.path))
+        };
+        assert!(!blocks(&git.status().await.unwrap()));
+        sh(&["add", "-f", ".agents/mcp_config.json"]);
+        sh(&["commit", "-qm", "track it"]);
+        std::fs::write(repo.join(".agents/mcp_config.json"), "{\"x\":1}").unwrap();
+        assert!(blocks(&git.status().await.unwrap()));
     }
 }
 

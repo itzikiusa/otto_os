@@ -583,9 +583,10 @@ every member with `viewer`+ on the event's `workspace_id` (root receives all);
 `assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
 `notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
-`mcp_approval_changed`) reach every authenticated client. There are 79
-variants (the sections below cover them; each `## …`/`### …` heading is one
-feature family). `ui/unit/eventContract.test.ts` checks every variant's tag is
+`mcp_approval_changed`) reach every authenticated client. The sections below
+cover every variant (80 as of this writing — `Event::type_name()` in
+`crates/otto-core/src/event.rs` is the authoritative list; each `## …`/`### …`
+heading is one feature family). `ui/unit/eventContract.test.ts` checks every variant's tag is
 documented here and that its fields match the `OttoEvent` union in
 `ui/src/lib/api/types.ts`.
 

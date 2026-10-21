@@ -26,11 +26,6 @@ export function fetchSlashCommands(sessionId: string): Promise<SlashCommand[]> {
   return api.get<SlashCommand[]>(`/sessions/${encodeURIComponent(sessionId)}/slash-commands`);
 }
 
-/** Keep an existing live tail armed without resuming a dormant session. */
-export function touchTranscript(sessionId: string): Promise<void> {
-  return api.bg.post<void>(`/sessions/${encodeURIComponent(sessionId)}/transcript/touch?view=true`, {});
-}
-
 export function submitPrompt(sessionId: string, text: string): Promise<void> {
   return api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/input`, { text, submit: true });
 }

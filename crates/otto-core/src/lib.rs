@@ -6,6 +6,7 @@
 pub mod access;
 pub mod api;
 pub mod auth;
+pub mod aws_env;
 pub mod cadence;
 pub mod cancel;
 pub mod cancel_signal;

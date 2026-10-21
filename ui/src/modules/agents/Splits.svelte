@@ -166,7 +166,6 @@
         class:active={broadcastMode}
         onclick={() => { broadcastMode = !broadcastMode; }}
         title={broadcastMode ? 'Exit broadcast mode (Esc)' : 'Type once, send to every visible session'}
-        aria-pressed={broadcastMode}
       ><Icon name="send" size={12} />{broadcastMode ? 'Exit broadcast' : 'Broadcast'}</button>
       {#if broadcastMode}
         <input dir="auto"

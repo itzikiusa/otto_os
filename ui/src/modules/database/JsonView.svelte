@@ -23,7 +23,7 @@
     setExpansionMode,
     type ExpansionState,
   } from './expansion-plan';
-  import { ALT_BATCH, cellStr, copyText, prettyJson } from './results-format';
+  import { ALT_BATCH, cellStr, copyWithToast, prettyJson } from './results-format';
   import { LineIndex, revealSteps, type FindTop, type RevealState } from './json-find';
 
   interface Props {
@@ -238,7 +238,7 @@
         {#if canEdit}
           <button class="jrec-copy" title="Edit this document (opens a review before running)" aria-label="Edit document" onclick={() => flow.openDocEditor(idx)}><Icon name="edit" size={12} /></button>
         {/if}
-        <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={12} /></button>
+        <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyWithToast(prettyJson(obj))}><Icon name="file" size={12} /></button>
         {#if !mini}
           <button class="jrec-copy jrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}><Icon name="more" size={14} /></button>
         {/if}

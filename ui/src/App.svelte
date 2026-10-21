@@ -2,9 +2,11 @@
   import { untrack } from 'svelte';
   // Boot flow: GET /meta → onboarding wizard | login | main shell.
   import Toasts from './lib/components/Toasts.svelte';
+  import LoadState from './lib/components/LoadState.svelte';
   import BarHost from './modules/desktop/BarHost.svelte';
   import TrayPage from './modules/desktop/TrayPage.svelte';
   import { auth } from './lib/stores/auth.svelte';
+  import { appLive } from './lib/live';
   import { router } from './lib/router.svelte';
   import { ui } from './lib/stores/ui.svelte';
   import { isEmbedded } from './lib/desktop';
@@ -80,6 +82,23 @@
     const t = setTimeout(() => (offlineLong = true), OFFLINE_GIVE_UP_MS);
     return () => clearTimeout(t);
   });
+  // A failed `/auth/capabilities` read is retried with backoff inside the
+  // store; a (re)connected events socket — the daemon answers again, maybe a
+  // restarted one — retries at once (error-handling-1-05).
+  $effect(() => appLive.onConnection((up) => {
+    if (up) auth.noteConnected();
+  }));
+  let capsRetrying = $state(false);
+  async function retryCapabilities(): Promise<void> {
+    if (capsRetrying) return;
+    capsRetrying = true;
+    try {
+      await auth.retryCapabilities();
+    } finally {
+      capsRetrying = false;
+    }
+  }
+
   // "Retry now" is inert while its own attempt is in flight (the 2 s poll
   // already dedupes inside auth.boot, but the button gave no feedback).
   let retrying = $state(false);
@@ -145,6 +164,13 @@
   {#await hostRoom()}{@render chunkWait()}{:then m}{#key router.parts[1]}<m.default roomId={router.parts[1] ?? ''} />{/key}{:catch}{@render chunkError()}{/await}
 {:else}
   {#await shell()}{@render chunkWait()}{:then m}<m.default />{:catch}{@render chunkError()}{/await}
+  {#if auth.capabilitiesError && !auth.isRoot}
+    <!-- Root never depends on the map; anyone else would otherwise see a
+         silently all-deny shell. -->
+    <div class="caps-banner">
+      <LoadState what="your permissions" variant="compact" empty error="Some pages may be hidden." loading={capsRetrying} onretry={retryCapabilities} />
+    </div>
+  {/if}
 {/if}
 
 {#snippet chunkWait()}
@@ -183,6 +209,29 @@
   .boot-sub {
     font-size: var(--fs-m);
     color: var(--text-dim);
+  }
+  .caps-banner {
+    position: fixed;
+    inset-block-start: 8px;
+    inset-inline: 16px;
+    margin-inline: auto;
+    max-width: 560px;
+    z-index: var(--z-toast);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--warning);
+    border-radius: var(--radius-m);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-s);
+    box-shadow: var(--shadow-card);
+  }
+  .caps-banner > :global(*) {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .boot-hint {
     max-width: 420px;

@@ -279,10 +279,6 @@ export interface UsageBudgetStatus {
   rows: BudgetStatusRow[];
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 /** Maximum time between background metrics refreshes driven by `applyMetricsTick`
  *  (capped poll fallback). Even if WS events come faster, we only re-fetch once
  *  per this window. */
@@ -446,7 +442,7 @@ class UsageStore {
       toasts.success('Budgets saved');
       return true;
     } catch (e) {
-      toasts.error('Couldn’t save budgets', errMsg(e));
+      toasts.error('Couldn’t save budgets', loadErrorText(e));
       return false;
     } finally {
       // Ignore refreshes begun before or during this mutation.
@@ -674,7 +670,7 @@ class UsageStore {
         toasts.error('Install finished but engine is not available', 'Check daemon logs.');
       }
     } catch (e) {
-      toasts.error('Couldn’t install', errMsg(e));
+      toasts.error('Couldn’t install', loadErrorText(e));
     } finally {
       this.installing = false;
     }
@@ -687,7 +683,7 @@ class UsageStore {
       toasts.success('Usage settings saved');
       await this.loadAll();
     } catch (e) {
-      toasts.error('Couldn’t save', errMsg(e));
+      toasts.error('Couldn’t save', loadErrorText(e));
     } finally {
       this.saving = false;
     }

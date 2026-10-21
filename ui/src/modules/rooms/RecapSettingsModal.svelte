@@ -10,7 +10,7 @@
   let capability = $state<RecapCapabilities | null>(null), loading = $state(true), busy = $state(false), error = $state(''), loaded = $state(false), loadError = $state('');
   onMount(() => { void load(); });
   async function load() { loading = true; error = ''; loadError = ''; try { [config, capability] = await Promise.all([recapRequest<RecapEngineSettings>('/room-recap-settings'), recapRequest<RecapCapabilities>('/room-recap-capabilities')]); loaded = true; } catch (e) { loadError = loadErrorText(e); if (loaded) error = loadError; } finally { loading = false; } }
-  async function save() { busy = true; error = ''; try { await recapRequest('/room-recap-settings', config, undefined, 'PUT'); await load(); } catch (e) { error = e instanceof Error ? e.message : 'Could not save settings.'; } finally { busy = false; } }
+  async function save() { busy = true; error = ''; try { await recapRequest('/room-recap-settings', config, undefined, 'PUT'); await load(); } catch (e) { error = e instanceof TypeError ? loadErrorText(e) : e instanceof Error ? e.message : 'Could not save settings.'; } finally { busy = false; } }
 </script>
 <Modal title="Local recap engines" width={600} {onclose}>
   <p>Spoken transcription runs locally with whisper.cpp and a multilingual model. Summary generation uses your signed-in Codex subscription. No API key is needed.</p>

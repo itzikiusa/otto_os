@@ -300,7 +300,8 @@ export function structuredModel(note: NoteLike): StructuredModel | null {
     label: KIND_LABEL[kind],
     status,
     owners,
-    tags: note.meta.tags,
+    // Exact-match dedupe (an older daemon kept repeated front-matter tags).
+    tags: [...new Set(note.meta.tags)],
     resource,
     operation,
     cards,
